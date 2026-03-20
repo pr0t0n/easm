@@ -1,0 +1,22 @@
+MISSION_ITEMS = [
+    "1. Amass Subdomain Recon", "2. Sublist3r Expansion", "3. DNSenum Active Enum", "4. MassDNS Validation", "5. IP/Infra Mapping",
+    "6. ASN/Network Block Mapping", "7. Naabu Fast Port Scan", "8. Nmap Detailed Scan", "9. Service Banner Grabbing", "10. Wafw00f Detection",
+    "11. identYwaf Evasion Analysis", "12. HSTS/CSP Header Audit", "13. X-Frame-Options Clickjacking Check", "14. Cookie Flags (Secure/HttpOnly)", "15. Server/X-Powered-By Exposure",
+    "16. FFUF Vhost Fuzzing (Host Header)", "17. S3 Bucket Discovery (CloudEnum)", "18. Azure/GCP Bucket Discovery", "19. Subdomain Takeover Check", "20. Robots.txt Analysis",
+    "21. Sitemap.xml Mapping", "22. Identify Variables: search, user, password, id", "23. SQLi Error-based (search)", "24. SQLi Boolean-based (search)", "25. SQLi Auth Bypass (user)",
+    "26. SQLi Auth Bypass (username)", "27. Blind SQLi Time-based (password)", "28. NoSQL Injection (JSON Payloads)", "29. SQLi in Headers (User-Agent/XFF)", "30. IDOR GET (id parameter)",
+    "31. IDOR Profile View (uuid)", "32. IDOR POST (Data Change)", "33. IDOR PUT (Update Profile)", "34. IDOR DELETE (Object Removal)", "35. IDOR Export/Download Endpoints",
+    "36. CSRF Password Change (No Token)", "37. CSRF Email Change", "38. CSRF Token Bypass (Null/Empty)", "39. Static CSRF Token Check", "40. FFUF /.git Directory",
+    "41. FFUF /.env Directory", "42. FFUF /.bak and /.old Files", "43. FFUF DB Dumps (.sql/.gz)", "44. FFUF /.ssh/id_rsa Exposure", "45. FFUF /admin and /config",
+    "46. Feroxbuster Recursive Discovery", "47. LinkFinder (JS Endpoints)", "48. SecretFinder (JS Keys/Tokens)", "49. KiteRunner API Routing", "50. Swagger/OpenAPI Exposure",
+    "51. SSRF Cloud Metadata (169.254.169.254)", "52. SSRF Internal Services (localhost)", "53. CORS Misconfiguration (*)", "54. Open Redirect (?url=/?next=)", "55. LFI (Local File Inclusion)",
+    "56. RFI (Remote File Inclusion)", "57. XXE (XML External Entity)", "58. SSTI (Jinja2/Mako)", "59. Insecure Deserialization (Java)", "60. Insecure Deserialization (PHP/Python)",
+    "61. CRLF Injection", "62. HTTP Request Smuggling", "63. Nuclei Critical Templates", "64. Nuclei High Templates", "65. Nuclei 2024/2025 CVEs",
+    "66. Nikto Web Server Scan", "67. WPScan (Plugins/Themes)", "68. WPScan (User Enum)", "69. Drupal/Joomla Scanners", "70. Nessus Infra Scan",
+    "71. Heartbleed Test", "72. Shellshock Test", "73. Host Header Injection", "74. SPF/DMARC Email Spoofing Audit", "75. Docker API Exposure (2375)",
+    "76. Kubernetes Kubelet (10250)", "77. Admin Panels (Jenkins/GitLab/Grafana)", "78. System Logs (access/error.log)", "79. TruffleHog Secret Leak", "80. Auth User Enumeration",
+    "81. Password Reset Poisoning", "82. Retire.js (Vulnerable JS Libs)", "83. Dangerous HTTP Methods (PUT/DELETE)", "84. Dev/Test/Staging Directories", "85. JWT None-algorithm Bypass",
+    "86. JWT Secret Brute Force", "87. Prototype Pollution (JS)", "88. OOB-SQLi (DNS Exfiltration)", "89. XPath Injection", "90. SSI Injection",
+    "91. LDAP Injection", "92. Command Injection (; | &&)", "93. Vertical Privilege Escalation", "94. Horizontal Privilege Escalation", "95. Cache Poisoning (X-Forwarded-Host)",
+    "96. Web Cache Deception", "97. Health Check Metrics Leak", "98. Gowitness Screenshots", "99. IA Analista (RAG ChromaDB/Triagem)", "100. Relatorio Final JSON"
+]

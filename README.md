@@ -1,1 +1,209 @@
-# easm
+# VALID ASM - vASM (LangGraph + FastAPI + React)
+
+VALID ASM - vASM e uma plataforma de External Attack Surface Management (EASM) orientada a operacao defensiva.
+Ela centraliza descoberta, triagem e monitoramento continuo do ambiente externo com controle de compliance e auditoria.
+
+## Aviso de seguranca
+
+Este projeto foi estruturado para **uso defensivo e autorizado**. As integracoes de ferramentas estao em modo adaptador seguro (stubs) e precisam de validacao de escopo legal antes de qualquer execucao real.
+
+## Arquitetura
+
+- Backend: FastAPI
+- Orquestracao de tarefas: Celery + Redis
+- Banco relacional e persistencia principal: PostgreSQL
+- Grafo de agentes: LangGraph StateGraph
+- IA local: Ollama (modelo configuravel via `.env`)
+- Memoria vetorial de falsos positivos: ChromaDB
+- Frontend: React + Tailwind + Vite
+
+## O que a aplicacao faz
+
+- Gerencia scans de superficie externa com orquestracao por LangGraph.
+- Executa workers separados por grupo funcional (recon, fuzzing, vuln, code_js, api).
+- Exige autorizacao formal por alvo antes da execucao.
+- Registra trilha de auditoria de ponta a ponta (criacao, gate, execucao, falhas, aprovacoes).
+- Entrega dashboard, relatorios e status de execucao com progresso e retestes.
+
+## Fluxo da aplicacao
+
+1. Admin escolhe um alvo no modulo Scan.
+2. Admin clica em Autorizar, informando prova de ownership; o sistema gera um authorization_code unico.
+3. O authorization_code e aprovado no fluxo de compliance e vinculado ao scan configurado.
+4. No momento de iniciar, o scan valida: authorization_code + validade da aprovacao + policy/allowlist do cliente.
+5. Se o gate passar, o worker manager inicia a missao de 100 itens no LangGraph:
+	- cada etapa da missao define o objetivo operacional;
+	- cada nodo do grafo segue instrucoes e decide o proximo nodo via estado global;
+	- as ferramentas sao delegadas para grupos de workers (recon, fuzzing, vuln, code_js, api) conforme prioridade.
+6. O ScanNode registra portas descobertas e cria retestes automaticos antes de avancar no fluxo.
+7. Logs sao transmitidos por WebSocket em tempo real e persistidos no banco.
+8. O estado do grafo e salvo via checkpointer PostgreSQL para continuidade apos reinicio.
+9. Resultados ficam disponiveis em Relatorios e indicadores no Dashboard.
+
+## Perfis e permissoes
+
+- Administrador:
+	- pode autorizar e executar scans;
+	- pode acessar Dashboard, Relatorios, Agendamento, Scan, Configuracao e Gestao de Usuarios;
+	- pode aprovar/revogar autorizacoes e consultar auditoria.
+- Usuario:
+	- acesso apenas a Dashboard e Relatorios;
+	- nao pode executar scan, agendar ou alterar configuracoes.
+
+Modelo de execucao dos agentes:
+
+- O LangGraph decide o proximo passo no grafo.
+- Cada categoria de ferramenta e delegada para um worker especializado.
+- O modo padrao e `stub` para seguranca, com mudanca para `live` apenas em escopo autorizado.
+- Antes da execucao, o scan passa por gate de compliance com autorizacao formal por alvo.
+- Todos os eventos criticos sao registrados em trilha de auditoria.
+
+## Missao e Instrucoes Operacionais
+
+- A missao contem 100 itens ordenados em [backend/app/graph/mission.py](backend/app/graph/mission.py).
+- O estado da execucao (AgentState) carrega contexto, progresso, ativos, vulnerabilidades e metrica de interacao.
+- Cada nodo opera com instrucoes especificas:
+	- ReconNode: descoberta e enriquecimento de ativos.
+	- ScanNode: validacao de servicos, descoberta de portas e retestes.
+	- FuzzingNode: exploracao de superficie web e descoberta lateral.
+	- VulnNode: correlacao tecnica de achados.
+	- AnalistaIANode: triagem e priorizacao de risco.
+- A decisao de roteamento e ciclica e contextual, com retorno para scans profundos quando necessario.
+
+## Worker Groups, Prioridades e Crescimento Lateral
+
+- Worker groups definidos com filas e funcoes em [backend/app/workers/worker_groups.py](backend/app/workers/worker_groups.py).
+- Prioridade operacional editavel no Worker Manager via `position` em OperationLine.
+- Indicadores de interacao disponiveis no endpoint de overview:
+	- tempo medio e maximo por nodo;
+	- contagem de transicoes entre nodos;
+	- media de crescimento lateral por scan;
+	- media de portas descobertas.
+
+## Policy e Allowlist por Cliente
+
+- Cada cliente possui policy default com allowlist de alvos.
+- O gate de policy valida padrao de alvo e grupo de ferramenta antes da execucao.
+- Endpoints dedicados:
+	- `GET /api/policy/allowlist`
+	- `POST /api/policy/allowlist`
+	- `PUT /api/policy/allowlist/{entry_id}`
+	- `DELETE /api/policy/allowlist/{entry_id}`
+
+## Checkpointing e Continuidade
+
+- Checkpointer primario: PostgreSQL (`langgraph-checkpoint-postgres`).
+- Fallback de desenvolvimento: MemorySaver.
+- O estado permite retomada de scans apos restart do backend/worker.
+
+## Streaming de Logs
+
+- Endpoint WebSocket: `GET ws://<host>/ws/scans/{scan_id}/logs?token=<jwt>`
+- O frontend recebe eventos incrementais de log sem polling.
+
+Servicos no Docker Compose:
+
+- `postgres`
+- `redis`
+- `ollama`
+- `backend`
+- `worker`
+- `frontend`
+
+## Grafo LangGraph
+
+Estado global (`AgentState`) com:
+
+- `lista_ativos`
+- `logs_terminais`
+- `vulnerabilidades_encontradas`
+- `proxima_ferramenta`
+- `mission_index`
+- `mission_items`
+
+Nos:
+
+- `ReconNode`
+- `ScanNode`
+- `FuzzingNode`
+- `VulnNode`
+- `AnalistaIANode`
+
+Fluxo ciclico:
+
+- O `FuzzingNode` pode sinalizar novo ativo e redirecionar para `ScanNode`.
+- O roteamento e feito por decisao condicional ate concluir os 100 itens da missao.
+- Quando o `ScanNode` encontra novas portas, o grafo agenda retestes automaticamente antes de seguir.
+
+## Missao de 100 itens
+
+A lista completa foi carregada em [backend/app/graph/mission.py](backend/app/graph/mission.py).
+
+## Funcionalidades Web
+
+- Login e registro com JWT persistido no navegador
+- Criacao de scan unitario e modo agendado
+- Terminal de logs com reconexao por leitura da tabela `scan_logs`
+- Consulta de relatorios por scan
+- Marcacao de falso positivo com ingestao no ChromaDB
+- Dashboard de evolucao com visao ISO 27001, NIST, CIS v8 e PCI
+- Menu lateral com: Dashboard, Agendamento, Configuracao e Scan
+- Configuracao com status da IA local (Ollama), modelos disponiveis e erros recentes
+- Flags de runtime por usuario para `debug_mode` e `verbose_mode`
+
+## Estrutura Principal
+
+- [docker-compose.yml](docker-compose.yml)
+- [backend/app/main.py](backend/app/main.py)
+- [backend/app/graph/workflow.py](backend/app/graph/workflow.py)
+- [backend/app/workers/tasks.py](backend/app/workers/tasks.py)
+- [frontend/src/App.jsx](frontend/src/App.jsx)
+
+## Como executar
+
+1. Copie o arquivo de ambiente:
+
+```bash
+cp .env.example .env
+```
+
+2. Suba todos os servicos:
+
+```bash
+docker compose up --build
+```
+
+3. Acesse:
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+- Healthcheck: `http://localhost:8000/health`
+
+## Endpoints principais
+
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/scans`
+- `GET /api/scans`
+- `GET /api/scans/{scan_id}/logs`
+- `GET /api/scans/{scan_id}/report`
+- `POST /api/findings/{finding_id}/false-positive`
+- `GET /api/dashboard`
+- `GET /api/scans/{scan_id}/status`
+- `POST /api/compliance/authorizations/request`
+- `GET /api/compliance/authorizations`
+- `PUT /api/compliance/authorizations/{authorization_id}/approve`
+- `PUT /api/compliance/authorizations/{authorization_id}/revoke`
+- `GET /api/audit/events`
+- `GET /api/worker-manager/overview`
+- `GET /api/policy/allowlist`
+- `POST /api/policy/allowlist`
+- `PUT /api/policy/allowlist/{entry_id}`
+- `DELETE /api/policy/allowlist/{entry_id}`
+
+## Proximos passos recomendados
+
+- Trocar `MemorySaver` por checkpointer PostgreSQL dedicado do LangGraph no ambiente de producao.
+- Criar camada de policy/allowlist por cliente antes da integracao real de ferramentas.
+- Adicionar WebSocket para streaming de logs sem polling.
+- Incluir migrations Alembic versionadas.
