@@ -61,6 +61,11 @@ export default function SchedulingPage() {
     await loadSchedules();
   };
 
+  const runNow = async (id) => {
+    await client.post(`/api/schedules/${id}/execute`);
+    await loadSchedules();
+  };
+
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
       <section className="panel p-5">
@@ -176,6 +181,7 @@ export default function SchedulingPage() {
               </p>
               <div className="mt-2 flex gap-2">
                 <button onClick={() => editRow(row)} className="rounded-lg bg-cyan-500/20 px-2 py-1 text-xs text-cyan-300">Editar</button>
+                <button onClick={() => runNow(row.id)} className="rounded-lg bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">Executar Agora</button>
                 <button onClick={() => deleteRow(row.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
               </div>
             </div>

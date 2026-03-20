@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://ollama:11434"
     ollama_model: str = "llama3"
+    ollama_qwen_model: str = "qwen2.5:7b"
+    ollama_cloudcode_model: str = "llama3.1:8b"
     frontend_origin: str = "http://localhost:5173"
 
 

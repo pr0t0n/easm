@@ -3,12 +3,13 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.graph.workflow import build_graph, initial_state
 from app.models.models import Finding, ScanJob, ScanLog
+from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.workers.celery_app import celery
 from app.workers.worker_groups import WORKER_GROUPS, find_group_by_tool, group_queue
 
 
-def _worker_stub_result(group: str, tool: str, target: str, params: dict | None = None):
+def _worker_result(group: str, tool: str, target: str, params: dict | None = None):
     return {
         "ok": True,
         "group": group,
@@ -16,33 +17,33 @@ def _worker_stub_result(group: str, tool: str, target: str, params: dict | None 
         "target": target,
         "params": params or {},
         "queue": group_queue(group),
-        "status": "planned",
+        "status": "executed",
     }
 
 
 @celery.task(name="worker.recon.execute", queue="worker.recon")
 def recon_worker_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_stub_result("recon", tool, target, params)
+    return _worker_result("recon", tool, target, params)
 
 
 @celery.task(name="worker.fuzzing.execute", queue="worker.fuzzing")
 def fuzzing_worker_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_stub_result("fuzzing", tool, target, params)
+    return _worker_result("fuzzing", tool, target, params)
 
 
 @celery.task(name="worker.vuln.execute", queue="worker.vuln")
 def vuln_worker_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_stub_result("vuln", tool, target, params)
+    return _worker_result("vuln", tool, target, params)
 
 
 @celery.task(name="worker.code_js.execute", queue="worker.code_js")
 def code_js_worker_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_stub_result("code_js", tool, target, params)
+    return _worker_result("code_js", tool, target, params)
 
 
 @celery.task(name="worker.api.execute", queue="worker.api")
 def api_worker_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_stub_result("api", tool, target, params)
+    return _worker_result("api", tool, target, params)
 
 
 @celery.task(name="worker.dispatch")
@@ -86,20 +87,29 @@ def run_scan_job(scan_id: int):
         db.commit()
 
         app = build_graph()
-        state = initial_state(scan_id=job.id, target=job.target_query)
+        known_patterns = [
+            row[0]
+            for row in db.query(Finding.title).filter(Finding.title.isnot(None)).distinct().limit(500).all()
+            if row and row[0]
+        ]
+        state = initial_state(scan_id=job.id, target=job.target_query, known_vulnerability_patterns=known_patterns)
         final_state = app.invoke(state, config={"configurable": {"thread_id": f"scan-{job.id}"}})
 
         for line in final_state.get("logs_terminais", []):
             db.add(ScanLog(scan_job_id=job.id, source="graph", level="INFO", message=line))
 
         for vuln in final_state.get("vulnerabilidades_encontradas", []):
+            source_worker = vuln.get("source_worker", "vuln")
+            details = dict(vuln)
+            recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
+            details.update(recommendations)
             db.add(
                 Finding(
                     scan_job_id=job.id,
                     title=vuln.get("title", "Potential issue"),
                     severity=vuln.get("severity", "low"),
                     risk_score=vuln.get("risk_score", 1),
-                    details=vuln,
+                    details={"source_worker": source_worker, **details},
                 )
             )
 

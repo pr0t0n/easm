@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api", tags=["scans"])
 vector_store = FalsePositiveVectorStore()
 
 
-def _resolve_valid_authorization(db: Session, target_query: str, authorization_code: str | None) -> ScanAuthorization | None:
+def _resolve_valid_authorization(db: Session, authorization_code: str | None) -> ScanAuthorization | None:
     if not authorization_code:
         return None
     now = datetime.now(timezone.utc)
@@ -25,7 +25,6 @@ def _resolve_valid_authorization(db: Session, target_query: str, authorization_c
         db.query(ScanAuthorization)
         .filter(
             ScanAuthorization.authorization_code == authorization_code,
-            ScanAuthorization.target_query == target_query,
             ScanAuthorization.status == "approved",
         )
         .order_by(ScanAuthorization.created_at.desc())
@@ -49,7 +48,7 @@ def create_scan(
         if access_group_id not in allowed_ids:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
 
-    authorization = _resolve_valid_authorization(db, payload.target_query, payload.authorization_code)
+    authorization = _resolve_valid_authorization(db, payload.authorization_code)
     allowlist_ok = is_target_allowed(db, current_user.id, payload.target_query, "*")
 
     if not authorization:
@@ -105,7 +104,20 @@ def create_scan(
     db.refresh(job)
 
     if compliance_status == "approved":
-        run_scan_job.delay(job.id)
+        try:
+            run_scan_job.delay(job.id)
+        except Exception as exc:
+            log_audit(
+                db,
+                event_type="scan.queue_fallback",
+                message="Fila indisponivel, executando scan de forma imediata",
+                actor_user_id=current_user.id,
+                scan_job_id=job.id,
+                level="WARNING",
+                metadata={"error": str(exc)},
+            )
+            db.commit()
+            run_scan_job(job.id)
 
     return ScanResponse(
         id=job.id,

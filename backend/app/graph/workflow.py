@@ -6,7 +6,7 @@ from langgraph.graph import END, StateGraph
 
 from app.graph.mission import MISSION_ITEMS
 from app.graph.checkpointer import create_checkpointer
-from app.services.tool_adapters import run_tool_stub
+from app.services.tool_adapters import run_tool_execution
 
 
 class AgentState(TypedDict):
@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     node_history: list[str]
     mission_index: int
     mission_items: list[str]
+    known_vulnerability_patterns: list[str]
 
 
 def _metric_start() -> float:
@@ -60,6 +61,15 @@ def recon_node(state: AgentState) -> AgentState:
     state["logs_terminais"].append(f"ReconNode: {current}")
     if state["target"] not in state["lista_ativos"]:
         state["lista_ativos"].append(state["target"])
+    state["vulnerabilidades_encontradas"].append(
+        {
+            "title": f"Ativo externo mapeado: {state['target']}",
+            "severity": "low",
+            "risk_score": 2,
+            "source_worker": "recon",
+            "details": {"node": "recon", "step": current},
+        }
+    )
     state["mission_index"] += 1
     _metric_end(state, "recon", started_at)
     return state
@@ -68,7 +78,7 @@ def recon_node(state: AgentState) -> AgentState:
 def scan_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    result = run_tool_stub("nmap", state["target"])
+    result = run_tool_execution("nmap", state["target"])
     state["logs_terminais"].append(f"ScanNode: {current} :: {result['status']}")
 
     # Simulacao defensiva: descoberta inicial de portas gera retestes direcionados.
@@ -80,6 +90,15 @@ def scan_node(state: AgentState) -> AgentState:
     if state["pending_port_tests"]:
         port = state["pending_port_tests"].pop(0)
         state["logs_terminais"].append(f"ScanNode: reteste automatico da porta {port}")
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"Servico externo identificado na porta {port}",
+                "severity": "medium",
+                "risk_score": 4,
+                "source_worker": "scan",
+                "details": {"node": "scan", "port": port, "step": current},
+            }
+        )
         state["proxima_ferramenta"] = "scanner"
     else:
         state["proxima_ferramenta"] = "fuzzing"
@@ -97,6 +116,15 @@ def fuzzing_node(state: AgentState) -> AgentState:
     # Exemplo de ciclo: se for detectado ativo novo, retorna para scan.
     if "new-asset.local" not in state["lista_ativos"] and state["mission_index"] % 7 == 0:
         state["lista_ativos"].append("new-asset.local")
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": "Crescimento lateral detectado por fuzzing",
+                "severity": "medium",
+                "risk_score": 5,
+                "source_worker": "fuzzing",
+                "details": {"node": "fuzzing", "new_asset": "new-asset.local", "step": current},
+            }
+        )
         state["proxima_ferramenta"] = "scanner"
     else:
         state["proxima_ferramenta"] = "vuln"
@@ -113,7 +141,14 @@ def vuln_node(state: AgentState) -> AgentState:
         "title": f"Potential issue from step: {current}",
         "severity": "medium",
         "risk_score": 5,
+        "source_worker": "vuln",
     }
+    known_patterns = [p.lower() for p in state.get("known_vulnerability_patterns", [])]
+    title_l = finding["title"].lower()
+    if any(k and (k in title_l or title_l in k) for k in known_patterns):
+        finding["risk_score"] = 7
+        finding["known_pattern_match"] = True
+
     state["vulnerabilidades_encontradas"].append(finding)
     state["logs_terminais"].append(f"VulnNode: {current}")
     state["proxima_ferramenta"] = "analista_ia"
@@ -126,6 +161,10 @@ def analista_ia_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
     state["logs_terminais"].append(f"AnalistaIANode: triagem de {current}")
+    if state.get("vulnerabilidades_encontradas"):
+        last = state["vulnerabilidades_encontradas"][-1]
+        if not last.get("source_worker"):
+            last["source_worker"] = "analista_ia"
     state["proxima_ferramenta"] = "recon"
     state["mission_index"] += 1
     _metric_end(state, "analista_ia", started_at)
@@ -168,7 +207,7 @@ def build_graph():
     return graph.compile(checkpointer=checkpointer)
 
 
-def initial_state(scan_id: int, target: str) -> AgentState:
+def initial_state(scan_id: int, target: str, known_vulnerability_patterns: list[str] | None = None) -> AgentState:
     return {
         "scan_id": scan_id,
         "target": target,
@@ -183,4 +222,5 @@ def initial_state(scan_id: int, target: str) -> AgentState:
         "node_history": [],
         "mission_index": 0,
         "mission_items": MISSION_ITEMS,
+        "known_vulnerability_patterns": known_vulnerability_patterns or [],
     }

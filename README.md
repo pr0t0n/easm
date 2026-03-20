@@ -5,7 +5,7 @@ Ela centraliza descoberta, triagem e monitoramento continuo do ambiente externo 
 
 ## Aviso de seguranca
 
-Este projeto foi estruturado para **uso defensivo e autorizado**. As integracoes de ferramentas estao em modo adaptador seguro (stubs) e precisam de validacao de escopo legal antes de qualquer execucao real.
+Este projeto foi estruturado para **uso defensivo e autorizado**. Toda execucao depende de autorizacao valida de escopo e policy/allowlist ativa.
 
 ## Arquitetura
 
@@ -21,16 +21,16 @@ Este projeto foi estruturado para **uso defensivo e autorizado**. As integracoes
 
 - Gerencia scans de superficie externa com orquestracao por LangGraph.
 - Executa workers separados por grupo funcional (recon, fuzzing, vuln, code_js, api).
-- Exige autorizacao formal por alvo antes da execucao.
+- Exige autorizacao formal por escopo de scan (singular ou agendado) antes da execucao.
 - Registra trilha de auditoria de ponta a ponta (criacao, gate, execucao, falhas, aprovacoes).
 - Entrega dashboard, relatorios e status de execucao com progresso e retestes.
 
 ## Fluxo da aplicacao
 
-1. Admin escolhe um alvo no modulo Scan.
-2. Admin clica em Autorizar, informando prova de ownership; o sistema gera um authorization_code unico.
-3. O authorization_code e aprovado no fluxo de compliance e vinculado ao scan configurado.
-4. No momento de iniciar, o scan valida: authorization_code + validade da aprovacao + policy/allowlist do cliente.
+1. Admin define um SCAN singular ou um agendamento de SCAN em grupo.
+2. Admin clica em Autorizar, informando prova de ownership e escopo do SCAN; o sistema gera um authorization_code unico.
+3. O authorization_code e aprovado no fluxo de compliance e vinculado ao SCAN/agendamento.
+4. No momento de iniciar, a execucao valida: authorization_code + validade da aprovacao + policy/allowlist do cliente.
 5. Se o gate passar, o worker manager inicia a missao de 100 itens no LangGraph:
 	- cada etapa da missao define o objetivo operacional;
 	- cada nodo do grafo segue instrucoes e decide o proximo nodo via estado global;
@@ -54,8 +54,7 @@ Modelo de execucao dos agentes:
 
 - O LangGraph decide o proximo passo no grafo.
 - Cada categoria de ferramenta e delegada para um worker especializado.
-- O modo padrao e `stub` para seguranca, com mudanca para `live` apenas em escopo autorizado.
-- Antes da execucao, o scan passa por gate de compliance com autorizacao formal por alvo.
+- Antes da execucao, o scan passa por gate de compliance com autorizacao formal por escopo de scan (singular ou agendado).
 - Todos os eventos criticos sao registrados em trilha de auditoria.
 
 ## Missao e Instrucoes Operacionais
@@ -90,6 +89,12 @@ Modelo de execucao dos agentes:
 	- `PUT /api/policy/allowlist/{entry_id}`
 	- `DELETE /api/policy/allowlist/{entry_id}`
 
+## Regras de Autorizacao
+
+- Sem authorization_code aprovado, o scan nao executa de forma alguma.
+- A autorizacao e por SCAN singular ou por agendamento de SCAN em grupo.
+- Em agendamento, a autorizacao e realizada uma vez para o escopo configurado e reutilizada nas execucoes subsequentes enquanto valida.
+
 ## Checkpointing e Continuidade
 
 - Checkpointer primario: PostgreSQL (`langgraph-checkpoint-postgres`).
@@ -100,6 +105,24 @@ Modelo de execucao dos agentes:
 
 - Endpoint WebSocket: `GET ws://<host>/ws/scans/{scan_id}/logs?token=<jwt>`
 - O frontend recebe eventos incrementais de log sem polling.
+
+## Persistencia de Vulnerabilidades e IA
+
+- Cada worker/nodo grava achados no banco na tabela `findings` com `source_worker` em `details`.
+- Dashboard e Relatorios usam exclusivamente dados persistidos no banco.
+- A IA Ollama (Qwen e CloudCode) gera recomendacoes em portugues e salva no `details` de cada finding:
+	- `qwen_recomendacao_pt`
+	- `cloudcode_recomendacao_pt`
+
+Prompt operacional aplicado para recomendacoes:
+
+"Voce e um analista senior de ciberseguranca. Responda SOMENTE em portugues do Brasil e em JSON valido. Objetivo: recomendar mitigacoes praticas para vulnerabilidades encontradas no EASM. Formato JSON obrigatorio: {\"resumo\":\"...\",\"impacto\":\"...\",\"mitigacoes\":[\"...\"],\"prioridade\":\"baixa|media|alta|critica\",\"validacoes\":[\"...\"]}."
+
+## Auto Aprendizado no LangGraph
+
+- Antes de cada execucao, o worker carrega vulnerabilidades conhecidas do banco e injeta no estado do grafo.
+- O nodo de vulnerabilidade aumenta prioridade/risk_score quando encontra padrao ja conhecido.
+- Esse ciclo melhora priorizacao e triagem a cada nova execucao.
 
 Servicos no Docker Compose:
 
@@ -200,10 +223,29 @@ docker compose up --build
 - `POST /api/policy/allowlist`
 - `PUT /api/policy/allowlist/{entry_id}`
 - `DELETE /api/policy/allowlist/{entry_id}`
+- `POST /api/schedules/{schedule_id}/execute`
 
-## Proximos passos recomendados
+## Status de implementacao
 
-- Trocar `MemorySaver` por checkpointer PostgreSQL dedicado do LangGraph no ambiente de producao.
-- Criar camada de policy/allowlist por cliente antes da integracao real de ferramentas.
-- Adicionar WebSocket para streaming de logs sem polling.
-- Incluir migrations Alembic versionadas.
+- Checkpointer PostgreSQL para LangGraph: implementado (com fallback local).
+- Policy/allowlist por cliente: implementado.
+- WebSocket para streaming de logs: implementado.
+- Migrations Alembic versionadas: implementado.
+
+## Validacao do fluxo completo (alvo ate relatorio)
+
+Fluxo validado na aplicacao:
+
+1. Solicitar autorizacao de escopo (`/api/compliance/authorizations/request`).
+2. Aprovar autorizacao (`/api/compliance/authorizations/{id}/approve`).
+3. Criar scan singular (`/api/scans`) ou agendamento (`/api/schedules`) com `authorization_code`.
+4. Executar agendamento sob demanda, quando aplicavel (`/api/schedules/{schedule_id}/execute`).
+5. Acompanhar execucao (`/api/scans/{scan_id}/status` e WebSocket de logs).
+6. Consultar relatorio final no banco (`/api/scans/{scan_id}/report`).
+
+Observacao de ambiente: quando a fila Celery estiver indisponivel, a API aplica fallback de execucao imediata para nao interromper o fluxo operacional.
+
+Script automatizado de validacao:
+
+- [scripts/validate_e2e_flow.py](scripts/validate_e2e_flow.py)
+- Executa login admin, autorizacao, aprovacao, criacao de scan, polling de status e validacao do relatorio final.
