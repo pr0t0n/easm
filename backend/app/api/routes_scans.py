@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -442,4 +442,128 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
             "cis_v8": {"score": max(0, 100 - int(open_issues * 0.7))},
             "pci": {"score": max(0, 100 - int(open_issues * 0.9))},
         },
+    }
+
+
+@router.get("/dashboard/insights")
+def dashboard_insights(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.is_admin:
+        jobs = db.query(ScanJob).order_by(ScanJob.created_at.desc()).all()
+        findings = db.query(Finding).all()
+    else:
+        allowed_ids = [g.id for g in current_user.groups]
+        jobs = (
+            db.query(ScanJob)
+            .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+            .order_by(ScanJob.created_at.desc())
+            .all()
+        )
+        findings = (
+            db.query(Finding)
+            .join(ScanJob, ScanJob.id == Finding.scan_job_id)
+            .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+            .all()
+        )
+
+    findings_by_scan: dict[int, list[Finding]] = {}
+    for f in findings:
+        findings_by_scan.setdefault(f.scan_job_id, []).append(f)
+
+    total = len(findings)
+    mitigated = len([f for f in findings if f.is_false_positive])
+    open_issues = total - mitigated
+
+    sev_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    vuln_counter: dict[tuple[str, str], int] = {}
+    for f in findings:
+        sev = str(f.severity or "low").lower()
+        if sev in sev_count:
+            sev_count[sev] += 1
+        key = (str(f.title or "Finding"), sev)
+        vuln_counter[key] = vuln_counter.get(key, 0) + 1
+
+    def _sev_weight(sev: str) -> int:
+        return {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(sev, 1)
+
+    asset_risk: dict[str, str] = {}
+    for job in jobs:
+        target = str(job.target_query)
+        current = asset_risk.get(target, "low")
+        for f in findings_by_scan.get(job.id, []):
+            sev = str(f.severity or "low").lower()
+            if _sev_weight(sev) > _sev_weight(current):
+                current = sev
+        asset_risk[target] = current
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=6)
+    day_labels = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"]
+    activity_map: dict[int, dict[str, int]] = {i: {"scans": 0, "findings": 0} for i in range(7)}
+    for job in jobs:
+        created = job.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created < cutoff:
+            continue
+        weekday = int(created.strftime("%w"))
+        activity_map[weekday]["scans"] += 1
+        activity_map[weekday]["findings"] += len(findings_by_scan.get(job.id, []))
+
+    recent_scans = [
+        {
+            "id": j.id,
+            "target_query": j.target_query,
+            "status": j.status,
+            "mode": j.mode,
+            "mission_progress": j.mission_progress,
+            "created_at": j.created_at,
+            "findings": len(findings_by_scan.get(j.id, [])),
+        }
+        for j in jobs[:8]
+    ]
+
+    top_vulns = [
+        {"title": title, "severity": severity, "count": count}
+        for (title, severity), count in sorted(vuln_counter.items(), key=lambda item: item[1], reverse=True)[:7]
+    ]
+
+    assets = [
+        {
+            "name": target,
+            "type": "wildcard" if "*." in target else ("domain" if "." in target else "asset"),
+            "risk": risk,
+        }
+        for target, risk in list(asset_risk.items())[:12]
+    ]
+
+    activity = [
+        {
+            "day": day_labels[idx],
+            "scans": activity_map[idx]["scans"],
+            "findings": activity_map[idx]["findings"],
+        }
+        for idx in range(7)
+    ]
+
+    return {
+        "stats": {
+            "scans": len(jobs),
+            "findings_total": total,
+            "findings_open": open_issues,
+            "findings_triaged": mitigated,
+            "critical": sev_count["critical"],
+            "high": sev_count["high"],
+            "medium": sev_count["medium"],
+            "low": sev_count["low"],
+        },
+        "frameworks": {
+            "iso27001": {"score": max(0, 100 - open_issues)},
+            "nist": {"score": max(0, 100 - int(open_issues * 0.8))},
+            "cis_v8": {"score": max(0, 100 - int(open_issues * 0.7))},
+            "pci": {"score": max(0, 100 - int(open_issues * 0.9))},
+        },
+        "recent_scans": recent_scans,
+        "top_vulns": top_vulns,
+        "assets": assets,
+        "activity": activity,
     }
