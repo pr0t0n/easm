@@ -14,6 +14,9 @@ export default function LoginPage() {
     const path = mode === "login" ? "/api/auth/login" : "/api/auth/register";
     const { data } = await client.post(path, { email, password });
     authStore.setToken(data.access_token);
+    if (data.refresh_token) {
+      localStorage.setItem("refresh_token", data.refresh_token);
+    }
     const me = await client.get("/api/auth/me");
     authStore.setMe(me.data);
     navigate("/");

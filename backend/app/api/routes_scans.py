@@ -10,7 +10,7 @@ from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanRespon
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
-from app.workers.tasks import run_scan_job
+from app.workers.tasks import run_scan_job, run_scan_job_unit
 
 
 router = APIRouter(prefix="/api", tags=["scans"])
@@ -105,12 +105,12 @@ def create_scan(
 
     if compliance_status == "approved":
         try:
-            run_scan_job.delay(job.id)
+            run_scan_job_unit.delay(job.id)
         except Exception as exc:
             log_audit(
                 db,
                 event_type="scan.queue_fallback",
-                message="Fila indisponivel, executando scan de forma imediata",
+                message="Fila indisponivel, executando scan unitario de forma imediata",
                 actor_user_id=current_user.id,
                 scan_job_id=job.id,
                 level="WARNING",
@@ -129,6 +129,10 @@ def create_scan(
         compliance_status=job.compliance_status,
         current_step=job.current_step,
         mission_progress=job.mission_progress,
+        retry_attempt=job.retry_attempt,
+        retry_max=job.retry_max,
+        next_retry_at=job.next_retry_at,
+        last_error=job.last_error,
         created_at=job.created_at,
     )
 
@@ -154,6 +158,10 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             compliance_status=s.compliance_status,
             current_step=s.current_step,
             mission_progress=s.mission_progress,
+            retry_attempt=s.retry_attempt,
+            retry_max=s.retry_max,
+            next_retry_at=s.next_retry_at,
+            last_error=s.last_error,
             created_at=s.created_at,
         )
         for s in rows
@@ -179,6 +187,10 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
         mission_progress=job.mission_progress,
         discovered_ports=state_data.get("discovered_ports", []),
         pending_port_tests=state_data.get("pending_port_tests", []),
+        retry_attempt=job.retry_attempt,
+        retry_max=job.retry_max,
+        next_retry_at=job.next_retry_at,
+        last_error=job.last_error,
     )
 
 
@@ -224,9 +236,15 @@ def scan_report(scan_id: int, db: Session = Depends(get_db), current_user: User 
                 "id": f.id,
                 "title": f.title,
                 "severity": f.severity,
+                "sn1per_priority": f.sn1per_priority,
                 "cve": f.cve,
                 "risk_score": f.risk_score,
+                "confidence_score": f.confidence_score,
                 "is_false_positive": f.is_false_positive,
+                "fp_notes": f.fp_notes,
+                "fp_reviewed_by_id": f.fp_reviewed_by_id,
+                "fp_reviewed_at": f.fp_reviewed_at,
+                "retest_status": f.retest_status,
                 "details": f.details,
             }
             for f in findings
@@ -236,7 +254,19 @@ def scan_report(scan_id: int, db: Session = Depends(get_db), current_user: User 
 
 
 @router.post("/findings/{finding_id}/false-positive")
-def mark_false_positive(finding_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+def mark_false_positive(
+    finding_id: int,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Marca ou desmarca um finding como falso positivo.
+
+    Payload opcional:
+      - is_false_positive (bool, default true)  — permite toggle (desmarcar FP)
+      - fp_notes (str)                           — justificativa obrigatória na prática
+    """
     query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id == finding_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
@@ -245,21 +275,139 @@ def mark_false_positive(finding_id: int, db: Session = Depends(get_db), current_
     if not finding:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding nao encontrado")
 
-    finding.is_false_positive = True
-    signature = f"{finding.title}|{finding.severity}|{finding.details}"
-    vector_id = f"fp-{finding.id}"
-    vector_store.add_false_positive(vector_id, signature, {"finding_id": finding.id})
+    body = payload or {}
+    new_fp_value = bool(body.get("is_false_positive", True))
+    fp_notes = (body.get("fp_notes") or "").strip() or None
 
-    fp = FalsePositiveMemory(
-        finding_id=finding.id,
-        signature=signature,
-        embedding_ref=vector_id,
-        metadata={"severity": finding.severity},
+    finding.is_false_positive = new_fp_value
+    finding.fp_notes = fp_notes
+    finding.fp_reviewed_by_id = current_user.id
+    finding.fp_reviewed_at = datetime.now(timezone.utc)
+    # Ao marcar como FP, limpa retest pendente (o finding foi validado pelo analista)
+    if new_fp_value:
+        finding.retest_status = None
+
+    if new_fp_value:
+        # Persiste na memória vetorial para prevenir reincidência
+        signature = f"{finding.title}|{finding.severity}|{finding.details}"
+        vector_id = f"fp-{finding.id}"
+        vector_store.add_false_positive(vector_id, signature, {"finding_id": finding.id})
+        fp_mem = FalsePositiveMemory(
+            finding_id=finding.id,
+            signature=signature,
+            embedding_ref=vector_id,
+            metadata={"severity": finding.severity, "fp_notes": fp_notes},
+        )
+        db.add(fp_mem)
+    else:
+        # Desmarcando FP: remove da memória vetorial se existir
+        try:
+            vector_store.remove_false_positive(f"fp-{finding.id}")
+        except Exception:
+            pass
+
+    log_audit(
+        db,
+        event_type="finding.false_positive_updated",
+        message=f"Finding #{finding.id} marcado como FP={new_fp_value} por {current_user.email}",
+        actor_user_id=current_user.id,
+        metadata={
+            "finding_id": finding.id,
+            "is_false_positive": new_fp_value,
+            "fp_notes": fp_notes,
+        },
     )
-    db.add(fp)
     db.commit()
+    return {"ok": True, "is_false_positive": new_fp_value}
 
-    return {"ok": True}
+
+@router.post("/findings/{finding_id}/retest")
+def request_retest(
+    finding_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Solicita retest de um finding (ex: após patch aplicado ou FP questionado).
+    Define retest_status='pending_retest' e remove is_false_positive.
+    O worker, ao encontrar este status, re-executa a verificação do finding.
+    """
+    query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id == finding_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    finding = query.first()
+    if not finding:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding nao encontrado")
+
+    finding.retest_status = "pending_retest"
+    finding.is_false_positive = False
+    finding.fp_notes = None
+    finding.fp_reviewed_by_id = current_user.id
+    finding.fp_reviewed_at = datetime.now(timezone.utc)
+
+    log_audit(
+        db,
+        event_type="finding.retest_requested",
+        message=f"Retest solicitado para finding #{finding.id} por {current_user.email}",
+        actor_user_id=current_user.id,
+        metadata={"finding_id": finding.id},
+    )
+    db.commit()
+    return {"ok": True, "retest_status": "pending_retest"}
+
+
+@router.post("/findings/bulk-false-positive")
+def bulk_mark_false_positive(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Marca/desmarca múltiplos findings como falso positivo em uma única operação.
+
+    Payload: { "finding_ids": [1,2,3], "is_false_positive": true, "fp_notes": "..." }
+    """
+    finding_ids: list[int] = payload.get("finding_ids") or []
+    if not finding_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="finding_ids nao pode ser vazio")
+    new_fp_value = bool(payload.get("is_false_positive", True))
+    fp_notes = (payload.get("fp_notes") or "").strip() or None
+
+    query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id.in_(finding_ids))
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    findings = query.all()
+
+    updated_ids = []
+    for finding in findings:
+        finding.is_false_positive = new_fp_value
+        finding.fp_notes = fp_notes
+        finding.fp_reviewed_by_id = current_user.id
+        finding.fp_reviewed_at = datetime.now(timezone.utc)
+        if new_fp_value:
+            finding.retest_status = None
+            signature = f"{finding.title}|{finding.severity}|{finding.details}"
+            vector_id = f"fp-{finding.id}"
+            vector_store.add_false_positive(vector_id, signature, {"finding_id": finding.id})
+            db.add(FalsePositiveMemory(
+                finding_id=finding.id,
+                signature=signature,
+                embedding_ref=vector_id,
+                metadata={"severity": finding.severity, "fp_notes": fp_notes},
+            ))
+        updated_ids.append(finding.id)
+
+    log_audit(
+        db,
+        event_type="finding.bulk_false_positive",
+        message=f"{len(updated_ids)} findings marcados como FP={new_fp_value} por {current_user.email}",
+        actor_user_id=current_user.id,
+        metadata={"finding_ids": updated_ids, "is_false_positive": new_fp_value, "fp_notes": fp_notes},
+    )
+    db.commit()
+    return {"ok": True, "updated": len(updated_ids), "ids": updated_ids}
 
 
 @router.get("/dashboard")

@@ -130,8 +130,77 @@ Servicos no Docker Compose:
 - `redis`
 - `ollama`
 - `backend`
-- `worker`
+- `worker_unit`
+- `worker_scheduled`
 - `frontend`
+
+## Backlog Solicitado (Concluido)
+
+Itens solicitados e status atual no repositorio:
+
+- Backend FastAPI base: concluido.
+	- API principal em [backend/app/main.py](backend/app/main.py)
+	- Rotas em [backend/app/api/routes_auth.py](backend/app/api/routes_auth.py), [backend/app/api/routes_scans.py](backend/app/api/routes_scans.py), [backend/app/api/routes_management.py](backend/app/api/routes_management.py)
+- LangGraph com estado persistente: concluido.
+	- Grafo em [backend/app/graph/workflow.py](backend/app/graph/workflow.py)
+	- Checkpointer Postgres + fallback em [backend/app/graph/checkpointer.py](backend/app/graph/checkpointer.py)
+- Celery e workers: concluido.
+	- App Celery em [backend/app/workers/celery_app.py](backend/app/workers/celery_app.py)
+	- Tasks/filas em [backend/app/workers/tasks.py](backend/app/workers/tasks.py)
+	- Mapeamento de grupos em [backend/app/workers/worker_groups.py](backend/app/workers/worker_groups.py)
+	- Servicos docker separados em [docker-compose.yml](docker-compose.yml)
+- Frontend React: concluido.
+	- App em [frontend/src/App.jsx](frontend/src/App.jsx)
+	- Paginas em [frontend/src/pages](frontend/src/pages)
+	- Cliente API em [frontend/src/api/client.js](frontend/src/api/client.js)
+- Documentacao de execucao: concluido e atualizado neste README.
+
+## Execucao Rapida (Stack Completa)
+
+1. Preparar ambiente:
+
+```bash
+cp .env.example .env
+```
+
+2. Subir backend + workers + frontend:
+
+```bash
+docker compose up --build
+```
+
+### Com perfis de ambiente
+
+Desenvolvimento:
+
+```bash
+docker compose --profile dev up --build
+```
+
+Producao:
+
+```bash
+docker compose --profile prod up --build -d
+```
+
+3. Validar servicos:
+
+- API Health: `http://localhost:8000/health`
+- Frontend: `http://localhost:5173`
+
+## Execucao de Validacao E2E
+
+Script de validacao de fluxo completo:
+
+```bash
+python scripts/validate_e2e_flow.py
+```
+
+Arquivo: [scripts/validate_e2e_flow.py](scripts/validate_e2e_flow.py)
+
+Runbook operacional (incidente, restart seguro e rollback):
+
+- [docs/RUNBOOK.md](docs/RUNBOOK.md)
 
 ## Grafo LangGraph
 
@@ -172,7 +241,9 @@ A lista completa foi carregada em [backend/app/graph/mission.py](backend/app/gra
 - Dashboard de evolucao com visao ISO 27001, NIST, CIS v8 e PCI
 - Menu lateral com: Dashboard, Agendamento, Configuracao e Scan
 - Configuracao com status da IA local (Ollama), modelos disponiveis e erros recentes
-- Flags de runtime por usuario para `debug_mode` e `verbose_mode`
+- Flags de runtime por usuario para `debug_mode`, `verbose_mode` e retry automatico de scans
+- Configuracao de workers na UI: stale timeout, cutoff de orfaos e limite de requeue
+- Status de scan com metadados de retry (tentativa atual, maximo, proxima tentativa e ultimo erro)
 
 ## Estrutura Principal
 
@@ -219,6 +290,10 @@ docker compose up --build
 - `PUT /api/compliance/authorizations/{authorization_id}/revoke`
 - `GET /api/audit/events`
 - `GET /api/worker-manager/overview`
+- `GET /api/worker-manager/health`
+- `POST /api/worker-manager/requeue-orphans`
+- `GET /api/config/runtime`
+- `PUT /api/config/runtime`
 - `GET /api/policy/allowlist`
 - `POST /api/policy/allowlist`
 - `PUT /api/policy/allowlist/{entry_id}`

@@ -7,17 +7,35 @@ from langgraph.graph import END, StateGraph
 from app.graph.mission import MISSION_ITEMS
 from app.graph.checkpointer import create_checkpointer
 from app.services.tool_adapters import run_tool_execution
+from app.workers.worker_groups import ScanMode
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Itens de missao reduzidos para scans UNITARIOS
+# Cobre os passos mais criticos: recon, ports, headers, injecoes, CVEs, relatorio
+# ──────────────────────────────────────────────────────────────────────────────
+UNIT_MISSION_ITEMS: list[str] = [item for item in MISSION_ITEMS if any(
+    kw in item for kw in [
+        "Amass", "Naabu", "Nmap", "HSTS/CSP", "Cookie Flags",
+        "SQLi", "IDOR", "CSRF", "SecretFinder", "Nuclei Critical",
+        "Nuclei High", "Nikto", "JWT", "Command Injection",
+        "Vertical Privilege", "Horizontal Privilege", "Relatorio Final",
+    ]
+)]
 
 
 class AgentState(TypedDict):
     scan_id: int
     target: str
+    scan_mode: str                          # "unit" | "scheduled"
     lista_ativos: list[str]
     logs_terminais: list[str]
     vulnerabilidades_encontradas: list[dict[str, Any]]
     proxima_ferramenta: str
     discovered_ports: list[int]
     pending_port_tests: list[int]
+    pending_asset_scans: list[str]
+    scanned_assets: list[str]
     port_followup_done: bool
     activity_metrics: list[dict[str, Any]]
     node_history: list[str]
@@ -45,6 +63,48 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
 
 checkpointer = create_checkpointer()
 
+# Portas comuns de superficie externa para fallback quando o scanner nao retorna
+# uma lista real de portas abertas.
+FALLBACK_PORT_CANDIDATES = [
+    80,
+    81,
+    443,
+    8080,
+    8443,
+    8888,
+    8000,
+    8008,
+    3000,
+    5000,
+    22,
+    21,
+    25,
+    53,
+    110,
+    143,
+    3306,
+    5432,
+    6379,
+    9200,
+    27017,
+]
+
+
+def _extract_open_ports(result: dict[str, Any]) -> list[int]:
+    raw_ports = result.get("open_ports")
+    if isinstance(raw_ports, list):
+        parsed = []
+        for p in raw_ports:
+            try:
+                port = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                parsed.append(port)
+        if parsed:
+            return sorted(set(parsed))
+    return FALLBACK_PORT_CANDIDATES.copy()
+
 
 def _step_name(state: AgentState) -> str:
     idx = state.get("mission_index", 0)
@@ -61,6 +121,12 @@ def recon_node(state: AgentState) -> AgentState:
     state["logs_terminais"].append(f"ReconNode: {current}")
     if state["target"] not in state["lista_ativos"]:
         state["lista_ativos"].append(state["target"])
+    if state["target"] not in state["pending_asset_scans"] and state["target"] not in state["scanned_assets"]:
+        state["pending_asset_scans"].append(state["target"])
+
+    # Sempre que houver ativo pendente, forca scanner para cobrir descoberta incremental.
+    if state["pending_asset_scans"]:
+        state["proxima_ferramenta"] = "scanner"
     state["vulnerabilidades_encontradas"].append(
         {
             "title": f"Ativo externo mapeado: {state['target']}",
@@ -78,27 +144,32 @@ def recon_node(state: AgentState) -> AgentState:
 def scan_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    result = run_tool_execution("nmap", state["target"])
-    state["logs_terminais"].append(f"ScanNode: {current} :: {result['status']}")
+    scan_target = state["pending_asset_scans"].pop(0) if state["pending_asset_scans"] else state["target"]
+    result = run_tool_execution("nmap", scan_target, scan_mode=state["scan_mode"])
+    state["logs_terminais"].append(f"ScanNode: {current} [{scan_target}] :: {result['status']}")
 
-    # Simulacao defensiva: descoberta inicial de portas gera retestes direcionados.
-    if not state["port_followup_done"]:
-        state["discovered_ports"] = [80, 443, 8443]
-        state["pending_port_tests"] = state["discovered_ports"].copy()
-        state["port_followup_done"] = True
+    # Reteste dinamico por portas descobertas no scan atual.
+    discovered = _extract_open_ports(result)
+    state["discovered_ports"] = discovered
+    state["pending_port_tests"] = discovered.copy()
+    if scan_target not in state["scanned_assets"]:
+        state["scanned_assets"].append(scan_target)
+    state["port_followup_done"] = True
 
     if state["pending_port_tests"]:
         port = state["pending_port_tests"].pop(0)
-        state["logs_terminais"].append(f"ScanNode: reteste automatico da porta {port}")
+        state["logs_terminais"].append(f"ScanNode: reteste automatico {scan_target}:{port}")
         state["vulnerabilidades_encontradas"].append(
             {
                 "title": f"Servico externo identificado na porta {port}",
                 "severity": "medium",
                 "risk_score": 4,
                 "source_worker": "scan",
-                "details": {"node": "scan", "port": port, "step": current},
+                "details": {"node": "scan", "asset": scan_target, "port": port, "step": current},
             }
         )
+        state["proxima_ferramenta"] = "scanner"
+    elif state["pending_asset_scans"]:
         state["proxima_ferramenta"] = "scanner"
     else:
         state["proxima_ferramenta"] = "fuzzing"
@@ -116,6 +187,8 @@ def fuzzing_node(state: AgentState) -> AgentState:
     # Exemplo de ciclo: se for detectado ativo novo, retorna para scan.
     if "new-asset.local" not in state["lista_ativos"] and state["mission_index"] % 7 == 0:
         state["lista_ativos"].append("new-asset.local")
+        if "new-asset.local" not in state["pending_asset_scans"] and "new-asset.local" not in state["scanned_assets"]:
+            state["pending_asset_scans"].append("new-asset.local")
         state["vulnerabilidades_encontradas"].append(
             {
                 "title": "Crescimento lateral detectado por fuzzing",
@@ -187,7 +260,12 @@ def route_decision(state: AgentState) -> str:
     return "recon"
 
 
-def build_graph():
+def build_graph(mode: ScanMode = "unit"):
+    """
+    Constroi o grafo LangGraph para o modo informado.
+    - "unit": missao reduzida (UNIT_MISSION_ITEMS), comportamento focado
+    - "scheduled": missao completa (100 passos), cobertura maxima
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("recon", recon_node)
@@ -207,20 +285,29 @@ def build_graph():
     return graph.compile(checkpointer=checkpointer)
 
 
-def initial_state(scan_id: int, target: str, known_vulnerability_patterns: list[str] | None = None) -> AgentState:
+def initial_state(
+    scan_id: int,
+    target: str,
+    scan_mode: ScanMode = "unit",
+    known_vulnerability_patterns: list[str] | None = None,
+) -> AgentState:
+    mission_items = UNIT_MISSION_ITEMS if scan_mode == "unit" else MISSION_ITEMS
     return {
         "scan_id": scan_id,
         "target": target,
+        "scan_mode": scan_mode,
         "lista_ativos": [],
         "logs_terminais": [],
         "vulnerabilidades_encontradas": [],
         "proxima_ferramenta": "recon",
         "discovered_ports": [],
         "pending_port_tests": [],
+        "pending_asset_scans": [],
+        "scanned_assets": [],
         "port_followup_done": False,
         "activity_metrics": [],
         "node_history": [],
         "mission_index": 0,
-        "mission_items": MISSION_ITEMS,
+        "mission_items": mission_items,
         "known_vulnerability_patterns": known_vulnerability_patterns or [],
     }

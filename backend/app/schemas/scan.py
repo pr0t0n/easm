@@ -22,6 +22,10 @@ class ScanResponse(BaseModel):
     compliance_status: str
     current_step: str
     mission_progress: int
+    retry_attempt: int = 0
+    retry_max: int = 0
+    next_retry_at: datetime | None = None
+    last_error: str | None = None
     created_at: datetime
 
 
@@ -48,3 +52,7 @@ class ScanStatusResponse(BaseModel):
     mission_progress: int
     discovered_ports: list[int]
     pending_port_tests: list[int]
+    retry_attempt: int = 0
+    retry_max: int = 0
+    next_retry_at: datetime | None = None
+    last_error: str | None = None

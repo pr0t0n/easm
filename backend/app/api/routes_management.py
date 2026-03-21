@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import secrets
 
 import httpx
@@ -9,13 +9,14 @@ from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AppSetting, AuditEvent, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User
+from app.models.models import AccessGroup, AppSetting, AuditEvent, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, WorkerHeartbeat
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
-from app.workers.tasks import run_scan_job
-from app.workers.worker_groups import WORKER_GROUPS
+from app.workers.celery_app import celery
+from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit
+from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS
 
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -478,7 +479,7 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
 
     for scan_id in created_scan_ids:
         try:
-            run_scan_job.delay(scan_id)
+            run_scan_job_scheduled.delay(scan_id)
         except Exception:
             run_scan_job(scan_id)
 
@@ -530,19 +531,74 @@ def _set_setting(db: Session, owner_id: int, key: str, value: str):
         db.add(AppSetting(owner_id=owner_id, key=key, value=value))
 
 
+def _parse_int(payload: dict, key: str, default: int, min_value: int, max_value: int) -> int:
+    raw = payload.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+def _parse_bool(payload: dict, key: str, default: bool) -> bool:
+    raw = payload.get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
+def _setting_int(db: Session, owner_id: int, key: str, default: int, min_value: int, max_value: int) -> int:
+    raw = _get_setting(db, owner_id, key, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
 @router.get("/config/runtime")
 def get_runtime_flags(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     debug_mode = _get_setting(db, current_user.id, "debug_mode", "false") == "true"
     verbose_mode = _get_setting(db, current_user.id, "verbose_mode", "false") == "true"
-    return {"debug_mode": debug_mode, "verbose_mode": verbose_mode}
+    scan_retry_enabled = _get_setting(db, current_user.id, "scan_retry_enabled", "true") == "true"
+    scan_retry_max_attempts = _setting_int(db, current_user.id, "scan_retry_max_attempts", 3, 1, 10)
+    scan_retry_delay_seconds = _setting_int(db, current_user.id, "scan_retry_delay_seconds", 45, 5, 3600)
+    worker_health_stale_after_seconds = _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600)
+    worker_orphan_cutoff_minutes = _setting_int(db, current_user.id, "worker_orphan_cutoff_minutes", 8, 1, 180)
+    worker_orphan_requeue_limit = _setting_int(db, current_user.id, "worker_orphan_requeue_limit", 100, 1, 2000)
+    return {
+        "debug_mode": debug_mode,
+        "verbose_mode": verbose_mode,
+        "scan_retry_enabled": scan_retry_enabled,
+        "scan_retry_max_attempts": scan_retry_max_attempts,
+        "scan_retry_delay_seconds": scan_retry_delay_seconds,
+        "worker_health_stale_after_seconds": worker_health_stale_after_seconds,
+        "worker_orphan_cutoff_minutes": worker_orphan_cutoff_minutes,
+        "worker_orphan_requeue_limit": worker_orphan_requeue_limit,
+    }
 
 
 @router.put("/config/runtime")
 def save_runtime_flags(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    debug_mode = bool(payload.get("debug_mode", False))
-    verbose_mode = bool(payload.get("verbose_mode", False))
+    debug_mode = _parse_bool(payload, "debug_mode", False)
+    verbose_mode = _parse_bool(payload, "verbose_mode", False)
+    scan_retry_enabled = _parse_bool(payload, "scan_retry_enabled", True)
+    scan_retry_max_attempts = _parse_int(payload, "scan_retry_max_attempts", 3, 1, 10)
+    scan_retry_delay_seconds = _parse_int(payload, "scan_retry_delay_seconds", 10, 5, 3600)
+    worker_health_stale_after_seconds = _parse_int(payload, "worker_health_stale_after_seconds", 60, 10, 3600)
+    worker_orphan_cutoff_minutes = _parse_int(payload, "worker_orphan_cutoff_minutes", 8, 1, 180)
+    worker_orphan_requeue_limit = _parse_int(payload, "worker_orphan_requeue_limit", 100, 1, 2000)
+
     _set_setting(db, current_user.id, "debug_mode", "true" if debug_mode else "false")
     _set_setting(db, current_user.id, "verbose_mode", "true" if verbose_mode else "false")
+    _set_setting(db, current_user.id, "scan_retry_enabled", "true" if scan_retry_enabled else "false")
+    _set_setting(db, current_user.id, "scan_retry_max_attempts", str(scan_retry_max_attempts))
+    _set_setting(db, current_user.id, "scan_retry_delay_seconds", str(scan_retry_delay_seconds))
+    _set_setting(db, current_user.id, "worker_health_stale_after_seconds", str(worker_health_stale_after_seconds))
+    _set_setting(db, current_user.id, "worker_orphan_cutoff_minutes", str(worker_orphan_cutoff_minutes))
+    _set_setting(db, current_user.id, "worker_orphan_requeue_limit", str(worker_orphan_requeue_limit))
     db.commit()
     return {"ok": True}
 
@@ -585,6 +641,12 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
         "runtime": {
             "debug_mode": _get_setting(db, current_user.id, "debug_mode", "false") == "true",
             "verbose_mode": _get_setting(db, current_user.id, "verbose_mode", "false") == "true",
+            "scan_retry_enabled": _get_setting(db, current_user.id, "scan_retry_enabled", "true") == "true",
+            "scan_retry_max_attempts": _setting_int(db, current_user.id, "scan_retry_max_attempts", 3, 1, 10),
+            "scan_retry_delay_seconds": _setting_int(db, current_user.id, "scan_retry_delay_seconds", 45, 5, 3600),
+            "worker_health_stale_after_seconds": _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600),
+            "worker_orphan_cutoff_minutes": _setting_int(db, current_user.id, "worker_orphan_cutoff_minutes", 8, 1, 180),
+            "worker_orphan_requeue_limit": _setting_int(db, current_user.id, "worker_orphan_requeue_limit", 100, 1, 2000),
         },
         "recent_errors": [
             {
@@ -621,7 +683,10 @@ def list_operation_lines(db: Session = Depends(get_db), current_user: User = Dep
 
 @router.get("/worker-manager/groups")
 def list_worker_groups_config(current_user: User = Depends(require_admin)):
-    return WORKER_GROUPS
+    return {
+        "unit": UNIT_WORKER_GROUPS,
+        "scheduled": SCHEDULED_WORKER_GROUPS,
+    }
 
 
 @router.get("/worker-manager/overview")
@@ -666,7 +731,10 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
     }
 
     return {
-        "worker_groups": WORKER_GROUPS,
+        "worker_groups": {
+            "unit": UNIT_WORKER_GROUPS,
+            "scheduled": SCHEDULED_WORKER_GROUPS,
+        },
         "priorities": [
             {
                 "line_id": row.id,
@@ -684,6 +752,191 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
             "avg_discovered_ports": round(sum(discovered_ports_sizes) / len(discovered_ports_sizes), 2) if discovered_ports_sizes else 0.0,
             "scans_analyzed": len(scans),
         },
+    }
+
+
+def _extract_scan_id(task: dict) -> int | None:
+    kwargs = task.get("kwargs") or {}
+    if isinstance(kwargs, dict) and "scan_id" in kwargs:
+        try:
+            return int(kwargs.get("scan_id"))
+        except (TypeError, ValueError):
+            return None
+
+    args = task.get("args")
+    if isinstance(args, (list, tuple)) and args:
+        try:
+            return int(args[0])
+        except (TypeError, ValueError):
+            return None
+
+    # Alguns brokers serializam args como string "(123,)".
+    if isinstance(args, str):
+        digits = "".join(ch for ch in args if ch.isdigit())
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+    return None
+
+
+def _active_scan_ids() -> tuple[dict[str, set[int]], bool]:
+    inspector = celery.control.inspect(timeout=1.5)
+    active = inspector.active()
+    if active is None:
+        return {"unit": set(), "scheduled": set()}, False
+
+    result = {"unit": set(), "scheduled": set()}
+    for _, tasks in active.items():
+        for task in tasks or []:
+            name = str(task.get("name") or "")
+            scan_id = _extract_scan_id(task)
+            if scan_id is None:
+                continue
+            if name == "run_scan_job_unit":
+                result["unit"].add(scan_id)
+            elif name == "run_scan_job_scheduled":
+                result["scheduled"].add(scan_id)
+    return result, True
+
+
+@router.get("/worker-manager/health")
+def worker_manager_health(
+    stale_after_seconds: int | None = Query(default=None, ge=10, le=3600),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    if stale_after_seconds is None:
+        stale_after_seconds = _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600)
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=stale_after_seconds)
+
+    rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).all()
+    workers = []
+    online_count = 0
+    for row in rows:
+        online = bool(row.last_seen_at and row.last_seen_at >= cutoff)
+        online_count += 1 if online else 0
+        workers.append(
+            {
+                "worker_name": row.worker_name,
+                "mode": row.mode,
+                "status": row.status,
+                "current_scan_id": row.current_scan_id,
+                "last_task_name": row.last_task_name,
+                "last_seen_at": row.last_seen_at,
+                "online": online,
+            }
+        )
+
+    return {
+        "summary": {
+            "total_workers": len(rows),
+            "online_workers": online_count,
+            "offline_workers": max(0, len(rows) - online_count),
+            "stale_after_seconds": stale_after_seconds,
+        },
+        "workers": workers,
+    }
+
+
+@router.post("/worker-manager/requeue-orphans")
+def requeue_orphan_scans(
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Recoloca em fila scans com status=running sem task ativa correspondente.
+
+    payload:
+      - older_than_seconds (int, default=300)
+      - limit (int, default=100)
+      - dry_run (bool, default=true)
+    """
+    body = payload or {}
+    default_cutoff_minutes = _setting_int(db, current_user.id, "worker_orphan_cutoff_minutes", 8, 1, 180)
+    default_requeue_limit = _setting_int(db, current_user.id, "worker_orphan_requeue_limit", 100, 1, 2000)
+
+    older_than_seconds = int(body.get("older_than_seconds", default_cutoff_minutes * 60))
+    limit = int(body.get("limit", default_requeue_limit))
+    dry_run = bool(body.get("dry_run", True))
+
+    if older_than_seconds < 30:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="older_than_seconds deve ser >= 30")
+
+    cutoff = datetime.utcnow() - timedelta(seconds=older_than_seconds)
+    active_by_mode, inspect_ok = _active_scan_ids()
+    if not inspect_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Nao foi possivel consultar workers ativos no Celery inspect",
+        )
+
+    candidates = (
+        db.query(ScanJob)
+        .filter(ScanJob.status == "running", ScanJob.updated_at < cutoff)
+        .order_by(ScanJob.updated_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+    orphan_ids: list[int] = []
+    requeued_ids: list[int] = []
+    skipped_active: list[int] = []
+
+    for job in candidates:
+        mode = "scheduled" if job.mode == "scheduled" else "unit"
+        if job.id in active_by_mode[mode]:
+            skipped_active.append(job.id)
+            continue
+
+        orphan_ids.append(job.id)
+        if dry_run:
+            continue
+
+        job.status = "queued"
+        job.current_step = "Reenfileirado por reconciliacao de orfao"
+        db.add(
+            ScanLog(
+                scan_job_id=job.id,
+                source="worker-manager",
+                level="WARNING",
+                message="Scan running sem worker ativo detectado; reenfileirando automaticamente",
+            )
+        )
+        if mode == "scheduled":
+            run_scan_job_scheduled.delay(job.id)
+        else:
+            run_scan_job_unit.delay(job.id)
+        requeued_ids.append(job.id)
+
+    log_audit(
+        db,
+        event_type="worker_manager.requeue_orphans",
+        message="Reconciliacao de scans orfaos executada",
+        actor_user_id=current_user.id,
+        metadata={
+            "dry_run": dry_run,
+            "older_than_seconds": older_than_seconds,
+            "candidates": [j.id for j in candidates],
+            "orphans": orphan_ids,
+            "requeued": requeued_ids,
+            "skipped_active": skipped_active,
+        },
+    )
+    db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "older_than_seconds": older_than_seconds,
+        "candidates": len(candidates),
+        "orphans": orphan_ids,
+        "requeued": requeued_ids,
+        "skipped_active": skipped_active,
     }
 
 

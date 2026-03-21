@@ -7,7 +7,13 @@ class Settings(BaseSettings):
     app_name: str = "VALID ASM - vASM"
     app_env: str = "development"
     secret_key: str = "change_me"
+    # Token de acesso: 24h por padrao.
+    # Scans longos nao sao afetados — a execucao ocorre inteiramente nos workers
+    # Celery, sem validacao JWT. O token so e necessario nas chamadas HTTP do frontend.
     access_token_expire_minutes: int = 1440
+    # Token de refresh: 7 dias. Usado pelo frontend para reemitir access tokens
+    # silenciosamente sem forcar re-login durante sessoes longas de monitoramento.
+    refresh_token_expire_days: int = 7
     admin_email: str = "admin@vasm.local"
     admin_password: str = "admin123"
 

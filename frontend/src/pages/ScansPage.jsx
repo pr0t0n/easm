@@ -18,6 +18,13 @@ export default function ScansPage() {
   const [authStatus, setAuthStatus] = useState("");
   const [isAuthorizedForTarget, setIsAuthorizedForTarget] = useState(false);
 
+  const fmtDateTime = (value) => {
+    if (!value) return "-";
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return "-";
+    return dt.toLocaleString();
+  };
+
   const loadScans = async () => {
     const { data } = await client.get("/api/scans");
     setScans(data);
@@ -180,6 +187,8 @@ export default function ScansPage() {
             >
               <p className="font-medium">#{scan.id} - {scan.target_query}</p>
               <p className="text-xs text-slate-300">{scan.status} | grupo {scan.access_group_id || "-"} | {scan.current_step} | {scan.mission_progress}%</p>
+              <p className="text-xs text-amber-200">retry {scan.retry_attempt || 0}/{scan.retry_max || 0} | proximo: {fmtDateTime(scan.next_retry_at)}</p>
+              {scan.last_error && <p className="text-xs text-rose-300">ultimo erro: {scan.last_error}</p>}
             </button>
           ))}
         </div>
@@ -193,6 +202,11 @@ export default function ScansPage() {
           <p className="text-sm text-slate-300">Scan #{scanStatus.id} | status: {scanStatus.status} | compliance: {scanStatus.compliance_status}</p>
           <p className="text-sm text-slate-300">WebSocket logs: {wsConnected ? "conectado" : "desconectado"}</p>
           <p className="text-sm text-slate-300">Passo: {scanStatus.current_step} | progresso: {scanStatus.mission_progress}%</p>
+          <p className="text-sm text-slate-300">
+            Retry: tentativa {scanStatus.retry_attempt || 0}/{scanStatus.retry_max || 0}
+            {scanStatus.next_retry_at ? ` | proxima em: ${fmtDateTime(scanStatus.next_retry_at)}` : ""}
+          </p>
+          {scanStatus.last_error && <p className="text-sm text-rose-300">Ultimo erro: {scanStatus.last_error}</p>}
           <p className="mt-2 text-sm text-slate-300">Portas descobertas: {(scanStatus.discovered_ports || []).join(", ") || "nenhuma"}</p>
           <p className="text-sm text-slate-300">Retestes pendentes: {(scanStatus.pending_port_tests || []).join(", ") || "nenhum"}</p>
         </section>

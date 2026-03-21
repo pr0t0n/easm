@@ -51,6 +51,10 @@ class ScanJob(Base):
     authorization_id: Mapped[int | None] = mapped_column(ForeignKey("scan_authorizations.id"), nullable=True, index=True)
     current_step: Mapped[str] = mapped_column(String(255), default="")
     mission_progress: Mapped[int] = mapped_column(Integer, default=0)
+    retry_attempt: Mapped[int] = mapped_column(Integer, default=0)
+    retry_max: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     state_data: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -79,13 +83,25 @@ class Finding(Base):
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
     title: Mapped[str] = mapped_column(String(255))
     severity: Mapped[str] = mapped_column(String(20), default="low")
+    # Mapeamento P1-P5 do Sn1per: P1=critical, P2=high, P3=medium, P4=low, P5=info
+    sn1per_priority: Mapped[str | None] = mapped_column(String(10), nullable=True)
     cve: Mapped[str | None] = mapped_column(String(50), nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer, default=1)
+    # Confianca (0-100): derivada do CVSS/nuclei severity para reduzir FP noise
+    confidence_score: Mapped[int] = mapped_column(Integer, default=50)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # ── Falso Positivo ────────────────────────────────────────────────────────
     is_false_positive: Mapped[bool] = mapped_column(Boolean, default=False)
+    fp_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fp_reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    fp_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # ── Retest ────────────────────────────────────────────────────────────────
+    # valores: None | "pending_retest" | "confirmed" | "refuted"
+    retest_status: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     scan_job = relationship("ScanJob", back_populates="findings")
+    fp_reviewed_by = relationship("User", foreign_keys=[fp_reviewed_by_id])
 
 
 class FalsePositiveMemory(Base):
@@ -138,6 +154,19 @@ class OperationLine(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     definition: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    worker_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(20), default="unit", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="idle", index=True)
+    current_scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True, index=True)
+    last_task_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

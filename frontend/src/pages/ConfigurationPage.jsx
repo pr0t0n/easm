@@ -3,7 +3,16 @@ import client from "../api/client";
 
 export default function ConfigurationPage() {
   const [shodanApiKey, setShodanApiKey] = useState("");
-  const [runtime, setRuntime] = useState({ debug_mode: false, verbose_mode: false });
+  const [runtime, setRuntime] = useState({
+    debug_mode: false,
+    verbose_mode: false,
+    scan_retry_enabled: true,
+    scan_retry_max_attempts: 3,
+    scan_retry_delay_seconds: 45,
+    worker_health_stale_after_seconds: 60,
+    worker_orphan_cutoff_minutes: 8,
+    worker_orphan_requeue_limit: 100,
+  });
   const [aiStatus, setAiStatus] = useState(null);
   const [workerGroups, setWorkerGroups] = useState({});
   const [overview, setOverview] = useState(null);
@@ -126,6 +135,71 @@ export default function ConfigurationPage() {
               />
               Verbose Mode
             </label>
+            <label className="mt-2 flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={runtime.scan_retry_enabled}
+                onChange={(e) => setRuntime({ ...runtime, scan_retry_enabled: e.target.checked })}
+              />
+              Habilitar retry automatico de scans
+            </label>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <label className="text-xs text-slate-300">
+                Max tentativas de retry
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+                  value={runtime.scan_retry_max_attempts}
+                  onChange={(e) => setRuntime({ ...runtime, scan_retry_max_attempts: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Delay entre retries (seg)
+                <input
+                  type="number"
+                  min={5}
+                  max={3600}
+                  className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+                  value={runtime.scan_retry_delay_seconds}
+                  onChange={(e) => setRuntime({ ...runtime, scan_retry_delay_seconds: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Worker stale timeout (seg)
+                <input
+                  type="number"
+                  min={10}
+                  max={3600}
+                  className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+                  value={runtime.worker_health_stale_after_seconds}
+                  onChange={(e) => setRuntime({ ...runtime, worker_health_stale_after_seconds: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Orphan cutoff (min)
+                <input
+                  type="number"
+                  min={1}
+                  max={180}
+                  className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+                  value={runtime.worker_orphan_cutoff_minutes}
+                  onChange={(e) => setRuntime({ ...runtime, worker_orphan_cutoff_minutes: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs text-slate-300 md:col-span-2">
+                Limite de requeue de orfaos por operacao
+                <input
+                  type="number"
+                  min={1}
+                  max={2000}
+                  className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+                  value={runtime.worker_orphan_requeue_limit}
+                  onChange={(e) => setRuntime({ ...runtime, worker_orphan_requeue_limit: Number(e.target.value) })}
+                />
+              </label>
+            </div>
             <button onClick={saveRuntime} className="mt-2 rounded-xl bg-cyan-500 px-4 py-2 font-semibold text-slate-950">Salvar runtime</button>
           </div>
         </div>
@@ -144,7 +218,13 @@ export default function ConfigurationPage() {
             <p>Modelo configurado: {aiStatus.ollama.configured_model}</p>
             <p>Modelos disponiveis: {(aiStatus.ollama.available_models || []).join(", ") || "nenhum"}</p>
             {aiStatus.ollama.error && <p className="text-rose-300">Erro IA: {aiStatus.ollama.error}</p>}
-            <p>Runtime atual: debug={String(aiStatus.runtime.debug_mode)} | verbose={String(aiStatus.runtime.verbose_mode)}</p>
+            <p>
+              Runtime atual: debug={String(aiStatus.runtime.debug_mode)} | verbose={String(aiStatus.runtime.verbose_mode)}
+              {" | "}retry={String(aiStatus.runtime.scan_retry_enabled)} ({aiStatus.runtime.scan_retry_max_attempts}x/{aiStatus.runtime.scan_retry_delay_seconds}s)
+            </p>
+            <p>
+              Workers: stale={aiStatus.runtime.worker_health_stale_after_seconds}s | orphan_cutoff={aiStatus.runtime.worker_orphan_cutoff_minutes}min | orphan_limit={aiStatus.runtime.worker_orphan_requeue_limit}
+            </p>
 
             <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <h4 className="font-semibold">Ultimos erros</h4>
