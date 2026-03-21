@@ -1,8 +1,17 @@
 import axios from "axios";
+import { toastError } from "../utils/toast";
 
 const client = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+  timeout: 20000,
 });
+
+const RETRYABLE_METHODS = new Set(["get", "head", "options"]);
+const MAX_RETRIES = 2;
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Injeta o access token em cada requisicao
 client.interceptors.request.use((config) => {
@@ -22,6 +31,18 @@ client.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config;
+
+    const method = String(original?.method || "get").toLowerCase();
+    const isTransient = !error.response || error.response.status >= 500 || error.code === "ECONNABORTED";
+    if (original && RETRYABLE_METHODS.has(method) && isTransient) {
+      original._retryCount = original._retryCount || 0;
+      if (original._retryCount < MAX_RETRIES) {
+        const delay = 350 * (2 ** original._retryCount) + Math.floor(Math.random() * 120);
+        original._retryCount += 1;
+        await wait(delay);
+        return client(original);
+      }
+    }
 
     if (error.response?.status === 401 && !original._retry) {
       const refreshToken = localStorage.getItem("refresh_token");
@@ -71,6 +92,11 @@ client.interceptors.response.use(
       } finally {
         _refreshing = false;
       }
+    }
+
+    if (!original?._skipToast) {
+      const detail = error?.response?.data?.detail || "Falha de comunicacao com o backend.";
+      toastError(detail);
     }
 
     return Promise.reject(error);

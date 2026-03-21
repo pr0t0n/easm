@@ -6,12 +6,11 @@ alembic==1.14.0
 pydantic-settings==2.7.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.19
 celery==5.4.0
 redis==5.2.1
 langgraph==0.2.62
 langgraph-checkpoint-postgres==2.0.9
-langchain-community==0.3.13
 chromadb==0.5.23
-ollama==0.4.4
 httpx==0.28.1
+pynessus
+pytest==8.3.5

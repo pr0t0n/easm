@@ -8,6 +8,7 @@ from app.graph.workflow import build_graph, initial_state
 from app.models.models import AppSetting, Finding, ScanJob, ScanLog, WorkerHeartbeat
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
+from app.services.cve_enrichment_service import enrichment_service
 from app.workers.celery_app import celery
 from app.workers.worker_groups import (
     UNIT_WORKER_GROUPS,
@@ -120,7 +121,7 @@ def unit_crawler_execute(tool: str, target: str, params: dict | None = None):
 
 @celery.task(name="worker.unit.osint.execute", queue="worker.unit.osint")
 def unit_osint_execute(tool: str, target: str, params: dict | None = None):
-    """theHarvester, urlscan-cli e subjack — OSINT rapido e takeover detection (Sn1per osint.sh)."""
+    """theHarvester, shodan-cli, whatweb, urlscan-cli e subjack — OSINT rapido e exposicao externa."""
     return _worker_result("osint", tool, target, "unit", params)
 
 
@@ -280,11 +281,18 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             details = dict(vuln)
             recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
             details.update(recommendations)
+
+            cve_id = enrichment_service.extract_cve(details, title=vuln.get("title"))
+            if cve_id:
+                details.update(enrichment_service.enrich(cve_id))
+
             db.add(
                 Finding(
                     scan_job_id=job.id,
                     title=vuln.get("title", "Potential issue"),
                     severity=vuln.get("severity", "low"),
+                    cve=cve_id,
+                    confidence_score=int(vuln.get("confidence_score", 50) or 50),
                     risk_score=vuln.get("risk_score", 1),
                     details={"source_worker": source_worker, "scan_mode": scan_mode, **details},
                 )

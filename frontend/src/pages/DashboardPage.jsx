@@ -52,13 +52,20 @@ export default function DashboardPage() {
   const [topVulns, setTopVulns] = useState([]);
   const [assets, setAssets] = useState([]);
   const [activity, setActivity] = useState([]);
+  const [prioritizedActions, setPrioritizedActions] = useState([]);
+  const [prioritizedPage, setPrioritizedPage] = useState({ total: 0, limit: 10, offset: 0 });
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/dashboard/insights");
+        const { data } = await client.get("/api/dashboard/insights", {
+          params: {
+            prioritized_limit: prioritizedPage.limit,
+            prioritized_offset: prioritizedPage.offset,
+          },
+        });
         const dashboard = data || {};
 
         setStats({
@@ -83,6 +90,11 @@ export default function DashboardPage() {
         setTopVulns(dashboard.top_vulns || []);
         setAssets(dashboard.assets || []);
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
+        setPrioritizedActions(dashboard.prioritized_actions || []);
+        setPrioritizedPage((prev) => ({
+          ...prev,
+          total: Number(dashboard.prioritized_actions_page?.total || 0),
+        }));
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -91,7 +103,10 @@ export default function DashboardPage() {
     };
 
     load();
-  }, []);
+  }, [prioritizedPage.offset]);
+
+  const hasPrevPrioritized = prioritizedPage.offset > 0;
+  const hasNextPrioritized = prioritizedPage.offset + prioritizedPage.limit < prioritizedPage.total;
 
   if (loading) {
     return (
@@ -124,6 +139,13 @@ export default function DashboardPage() {
         <StatCard label="Alto" value={stats.high} color="text-orange-400" />
         <StatCard label="Medio" value={stats.medium} color="text-yellow-400" />
         <StatCard label="Baixo" value={stats.low} color="text-emerald-400" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatCard label="FAIR Medio" value={stats.fair_avg_score || 0} sub="score medio 0-100" color="text-cyan-300" />
+        <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
+        <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />
+        <StatCard label="AGE Mercado/Exploit" value={`${stats.age_market_avg_days || 0}d / ${stats.age_exploit_avg_days || 0}d`} sub="mercado / exploit" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -218,6 +240,38 @@ export default function DashboardPage() {
                 <p className="truncate font-mono text-sm font-medium">{asset.name}</p>
               </div>
               <p className="mt-1 text-xs text-slate-400 capitalize">{asset.type}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+        <h2 className="font-display text-lg font-semibold">Prioridade de Correcao (FAIR + AGE)</h2>
+        <p className="mt-1 text-xs text-slate-400">Ordem sugerida por impacto operacional e financeiro (ALE).</p>
+        <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
+          <p>Mostrando {prioritizedActions.length} de {prioritizedPage.total}</p>
+          <div className="flex gap-2">
+            <button disabled={!hasPrevPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Anterior</button>
+            <button disabled={!hasNextPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: p.offset + p.limit }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Proxima</button>
+          </div>
+        </div>
+        <div className="mt-3 space-y-2">
+          {prioritizedActions.length === 0 && <p className="text-sm text-slate-500">Sem recomendacoes priorizadas no momento.</p>}
+          {prioritizedActions.map((item, index) => (
+            <div key={`${item.finding_id}-${index}`} className="rounded-xl border border-slate-800 bg-slate-800/40 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <p className="font-medium">#{index + 1} {item.title}</p>
+                <span className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                  ALE USD {Number(item.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                </span>
+              </div>
+              <div className="mt-1 grid gap-1 text-xs text-slate-300 md:grid-cols-3">
+                <p>severidade: <span className="uppercase text-white">{item.severity}</span></p>
+                <p>FAIR: <span className="text-white">{item.fair_score}</span></p>
+                <p>AGE env/merc/exploit: <span className="text-white">{item.age?.known_in_environment_days ?? 0}d / {item.age?.known_in_market_days ?? 0}d / {item.age?.exploit_published_days ?? 0}d</span></p>
+              </div>
+              <p className="mt-2 text-xs text-slate-300"><span className="font-semibold text-cyan-300">Operacional:</span> {item.operational_reason}</p>
+              <p className="mt-1 text-xs text-slate-300"><span className="font-semibold text-amber-300">Financeiro:</span> {item.financial_reason}</p>
             </div>
           ))}
         </div>

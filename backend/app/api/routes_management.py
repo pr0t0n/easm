@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 import secrets
+import shutil
+from importlib.util import find_spec
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -558,6 +560,41 @@ def _setting_int(db: Session, owner_id: int, key: str, default: int, min_value: 
     return max(min_value, min(max_value, value))
 
 
+def _tool_installed(tool_name: str) -> bool:
+    normalized = tool_name.strip().lower()
+    if normalized == "nessus":
+        return find_spec("nessus") is not None or find_spec("pynessus") is not None
+    alias_map = {
+        "subfinder": "subfinder",
+        "amass": "amass",
+        "assetfinder": "assetfinder",
+        "dnsx": "dnsx",
+        "naabu": "naabu",
+        "httpx": "httpx",
+        "katana": "katana",
+        "uro": "uro",
+        "ffuf": "ffuf",
+        "feroxbuster": "feroxbuster",
+        "arjun": "arjun",
+        "nuclei": "nuclei",
+        "dalfox": "dalfox",
+        "nikto": "nikto",
+        "wpscan": "wpscan",
+        "zap": "zap",
+        "trufflehog": "trufflehog",
+        "secretfinder": "secretfinder",
+        "kiterunner": "kr",
+        "theharvester": "theHarvester",
+        "h8mail": "h8mail",
+        "metagoofil": "metagoofil",
+        "subjack": "subjack",
+        "semgrep": "semgrep",
+        "openvas": "openvas",
+    }
+    cmd = alias_map.get(normalized, normalized)
+    return shutil.which(cmd) is not None
+
+
 @router.get("/config/runtime")
 def get_runtime_flags(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     debug_mode = _get_setting(db, current_user.id, "debug_mode", "false") == "true"
@@ -660,6 +697,86 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
     }
 
 
+@router.get("/config/tools")
+def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    def _group_payload(mode_name: str, groups: dict) -> list[dict]:
+        result: list[dict] = []
+        for group_name, group in groups.items():
+            tools = []
+            for tool in group.get("tools", []):
+                tools.append(
+                    {
+                        "name": tool,
+                        "installed": _tool_installed(tool),
+                    }
+                )
+            result.append(
+                {
+                    "mode": mode_name,
+                    "group": group_name,
+                    "queue": group.get("queue"),
+                    "description": group.get("description", ""),
+                    "tools": tools,
+                }
+            )
+        return result
+
+    nessus_enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
+    nessus_url = _get_setting(db, current_user.id, "nessus_url", "")
+
+    return {
+        "catalog": {
+            "unit": _group_payload("unit", UNIT_WORKER_GROUPS),
+            "scheduled": _group_payload("scheduled", SCHEDULED_WORKER_GROUPS),
+        },
+        "nessus": {
+            "enabled": nessus_enabled,
+            "url": nessus_url,
+            "pynessus_installed": _tool_installed("nessus"),
+            "configured": bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")),
+        },
+    }
+
+
+@router.get("/config/nessus")
+def get_nessus_config(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
+    url = _get_setting(db, current_user.id, "nessus_url", "")
+    access_key = _get_setting(db, current_user.id, "nessus_access_key", "")
+    secret_key = _get_setting(db, current_user.id, "nessus_secret_key", "")
+    verify_tls = _get_setting(db, current_user.id, "nessus_verify_tls", "true") == "true"
+
+    return {
+        "enabled": enabled,
+        "url": url,
+        "access_key": access_key,
+        "secret_key": "***" if secret_key else "",
+        "verify_tls": verify_tls,
+        "configured": bool(url and access_key and secret_key),
+        "pynessus_installed": _tool_installed("nessus"),
+    }
+
+
+@router.put("/config/nessus")
+def save_nessus_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    enabled = _parse_bool(payload, "enabled", False)
+    url = str(payload.get("url") or "").strip()
+    access_key = str(payload.get("access_key") or "").strip()
+    secret_key = str(payload.get("secret_key") or "").strip()
+    verify_tls = _parse_bool(payload, "verify_tls", True)
+
+    _set_setting(db, current_user.id, "nessus_enabled", "true" if enabled else "false")
+    _set_setting(db, current_user.id, "nessus_url", url)
+    if access_key:
+        _set_setting(db, current_user.id, "nessus_access_key", access_key)
+    if secret_key and secret_key != "***":
+        _set_setting(db, current_user.id, "nessus_secret_key", secret_key)
+    _set_setting(db, current_user.id, "nessus_verify_tls", "true" if verify_tls else "false")
+    db.commit()
+
+    return {"ok": True}
+
+
 @router.get("/worker-manager/lines")
 def list_operation_lines(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     rows = (
@@ -752,6 +869,106 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
             "avg_discovered_ports": round(sum(discovered_ports_sizes) / len(discovered_ports_sizes), 2) if discovered_ports_sizes else 0.0,
             "scans_analyzed": len(scans),
         },
+    }
+
+
+SUPERVISOR_WORKER_NODES = {"recon", "scan", "fuzzing", "vuln", "analista_ia", "osint"}
+
+
+def _validate_supervisor_path(node_history: list[str]) -> dict:
+    if not node_history:
+        return {
+            "valid": False,
+            "starts_with_supervisor": False,
+            "has_osint_node": False,
+            "invalid_edges": [],
+            "transitions": [],
+        }
+
+    transitions: list[str] = []
+    invalid_edges: list[str] = []
+    starts_with_supervisor = node_history[0] == "supervisor"
+    has_osint_node = "osint" in node_history
+
+    for idx in range(len(node_history) - 1):
+        src = str(node_history[idx])
+        dst = str(node_history[idx + 1])
+        edge = f"{src}->{dst}"
+        transitions.append(edge)
+
+        if src == "supervisor":
+            if dst not in SUPERVISOR_WORKER_NODES:
+                invalid_edges.append(edge)
+            continue
+
+        if src in SUPERVISOR_WORKER_NODES:
+            if dst != "supervisor":
+                invalid_edges.append(edge)
+            continue
+
+        invalid_edges.append(edge)
+
+    return {
+        "valid": starts_with_supervisor and len(invalid_edges) == 0,
+        "starts_with_supervisor": starts_with_supervisor,
+        "has_osint_node": has_osint_node,
+        "invalid_edges": invalid_edges,
+        "transitions": transitions,
+    }
+
+
+@router.get("/worker-manager/supervisor-trail")
+def worker_manager_supervisor_trail(
+    scan_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    query = db.query(ScanJob)
+    if scan_id is not None:
+        query = query.filter(ScanJob.id == scan_id)
+
+    scans = query.order_by(ScanJob.created_at.desc()).limit(limit).all()
+    items: list[dict] = []
+    valid_count = 0
+    osint_count = 0
+
+    for scan in scans:
+        state = scan.state_data or {}
+        node_history = [str(n) for n in (state.get("node_history") or [])]
+        logs = [str(line) for line in (state.get("logs_terminais") or [])]
+        supervisor_logs = [line for line in logs if line.startswith("Supervisor:")]
+
+        validation = _validate_supervisor_path(node_history)
+        if validation["valid"]:
+            valid_count += 1
+        if validation["has_osint_node"]:
+            osint_count += 1
+
+        items.append(
+            {
+                "scan_id": scan.id,
+                "target_query": scan.target_query,
+                "status": scan.status,
+                "mode": scan.mode,
+                "created_at": scan.created_at,
+                "updated_at": scan.updated_at,
+                "validation": validation,
+                "node_history": node_history,
+                "supervisor_logs": supervisor_logs,
+            }
+        )
+
+    return {
+        "summary": {
+            "scans_analyzed": len(scans),
+            "valid_supervisor_flow": valid_count,
+            "invalid_supervisor_flow": max(0, len(scans) - valid_count),
+            "scans_with_osint_node": osint_count,
+            "scans_without_osint_node": max(0, len(scans) - osint_count),
+            "required_worker_nodes": sorted(SUPERVISOR_WORKER_NODES),
+        },
+        "scans": items,
     }
 
 

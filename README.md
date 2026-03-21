@@ -1,326 +1,376 @@
-# VALID ASM - vASM (LangGraph + FastAPI + React)
+# VALID ASM - Guia Operacional
 
-VALID ASM - vASM e uma plataforma de External Attack Surface Management (EASM) orientada a operacao defensiva.
-Ela centraliza descoberta, triagem e monitoramento continuo do ambiente externo com controle de compliance e auditoria.
+VALID ASM (vASM) e uma plataforma de External Attack Surface Management voltada para uso defensivo e autorizado. A aplicacao centraliza descoberta, triagem, priorizacao e monitoramento da superficie externa com trilha de auditoria, compliance e visao operacional em dashboard e relatorios.
 
 ## Aviso de seguranca
 
-Este projeto foi estruturado para **uso defensivo e autorizado**. Toda execucao depende de autorizacao valida de escopo e policy/allowlist ativa.
+Este projeto foi estruturado para uso defensivo e autorizado. Toda execucao depende de autorizacao valida por escopo e de policy/allowlist ativa para o cliente.
 
-## Arquitetura
+## Estado atual da aplicacao
+
+O repositorio implementa hoje:
+
+- backend FastAPI com persistencia em PostgreSQL;
+- workers Celery separados por modo unitario e agendado;
+- grafo LangGraph com supervisor explicito;
+- nodos especializados de recon, scan, fuzzing, vuln, analista_ia e osint;
+- logs em tempo real por WebSocket;
+- findings persistidos com enriquecimento CVE/CVSS/KEV;
+- recomendacoes IA em portugues;
+- dashboard com FAIR + AGE;
+- paginacao server-side para findings e acoes priorizadas;
+- validacao da trilha do supervisor com status OK/NOK.
+
+## Arquitetura operacional
 
 - Backend: FastAPI
-- Orquestracao de tarefas: Celery + Redis
-- Banco relacional e persistencia principal: PostgreSQL
-- Grafo de agentes: LangGraph StateGraph
-- IA local: Ollama (modelo configuravel via `.env`)
-- Memoria vetorial de falsos positivos: ChromaDB
+- Orquestracao async: Celery + Redis
+- Persistencia principal: PostgreSQL
+- Grafo de execucao: LangGraph StateGraph
+- Checkpointer: PostgreSQL com fallback MemorySaver
+- IA local: Ollama via HTTP
+- Memoria vetorial para falsos positivos: ChromaDB
 - Frontend: React + Tailwind + Vite
 
-## O que a aplicacao faz
-
-- Gerencia scans de superficie externa com orquestracao por LangGraph.
-- Executa workers separados por grupo funcional (recon, fuzzing, vuln, code_js, api).
-- Exige autorizacao formal por escopo de scan (singular ou agendado) antes da execucao.
-- Registra trilha de auditoria de ponta a ponta (criacao, gate, execucao, falhas, aprovacoes).
-- Entrega dashboard, relatorios e status de execucao com progresso e retestes.
-
-## Fluxo da aplicacao
-
-1. Admin define um SCAN singular ou um agendamento de SCAN em grupo.
-2. Admin clica em Autorizar, informando prova de ownership e escopo do SCAN; o sistema gera um authorization_code unico.
-3. O authorization_code e aprovado no fluxo de compliance e vinculado ao SCAN/agendamento.
-4. No momento de iniciar, a execucao valida: authorization_code + validade da aprovacao + policy/allowlist do cliente.
-5. Se o gate passar, o worker manager inicia a missao de 100 itens no LangGraph:
-	- cada etapa da missao define o objetivo operacional;
-	- cada nodo do grafo segue instrucoes e decide o proximo nodo via estado global;
-	- as ferramentas sao delegadas para grupos de workers (recon, fuzzing, vuln, code_js, api) conforme prioridade.
-6. O ScanNode registra portas descobertas e cria retestes automaticos antes de avancar no fluxo.
-7. Logs sao transmitidos por WebSocket em tempo real e persistidos no banco.
-8. O estado do grafo e salvo via checkpointer PostgreSQL para continuidade apos reinicio.
-9. Resultados ficam disponiveis em Relatorios e indicadores no Dashboard.
-
-## Perfis e permissoes
+## Perfis e acesso
 
 - Administrador:
-	- pode autorizar e executar scans;
-	- pode acessar Dashboard, Relatorios, Agendamento, Scan, Configuracao e Gestao de Usuarios;
-	- pode aprovar/revogar autorizacoes e consultar auditoria.
+  - cria scans e agendamentos;
+  - solicita e aprova autorizacoes;
+  - ajusta runtime, tools, workers, allowlist e grupos;
+  - consulta auditoria, jobs e health.
 - Usuario:
-	- acesso apenas a Dashboard e Relatorios;
-	- nao pode executar scan, agendar ou alterar configuracoes.
+  - acessa dashboard, reports, targets, assets, vulnerabilities e issues;
+  - nao altera configuracao nem dispara scans.
 
-Modelo de execucao dos agentes:
+## Fluxo ponta a ponta
 
-- O LangGraph decide o proximo passo no grafo.
-- Cada categoria de ferramenta e delegada para um worker especializado.
-- Antes da execucao, o scan passa por gate de compliance com autorizacao formal por escopo de scan (singular ou agendado).
-- Todos os eventos criticos sao registrados em trilha de auditoria.
+### Resumo operacional
 
-## Missao e Instrucoes Operacionais
+1. O usuario/admin define um alvo unico ou um conjunto de alvos para agendamento.
+2. O admin solicita autorizacao com prova de ownership e recebe um authorization_code.
+3. O admin aprova a autorizacao.
+4. O backend valida autorizacao e policy/allowlist antes de qualquer execucao.
+5. O worker inicia o LangGraph e entra sempre pelo nodo supervisor.
+6. O supervisor roteia os nodos especialistas em ciclo: recon, scan, fuzzing, vuln, analista_ia e osint conforme o estado.
+7. O scan registra portas e retestes; o fuzzing pode descobrir ativos laterais; o osint faz enriquecimento externo.
+8. Achados sao persistidos como findings, com recomendacoes IA e enrichment CVE/CVSS/KEV quando houver correlacao.
+9. Dashboard, Reports, Workers e demais telas leem apenas dados persistidos.
 
-- A missao contem 100 itens ordenados em [backend/app/graph/mission.py](backend/app/graph/mission.py).
-- O estado da execucao (AgentState) carrega contexto, progresso, ativos, vulnerabilidades e metrica de interacao.
-- Cada nodo opera com instrucoes especificas:
-	- ReconNode: descoberta e enriquecimento de ativos.
-	- ScanNode: validacao de servicos, descoberta de portas e retestes.
-	- FuzzingNode: exploracao de superficie web e descoberta lateral.
-	- VulnNode: correlacao tecnica de achados.
-	- AnalistaIANode: triagem e priorizacao de risco.
-- A decisao de roteamento e ciclica e contextual, com retorno para scans profundos quando necessario.
+### Diagrama completo
 
-## Worker Groups, Prioridades e Crescimento Lateral
-
-- Worker groups definidos com filas e funcoes em [backend/app/workers/worker_groups.py](backend/app/workers/worker_groups.py).
-- Prioridade operacional editavel no Worker Manager via `position` em OperationLine.
-- Indicadores de interacao disponiveis no endpoint de overview:
-	- tempo medio e maximo por nodo;
-	- contagem de transicoes entre nodos;
-	- media de crescimento lateral por scan;
-	- media de portas descobertas.
-
-## Policy e Allowlist por Cliente
-
-- Cada cliente possui policy default com allowlist de alvos.
-- O gate de policy valida padrao de alvo e grupo de ferramenta antes da execucao.
-- Endpoints dedicados:
-	- `GET /api/policy/allowlist`
-	- `POST /api/policy/allowlist`
-	- `PUT /api/policy/allowlist/{entry_id}`
-	- `DELETE /api/policy/allowlist/{entry_id}`
-
-## Regras de Autorizacao
-
-- Sem authorization_code aprovado, o scan nao executa de forma alguma.
-- A autorizacao e por SCAN singular ou por agendamento de SCAN em grupo.
-- Em agendamento, a autorizacao e realizada uma vez para o escopo configurado e reutilizada nas execucoes subsequentes enquanto valida.
-
-## Checkpointing e Continuidade
-
-- Checkpointer primario: PostgreSQL (`langgraph-checkpoint-postgres`).
-- Fallback de desenvolvimento: MemorySaver.
-- O estado permite retomada de scans apos restart do backend/worker.
-
-## Streaming de Logs
-
-- Endpoint WebSocket: `GET ws://<host>/ws/scans/{scan_id}/logs?token=<jwt>`
-- O frontend recebe eventos incrementais de log sem polling.
-
-## Persistencia de Vulnerabilidades e IA
-
-- Cada worker/nodo grava achados no banco na tabela `findings` com `source_worker` em `details`.
-- Dashboard e Relatorios usam exclusivamente dados persistidos no banco.
-- A IA Ollama (Qwen e CloudCode) gera recomendacoes em portugues e salva no `details` de cada finding:
-	- `qwen_recomendacao_pt`
-	- `cloudcode_recomendacao_pt`
-
-Prompt operacional aplicado para recomendacoes:
-
-"Voce e um analista senior de ciberseguranca. Responda SOMENTE em portugues do Brasil e em JSON valido. Objetivo: recomendar mitigacoes praticas para vulnerabilidades encontradas no EASM. Formato JSON obrigatorio: {\"resumo\":\"...\",\"impacto\":\"...\",\"mitigacoes\":[\"...\"],\"prioridade\":\"baixa|media|alta|critica\",\"validacoes\":[\"...\"]}."
-
-## Auto Aprendizado no LangGraph
-
-- Antes de cada execucao, o worker carrega vulnerabilidades conhecidas do banco e injeta no estado do grafo.
-- O nodo de vulnerabilidade aumenta prioridade/risk_score quando encontra padrao ja conhecido.
-- Esse ciclo melhora priorizacao e triagem a cada nova execucao.
-
-Servicos no Docker Compose:
-
-- `postgres`
-- `redis`
-- `ollama`
-- `backend`
-- `worker_unit`
-- `worker_scheduled`
-- `frontend`
-
-## Backlog Solicitado (Concluido)
-
-Itens solicitados e status atual no repositorio:
-
-- Backend FastAPI base: concluido.
-	- API principal em [backend/app/main.py](backend/app/main.py)
-	- Rotas em [backend/app/api/routes_auth.py](backend/app/api/routes_auth.py), [backend/app/api/routes_scans.py](backend/app/api/routes_scans.py), [backend/app/api/routes_management.py](backend/app/api/routes_management.py)
-- LangGraph com estado persistente: concluido.
-	- Grafo em [backend/app/graph/workflow.py](backend/app/graph/workflow.py)
-	- Checkpointer Postgres + fallback em [backend/app/graph/checkpointer.py](backend/app/graph/checkpointer.py)
-- Celery e workers: concluido.
-	- App Celery em [backend/app/workers/celery_app.py](backend/app/workers/celery_app.py)
-	- Tasks/filas em [backend/app/workers/tasks.py](backend/app/workers/tasks.py)
-	- Mapeamento de grupos em [backend/app/workers/worker_groups.py](backend/app/workers/worker_groups.py)
-	- Servicos docker separados em [docker-compose.yml](docker-compose.yml)
-- Frontend React: concluido.
-	- App em [frontend/src/App.jsx](frontend/src/App.jsx)
-	- Paginas em [frontend/src/pages](frontend/src/pages)
-	- Cliente API em [frontend/src/api/client.js](frontend/src/api/client.js)
-- Documentacao de execucao: concluido e atualizado neste README.
-
-## Execucao Rapida (Stack Completa)
-
-1. Preparar ambiente:
-
-```bash
-cp .env.example .env
+```mermaid
+flowchart TD
+    A[Definir alvo ou lote de alvos] --> B[Solicitar autorizacao de escopo]
+    B --> C[Aprovar authorization_code]
+    C --> D[Criar scan ou schedule]
+    D --> E[Gate de compliance]
+    E -->|NOK| E1[Scan bloqueado]
+    E -->|OK| F[Iniciar worker]
+    F --> G[LangGraph START -> supervisor]
+    G --> H[recon]
+    H --> G
+    G --> I[scan]
+    I --> J{Portas ou ativos novos?}
+    J -->|Sim| J1[Retestes automaticos]
+    J1 --> G
+    J -->|Nao| G
+    G --> K[fuzzing]
+    K --> L{Crescimento lateral?}
+    L -->|Sim| I
+    L -->|Nao| G
+    G --> M[vuln]
+    M --> G
+    G --> N[analista_ia]
+    N --> G
+    G --> O[osint]
+    O --> G
+    G --> P{Missao concluida?}
+    P -->|Nao| H
+    P -->|Sim| Q[Persistir findings, state_data e auditoria]
+    Q --> R[Reports]
+    Q --> S[Dashboard]
+    Q --> T[Workers / supervisor trail OK-NOK]
 ```
 
-2. Subir backend + workers + frontend:
+## Guia operacional por etapa
 
-```bash
-docker compose up --build
-```
-
-### Com perfis de ambiente
+### 1. Subir a stack
 
 Desenvolvimento:
 
 ```bash
+cp .env.example .env
 docker compose --profile dev up --build
 ```
 
 Producao:
 
 ```bash
+cp .env.example .env
 docker compose --profile prod up --build -d
 ```
 
-3. Validar servicos:
+Acessos padrao:
 
-- API Health: `http://localhost:8000/health`
-- Frontend: `http://localhost:5173`
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8000
+- Health: http://localhost:8000/health
 
-## Execucao de Validacao E2E
+### 2. Autorizar o escopo
 
-Script de validacao de fluxo completo:
+Fluxo minimo:
+
+1. POST /api/compliance/authorizations/request
+2. PUT /api/compliance/authorizations/{authorization_id}/approve
+3. usar o authorization_code aprovado na criacao de scan ou schedule.
+
+Sem esse passo, o scan fica bloqueado por compliance.
+
+### 3. Criar scan unitario
+
+- Endpoint: POST /api/scans
+- Uso: execucao pontual de um alvo especifico.
+- Filas envolvidas:
+  - scan.unit
+  - worker.unit.recon
+  - worker.unit.crawler
+  - worker.unit.fuzzing
+  - worker.unit.vuln
+  - worker.unit.code_js
+  - worker.unit.api
+  - worker.unit.osint
+
+### 4. Criar agendamento
+
+- Endpoint: POST /api/schedules
+- O agendamento persiste:
+  - targets_text
+  - frequency
+  - run_time
+  - day_of_week
+  - day_of_month
+
+Estado real atual da stack:
+
+- o modelo de agendamento existe;
+- a execucao manual existe via POST /api/schedules/{schedule_id}/execute;
+- o docker-compose.yml atual nao sobe um scheduler automatico tipo Celery Beat.
+
+Em outras palavras: hoje o schedule e persistido e executado sob demanda, nao automaticamente por cron interno da stack.
+
+### 5. Monitorar a execucao
+
+Durante a execucao, acompanhe:
+
+- status do scan: GET /api/scans/{scan_id}/status
+- logs do scan: GET /api/scans/{scan_id}/logs
+- logs em tempo real: GET ws://<host>/ws/scans/{scan_id}/logs?token=<jwt>
+- health dos workers: GET /api/worker-manager/health
+- metricas de interacao: GET /api/worker-manager/overview
+- validacao da trilha do supervisor: GET /api/worker-manager/supervisor-trail
+
+### 6. Consumir a saida operacional
+
+Depois da execucao:
+
+- report do scan: GET /api/scans/{scan_id}/report
+- dashboard consolidado: GET /api/dashboard/insights
+- findings paginados: GET /api/findings/page
+- inventario de targets: GET /api/targets/summary
+- inventario de assets: GET /api/assets
+- registry de jobs: GET /api/jobs/registry
+
+## Grafo de execucao
+
+Estado principal do AgentState:
+
+- lista_ativos
+- logs_terminais
+- vulnerabilidades_encontradas
+- proxima_ferramenta
+- mission_index
+- mission_items
+- activity_metrics
+- node_history
+
+Nodos atuais:
+
+- SupervisorNode
+- ReconNode
+- ScanNode
+- FuzzingNode
+- VulnNode
+- AnalistaIANode
+- OSINTNode
+
+Regras do fluxo:
+
+- a entrada sempre ocorre no SupervisorNode;
+- o supervisor decide o proximo worker pelo campo proxima_ferramenta;
+- todo worker retorna para o supervisor;
+- node_history registra a trilha de transicoes;
+- a trilha e validada para classificar cada scan como OK ou NOK no endpoint de supervisor trail.
+
+## Tabelas e telas operacionais
+
+Telas principais do frontend:
+
+- Dashboard
+- Targets
+- Assets
+- Vulnerabilities
+- Issues
+- Reports
+- Scans
+- Schedules
+- Settings
+- Tools
+- Workers
+- Jobs Registry
+
+As telas operacionais leem dados persistidos do banco. O frontend nao inventa estado paralelo para findings, dashboard ou relatorios.
+
+## Endpoints principais
+
+Autenticacao:
+
+- POST /api/auth/register
+- POST /api/auth/login
+- POST /api/auth/refresh
+- GET /api/auth/me
+
+Scans e resultados:
+
+- POST /api/scans
+- GET /api/scans
+- GET /api/scans/{scan_id}/status
+- GET /api/scans/{scan_id}/logs
+- GET /api/scans/{scan_id}/report
+- GET /api/findings
+- GET /api/findings/page
+- POST /api/findings/{finding_id}/false-positive
+
+Inventario e dashboard:
+
+- GET /api/dashboard
+- GET /api/dashboard/insights
+- GET /api/targets/summary
+- GET /api/assets
+- GET /api/jobs/registry
+
+Compliance e auditoria:
+
+- POST /api/compliance/authorizations/request
+- GET /api/compliance/authorizations
+- PUT /api/compliance/authorizations/{authorization_id}/approve
+- PUT /api/compliance/authorizations/{authorization_id}/revoke
+- GET /api/audit/events
+
+Workers e operacao:
+
+- GET /api/worker-manager/groups
+- GET /api/worker-manager/overview
+- GET /api/worker-manager/health
+- GET /api/worker-manager/supervisor-trail
+- POST /api/worker-manager/requeue-orphans
+
+Configuracao e policy:
+
+- GET /api/config/runtime
+- PUT /api/config/runtime
+- GET /api/config/ai-status
+- GET /api/config/tools
+- GET /api/config/nessus
+- PUT /api/config/nessus
+- GET /api/policy/allowlist
+- POST /api/policy/allowlist
+- PUT /api/policy/allowlist/{entry_id}
+- DELETE /api/policy/allowlist/{entry_id}
+
+Agendamentos:
+
+- GET /api/schedules
+- POST /api/schedules
+- PUT /api/schedules/{schedule_id}
+- DELETE /api/schedules/{schedule_id}
+- POST /api/schedules/{schedule_id}/execute
+
+## Validacao da stack declarada
+
+### Docker Compose
+
+Validacao estatica realizada:
+
+- docker-compose.yml sem erro de sintaxe;
+- separacao correta entre perfis dev e prod;
+- filas declaradas dos workers estao alinhadas com backend/app/workers/worker_groups.py e backend/app/workers/tasks.py;
+- frontend_prod usa npm run preview, e o script existe em frontend/package.json.
+
+Observacao operacional importante:
+
+- nao existe servico de scheduler automatico no compose atual;
+- portanto, agendamentos nao rodam automaticamente apenas por frequency/run_time;
+- a execucao atual de agendamentos e manual via endpoint POST /api/schedules/{schedule_id}/execute.
+
+### Requirements do backend
+
+Validacao do uso real do codigo:
+
+- pytest estava faltando, apesar de ja existirem testes em backend/tests;
+- python-multipart nao esta em uso no backend atual;
+- langchain-community nao esta sendo importado no codigo atual;
+- ollama como pacote Python nao esta em uso porque a integracao atual com Ollama e feita via httpx.
+
+Ajuste aplicado em backend/requirements.txt:
+
+- adicionado pytest==8.3.5;
+- removidos python-multipart, langchain-community e ollama.
+
+Dependencias que permanecem coerentes com o codigo:
+
+- fastapi
+- uvicorn[standard]
+- sqlalchemy
+- psycopg2-binary
+- alembic
+- pydantic-settings
+- python-jose[cryptography]
+- passlib[bcrypt]
+- celery
+- redis
+- langgraph
+- langgraph-checkpoint-postgres
+- chromadb
+- httpx
+- pynessus
+
+## Estrutura principal
+
+- [docker-compose.yml](docker-compose.yml)
+- [backend/Dockerfile](backend/Dockerfile)
+- [backend/requirements.txt](backend/requirements.txt)
+- [backend/app/main.py](backend/app/main.py)
+- [backend/app/graph/workflow.py](backend/app/graph/workflow.py)
+- [backend/app/workers/tasks.py](backend/app/workers/tasks.py)
+- [backend/app/workers/worker_groups.py](backend/app/workers/worker_groups.py)
+- [backend/app/api/routes_scans.py](backend/app/api/routes_scans.py)
+- [backend/app/api/routes_management.py](backend/app/api/routes_management.py)
+- [frontend/src/App.jsx](frontend/src/App.jsx)
+- [frontend/src/pages](frontend/src/pages)
+
+## Validacao automatizada disponivel
+
+Fluxo E2E:
 
 ```bash
 python scripts/validate_e2e_flow.py
 ```
 
-Arquivo: [scripts/validate_e2e_flow.py](scripts/validate_e2e_flow.py)
-
-Runbook operacional (incidente, restart seguro e rollback):
-
-- [docs/RUNBOOK.md](docs/RUNBOOK.md)
-
-## Grafo LangGraph
-
-Estado global (`AgentState`) com:
-
-- `lista_ativos`
-- `logs_terminais`
-- `vulnerabilidades_encontradas`
-- `proxima_ferramenta`
-- `mission_index`
-- `mission_items`
-
-Nos:
-
-- `ReconNode`
-- `ScanNode`
-- `FuzzingNode`
-- `VulnNode`
-- `AnalistaIANode`
-
-Fluxo ciclico:
-
-- O `FuzzingNode` pode sinalizar novo ativo e redirecionar para `ScanNode`.
-- O roteamento e feito por decisao condicional ate concluir os 100 itens da missao.
-- Quando o `ScanNode` encontra novas portas, o grafo agenda retestes automaticamente antes de seguir.
-
-## Missao de 100 itens
-
-A lista completa foi carregada em [backend/app/graph/mission.py](backend/app/graph/mission.py).
-
-## Funcionalidades Web
-
-- Login e registro com JWT persistido no navegador
-- Criacao de scan unitario e modo agendado
-- Terminal de logs com reconexao por leitura da tabela `scan_logs`
-- Consulta de relatorios por scan
-- Marcacao de falso positivo com ingestao no ChromaDB
-- Dashboard de evolucao com visao ISO 27001, NIST, CIS v8 e PCI
-- Menu lateral com: Dashboard, Agendamento, Configuracao e Scan
-- Configuracao com status da IA local (Ollama), modelos disponiveis e erros recentes
-- Flags de runtime por usuario para `debug_mode`, `verbose_mode` e retry automatico de scans
-- Configuracao de workers na UI: stale timeout, cutoff de orfaos e limite de requeue
-- Status de scan com metadados de retry (tentativa atual, maximo, proxima tentativa e ultimo erro)
-
-## Estrutura Principal
-
-- [docker-compose.yml](docker-compose.yml)
-- [backend/app/main.py](backend/app/main.py)
-- [backend/app/graph/workflow.py](backend/app/graph/workflow.py)
-- [backend/app/workers/tasks.py](backend/app/workers/tasks.py)
-- [frontend/src/App.jsx](frontend/src/App.jsx)
-
-## Como executar
-
-1. Copie o arquivo de ambiente:
-
-```bash
-cp .env.example .env
-```
-
-2. Suba todos os servicos:
-
-```bash
-docker compose up --build
-```
-
-3. Acesse:
-
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:8000`
-- Healthcheck: `http://localhost:8000/health`
-
-## Endpoints principais
-
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/scans`
-- `GET /api/scans`
-- `GET /api/scans/{scan_id}/logs`
-- `GET /api/scans/{scan_id}/report`
-- `POST /api/findings/{finding_id}/false-positive`
-- `GET /api/dashboard`
-- `GET /api/scans/{scan_id}/status`
-- `POST /api/compliance/authorizations/request`
-- `GET /api/compliance/authorizations`
-- `PUT /api/compliance/authorizations/{authorization_id}/approve`
-- `PUT /api/compliance/authorizations/{authorization_id}/revoke`
-- `GET /api/audit/events`
-- `GET /api/worker-manager/overview`
-- `GET /api/worker-manager/health`
-- `POST /api/worker-manager/requeue-orphans`
-- `GET /api/config/runtime`
-- `PUT /api/config/runtime`
-- `GET /api/policy/allowlist`
-- `POST /api/policy/allowlist`
-- `PUT /api/policy/allowlist/{entry_id}`
-- `DELETE /api/policy/allowlist/{entry_id}`
-- `POST /api/schedules/{schedule_id}/execute`
-
-## Status de implementacao
-
-- Checkpointer PostgreSQL para LangGraph: implementado (com fallback local).
-- Policy/allowlist por cliente: implementado.
-- WebSocket para streaming de logs: implementado.
-- Migrations Alembic versionadas: implementado.
-
-## Validacao do fluxo completo (alvo ate relatorio)
-
-Fluxo validado na aplicacao:
-
-1. Solicitar autorizacao de escopo (`/api/compliance/authorizations/request`).
-2. Aprovar autorizacao (`/api/compliance/authorizations/{id}/approve`).
-3. Criar scan singular (`/api/scans`) ou agendamento (`/api/schedules`) com `authorization_code`.
-4. Executar agendamento sob demanda, quando aplicavel (`/api/schedules/{schedule_id}/execute`).
-5. Acompanhar execucao (`/api/scans/{scan_id}/status` e WebSocket de logs).
-6. Consultar relatorio final no banco (`/api/scans/{scan_id}/report`).
-
-Observacao de ambiente: quando a fila Celery estiver indisponivel, a API aplica fallback de execucao imediata para nao interromper o fluxo operacional.
-
-Script automatizado de validacao:
+Arquivo:
 
 - [scripts/validate_e2e_flow.py](scripts/validate_e2e_flow.py)
-- Executa login admin, autorizacao, aprovacao, criacao de scan, polling de status e validacao do relatorio final.
+
+Runbook:
+
+- [docs/RUNBOOK.md](docs/RUNBOOK.md)

@@ -80,6 +80,7 @@ function FindingCard({ f, isAdmin, onFalsePositive }) {
           <div className="mt-1 flex flex-wrap items-center gap-3 text-xs">
             <span className={`rounded-md border px-2 py-0.5 font-semibold uppercase ${sev.badge}`}>{f.severity}</span>
             <RiskBar score={f.risk_score || 0} />
+            <span className="rounded-md border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-cyan-300">FAIR {f.fair?.fair_score ?? 0}</span>
             <span className="text-slate-500">{WORKER_LABEL[f.details?.source_worker] || f.details?.source_worker || "worker"}</span>
             <span className="text-slate-500">modo: {f.details?.scan_mode || "-"}</span>
           </div>
@@ -103,6 +104,21 @@ function FindingCard({ f, isAdmin, onFalsePositive }) {
           {f.cve && (
             <p className="text-xs text-slate-500">Referencia: <span className="text-sky-400">{f.cve}</span></p>
           )}
+
+          <div className="grid gap-2 text-xs text-slate-300 sm:grid-cols-2">
+            <p className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">
+              ALE estimado: <span className="text-amber-300">USD {Number(f.fair?.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
+            </p>
+            <p className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">
+              LEF: <span className="text-cyan-300">{f.fair?.loss_event_frequency ?? "-"}</span>
+            </p>
+            <p className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">
+              AGE ambiente: <span className="text-white">{f.age?.known_in_environment_days ?? 0} dias</span>
+            </p>
+            <p className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">
+              AGE mercado/exploit: <span className="text-white">{f.age?.known_in_market_days ?? 0} / {f.age?.exploit_published_days ?? 0} dias</span>
+            </p>
+          </div>
 
           {f.details?.qwen_recomendacao_pt && (
             <RecoSection data={f.details.qwen_recomendacao_pt} model="Qwen 2.5 — Recomendacao PT-BR" />
@@ -135,6 +151,7 @@ export default function ReportsPage() {
   const [loadingReport, setLoadingReport] = useState(false);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState("all");
+  const [prioritizedPage, setPrioritizedPage] = useState({ total: 0, limit: 10, offset: 0 });
 
   useEffect(() => {
     const load = async () => {
@@ -157,8 +174,17 @@ export default function ReportsPage() {
     setLoadingReport(true);
     setError("");
     try {
-      const { data } = await client.get(`/api/scans/${scan.id}/report`);
+      const { data } = await client.get(`/api/scans/${scan.id}/report`, {
+        params: {
+          prioritized_limit: prioritizedPage.limit,
+          prioritized_offset: prioritizedPage.offset,
+        },
+      });
       setReport(data);
+      setPrioritizedPage((prev) => ({
+        ...prev,
+        total: Number(data?.state_data?.prioritized_actions_page?.total || 0),
+      }));
     } catch (err) {
       setReport(null);
       setError(err?.response?.data?.detail || "Falha ao carregar relatorio.");
@@ -178,6 +204,11 @@ export default function ReportsPage() {
     }
   };
 
+  useEffect(() => {
+    if (!selectedScan) return;
+    openReport(selectedScan);
+  }, [prioritizedPage.offset]);
+
   const filteredFindings = (report?.findings || []).filter((f) => {
     if (filter === "all") return true;
     if (filter === "fp") return Boolean(f.is_false_positive);
@@ -186,6 +217,9 @@ export default function ReportsPage() {
   });
 
   const sevCount = (sev) => (report?.findings || []).filter((f) => String(f.severity || "").toLowerCase() === sev && !f.is_false_positive).length;
+  const prioritized = report?.state_data?.prioritized_actions_page?.items || report?.state_data?.prioritized_actions || [];
+  const hasPrevPrioritized = prioritizedPage.offset > 0;
+  const hasNextPrioritized = prioritizedPage.offset + prioritizedPage.limit < prioritizedPage.total;
 
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-5 pb-12">
@@ -294,6 +328,34 @@ export default function ReportsPage() {
               </div>
 
               <div className="space-y-3">
+                {prioritized.length > 0 && (
+                  <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+                    <h3 className="font-display text-lg font-semibold">O que resolver primeiro e por que</h3>
+                    <p className="mt-1 text-xs text-slate-400">Prioridade por risco operacional e financeiro (FAIR/ALE + AGE).</p>
+                    <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
+                      <p>Mostrando {prioritized.length} de {prioritizedPage.total}</p>
+                      <div className="flex gap-2">
+                        <button disabled={!hasPrevPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Anterior</button>
+                        <button disabled={!hasNextPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: p.offset + p.limit }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Proxima</button>
+                      </div>
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {prioritized.map((item, index) => (
+                        <div key={`${item.finding_id}-${index}`} className="rounded-xl border border-slate-800 bg-slate-800/40 p-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-semibold text-slate-100">#{index + 1} {item.title}</p>
+                            <span className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                              ALE USD {Number(item.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-slate-300"><span className="font-semibold text-cyan-300">Operacional:</span> {item.operational_reason}</p>
+                          <p className="mt-1 text-slate-300"><span className="font-semibold text-amber-300">Financeiro:</span> {item.financial_reason}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {filteredFindings.length === 0 && (
                   <p className="rounded-xl border border-dashed border-slate-700 py-8 text-center text-sm text-slate-500">
                     Nenhum finding neste filtro

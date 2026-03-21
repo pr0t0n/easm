@@ -63,6 +63,7 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "queue": "worker.unit.vuln",
         "description": "[UNITARIO] Validacao de CVEs criticos e XSS",
         "tools": [
+            "nessus",       # Tenable — discovery + scanner de vulnerabilidade autenticado
             "nuclei",       # ProjectDiscovery — template-based scanner (xingrin + EasyEASM/CONTRIBUTING)
             "dalfox",       # Hahwul — XSS scanner automatizado (xingrin)
             "nikto",        # Sullo — web server scanner classico
@@ -96,6 +97,8 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "description": "[UNITARIO] Coleta rapida de emails, dominios e exposicao publica",
         "tools": [
             "theharvester", # Laramies — emails, subdomínios, IPs via search engines (Sn1per osint.sh)
+            "shodan-cli",   # Shodan.io CLI — lookup rapido de exposicao por host/ASN
+            "whatweb",      # Urbanadventurer — fingerprint de tecnologias web (OSINT_AI_Agent)
             "urlscan-cli",  # Urlscan.io CLI — visibilidade de requisicoes e tecnologias (Sn1per)
             "subjack",      # Haccer — subdomain takeover c/ padroes de 50+ servicos (Sn1per recon.sh)
         ],
@@ -146,6 +149,7 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
             "dnsgen",       # AlephNullSK — permutacao por wordlist de partes (xingrin)
             # Portas
             "naabu",        # ProjectDiscovery — port scanner ativo + passivo (xingrin)
+            "nessus",       # Tenable — host discovery complementar e baseline de superficie
             # Takeover
             "subjack",      # Haccer — subdomain takeover (50+ servicos: Sn1per recon.sh)
         ],

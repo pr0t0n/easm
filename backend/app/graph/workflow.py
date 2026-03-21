@@ -7,7 +7,7 @@ from langgraph.graph import END, StateGraph
 from app.graph.mission import MISSION_ITEMS
 from app.graph.checkpointer import create_checkpointer
 from app.services.tool_adapters import run_tool_execution
-from app.workers.worker_groups import ScanMode
+from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -238,9 +238,56 @@ def analista_ia_node(state: AgentState) -> AgentState:
         last = state["vulnerabilidades_encontradas"][-1]
         if not last.get("source_worker"):
             last["source_worker"] = "analista_ia"
-    state["proxima_ferramenta"] = "recon"
+    state["proxima_ferramenta"] = "osint"
     state["mission_index"] += 1
     _metric_end(state, "analista_ia", started_at)
+    return state
+
+
+def osint_node(state: AgentState) -> AgentState:
+    started_at = _metric_start()
+    current = _step_name(state)
+    state["logs_terminais"].append(f"OSINTNode: {current}")
+
+    # Puxa a lista de ferramentas OSINT por modo para manter alinhamento com worker groups.
+    osint_tools = []
+    groups = get_worker_groups(mode=state["scan_mode"])
+    osint_group = groups.get("osint", {})
+    osint_tools = list(osint_group.get("tools", []))[:3]
+
+    for tool in osint_tools:
+        result = run_tool_execution(tool, state["target"], scan_mode=state["scan_mode"])
+        state["logs_terminais"].append(
+            f"OSINTNode: ferramenta={tool} status={result.get('status', 'unknown')}"
+        )
+
+    if osint_tools:
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"OSINT exposure indicators for {state['target']}",
+                "severity": "low",
+                "risk_score": 3,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "tools": osint_tools,
+                    "step": current,
+                },
+            }
+        )
+
+    state["proxima_ferramenta"] = "recon"
+    state["mission_index"] += 1
+    _metric_end(state, "osint", started_at)
+    return state
+
+
+def supervisor_node(state: AgentState) -> AgentState:
+    started_at = _metric_start()
+    current = _step_name(state)
+    nxt = state.get("proxima_ferramenta", "recon")
+    state["logs_terminais"].append(f"Supervisor: step={current} -> proxima={nxt}")
+    _metric_end(state, "supervisor", started_at)
     return state
 
 
@@ -257,6 +304,8 @@ def route_decision(state: AgentState) -> str:
         return "vuln"
     if nxt == "analista_ia":
         return "analista_ia"
+    if nxt == "osint":
+        return "osint"
     return "recon"
 
 
@@ -268,19 +317,24 @@ def build_graph(mode: ScanMode = "unit"):
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("supervisor", supervisor_node)
     graph.add_node("recon", recon_node)
     graph.add_node("scan", scan_node)
     graph.add_node("fuzzing", fuzzing_node)
     graph.add_node("vuln", vuln_node)
     graph.add_node("analista_ia", analista_ia_node)
+    graph.add_node("osint", osint_node)
 
-    graph.set_entry_point("recon")
+    graph.set_entry_point("supervisor")
 
-    graph.add_conditional_edges("recon", route_decision)
-    graph.add_conditional_edges("scan", route_decision)
-    graph.add_conditional_edges("fuzzing", route_decision)
-    graph.add_conditional_edges("vuln", route_decision)
-    graph.add_conditional_edges("analista_ia", route_decision)
+    graph.add_conditional_edges("supervisor", route_decision)
+
+    graph.add_edge("recon", "supervisor")
+    graph.add_edge("scan", "supervisor")
+    graph.add_edge("fuzzing", "supervisor")
+    graph.add_edge("vuln", "supervisor")
+    graph.add_edge("analista_ia", "supervisor")
+    graph.add_edge("osint", "supervisor")
 
     return graph.compile(checkpointer=checkpointer)
 

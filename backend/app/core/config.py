@@ -29,5 +29,11 @@ class Settings(BaseSettings):
     ollama_cloudcode_model: str = "llama3.1:8b"
     frontend_origin: str = "http://localhost:5173"
 
+    nessus_enabled: bool = False
+    nessus_url: str = ""
+    nessus_access_key: str = ""
+    nessus_secret_key: str = ""
+    nessus_verify_tls: bool = True
+
 
 settings = Settings()
