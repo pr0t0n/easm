@@ -50,8 +50,20 @@ export default function IssuesPage() {
         <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
           <p>Mostrando {rows.length} de {page.total} findings abertos</p>
           <div className="flex gap-2">
-            <button disabled={!hasPrev} onClick={() => setPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Anterior</button>
-            <button disabled={!hasNext} onClick={() => setPage((p) => ({ ...p, offset: p.offset + p.limit }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Proxima</button>
+            <button
+              disabled={!hasPrev}
+              onClick={() => setPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))}
+              className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Anterior
+            </button>
+            <button
+              disabled={!hasNext}
+              onClick={() => setPage((p) => ({ ...p, offset: p.offset + p.limit }))}
+              className="rounded-lg bg-[#1A365D] px-2 py-1 text-white hover:bg-[#2C5282] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Proxima
+            </button>
           </div>
         </div>
       </section>

@@ -1,0 +1,19 @@
+# Local environment files
+.env
+.venv/
+
+# Python caches
+**/__pycache__/
+*.pyc
+
+# Frontend generated artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Runtime-generated data
+asm-rules/
+backend/asm-rules/
+backend/nuclei-templates/
+
+# Temp files
+.DS_Store

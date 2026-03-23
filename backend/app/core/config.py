@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # Token de refresh: 7 dias. Usado pelo frontend para reemitir access tokens
     # silenciosamente sem forcar re-login durante sessoes longas de monitoramento.
     refresh_token_expire_days: int = 7
-    admin_email: str = "admin@vasm.local"
+    admin_email: str = "admin@example.com"
     admin_password: str = "admin123"
 
     database_url: str
@@ -27,7 +27,11 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3"
     ollama_qwen_model: str = "qwen2.5:7b"
     ollama_cloudcode_model: str = "llama3.1:8b"
+    ai_recommendations_use_ollama: bool = False
+    ai_recommendations_timeout_seconds: int = 20
     frontend_origin: str = "http://localhost:5173"
+    frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    frontend_origin_regex: str | None = None
 
     nessus_enabled: bool = False
     nessus_url: str = ""

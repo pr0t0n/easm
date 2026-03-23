@@ -4,6 +4,7 @@ import client from "../api/client";
 export default function ConfigurationPage() {
   const [activeTab, setActiveTab] = useState("runtime");
   const [shodanApiKey, setShodanApiKey] = useState("");
+  const [shodanMeta, setShodanMeta] = useState({ configured: false, enabled: false, status: "desativado" });
   const [runtime, setRuntime] = useState({
     debug_mode: false,
     verbose_mode: false,
@@ -58,6 +59,11 @@ export default function ConfigurationPage() {
       verify_tls: Boolean(nessusRes.data?.verify_tls),
     });
     setSupervisorTrail(supervisorRes.data || { summary: null, scans: [] });
+    setShodanMeta({
+      configured: Boolean(shodanRes.data?.configured),
+      enabled: Boolean(shodanRes.data?.enabled),
+      status: shodanRes.data?.status || "desativado",
+    });
     const groupsRes = await client.get("/api/access-groups");
     setGroups(groupsRes.data);
   };
@@ -127,10 +133,10 @@ export default function ConfigurationPage() {
     <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
       <section className="panel p-4">
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-brand-500 text-slate-950" : "bg-slate-800 text-slate-200"}`}>Runtime</button>
-          <button onClick={() => setActiveTab("tools")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "tools" ? "bg-brand-500 text-slate-950" : "bg-slate-800 text-slate-200"}`}>Ferramentas</button>
-          <button onClick={() => setActiveTab("policy")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "policy" ? "bg-brand-500 text-slate-950" : "bg-slate-800 text-slate-200"}`}>Policy e Acesso</button>
-          <button onClick={() => setActiveTab("workers")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "workers" ? "bg-brand-500 text-slate-950" : "bg-slate-800 text-slate-200"}`}>Workers</button>
+          <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Runtime</button>
+          <button onClick={() => setActiveTab("tools")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "tools" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Ferramentas</button>
+          <button onClick={() => setActiveTab("policy")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "policy" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Policy e Acesso</button>
+          <button onClick={() => setActiveTab("workers")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "workers" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Workers</button>
         </div>
       </section>
 
@@ -147,7 +153,16 @@ export default function ConfigurationPage() {
               onChange={(e) => setShodanApiKey(e.target.value)}
               placeholder="insira a chave"
             />
-            <button onClick={saveShodan} className="mt-2 rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">Salvar chave</button>
+            <button onClick={saveShodan} className="mt-2 rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar chave</button>
+            <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
+              <p>
+                Status Shodan:{" "}
+                <span className={shodanMeta.configured ? "text-emerald-300" : "text-amber-300"}>{shodanMeta.status}</span>
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                {shodanMeta.configured ? "A integracao pode enriquecer ativos e exposicoes externas." : "Desativado ate que uma API key valida seja salva."}
+              </p>
+            </div>
           </div>
 
           <div>
@@ -233,7 +248,7 @@ export default function ConfigurationPage() {
                 />
               </label>
             </div>
-            <button onClick={saveRuntime} className="mt-2 rounded-xl bg-cyan-500 px-4 py-2 font-semibold text-slate-950">Salvar runtime</button>
+            <button onClick={saveRuntime} className="mt-2 rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar runtime</button>
           </div>
         </div>
       </section>
@@ -243,16 +258,21 @@ export default function ConfigurationPage() {
       <section className="panel p-5">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">Status das IAs</h3>
-          <button onClick={loadAll} className="rounded-lg bg-slate-800 px-3 py-1 text-xs">Atualizar</button>
+          <button onClick={loadAll} className="rounded-lg bg-[#1A365D] px-3 py-1 text-xs text-white hover:bg-[#2C5282]">Atualizar</button>
         </div>
 
         {aiStatus && (
           <div className="mt-3 space-y-2 text-sm">
-            <p>Ollama: <span className={aiStatus.ollama.health === "online" ? "text-emerald-300" : "text-rose-300"}>{aiStatus.ollama.health}</span></p>
+            <p>
+              Ollama:{" "}
+              <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${aiStatus.ollama.health === "online" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
+                {aiStatus.ollama.health}
+              </span>
+            </p>
             <p>Base URL: {aiStatus.ollama.base_url}</p>
             <p>Modelo configurado: {aiStatus.ollama.configured_model}</p>
             <p>Modelos disponiveis: {(aiStatus.ollama.available_models || []).join(", ") || "nenhum"}</p>
-            {aiStatus.ollama.error && <p className="text-rose-300">Erro IA: {aiStatus.ollama.error}</p>}
+            {aiStatus.ollama.error && <p className="text-rose-700">Erro IA: {aiStatus.ollama.error}</p>}
             <p>
               Runtime atual: debug={String(aiStatus.runtime.debug_mode)} | verbose={String(aiStatus.runtime.verbose_mode)}
               {" | "}retry={String(aiStatus.runtime.scan_retry_enabled)} ({aiStatus.runtime.scan_retry_max_attempts}x/{aiStatus.runtime.scan_retry_delay_seconds}s)
@@ -261,11 +281,11 @@ export default function ConfigurationPage() {
               Workers: stale={aiStatus.runtime.worker_health_stale_after_seconds}s | orphan_cutoff={aiStatus.runtime.worker_orphan_cutoff_minutes}min | orphan_limit={aiStatus.runtime.worker_orphan_requeue_limit}
             </p>
 
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+            <div className="rounded-xl border border-slate-300 bg-slate-50 p-3">
               <h4 className="font-semibold">Ultimos erros</h4>
               {(aiStatus.recent_errors || []).length === 0 && <p className="text-slate-400">Sem erros recentes.</p>}
               {(aiStatus.recent_errors || []).map((err) => (
-                <p key={err.id} className="font-mono text-xs text-rose-200">
+                <p key={err.id} className="font-mono text-xs text-rose-700">
                   [{new Date(err.created_at).toLocaleString()}] {err.source}: {err.message}
                 </p>
               ))}
@@ -337,7 +357,7 @@ export default function ConfigurationPage() {
             <p className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">scans analisados: {supervisorTrail.summary.scans_analyzed}</p>
             <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-emerald-200">fluxo valido: {supervisorTrail.summary.valid_supervisor_flow}</p>
             <p className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-rose-200">fluxo invalido: {supervisorTrail.summary.invalid_supervisor_flow}</p>
-            <p className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-cyan-200">com no osint: {supervisorTrail.summary.scans_with_osint_node}</p>
+            <p className="rounded-lg border border-blue-500/35 bg-blue-500/10 px-3 py-2 text-blue-200">com no osint: {supervisorTrail.summary.scans_with_osint_node}</p>
             <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-200 md:col-span-2">sem no osint: {supervisorTrail.summary.scans_without_osint_node}</p>
           </div>
         )}
@@ -394,14 +414,14 @@ export default function ConfigurationPage() {
             />
             Ativo
           </label>
-          <button onClick={addAllowlist} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-slate-950">Adicionar</button>
+          <button onClick={addAllowlist} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Adicionar</button>
         </div>
         <div className="mt-3 space-y-2">
           {(allowlist.entries || []).map((entry) => (
             <div key={entry.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <p className="text-sm">{entry.target_pattern} | group: {entry.tool_group} | ativo: {String(entry.is_active)}</p>
               <div className="mt-2 flex gap-2">
-                <button onClick={() => toggleAllowlist(entry)} className="rounded-lg bg-cyan-500/20 px-2 py-1 text-xs text-cyan-300">Alternar</button>
+                <button onClick={() => toggleAllowlist(entry)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Alternar</button>
                 <button onClick={() => deleteAllowlist(entry.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
               </div>
             </div>
@@ -426,7 +446,7 @@ export default function ConfigurationPage() {
             value={groupForm.description}
             onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })}
           />
-          <button onClick={addGroup} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-slate-950">Salvar grupo</button>
+          <button onClick={addGroup} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar grupo</button>
         </div>
         <div className="mt-3 space-y-2">
           {groups.map((g) => (
@@ -468,7 +488,7 @@ export default function ConfigurationPage() {
             value={newLine.position}
             onChange={(e) => setNewLine({ ...newLine, position: Number(e.target.value) })}
           />
-          <button onClick={addLine} className="rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">Adicionar</button>
+          <button onClick={addLine} className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Adicionar</button>
         </div>
 
         <div className="mt-3 space-y-2">
@@ -477,7 +497,7 @@ export default function ConfigurationPage() {
               <p className="font-medium">{line.position} - {line.name} ({line.category})</p>
               <p className="text-xs text-slate-300">enabled: {String(line.enabled)}</p>
               <div className="mt-2 flex gap-2">
-                <button onClick={() => toggleLine(line)} className="rounded-lg bg-cyan-500/20 px-2 py-1 text-xs text-cyan-300">Alternar</button>
+                <button onClick={() => toggleLine(line)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Alternar</button>
                 <button onClick={() => deleteLine(line.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
               </div>
             </div>
@@ -519,9 +539,11 @@ export default function ConfigurationPage() {
           <h3 className="text-lg font-semibold">Nessus (pynessus)</h3>
           <p className="mt-1 text-xs text-slate-300">Habilita o Nessus como discovery/scanner/analista de vulnerabilidade.</p>
           <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
+            <p>Status: <span className={nessusMeta.configured ? "text-emerald-300" : "text-amber-300"}>{nessusMeta.status || (nessusMeta.configured ? "ativo" : "desativado")}</span></p>
             <p>pynessus instalado: <span className={nessusMeta.pynessus_installed ? "text-emerald-300" : "text-rose-300"}>{String(nessusMeta.pynessus_installed)}</span></p>
             <p>Nessus configurado: <span className={nessusMeta.configured ? "text-emerald-300" : "text-amber-300"}>{String(nessusMeta.configured)}</span></p>
             <p>URL atual: {nessusMeta.url || "nao definida"}</p>
+            {!nessusMeta.configured && <p className="mt-1 text-xs text-slate-400">Desativado ate que URL, Access Key e Secret Key sejam informados.</p>}
           </div>
 
           <div className="mt-3 grid gap-2 md:grid-cols-2">
@@ -537,7 +559,7 @@ export default function ConfigurationPage() {
             <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Access Key" value={nessusConfig.access_key} onChange={(e) => setNessusConfig({ ...nessusConfig, access_key: e.target.value })} />
             <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Secret Key (deixe vazio para manter)" value={nessusConfig.secret_key} onChange={(e) => setNessusConfig({ ...nessusConfig, secret_key: e.target.value })} />
           </div>
-          <button onClick={saveNessus} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-slate-950">Salvar Nessus</button>
+          <button onClick={saveNessus} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar Nessus</button>
         </section>
       )}
     </main>

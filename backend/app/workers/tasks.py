@@ -9,6 +9,7 @@ from app.models.models import AppSetting, Finding, ScanJob, ScanLog, WorkerHeart
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cve_enrichment_service import enrichment_service
+from app.services.tool_adapters import run_tool_execution
 from app.workers.celery_app import celery
 from app.workers.worker_groups import (
     UNIT_WORKER_GROUPS,
@@ -21,20 +22,50 @@ from app.workers.worker_groups import (
 )
 
 
+def _progress_from_state(final_state: dict) -> tuple[int, dict]:
+    mission_items = final_state.get("mission_items") or []
+    total_steps = max(1, len(mission_items))
+    metrics = final_state.get("mission_metrics") or {}
+    steps_done = int(metrics.get("steps_done", 0) or 0)
+    steps_success = int(metrics.get("steps_success", 0) or 0)
+    tools_attempted = int(metrics.get("tools_attempted", 0) or 0)
+    tools_success = int(metrics.get("tools_success", 0) or 0)
+
+    step_ratio = min(1.0, steps_done / total_steps)
+    quality_ratio = (tools_success / tools_attempted) if tools_attempted > 0 else 0.0
+    progress = int(round((step_ratio * 0.85 + quality_ratio * 0.15) * 100))
+
+    normalized = {
+        "total_steps": total_steps,
+        "steps_done": steps_done,
+        "steps_success": steps_success,
+        "tools_attempted": tools_attempted,
+        "tools_success": tools_success,
+    }
+    return max(0, min(100, progress)), normalized
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers de resultado por execucao de ferramenta
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _worker_result(group: str, tool: str, target: str, mode: ScanMode, params: dict | None = None):
+    execution = run_tool_execution(tool_name=tool, target=target, scan_mode=mode)
     return {
-        "ok": True,
+        "ok": execution.get("status") == "executed",
         "group": group,
         "tool": tool,
         "target": target,
         "mode": mode,
         "params": params or {},
-        "queue": group_queue(group, mode),
-        "status": "executed",
+        "queue": execution.get("worker", group_queue(group, mode)),
+        "status": execution.get("status", "error"),
+        "command": execution.get("command", ""),
+        "return_code": execution.get("return_code"),
+        "stdout": execution.get("stdout", ""),
+        "stderr": execution.get("stderr", ""),
+        "output": execution.get("output", ""),
+        "open_ports": execution.get("open_ports", []),
     }
 
 
@@ -215,6 +246,9 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if not job:
             return {"ok": False, "error": "scan not found", "retryable": False}
 
+        if job.status == "stopped":
+            return {"ok": False, "error": "scan_stopped", "retryable": False}
+
         if job.compliance_status != "approved":
             job.status = "blocked"
             db.add(ScanLog(
@@ -271,15 +305,55 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             scan_mode=scan_mode,
             known_vulnerability_patterns=known_patterns,
         )
-        final_state = app.invoke(state, config={"configurable": {"thread_id": f"scan-{job.id}"}})
+        recursion_limit = max(100, len(state.get("mission_items", [])) * 4)
+        final_state = app.invoke(
+            state,
+            config={
+                "configurable": {"thread_id": f"scan-{job.id}"},
+                "recursion_limit": recursion_limit,
+            },
+        )
+
+        db.refresh(job)
+        if job.status == "stopped":
+            db.add(ScanLog(scan_job_id=job.id, source="worker", level="WARNING", message="Execucao interrompida apos solicitacao de stop"))
+            _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
+            db.commit()
+            return {"ok": False, "error": "scan_stopped", "retryable": False}
 
         for line in final_state.get("logs_terminais", []):
             db.add(ScanLog(scan_job_id=job.id, source="graph", level="INFO", message=line))
 
+        seen_findings: set[tuple[str, str, str, str]] = set()
         for vuln in final_state.get("vulnerabilidades_encontradas", []):
             source_worker = vuln.get("source_worker", "vuln")
             details = dict(vuln)
-            recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
+
+            dedupe_key = (
+                str(vuln.get("title") or "").strip().lower(),
+                str(vuln.get("severity") or "low").strip().lower(),
+                str(source_worker).strip().lower(),
+                str((details.get("asset") or details.get("port") or details.get("step") or "")).strip().lower(),
+            )
+            if dedupe_key in seen_findings:
+                continue
+            seen_findings.add(dedupe_key)
+
+            try:
+                recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
+            except Exception as rec_exc:
+                db.add(
+                    ScanLog(
+                        scan_job_id=job.id,
+                        source="ia",
+                        level="WARNING",
+                        message=f"Falha ao gerar recomendacao IA: {rec_exc}",
+                    )
+                )
+                recommendations = {
+                    "qwen_recomendacao_pt": "{\"resumo\":\"Recomendacao indisponivel temporariamente\",\"impacto\":\"Servico de IA indisponivel\",\"mitigacoes\":[\"Aplicar hardening baseline\",\"Executar reteste\"],\"prioridade\":\"media\",\"validacoes\":[\"Reexecutar analise\"]}",
+                    "cloudcode_recomendacao_pt": "{\"resumo\":\"Recomendacao indisponivel temporariamente\",\"impacto\":\"Servico de IA indisponivel\",\"mitigacoes\":[\"Aplicar hardening baseline\",\"Executar reteste\"],\"prioridade\":\"media\",\"validacoes\":[\"Reexecutar analise\"]}",
+                }
             details.update(recommendations)
 
             cve_id = enrichment_service.extract_cve(details, title=vuln.get("title"))
@@ -298,8 +372,10 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 )
             )
 
+        progress, progress_ctx = _progress_from_state(final_state)
+        final_state["mission_progress_context"] = progress_ctx
         job.state_data = final_state
-        job.mission_progress = min(final_state.get("mission_index", 0), 100)
+        job.mission_progress = progress
         job.current_step = "100. Relatorio Final JSON"
         job.status = "completed"
         job.last_error = None
@@ -323,6 +399,10 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.rollback()
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if job:
+            if job.status == "stopped":
+                _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
+                db.commit()
+                return {"ok": False, "error": "scan_stopped", "retryable": False}
             job.status = "failed"
             job.last_error = str(exc)
             db.add(ScanLog(scan_job_id=job.id, source="worker", level="ERROR", message=str(exc)))
@@ -347,6 +427,9 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not job:
             return {"ok": False, "error": "scan not found", "retryable": False}
+
+        if job.status == "stopped":
+            return {"ok": False, "error": "scan_stopped", "retryable": False}
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:
@@ -382,6 +465,9 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not job:
             return result
+
+        if job.status == "stopped":
+            return {"ok": False, "error": "scan_stopped", "retryable": False}
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:

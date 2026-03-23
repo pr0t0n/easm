@@ -1,22 +1,279 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg-a: #020617;
-  --bg-b: #0f172a;
-  --bg-c: #1e293b;
+  --bg-main: #f7fafc;
+  --surface: #ffffff;
+  --surface-elevated: #edf2f7;
+  --primary: #1a365d;
+  --primary-light: #2c5282;
+  --secondary: #3182ce;
+  --text-primary: #2d3748;
+  --text-secondary: #4a5568;
+  --text-tertiary: #718096;
+  --border: #e2e8f0;
+  --border-light: #cbd5e0;
 }
 
 body {
-  font-family: "Montserrat", sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   min-height: 100vh;
+  color: var(--text-primary);
   background:
-    radial-gradient(circle at 20% 20%, rgba(14, 165, 233, 0.2), transparent 40%),
-    radial-gradient(circle at 80% 0%, rgba(56, 189, 248, 0.18), transparent 35%),
-    linear-gradient(135deg, var(--bg-a), var(--bg-b), var(--bg-c));
+    radial-gradient(circle at 10% 10%, rgba(26, 54, 93, 0.08), transparent 35%),
+    radial-gradient(circle at 90% 0%, rgba(49, 130, 206, 0.08), transparent 26%),
+    linear-gradient(180deg, #f7fafc 0%, #edf2f7 100%);
+  background-attachment: fixed;
+  letter-spacing: 0.003em;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .panel {
-  @apply rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur;
+  @apply border rounded-lg;
+  border-color: var(--border);
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 6px 16px rgba(26, 54, 93, 0.08);
+}
+
+.panel-header {
+  @apply border-b pb-4;
+  border-color: var(--border);
+}
+
+.rounded-2xl {
+  border-radius: 0.75rem !important;
+}
+
+.rounded-xl {
+  border-radius: 0.625rem !important;
+}
+
+.rounded-lg {
+  border-radius: 0.5rem !important;
+}
+
+.font-display {
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: -0.025em;
+}
+
+main {
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  color: var(--text-primary);
+  border-color: var(--border-light) !important;
+  background-color: #ffffff !important;
+  transition: all 200ms ease;
+  font-size: 0.875rem;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):hover,
+select:hover,
+textarea:hover {
+  border-color: var(--border) !important;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.18);
+  outline: none;
+  background-color: #ffffff !important;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.22);
+}
+
+/* Primary buttons */
+button.btn-primary {
+  @apply px-4 py-2 rounded-lg font-medium text-white;
+  background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
+  box-shadow: 0 2px 8px rgba(26, 54, 93, 0.3);
+  transition: all 200ms ease;
+}
+
+button.btn-primary:hover {
+  box-shadow: 0 4px 12px rgba(26, 54, 93, 0.35);
+  transform: translateY(-1px);
+}
+
+button.btn-primary:disabled {
+  @apply opacity-50 cursor-not-allowed;
+  transform: none;
+}
+
+/* Secondary buttons */
+button.btn-secondary {
+  @apply px-4 py-2 rounded-lg font-medium border;
+  color: #2d3748;
+  background: #edf2f7;
+  border-color: #cbd5e0;
+  transition: all 200ms ease;
+}
+
+button.btn-secondary:hover {
+  border-color: #a0aec0;
+  background-color: #e2e8f0 !important;
+}
+
+/* Danger buttons */
+button.btn-danger {
+  @apply px-4 py-2 rounded-lg font-medium text-rose-200 bg-rose-900/30 border border-rose-800/50 hover:bg-rose-900/50;
+  transition: all 200ms ease;
+}
+
+button.btn-danger:hover {
+  border-color: rgba(217, 70, 71, 0.8) !important;
+  background-color: rgba(145, 29, 35, 0.5) !important;
+}
+
+button {
+  transition: all 200ms ease;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border-color: var(--border);
+}
+
+[class*="border-slate-800"],
+[class*="border-slate-700"] {
+  border-color: var(--border) !important;
+}
+
+[class*="bg-slate-900/70"],
+[class*="bg-slate-900/60"],
+[class*="bg-slate-900/50"],
+[class*="bg-slate-950/60"],
+[class*="bg-slate-950/50"] {
+  background-color: #ffffff !important;
+}
+
+[class*="text-slate-300"],
+[class*="text-slate-400"],
+[class*="text-slate-500"] {
+  color: var(--text-secondary) !important;
+}
+
+[class*="text-slate-600"] {
+  color: var(--text-tertiary) !important;
+}
+
+tbody tr {
+  transition: background-color 200ms ease;
+}
+
+tbody tr:hover {
+  background-color: rgba(237, 242, 247, 0.9);
+}
+
+/* Status badges */
+.badge {
+  @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium text-xs;
+}
+
+.badge-primary {
+  @apply bg-blue-900/40 text-blue-300 border border-blue-800/50;
+}
+
+.badge-success {
+  @apply bg-green-900/40 text-green-300 border border-green-800/50;
+}
+
+.badge-warning {
+  @apply bg-amber-900/40 text-amber-300 border border-amber-800/50;
+}
+
+.badge-danger {
+  @apply bg-rose-900/40 text-rose-300 border border-rose-800/50;
+}
+
+/* Section title */
+.section-title {
+  @apply text-2xl font-bold tracking-tight;
+  color: var(--text-primary);
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.35);
+  color: #f8fafc;
+}
+
+.no-print {
+  display: block;
+}
+
+.print-avoid-break {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+@media print {
+  :root {
+    color-scheme: light;
+  }
+
+  body {
+    color: #111827;
+    background: #ffffff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  #root {
+    min-height: auto;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  table {
+    width: 100%;
+    table-layout: auto !important;
+    border-collapse: collapse;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr,
+  td,
+  th {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    word-break: break-word;
+    white-space: normal;
+  }
 }

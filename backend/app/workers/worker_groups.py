@@ -55,6 +55,8 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
             "ffuf",         # Jfrog — directory/parameter fuzzer (xingrin)
             "feroxbuster",  # Epi052 — recursive content discovery
             "arjun",        # S0md3v — HTTP parameter discovery
+            "gobuster",     # OJ — directory, vhost e fuzz mode
+            "wfuzz",        # Xmendez — fuzzing de params, headers e body
         ],
         "priority": 8,
     },
@@ -66,7 +68,13 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
             "nessus",       # Tenable — discovery + scanner de vulnerabilidade autenticado
             "nuclei",       # ProjectDiscovery — template-based scanner (xingrin + EasyEASM/CONTRIBUTING)
             "dalfox",       # Hahwul — XSS scanner automatizado (xingrin)
+            "wapiti",       # Wapiti — scanner web multi-classe para SSRF, XXE, file/include e headers
+            "sqlmap",       # Sqlmap — validacao automatizada de SQL injection
+            "commix",       # Commix — command injection e blind command execution
+            "tplmap",       # Tplmap — validacao de SSTI em Jinja2, Mako e similares
+            "wafw00f",      # Fingerprinting de WAF para orientar evasao/confirmacao
             "nikto",        # Sullo — web server scanner classico
+            "nmap-vulscan", # Nmap + Vulscan NSE — network mapping + vuln assessment
         ],
         "priority": 9,
     },
@@ -194,6 +202,8 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
             "feroxbuster",  # Epi052 — recursive content discovery
             "arjun",        # S0md3v — HTTP parameter discovery
             "dirb",         # Legado — wordlist-based directory scanner
+            "gobuster",     # OJ — directory, vhost e fuzz mode
+            "wfuzz",        # Xmendez — fuzzing flexivel de URL, header e corpo
         ],
         "priority": 4,
     },
@@ -206,12 +216,18 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "tools": [
             "nuclei",       # ProjectDiscovery — template-based scanner (xingrin + Sn1per)
             "dalfox",       # Hahwul — XSS scanner automatizado (xingrin)
+            "wapiti",       # Wapiti — SQLi, XSS, SSRF, XXE, file/include, CRLF e headers
+            "sqlmap",       # Sqlmap — SQL injection detection/exploitation assistida
+            "commix",       # Commix — command injection
+            "tplmap",       # Tplmap — SSTI
+            "wafw00f",      # Fingerprinting de WAF antes de evasao e DAST pesado
             "nikto",        # Sullo — web server scanner (Sn1per normal_webporthttp.sh)
             "wpscan",       # WPScan Team — scanner WordPress (Sn1per webporthttps.sh)
             "zap",          # OWASP ZAP — DAST completo
             "nessus",       # Tenable — vulnerability assessment enterprise (Sn1per vulnscan.sh)
             "openvas",      # Greenbone — VA opensource integrado ao Sn1per vulnscan.sh
             "semgrep",      # Semgrep Inc — SAST para codigo fonte e IaC
+            "nmap-vulscan", # Nmap + Vulscan NSE — network mapping + vuln assessment
         ],
         "priority": 5,
     },

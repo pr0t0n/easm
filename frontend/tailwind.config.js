@@ -5,14 +5,16 @@ export default {
     extend: {
       colors: {
         brand: {
-          50: "#f4f8ff",
-          500: "#0ea5e9",
-          700: "#0369a1"
+          50: "#eff6ff",
+          100: "#dbeafe",
+          500: "#2563eb",
+          700: "#1d4ed8",
+          900: "#1e3a8a"
         }
       },
       fontFamily: {
-        display: ["Montserrat", "sans-serif"],
-        mono: ["Montserrat", "sans-serif"]
+        display: ["Inter", "system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"],
+        mono: ["IBM Plex Mono", "monospace"]
       }
     },
   },

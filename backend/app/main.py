@@ -14,9 +14,19 @@ from app.models.models import User
 
 app = FastAPI(title=settings.app_name)
 
+
+def _cors_origins() -> list[str]:
+    origins: list[str] = []
+    for raw in [settings.frontend_origin, settings.frontend_origins]:
+        if not raw:
+            continue
+        origins.extend([item.strip() for item in str(raw).split(",") if item.strip()])
+    return list(dict.fromkeys(origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=_cors_origins(),
+    allow_origin_regex=settings.frontend_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -39,7 +39,7 @@ export default function WorkersPage() {
             <h2 className="text-xl font-semibold">Workers</h2>
             <p className="mt-1 text-sm text-slate-300">Estado operacional em tempo real do worker manager.</p>
           </div>
-          <button onClick={load} className="rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">Atualizar</button>
+          <button onClick={load} className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Atualizar</button>
         </div>
       </section>
 

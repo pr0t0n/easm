@@ -111,7 +111,7 @@ class FalsePositiveMemory(Base):
     finding_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signature: Mapped[str] = mapped_column(String(500), index=True)
     embedding_ref: Mapped[str] = mapped_column(String(255))
-    metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    memory_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

@@ -36,7 +36,7 @@ export default function JobsRegistryPage() {
             <h2 className="text-xl font-semibold">Jobs Registry</h2>
             <p className="mt-1 text-sm text-slate-300">Historico real de execucoes e trilha de auditoria.</p>
           </div>
-          <button onClick={load} className="rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">Atualizar</button>
+          <button onClick={load} className="rounded-xl bg-[#1A365D] px-4 py-2 font-semibold text-white hover:bg-[#2C5282]">Atualizar</button>
         </div>
       </section>
 
@@ -52,7 +52,7 @@ export default function JobsRegistryPage() {
               <div key={job.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="font-mono font-semibold">#{job.id} - {job.target_query}</p>
-                  <span className="rounded-md border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs uppercase">{job.status}</span>
+                  <span className="rounded-md border border-slate-300 bg-slate-100 px-2 py-0.5 text-xs uppercase text-slate-700">{job.status}</span>
                 </div>
                 <p className="mt-1 text-xs text-slate-300">{job.mode} | compliance: {job.compliance_status} | findings: {job.findings_count}</p>
                 <p className="text-xs text-slate-400">retry {job.retry_attempt || 0}/{job.retry_max || 0} | progresso {job.mission_progress}%</p>
@@ -70,7 +70,7 @@ export default function JobsRegistryPage() {
           <div className="mt-3 space-y-2">
             {events.map((event) => (
               <div key={event.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs">
-                <p className="font-semibold text-slate-100">{event.event_type}</p>
+                <p className="font-semibold text-slate-800">{event.event_type}</p>
                 <p className="mt-1 text-slate-300">{event.message}</p>
                 <p className="mt-1 text-slate-500">{new Date(event.created_at).toLocaleString("pt-BR")}</p>
               </div>

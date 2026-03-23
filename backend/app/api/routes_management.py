@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta
+import os
 import secrets
 import shutil
+import subprocess
+import sys
 from importlib.util import find_spec
 
 import httpx
@@ -22,6 +25,96 @@ from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDUL
 
 
 router = APIRouter(prefix="/api", tags=["management"])
+
+TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
+    "subfinder": {"url": "https://github.com/projectdiscovery/subfinder", "requirements": "Go 1.22+, acesso HTTP externo e DNS funcional."},
+    "amass": {"url": "https://github.com/owasp-amass/amass", "requirements": "Go, memória moderada e conectividade DNS/HTTP."},
+    "assetfinder": {"url": "https://github.com/tomnomnom/assetfinder", "requirements": "Go e acesso HTTP externo."},
+    "dnsx": {"url": "https://github.com/projectdiscovery/dnsx", "requirements": "Go e resolução DNS liberada."},
+    "naabu": {"url": "https://github.com/projectdiscovery/naabu", "requirements": "Go, libpcap-dev e acesso de rede para probe."},
+    "httpx": {"url": "https://github.com/projectdiscovery/httpx", "requirements": "Go e saída HTTP/HTTPS liberada."},
+    "katana": {"url": "https://github.com/projectdiscovery/katana", "requirements": "Go e saída HTTP/HTTPS liberada."},
+    "uro": {"url": "https://github.com/s0md3v/uro", "requirements": "Python 3.10+ e pip."},
+    "ffuf": {"url": "https://github.com/ffuf/ffuf", "requirements": "Go e wordlists locais/remotas."},
+    "feroxbuster": {"url": "https://github.com/epi052/feroxbuster", "requirements": "Rust ou binário dedicado; instalação manual recomendada."},
+    "arjun": {"url": "https://github.com/s0md3v/Arjun", "requirements": "Python 3.10+ e pip."},
+    "nessus": {"url": "https://www.tenable.com/products/nessus", "requirements": "Credenciais Nessus, URL do scanner e pynessus instalado."},
+    "nuclei": {"url": "https://github.com/projectdiscovery/nuclei", "requirements": "Go, templates e conectividade HTTP/HTTPS."},
+    "nmap-vulscan": {"url": "https://github.com/scipag/vulscan", "requirements": "Nmap instalado e script NSE vulscan em /root/vulscan ou /opt/vulscan."},
+    "dalfox": {"url": "https://github.com/hahwul/dalfox", "requirements": "Go e saída HTTP/HTTPS liberada."},
+    "nikto": {"url": "https://github.com/sullo/nikto", "requirements": "Perl/apt compatível; pode exigir instalação manual."},
+    "wpscan": {"url": "https://github.com/wpscanteam/wpscan", "requirements": "Ruby, gem e acesso HTTP/HTTPS."},
+    "zap": {"url": "https://www.zaproxy.org/", "requirements": "Java 11+ ou container dedicado; recomendado serviço separado."},
+    "secretfinder": {"url": "https://github.com/m4ll0k/SecretFinder", "requirements": "Python e instalação manual do projeto."},
+    "trufflehog": {"url": "https://github.com/trufflesecurity/trufflehog", "requirements": "Go moderno e acesso a repositórios/targets."},
+    "kiterunner": {"url": "https://github.com/assetnote/kiterunner", "requirements": "Go moderno; binário pode variar por arquitetura."},
+    "theharvester": {"url": "https://github.com/laramies/theHarvester", "requirements": "Python, APIs opcionais e saída HTTP externa."},
+    "shodan-cli": {"url": "https://github.com/achillean/shodan-python", "requirements": "Python, pacote shodan e chave API configurada."},
+    "whatweb": {"url": "https://github.com/urbanadventurer/WhatWeb", "requirements": "Ruby/apt compatível."},
+    "urlscan-cli": {"url": "https://urlscan.io/docs/api/", "requirements": "Cliente compatível e API key do urlscan quando aplicável."},
+    "subjack": {"url": "https://github.com/haccer/subjack", "requirements": "Go e listas de fingerprints."},
+    "findomain": {"url": "https://github.com/findomain/findomain", "requirements": "Binário próprio; instalação manual recomendada."},
+    "sublist3r": {"url": "https://github.com/aboul3la/Sublist3r", "requirements": "Python 3 e pip."},
+    "chaos": {"url": "https://github.com/projectdiscovery/chaos-client", "requirements": "Go e API key Chaos quando usada."},
+    "cloudenum": {"url": "https://github.com/initstring/cloud_enum", "requirements": "Python e instalação manual do projeto."},
+    "puredns": {"url": "https://github.com/d3mondev/puredns", "requirements": "Go, massdns e resolução DNS liberada."},
+    "massdns": {"url": "https://github.com/blechschmidt/massdns", "requirements": "Compilação nativa/manual; não empacotado por padrão."},
+    "dnsenum": {"url": "https://github.com/fwaeytens/dnsenum", "requirements": "Perl e pacote do sistema."},
+    "alterx": {"url": "https://github.com/projectdiscovery/alterx", "requirements": "Go moderno."},
+    "dnsgen": {"url": "https://github.com/ProjectAnte/dnsgen", "requirements": "Python e instalação manual do projeto."},
+    "gowitness": {"url": "https://github.com/sensepost/gowitness", "requirements": "Go e engine headless/chromium."},
+    "wappalyzer": {"url": "https://www.wappalyzer.com/", "requirements": "Node.js/CLI dedicado ou serviço externo."},
+    "webanalyze": {"url": "https://github.com/rverton/webanalyze", "requirements": "Go moderno."},
+    "cmsmap": {"url": "https://github.com/Dionach/CMSmap", "requirements": "Python e dependências específicas do projeto."},
+    "dirb": {"url": "http://dirb.sourceforge.net/", "requirements": "Pacote apt ou binário Linux."},
+    "linkfinder": {"url": "https://github.com/GerbenJavado/LinkFinder", "requirements": "Python 3 e pip."},
+    "postman-to-k6": {"url": "https://github.com/grafana/postman-to-k6", "requirements": "Node.js e npm."},
+    "h8mail": {"url": "https://github.com/khast3x/h8mail", "requirements": "Python 3 e pip."},
+    "metagoofil": {"url": "https://github.com/opsdisk/metagoofil", "requirements": "Projeto externo; instalação manual recomendada."},
+    "openvas": {"url": "https://greenbone.github.io/docs/latest/", "requirements": "Stack dedicada Greenbone/OpenVAS; serviço separado."},
+    "waymore": {"url": "https://github.com/xnl-h4ck3r/waymore", "requirements": "Python 3 e pip."},
+    "gobuster": {"url": "https://github.com/OJ/gobuster", "requirements": "Go moderno e wordlists locais para dir, vhost e fuzz."},
+    "wapiti": {"url": "https://github.com/wapiti-scanner/wapiti", "requirements": "Python 3.12+ e pacote wapiti3; cobre SQLi, XSS, SSRF, XXE, file/include e CRLF."},
+    "wfuzz": {"url": "https://github.com/xmendez/wfuzz", "requirements": "Python 3, pip e wordlists locais para fuzzing HTTP."},
+    "sqlmap": {"url": "https://github.com/sqlmapproject/sqlmap", "requirements": "Python 3 e clone local do projeto ou pacote equivalente."},
+    "commix": {"url": "https://github.com/commixproject/commix", "requirements": "Python 3 e clone local do projeto para command injection."},
+    "tplmap": {"url": "https://github.com/epinna/tplmap", "requirements": "Python 3 e dependências do projeto para SSTI."},
+    "wafw00f": {"url": "https://github.com/EnableSecurity/wafw00f", "requirements": "Python 3 e pip para fingerprinting de WAF."},
+}
+
+INSTALL_SUPPORTED_TOOLS = {
+    "nessus", "arjun", "semgrep", "h8mail", "metagoofil", "theharvester", "shodan-cli", "urlscan-cli",
+    "uro", "subfinder", "amass", "assetfinder", "dnsx", "naabu", "httpx", "katana", "ffuf", "nuclei",
+    "dalfox", "kiterunner", "subjack", "wpscan", "nikto", "nmap-vulscan", "whatweb", "sublist3r", "waymore", "linkfinder",
+    "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz", "sqlmap", "commix",
+    "tplmap", "wafw00f",
+}
+
+TOOL_BINARY_ALIASES = {
+    "kiterunner": "kr",
+    "theharvester": "theHarvester",
+    "linkfinder": "linkfinder.py",
+    "secretfinder": "SecretFinder.py",
+    "shodan-cli": "shodan",
+    "urlscan-cli": "urlscan",
+    "sublist3r": "python3",
+    "nmap-vulscan": "nmap",
+    "zap": "zaproxy",
+    "sqlmap": "sqlmap.py",
+    "tplmap": "tplmap.py",
+}
+
+
+def _tool_metadata(tool_name: str) -> dict[str, str | bool]:
+    normalized = tool_name.strip().lower()
+    base = TOOL_REQUIREMENTS.get(normalized, {})
+    requirements = str(base.get("requirements") or "Instalação manual ou externa pode ser necessária.")
+    return {
+        "url": str(base.get("url") or ""),
+        "requirements": requirements,
+        "install_supported": normalized in INSTALL_SUPPORTED_TOOLS,
+        "requires_credentials": normalized in {"nessus", "shodan-cli", "urlscan-cli", "chaos"},
+    }
 
 
 def _parse_targets(targets_text: str) -> list[str]:
@@ -495,9 +588,13 @@ def get_shodan_config(db: Session = Depends(get_db), current_user: User = Depend
         .filter(AppSetting.owner_id == current_user.id, AppSetting.key == "shodan_api_key")
         .first()
     )
-    if not row:
-        return {"api_key": ""}
-    return {"api_key": row.value}
+    api_key = row.value if row else ""
+    return {
+        "api_key": api_key,
+        "configured": bool(api_key),
+        "enabled": bool(api_key),
+        "status": "ativo" if api_key else "desativado",
+    }
 
 
 @router.put("/config/shodan")
@@ -564,35 +661,113 @@ def _tool_installed(tool_name: str) -> bool:
     normalized = tool_name.strip().lower()
     if normalized == "nessus":
         return find_spec("nessus") is not None or find_spec("pynessus") is not None
-    alias_map = {
-        "subfinder": "subfinder",
-        "amass": "amass",
-        "assetfinder": "assetfinder",
-        "dnsx": "dnsx",
-        "naabu": "naabu",
-        "httpx": "httpx",
-        "katana": "katana",
-        "uro": "uro",
-        "ffuf": "ffuf",
-        "feroxbuster": "feroxbuster",
-        "arjun": "arjun",
-        "nuclei": "nuclei",
-        "dalfox": "dalfox",
-        "nikto": "nikto",
-        "wpscan": "wpscan",
-        "zap": "zap",
-        "trufflehog": "trufflehog",
-        "secretfinder": "secretfinder",
-        "kiterunner": "kr",
-        "theharvester": "theHarvester",
-        "h8mail": "h8mail",
-        "metagoofil": "metagoofil",
-        "subjack": "subjack",
-        "semgrep": "semgrep",
-        "openvas": "openvas",
-    }
-    cmd = alias_map.get(normalized, normalized)
+
+    if normalized == "sublist3r":
+        # Sublist3r costuma existir como modulo Python sem binario dedicado no PATH.
+        return (
+            find_spec("sublist3r") is not None
+            or shutil.which("sublist3r") is not None
+            or shutil.which("Sublist3r") is not None
+        )
+
+    if normalized == "nmap-vulscan":
+        if shutil.which("nmap") is None:
+            return False
+        return any(
+            os.path.exists(path)
+            for path in [
+                "/root/vulscan/vulscan.nse",
+                "/opt/vulscan/vulscan.nse",
+            ]
+        )
+
+    if normalized == "nikto":
+        return (
+            shutil.which("nikto") is not None
+            or os.path.exists("/usr/bin/nikto")
+            or os.path.exists("/opt/nikto/program/nikto.pl")
+        )
+
+    cmd = TOOL_BINARY_ALIASES.get(normalized, normalized)
     return shutil.which(cmd) is not None
+
+
+def _run_install_command(command: list[str]) -> bool:
+    try:
+        proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=600)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _install_tool(tool_name: str) -> bool:
+    normalized = tool_name.strip().lower()
+
+    install_map: dict[str, list[list[str]]] = {
+        "nessus": [[sys.executable, "-m", "pip", "install", "pynessus"]],
+        "arjun": [[sys.executable, "-m", "pip", "install", "arjun"]],
+        "semgrep": [[sys.executable, "-m", "pip", "install", "semgrep"]],
+        "h8mail": [[sys.executable, "-m", "pip", "install", "h8mail"]],
+        "metagoofil": [[sys.executable, "-m", "pip", "install", "metagoofil"]],
+        "theharvester": [[sys.executable, "-m", "pip", "install", "theHarvester"]],
+        "shodan-cli": [[sys.executable, "-m", "pip", "install", "shodan"]],
+        "urlscan-cli": [[sys.executable, "-m", "pip", "install", "urlscanio"]],
+        "uro": [[sys.executable, "-m", "pip", "install", "uro"]],
+        "subfinder": [["go", "install", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"]],
+        "amass": [["go", "install", "github.com/owasp-amass/amass/v4/...@master"]],
+        "assetfinder": [["go", "install", "github.com/tomnomnom/assetfinder@latest"]],
+        "dnsx": [["go", "install", "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"]],
+        "naabu": [["go", "install", "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"]],
+        "httpx": [["go", "install", "github.com/projectdiscovery/httpx/cmd/httpx@latest"]],
+        "katana": [["go", "install", "github.com/projectdiscovery/katana/cmd/katana@latest"]],
+        "ffuf": [["go", "install", "github.com/ffuf/ffuf/v2@latest"]],
+        "nuclei": [["go", "install", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"]],
+        "nmap-vulscan": [
+            ["apt-get", "update"],
+            ["apt-get", "install", "-y", "nmap", "git"],
+            ["git", "clone", "--depth", "1", "https://github.com/scipag/vulscan.git", "/root/vulscan"],
+        ],
+        "dalfox": [["go", "install", "github.com/hahwul/dalfox/v2@latest"]],
+        "kiterunner": [["go", "install", "github.com/assetnote/kiterunner@latest"]],
+        "subjack": [["go", "install", "github.com/haccer/subjack@latest"]],
+        "trufflehog": [["go", "install", "github.com/trufflesecurity/trufflehog/v3@latest"]],
+        "wpscan": [["gem", "install", "--no-document", "wpscan"]],
+        "nikto": [
+            ["apt-get", "update"],
+            ["apt-get", "install", "-y", "nikto"],
+            ["apt-get", "install", "-y", "git", "perl"],
+            ["sh", "-lc", "if [ ! -d /opt/nikto ]; then git clone --depth 1 https://github.com/sullo/nikto.git /opt/nikto; fi"],
+            ["sh", "-lc", "if [ -f /opt/nikto/program/nikto.pl ]; then ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto && chmod +x /opt/nikto/program/nikto.pl; fi"],
+        ],
+        "whatweb": [["apt-get", "update"], ["apt-get", "install", "-y", "whatweb"]],
+        "sublist3r": [
+            [sys.executable, "-m", "pip", "install", "git+https://github.com/aboul3la/Sublist3r.git"],
+            ["sh", "-lc", "printf '#!/bin/sh\nexec python3 -m sublist3r \"$@\"\n' >/usr/local/bin/sublist3r && chmod +x /usr/local/bin/sublist3r"],
+        ],
+        "waymore": [[sys.executable, "-m", "pip", "install", "waymore"]],
+        "linkfinder": [[sys.executable, "-m", "pip", "install", "linkfinder"]],
+        "alterx": [["go", "install", "github.com/projectdiscovery/alterx/cmd/alterx@latest"]],
+        "chaos": [["go", "install", "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"]],
+        "puredns": [["go", "install", "github.com/d3mondev/puredns/v2@latest"]],
+        "webanalyze": [["go", "install", "github.com/rverton/webanalyze/cmd/webanalyze@latest"]],
+        "gobuster": [["sh", "-lc", "ARCH=$(uname -m); if [ \"$ARCH\" = \"aarch64\" ] || [ \"$ARCH\" = \"arm64\" ]; then URL=https://github.com/OJ/gobuster/releases/download/v3.8.2/gobuster_Linux_arm64.tar.gz; else URL=https://github.com/OJ/gobuster/releases/download/v3.8.2/gobuster_Linux_x86_64.tar.gz; fi; curl -fsSL \"$URL\" -o /tmp/gobuster.tar.gz && tar -xzf /tmp/gobuster.tar.gz -C /tmp && install -m 0755 /tmp/gobuster /usr/local/bin/gobuster"]],
+        "wapiti": [[sys.executable, "-m", "pip", "install", "wapiti3"]],
+        "wfuzz": [[sys.executable, "-m", "pip", "install", "git+https://github.com/xmendez/wfuzz.git"]],
+        "wafw00f": [[sys.executable, "-m", "pip", "install", "wafw00f"]],
+        "sqlmap": [["git", "clone", "--depth", "1", "https://github.com/sqlmapproject/sqlmap.git", "/opt/sqlmap"], ["ln", "-sf", "/opt/sqlmap/sqlmap.py", "/usr/local/bin/sqlmap.py"]],
+        "commix": [["git", "clone", "--depth", "1", "https://github.com/commixproject/commix.git", "/opt/commix"], ["ln", "-sf", "/opt/commix/commix.py", "/usr/local/bin/commix"]],
+        "tplmap": [["git", "clone", "--depth", "1", "https://github.com/epinna/tplmap.git", "/opt/tplmap"], ["ln", "-sf", "/opt/tplmap/tplmap.py", "/usr/local/bin/tplmap.py"], [sys.executable, "-m", "pip", "install", "-r", "/opt/tplmap/requirements.txt"]],
+    }
+
+    commands = install_map.get(normalized)
+    if not commands:
+        return False
+
+    for cmd in commands:
+        _run_install_command(cmd)
+        if _tool_installed(normalized):
+            return True
+    return _tool_installed(normalized)
 
 
 @router.get("/config/runtime")
@@ -704,10 +879,12 @@ def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depen
         for group_name, group in groups.items():
             tools = []
             for tool in group.get("tools", []):
+                metadata = _tool_metadata(tool)
                 tools.append(
                     {
                         "name": tool,
                         "installed": _tool_installed(tool),
+                        **metadata,
                     }
                 )
             result.append(
@@ -723,19 +900,60 @@ def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depen
 
     nessus_enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
     nessus_url = _get_setting(db, current_user.id, "nessus_url", "")
+    shodan_key = _get_setting(db, current_user.id, "shodan_api_key", "")
+
+    unique_tools: dict[str, dict] = {}
+    for groups in [UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS]:
+        for group in groups.values():
+            for tool in group.get("tools", []):
+                if tool not in unique_tools:
+                    unique_tools[tool] = {
+                        "name": tool,
+                        "installed": _tool_installed(tool),
+                        **_tool_metadata(tool),
+                    }
 
     return {
         "catalog": {
             "unit": _group_payload("unit", UNIT_WORKER_GROUPS),
             "scheduled": _group_payload("scheduled", SCHEDULED_WORKER_GROUPS),
         },
+        "requirements_catalog": sorted(unique_tools.values(), key=lambda item: item["name"]),
         "nessus": {
             "enabled": nessus_enabled,
             "url": nessus_url,
             "pynessus_installed": _tool_installed("nessus"),
             "configured": bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")),
+            "status": "ativo" if bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")) else "desativado",
+        },
+        "shodan": {
+            "configured": bool(shodan_key),
+            "enabled": bool(shodan_key),
+            "status": "ativo" if shodan_key else "desativado",
         },
     }
+
+
+@router.post("/config/tools/install-one")
+def install_tool(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    tool = str(payload.get("tool") or "").strip().lower()
+    if not tool:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tool obrigatorio")
+
+    already_installed = _tool_installed(tool)
+    installed = already_installed or _install_tool(tool)
+
+    log_audit(
+        db,
+        event_type="tools.install_attempt",
+        message=f"Instalacao de tool solicitada: {tool}",
+        actor_user_id=current_user.id,
+        level="INFO" if installed else "WARNING",
+        metadata={"tool": tool, "installed": installed, "already_installed": already_installed},
+    )
+    db.commit()
+
+    return {"ok": installed, "tool": tool, "installed": installed, "already_installed": already_installed}
 
 
 @router.get("/config/nessus")
@@ -1297,15 +1515,45 @@ def update_user(user_id: int, payload: dict, db: Session = Depends(get_db), curr
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado")
 
+    if "email" in payload:
+        email = str(payload.get("email") or "").strip().lower()
+        if not email:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email obrigatorio")
+        exists = db.query(User).filter(User.email == email, User.id != user_id).first()
+        if exists:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email ja cadastrado")
+        user.email = email
+
     if "is_admin" in payload:
+        if user.id == current_user.id and not bool(payload["is_admin"]):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido remover seu proprio perfil admin")
         user.is_admin = bool(payload["is_admin"])
     if "is_active" in payload:
+        if user.id == current_user.id and not bool(payload["is_active"]):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido desativar seu proprio usuario")
         user.is_active = bool(payload["is_active"])
     if "group_ids" in payload:
         group_ids = payload.get("group_ids") or []
         groups = db.query(AccessGroup).filter(AccessGroup.id.in_(group_ids)).all()
         user.groups = groups
 
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir seu proprio usuario")
+
+    admins_count = db.query(User).filter(User.is_admin.is_(True)).count()
+    if user.is_admin and admins_count <= 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir o ultimo administrador")
+
+    db.delete(user)
     db.commit()
     return {"ok": True}
 

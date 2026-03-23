@@ -8,6 +8,7 @@ services:
       POSTGRES_DB: easm
       POSTGRES_USER: easm
       POSTGRES_PASSWORD: easm
+      TZ: America/Sao_Paulo
     ports:
       - "5432:5432"
     profiles: ["dev", "prod"]
@@ -26,6 +27,8 @@ services:
     ports:
       - "6379:6379"
     profiles: ["dev", "prod"]
+    environment:
+      TZ: America/Sao_Paulo
 
   ollama:
     image: ollama/ollama:latest
@@ -35,14 +38,28 @@ services:
     profiles: ["dev", "prod"]
     volumes:
       - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 10g
+        reservations:
+          memory: 8g
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_NUM_GPU: "0"
+      TZ: America/Sao_Paulo
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_backend
+    command: >
+      sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     env_file:
       - .env
+    environment:
+      TZ: America/Sao_Paulo
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +82,8 @@ services:
       sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     env_file:
       - .env
+    environment:
+      TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
       postgres:
@@ -100,6 +119,7 @@ services:
       - .env
     environment:
       WORKER_MODE: unit
+      TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
       postgres:
@@ -126,6 +146,7 @@ services:
       - .env
     environment:
       WORKER_MODE: unit
+      TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
       postgres:
@@ -160,6 +181,7 @@ services:
       - .env
     environment:
       WORKER_MODE: scheduled
+      TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
       postgres:
@@ -186,6 +208,7 @@ services:
       - .env
     environment:
       WORKER_MODE: scheduled
+      TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
       postgres:
@@ -203,6 +226,7 @@ services:
     container_name: easm_frontend
     environment:
       VITE_API_URL: http://localhost:8000
+      TZ: America/Sao_Paulo
     depends_on:
       backend:
         condition: service_started
@@ -211,6 +235,7 @@ services:
       - "5173:5173"
     volumes:
       - ./frontend:/app
+      - /app/node_modules
 
   frontend_prod:
     build:
@@ -220,6 +245,7 @@ services:
     command: ["npm", "run", "preview"]
     environment:
       VITE_API_URL: http://localhost:8000
+      TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
       backend_prod:

@@ -17,7 +17,6 @@ export default function Sidebar() {
       title: "Attack Surface",
       items: [
         { to: "/targets", label: "Targets", adminOnly: false },
-        { to: "/assets", label: "Assets", adminOnly: false },
         { to: "/scan", label: "Scans", adminOnly: true },
         { to: "/agendamento", label: "Schedules", adminOnly: true },
       ],
@@ -26,7 +25,6 @@ export default function Sidebar() {
       title: "Security",
       items: [
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
-        { to: "/issues", label: "Issues", adminOnly: false },
         { to: "/relatorios", label: "Reports", adminOnly: false },
       ],
     },
@@ -54,10 +52,10 @@ export default function Sidebar() {
   };
 
   return (
-    <aside className="w-full border-b border-slate-800 bg-slate-900/70 p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r">
-      <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-        <h1 className="font-display text-2xl font-bold text-brand-500">VALID ASM</h1>
-        <p className="mt-1 text-xs text-slate-400">Open Attack Surface Console</p>
+    <aside className="w-full border-b border-[#cbd5e0] bg-[#1a365d] p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r">
+      <div className="rounded-xl border border-[#2c5282] bg-[#224874] p-4">
+        <h1 className="font-display text-xl font-bold tracking-tight text-white">VALID ASM</h1>
+        <p className="mt-1 text-xs text-[#dbeafe]">Enterprise Security Platform</p>
       </div>
 
       <nav className="mt-4 space-y-4">
@@ -65,15 +63,19 @@ export default function Sidebar() {
           const visibleItems = group.items.filter((item) => !item.adminOnly || isAdmin);
           if (visibleItems.length === 0) return null;
           return (
-            <div key={group.title} className="rounded-xl border border-slate-800 bg-slate-950/50 p-2">
-              <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{group.title}</p>
+            <div key={group.title} className="rounded-xl border border-[#2c5282] bg-[#224874] p-2">
+              <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#bfdbfe]">{group.title}</p>
               <div className="mt-1 space-y-1">
                 {visibleItems.map((item) => (
                   <NavLink
                     key={item.to}
                     to={item.to}
                     className={({ isActive }) =>
-                      `block rounded-lg px-3 py-2 text-sm ${isActive ? "bg-brand-500 text-slate-950" : "text-slate-200 hover:bg-slate-800/70"}`
+                      `block rounded-lg border px-3 py-2 text-sm font-medium transition-all duration-200 ${
+                        isActive
+                          ? "border-[#63b3ed] bg-[#2c5282] text-white shadow-[0_0_0_1px_rgba(99,179,237,0.5)]"
+                          : "border-transparent text-[#e2e8f0] hover:border-[#2c5282] hover:bg-[#2a4f7a]"
+                      }`
                     }
                   >
                     {item.label}
@@ -87,7 +89,7 @@ export default function Sidebar() {
 
       <button
         onClick={logout}
-        className="mt-4 w-full rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm text-rose-300"
+        className="mt-4 w-full rounded-lg border border-[#2c5282] bg-transparent px-3 py-2 text-sm font-medium text-white hover:border-[#63b3ed] hover:text-[#bfdbfe]"
       >
         Sair
       </button>

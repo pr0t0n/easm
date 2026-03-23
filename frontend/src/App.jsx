@@ -2,12 +2,11 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useEffect, useState } from "react";
 import client from "./api/client";
 import Sidebar from "./components/Sidebar";
+import Navbar from "./components/Navbar";
 import ToastCenter from "./components/ToastCenter";
 import AccountPage from "./pages/AccountPage";
 import ConfigurationPage from "./pages/ConfigurationPage";
 import DashboardPage from "./pages/DashboardPage";
-import AssetsPage from "./pages/AssetsPage";
-import IssuesPage from "./pages/IssuesPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
 import SchedulingPage from "./pages/SchedulingPage";
@@ -63,16 +62,15 @@ export default function App() {
           path="/*"
           element={
             <Protected>
-              <div className="min-h-screen md:flex">
+              <div className="min-h-screen md:flex" style={{ backgroundColor: "var(--bg-main)" }}>
                 <Sidebar />
-                <div className="flex-1">
+                <div className="flex min-h-screen flex-1 flex-col">
+                  <Navbar />
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<ReportsPage />} />
                     <Route path="/targets" element={<TargetsPage />} />
-                    <Route path="/assets" element={<AssetsPage />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
-                    <Route path="/issues" element={<IssuesPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
                     <Route path="/configuracao" element={<AdminOnly><ConfigurationPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />

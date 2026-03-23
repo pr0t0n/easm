@@ -1,21 +1,118 @@
 from datetime import datetime, timedelta, timezone
+import csv
+import io
+import json
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import FalsePositiveMemory, Finding, ScanAuthorization, ScanJob, ScanLog, User
+from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanAuthorization, ScanJob, ScanLog, User
+from app.models.models import WorkerHeartbeat
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
 from app.services.risk_service import build_priority_reason, compute_age_metrics, compute_fair_metrics
+from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
 
 
 router = APIRouter(prefix="/api", tags=["scans"])
 vector_store = FalsePositiveVectorStore()
+
+
+def _extract_scan_id_from_task(task: dict) -> int | None:
+    kwargs = task.get("kwargs")
+    if isinstance(kwargs, dict) and "scan_id" in kwargs:
+        try:
+            return int(kwargs.get("scan_id"))
+        except (TypeError, ValueError):
+            return None
+
+    args = task.get("args")
+    if isinstance(args, (list, tuple)) and args:
+        try:
+            return int(args[0])
+        except (TypeError, ValueError):
+            return None
+
+    if isinstance(args, str):
+        digits = "".join(ch for ch in args if ch.isdigit())
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+    return None
+
+
+def _active_scan_task_ids(scan_id: int) -> list[str]:
+    inspector = celery.control.inspect(timeout=1.5)
+    buckets = [inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}]
+    task_ids: list[str] = []
+    for tasks_by_worker in buckets:
+        for _, tasks in tasks_by_worker.items():
+            for task in tasks or []:
+                name = str(task.get("name") or "")
+                if name not in {"run_scan_job_unit", "run_scan_job_scheduled"}:
+                    continue
+                resolved_scan_id = _extract_scan_id_from_task(task)
+                if resolved_scan_id != scan_id:
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if task_id:
+                    task_ids.append(task_id)
+    return list(dict.fromkeys(task_ids))
+
+
+def _reconcile_orphan_running_scans(db: Session) -> int:
+    inspector = celery.control.inspect(timeout=1.5)
+    active = inspector.active()
+    if active is None:
+        return 0
+
+    active_scan_ids: set[int] = set()
+    for _, tasks in active.items():
+        for task in tasks or []:
+            if str(task.get("name") or "") not in {"run_scan_job_unit", "run_scan_job_scheduled"}:
+                continue
+            scan_id = _extract_scan_id_from_task(task)
+            if scan_id is not None:
+                active_scan_ids.add(scan_id)
+
+    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    stale_rows = (
+        db.query(ScanJob)
+        .filter(ScanJob.status.in_(["running", "retrying"]), ScanJob.updated_at < cutoff)
+        .all()
+    )
+
+    fixed = 0
+    for row in stale_rows:
+        if row.id in active_scan_ids:
+            continue
+        row.status = "failed"
+        row.current_step = "Scan encerrado por reconciliacao de orfao"
+        row.last_error = "Scan marcado como falho por estar running sem task ativa no worker"
+        row.next_retry_at = None
+        db.add(
+            ScanLog(
+                scan_job_id=row.id,
+                source="reconciler",
+                level="WARNING",
+                message="Scan running/retrying sem task ativa; status corrigido para failed",
+            )
+        )
+        fixed += 1
+
+    if fixed:
+        db.commit()
+    return fixed
 
 
 def _authorized_scan_query(db: Session, current_user: User):
@@ -38,6 +135,348 @@ def _sev_weight(severity: str) -> int:
     return {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(str(severity or "low").lower(), 1)
 
 
+def _sanitize_text(value: str | None) -> str:
+    if not value:
+        return ""
+    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
+    sanitized = ansi_pattern.sub("", str(value))
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    return sanitized
+
+
+def _normalize_finding_title(value: str | None) -> str:
+    title = _sanitize_text(value)
+    lowered = title.lower()
+    for prefix in ["nuclei:", "nuclei -", "nikto:", "ffuf:"]:
+        if lowered.startswith(prefix):
+            title = title[len(prefix):].strip(" -:")
+            break
+    return title or "Vulnerabilidade sem titulo"
+
+
+def _normalize_recommendation(details: dict) -> str:
+    rec = _extract_recommendation_payload(details)
+    mitigacoes = rec.get("mitigacoes") or []
+    if mitigacoes:
+        return _sanitize_text("; ".join(str(m) for m in mitigacoes[:3] if str(m).strip()))
+    if rec.get("resumo"):
+        return _sanitize_text(str(rec.get("resumo")))
+
+    severity = str((details or {}).get("severity") or "").lower()
+    if severity == "critical":
+        return "Aplicar mitigacao imediata, corrigir configuracao e validar por reteste priorizado."
+    if severity == "high":
+        return "Corrigir nesta sprint, aplicar hardening e validar com novo scan."
+    if severity == "medium":
+        return "Planejar correcao em curto prazo e monitorar exposicao residual."
+    return "Registrar no backlog de seguranca, corrigir e confirmar por reteste."
+
+
+def _extract_ports_from_text(value: str | None) -> set[int]:
+    text = str(value or "")
+    ports: set[int] = set()
+
+    for match in re.finditer(r"porta\s+(\d{1,5})", text, re.IGNORECASE):
+        try:
+            port = int(match.group(1))
+        except Exception:
+            continue
+        if 1 <= port <= 65535:
+            ports.add(port)
+
+    for match in re.finditer(r":(\d{1,5})\b", text):
+        try:
+            port = int(match.group(1))
+        except Exception:
+            continue
+        if 1 <= port <= 65535:
+            ports.add(port)
+
+    return ports
+
+
+def _build_top_recommendations(vulnerability_rows: list[dict], recommendations: list[dict]) -> list[dict]:
+    top: list[dict] = []
+    seen: set[str] = set()
+    all_ports: set[int] = set()
+
+    for row in vulnerability_rows or []:
+        for field in [
+            row.get("name"),
+            row.get("problem"),
+            row.get("target"),
+            row.get("error"),
+            row.get("recommendation"),
+        ]:
+            all_ports.update(_extract_ports_from_text(str(field or "")))
+
+    if all_ports:
+        ports = ",".join(str(p) for p in sorted(all_ports)[:20])
+        top.append(
+            {
+                "id": "R-PORTS",
+                "name": "Exposicao de portas externas",
+                "recommendation": f"Desabilitar porta {ports}. Manter somente portas estritamente necessarias com filtro de origem e segmentacao.",
+                "kind": "consolidated",
+            }
+        )
+        seen.add(f"ports:{ports}")
+
+    for rec in recommendations or []:
+        text = _sanitize_text(rec.get("recommendation") or "")
+        if not text:
+            continue
+        normalized = re.sub(r"\s+", " ", text).strip().lower()[:220]
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        top.append(
+            {
+                "id": _sanitize_text(rec.get("id") or f"R-{len(top) + 1}"),
+                "name": _sanitize_text(rec.get("name") or "Correcao recomendada"),
+                "recommendation": text,
+                "kind": "consolidated",
+            }
+        )
+        if len(top) >= 5:
+            break
+
+    return top[:5]
+
+
+def _build_strategic_points(
+    target: str,
+    summary: dict[str, int],
+    fair_total: dict[str, float],
+    lifecycle: dict[str, int],
+    category_scores: list[dict],
+) -> list[str]:
+    points: list[str] = []
+    open_count = int(summary.get("open") or 0)
+    critical = int(summary.get("critical") or 0)
+    high = int(summary.get("high") or 0)
+    corrected = int(lifecycle.get("corrected") or 0)
+    ale_open = float(fair_total.get("ale_total_open_usd") or 0.0)
+
+    points.append(
+        f"Risco atual do alvo {target}: {open_count} vulnerabilidades abertas, com {critical} criticas e {high} altas exigindo prioridade executiva."
+    )
+    points.append(
+        f"Exposicao financeira anual estimada (ALE aberto): USD {ale_open:,.0f}. Recomendado tratar como meta de reducao trimestral com dono e prazo definidos."
+    )
+    if corrected > 0:
+        points.append(
+            f"Evolucao positiva detectada: {corrected} vulnerabilidades nao reapareceram no re-scan. Manter cadencia de validacao para evitar reabertura de risco."
+        )
+
+    weak_categories = sorted(category_scores, key=lambda item: item.get("score", 100))[:2]
+    if weak_categories:
+        categories = ", ".join(str(item.get("category") or "-") for item in weak_categories)
+        points.append(
+            f"Prioridade de governanca: reforcar controles nas categorias com menor pontuacao ({categories}), com acompanhamento no comite de seguranca."
+        )
+
+    return points[:5]
+
+
+def _build_technical_points(vulnerability_rows: list[dict], recommendations: list[dict]) -> list[str]:
+    points: list[str] = []
+    seen: set[str] = set()
+
+    ports: set[int] = set()
+    for row in vulnerability_rows:
+        for field in [row.get("target"), row.get("name"), row.get("problem"), row.get("error"), row.get("recommendation")]:
+            ports.update(_extract_ports_from_text(str(field or "")))
+    if ports:
+        ports_list = ",".join(str(p) for p in sorted(ports)[:20])
+        points.append(
+            f"Rede: desabilitar porta {ports_list} quando nao houver justificativa de negocio; aplicar ACL por origem e segmentacao por ambiente."
+        )
+        seen.add(f"ports:{ports_list}")
+
+    for rec in recommendations or []:
+        text = _sanitize_text(rec.get("recommendation") or "")
+        if not text:
+            continue
+        normalized = text.lower()[:220]
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        points.append(f"Aplicacao: {text}")
+        if len(points) >= 8:
+            break
+
+    if not points:
+        points.append("Sem recomendacoes tecnicas disponiveis para este scan.")
+    return points[:8]
+
+
+def _try_parse_json_dict(value) -> dict | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_recommendation_payload(details: dict) -> dict[str, object]:
+    details = details if isinstance(details, dict) else {}
+    candidates = [
+        details.get("qwen_recomendacao_pt"),
+        details.get("cloudcode_recomendacao_pt"),
+    ]
+    for candidate in candidates:
+        parsed = _try_parse_json_dict(candidate)
+        if not parsed:
+            continue
+        mitigacoes = parsed.get("mitigacoes")
+        if not isinstance(mitigacoes, list):
+            mitigacoes = []
+        validacoes = parsed.get("validacoes")
+        if not isinstance(validacoes, list):
+            validacoes = []
+        return {
+            "resumo": _sanitize_text(parsed.get("resumo") or ""),
+            "impacto": _sanitize_text(parsed.get("impacto") or ""),
+            "mitigacoes": [_sanitize_text(str(item)) for item in mitigacoes if _sanitize_text(str(item))],
+            "prioridade": _sanitize_text(parsed.get("prioridade") or ""),
+            "validacoes": [_sanitize_text(str(item)) for item in validacoes if _sanitize_text(str(item))],
+        }
+
+    # fallback simples para texto cru quando IA nao devolve JSON
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return {
+                "resumo": _sanitize_text(candidate),
+                "impacto": "",
+                "mitigacoes": [],
+                "prioridade": "",
+                "validacoes": [],
+            }
+
+    return {
+        "resumo": "",
+        "impacto": "",
+        "mitigacoes": [],
+        "prioridade": "",
+        "validacoes": [],
+    }
+
+
+def _pick_first_text(details: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = details.get(key)
+        if isinstance(value, str) and value.strip():
+            return _sanitize_text(value)
+    return ""
+
+
+def _extract_technical_details(details: dict, default_target: str) -> dict[str, str]:
+    details = details if isinstance(details, dict) else {}
+    full_url = _pick_first_text(details, ["url", "full_url", "endpoint", "target", "asset"])
+    if not full_url:
+        full_url = _sanitize_text(default_target)
+
+    exploit = _pick_first_text(details, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc", "payload"])
+    error = _pick_first_text(details, ["error", "stderr", "exception", "message", "http_error", "status_code"])
+    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response"])
+
+    return {
+        "full_url": full_url,
+        "exploit": exploit,
+        "error": error,
+        "evidence": evidence,
+    }
+
+
+CATEGORY_ORDER = [
+    "Software Patching",
+    "Application Security",
+    "Web Encryption",
+    "Network Filtering",
+    "Authentication",
+    "Authorization",
+    "Data Exposure",
+    "DNS Security",
+    "System Hosting",
+]
+
+
+def _infer_category(title: str, details: dict) -> str:
+    blob = " ".join(
+        [
+            str(title or ""),
+            str(details.get("service") or ""),
+            str(details.get("protocol") or ""),
+            str(details.get("url") or details.get("target") or ""),
+            str(details.get("error") or details.get("stderr") or ""),
+            str(details.get("output") or ""),
+        ]
+    ).lower()
+
+    if any(k in blob for k in ["tls", "ssl", "cipher", "https", "hsts", "certificate"]):
+        return "Web Encryption"
+    if any(k in blob for k in ["dns", "subdomain takeover", "subdomain", "cname", "ns ", "mx "]):
+        return "DNS Security"
+    if any(k in blob for k in ["auth", "login", "jwt", "token", "session", "password", "credential"]):
+        return "Authentication"
+    if any(k in blob for k in ["idor", "forbidden", "403", "access control", "authorization", "privilege"]):
+        return "Authorization"
+    if any(k in blob for k in ["open port", "nmap", "naabu", "firewall", "exposed service", "waf"]):
+        return "Network Filtering"
+    if any(k in blob for k in ["xss", "sqli", "sql", "ssti", "rce", "xxe", "csrf", "command injection", "template"]):
+        return "Application Security"
+    if any(k in blob for k in ["cve", "version", "outdated", "vuln", "patch", "upgrade"]):
+        return "Software Patching"
+    if any(k in blob for k in ["secret", "leak", "exposure", "directory listing", "bucket", "metadata"]):
+        return "Data Exposure"
+    if any(k in blob for k in ["hosting", "server", "docker", "kubernetes", "cloud", "misconfig"]):
+        return "System Hosting"
+
+    return "Application Security"
+
+
+def _build_category_scores(rows: list[dict]) -> list[dict]:
+    sev_weight = {"critical": 20, "high": 12, "medium": 7, "low": 3, "info": 1}
+    aggregate: dict[str, dict[str, int]] = {category: {"findings": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "risk_points": 0} for category in CATEGORY_ORDER}
+
+    for row in rows:
+        category = row.get("category") or "Application Security"
+        sev = str(row.get("severity") or "low").lower()
+        if category not in aggregate:
+            aggregate[category] = {"findings": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "risk_points": 0}
+        aggregate[category]["findings"] += 1
+        if sev in aggregate[category]:
+            aggregate[category][sev] += 1
+        aggregate[category]["risk_points"] += sev_weight.get(sev, 1)
+
+    results: list[dict] = []
+    for category in CATEGORY_ORDER:
+        item = aggregate.get(category)
+        if not item:
+            continue
+        score = max(0, 100 - min(95, int(item["risk_points"] * 3)))
+        results.append({"category": category, "score": score, **item})
+    return results
+
+
+def _finding_signature(title: str, severity: str, target: str) -> str:
+    return "|".join(
+        [
+            _sanitize_text(title).lower(),
+            _sanitize_text(severity).lower(),
+            _sanitize_text(target).lower(),
+        ]
+    )
+
+
 def _infer_asset_type(name: str) -> str:
     value = str(name or "").strip().lower()
     if not value:
@@ -51,6 +490,40 @@ def _infer_asset_type(name: str) -> str:
     if "." in value:
         return "domain"
     return "asset"
+
+
+def _append_technology(counter: dict[str, int], value) -> None:
+    if isinstance(value, str):
+        name = value.strip()
+        if len(name) >= 2:
+            counter[name] = counter.get(name, 0) + 1
+        return
+    if isinstance(value, list):
+        for item in value:
+            _append_technology(counter, item)
+        return
+    if isinstance(value, dict):
+        preferred_keys = [
+            "name", "product", "technology", "tech", "server", "framework", "cms", "vendor",
+            "technologies", "stack", "web_server", "x_powered_by",
+        ]
+        for key in preferred_keys:
+            if key in value:
+                _append_technology(counter, value[key])
+
+
+def _collect_technologies(job: ScanJob, scan_findings: list[Finding]) -> dict[str, int]:
+    counter: dict[str, int] = {}
+    state = job.state_data or {}
+    for key in ["technologies", "technology", "tech", "tech_stack", "stack", "fingerprint", "fingerprints"]:
+        if key in state:
+            _append_technology(counter, state.get(key))
+    for finding in scan_findings:
+        details = finding.details or {}
+        for key in ["technologies", "technology", "tech", "tech_stack", "stack", "server", "web_server", "x_powered_by", "framework", "cms"]:
+            if key in details:
+                _append_technology(counter, details.get(key))
+    return counter
 
 
 def _resolve_valid_authorization(db: Session, authorization_code: str | None) -> ScanAuthorization | None:
@@ -175,6 +648,7 @@ def create_scan(
 
 @router.get("/scans", response_model=list[ScanResponse])
 def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _reconcile_orphan_running_scans(db)
     query = _authorized_scan_query(db, current_user)
     rows = query.order_by(ScanJob.created_at.desc()).all()
     return [
@@ -196,6 +670,163 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
         )
         for s in rows
     ]
+
+
+@router.delete("/scans/{scan_id}")
+def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    if job.status in {"queued", "running", "retrying"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir scan em execucao")
+
+    # Limpar referências de audit_events antes de deletar o scan
+    db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
+    
+    db.delete(job)
+    log_audit(
+        db,
+        event_type="scan.deleted",
+        message=f"Scan {scan_id} excluido",
+        actor_user_id=current_user.id,
+        metadata={"scan_id": scan_id},
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/scans/reset-operational")
+def reset_operational_scans(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    scan_rows = db.query(ScanJob.id, ScanJob.status).all()
+    scan_ids = [row.id for row in scan_rows]
+    active_scan_ids = [row.id for row in scan_rows if row.status in {"queued", "running", "retrying"}]
+
+    revoked_task_ids: list[str] = []
+    for scan_id in active_scan_ids:
+        task_ids = _active_scan_task_ids(scan_id)
+        for task_id in task_ids:
+            try:
+                celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
+                revoked_task_ids.append(task_id)
+            except Exception:
+                continue
+
+    try:
+        # Limpa primeiro as referencias de workers para evitar violacao de FK em scan_jobs.
+        db.query(WorkerHeartbeat).filter(WorkerHeartbeat.current_scan_id.is_not(None)).update(
+            {
+                WorkerHeartbeat.current_scan_id: None,
+                WorkerHeartbeat.status: "idle",
+                WorkerHeartbeat.last_task_name: None,
+            },
+            synchronize_session=False,
+        )
+
+        deleted_audit_events = db.query(AuditEvent).filter(AuditEvent.scan_job_id.is_not(None)).delete(synchronize_session=False)
+        deleted_scan_logs = db.query(ScanLog).delete(synchronize_session=False)
+        deleted_findings = db.query(Finding).delete(synchronize_session=False)
+        deleted_scan_jobs = db.query(ScanJob).delete(synchronize_session=False)
+
+        db.execute(text("ALTER SEQUENCE scan_jobs_id_seq RESTART WITH 1"))
+        db.execute(text("ALTER SEQUENCE findings_id_seq RESTART WITH 1"))
+        db.execute(text("ALTER SEQUENCE scan_logs_id_seq RESTART WITH 1"))
+
+        log_audit(
+            db,
+            event_type="scan.reset_operational",
+            message="Reset operacional executado: scans, findings e logs removidos",
+            actor_user_id=current_user.id,
+            metadata={
+                "scan_ids": scan_ids,
+                "revoked_task_ids": revoked_task_ids,
+                "deleted": {
+                    "scan_jobs": deleted_scan_jobs,
+                    "findings": deleted_findings,
+                    "scan_logs": deleted_scan_logs,
+                    "audit_events": deleted_audit_events,
+                },
+            },
+        )
+        db.commit()
+
+        return {
+            "ok": True,
+            "deleted": {
+                "scan_jobs": deleted_scan_jobs,
+                "findings": deleted_findings,
+                "scan_logs": deleted_scan_logs,
+                "audit_events": deleted_audit_events,
+            },
+            "revoked_task_ids": list(dict.fromkeys(revoked_task_ids)),
+        }
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Falha ao executar reset operacional: {exc.__class__.__name__}") from exc
+
+
+@router.post("/scans/{scan_id}/stop")
+def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    if job.status not in {"queued", "running", "retrying"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans em execucao/fila podem ser interrompidos")
+
+    task_ids = _active_scan_task_ids(scan_id)
+    for task_id in task_ids:
+        try:
+            celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception:
+            continue
+
+    job.status = "stopped"
+    job.current_step = "Scan interrompido manualmente"
+    job.next_retry_at = None
+    job.last_error = "Interrompido manualmente por administrador"
+    db.add(
+        ScanLog(
+            scan_job_id=scan_id,
+            source="manager",
+            level="WARNING",
+            message=f"Scan interrompido manualmente (task_ids={task_ids or ['nao_encontrada']})",
+        )
+    )
+    log_audit(
+        db,
+        event_type="scan.stopped",
+        message=f"Scan {scan_id} interrompido manualmente",
+        actor_user_id=current_user.id,
+        metadata={"scan_id": scan_id, "task_ids": task_ids},
+    )
+    db.commit()
+    return {"ok": True, "scan_id": scan_id, "revoked_task_ids": task_ids}
+
+
+@router.delete("/scans/{scan_id}/report")
+def delete_scan_report(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    if job.status in {"queued", "running", "retrying"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir relatorio de scan em execucao")
+
+    findings_deleted = db.query(Finding).filter(Finding.scan_job_id == scan_id).delete(synchronize_session=False)
+    job.state_data = {}
+    job.mission_progress = 0
+    job.current_step = "Relatorio removido"
+
+    log_audit(
+        db,
+        event_type="scan.report_deleted",
+        message=f"Relatorio do scan {scan_id} removido",
+        actor_user_id=current_user.id,
+        metadata={"scan_id": scan_id, "findings_deleted": findings_deleted},
+    )
+    db.commit()
+    return {"ok": True, "findings_deleted": findings_deleted}
 
 
 @router.get("/targets/summary")
@@ -508,19 +1139,77 @@ def scan_report(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
     findings = db.query(Finding).filter(Finding.scan_job_id == scan_id).all()
+    previous_scan = (
+        db.query(ScanJob)
+        .filter(
+            ScanJob.target_query == job.target_query,
+            ScanJob.id < scan_id,
+            ScanJob.status == "completed",
+        )
+        .order_by(ScanJob.id.desc())
+        .first()
+    )
+    previous_findings = []
+    if previous_scan:
+        previous_findings = db.query(Finding).filter(Finding.scan_job_id == previous_scan.id, Finding.is_false_positive.is_(False)).all()
 
     enriched_findings = []
     prioritized_actions = []
+    severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    fair_ale_total_open = 0.0
+    fair_ale_total_all = 0.0
+    fair_score_samples: list[float] = []
+    vulnerability_rows: list[dict] = []
+
     for finding in findings:
         details = finding.details or {}
+        normalized_title = _normalize_finding_title(finding.title)
+        recommendation_payload = _extract_recommendation_payload(details)
+        technical = _extract_technical_details(details, job.target_query)
+        category = _infer_category(normalized_title, details)
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
-        reasons = build_priority_reason(finding.title, finding.severity, fair, age)
+        reasons = build_priority_reason(normalized_title, finding.severity, fair, age)
+
+        sev = str(finding.severity or "low").lower()
+        if sev in severity_count:
+            severity_count[sev] += 1
+
+        ale_value = float(fair.get("annualized_loss_exposure_usd") or 0.0)
+        fair_ale_total_all += ale_value
+        fair_score_samples.append(float(fair.get("fair_score") or 0.0))
+
+        target_value = technical.get("full_url") or _sanitize_text(details.get("url") or details.get("target") or job.target_query)
+        cve_or_id = _sanitize_text(finding.cve or f"F-{finding.id}")
+        signature = _finding_signature(normalized_title, sev, target_value)
+        vulnerability_rows.append(
+            {
+                "index": len(vulnerability_rows) + 1,
+                "signature": signature,
+                "id": cve_or_id,
+                "cve": _sanitize_text(finding.cve or ""),
+                "target": target_value,
+                "name": normalized_title,
+                "problem": normalized_title,
+                "service": _sanitize_text(details.get("service") or details.get("protocol") or "-"),
+                "cvss": details.get("cvss_score") or details.get("cvss") or finding.risk_score or "-",
+                "severity": sev,
+                "category": category,
+                "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or "-"),
+                "iso_control": _sanitize_text(details.get("iso_control") or details.get("iso27001") or "-"),
+                "recommendation": _normalize_recommendation({**details, "severity": sev}),
+                "recommendation_structured": recommendation_payload,
+                "exploit": technical.get("exploit") or "-",
+                "error": technical.get("error") or "-",
+                "evidence": technical.get("evidence") or "-",
+                "is_false_positive": bool(finding.is_false_positive),
+            }
+        )
 
         enriched_findings.append(
             {
                 "id": finding.id,
-                "title": finding.title,
+                "title": normalized_title,
                 "severity": finding.severity,
                 "sn1per_priority": finding.sn1per_priority,
                 "cve": finding.cve,
@@ -538,10 +1227,11 @@ def scan_report(
         )
 
         if not finding.is_false_positive:
+            fair_ale_total_open += ale_value
             prioritized_actions.append(
                 {
                     "finding_id": finding.id,
-                    "title": finding.title,
+                    "title": normalized_title,
                     "severity": finding.severity,
                     "fair_score": fair["fair_score"],
                     "annualized_loss_exposure_usd": fair["annualized_loss_exposure_usd"],
@@ -555,12 +1245,140 @@ def scan_report(
 
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
+    score = max(
+        0,
+        min(
+            100,
+            100 - (severity_count["critical"] * 30 + severity_count["high"] * 15 + severity_count["medium"] * 8 + severity_count["low"] * 2),
+        ),
+    )
+    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+
+    open_findings = len([f for f in findings if not f.is_false_positive])
+    frameworks = {
+        "iso27001": {"score": max(0, 100 - open_findings)},
+        "nist": {"score": max(0, 100 - int(open_findings * 0.8))},
+        "cis_v8": {"score": max(0, 100 - int(open_findings * 0.7))},
+        "pci": {"score": max(0, 100 - int(open_findings * 0.9))},
+    }
+
+    fair_score_avg = round(sum(fair_score_samples) / max(1, len(fair_score_samples)), 2)
+    fair_total = {
+        "enabled": True,
+        "ale_total_open_usd": round(fair_ale_total_open, 2),
+        "ale_total_all_usd": round(fair_ale_total_all, 2),
+        "daily_impact_open_usd": round(fair_ale_total_open / 365.0, 2),
+        "mitigation_cost_estimate_open_usd": round(fair_ale_total_open * 0.057, 2),
+        "fair_avg_score": fair_score_avg,
+    }
+
+    open_vulnerability_table = [row for row in vulnerability_rows if not row["is_false_positive"]]
+
+    prev_signatures: set[str] = set()
+    resolved_vulnerabilities: list[dict] = []
+    for prev in previous_findings:
+        prev_details = prev.details or {}
+        prev_target = _sanitize_text(prev_details.get("url") or prev_details.get("target") or job.target_query)
+        prev_signature = _finding_signature(_normalize_finding_title(prev.title), str(prev.severity or "low"), prev_target)
+        prev_signatures.add(prev_signature)
+
+    curr_signatures = {row["signature"] for row in open_vulnerability_table}
+    for prev in previous_findings:
+        prev_details = prev.details or {}
+        prev_title = _normalize_finding_title(prev.title)
+        prev_sev = str(prev.severity or "low").lower()
+        prev_target = _sanitize_text(prev_details.get("url") or prev_details.get("target") or job.target_query)
+        prev_signature = _finding_signature(prev_title, prev_sev, prev_target)
+        if prev_signature not in curr_signatures:
+            resolved_vulnerabilities.append(
+                {
+                    "id": _sanitize_text(prev.cve or f"F-{prev.id}"),
+                    "target": prev_target,
+                    "name": prev_title,
+                    "severity": prev_sev,
+                    "status": "corrected",
+                    "correction_note": "Vulnerabilidade nao reapareceu no scan mais recente do mesmo alvo.",
+                }
+            )
+
+    for row in open_vulnerability_table:
+        row["status"] = "open" if row["signature"] in prev_signatures else "new"
+        row.pop("signature", None)
+
+    category_scores = _build_category_scores(open_vulnerability_table)
+
+    detailed_recommendations = [
+        {
+            "id": row["id"],
+            "cve": row.get("cve") or "",
+            "name": row["name"],
+            "problem": row.get("problem") or row["name"],
+            "category": row.get("category") or "Application Security",
+            "severity": row["severity"],
+            "target": row["target"],
+            "technical": {
+                "exploit": row.get("exploit") or "-",
+                "error": row.get("error") or "-",
+                "evidence": row.get("evidence") or "-",
+            },
+            "recommendation": row["recommendation"],
+            "recommendation_structured": row.get("recommendation_structured") or {},
+        }
+        for row in open_vulnerability_table[:50]
+    ]
+    top_recommendations = _build_top_recommendations(open_vulnerability_table, detailed_recommendations)
+
+    lifecycle = {
+        "open": len([r for r in open_vulnerability_table if r.get("status") == "open"]),
+        "new": len([r for r in open_vulnerability_table if r.get("status") == "new"]),
+        "corrected": len(resolved_vulnerabilities),
+    }
+    summary_data = {
+        "total": len(findings),
+        "critical": severity_count["critical"],
+        "high": severity_count["high"],
+        "medium": severity_count["medium"],
+        "low": severity_count["low"],
+        "info": severity_count["info"],
+        "open": open_findings,
+        "triaged": len(findings) - open_findings,
+    }
+    strategic_points = _build_strategic_points(
+        target=job.target_query,
+        summary=summary_data,
+        fair_total=fair_total,
+        lifecycle=lifecycle,
+        category_scores=category_scores,
+    )
+    technical_points = _build_technical_points(open_vulnerability_table, detailed_recommendations)
+
     return ReportResponse(
         scan_id=scan_id,
         status=job.status,
         findings=enriched_findings,
         state_data={
             **(job.state_data or {}),
+            "report_v2": {
+                "domain": job.target_query,
+                "scan_type": "ASM_EXTERNAL",
+                "risk_score": score,
+                "grade": grade,
+                "summary": summary_data,
+                "fair": fair_total,
+                "frameworks": frameworks,
+                "category_scores": category_scores,
+                "vulnerability_table": open_vulnerability_table,
+                "recommendations": top_recommendations,
+                "recommendations_detailed": detailed_recommendations,
+                "strategic_points": strategic_points,
+                "technical_points": technical_points,
+                "lifecycle": lifecycle,
+                "resolved_vulnerabilities": resolved_vulnerabilities,
+                "comparison": {
+                    "current_scan_id": scan_id,
+                    "previous_scan_id": previous_scan.id if previous_scan else None,
+                },
+            },
             "prioritized_actions": paged_prioritized,
             "prioritized_actions_page": {
                 "items": paged_prioritized,
@@ -569,6 +1387,82 @@ def scan_report(
                 "offset": prioritized_offset,
             },
         },
+    )
+
+
+@router.get("/scans/{scan_id}/report.csv")
+def scan_report_csv(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    report = scan_report(
+        scan_id=scan_id,
+        prioritized_limit=100,
+        prioritized_offset=0,
+        db=db,
+        current_user=current_user,
+    )
+
+    report_v2 = (report.state_data or {}).get("report_v2") or {}
+    rows = report_v2.get("vulnerability_table") or []
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "index",
+            "id",
+            "cve",
+            "target",
+            "problem",
+            "service",
+            "severity",
+            "category",
+            "cvss",
+            "status",
+            "exploit",
+            "error",
+            "evidence",
+            "recommendation",
+            "priority",
+            "mitigations",
+            "validations",
+        ]
+    )
+
+    for row in rows:
+        rec = row.get("recommendation_structured") or {}
+        mitigations = rec.get("mitigacoes") if isinstance(rec, dict) else []
+        validations = rec.get("validacoes") if isinstance(rec, dict) else []
+        writer.writerow(
+            [
+                row.get("index"),
+                row.get("id") or "",
+                row.get("cve") or "",
+                row.get("target") or "",
+                row.get("problem") or row.get("name") or "",
+                row.get("service") or "",
+                row.get("severity") or "",
+                row.get("category") or "",
+                row.get("cvss") or "",
+                row.get("status") or "",
+                row.get("exploit") or "",
+                row.get("error") or "",
+                row.get("evidence") or "",
+                row.get("recommendation") or "",
+                rec.get("prioridade") if isinstance(rec, dict) else "",
+                "; ".join(str(item) for item in mitigations) if isinstance(mitigations, list) else "",
+                "; ".join(str(item) for item in validations) if isinstance(validations, list) else "",
+            ]
+        )
+
+    csv_text = output.getvalue()
+    filename = f"scan_{scan_id}_report.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -615,7 +1509,7 @@ def mark_false_positive(
             finding_id=finding.id,
             signature=signature,
             embedding_ref=vector_id,
-            metadata={"severity": finding.severity, "fp_notes": fp_notes},
+            memory_metadata={"severity": finding.severity, "fp_notes": fp_notes},
         )
         db.add(fp_mem)
     else:
@@ -714,7 +1608,7 @@ def bulk_mark_false_positive(
                 finding_id=finding.id,
                 signature=signature,
                 embedding_ref=vector_id,
-                metadata={"severity": finding.severity, "fp_notes": fp_notes},
+                memory_metadata={"severity": finding.severity, "fp_notes": fp_notes},
             ))
         updated_ids.append(finding.id)
 
@@ -768,26 +1662,29 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
 def dashboard_insights(
     prioritized_limit: int = Query(default=10, ge=1, le=100),
     prioritized_offset: int = Query(default=0, ge=0, le=10000),
+    target: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     if current_user.is_admin:
-        jobs = db.query(ScanJob).order_by(ScanJob.created_at.desc()).all()
-        findings = db.query(Finding).all()
+        jobs_query = db.query(ScanJob)
+        findings_query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id)
     else:
         allowed_ids = [g.id for g in current_user.groups]
-        jobs = (
-            db.query(ScanJob)
-            .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
-            .order_by(ScanJob.created_at.desc())
-            .all()
-        )
-        findings = (
+        jobs_query = db.query(ScanJob).filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        findings_query = (
             db.query(Finding)
             .join(ScanJob, ScanJob.id == Finding.scan_job_id)
             .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
-            .all()
         )
+
+    normalized_target = (target or "").strip()
+    if normalized_target:
+        jobs_query = jobs_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
+        findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
+
+    jobs = jobs_query.order_by(ScanJob.created_at.desc()).all()
+    findings = findings_query.all()
 
     findings_by_scan: dict[int, list[Finding]] = {}
     for f in findings:
@@ -805,6 +1702,7 @@ def dashboard_insights(
     age_exploit_samples: list[int] = []
     prioritized_actions: list[dict] = []
     vuln_counter: dict[tuple[str, str], int] = {}
+    technologies_counter: dict[str, int] = {}
     for f in findings:
         sev = str(f.severity or "low").lower()
         if sev in sev_count:
@@ -840,6 +1738,11 @@ def dashboard_insights(
                     "financial_reason": reasons["financial"],
                 }
             )
+
+    for job in jobs:
+        techs = _collect_technologies(job, findings_by_scan.get(job.id, []))
+        for name, count in techs.items():
+            technologies_counter[name] = technologies_counter.get(name, 0) + count
 
     def _sev_weight(sev: str) -> int:
         return {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(sev, 1)
@@ -881,9 +1784,27 @@ def dashboard_insights(
         for j in jobs[:8]
     ]
 
+    ongoing_scans = [
+        {
+            "id": j.id,
+            "target_query": j.target_query,
+            "status": j.status,
+            "mode": j.mode,
+            "current_step": j.current_step,
+            "mission_progress": j.mission_progress,
+            "created_at": j.created_at,
+        }
+        for j in jobs if j.status in {"queued", "running", "retrying"}
+    ][:8]
+
     top_vulns = [
         {"title": title, "severity": severity, "count": count}
         for (title, severity), count in sorted(vuln_counter.items(), key=lambda item: item[1], reverse=True)[:7]
+    ]
+
+    top_technologies = [
+        {"name": name, "count": count}
+        for name, count in sorted(technologies_counter.items(), key=lambda item: item[1], reverse=True)[:10]
     ]
 
     assets = [
@@ -936,10 +1857,14 @@ def dashboard_insights(
             "pci": {"score": max(0, 100 - int(open_issues * 0.9))},
         },
         "recent_scans": recent_scans,
+        "ongoing_scans": ongoing_scans,
         "top_vulns": top_vulns,
+        "top_technologies": top_technologies,
         "assets": assets,
         "activity": activity,
         "prioritized_actions": paged_prioritized,
+        "filters": {"target": normalized_target},
+        "targets": sorted(list({j.target_query for j in jobs if j.target_query})),
         "prioritized_actions_page": {
             "items": paged_prioritized,
             "total": len(prioritized_actions),

@@ -1,26 +1,113 @@
 import json
+import time
 
 import httpx
 
 from app.core.config import settings
 
 
-def _call_ollama(model: str, prompt: str) -> str:
+_MODEL_CACHE: dict[str, object] = {
+    "models": tuple(),
+    "expires_at": 0.0,
+}
+
+_GENERATION_CACHE: dict[str, object] = {
+    "cooldown_until": 0.0,
+}
+
+MODEL_CACHE_TTL_SECONDS = 60.0
+EMPTY_MODEL_CACHE_TTL_SECONDS = 10.0
+GENERATION_ERROR_COOLDOWN_SECONDS = 120.0
+
+
+def _generation_in_cooldown() -> bool:
+    now = time.time()
+    cooldown_until = float(_GENERATION_CACHE.get("cooldown_until", 0.0) or 0.0)
+    return now < cooldown_until
+
+
+def _set_generation_cooldown() -> None:
+    _GENERATION_CACHE["cooldown_until"] = time.time() + GENERATION_ERROR_COOLDOWN_SECONDS
+
+
+def _ollama_available_models() -> tuple[str, ...]:
+    now = time.time()
+    cached_models = _MODEL_CACHE.get("models")
+    cached_expires_at = float(_MODEL_CACHE.get("expires_at", 0.0) or 0.0)
+    if isinstance(cached_models, tuple) and now < cached_expires_at:
+        return cached_models
+
     try:
-        with httpx.Client(timeout=20.0) as client:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"{settings.ollama_base_url}/api/tags")
+        if resp.status_code != 200:
+            _MODEL_CACHE["models"] = tuple()
+            _MODEL_CACHE["expires_at"] = now + EMPTY_MODEL_CACHE_TTL_SECONDS
+            return tuple()
+        payload = resp.json()
+        models = []
+        for item in payload.get("models", []):
+            name = str(item.get("name") or "").strip()
+            if name:
+                models.append(name)
+        resolved = tuple(models)
+        _MODEL_CACHE["models"] = resolved
+        _MODEL_CACHE["expires_at"] = now + (MODEL_CACHE_TTL_SECONDS if resolved else EMPTY_MODEL_CACHE_TTL_SECONDS)
+        return resolved
+    except Exception:
+        _MODEL_CACHE["models"] = tuple()
+        _MODEL_CACHE["expires_at"] = now + EMPTY_MODEL_CACHE_TTL_SECONDS
+        return tuple()
+
+
+def _resolve_model(requested_model: str) -> str:
+    available = _ollama_available_models()
+    if not available:
+        return ""
+
+    requested = (requested_model or "").strip()
+    if requested and requested in available:
+        return requested
+
+    preferred = (settings.ollama_model or "").strip()
+    if preferred and preferred in available:
+        return preferred
+
+    return available[0]
+
+
+def _call_ollama(model: str, prompt: str) -> str:
+    if not settings.ai_recommendations_use_ollama:
+        return ""
+
+    if _generation_in_cooldown():
+        return ""
+
+    resolved_model = _resolve_model(model)
+    if not resolved_model:
+        return ""
+
+    try:
+        timeout_seconds = float(settings.ai_recommendations_timeout_seconds)
+        if timeout_seconds <= 0:
+            timeout_seconds = 20.0
+        with httpx.Client(timeout=timeout_seconds) as client:
             resp = client.post(
                 f"{settings.ollama_base_url}/api/generate",
                 json={
-                    "model": model,
+                    "model": resolved_model,
                     "prompt": prompt,
                     "stream": False,
                 },
             )
         if resp.status_code != 200:
+            if resp.status_code >= 500:
+                _set_generation_cooldown()
             return ""
         payload = resp.json()
         return (payload.get("response") or "").strip()
     except Exception:
+        _set_generation_cooldown()
         return ""
 
 

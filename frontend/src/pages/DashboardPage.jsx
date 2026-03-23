@@ -31,6 +31,10 @@ const RISK_DOT = {
   low: "bg-emerald-500",
 };
 
+const PAGINATION_BTN_BASE = "rounded-lg px-2 py-1 text-xs font-semibold transition-colors";
+const PAGINATION_BTN_ENABLED = "bg-[#1a365d] text-white hover:bg-[#2c5282]";
+const PAGINATION_BTN_DISABLED = "bg-slate-200 text-slate-500 cursor-not-allowed";
+
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
 
 function StatCard({ label, value, sub, color = "text-white" }) {
@@ -221,7 +225,7 @@ export default function DashboardPage() {
                 <span className="flex-1">{v.title}</span>
                 <div className="ml-3 flex items-center gap-2">
                   <span className="text-xs uppercase font-semibold">{v.severity}</span>
-                  <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-300">×{v.count}</span>
+                  <span className="rounded-full border border-slate-300 bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-900">×{v.count}</span>
                 </div>
               </div>
             ))}
@@ -251,8 +255,20 @@ export default function DashboardPage() {
         <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
           <p>Mostrando {prioritizedActions.length} de {prioritizedPage.total}</p>
           <div className="flex gap-2">
-            <button disabled={!hasPrevPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Anterior</button>
-            <button disabled={!hasNextPrioritized} onClick={() => setPrioritizedPage((p) => ({ ...p, offset: p.offset + p.limit }))} className="rounded-lg bg-slate-800 px-2 py-1 disabled:opacity-40">Proxima</button>
+            <button
+              disabled={!hasPrevPrioritized}
+              onClick={() => setPrioritizedPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))}
+              className={`${PAGINATION_BTN_BASE} ${hasPrevPrioritized ? PAGINATION_BTN_ENABLED : PAGINATION_BTN_DISABLED}`}
+            >
+              Anterior
+            </button>
+            <button
+              disabled={!hasNextPrioritized}
+              onClick={() => setPrioritizedPage((p) => ({ ...p, offset: p.offset + p.limit }))}
+              className={`${PAGINATION_BTN_BASE} ${hasNextPrioritized ? PAGINATION_BTN_ENABLED : PAGINATION_BTN_DISABLED}`}
+            >
+              Proxima
+            </button>
           </div>
         </div>
         <div className="mt-3 space-y-2">
@@ -261,7 +277,7 @@ export default function DashboardPage() {
             <div key={`${item.finding_id}-${index}`} className="rounded-xl border border-slate-800 bg-slate-800/40 p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <p className="font-medium">#{index + 1} {item.title}</p>
-                <span className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                <span className="rounded-md border border-amber-300 bg-amber-200 px-2 py-0.5 text-xs font-semibold text-amber-900">
                   ALE USD {Number(item.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}
                 </span>
               </div>

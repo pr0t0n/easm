@@ -37,7 +37,7 @@ export default function AccountPage() {
             value={newPassword}
             onChange={(e) => setNewPassword(e.target.value)}
           />
-          <button className="rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">Salvar senha</button>
+          <button className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar senha</button>
         </form>
         {message && <p className="mt-3 text-sm text-emerald-300">{message}</p>}
       </section>

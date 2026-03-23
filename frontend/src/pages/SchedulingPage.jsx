@@ -162,7 +162,7 @@ export default function SchedulingPage() {
             Habilitado
           </label>
 
-          <button className="rounded-xl bg-brand-500 px-4 py-2 font-semibold text-slate-950">
+          <button className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">
             {editingId ? "Salvar Edicao" : "Criar Agendamento"}
           </button>
         </form>
@@ -180,7 +180,7 @@ export default function SchedulingPage() {
                 {row.day_of_month ? ` | Dia mes: ${row.day_of_month}` : ""}
               </p>
               <div className="mt-2 flex gap-2">
-                <button onClick={() => editRow(row)} className="rounded-lg bg-cyan-500/20 px-2 py-1 text-xs text-cyan-300">Editar</button>
+                <button onClick={() => editRow(row)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Editar</button>
                 <button onClick={() => runNow(row.id)} className="rounded-lg bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">Executar Agora</button>
                 <button onClick={() => deleteRow(row.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
               </div>
