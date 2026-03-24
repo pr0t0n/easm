@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
 import LogTerminal from "../components/LogTerminal";
+import MissionProgress from "../components/MissionProgress";
 
 export default function ScansPage() {
   const [target, setTarget] = useState("");
@@ -471,6 +472,11 @@ export default function ScansPage() {
 
             {/* Sidebar */}
             <div className="space-y-6 lg:sticky lg:top-8">
+              {/* Mission Progress */}
+              {selected && (
+                <MissionProgress scan={selected} logs={logs} />
+              )}
+
               {/* Logs */}
               <section className="panel p-6">
                 <h3 className="text-sm font-semibold mb-4">Timeline de Logs</h3>

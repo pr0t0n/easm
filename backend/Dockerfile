@@ -162,7 +162,7 @@ RUN find nuclei-templates -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -
 RUN mkdir -p /root/.nuclei && rm -rf /root/.nuclei/templates && cp -R nuclei-templates /root/.nuclei/templates
 
 # Vulscan NSE script para nmap vulnerability assessment
-RUN git clone --depth 1 https://github.com/scipag/vulscan.git /root/vulscan || true
+RUN git clone --depth 1 https://github.com/scipag/vulscan.git /usr/share/nmap/scripts/vulscan || true
 
 # ASM Rules: prefer bundled rules in repo; fallback to remote download
 RUN mkdir -p /root/.easm && \

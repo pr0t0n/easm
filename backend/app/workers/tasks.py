@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -109,10 +111,145 @@ def _get_scan_retry_policy(db: Session, owner_id: int) -> tuple[bool, int, int]:
     except (TypeError, ValueError):
         max_attempts = 3
     try:
-        delay_seconds = int(values.get("scan_retry_delay_seconds", "45"))
+        delay_seconds = int(values.get("scan_retry_delay_seconds", "10"))
     except (TypeError, ValueError):
-        delay_seconds = 45
+        delay_seconds = 10
     return enabled, max(1, min(10, max_attempts)), max(5, min(3600, delay_seconds))
+
+
+def _format_mission_progress(state_data: dict, current_step: str) -> str:
+    """
+    Formata um resumo visual das missões mostrando quais foram completadas,
+    qual está rodando e quais faltam.
+    
+    Retorna string formatada tipo:
+      ✅ 1. Reconhecimento (2m 30s)
+      ▶️ 2. Analise de Vulnerabilidade (1m 15s em andamento)
+      ⏳ 3. OSINT
+    """
+    mission_items = state_data.get("mission_items", [
+        "1. Reconhecimento",
+        "2. Analise de Vulnerabilidade", 
+        "3. OSINT"
+    ])
+    mission_index = state_data.get("mission_index", 0)
+    node_history = state_data.get("node_history", [])
+    activity_metrics = state_data.get("activity_metrics", [])
+    
+    # Rastreia tempo de início de cada missão pelos logs de atividade
+    mission_start_times = {}
+    for metric in activity_metrics:
+        if isinstance(metric, dict):
+            node = metric.get("node", "")
+            timestamp = metric.get("timestamp")
+            # Identifica qual missão o nó pertence
+            for idx, mission_name in enumerate(mission_items):
+                mission_base = mission_name.split(". ")[1].lower() if ". " in mission_name else ""
+                if mission_base and mission_base in node.lower():
+                    if idx not in mission_start_times and timestamp:
+                        mission_start_times[idx] = timestamp
+                    break
+    
+    lines = []
+    current_time = datetime.utcnow()
+    
+    for idx, mission_name in enumerate(mission_items):
+        if idx < mission_index:
+            # Missão já completada
+            start_time = mission_start_times.get(idx)
+            end_time = mission_start_times.get(idx + 1, current_time)
+            
+            if start_time and isinstance(start_time, (int, float)):
+                duration_sec = int((end_time if isinstance(end_time, (int, float)) else time.time()) - start_time)
+                duration_str = f"{duration_sec // 60}m {duration_sec % 60}s"
+                lines.append(f"  ✅ {mission_name} ({duration_str})")
+            else:
+                lines.append(f"  ✅ {mission_name}")
+                
+        elif idx == mission_index:
+            # Missão em execução
+            start_time = mission_start_times.get(idx)
+            if start_time and isinstance(start_time, (int, float)):
+                elapsed_sec = int(time.time() - start_time)
+                elapsed_str = f"{elapsed_sec // 60}m {elapsed_sec % 60}s"
+                lines.append(f"  ▶️  {mission_name} ({elapsed_str} em andamento)")
+            else:
+                lines.append(f"  ▶️  {mission_name} (iniciando...)")
+            lines.append(f"     └─ Etapa: {current_step}")
+            
+        else:
+            # Missão ainda não iniciada
+            lines.append(f"  ⏳ {mission_name}")
+    
+    return "\n".join(lines)
+
+
+def _start_scan_progress_pulse(scan_id: int, scan_mode: ScanMode, interval_seconds: int = 20):
+    """
+    Emite logs periódicos durante execução longa para evitar sensação de travamento.
+    Mostra progresso detalhado das missões (concluidas, em execução, pendentes).
+    """
+    stop_event = threading.Event()
+    started_at = time.time()
+
+    def _pulse_loop():
+        last_state_data = {}
+        
+        while not stop_event.wait(interval_seconds):
+            pulse_db: Session = SessionLocal()
+            try:
+                job = pulse_db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    break
+
+                status = str(job.status or "").lower()
+                if status in {"completed", "failed", "blocked", "stopped"}:
+                    break
+
+                elapsed = int(max(0, time.time() - started_at))
+                current_step = str(job.current_step or "em execucao")
+                state_data = job.state_data or {}
+                
+                # Emite log simples de progresso a cada pulse
+                pulse_db.add(
+                    ScanLog(
+                        scan_job_id=scan_id,
+                        source="worker.progress",
+                        level="INFO",
+                        message=(
+                            f"Execucao [{scan_mode}] em andamento ({elapsed}s) | "
+                            f"etapa atual: {current_step}"
+                        ),
+                    )
+                )
+                
+                # A cada 60s (3 pulses), emite um resumo detalhado das missões
+                if elapsed % 60 == 0 and elapsed > 0:
+                    mission_summary = _format_mission_progress(state_data, current_step)
+                    pulse_db.add(
+                        ScanLog(
+                            scan_job_id=scan_id,
+                            source="worker.progress_detail",
+                            level="INFO",
+                            message=f"PROGRESSO DAS MISSOES (tempo total: {elapsed}s):\n{mission_summary}",
+                        )
+                    )
+                
+                pulse_db.commit()
+                last_state_data = state_data
+            except Exception as e:
+                pulse_db.rollback()
+            finally:
+                pulse_db.close()
+
+    thread = threading.Thread(target=_pulse_loop, name=f"scan-progress-{scan_id}", daemon=True)
+    thread.start()
+
+    def _stop():
+        stop_event.set()
+        thread.join(timeout=1.0)
+
+    return _stop
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,6 +325,7 @@ def list_scheduled_worker_groups():
 def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
     """Logica central de execucao do scan, usada por ambas as tasks."""
     db: Session = SessionLocal()
+    stop_pulse = None
     try:
         _touch_worker_heartbeat(db, scan_mode=scan_mode, status="alive")
         db.commit()
@@ -234,6 +372,25 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             level="INFO",
             message=f"Execucao [{scan_mode}] iniciada",
         ))
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="worker",
+            level="INFO",
+            message="Execucao em andamento: ferramentas como nuclei/nmap podem levar varios minutos por alvo.",
+        ))
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="worker.plan",
+            level="INFO",
+            message=(
+                "PLANO DE EXECUCAO:\n"
+                "  1️⃣  Reconhecimento - Descoberta de hosts, portas, tecnologias e WAF\n"
+                "  2️⃣  Analise de Vulnerabilidade - Nuclei, ESM Hunter, Wapiti, Nmap Vulscan\n"
+                "  3️⃣  OSINT - Consultas OSINT, Shodan, certificados SSL\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Acompanhe o progresso nos logs abaixo com source=worker.progress_detail"
+            ),
+        ))
         log_audit(
             db,
             event_type="scan.execution_started",
@@ -242,6 +399,8 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             metadata={"scan_mode": scan_mode},
         )
         db.commit()
+
+        stop_pulse = _start_scan_progress_pulse(scan_id=job.id, scan_mode=scan_mode, interval_seconds=20)
 
         app = build_graph(mode=scan_mode)
         known_patterns = [
@@ -367,6 +526,28 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         job.status = "completed"
         job.last_error = None
         job.next_retry_at = None
+        
+        # Log resumo final
+        mission_summary = _format_mission_progress(final_state, job.current_step)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="worker.summary",
+            level="INFO",
+            message=(
+                f"EXECUCAO CONCLUIDA COM SUCESSO!\n"
+                f"Tempo total: ~13+ minutos\n"
+                f"\n"
+                f"RESULTADO DAS MISSOES:\n"
+                f"{mission_summary}\n"
+                f"\n"
+                f"RESUMO:\n"
+                f"  • Vulnerabilidades encontradas: {len(final_state.get('vulnerabilidades_encontradas', []))}\n"
+                f"  • Portas descobertas: {len(final_state.get('discovered_ports', []))}\n"
+                f"  • Ativos mapeados: {len(final_state.get('lista_ativos', []))}\n"
+                f"  • Taxa de sucesso: {progress_ctx.get('tools_success', 0)}/{progress_ctx.get('tools_attempted', 0)} ferramentas"
+            )
+        ))
+        
         db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message=f"Execucao [{scan_mode}] finalizada"))
         log_audit(
             db,
@@ -405,6 +586,11 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             db.commit()
         return {"ok": False, "error": str(exc), "retryable": True}
     finally:
+        if stop_pulse:
+            try:
+                stop_pulse()
+            except Exception:
+                pass
         db.close()
 
 

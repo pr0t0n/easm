@@ -126,6 +126,8 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("commix", "commix"),
     ("tplmap", "tplmap"),
     ("wafw00f", "wafw00f"),
+    ("curl", "curl-headers"),
+    ("header", "curl-headers"),
     ("nikto", "nikto"),
     ("wpscan", "wpscan"),
     ("zap", "zap"),
@@ -279,8 +281,104 @@ def _run_tools_and_collect(
         for asset in _extract_assets_from_result(result, root_domain=root_domain):
             discovered_assets.add(asset)
 
+    all_findings = _suppress_waf_proxy_false_positives(
+        all_findings,
+        step_name=step_name,
+        default_target=scan_target,
+    )
+
     _mark_step_metric(state, step_success)
     return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
+
+
+def _suppress_waf_proxy_false_positives(
+    findings: list[dict[str, Any]],
+    step_name: str,
+    default_target: str,
+) -> list[dict[str, Any]]:
+    if not findings:
+        return findings
+
+    waf_vendors: set[str] = set()
+    header_blob_parts: list[str] = []
+    nmap_vulscan_cve_findings: list[dict[str, Any]] = []
+    evidence_blob_parts: list[str] = []
+
+    for item in findings:
+        details = item.get("details") or {}
+        tool = str(details.get("tool") or "").strip().lower()
+
+        if tool == "wafw00f" and details.get("waf_detected"):
+            vendor = str(details.get("waf_vendor") or "").strip().lower()
+            if vendor:
+                waf_vendors.add(vendor)
+
+        if tool == "curl-headers":
+            raw_headers = str(details.get("http_headers_raw") or "")
+            if raw_headers:
+                header_blob_parts.append(raw_headers.lower())
+
+        if tool == "nmap-vulscan" and details.get("cve"):
+            nmap_vulscan_cve_findings.append(item)
+            evidence = str(details.get("evidence") or "").lower()
+            if evidence:
+                evidence_blob_parts.append(evidence)
+
+    if not nmap_vulscan_cve_findings:
+        return findings
+
+    if not waf_vendors:
+        return findings
+
+    header_blob = "\n".join(header_blob_parts)
+    evidence_blob = "\n".join(evidence_blob_parts)
+
+    header_indicates_waf = any(
+        token in header_blob
+        for token in ["server: cloudflare", "cf-ray", "cf-cache-status", "__cf_bm", "cloudflare"]
+    )
+    evidence_indicates_proxy = any(
+        token in evidence_blob
+        for token in ["cloudflare", "http proxy", "reverse proxy", "proxy"]
+    )
+
+    known_waf = any(model in " ".join(sorted(waf_vendors)) for model in KNOWN_WAF_MODELS)
+
+    should_suppress = header_indicates_waf and known_waf and evidence_indicates_proxy
+    if not should_suppress:
+        return findings
+
+    filtered_findings = [
+        item
+        for item in findings
+        if not (
+            str((item.get("details") or {}).get("tool") or "").strip().lower() == "nmap-vulscan"
+            and bool((item.get("details") or {}).get("cve"))
+        )
+    ]
+
+    filtered_findings.append(
+        {
+            "title": "nmap-vulscan suprimido por possivel falso positivo de WAF/proxy",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "analise_vulnerabilidade",
+            "details": {
+                "node": "vuln",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "wafw00f",
+                "waf_detected": True,
+                "waf_vendors": sorted(waf_vendors),
+                "header_validated": True,
+                "suppressed_tool": "nmap-vulscan",
+                "suppressed_cve_count": len(nmap_vulscan_cve_findings),
+                "reason": "target protegido por WAF/proxy (ex.: Cloudflare) com comportamento de resposta em portas/proxy que gera CVEs nao aplicaveis",
+            },
+        }
+    )
+
+    return filtered_findings
 
 
 def _target_host(target: str) -> str:
@@ -544,6 +642,16 @@ def _extract_nuclei_findings(result: dict[str, Any], step_name: str, default_tar
         r"^\[(?P<template>[^\]]+)\]\s+\[(?P<proto>[^\]]+)\]\s+\[(?P<severity>[^\]]+)\]\s+(?P<target>\S+)(?:\s+\[(?P<extra>.*)\])?$"
     )
     findings: list[dict[str, Any]] = []
+    known_waf_tokens = {
+        "cloudflare",
+        "akamai",
+        "imperva",
+        "modsecurity",
+        "f5",
+        "aws waf",
+        "barracuda",
+        "fortiweb",
+    }
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -558,6 +666,7 @@ def _extract_nuclei_findings(result: dict[str, Any], step_name: str, default_tar
         target = str(match.group("target") or default_target).strip()
         proto = str(match.group("proto") or "").strip().lower()
         extra = str(match.group("extra") or "").strip()
+        template_l = template.lower()
 
         details: dict[str, Any] = {
             "node": "scan",
@@ -570,6 +679,29 @@ def _extract_nuclei_findings(result: dict[str, Any], step_name: str, default_tar
         }
         if extra:
             details["evidence"] = extra
+
+        # Ex.: [http-missing-security-headers:strict-transport-security] ...
+        if template_l.startswith("http-missing-security-headers:"):
+            header_name = template.split(":", 1)[1].strip().lower() if ":" in template else ""
+            if header_name:
+                details["header_name"] = header_name
+                details["header_issue"] = "missing"
+                if "evidence" not in details:
+                    details["evidence"] = f"{header_name}: missing"
+
+        # Ex.: [waf-detect:cloudflare] ...
+        if template_l.startswith("waf-detect:"):
+            vendor = template.split(":", 1)[1].strip().lower() if ":" in template else ""
+            if vendor:
+                details["waf_vendor"] = vendor
+                details["waf_detected"] = True
+
+        # Ex.: [tech-detect:cloudflare] ... (usa apenas quando token casa com WAF conhecido)
+        if template_l.startswith("tech-detect:"):
+            tech = template.split(":", 1)[1].strip().lower() if ":" in template else ""
+            if tech and any(token in tech for token in known_waf_tokens):
+                details["waf_vendor"] = tech
+                details["waf_detected"] = True
 
         findings.append(
             {
@@ -633,12 +765,16 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_wafw00f_findings(stdout, step_name, default_target)
     if tool == "shcheck":
         return _extract_shcheck_findings(stdout, step_name, default_target)
+    if tool == "curl-headers":
+        return _extract_curl_headers_findings(stdout, step_name, default_target)
     if tool == "nikto":
         return _extract_nikto_findings(stdout, step_name, default_target)
     if tool in {"nmap-vulscan", "vulscan"}:
         return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
     if tool == "sslscan":
         return _extract_sslscan_findings(stdout, step_name, default_target)
+    if tool == "wapiti":
+        return _extract_wapiti_findings(stdout, step_name, default_target)
     return []
 
 
@@ -678,50 +814,194 @@ def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) 
 
 def _extract_shcheck_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    seen_headers: set[str] = set()
+    seen_missing: set[str] = set()
+    seen_present: set[str] = set()
     header_pattern = re.compile(
-        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|x-xss-protection)",
         re.IGNORECASE,
     )
+    missing_tokens = ["missing", "not set", "absent", "not configured", "misconfigured"]
+    present_tokens = ["present", "set", "configured", "ok", "enabled", "good"]
 
     for raw_line in stdout.splitlines():
         line = str(raw_line or "").strip()
         if not line:
             continue
-        lowered = line.lower()
-        if "missing" not in lowered and "not set" not in lowered and "absent" not in lowered:
-            continue
         header_match = header_pattern.search(line)
         if not header_match:
             continue
         header = str(header_match.group(1) or "").strip().lower()
-        if header in seen_headers:
+        lowered = line.lower()
+        is_missing = any(token in lowered for token in missing_tokens)
+        is_present = any(token in lowered for token in present_tokens) or (":" in line and not is_missing)
+
+        if is_missing:
+            if header in seen_missing:
+                continue
+            seen_missing.add(header)
+            sev = "medium" if header in {"strict-transport-security", "content-security-policy", "x-frame-options"} else "low"
+            findings.append(
+                {
+                    "title": f"Header de seguranca ausente: {header}",
+                    "severity": sev,
+                    "risk_score": 5 if sev == "medium" else 3,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "shcheck",
+                        "header_name": header,
+                        "header_issue": "missing",
+                        "evidence": line,
+                    },
+                }
+            )
             continue
-        seen_headers.add(header)
-        sev = "medium" if header in {"strict-transport-security", "content-security-policy", "x-frame-options"} else "low"
-        findings.append(
-            {
-                "title": f"Header de seguranca ausente: {header}",
-                "severity": sev,
-                "risk_score": 5 if sev == "medium" else 3,
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "shcheck",
-                    "header_name": header,
-                    "header_issue": "missing",
-                    "evidence": line,
-                },
-            }
-        )
+
+        if is_present:
+            if header in seen_present:
+                continue
+            seen_present.add(header)
+            findings.append(
+                {
+                    "title": f"Header de seguranca configurado: {header}",
+                    "severity": "info",
+                    "risk_score": 1,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "shcheck",
+                        "header_name": header,
+                        "header_issue": "present",
+                        "evidence": line,
+                    },
+                }
+            )
+    return findings
+
+
+def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+
+    expected_headers = [
+        "strict-transport-security",
+        "content-security-policy",
+        "x-frame-options",
+        "x-content-type-options",
+        "referrer-policy",
+        "permissions-policy",
+        "x-xss-protection",
+    ]
+
+    blocks: list[tuple[str, str]] = []
+    current_url = default_target
+    current_lines: list[str] = []
+
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "")
+        if line.startswith("# URL:"):
+            if current_lines:
+                blocks.append((current_url, "\n".join(current_lines).strip()))
+                current_lines = []
+            current_url = line.replace("# URL:", "", 1).strip() or default_target
+            continue
+        if line.strip():
+            current_lines.append(line)
+
+    if current_lines:
+        blocks.append((current_url, "\n".join(current_lines).strip()))
+
+    if not blocks and stdout.strip():
+        blocks.append((default_target, stdout.strip()))
+
+    seen: set[tuple[str, str, str]] = set()
+    high_value_headers = {"strict-transport-security", "content-security-policy", "x-frame-options"}
+
+    for block_url, block_text in blocks:
+        block_lower = block_text.lower()
+
+        for header in expected_headers:
+            present = re.search(rf"(?im)^\s*{re.escape(header)}\s*:\s*.+$", block_text) is not None
+            issue = "present" if present else "missing"
+            dedupe_key = (str(block_url or default_target).strip().lower(), header, issue)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            if present:
+                match = re.search(rf"(?im)^\s*{re.escape(header)}\s*:\s*(.+)$", block_text)
+                evidence = f"{header}: {str(match.group(1) if match else '').strip()}".strip()
+                findings.append(
+                    {
+                        "title": f"Header de seguranca configurado: {header}",
+                        "severity": "info",
+                        "risk_score": 1,
+                        "source_worker": "analise_vulnerabilidade",
+                        "details": {
+                            "node": "vuln",
+                            "step": step_name,
+                            "asset": block_url or default_target,
+                            "tool": "curl-headers",
+                            "header_name": header,
+                            "header_issue": "present",
+                            "evidence": evidence,
+                            "http_headers_raw": block_text[:1400],
+                        },
+                    }
+                )
+            else:
+                sev = "medium" if header in high_value_headers else "low"
+                findings.append(
+                    {
+                        "title": f"Header de seguranca ausente: {header}",
+                        "severity": sev,
+                        "risk_score": 5 if sev == "medium" else 3,
+                        "source_worker": "analise_vulnerabilidade",
+                        "details": {
+                            "node": "vuln",
+                            "step": step_name,
+                            "asset": block_url or default_target,
+                            "tool": "curl-headers",
+                            "header_name": header,
+                            "header_issue": "missing",
+                            "evidence": f"{header}: missing",
+                            "http_headers_raw": block_text[:1400],
+                        },
+                    }
+                )
+
+        status_match = re.search(r"(?im)^\s*HTTP/\S+\s+(\d{3})\b", block_text)
+        if status_match:
+            status_code = str(status_match.group(1) or "").strip()
+            findings.append(
+                {
+                    "title": f"HTTP status observado: {status_code}",
+                    "severity": "info",
+                    "risk_score": 1,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": block_url or default_target,
+                        "tool": "curl-headers",
+                        "http_status": status_code,
+                        "evidence": re.search(r"(?im)^\s*HTTP/\S+\s+\d{3}.*$", block_text).group(0),
+                        "http_headers_raw": block_text[:1400],
+                    },
+                }
+            )
+
     return findings
 
 
 def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_headers: set[str] = set()
+    
     ignore_tokens = [
         "target host",
         "target ip",
@@ -729,17 +1009,59 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
         "start time",
         "end time",
         "no web server found",
+        "nikto installation",
+        "multiple ips",
+        "cloudflare detected",
+        "uncommon header",
+        "cgi directories",
     ]
+    
+    header_pattern = re.compile(
+        r"Suggested security header missing:\s*(\S+)",
+        re.IGNORECASE,
+    )
+    
     for raw_line in stdout.splitlines():
         line = str(raw_line or "").strip()
         if not line.startswith("+"):
             continue
         lowered = line.lower()
+        
+        # Extrai headers ausentes especialmente
+        header_match = header_pattern.search(line)
+        if header_match:
+            header = str(header_match.group(1) or "").strip().lower()
+            if header not in seen_headers:
+                seen_headers.add(header)
+                sev = "medium" if header in {"strict-transport-security", "content-security-policy", "permissions-policy"} else "low"
+                findings.append(
+                    {
+                        "title": f"Header de seguranca ausente: {header}",
+                        "severity": sev,
+                        "risk_score": 5 if sev == "medium" else 3,
+                        "source_worker": "analise_vulnerabilidade",
+                        "details": {
+                            "node": "vuln",
+                            "step": step_name,
+                            "asset": default_target,
+                            "tool": "nikto",
+                            "header_name": header,
+                            "header_issue": "missing",
+                            "evidence": line,
+                        },
+                    }
+                )
+            continue
+        
+        # Ignora linhas com tokens conhecidos
         if any(token in lowered for token in ignore_tokens):
             continue
+        
         if lowered in seen:
             continue
         seen.add(lowered)
+        
+        # CVEs e vulnerabilidades
         sev = "high" if ("cve-" in lowered or "osvdb" in lowered) else "medium"
         findings.append(
             {
@@ -857,6 +1179,118 @@ def _extract_sslscan_findings(stdout: str, step_name: str, default_target: str) 
                     },
                 }
             )
+    return findings
+
+
+def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Parse wapiti inline warning lines (emitidos durante o scan com -v 1)."""
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # (regex, severity, risk_score, title, header_name)
+    _PATTERNS = [
+        (
+            re.compile(r"CSP is not set for URL:\s*(\S+)", re.IGNORECASE),
+            "medium", 5,
+            "Content Security Policy (CSP) ausente",
+            "content-security-policy",
+        ),
+        (
+            re.compile(r"X-Content-Type-Options is not set on\s*(\S+)", re.IGNORECASE),
+            "low", 3,
+            "X-Content-Type-Options ausente",
+            "x-content-type-options",
+        ),
+        (
+            re.compile(r"Host\s+(\S+)\s+serves HTTP content without redirecting to HTTPS", re.IGNORECASE),
+            "medium", 6,
+            "Canal nao cifrado: sem redirecionamento HTTPS",
+            None,
+        ),
+        (
+            re.compile(r"Strict-Transport-Security.*?not set.*?(\S+)", re.IGNORECASE),
+            "medium", 5,
+            "HSTS ausente",
+            "strict-transport-security",
+        ),
+        (
+            re.compile(r"X-Frame-Options.*?not set.*?(\S+)", re.IGNORECASE),
+            "low", 3,
+            "X-Frame-Options ausente (clickjacking)",
+            "x-frame-options",
+        ),
+        (
+            re.compile(r"\[!\].*?SQL\s+injection.*?(\S+)", re.IGNORECASE),
+            "high", 8,
+            "SQL Injection detectado",
+            None,
+        ),
+        (
+            re.compile(r"\[!\].*?XSS.*?(\S+)", re.IGNORECASE),
+            "high", 8,
+            "Cross-Site Scripting (XSS) detectado",
+            None,
+        ),
+        (
+            re.compile(r"\[!\].*?Path\s+Traversal.*?(\S+)", re.IGNORECASE),
+            "high", 8,
+            "Path Traversal detectado",
+            None,
+        ),
+        (
+            re.compile(r"\[!\].*?SSRF.*?(\S+)", re.IGNORECASE),
+            "high", 8,
+            "Server-Side Request Forgery (SSRF) detectado",
+            None,
+        ),
+        (
+            re.compile(r"\[!\].*?CRLF\s+Injection.*?(\S+)", re.IGNORECASE),
+            "medium", 5,
+            "CRLF Injection detectado",
+            None,
+        ),
+        (
+            re.compile(r"\[!\].*?Open\s+Redirect.*?(\S+)", re.IGNORECASE),
+            "medium", 5,
+            "Open Redirect detectado",
+            None,
+        ),
+    ]
+
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("[*]") or line.startswith("[+]"):
+            continue
+
+        for pattern, severity, risk_score, title, header_name in _PATTERNS:
+            m = pattern.search(line)
+            if not m:
+                continue
+            key = f"{title}:{default_target}"
+            if key in seen:
+                break
+            seen.add(key)
+            details: dict[str, Any] = {
+                "node": "vuln",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "wapiti",
+                "evidence": line[:500],
+            }
+            if header_name:
+                details["header_name"] = header_name
+                details["header_issue"] = "missing"
+            findings.append(
+                {
+                    "title": title,
+                    "severity": severity,
+                    "risk_score": risk_score,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": details,
+                }
+            )
+            break
+
     return findings
 
 

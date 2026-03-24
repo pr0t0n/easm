@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
 
+const PHASE_BADGE = {
+  reconhecimento: "bg-cyan-500/20 text-cyan-300 border-cyan-500/40",
+  analise_vulnerabilidade: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+  osint: "bg-violet-500/20 text-violet-300 border-violet-500/40",
+  desconhecido: "bg-slate-500/20 text-slate-300 border-slate-500/40",
+};
+
 export default function WorkersPage() {
   const [health, setHealth] = useState(null);
   const [groups, setGroups] = useState({ unit: {}, scheduled: {} });
@@ -31,6 +38,13 @@ export default function WorkersPage() {
     load();
   }, []);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      load();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
       <section className="panel p-5">
@@ -56,17 +70,52 @@ export default function WorkersPage() {
           </div>
         )}
 
+        {health?.summary?.phase_counts && (
+          <div className="mt-3 grid gap-2 text-sm md:grid-cols-4">
+            <p className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2">reconhecimento: {health.summary.phase_counts.reconhecimento || 0}</p>
+            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">analise de vulnerabilidade: {health.summary.phase_counts.analise_vulnerabilidade || 0}</p>
+            <p className="rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2">osint: {health.summary.phase_counts.osint || 0}</p>
+            <p className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">desconhecido: {health.summary.phase_counts.desconhecido || 0}</p>
+          </div>
+        )}
+
+        <p className="mt-3 text-xs text-slate-400">
+          inspeccao celery: {health?.summary?.inspect_ok ? "ok" : "indisponivel"}
+        </p>
+
         <div className="mt-3 space-y-2">
           {(health?.workers || []).map((worker) => (
             <div key={worker.worker_name} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="font-mono font-semibold">{worker.worker_name}</p>
-                <span className={`rounded-md px-2 py-0.5 text-xs ${worker.online ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}`}>
-                  {worker.online ? "online" : "offline"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-md px-2 py-0.5 text-xs ${worker.online ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}`}>
+                    {worker.online ? "online" : "offline"}
+                  </span>
+                  <span className={`rounded-md border px-2 py-0.5 text-xs ${PHASE_BADGE[worker.execution_phase] || PHASE_BADGE.desconhecido}`}>
+                    {worker.execution_phase || "desconhecido"}
+                  </span>
+                </div>
               </div>
               <p className="mt-1 text-xs text-slate-300">modo: {worker.mode} | status: {worker.status} | task: {worker.last_task_name || "-"}</p>
-              <p className="text-xs text-slate-400">last_seen: {worker.last_seen_at ? new Date(worker.last_seen_at).toLocaleString("pt-BR") : "-"}</p>
+              <p className="text-xs text-slate-400">
+                last_seen: {worker.last_seen_at ? new Date(worker.last_seen_at).toLocaleString("pt-BR") : "-"}
+                {worker.last_seen_lag_seconds != null ? ` (${worker.last_seen_lag_seconds}s atras)` : ""}
+              </p>
+              <p className="text-xs text-slate-500">origem status: {worker.online_reason || "-"}</p>
+              {worker.active_scan && (
+                <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/40 p-2 text-xs text-slate-300">
+                  <p>
+                    scan #{worker.active_scan.id} | alvo: <span className="text-slate-100">{worker.active_scan.target_query || "-"}</span>
+                  </p>
+                  <p>
+                    etapa atual: <span className="text-slate-100">{worker.active_scan.current_step || "-"}</span>
+                  </p>
+                  <p>
+                    status scan: <span className="text-slate-100">{worker.active_scan.status || "-"}</span> | modo: <span className="text-slate-100">{worker.active_scan.mode || "-"}</span>
+                  </p>
+                </div>
+              )}
             </div>
           ))}
         </div>

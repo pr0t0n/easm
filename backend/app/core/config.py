@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3"
     ollama_qwen_model: str = "qwen2.5:7b"
     ollama_cloudcode_model: str = "llama3.1:8b"
-    ai_recommendations_use_ollama: bool = False
+    ai_recommendations_use_ollama: bool = True
     ai_recommendations_timeout_seconds: int = 20
     frontend_origin: str = "http://localhost:5173"
     frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

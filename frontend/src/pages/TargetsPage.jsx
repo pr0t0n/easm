@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
+import LogTerminal from "../components/LogTerminal";
 
 const RISK_COLOR = {
   critical: "text-red-300 border-red-500/30 bg-red-500/10",
@@ -19,6 +20,7 @@ const STATUS_BADGE = {
 
 export default function TargetsPage() {
   const [rows, setRows] = useState([]);
+  const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -27,14 +29,44 @@ export default function TargetsPage() {
   const [scanMode, setScanMode] = useState("single");
   const [submitting, setSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
+  const [selectedScanId, setSelectedScanId] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [scanStatus, setScanStatus] = useState(null);
+  const [wsConnected, setWsConnected] = useState(false);
+
+  const fmtDateTime = (value) => {
+    if (!value) return "-";
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return "-";
+    return dt.toLocaleString("pt-BR");
+  };
+
+  const loadScans = async () => {
+    const { data } = await client.get("/api/scans");
+    setScans(data || []);
+  };
+
+  const loadLogs = async (scanId) => {
+    const { data } = await client.get(`/api/scans/${scanId}/logs`);
+    setLogs(data || []);
+  };
+
+  const loadScanStatus = async (scanId) => {
+    const { data } = await client.get(`/api/scans/${scanId}/status`);
+    setScanStatus(data || null);
+  };
+
+  const loadTargets = async () => {
+    const { data } = await client.get("/api/targets/summary");
+    setRows(data || []);
+  };
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/targets/summary");
-        setRows(data || []);
+        await Promise.all([loadTargets(), loadScans()]);
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar targets.");
       } finally {
@@ -43,6 +75,50 @@ export default function TargetsPage() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadScans().catch(() => null);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedScanId) {
+      setLogs([]);
+      setScanStatus(null);
+      setWsConnected(false);
+      return;
+    }
+
+    loadLogs(selectedScanId);
+    loadScanStatus(selectedScanId);
+
+    const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+    const wsBase = apiUrl.startsWith("https://") ? apiUrl.replace("https://", "wss://") : apiUrl.replace("http://", "ws://");
+    const token = localStorage.getItem("token") || "";
+    const ws = new WebSocket(`${wsBase}/ws/scans/${selectedScanId}/logs?token=${encodeURIComponent(token)}`);
+
+    ws.onopen = () => setWsConnected(true);
+    ws.onclose = () => setWsConnected(false);
+    ws.onerror = () => setWsConnected(false);
+    ws.onmessage = (event) => {
+      const payload = JSON.parse(event.data);
+      if (payload.type === "logs") {
+        setLogs((prev) => {
+          const map = new Map(prev.map((l) => [l.id, l]));
+          for (const item of payload.items || []) map.set(item.id, item);
+          return Array.from(map.values()).sort((a, b) => a.id - b.id);
+        });
+      }
+    };
+
+    const timer = setInterval(() => loadScanStatus(selectedScanId), 2000);
+    return () => {
+      clearInterval(timer);
+      ws.close();
+    };
+  }, [selectedScanId]);
 
   const filtered = rows.filter((item) => {
     const target = String(item.target || "").toLowerCase();
@@ -77,13 +153,13 @@ export default function TargetsPage() {
       setStatusMessage(`Scan para ${targetName} iniciado com sucesso!`);
       setAuthorizationAccepted({ ...authorizationAccepted, [targetName]: false });
       setExpandedTarget(null);
+      setSelectedScanId(null);
       
       // Recarregar targets após criação
       setTimeout(() => {
         const reload = async () => {
           try {
-            const { data } = await client.get("/api/targets/summary");
-            setRows(data || []);
+            await Promise.all([loadTargets(), loadScans()]);
           } catch {}
         };
         reload();
@@ -121,7 +197,12 @@ export default function TargetsPage() {
         {!loading && filtered.length === 0 && <p className="text-sm text-slate-500">Nenhum target encontrado.</p>}
 
         <div className="space-y-2">
-          {filtered.map((item) => (
+          {filtered.map((item) => {
+            const targetScans = scans
+              .filter((scan) => String(scan.target_query || "") === String(item.target || ""))
+              .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+
+            return (
             <div key={item.target} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="flex-1">
@@ -138,7 +219,11 @@ export default function TargetsPage() {
                     risco {item.highest_severity}
                   </span>
                   <button
-                    onClick={() => setExpandedTarget(expandedTarget === item.target ? null : item.target)}
+                    onClick={() => {
+                      const willExpand = expandedTarget !== item.target;
+                      setExpandedTarget(willExpand ? item.target : null);
+                      setSelectedScanId(null);
+                    }}
                     className="rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-500"
                   >
                     ▶ Scan
@@ -154,6 +239,58 @@ export default function TargetsPage() {
 
               {expandedTarget === item.target && (
                 <div className="mt-4 border-t border-slate-700 pt-4">
+                  <div className="mb-4">
+                    <h4 className="text-sm font-semibold text-slate-200">Scans deste target</h4>
+                    <p className="mt-1 text-xs text-slate-400">Clique em um scan para acompanhar o log em tempo real.</p>
+                    <div className="mt-2 space-y-2">
+                      {targetScans.length === 0 && (
+                        <p className="text-xs text-slate-500">Nenhum scan encontrado para este target.</p>
+                      )}
+                      {targetScans.slice(0, 8).map((scan) => {
+                        const isSelected = selectedScanId === scan.id;
+                        return (
+                          <button
+                            key={scan.id}
+                            onClick={() => setSelectedScanId(scan.id)}
+                            className={`w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                              isSelected
+                                ? "border-cyan-500/60 bg-cyan-500/10"
+                                : "border-slate-700 bg-slate-900/50 hover:bg-slate-800/70"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-100">Scan #{scan.id}</span>
+                              <span className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase ${STATUS_BADGE[scan.status] || "border-slate-300 bg-slate-200 text-slate-900"}`}>
+                                {scan.status}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-400">
+                              criado em {fmtDateTime(scan.created_at)} | modo {scan.mode || "-"}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {selectedScanId && (
+                    <div className="mb-4 space-y-2 rounded-xl border border-slate-700 bg-slate-900/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <p className="text-slate-300">
+                          Acompanhando scan <span className="font-semibold text-cyan-300">#{selectedScanId}</span>
+                        </p>
+                        <p className="text-slate-400">
+                          WS: <span className={wsConnected ? "text-emerald-300" : "text-rose-300"}>{wsConnected ? "conectado" : "desconectado"}</span>
+                        </p>
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        status atual: <span className="font-semibold text-slate-200">{scanStatus?.status || "-"}</span>
+                        {scanStatus?.current_step ? ` | etapa: ${scanStatus.current_step}` : ""}
+                      </div>
+                      <LogTerminal logs={logs} />
+                    </div>
+                  )}
+
                   <div className="space-y-3">
                     <select
                       className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
@@ -185,7 +322,7 @@ export default function TargetsPage() {
                 </div>
               )}
             </div>
-          ))}
+          )})}
         </div>
       </section>
     </main>

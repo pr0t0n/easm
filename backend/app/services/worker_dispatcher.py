@@ -54,6 +54,22 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
     if execution_mode == "local":
         return run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
 
+    # Evita bloqueio "Never call result.get() within a task" quando o grafo
+    # ja esta rodando dentro de um worker Celery.
+    in_celery_task = False
+    try:
+        from celery import current_task as _current_task  # type: ignore
+        in_celery_task = _current_task is not None
+    except Exception:
+        in_celery_task = False
+
+    if in_celery_task:
+        fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
+        fallback.setdefault("dispatch_task_name", _tool_task_name(scan_mode=scan_mode, tool_name=tool_name))
+        fallback.setdefault("dispatch_bypassed", True)
+        fallback.setdefault("dispatch_bypass_reason", "running_inside_celery_task")
+        return fallback
+
     task_name = _tool_task_name(scan_mode=scan_mode, tool_name=tool_name)
     queue_name = _tool_queue_name(scan_mode=scan_mode, tool_name=tool_name)
     timeout = _timeout_for_tool(tool_name)

@@ -1170,6 +1170,35 @@ function frameworkStatus(score) {
   return { css: "status-non-compliant", label: "Não Conforme" };
 }
 
+function benchmarkAssessmentIndicator(benchmark = {}) {
+  const target = Number(benchmark?.target_external_exposure_index);
+  const segment = Number(benchmark?.segment_external_exposure_index);
+  const assessment = String(benchmark?.assessment || "").toLowerCase();
+
+  if (Number.isFinite(target) && Number.isFinite(segment)) {
+    const diff = target - segment;
+    if (Math.abs(diff) <= 3) {
+      return { icon: "=", label: "similar_ao_benchmark", color: "#718096" };
+    }
+    if (diff < 0) {
+      return { icon: "✅", label: "melhor_que_o_benchmark", color: "#2f855a" };
+    }
+    return { icon: "👎", label: "acima_do_benchmark", color: "#c53030" };
+  }
+
+  if (assessment.includes("igual") || assessment.includes("similar") || assessment.includes("parecido")) {
+    return { icon: "=", label: "similar_ao_benchmark", color: "#718096" };
+  }
+  if (assessment.includes("dentro") || assessment.includes("abaixo") || assessment.includes("melhor")) {
+    return { icon: "✅", label: assessment || "dentro_do_benchmark", color: "#2f855a" };
+  }
+  if (assessment.includes("acima") || assessment.includes("pior") || assessment.includes("negativo")) {
+    return { icon: "👎", label: assessment || "acima_do_benchmark", color: "#c53030" };
+  }
+
+  return { icon: "=", label: assessment || "sem_avaliacao", color: "#718096" };
+}
+
 function metricTrendText(severity, lifecycle) {
   const newCount = Number(lifecycle.new || 0);
   const corrected = Number(lifecycle.corrected || 0);
@@ -1220,6 +1249,25 @@ function buildQuickWins(recommendations = []) {
       category: ["Authentication", "Web Encryption", "Software Patching", "Application Security", "Data Exposure"][index],
     };
   });
+}
+
+function toMultiline(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "-") return "-";
+  return text;
+}
+
+function buildContextSummary(row = {}) {
+  const parts = [
+    `step=${row.step || "-"}`,
+    `node=${row.node || "-"}`,
+    `tool=${row.tool || "-"}`,
+    `asset=${row.asset || "-"}`,
+    `porta=${row.port || "-"}`,
+    `servico=${row.service || "-"}`,
+  ];
+  if (row.version) parts.push(`versao=${row.version}`);
+  return parts.join(" | ");
 }
 
 export default function ReportsPage() {
@@ -1303,8 +1351,19 @@ export default function ReportsPage() {
     const lifecycle = v2.lifecycle || {};
     const benchmark = v2.segment_benchmark || {};
     const targetEvolution = v2.target_evolution || { timeline: [], recurring_findings: [] };
+    const coverageSummary = v2.coverage_summary || { vulnerability_findings: 0, recon_findings: 0, osint_findings: 0 };
+    const reconFindings = v2.recon_findings || [];
+    const osintFindings = v2.osint_findings || [];
     const wafSummary = v2.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] };
-    const securityHeadersSummary = v2.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], missing_headers: [] };
+    const securityHeadersSummary = v2.security_headers_summary || {
+      findings_count: 0,
+      assets_count: 0,
+      assets: [],
+      present_headers: [],
+      missing_headers: [],
+      samples: [],
+      owasp_top10_alignment: [],
+    };
 
     const total = Number(summary.total || vulnerabilities.length || 0);
     const sev = {
@@ -1338,6 +1397,9 @@ export default function ReportsPage() {
       frameworks,
       vulnerabilities,
       categories,
+      coverageSummary,
+      reconFindings,
+      osintFindings,
       wafSummary,
       securityHeadersSummary,
       lifecycle,
@@ -1443,6 +1505,7 @@ export default function ReportsPage() {
               <li><span><span className="toc-number">08</span><span className="toc-title">Benchmark e Evolução por Alvo</span></span><span className="toc-page">Seção VIII</span></li>
               <li><span><span className="toc-number">09</span><span className="toc-title">WAF no Ambiente</span></span><span className="toc-page">Seção IX</span></li>
               <li><span><span className="toc-number">10</span><span className="toc-title">Headers de Segurança</span></span><span className="toc-page">Seção X</span></li>
+              <li><span><span className="toc-number">11</span><span className="toc-title">Cobertura Recon e OSINT</span></span><span className="toc-page">Seção XI</span></li>
             </ul>
           </div>
 
@@ -1464,6 +1527,7 @@ export default function ReportsPage() {
                 <a href="#evolucao">Benchmark e Evolução</a>
                 <a href="#waf">WAF no Ambiente</a>
                 <a href="#headers">Headers de Segurança</a>
+                <a href="#cobertura">Cobertura Recon/OSINT</a>
               </nav>
             </aside>
 
@@ -1557,6 +1621,7 @@ export default function ReportsPage() {
                         <th>Categoria</th>
                         <th>Status</th>
                         <th>Classificação de Risco</th>
+                        <th>Ferramenta</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1572,6 +1637,7 @@ export default function ReportsPage() {
                             <td>{row.category || "Application Security"}</td>
                             <td>{status}</td>
                             <td>{row.risk_text || "-"}</td>
+                            <td>{row.tool || "-"}</td>
                           </tr>
                         );
                       })}
@@ -1596,6 +1662,10 @@ export default function ReportsPage() {
                   <div className="metric-card low no-break">
                     <div className="metric-value">{Number(data.wafSummary.assets_count || 0)}</div>
                     <div className="metric-label">Ativos com evidência</div>
+                  </div>
+                  <div className="metric-card medium no-break">
+                    <div className="metric-value">{(data.wafSummary.vendors || []).length}</div>
+                    <div className="metric-label">Modelos/Fabricantes detectados</div>
                   </div>
                 </div>
                 <div className="table-container no-break">
@@ -1622,6 +1692,16 @@ export default function ReportsPage() {
                     </tbody>
                   </table>
                 </div>
+                <div className="technical-detail no-break" style={{ marginTop: 12 }}>
+                  <div className="technical-label">Resumo WAF (quais e quantos)</div>
+                  <div className="technical-url">
+                    {(data.wafSummary.vendors || []).length === 0
+                      ? "Nenhum WAF identificado no scan atual."
+                      : (data.wafSummary.vendors || [])
+                          .map((item) => `${item.name || "WAF nao identificado"}: ${item.count || 0}`)
+                          .join(" | ")}
+                  </div>
+                </div>
               </section>
 
               <section id="headers" className="section page-break">
@@ -1646,6 +1726,30 @@ export default function ReportsPage() {
                   <table>
                     <thead>
                       <tr>
+                        <th>Header configurado</th>
+                        <th>Ocorrências</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.securityHeadersSummary.present_headers || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={2}>Sem headers explicitamente confirmados no scan atual.</td>
+                        </tr>
+                      ) : (
+                        (data.securityHeadersSummary.present_headers || []).map((item, idx) => (
+                          <tr key={`header-present-${idx}`}>
+                            <td>{item.header || "header"}</td>
+                            <td>{item.count || 0}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="table-container no-break">
+                  <table>
+                    <thead>
+                      <tr>
                         <th>Header ausente</th>
                         <th>Ocorrências</th>
                       </tr>
@@ -1660,6 +1764,118 @@ export default function ReportsPage() {
                           <tr key={`header-${idx}`}>
                             <td>{item.header || "header"}</td>
                             <td>{item.count || 0}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="technical-detail no-break" style={{ marginTop: 12 }}>
+                  <div className="technical-label">OWASP Top 10 (avaliação)</div>
+                  <div className="technical-url">
+                    {(data.securityHeadersSummary.owasp_top10_alignment || []).length === 0
+                      ? "A05 Security Misconfiguration: headers HTTP mitigam configuração insegura; A03 Injection: CSP reduz impacto de XSS no browser."
+                      : (data.securityHeadersSummary.owasp_top10_alignment || [])
+                          .map((item) => `${item.owasp}: ${item.coverage}`)
+                          .join(" | ")}
+                  </div>
+                </div>
+                <div className="table-container no-break" style={{ marginTop: 12 }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Amostra técnica (curl -I)</th>
+                        <th>Headers brutos</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.securityHeadersSummary.samples || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={2}>Sem amostras brutas de headers no scan atual.</td>
+                        </tr>
+                      ) : (
+                        (data.securityHeadersSummary.samples || []).slice(0, 3).map((sample, idx) => (
+                          <tr key={`header-sample-${idx}`}>
+                            <td>{sample.target || "-"}</td>
+                            <td style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11, lineHeight: 1.35 }}>{sample.raw || "-"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="cobertura" className="section page-break">
+                <div className="section-header">
+                  <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" /></svg></div>
+                  <div>
+                    <h2 className="section-title">Cobertura Recon e OSINT</h2>
+                    <p className="section-subtitle">Transparência do que foi coletado por fase</p>
+                  </div>
+                </div>
+                <div className="metrics-grid">
+                  <div className="metric-card high no-break">
+                    <div className="metric-value">{Number(data.coverageSummary.vulnerability_findings || 0)}</div>
+                    <div className="metric-label">Achados de Vulnerabilidade</div>
+                  </div>
+                  <div className="metric-card low no-break">
+                    <div className="metric-value">{Number(data.coverageSummary.recon_findings || 0)}</div>
+                    <div className="metric-label">Achados de Reconhecimento</div>
+                  </div>
+                  <div className="metric-card info no-break">
+                    <div className="metric-value">{Number(data.coverageSummary.osint_findings || 0)}</div>
+                    <div className="metric-label">Achados de OSINT</div>
+                  </div>
+                </div>
+
+                <div className="table-container no-break">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Reconhecimento (amostra)</th>
+                        <th>Severidade</th>
+                        <th>Ativo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.reconFindings || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={3}>Sem eventos de reconhecimento no dataset atual.</td>
+                        </tr>
+                      ) : (
+                        (data.reconFindings || []).slice(0, 15).map((item, idx) => (
+                          <tr key={`recon-${idx}`}>
+                            <td>{item.name || item.problem || "Evento de reconhecimento"}</td>
+                            <td>{item.severity || "info"}</td>
+                            <td>{item.target || item.asset || "-"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="table-container no-break">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>OSINT (amostra)</th>
+                        <th>Severidade</th>
+                        <th>Ativo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.osintFindings || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={3}>Sem eventos de OSINT no dataset atual.</td>
+                        </tr>
+                      ) : (
+                        (data.osintFindings || []).slice(0, 15).map((item, idx) => (
+                          <tr key={`osint-${idx}`}>
+                            <td>{item.name || item.problem || "Evento OSINT"}</td>
+                            <td>{item.severity || "info"}</td>
+                            <td>{item.target || item.asset || "-"}</td>
                           </tr>
                         ))
                       )}
@@ -1832,8 +2048,12 @@ export default function ReportsPage() {
                   const sev = String(row.severity || "low").toLowerCase();
                   const badge = SEVERITY_META[sev] || SEVERITY_META.low;
                   const title = row.name || row.problem || "Vulnerabilidade identificada";
-                  const technicalPayload = row.payload || row.exploit || row.evidence || row.error || "Sem payload/evidência detalhada para este item.";
                   const urls = [row.full_url, row.target].filter(Boolean).join("\n");
+                  const methodEndpoint = `${row.http_method || "GET"} ${row.endpoint || "/"}`;
+                  const frameworkTitle = `${row.owasp || "-"}`;
+                  const contextSummary = row.technical_context || buildContextSummary(row);
+                  const controls = Array.isArray(row.recommendation_controls) ? row.recommendation_controls : [];
+                  const validations = Array.isArray(row.recommendation_validation) ? row.recommendation_validation : [];
                   return (
                     <div key={`tech-${index}-${row.id}`} className="technical-card no-break">
                       <div className="technical-header">
@@ -1844,18 +2064,67 @@ export default function ReportsPage() {
                       </div>
                       <div className="technical-body">
                         <div className="technical-detail">
-                          <div className="technical-label">URLs Afetadas</div>
-                          <div className="technical-url">{urls || "Sem URL consolidada."}</div>
+                          <div className="technical-label">Resumo Técnico</div>
+                          <div className="technical-url">
+                            severidade={badge.label} | endpoint={methodEndpoint} | parametro={row.parameter || "-"}
+                          </div>
                         </div>
+
                         <div className="technical-detail">
-                          <div className="technical-label">Payload/Evidência</div>
-                          <div className="technical-payload">{technicalPayload}</div>
+                          <div className="technical-label">Framework Afetado</div>
+                          <div className="technical-url">
+                            OWASP={frameworkTitle} | CWE={row.cwe || "-"} | Classe={row.vuln_class || "-"}
+                          </div>
+                          <div className="technical-url" style={{ marginTop: 6 }}>
+                            ISO={row.iso_control || "-"} | NIST={row.nist_control || "-"} | CIS={row.cis_control || "-"}
+                          </div>
                         </div>
+
+                        <div className="technical-detail">
+                          <div className="technical-label">Payload (Input de Ataque)</div>
+                          <pre className="technical-payload">{toMultiline(row.attack_input || row.payload || "-")}</pre>
+                        </div>
+
+                        <div className="technical-detail">
+                          <div className="technical-label">Requisição Gerada (PoC)</div>
+                          <pre className="technical-payload">{toMultiline(row.poc_request || row.payload || row.command || "-")}</pre>
+                        </div>
+
+                        <div className="technical-detail">
+                          <div className="technical-label">Evidência (Prova Técnica)</div>
+                          <div className="technical-url">Resposta HTTP: {toMultiline(row.response_http || "-")}</div>
+                          <pre className="technical-payload" style={{ marginTop: 6 }}>{toMultiline(row.response_application || row.evidence || row.error || "-")}</pre>
+                          <div className="technical-url" style={{ marginTop: 6 }}>Validação técnica: {toMultiline(row.technical_validation || "-")}</div>
+                        </div>
+
+                        <div className="technical-detail">
+                          <div className="technical-label">Análise Técnica</div>
+                          <div className="technical-url">Comportamento esperado: {toMultiline(row.expected_behavior || "-")}</div>
+                          <div className="technical-url" style={{ marginTop: 6 }}>Comportamento observado: {toMultiline(row.observed_behavior || "-")}</div>
+                          <div className="technical-url" style={{ marginTop: 6 }}>Causa raiz: {toMultiline(row.root_cause || "-")}</div>
+                        </div>
+
+                        <div className="technical-detail">
+                          <div className="technical-label">Recomendação Técnica</div>
+                          <pre className="technical-payload">{toMultiline(row.recommendation_required || row.recommendation || "-")}</pre>
+                          <div className="technical-url" style={{ marginTop: 6 }}>Controles complementares:</div>
+                          <ul style={{ marginTop: 6, marginLeft: 18 }}>
+                            {(controls.length > 0 ? controls : ["Aplicar correção específica do componente", "Executar hardening de configuração", "Revalidar com reteste técnico"]).map((item, idx) => (
+                              <li key={`ctrl-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
+                            ))}
+                          </ul>
+                          <div className="technical-url" style={{ marginTop: 6 }}>Validação pós-correção:</div>
+                          <ul style={{ marginTop: 6, marginLeft: 18 }}>
+                            {(validations.length > 0 ? validations : ["Reexecutar a PoC para confirmar correção", "Validar que não houve regressão funcional", "Registrar evidências do reteste no ticket"] ).map((item, idx) => (
+                              <li key={`val-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+
                         <div className="technical-detail">
                           <div className="technical-label">Contexto Técnico</div>
-                          <div className="technical-url">
-                            step={row.step || "-"} | node={row.node || "-"} | tool={row.tool || "-"} | asset={row.asset || "-"} | porta={row.port || "-"} | servico={row.service || "-"} {row.version ? `| versao=${row.version}` : ""}
-                          </div>
+                          <div className="technical-url">{contextSummary}</div>
+                          <div className="technical-url" style={{ marginTop: 6 }}>URLs afetadas: {urls || "Sem URL consolidada."}</div>
                         </div>
                       </div>
                     </div>
@@ -1874,6 +2143,9 @@ export default function ReportsPage() {
 
                 <div className="chart-container no-break">
                   <div className="chart-header"><h3 className="chart-title">Benchmark Setorial</h3></div>
+                  {(() => {
+                    const indicator = benchmarkAssessmentIndicator(data.benchmark);
+                    return (
                   <div className="table-container">
                     <table>
                       <thead>
@@ -1893,11 +2165,16 @@ export default function ReportsPage() {
                           <td>{data.benchmark.target_external_exposure_index ?? "-"}</td>
                           <td>{data.benchmark.segment_external_exposure_index ?? "-"}</td>
                           <td>{data.benchmark.segment_patch_sla_days ?? "-"}</td>
-                          <td>{data.benchmark.assessment || "-"}</td>
+                          <td>
+                            <span style={{ color: indicator.color, fontWeight: 700 }}>{indicator.icon}</span>
+                            <span style={{ marginLeft: 8 }}>{indicator.label}</span>
+                          </td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="chart-container no-break">

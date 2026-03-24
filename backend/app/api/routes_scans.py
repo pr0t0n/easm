@@ -193,6 +193,18 @@ def _sanitize_text(value: str | None) -> str:
     return sanitized
 
 
+def _sanitize_multiline_text(value: str | None) -> str:
+    if not value:
+        return ""
+    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
+    sanitized = ansi_pattern.sub("", str(value))
+    sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"\s+$", "", line) for line in sanitized.split("\n")]
+    compact = "\n".join(lines).strip()
+    compact = re.sub(r"\n{3,}", "\n\n", compact)
+    return compact
+
+
 def _normalize_finding_title(value: str | None) -> str:
     title = _sanitize_text(value)
     lowered = title.lower()
@@ -430,8 +442,11 @@ def _compute_framework_scores(vulnerability_rows: list[dict]) -> dict:
             penalties[fw] += base * float(weights.get(fw, {}).get(category, 0.75))
 
     def score_from_penalty(value: float) -> int:
-        # Escala pragmática para evitar score sempre extremo.
-        return max(0, min(100, int(round(100.0 - min(100.0, value * 1.35)))))
+        # Curva suavizada: evita queda excessiva de score por poucos achados.
+        safe_value = max(0.0, float(value))
+        if safe_value <= 0:
+            return 100
+        return max(55, min(100, int(round(100.0 / (1.0 + (safe_value / 55.0))))))
 
     return {
         "iso27001": {"score": score_from_penalty(penalties["iso27001"])},
@@ -528,12 +543,229 @@ def _extract_recommendation_payload(details: dict) -> dict[str, object]:
     }
 
 
-def _pick_first_text(details: dict, keys: list[str]) -> str:
+def _pick_first_text(details: dict, keys: list[str], preserve_linebreaks: bool = False) -> str:
     for key in keys:
         value = details.get(key)
         if isinstance(value, str) and value.strip():
+            if preserve_linebreaks:
+                return _sanitize_multiline_text(value)
             return _sanitize_text(value)
     return ""
+
+
+def _extract_method_and_endpoint(full_url: str, payload: str, evidence: str, command: str) -> tuple[str, str]:
+    blob = "\n".join([full_url or "", payload or "", evidence or "", command or ""])
+    method_match = re.search(r"\b(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b", blob, re.IGNORECASE)
+    method = str(method_match.group(1) if method_match else "GET").upper()
+
+    endpoint = ""
+    req_line = re.search(r"(?im)^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^\s]+)", blob)
+    if req_line:
+        endpoint = str(req_line.group(2) or "").strip()
+    elif full_url:
+        parsed = urlparse(full_url if "://" in full_url else f"http://{full_url}")
+        endpoint = str(parsed.path or "/")
+    if not endpoint:
+        endpoint = "/"
+    return method, endpoint
+
+
+def _extract_parameter_name(payload: str, evidence: str, title: str) -> str:
+    blob = "\n".join([payload or "", evidence or "", title or ""])
+
+    patterns = [
+        re.compile(r"(?:param(?:eter)?|campo|field)\s*[:=]\s*([a-zA-Z0-9_\-\.]+)", re.IGNORECASE),
+        re.compile(r"\"([a-zA-Z0-9_\-\.]+)\"\s*:\s*\"[^\"]+\""),
+        re.compile(r"\b([a-zA-Z0-9_\-\.]+)='[^']+'"),
+        re.compile(r"\b([a-zA-Z0-9_\-\.]+)=\S+"),
+    ]
+    for pattern in patterns:
+        match = pattern.search(blob)
+        if match:
+            candidate = str(match.group(1) or "").strip()
+            if candidate and candidate.lower() not in {"http", "https", "host", "content-type"}:
+                return candidate
+    return "-"
+
+
+def _extract_http_response_status(evidence: str) -> str:
+    match = re.search(r"(?im)^\s*HTTP/\S+\s+(\d{3})\b", evidence or "")
+    if not match:
+        return "-"
+    return f"HTTP {str(match.group(1) or '').strip()}"
+
+
+def _framework_context(category: str, title: str, details: dict) -> dict[str, str]:
+    cat = str(category or "Application Security")
+    title_blob = str(title or "").lower()
+    detail_blob = " ".join(
+        [
+            str((details or {}).get("evidence") or ""),
+            str((details or {}).get("payload") or ""),
+            str((details or {}).get("output") or ""),
+        ]
+    ).lower()
+    blob = f"{title_blob} {detail_blob}"
+
+    mapping = {
+        "Application Security": {
+            "owasp": "A03:2021 - Injection",
+            "cwe": "CWE-89",
+            "class": "Improper Input Neutralization",
+            "iso": "ISO 27001 A.8.28 Secure coding",
+            "nist": "NIST PR.DS-6 / SI-10",
+            "cis": "CIS v8 Control 16 - Application Software Security",
+        },
+        "Web Encryption": {
+            "owasp": "A02:2021 - Cryptographic Failures",
+            "cwe": "CWE-319",
+            "class": "Cleartext Transmission of Sensitive Information",
+            "iso": "ISO 27001 A.8.24 Use of cryptography",
+            "nist": "NIST SC-8 / SC-13",
+            "cis": "CIS v8 Control 3 - Data Protection",
+        },
+        "Authentication": {
+            "owasp": "A07:2021 - Identification and Authentication Failures",
+            "cwe": "CWE-287",
+            "class": "Improper Authentication",
+            "iso": "ISO 27001 A.5.17 Authentication information",
+            "nist": "NIST IA-2 / AC-7",
+            "cis": "CIS v8 Control 6 - Access Control Management",
+        },
+        "Authorization": {
+            "owasp": "A01:2021 - Broken Access Control",
+            "cwe": "CWE-285",
+            "class": "Improper Authorization",
+            "iso": "ISO 27001 A.5.15 Access control",
+            "nist": "NIST AC-3 / AC-6",
+            "cis": "CIS v8 Control 6 - Access Control Management",
+        },
+        "Network Filtering": {
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "cwe": "CWE-16",
+            "class": "Configuration",
+            "iso": "ISO 27001 A.8.20 Network security",
+            "nist": "NIST SC-7 / CM-7",
+            "cis": "CIS v8 Control 12 - Network Infrastructure Management",
+        },
+        "Data Exposure": {
+            "owasp": "A01:2021 - Broken Access Control",
+            "cwe": "CWE-200",
+            "class": "Exposure of Sensitive Information",
+            "iso": "ISO 27001 A.5.12 Classification of information",
+            "nist": "NIST PR.DS-1 / PR.DS-5",
+            "cis": "CIS v8 Control 3 - Data Protection",
+        },
+        "Software Patching": {
+            "owasp": "A06:2021 - Vulnerable and Outdated Components",
+            "cwe": "CWE-1104",
+            "class": "Use of Unmaintained Third Party Components",
+            "iso": "ISO 27001 A.8.8 Management of technical vulnerabilities",
+            "nist": "NIST SI-2 / RA-5",
+            "cis": "CIS v8 Control 7 - Continuous Vulnerability Management",
+        },
+        "DNS Security": {
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "cwe": "CWE-346",
+            "class": "Origin Validation Error",
+            "iso": "ISO 27001 A.8.20 Network security",
+            "nist": "NIST SC-20 / SC-21",
+            "cis": "CIS v8 Control 12 - Network Infrastructure Management",
+        },
+        "System Hosting": {
+            "owasp": "A05:2021 - Security Misconfiguration",
+            "cwe": "CWE-16",
+            "class": "Configuration",
+            "iso": "ISO 27001 A.8.9 Configuration management",
+            "nist": "NIST CM-2 / CM-6",
+            "cis": "CIS v8 Control 4 - Secure Configuration",
+        },
+    }
+
+    base = mapping.get(cat, mapping["Application Security"]).copy()
+
+    if any(token in blob for token in ["xss", "cross-site scripting"]):
+        base.update(
+            {
+                "owasp": "A03:2021 - Injection",
+                "cwe": "CWE-79",
+                "class": "Improper Neutralization of Input During Web Page Generation",
+            }
+        )
+    elif any(token in blob for token in ["sql", "sqli", "injection"]):
+        base.update(
+            {
+                "owasp": "A03:2021 - Injection",
+                "cwe": "CWE-89",
+                "class": "Improper Input Neutralization",
+            }
+        )
+
+    return base
+
+
+def _technical_recommendation(category: str, title: str, severity: str) -> dict[str, object]:
+    sev = str(severity or "low").lower()
+    cat = str(category or "Application Security")
+    title_blob = str(title or "").lower()
+
+    required_fix = "Aplicar correção definitiva no componente afetado e validar com reteste técnico orientado por evidência."
+    controls = [
+        "Validar entrada por allowlist e normalização estrita",
+        "Aplicar princípio de privilégio mínimo",
+        "Adicionar teste automatizado de segurança no pipeline",
+    ]
+
+    if cat == "Application Security":
+        if "sql" in title_blob or "injection" in title_blob:
+            required_fix = "Substituir concatenação dinâmica por consultas parametrizadas (prepared statements) em 100% dos pontos de entrada."
+            controls = [
+                "Prepared Statements / Parameter Binding",
+                "ORM com queries parametrizadas e revisão de queries legadas",
+                "Validação de entrada por tipo/regex e bloqueio de payload malicioso",
+                "Conta de banco com privilégio mínimo e segregação de funções",
+            ]
+        elif "xss" in title_blob:
+            required_fix = "Neutralizar saída no contexto correto (HTML/JS/URL) e bloquear execução de script não confiável."
+            controls = [
+                "Output encoding contextual",
+                "Content-Security-Policy restritiva",
+                "Sanitização server-side de campos ricos",
+                "Cookies com HttpOnly/Secure/SameSite",
+            ]
+    elif cat == "Web Encryption":
+        required_fix = "Desabilitar protocolos/ciphers legados e forçar TLS forte com cadeias válidas e renovação automatizada."
+        controls = [
+            "Desabilitar TLS 1.0/1.1 e ciphers fracos",
+            "HSTS com includeSubDomains quando aplicável",
+            "Rotação e monitoramento de certificados",
+        ]
+    elif cat == "Network Filtering":
+        required_fix = "Restringir exposição de portas/serviços externamente e aplicar política de deny-by-default na borda."
+        controls = [
+            "Firewall/ACL por origem e serviço",
+            "Segmentação por ambiente e função",
+            "Bloqueio de administração remota fora de rede autorizada",
+        ]
+
+    if sev in {"critical", "high"}:
+        validation_window = "Retestar em até 24h após correção e validar ausência de regressão funcional e de segurança."
+    elif sev == "medium":
+        validation_window = "Retestar na mesma sprint e confirmar mitigação em ambiente homologado e produção."
+    else:
+        validation_window = "Retestar no próximo ciclo e monitorar recorrência no baseline."
+
+    validations = [
+        "Executar reteste com a mesma ferramenta e payload da evidência",
+        "Validar resposta HTTP e comportamento de negócio esperado",
+        validation_window,
+    ]
+
+    return {
+        "required_fix": required_fix,
+        "controls": controls,
+        "validations": validations,
+    }
 
 
 def _extract_technical_details(details: dict, default_target: str) -> dict[str, str]:
@@ -546,17 +778,17 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     if not full_url:
         full_url = _sanitize_text(default_target)
 
-    exploit = _pick_first_text(details, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"])
+    exploit = _pick_first_text(details, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"], preserve_linebreaks=True)
     if not exploit:
-        exploit = _pick_first_text(nested, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"])
+        exploit = _pick_first_text(nested, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"], preserve_linebreaks=True)
 
-    error = _pick_first_text(details, ["error", "stderr", "exception", "message", "http_error", "status_code"])
+    error = _pick_first_text(details, ["error", "stderr", "exception", "message", "http_error", "status_code"], preserve_linebreaks=True)
     if not error:
-        error = _pick_first_text(nested, ["error", "stderr", "exception", "message", "http_error", "status_code"])
+        error = _pick_first_text(nested, ["error", "stderr", "exception", "message", "http_error", "status_code"], preserve_linebreaks=True)
 
-    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"])
+    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"], preserve_linebreaks=True)
     if not evidence:
-        evidence = _pick_first_text(nested, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"])
+        evidence = _pick_first_text(nested, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"], preserve_linebreaks=True)
 
     payload = _pick_first_text(
         details,
@@ -571,6 +803,7 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
             "matcher_name",
             "proof",
         ],
+        preserve_linebreaks=True,
     )
     if not payload:
         payload = _pick_first_text(
@@ -586,11 +819,12 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
                 "matcher_name",
                 "proof",
             ],
+            preserve_linebreaks=True,
         )
 
     if not payload and nested:
         try:
-            payload = _sanitize_text(json.dumps(nested, ensure_ascii=False))
+            payload = _sanitize_multiline_text(json.dumps(nested, ensure_ascii=False, indent=2))
         except Exception:
             payload = ""
 
@@ -649,12 +883,50 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     if not payload and command:
         payload = command
 
+    method, endpoint = _extract_method_and_endpoint(full_url, payload, evidence, command)
+    parameter = _extract_parameter_name(payload, evidence, " ".join([details.get("title") or "", details.get("name") or ""]))
+    response_http = _extract_http_response_status(evidence)
+
+    response_application = ""
+    if evidence:
+        response_application = evidence[:1200]
+
+    observed_behavior = _sanitize_text(evidence.splitlines()[0] if evidence else "")
+    expected_behavior = "Retornar bloqueio/erro seguro para a entrada maliciosa e manter fluxo de negócio íntegro."
+
+    if "waf" in (tool or "").lower() or "cloudflare" in (evidence or "").lower():
+        expected_behavior = "WAF deve filtrar tráfego malicioso sem classificar indevidamente serviço de borda como vulnerabilidade da aplicação."
+        observed_behavior = observed_behavior or "Comportamento de borda/proxy identificado no tráfego analisado."
+
+    root_cause = "Entrada e/ou configuração de segurança sem controle defensivo suficiente para o vetor observado."
+    if "sql" in (payload + " " + evidence).lower():
+        root_cause = "Possível concatenação de input não confiável em consulta SQL ou validação insuficiente de entrada."
+    elif "xss" in (payload + " " + evidence).lower():
+        root_cause = "Possível falta de neutralização/encoding contextual de saída para conteúdo controlado por usuário."
+    elif "tls" in (payload + " " + evidence).lower() or "ssl" in (payload + " " + evidence).lower():
+        root_cause = "Configuração criptográfica legada ou inconsistente com baseline de segurança."
+
+    technical_validation = "Evidência coletada por ferramenta de segurança e correlacionada com contexto técnico do alvo."
+    if response_http != "-":
+        technical_validation = f"{technical_validation} Resposta observada: {response_http}."
+
     return {
         "full_url": full_url,
+        "endpoint": endpoint,
+        "http_method": method,
+        "parameter": parameter,
         "exploit": exploit,
         "error": error,
         "evidence": evidence,
+        "response_http": response_http,
+        "response_application": response_application,
         "payload": payload,
+        "attack_input": payload[:500] if payload else "-",
+        "poc_request": payload[:1200] if payload else "-",
+        "technical_validation": technical_validation,
+        "expected_behavior": expected_behavior,
+        "observed_behavior": observed_behavior or "-",
+        "root_cause": root_cause,
         "step": step,
         "node": node,
         "asset": asset,
@@ -907,6 +1179,115 @@ def _finding_signature(title: str, severity: str, target: str) -> str:
             _sanitize_text(target).lower(),
         ]
     )
+
+
+def _source_group_from_details(details: dict) -> str:
+    details = details if isinstance(details, dict) else {}
+    nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+
+    node = str(details.get("node") or nested.get("node") or "").strip().lower()
+    worker = str(details.get("source_worker") or nested.get("source_worker") or "").strip().lower()
+    tool = str(details.get("tool") or nested.get("tool") or "").strip().lower()
+
+    if node in {"recon", "scan", "fingerprint"} or worker in {"recon", "reconhecimento", "scan"}:
+        return "recon"
+    if node == "osint" or worker == "osint":
+        return "osint"
+    if node in {"vuln", "fuzzing", "api", "code_js"} or worker in {"analise_vulnerabilidade", "vuln"}:
+        return "vuln"
+    if tool in {"nuclei", "nikto", "sqlmap", "commix", "tplmap", "wapiti", "dalfox", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
+        return "vuln"
+    return "other"
+
+
+def _is_vulnerability_row(row: dict) -> bool:
+    source_group = str(row.get("source_group") or "").strip().lower()
+    severity = str(row.get("severity") or "low").strip().lower()
+    if source_group == "vuln":
+        return True
+    if severity in {"critical", "high", "medium"}:
+        return True
+    return False
+
+
+def _finding_lifecycle_signature(finding: Finding) -> str:
+    details = finding.details or {}
+    nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+    tool = _sanitize_text(details.get("tool") or nested.get("tool") or "")
+    target = _sanitize_text(finding.scan_job.target_query if finding.scan_job else "")
+    title = _sanitize_text(finding.title or "")
+    cve = _sanitize_text(finding.cve or "")
+    return "|".join([target.lower(), tool.lower(), title.lower(), cve.lower()])
+
+
+def _build_finding_lifecycle_status_map(findings: list[Finding]) -> dict[int, str]:
+    """
+    Define status por ciclo de scans do mesmo target:
+    - false_positive: marcado como FP
+    - open: encontrado no scan posterior imediato (ou nao existe scan posterior)
+    - closed: nao encontrado no scan posterior imediato
+    """
+    status_by_id: dict[int, str] = {}
+    if not findings:
+        return status_by_id
+
+    scans_by_target: dict[str, list[ScanJob]] = {}
+    findings_by_scan: dict[int, list[Finding]] = {}
+
+    for finding in findings:
+        if finding.is_false_positive:
+            status_by_id[finding.id] = "false_positive"
+
+        if not finding.scan_job:
+            status_by_id.setdefault(finding.id, "open")
+            continue
+
+        target = str(finding.scan_job.target_query or "").strip().lower()
+        if not target:
+            status_by_id.setdefault(finding.id, "open")
+            continue
+
+        scans_by_target.setdefault(target, []).append(finding.scan_job)
+        findings_by_scan.setdefault(finding.scan_job_id, []).append(finding)
+
+    for target, scans in scans_by_target.items():
+        unique_scans = {scan.id: scan for scan in scans}
+        ordered_scans = sorted(
+            unique_scans.values(),
+            key=lambda s: ((s.created_at or datetime.min), s.id),
+        )
+        if not ordered_scans:
+            continue
+
+        signatures_by_scan: dict[int, set[str]] = {}
+        for scan in ordered_scans:
+            sigs: set[str] = set()
+            for finding in findings_by_scan.get(scan.id, []):
+                if finding.is_false_positive:
+                    continue
+                sigs.add(_finding_lifecycle_signature(finding))
+            signatures_by_scan[scan.id] = sigs
+
+        for idx, scan in enumerate(ordered_scans):
+            next_scan = ordered_scans[idx + 1] if idx + 1 < len(ordered_scans) else None
+            next_signatures = signatures_by_scan.get(next_scan.id, set()) if next_scan else set()
+
+            for finding in findings_by_scan.get(scan.id, []):
+                if finding.is_false_positive:
+                    status_by_id[finding.id] = "false_positive"
+                    continue
+
+                if not next_scan:
+                    status_by_id[finding.id] = "open"
+                    continue
+
+                current_sig = _finding_lifecycle_signature(finding)
+                if current_sig in next_signatures:
+                    status_by_id[finding.id] = "open"
+                else:
+                    status_by_id[finding.id] = "closed"
+
+    return status_by_id
 
 
 def _infer_asset_type(name: str) -> str:
@@ -1349,13 +1730,17 @@ def list_findings(
     if target:
         query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
 
-    normalized_status = status_filter.strip().lower()
-    if normalized_status == "open":
-        query = query.filter(Finding.is_false_positive.is_(False))
-    elif normalized_status == "false_positive":
-        query = query.filter(Finding.is_false_positive.is_(True))
+    lifecycle_query = _authorized_finding_query(db, current_user)
+    if target:
+        lifecycle_query = lifecycle_query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).all()
+    lifecycle_status = _build_finding_lifecycle_status_map(lifecycle_rows)
 
-    rows = query.order_by(Finding.created_at.desc()).limit(max_limit).all()
+    rows = query.order_by(Finding.created_at.desc()).all()
+    normalized_status = status_filter.strip().lower()
+    if normalized_status in {"open", "closed", "false_positive"}:
+        rows = [finding for finding in rows if lifecycle_status.get(finding.id, "open") == normalized_status]
+    rows = rows[:max_limit]
     response = []
     for finding in rows:
         details = finding.details or {}
@@ -1374,6 +1759,7 @@ def list_findings(
                 "is_false_positive": finding.is_false_positive,
                 "retest_status": finding.retest_status,
                 "cve": finding.cve,
+                "lifecycle_status": lifecycle_status.get(finding.id, "open"),
                 "details": details,
                 "age": age,
                 "fair": fair,
@@ -1400,14 +1786,19 @@ def list_findings_paginated(
     if target:
         query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
 
-    normalized_status = status_filter.strip().lower()
-    if normalized_status == "open":
-        query = query.filter(Finding.is_false_positive.is_(False))
-    elif normalized_status == "false_positive":
-        query = query.filter(Finding.is_false_positive.is_(True))
+    lifecycle_query = _authorized_finding_query(db, current_user)
+    if target:
+        lifecycle_query = lifecycle_query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).all()
+    lifecycle_status = _build_finding_lifecycle_status_map(lifecycle_rows)
 
-    total = query.count()
-    rows = query.order_by(Finding.created_at.desc()).offset(offset).limit(limit).all()
+    rows = query.order_by(Finding.created_at.desc()).all()
+    normalized_status = status_filter.strip().lower()
+    if normalized_status in {"open", "closed", "false_positive"}:
+        rows = [finding for finding in rows if lifecycle_status.get(finding.id, "open") == normalized_status]
+
+    total = len(rows)
+    rows = rows[offset:offset + limit]
 
     items = []
     for finding in rows:
@@ -1427,6 +1818,7 @@ def list_findings_paginated(
                 "is_false_positive": finding.is_false_positive,
                 "retest_status": finding.retest_status,
                 "cve": finding.cve,
+                "lifecycle_status": lifecycle_status.get(finding.id, "open"),
                 "details": details,
                 "age": age,
                 "fair": fair,
@@ -1575,11 +1967,13 @@ def scan_report(
         recommendation_payload = _extract_recommendation_payload(details)
         technical = _extract_technical_details(details, job.target_query)
         category = _infer_category(normalized_title, details)
+        sev = str(finding.severity or "low").lower()
+        framework_ctx = _framework_context(category, normalized_title, details)
+        recommendation_ctx = _technical_recommendation(category, normalized_title, sev)
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
         reasons = build_priority_reason(normalized_title, finding.severity, fair, age)
 
-        sev = str(finding.severity or "low").lower()
         if sev in severity_count:
             severity_count[sev] += 1
 
@@ -1588,16 +1982,19 @@ def scan_report(
         fair_score_samples.append(float(fair.get("fair_score") or 0.0))
 
         target_value = technical.get("full_url") or _sanitize_text(details.get("url") or details.get("target") or job.target_query)
-        cve_or_id = _sanitize_text(finding.cve or f"F-{finding.id}")
+        report_id = f"F-{finding.id}"
         signature = _finding_signature(normalized_title, sev, target_value)
         vulnerability_rows.append(
             {
                 "index": len(vulnerability_rows) + 1,
                 "signature": signature,
-                "id": cve_or_id,
+            "id": report_id,
                 "cve": _sanitize_text(finding.cve or ""),
                 "target": target_value,
                 "full_url": technical.get("full_url") or target_value,
+            "endpoint": technical.get("endpoint") or "/",
+            "http_method": technical.get("http_method") or "GET",
+            "parameter": technical.get("parameter") or "-",
                 "name": normalized_title,
                 "problem": normalized_title,
                 "service": _sanitize_text(technical.get("service") or "-"),
@@ -1606,20 +2003,42 @@ def scan_report(
                 "risk_text": _risk_text(sev, finding.confidence_score),
                 "severity": sev,
                 "category": category,
-                "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or "-"),
-                "iso_control": _sanitize_text(details.get("iso_control") or details.get("iso27001") or "-"),
+                "header_name": _sanitize_text(details.get("header_name") or ""),
+                "header_issue": _sanitize_text(details.get("header_issue") or ""),
+                "owasp": _sanitize_text(framework_ctx.get("owasp") or "-"),
+                "cwe": _sanitize_text(framework_ctx.get("cwe") or "-"),
+                "vuln_class": _sanitize_text(framework_ctx.get("class") or "-"),
+                "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or framework_ctx.get("nist") or "-"),
+                "iso_control": _sanitize_text(details.get("iso_control") or details.get("iso27001") or framework_ctx.get("iso") or "-"),
+                "cis_control": _sanitize_text(details.get("cis_control") or framework_ctx.get("cis") or "-"),
                 "recommendation": _normalize_recommendation({**details, "severity": sev}),
                 "recommendation_structured": recommendation_payload,
+                "recommendation_required": _sanitize_multiline_text(str(recommendation_ctx.get("required_fix") or "")),
+                "recommendation_controls": recommendation_ctx.get("controls") or [],
+                "recommendation_validation": recommendation_ctx.get("validations") or [],
                 "exploit": technical.get("exploit") or "-",
-                "error": technical.get("error") or "-",
-                "evidence": technical.get("evidence") or "-",
-                "payload": technical.get("payload") or "-",
+                "error": _sanitize_multiline_text(technical.get("error") or "-") or "-",
+                "evidence": _sanitize_multiline_text(technical.get("evidence") or "-") or "-",
+                "payload": _sanitize_multiline_text(technical.get("payload") or "-") or "-",
+                "attack_input": _sanitize_multiline_text(technical.get("attack_input") or "-") or "-",
+                "poc_request": _sanitize_multiline_text(technical.get("poc_request") or "-") or "-",
+                "response_http": _sanitize_multiline_text(technical.get("response_http") or "-") or "-",
+                "response_application": _sanitize_multiline_text(technical.get("response_application") or "-") or "-",
+                "technical_validation": _sanitize_multiline_text(technical.get("technical_validation") or "-") or "-",
+                "expected_behavior": _sanitize_multiline_text(technical.get("expected_behavior") or "-") or "-",
+                "observed_behavior": _sanitize_multiline_text(technical.get("observed_behavior") or "-") or "-",
+                "root_cause": _sanitize_multiline_text(technical.get("root_cause") or "-") or "-",
                 "step": technical.get("step") or "-",
                 "node": technical.get("node") or "-",
                 "asset": technical.get("asset") or "-",
                 "port": technical.get("port") or "-",
                 "tool": technical.get("tool") or "-",
                 "command": technical.get("command") or "-",
+                "http_headers_raw": _sanitize_text(details.get("http_headers_raw") or ""),
+                "technical_context": _sanitize_text(
+                    f"step={technical.get('step') or '-'}; node={technical.get('node') or '-'}; tool={technical.get('tool') or '-'}; asset={technical.get('asset') or '-'}; porta={technical.get('port') or '-'}; servico={technical.get('service') or '-'}"
+                ),
+                "source_group": _source_group_from_details(details),
                 "is_false_positive": bool(finding.is_false_positive),
             }
         )
@@ -1663,21 +2082,35 @@ def scan_report(
 
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
+    open_rows = [row for row in vulnerability_rows if not row["is_false_positive"]]
+    open_vulnerability_table = [row for row in open_rows if _is_vulnerability_row(row)]
+    open_recon_table = [row for row in open_rows if str(row.get("source_group") or "") == "recon"]
+    open_osint_table = [row for row in open_rows if str(row.get("source_group") or "") == "osint"]
+
+    severity_count_vuln = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for row in open_vulnerability_table:
+        sev = str(row.get("severity") or "low").lower()
+        if sev in severity_count_vuln:
+            severity_count_vuln[sev] += 1
+
     score = max(
         0,
         min(
             100,
-            100 - (severity_count["critical"] * 30 + severity_count["high"] * 15 + severity_count["medium"] * 8 + severity_count["low"] * 2),
+            100
+            - (
+                severity_count_vuln["critical"] * 30
+                + severity_count_vuln["high"] * 15
+                + severity_count_vuln["medium"] * 8
+                + severity_count_vuln["low"] * 2
+            ),
         ),
     )
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
 
-    open_findings = len([f for f in findings if not f.is_false_positive])
-    frameworks = _compute_framework_scores(vulnerability_rows)
-
     fair_total = _compute_fair_summary(findings, enriched_findings, fair_ale_total_open, fair_ale_total_all)
 
-    open_vulnerability_table = [row for row in vulnerability_rows if not row["is_false_positive"]]
+    frameworks = _compute_framework_scores(open_vulnerability_table)
 
     prev_signatures: set[str] = set()
     resolved_vulnerabilities: list[dict] = []
@@ -1723,10 +2156,13 @@ def scan_report(
     waf_findings_count = 0
 
     security_header_missing: dict[str, int] = {}
+    security_header_present: dict[str, int] = {}
     security_header_assets: set[str] = set()
+    security_header_samples: list[dict[str, str]] = []
+    security_header_sample_keys: set[str] = set()
     security_header_findings_count = 0
     header_pattern = re.compile(
-        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|x-xss-protection)",
         re.IGNORECASE,
     )
 
@@ -1746,15 +2182,37 @@ def scan_report(
             vendor = _detect_waf_vendor(f"{parsed_vendor} {title} {evidence}") or parsed_vendor or "WAF nao identificado"
             waf_vendors[vendor] = int(waf_vendors.get(vendor, 0)) + 1
 
-        if tool == "shcheck" or any(tok in blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
+        if tool in {"shcheck", "curl-headers"} or any(tok in blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
+            explicit_header = str(row.get("header_name") or "").strip().lower()
+            explicit_issue = str(row.get("header_issue") or "").strip().lower()
+            raw_http_headers = str(row.get("http_headers_raw") or "").strip()
             matched_headers = header_pattern.findall(f"{title}\n{evidence}")
-            if matched_headers:
+            candidate_headers = [explicit_header] if explicit_header else [str(h or "").strip().lower() for h in matched_headers]
+            if candidate_headers:
                 security_header_findings_count += 1
                 if target:
                     security_header_assets.add(target)
-                for header_name in matched_headers:
-                    normalized_header = str(header_name or "").strip().lower()
+            if tool == "curl-headers" and raw_http_headers:
+                sample_key = f"{target}|{raw_http_headers[:120]}"
+                if sample_key not in security_header_sample_keys:
+                    security_header_sample_keys.add(sample_key)
+                    security_header_samples.append(
+                        {
+                            "target": target or "-",
+                            "raw": raw_http_headers[:1200],
+                        }
+                    )
+            for normalized_header in candidate_headers:
+                if not normalized_header:
+                    continue
+                if explicit_issue == "present":
+                    security_header_present[normalized_header] = int(security_header_present.get(normalized_header, 0)) + 1
+                elif explicit_issue == "missing":
                     security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+                elif "ausente" in blob or "missing" in blob or "not set" in blob:
+                    security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+                else:
+                    security_header_present[normalized_header] = int(security_header_present.get(normalized_header, 0)) + 1
 
     category_scores = _build_category_scores(open_vulnerability_table)
 
@@ -1808,15 +2266,18 @@ def scan_report(
         "new": len([r for r in open_vulnerability_table if r.get("status") == "new"]),
         "corrected": len(resolved_vulnerabilities),
     }
+    triaged_vulnerability_count = len([row for row in vulnerability_rows if row.get("is_false_positive") and _is_vulnerability_row(row)])
+
     summary_data = {
-        "total": len(findings),
-        "critical": severity_count["critical"],
-        "high": severity_count["high"],
-        "medium": severity_count["medium"],
-        "low": severity_count["low"],
-        "info": severity_count["info"],
-        "open": open_findings,
-        "triaged": len(findings) - open_findings,
+        "total": len(open_vulnerability_table),
+        "total_raw": len(findings),
+        "critical": severity_count_vuln["critical"],
+        "high": severity_count_vuln["high"],
+        "medium": severity_count_vuln["medium"],
+        "low": severity_count_vuln["low"],
+        "info": severity_count_vuln["info"],
+        "open": len(open_vulnerability_table),
+        "triaged": triaged_vulnerability_count,
     }
     strategic_points = _build_strategic_points(
         target=job.target_query,
@@ -1828,7 +2289,7 @@ def scan_report(
     technical_points = _build_technical_points(open_vulnerability_table, detailed_recommendations)
 
     segment = _infer_target_segment(job.target_query)
-    benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count)
+    benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     target_evolution = _build_target_evolution(db, job.target_query, scan_id)
 
     return ReportResponse(
@@ -1866,11 +2327,33 @@ def scan_report(
                     "findings_count": security_header_findings_count,
                     "assets_count": len(security_header_assets),
                     "assets": sorted(list(security_header_assets))[:30],
+                    "present_headers": [
+                        {"header": name, "count": count}
+                        for name, count in sorted(security_header_present.items(), key=lambda item: item[1], reverse=True)
+                    ][:20],
                     "missing_headers": [
                         {"header": name, "count": count}
                         for name, count in sorted(security_header_missing.items(), key=lambda item: item[1], reverse=True)
                     ][:20],
+                    "samples": security_header_samples[:5],
+                    "owasp_top10_alignment": [
+                        {
+                            "owasp": "A05 Security Misconfiguration",
+                            "coverage": "CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy e Permissions-Policy reduzem superfície de configuração insegura.",
+                        },
+                        {
+                            "owasp": "A03 Injection",
+                            "coverage": "CSP restringe execução de scripts e reduz impacto de XSS/injeções no browser.",
+                        },
+                    ],
                 },
+                "coverage_summary": {
+                    "vulnerability_findings": len(open_vulnerability_table),
+                    "recon_findings": len(open_recon_table),
+                    "osint_findings": len(open_osint_table),
+                },
+                "recon_findings": open_recon_table[:60],
+                "osint_findings": open_osint_table[:60],
                 "lifecycle": lifecycle,
                 "resolved_vulnerabilities": resolved_vulnerabilities,
                 "comparison": {
@@ -2202,16 +2685,23 @@ def dashboard_insights(
     open_issues = total - mitigated
 
     sev_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    sev_count_vuln = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     waf_vendors: dict[str, int] = {}
+    waf_assets: set[str] = set()
     security_header_missing: dict[str, int] = {}
+    security_header_present: dict[str, int] = {}
+    security_header_assets: set[str] = set()
     waf_findings_count = 0
     security_header_findings_count = 0
     header_pattern = re.compile(
-        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|x-xss-protection)",
         re.IGNORECASE,
     )
     fair_total = 0.0
     ale_total = 0.0
+    recon_findings_count = 0
+    osint_findings_count = 0
+    vulnerability_findings_count = 0
     age_env_samples: list[int] = []
     age_market_samples: list[int] = []
     age_exploit_samples: list[int] = []
@@ -2222,26 +2712,55 @@ def dashboard_insights(
         sev = str(f.severity or "low").lower()
         if sev in sev_count:
             sev_count[sev] += 1
-        key = (str(f.title or "Finding"), sev)
-        vuln_counter[key] = vuln_counter.get(key, 0) + 1
 
         details = f.details or {}
         nested_details = details.get("details") if isinstance(details.get("details"), dict) else {}
+        source_group = _source_group_from_details(details)
+        if source_group == "recon":
+            recon_findings_count += 1
+        elif source_group == "osint":
+            osint_findings_count += 1
+        elif source_group == "vuln" or sev in {"critical", "high", "medium"}:
+            vulnerability_findings_count += 1
+            if sev in sev_count_vuln:
+                sev_count_vuln[sev] += 1
+
+        key = (str(f.title or "Finding"), sev)
+        vuln_counter[key] = vuln_counter.get(key, 0) + 1
+
         tool = str(details.get("tool") or nested_details.get("tool") or "").strip().lower()
         evidence_text = str(details.get("evidence") or nested_details.get("evidence") or "")
         title_blob = f"{f.title or ''}\n{evidence_text}".lower()
         if tool == "wafw00f" or "waf" in title_blob:
             waf_findings_count += 1
+            target_query = str(f.scan_job.target_query or "").strip() if f.scan_job else ""
+            if target_query:
+                waf_assets.add(target_query)
             vendor_match = re.search(r"behind\s+(.+?)\s+waf", f"{f.title or ''} {evidence_text}", re.IGNORECASE)
             parsed_vendor = str(vendor_match.group(1) or "").strip() if vendor_match else ""
             vendor = _detect_waf_vendor(f"{parsed_vendor} {f.title or ''} {evidence_text}") or parsed_vendor or "WAF nao identificado"
             waf_vendors[vendor] = int(waf_vendors.get(vendor, 0)) + 1
 
-        if tool == "shcheck" or any(tok in title_blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
-            for header_name in header_pattern.findall(f"{f.title or ''}\n{evidence_text}"):
-                normalized_header = str(header_name or "").strip().lower()
-                security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
-            security_header_findings_count += 1
+        if tool in {"shcheck", "curl-headers"} or any(tok in title_blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
+            header_name = str(details.get("header_name") or nested_details.get("header_name") or "").strip().lower()
+            header_issue = str(details.get("header_issue") or nested_details.get("header_issue") or "").strip().lower()
+            matched_headers = [header_name] if header_name else [str(h or "").strip().lower() for h in header_pattern.findall(f"{f.title or ''}\n{evidence_text}")]
+            if matched_headers:
+                security_header_findings_count += 1
+                target_query = str(f.scan_job.target_query or "").strip() if f.scan_job else ""
+                if target_query:
+                    security_header_assets.add(target_query)
+            for normalized_header in matched_headers:
+                if not normalized_header:
+                    continue
+                if header_issue == "present":
+                    security_header_present[normalized_header] = int(security_header_present.get(normalized_header, 0)) + 1
+                elif header_issue == "missing":
+                    security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+                elif "ausente" in title_blob or "missing" in title_blob or "not set" in title_blob:
+                    security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+                else:
+                    security_header_present[normalized_header] = int(security_header_present.get(normalized_header, 0)) + 1
 
         age = compute_age_metrics(f.created_at, details)
         fair = compute_fair_metrics(f.severity, f.confidence_score, details, age)
@@ -2366,6 +2885,14 @@ def dashboard_insights(
 
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
+    risk_points = (
+        int(sev_count_vuln.get("critical", 0)) * 6
+        + int(sev_count_vuln.get("high", 0)) * 4
+        + int(sev_count_vuln.get("medium", 0)) * 2
+        + int(sev_count_vuln.get("low", 0))
+    )
+    base_framework_score = max(55, min(100, int(round(100.0 / (1.0 + (risk_points / 55.0))))))
+
     return {
         "stats": {
             "scans": len(jobs),
@@ -2383,12 +2910,15 @@ def dashboard_insights(
             "age_exploit_avg_days": _avg(age_exploit_samples),
             "waf_findings": waf_findings_count,
             "security_header_findings": security_header_findings_count,
+            "recon_findings": recon_findings_count,
+            "osint_findings": osint_findings_count,
+            "vulnerability_findings": vulnerability_findings_count,
         },
         "frameworks": {
-            "iso27001": {"score": max(0, 100 - open_issues)},
-            "nist": {"score": max(0, 100 - int(open_issues * 0.8))},
-            "cis_v8": {"score": max(0, 100 - int(open_issues * 0.7))},
-            "pci": {"score": max(0, 100 - int(open_issues * 0.9))},
+            "iso27001": {"score": base_framework_score},
+            "nist": {"score": max(55, min(100, base_framework_score + 3))},
+            "cis_v8": {"score": max(55, min(100, base_framework_score + 5))},
+            "pci": {"score": max(55, min(100, base_framework_score - 2))},
         },
         "recent_scans": recent_scans,
         "ongoing_scans": ongoing_scans,
@@ -2396,6 +2926,8 @@ def dashboard_insights(
         "top_technologies": top_technologies,
         "waf_summary": {
             "findings_count": waf_findings_count,
+            "assets_count": len(waf_assets),
+            "assets": sorted(list(waf_assets))[:30],
             "vendors": [
                 {"name": name, "count": count}
                 for name, count in sorted(waf_vendors.items(), key=lambda item: item[1], reverse=True)
@@ -2403,10 +2935,26 @@ def dashboard_insights(
         },
         "security_headers_summary": {
             "findings_count": security_header_findings_count,
+            "assets_count": len(security_header_assets),
+            "assets": sorted(list(security_header_assets))[:30],
+            "present_headers": [
+                {"header": name, "count": count}
+                for name, count in sorted(security_header_present.items(), key=lambda item: item[1], reverse=True)
+            ][:20],
             "missing_headers": [
                 {"header": name, "count": count}
                 for name, count in sorted(security_header_missing.items(), key=lambda item: item[1], reverse=True)
             ][:20],
+            "owasp_top10_alignment": [
+                {
+                    "owasp": "A05 Security Misconfiguration",
+                    "coverage": "CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy e Permissions-Policy reduzem superficie de configuracao insegura.",
+                },
+                {
+                    "owasp": "A03 Injection",
+                    "coverage": "CSP restringe execucao de scripts e reduz impacto de XSS/injecoes no browser.",
+                },
+            ],
         },
         "assets": assets,
         "activity": activity,

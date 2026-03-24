@@ -31,9 +31,6 @@ const RISK_DOT = {
   low: "bg-emerald-500",
 };
 
-const PAGINATION_BTN_BASE = "rounded-lg px-2 py-1 text-xs font-semibold transition-colors";
-const PAGINATION_BTN_ENABLED = "bg-[#1a365d] text-white hover:bg-[#2c5282]";
-const PAGINATION_BTN_DISABLED = "bg-slate-200 text-slate-500 cursor-not-allowed";
 
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
 
@@ -56,22 +53,15 @@ export default function DashboardPage() {
   const [topVulns, setTopVulns] = useState([]);
   const [assets, setAssets] = useState([]);
   const [activity, setActivity] = useState([]);
-  const [prioritizedActions, setPrioritizedActions] = useState([]);
-  const [prioritizedPage, setPrioritizedPage] = useState({ total: 0, limit: 10, offset: 0 });
-  const [wafSummary, setWafSummary] = useState({ findings_count: 0, vendors: [] });
-  const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, missing_headers: [] });
+  const [wafSummary, setWafSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], vendors: [] });
+  const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/dashboard/insights", {
-          params: {
-            prioritized_limit: prioritizedPage.limit,
-            prioritized_offset: prioritizedPage.offset,
-          },
-        });
+        const { data } = await client.get("/api/dashboard/insights");
         const dashboard = data || {};
 
         setStats({
@@ -79,6 +69,9 @@ export default function DashboardPage() {
           findings_total: dashboard.stats?.findings_total || 0,
           findings_open: dashboard.stats?.findings_open || 0,
           findings_triaged: dashboard.stats?.findings_triaged || 0,
+          vulnerability_findings: dashboard.stats?.vulnerability_findings || 0,
+          recon_findings: dashboard.stats?.recon_findings || 0,
+          osint_findings: dashboard.stats?.osint_findings || 0,
           critical: dashboard.stats?.critical || 0,
           high: dashboard.stats?.high || 0,
           medium: dashboard.stats?.medium || 0,
@@ -96,13 +89,8 @@ export default function DashboardPage() {
         setTopVulns(dashboard.top_vulns || []);
         setAssets(dashboard.assets || []);
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
-        setPrioritizedActions(dashboard.prioritized_actions || []);
-        setWafSummary(dashboard.waf_summary || { findings_count: 0, vendors: [] });
-        setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, missing_headers: [] });
-        setPrioritizedPage((prev) => ({
-          ...prev,
-          total: Number(dashboard.prioritized_actions_page?.total || 0),
-        }));
+        setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
+        setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -111,10 +99,7 @@ export default function DashboardPage() {
     };
 
     load();
-  }, [prioritizedPage.offset]);
-
-  const hasPrevPrioritized = prioritizedPage.offset > 0;
-  const hasNextPrioritized = prioritizedPage.offset + prioritizedPage.limit < prioritizedPage.total;
+  }, []);
 
   if (loading) {
     return (
@@ -149,11 +134,18 @@ export default function DashboardPage() {
         <StatCard label="Baixo" value={stats.low} color="text-emerald-400" />
       </div>
 
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
+        Tempo esperado de execução: Nuclei e Nmap podem levar em torno de 10 minutos por alvo, dependendo da superfície e conectividade.
+      </div>
+
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label="FAIR Medio" value={stats.fair_avg_score || 0} sub="score medio 0-100" color="text-cyan-300" />
         <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
         <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />
         <StatCard label="AGE Mercado/Exploit" value={`${stats.age_market_avg_days || 0}d / ${stats.age_exploit_avg_days || 0}d`} sub="mercado / exploit" />
+        <StatCard label="Cobertura Vuln" value={stats.vulnerability_findings || 0} sub="achados de vulnerabilidade" color="text-rose-300" />
+        <StatCard label="Cobertura Recon" value={stats.recon_findings || 0} sub="eventos de reconhecimento" color="text-emerald-300" />
+        <StatCard label="Cobertura OSINT" value={stats.osint_findings || 0} sub="eventos de inteligencia externa" color="text-sky-300" />
         <StatCard label="WAF Detectado" value={stats.waf_findings || 0} sub="achados no ciclo" color="text-blue-300" />
         <StatCard label="Headers (Issues)" value={stats.security_header_findings || 0} sub="lacunas de hardening" color="text-indigo-300" />
       </div>
@@ -161,7 +153,11 @@ export default function DashboardPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
           <h2 className="font-display text-lg font-semibold">WAF no Ambiente</h2>
-          <p className="mt-1 text-xs text-slate-400">Resumo de fornecedores WAF detectados.</p>
+          <p className="mt-1 text-xs text-slate-400">Resumo de fornecedores WAF detectados (quais e quantos).</p>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
+            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Achados: <strong>{wafSummary.findings_count || 0}</strong></div>
+            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Ativos: <strong>{wafSummary.assets_count || 0}</strong></div>
+          </div>
           <div className="mt-3 space-y-2">
             {(wafSummary.vendors || []).length === 0 && <p className="text-sm text-slate-500">Sem WAF identificado no momento.</p>}
             {(wafSummary.vendors || []).map((item, idx) => (
@@ -171,13 +167,33 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+          <p className="mt-3 text-xs text-slate-400">
+            {(wafSummary.vendors || []).length === 0
+              ? "Nenhum WAF identificado no ciclo atual."
+              : (wafSummary.vendors || []).map((item) => `${item.name || "WAF nao identificado"}: ${item.count || 0}`).join(" | ")}
+          </p>
         </section>
 
         <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
           <h2 className="font-display text-lg font-semibold">Headers de Segurança</h2>
-          <p className="mt-1 text-xs text-slate-400">Headers ausentes mais recorrentes.</p>
+          <p className="mt-1 text-xs text-slate-400">Headers presentes e ausentes mais recorrentes.</p>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
+            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Achados: <strong>{securityHeadersSummary.findings_count || 0}</strong></div>
+            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Ativos: <strong>{securityHeadersSummary.assets_count || 0}</strong></div>
+          </div>
           <div className="mt-3 space-y-2">
-            {(securityHeadersSummary.missing_headers || []).length === 0 && <p className="text-sm text-slate-500">Sem gaps de headers detectados.</p>}
+            {(securityHeadersSummary.present_headers || []).length === 0 && (securityHeadersSummary.missing_headers || []).length === 0 && (
+              <p className="text-sm text-slate-500">Sem gaps de headers detectados.</p>
+            )}
+            {(securityHeadersSummary.present_headers || []).map((item, idx) => (
+              <div key={`header-present-${idx}`} className="flex items-center justify-between rounded-xl border border-emerald-700/50 bg-emerald-900/10 px-3 py-2 text-sm">
+                <span className="font-mono">{item.header || "header"} (presente)</span>
+                <span className="rounded-md border border-emerald-700/60 px-2 py-0.5 text-xs">{item.count || 0}</span>
+              </div>
+            ))}
+            {(securityHeadersSummary.missing_headers || []).length === 0 && (securityHeadersSummary.present_headers || []).length > 0 && (
+              <p className="text-sm text-slate-500">Sem headers ausentes detectados no ciclo atual.</p>
+            )}
             {(securityHeadersSummary.missing_headers || []).map((item, idx) => (
               <div key={`header-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm">
                 <span className="font-mono">{item.header || "header"}</span>
@@ -185,6 +201,11 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+          <p className="mt-3 text-xs text-slate-400">
+            {(securityHeadersSummary.owasp_top10_alignment || []).length === 0
+              ? "A05 Security Misconfiguration: headers HTTP mitiga configuracao insegura. A03 Injection: CSP reduz impacto de XSS no browser."
+              : (securityHeadersSummary.owasp_top10_alignment || []).map((item) => `${item.owasp}: ${item.coverage}`).join(" | ")}
+          </p>
         </section>
       </div>
 
@@ -286,47 +307,27 @@ export default function DashboardPage() {
       </section>
 
       <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-        <h2 className="font-display text-lg font-semibold">Prioridade de Correcao (FAIR + AGE)</h2>
-        <p className="mt-1 text-xs text-slate-400">Ordem sugerida por impacto operacional e financeiro (ALE).</p>
-        <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
-          <p>Mostrando {prioritizedActions.length} de {prioritizedPage.total}</p>
-          <div className="flex gap-2">
-            <button
-              disabled={!hasPrevPrioritized}
-              onClick={() => setPrioritizedPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))}
-              className={`${PAGINATION_BTN_BASE} ${hasPrevPrioritized ? PAGINATION_BTN_ENABLED : PAGINATION_BTN_DISABLED}`}
-            >
-              Anterior
-            </button>
-            <button
-              disabled={!hasNextPrioritized}
-              onClick={() => setPrioritizedPage((p) => ({ ...p, offset: p.offset + p.limit }))}
-              className={`${PAGINATION_BTN_BASE} ${hasNextPrioritized ? PAGINATION_BTN_ENABLED : PAGINATION_BTN_DISABLED}`}
-            >
-              Proxima
-            </button>
+        <h2 className="font-display text-lg font-semibold">Risco Operacional</h2>
+        <p className="mt-1 text-xs text-slate-400">Visão resumida por severidade e volume de achados abertos.</p>
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
+            <p className="text-xs uppercase text-red-300">Crítico</p>
+            <p className="mt-1 text-2xl font-bold text-red-200">{stats.critical || 0}</p>
+          </div>
+          <div className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3 text-sm">
+            <p className="text-xs uppercase text-orange-300">Alto</p>
+            <p className="mt-1 text-2xl font-bold text-orange-200">{stats.high || 0}</p>
+          </div>
+          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
+            <p className="text-xs uppercase text-yellow-300">Médio</p>
+            <p className="mt-1 text-2xl font-bold text-yellow-200">{stats.medium || 0}</p>
+          </div>
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">
+            <p className="text-xs uppercase text-emerald-300">Baixo</p>
+            <p className="mt-1 text-2xl font-bold text-emerald-200">{stats.low || 0}</p>
           </div>
         </div>
-        <div className="mt-3 space-y-2">
-          {prioritizedActions.length === 0 && <p className="text-sm text-slate-500">Sem recomendacoes priorizadas no momento.</p>}
-          {prioritizedActions.map((item, index) => (
-            <div key={`${item.finding_id}-${index}`} className="rounded-xl border border-slate-800 bg-slate-800/40 p-3">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <p className="font-medium">#{index + 1} {item.title}</p>
-                <span className="rounded-md border border-amber-300 bg-amber-200 px-2 py-0.5 text-xs font-semibold text-amber-900">
-                  ALE USD {Number(item.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}
-                </span>
-              </div>
-              <div className="mt-1 grid gap-1 text-xs text-slate-300 md:grid-cols-3">
-                <p>severidade: <span className="uppercase text-white">{item.severity}</span></p>
-                <p>FAIR: <span className="text-white">{item.fair_score}</span></p>
-                <p>AGE env/merc/exploit: <span className="text-white">{item.age?.known_in_environment_days ?? 0}d / {item.age?.known_in_market_days ?? 0}d / {item.age?.exploit_published_days ?? 0}d</span></p>
-              </div>
-              <p className="mt-2 text-xs text-slate-300"><span className="font-semibold text-cyan-300">Operacional:</span> {item.operational_reason}</p>
-              <p className="mt-1 text-xs text-slate-300"><span className="font-semibold text-amber-300">Financeiro:</span> {item.financial_reason}</p>
-            </div>
-          ))}
-        </div>
+        <p className="mt-3 text-xs text-slate-400">Total aberto: {stats.findings_open || 0} | Triados: {stats.findings_triaged || 0}</p>
       </section>
     </main>
   );

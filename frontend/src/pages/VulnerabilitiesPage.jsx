@@ -124,6 +124,7 @@ export default function VulnerabilitiesPage() {
           </select>
           <select className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="open">Abertas</option>
+            <option value="closed">Fechadas</option>
             <option value="false_positive">Falsos positivos</option>
             <option value="all">Todas</option>
           </select>
@@ -225,11 +226,12 @@ export default function VulnerabilitiesPage() {
                 <p>risk: <span className="text-white">{item.risk_score ?? "-"}</span></p>
                 <p>confidence: <span className="text-white">{item.confidence_score ?? "-"}</span></p>
                 <p>cve: <span className="text-white">{item.cve || "-"}</span></p>
-                <p>status: <span className="text-white">{item.is_false_positive ? "false_positive" : "open"}</span></p>
+                <p>status: <span className="text-white">{item.lifecycle_status || (item.is_false_positive ? "false_positive" : "open")}</span></p>
                 <p>FAIR: <span className="text-blue-300">{item.fair?.fair_score ?? 0}</span></p>
                 <p>ALE: <span className="text-amber-300">USD {Number(item.fair?.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></p>
                 <p>AGE ambiente: <span className="text-white">{item.age?.known_in_environment_days ?? 0}d</span></p>
                 <p>AGE mercado/exploit: <span className="text-white">{item.age?.known_in_market_days ?? 0}/{item.age?.exploit_published_days ?? 0}d</span></p>
+                <p>tool: <span className="text-purple-300">{item.details?.tool || "-"}</span></p>
               </div>
             </div>
           ))}

@@ -15,7 +15,7 @@ SAFE_TOOL_REGISTRY = {
     "recon": ["subfinder", "amass", "assetfinder", "dnsx", "naabu", "nessus"],
     "crawler": ["httpx", "katana", "waymore", "uro", "gowitness"],
     "fuzzing": ["ffuf", "feroxbuster", "arjun", "dirb", "gobuster", "wfuzz"],
-    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck"],
+    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
     "code_js": ["linkfinder", "secretfinder", "trufflehog"],
     "api": ["kiterunner", "postman-to-k6"],
     "osint": ["theharvester", "h8mail", "metagoofil", "urlscan-cli", "subjack", "shodan-cli", "whatweb"],
@@ -25,17 +25,25 @@ TOOL_TIMEOUT_SECONDS = 90
 
 # Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
 TOOL_SPECIFIC_TIMEOUTS = {
-    "nmap": 180,
-    "nmap-vulscan": 300,
-    "vulscan": 300,
-    "nuclei": 300,
-    "katana": 180,
-    "ffuf": 120,
+    # Nuclei e Nmap podem levar ~10min por alvo em varreduras completas.
+    "nmap": 600,
+    "nmap-vulscan": 600,
+    "vulscan": 600,
+    "nuclei": 600,
+    "sqlmap": 300,
+    "zap": 300,
     "wapiti": 240,
     "nikto": 240,
-    "sqlmap": 300,
+    "katana": 180,
+    "dalfox": 180,
+    "commix": 180,
+    "sslscan": 180,
+    "wafw00f": 120,
+    "shcheck": 120,
+    "ffuf": 120,
     "subfinder": 120,
     "amass": 120,
+    "curl-headers": 25,
 }
 
 OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {
@@ -123,6 +131,8 @@ def _tool_binary(tool_name: str) -> str:
         "vulscan": "nmap",
         "linkfinder": "linkfinder.py",
         "secretfinder": "SecretFinder.py",
+        "shcheck": "shcheck.py",
+        "curl-headers": "curl",
         "wappalyzer": "wappalyzer",
         "sublist3r": "python3",
         "zap": "zaproxy",
@@ -141,28 +151,16 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     url = parts["url"]
     normalized = tool_name.strip().lower()
 
-    if normalized == "nmap":
-        # Top 100 portas + deteccao de versao/scripts default para baseline consistente.
-        return ["nmap", "-Pn", "-sV", "-sC", "--top-ports", "100", "-T4", host]
-    if normalized == "nmap-vulscan" or normalized == "vulscan":
-        # nmap com vulscan NSE script para vulnerability assessment
-        # Requer git clone --depth=1 https://github.com/scipag/vulscan.git /root/vulscan
-        vulscan_path = "/root/vulscan"
-        if not os.path.exists(vulscan_path):
-            vulscan_path = "/opt/vulscan"
-        if not os.path.exists(vulscan_path):
-            # Fallback: sem vulscan, mantem varredura agressiva para enriquecer evidencia.
-            return ["nmap", "-Pn", "-A", "--top-ports", "100", host]
-        # Com vulscan: versioning + vulnerability detection
-        script_path = os.path.join(vulscan_path, "vulscan.nse")
+    if normalized in {"nmap", "nmap-vulscan", "vulscan"}:
         return [
             "nmap",
-            "-Pn",
+            "-sS",
+            "-sV",
             "-A",
-            "--top-ports",
-            "100",
-            "-T4",
-            f"--script={script_path}",
+            "-p-",
+            "--script=vulscan",
+            "--script-args",
+            "vulscandb=cve.csv",
             host,
         ]
     if normalized == "naabu":
@@ -212,7 +210,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         if not templates_path:
             # Obrigatorio por requisito: sem templates customizados, nao executa nuclei.
             return ["__missing_nuclei_templates__"]
-        cmd = ["nuclei", "-u", url]
+        nuclei_target = parts["raw"] or host
+        cmd = ["nuclei", "--target", nuclei_target]
         # Obrigatorio: usa sempre os templates customizados instalados no worker.
         cmd.extend(["-t", templates_path])
         return cmd
@@ -221,9 +220,11 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "sslscan":
         return ["sslscan", "--no-colour", host]
     if normalized == "shcheck":
-        return ["shcheck", url]
+        return ["shcheck.py", url]
+    if normalized == "curl-headers":
+        return ["curl", "-I", "-sS", "--max-time", "20", url]
     if normalized == "wapiti":
-        # Modulos validos no wapiti 3.2.x (http_header e csp nao existem nessa versao)
+        # Sem restricao de modulos — deixa o wapiti rodar todos (CSP, MIME, HTTPS, etc.)
         return [
             "wapiti",
             "-u",
@@ -233,8 +234,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "domain",
             "--format",
             "txt",
-            "--module",
-            "sql,xss,permanentxss,ssrf,xxe,exec,file,crlf,redirect,csrf,ldap",
+            "-v",
+            "1",
         ]
     if normalized == "zap":
         return ["zaproxy", "-version"]
@@ -410,6 +411,9 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "open_ports": [],
         }
 
+    if normalized_tool == "curl-headers":
+        return _run_curl_headers_tool(target)
+
     cmd = _build_tool_command(tool_name, target)
     if cmd and cmd[0] == "__missing_nuclei_templates__":
         return {
@@ -467,6 +471,137 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
         "command": " ".join(cmd),
         "stdout": stdout[:stream_limit],
         "stderr": stderr[:stream_limit],
+    }
+
+
+def _http_status_code_from_headers(raw_headers: str) -> int:
+    for raw_line in (raw_headers or "").splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        match = re.match(r"^HTTP/\S+\s+(\d{3})\b", line, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return 0
+    return 0
+
+
+def _with_scheme(target: str, scheme: str) -> str:
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"{scheme}://{raw}")
+    host = str(parsed.hostname or "").strip()
+    if not host:
+        return ""
+    port = f":{parsed.port}" if parsed.port else ""
+    path = str(parsed.path or "").strip() or "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{scheme}://{host}{port}{path}{query}"
+
+
+def _run_curl_headers_tool(target: str) -> dict[str, Any]:
+    # Regra operacional: sempre usar schema explicito e, se HTTP responder 301/302,
+    # reexecutar automaticamente com HTTPS para capturar headers finais.
+    raw = str(target or "").strip()
+    if not raw:
+        return {
+            "status": "error",
+            "output": "Target vazio para curl-headers.",
+            "open_ports": [],
+            "return_code": 2,
+            "command": "curl -I <target>",
+            "stdout": "",
+            "stderr": "target vazio",
+        }
+
+    if "://" in raw:
+        first_url = raw
+    else:
+        first_url = _with_scheme(raw, "http")
+
+    if not first_url:
+        return {
+            "status": "error",
+            "output": "Target invalido para curl-headers.",
+            "open_ports": [],
+            "return_code": 2,
+            "command": "curl -I <target>",
+            "stdout": "",
+            "stderr": "target invalido",
+        }
+
+    first_cmd = ["curl", "-I", "-sS", "--max-time", "20", first_url]
+    timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get("curl-headers", 25)
+
+    try:
+        first = subprocess.run(first_cmd, check=False, capture_output=True, text=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "output": f"Timeout ao executar curl-headers em {timeout_seconds}s.",
+            "open_ports": [],
+            "return_code": 124,
+            "command": " ".join(first_cmd),
+            "stdout": "",
+            "stderr": "timeout",
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "output": f"Falha ao executar curl-headers: {exc}",
+            "open_ports": [],
+            "return_code": 1,
+            "command": " ".join(first_cmd),
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+    first_stdout = str(first.stdout or "").strip()
+    first_stderr = str(first.stderr or "").strip()
+    first_code = _http_status_code_from_headers(first_stdout)
+
+    combined_stdout = f"# URL: {first_url}\n{first_stdout}".strip()
+    combined_stderr = first_stderr
+    command_str = " ".join(first_cmd)
+    return_code = first.returncode
+
+    is_http = first_url.lower().startswith("http://")
+    should_retry_https = is_http and first_code in {301, 302}
+
+    if should_retry_https:
+        https_url = _with_scheme(first_url, "https")
+        if https_url:
+            second_cmd = ["curl", "-I", "-sS", "--max-time", "20", https_url]
+            try:
+                second = subprocess.run(second_cmd, check=False, capture_output=True, text=True, timeout=timeout_seconds)
+                second_stdout = str(second.stdout or "").strip()
+                second_stderr = str(second.stderr or "").strip()
+                combined_stdout = (
+                    f"# URL: {first_url}\n{first_stdout}\n\n"
+                    f"# URL: {https_url}\n{second_stdout}"
+                ).strip()
+                combined_stderr = "\n".join(part for part in [first_stderr, second_stderr] if part)
+                command_str = f"{' '.join(first_cmd)} ; {' '.join(second_cmd)}"
+                return_code = 0 if second.returncode == 0 else second.returncode
+            except Exception as exc:
+                combined_stderr = "\n".join(part for part in [first_stderr, f"https_retry_error={exc}"] if part)
+
+    output = "\n".join(part for part in [combined_stdout, combined_stderr] if part).strip()
+    if not output:
+        output = "curl-headers executado sem output textual."
+
+    status = "executed" if return_code == 0 else "error"
+    return {
+        "status": status,
+        "output": output[:2500],
+        "open_ports": [],
+        "return_code": return_code,
+        "command": command_str,
+        "stdout": combined_stdout[:1500],
+        "stderr": combined_stderr[:1500],
     }
 
 

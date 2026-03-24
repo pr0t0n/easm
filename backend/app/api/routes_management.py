@@ -757,7 +757,7 @@ def get_runtime_flags(db: Session = Depends(get_db), current_user: User = Depend
     verbose_mode = _get_setting(db, current_user.id, "verbose_mode", "false") == "true"
     scan_retry_enabled = _get_setting(db, current_user.id, "scan_retry_enabled", "true") == "true"
     scan_retry_max_attempts = _setting_int(db, current_user.id, "scan_retry_max_attempts", 3, 1, 10)
-    scan_retry_delay_seconds = _setting_int(db, current_user.id, "scan_retry_delay_seconds", 45, 5, 3600)
+    scan_retry_delay_seconds = _setting_int(db, current_user.id, "scan_retry_delay_seconds", 10, 5, 3600)
     worker_health_stale_after_seconds = _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600)
     worker_orphan_cutoff_minutes = _setting_int(db, current_user.id, "worker_orphan_cutoff_minutes", 8, 1, 180)
     worker_orphan_requeue_limit = _setting_int(db, current_user.id, "worker_orphan_requeue_limit", 100, 1, 2000)
@@ -836,7 +836,7 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
             "verbose_mode": _get_setting(db, current_user.id, "verbose_mode", "false") == "true",
             "scan_retry_enabled": _get_setting(db, current_user.id, "scan_retry_enabled", "true") == "true",
             "scan_retry_max_attempts": _setting_int(db, current_user.id, "scan_retry_max_attempts", 3, 1, 10),
-            "scan_retry_delay_seconds": _setting_int(db, current_user.id, "scan_retry_delay_seconds", 45, 5, 3600),
+            "scan_retry_delay_seconds": _setting_int(db, current_user.id, "scan_retry_delay_seconds", 10, 5, 3600),
             "worker_health_stale_after_seconds": _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600),
             "worker_orphan_cutoff_minutes": _setting_int(db, current_user.id, "worker_orphan_cutoff_minutes", 8, 1, 180),
             "worker_orphan_requeue_limit": _setting_int(db, current_user.id, "worker_orphan_requeue_limit", 100, 1, 2000),
@@ -1217,6 +1217,44 @@ def _active_scan_ids() -> tuple[dict[str, set[int]], bool]:
     return result, True
 
 
+def _phase_from_task_name(task_name: str | None) -> str:
+    value = str(task_name or "").strip().lower()
+    if ".reconhecimento." in value or "recon" in value:
+        return "reconhecimento"
+    if ".analise_vulnerabilidade." in value or "vulnerab" in value or "vuln" in value:
+        return "analise_vulnerabilidade"
+    if ".osint." in value or "osint" in value:
+        return "osint"
+    return "desconhecido"
+
+
+def _phase_from_scan(scan: ScanJob | None) -> str:
+    if not scan:
+        return "desconhecido"
+
+    state = scan.state_data or {}
+    node_history = [str(n or "").strip().lower() for n in (state.get("node_history") or []) if str(n or "").strip()]
+    current_step = str(scan.current_step or "").strip().lower()
+
+    if node_history:
+        last_node = node_history[-1]
+        if last_node in {"recon", "scan", "fingerprint", "crawler"}:
+            return "reconhecimento"
+        if last_node in {"vuln", "fuzzing", "api", "code_js"}:
+            return "analise_vulnerabilidade"
+        if last_node == "osint":
+            return "osint"
+
+    if any(token in current_step for token in ["recon", "subdomain", "dns", "asset", "scan de superficie", "amass", "subfinder", "naabu", "nmap"]):
+        return "reconhecimento"
+    if any(token in current_step for token in ["vulnerab", "vuln", "nikto", "nuclei", "sqlmap", "wapiti", "waf", "sslscan", "dalfox", "commix", "tplmap"]):
+        return "analise_vulnerabilidade"
+    if any(token in current_step for token in ["osint", "theharvester", "h8mail", "metagoofil", "urlscan", "shodan"]):
+        return "osint"
+
+    return "desconhecido"
+
+
 @router.get("/worker-manager/health")
 def worker_manager_health(
     stale_after_seconds: int | None = Query(default=None, ge=10, le=3600),
@@ -1229,12 +1267,56 @@ def worker_manager_health(
     now = datetime.utcnow()
     cutoff = now - timedelta(seconds=stale_after_seconds)
 
+    active_scan_ids, inspect_ok = _active_scan_ids()
+    active_unit = active_scan_ids.get("unit", set())
+    active_scheduled = active_scan_ids.get("scheduled", set())
+
+    active_scan_union = set(active_unit) | set(active_scheduled)
+    active_scan_map: dict[int, ScanJob] = {}
+    if active_scan_union:
+        scan_rows = db.query(ScanJob).filter(ScanJob.id.in_(list(active_scan_union))).all()
+        active_scan_map = {row.id: row for row in scan_rows}
+
     rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).all()
+
+    heartbeat_scan_ids = {int(row.current_scan_id) for row in rows if row.current_scan_id is not None}
+    linked_scan_map: dict[int, ScanJob] = {}
+    if heartbeat_scan_ids:
+        linked_rows = db.query(ScanJob).filter(ScanJob.id.in_(list(heartbeat_scan_ids))).all()
+        linked_scan_map = {row.id: row for row in linked_rows}
+
     workers = []
     online_count = 0
+    phase_counts = {"reconhecimento": 0, "analise_vulnerabilidade": 0, "osint": 0, "desconhecido": 0}
+
     for row in rows:
-        online = bool(row.last_seen_at and row.last_seen_at >= cutoff)
+        heartbeat_online = bool(row.last_seen_at and row.last_seen_at >= cutoff)
+
+        running_scan = None
+        if row.current_scan_id:
+            running_scan = active_scan_map.get(row.current_scan_id) or linked_scan_map.get(row.current_scan_id)
+
+        scan_indicates_alive = False
+        if running_scan and str(row.status or "").lower() in {"busy", "alive", "running"}:
+            scan_updated_at = running_scan.updated_at or running_scan.created_at
+            if scan_updated_at and scan_updated_at >= (now - timedelta(seconds=max(120, stale_after_seconds * 5))):
+                if str(running_scan.status or "").lower() in {"queued", "running", "retrying"}:
+                    scan_indicates_alive = True
+
+        online = bool(heartbeat_online or scan_indicates_alive)
         online_count += 1 if online else 0
+
+        task_phase = _phase_from_task_name(row.last_task_name)
+        scan_phase = _phase_from_scan(running_scan)
+        execution_phase = scan_phase if scan_phase != "desconhecido" else task_phase
+        if execution_phase not in phase_counts:
+            execution_phase = "desconhecido"
+        phase_counts[execution_phase] += 1
+
+        last_seen_lag_seconds = None
+        if row.last_seen_at:
+            last_seen_lag_seconds = max(0, int((now - row.last_seen_at).total_seconds()))
+
         workers.append(
             {
                 "worker_name": row.worker_name,
@@ -1244,6 +1326,20 @@ def worker_manager_health(
                 "last_task_name": row.last_task_name,
                 "last_seen_at": row.last_seen_at,
                 "online": online,
+                "online_reason": "heartbeat" if heartbeat_online else ("active_scan" if scan_indicates_alive else "stale"),
+                "execution_phase": execution_phase,
+                "execution_phase_from_task": task_phase,
+                "execution_phase_from_scan": scan_phase,
+                "last_seen_lag_seconds": last_seen_lag_seconds,
+                "active_scan": {
+                    "id": running_scan.id,
+                    "target_query": running_scan.target_query,
+                    "mode": running_scan.mode,
+                    "status": running_scan.status,
+                    "current_step": running_scan.current_step,
+                }
+                if running_scan
+                else None,
             }
         )
 
@@ -1253,6 +1349,8 @@ def worker_manager_health(
             "online_workers": online_count,
             "offline_workers": max(0, len(rows) - online_count),
             "stale_after_seconds": stale_after_seconds,
+            "inspect_ok": inspect_ok,
+            "phase_counts": phase_counts,
         },
         "workers": workers,
     }
