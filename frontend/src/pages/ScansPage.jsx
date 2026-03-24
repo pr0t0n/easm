@@ -259,7 +259,7 @@ export default function ScansPage() {
 
   const resetOperationalScans = async () => {
     const confirmed = window.confirm(
-      "Deseja executar o reset operacional? Isso vai interromper scans em andamento, remover scans, findings e logs, e reiniciar a contagem do ambiente.",
+      "Deseja executar o reset operacional? Isso vai interromper/remover execucoes ja ocorridas (running/completed/failed/stopped), mantendo scans em fila e schedules futuros.",
     );
     if (!confirmed) return;
 
@@ -272,8 +272,9 @@ export default function ScansPage() {
       setSelectedScans(new Set());
       await loadScans();
       const deleted = data?.deleted || {};
+      const preserved = data?.preserved || {};
       setAuthStatus(
-        `Reset operacional concluido. Scans removidos: ${deleted.scan_jobs || 0}, findings: ${deleted.findings || 0}, logs: ${deleted.scan_logs || 0}.`,
+        `Reset operacional concluido. Removidos - scans: ${deleted.scan_jobs || 0}, findings: ${deleted.findings || 0}, logs: ${deleted.scan_logs || 0}. Preservados - fila: ${preserved.queued_scans || 0}, schedules ativos: ${preserved.enabled_schedules || 0}.`,
       );
     } catch (err) {
       setAuthStatus(err?.response?.data?.detail || "Falha ao executar reset operacional.");

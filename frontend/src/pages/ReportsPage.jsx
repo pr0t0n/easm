@@ -1053,6 +1053,9 @@ const REPORT_STYLES = `
   }
   .sidebar {
     display: none !important;
+    position: static !important;
+    width: 0 !important;
+    overflow: hidden !important;
   }
   .main-container {
     display: block !important;
@@ -1171,32 +1174,49 @@ function frameworkStatus(score) {
 }
 
 function benchmarkAssessmentIndicator(benchmark = {}) {
-  const target = Number(benchmark?.target_external_exposure_index);
-  const segment = Number(benchmark?.segment_external_exposure_index);
+  const targetCri = Number(
+    benchmark?.target_cri_score ?? benchmark?.calculation?.final_score,
+  );
+  const segmentCri = Number(benchmark?.segment_cri_score);
+  const targetExposure = Number(benchmark?.target_external_exposure_index);
+  const segmentExposure = Number(benchmark?.segment_external_exposure_index);
   const assessment = String(benchmark?.assessment || "").toLowerCase();
 
-  if (Number.isFinite(target) && Number.isFinite(segment)) {
-    const diff = target - segment;
+  // Prioriza comparação por CRI quando disponível.
+  if (Number.isFinite(targetCri) && Number.isFinite(segmentCri)) {
+    const diffCri = targetCri - segmentCri;
+    if (Math.abs(diffCri) <= 3) {
+      return { icon: "→", label: "Similar ao benchmark", color: "#718096" };
+    }
+    if (diffCri > 0) {
+      return { icon: "↑", label: "Melhor que o benchmark", color: "#2f855a" };
+    }
+    return { icon: "↓", label: "Pior que o benchmark", color: "#c53030" };
+  }
+
+  // Compatibilidade com payload antigo baseado em exposure.
+  if (Number.isFinite(targetExposure) && Number.isFinite(segmentExposure)) {
+    const diff = targetExposure - segmentExposure;
     if (Math.abs(diff) <= 3) {
-      return { icon: "=", label: "similar_ao_benchmark", color: "#718096" };
+      return { icon: "→", label: "Similar ao benchmark", color: "#718096" };
     }
     if (diff < 0) {
-      return { icon: "✅", label: "melhor_que_o_benchmark", color: "#2f855a" };
+      return { icon: "↑", label: "Melhor que o benchmark", color: "#2f855a" };
     }
-    return { icon: "👎", label: "acima_do_benchmark", color: "#c53030" };
+    return { icon: "↓", label: "Pior que o benchmark", color: "#c53030" };
   }
 
   if (assessment.includes("igual") || assessment.includes("similar") || assessment.includes("parecido")) {
-    return { icon: "=", label: "similar_ao_benchmark", color: "#718096" };
+    return { icon: "→", label: "Similar ao benchmark", color: "#718096" };
   }
   if (assessment.includes("dentro") || assessment.includes("abaixo") || assessment.includes("melhor")) {
-    return { icon: "✅", label: assessment || "dentro_do_benchmark", color: "#2f855a" };
+    return { icon: "↑", label: "Melhor que o benchmark", color: "#2f855a" };
   }
   if (assessment.includes("acima") || assessment.includes("pior") || assessment.includes("negativo")) {
-    return { icon: "👎", label: assessment || "acima_do_benchmark", color: "#c53030" };
+    return { icon: "↓", label: "Pior que o benchmark", color: "#c53030" };
   }
 
-  return { icon: "=", label: assessment || "sem_avaliacao", color: "#718096" };
+  return { icon: "→", label: "Sem avaliação", color: "#718096" };
 }
 
 function metricTrendText(severity, lifecycle) {
@@ -1354,9 +1374,60 @@ export default function ReportsPage() {
     const coverageSummary = v2.coverage_summary || { vulnerability_findings: 0, recon_findings: 0, osint_findings: 0 };
     const reconFindings = v2.recon_findings || [];
     const osintFindings = v2.osint_findings || [];
+    const toolExecutionSummary = v2.tool_execution_summary || { requested_tools: [], tools: [], summary: { requested_count: 0, attempted_count: 0, executed_count: 0 } };
     const wafSummary = v2.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] };
     const assetsSummary = v2.assets_summary || { domain: '', subdomains: [], subdomain_count: 0, total_assets: 0 };
     const findingsBySubdomain = v2.findings_by_subdomain || {};
+    const osintNoEvidenceText = "Sem IOC/evidência específica retornada pelas ferramentas neste alvo (apenas execução registrada).";
+
+    const hasOsintEvidence = (item) => {
+      const evidence = String(item?.evidence || "").trim();
+      const payload = String(item?.payload || "").trim();
+      return (evidence && evidence !== "-") || (payload && payload !== "-");
+    };
+
+    const domainForOsint = String(assetsSummary?.domain || v2?.domain || selectedScan?.target_query || "-").trim() || "-";
+    const osintWithEvidence = osintFindings.filter(hasOsintEvidence);
+    const osintWithoutEvidence = osintFindings.filter((item) => !hasOsintEvidence(item));
+
+    let osintDisplayRows = [];
+    if (osintFindings.length === 0) {
+      osintDisplayRows = [];
+    } else if (osintWithEvidence.length === 0) {
+      // Sem IOC técnico: mostrar só o domínio principal, sem repetir subdomínios.
+      const mergedTools = Array.from(
+        new Set(
+          osintFindings.flatMap((item) => {
+            const tools = Array.isArray(item?.osint_tools) ? item.osint_tools : [];
+            if (tools.length > 0) return tools.map((t) => String(t || "").trim()).filter(Boolean);
+            const tool = String(item?.tool || "").trim();
+            return tool ? [tool] : [];
+          }),
+        ),
+      );
+
+      osintDisplayRows = [
+        {
+          name: `OSINT executado em ${domainForOsint}`,
+          severity: "info",
+          target: domainForOsint,
+          osint_tools: mergedTools.length > 0 ? mergedTools : ["osint"],
+          evidence: osintNoEvidenceText,
+        },
+      ];
+    } else {
+      // Mantém apenas linhas com IOC/evidência e adiciona uma linha-resumo para execuções sem IOC.
+      osintDisplayRows = [...osintWithEvidence];
+      if (osintWithoutEvidence.length > 0) {
+        osintDisplayRows.push({
+          name: `OSINT executado sem IOC específico em ${osintWithoutEvidence.length} ativo(s)` ,
+          severity: "info",
+          target: domainForOsint,
+          osint_tools: ["osint"],
+          evidence: osintNoEvidenceText,
+        });
+      }
+    }
     const securityHeadersSummary = v2.security_headers_summary || {
       findings_count: 0,
       assets_count: 0,
@@ -1402,6 +1473,8 @@ export default function ReportsPage() {
       coverageSummary,
       reconFindings,
       osintFindings,
+      osintDisplayRows,
+      toolExecutionSummary,
       wafSummary,
       assetsSummary,
       findingsBySubdomain,
@@ -1515,7 +1588,7 @@ export default function ReportsPage() {
           </div>
 
           <div className="main-container">
-            <aside className="sidebar no-print">
+            {!isPrinting && <aside className="sidebar no-print">
               <div className="sidebar-logo">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="white">
                   <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
@@ -1535,7 +1608,7 @@ export default function ReportsPage() {
                 <a href="#headers">Headers de Segurança</a>
                 <a href="#cobertura">Cobertura Recon/OSINT</a>
               </nav>
-            </aside>
+            </aside>}
 
             <main className="main-content">
 
@@ -1751,6 +1824,61 @@ export default function ReportsPage() {
                     </tbody>
                   </table>
                 </div>
+
+                <div className="chart-container no-break" style={{ marginTop: 14 }}>
+                  <div className="chart-header">
+                    <h3 className="chart-title">Evidência de Execução Técnica (Vulnerabilidade)</h3>
+                  </div>
+                  <div className="metrics-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", marginBottom: 14 }}>
+                    <div className="metric-card info no-break">
+                      <div className="metric-value">{Number(data.toolExecutionSummary?.summary?.requested_count || 0)}</div>
+                      <div className="metric-label">Ferramentas previstas</div>
+                    </div>
+                    <div className="metric-card medium no-break">
+                      <div className="metric-value">{Number(data.toolExecutionSummary?.summary?.attempted_count || 0)}</div>
+                      <div className="metric-label">Ferramentas tentadas</div>
+                    </div>
+                    <div className="metric-card low no-break">
+                      <div className="metric-value">{Number(data.toolExecutionSummary?.summary?.executed_count || 0)}</div>
+                      <div className="metric-label">Ferramentas executadas</div>
+                    </div>
+                  </div>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Ferramenta</th>
+                          <th>Targets</th>
+                          <th>Status</th>
+                          <th>Último RC</th>
+                          <th>Comando (amostra)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(data.toolExecutionSummary?.tools || []).length === 0 ? (
+                          <tr>
+                            <td colSpan={5}>Sem telemetria de execução de ferramenta para este scan.</td>
+                          </tr>
+                        ) : (
+                          (data.toolExecutionSummary.tools || []).map((row, idx) => {
+                            const status = Number(row.executed_events || 0) > 0
+                              ? "executada"
+                              : (Number(row.attempted_events || 0) > 0 || Number(row.targets_count || 0) > 0 ? "tentada" : "não evidenciada");
+                            return (
+                              <tr key={`tool-exec-${idx}`}>
+                                <td style={{ fontFamily: "monospace", fontWeight: 600 }}>{row.tool || "-"}</td>
+                                <td>{row.targets_count || 0}</td>
+                                <td>{status}</td>
+                                <td>{row.last_return_code ?? "-"}</td>
+                                <td style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11, lineHeight: 1.3 }}>{row.sample_command || "-"}</td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </section>
 
               <section id="waf" className="section page-break">
@@ -1901,7 +2029,7 @@ export default function ReportsPage() {
                           <td colSpan={2}>Sem amostras brutas de headers no scan atual.</td>
                         </tr>
                       ) : (
-                        (data.securityHeadersSummary.samples || []).slice(0, 3).map((sample, idx) => (
+                        (data.securityHeadersSummary.samples || []).map((sample, idx) => (
                           <tr key={`header-sample-${idx}`}>
                             <td>{sample.target || "-"}</td>
                             <td style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11, lineHeight: 1.35 }}>{sample.raw || "-"}</td>
@@ -1967,22 +2095,36 @@ export default function ReportsPage() {
                   <table>
                     <thead>
                       <tr>
-                        <th>OSINT (amostra)</th>
+                        <th>OSINT (achado)</th>
                         <th>Severidade</th>
                         <th>Ativo</th>
+                        <th>Ferramenta(s)</th>
+                        <th>Detalhe técnico</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(data.osintFindings || []).length === 0 ? (
+                      {(data.osintDisplayRows || []).length === 0 ? (
                         <tr>
-                          <td colSpan={3}>Sem eventos de OSINT no dataset atual.</td>
+                          <td colSpan={5}>Sem eventos de OSINT no dataset atual.</td>
                         </tr>
                       ) : (
-                        (data.osintFindings || []).slice(0, 15).map((item, idx) => (
+                        (data.osintDisplayRows || []).map((item, idx) => (
                           <tr key={`osint-${idx}`}>
                             <td>{item.name || item.problem || "Evento OSINT"}</td>
                             <td>{item.severity || "info"}</td>
                             <td>{item.target || item.asset || "-"}</td>
+                            <td style={{ fontFamily: "monospace", fontSize: 11 }}>
+                              {Array.isArray(item.osint_tools) && item.osint_tools.length > 0
+                                ? item.osint_tools.join(", ")
+                                : (item.tool || "-")}
+                            </td>
+                            <td style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 11, lineHeight: 1.35 }}>
+                              {item.evidence && item.evidence !== "-"
+                                ? item.evidence
+                                : (item.payload && item.payload !== "-"
+                                    ? item.payload
+                                    : osintNoEvidenceText)}
+                            </td>
                           </tr>
                         ))
                       )}
@@ -2302,17 +2444,29 @@ export default function ReportsPage() {
                 <div className="chart-container no-break">
                   <div className="chart-header"><h3 className="chart-title">Benchmark Setorial</h3></div>
                   {(() => {
+                    const targetCriDisplay = Number.isFinite(Number(data.benchmark?.target_cri_score))
+                      ? Number(data.benchmark?.target_cri_score)
+                      : Number.isFinite(Number(data.benchmark?.calculation?.final_score))
+                        ? Number(data.benchmark?.calculation?.final_score)
+                        : Number.isFinite(Number(data.benchmark?.target_external_exposure_index))
+                          ? Math.max(0, Math.min(100, 100 - Number(data.benchmark?.target_external_exposure_index)))
+                          : null;
+                    const segmentCriDisplay = Number.isFinite(Number(data.benchmark?.segment_cri_score))
+                      ? Number(data.benchmark?.segment_cri_score)
+                      : Number.isFinite(Number(data.benchmark?.segment_external_exposure_index))
+                        ? Math.max(0, Math.min(100, 100 - Number(data.benchmark?.segment_external_exposure_index)))
+                        : null;
                     const indicator = benchmarkAssessmentIndicator(data.benchmark);
                     return (
+                  <>
                   <div className="table-container">
                     <table>
                       <thead>
                         <tr>
                           <th>Segmento</th>
                           <th>Fonte</th>
-                          <th>Exposure Alvo</th>
-                          <th>Exposure Segmento</th>
-                          <th>SLA Patch (dias)</th>
+                          <th>CRI Alvo</th>
+                          <th>CRI Segmento</th>
                           <th>Avaliação</th>
                         </tr>
                       </thead>
@@ -2320,17 +2474,17 @@ export default function ReportsPage() {
                         <tr>
                           <td>{data.benchmark.segment || "-"}</td>
                           <td>{data.benchmark.source || "-"}</td>
-                          <td>{data.benchmark.target_external_exposure_index ?? "-"}</td>
-                          <td>{data.benchmark.segment_external_exposure_index ?? "-"}</td>
-                          <td>{data.benchmark.segment_patch_sla_days ?? "-"}</td>
+                          <td>{targetCriDisplay ?? "-"}</td>
+                          <td>{segmentCriDisplay ?? "-"}</td>
                           <td>
-                            <span style={{ color: indicator.color, fontWeight: 700 }}>{indicator.icon}</span>
+                            <span style={{ color: indicator.color, fontWeight: 900, fontSize: 32, lineHeight: 1 }}>{indicator.icon}</span>
                             <span style={{ marginLeft: 8 }}>{indicator.label}</span>
                           </td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
+                  </>
                     );
                   })()}
                 </div>

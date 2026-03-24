@@ -1546,11 +1546,12 @@ def vuln_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
     vuln_tools = _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
-    targets = _targets_for_deep_scan(state, limit=8)
+    primary_targets = _targets_for_deep_scan(state, limit=8)
+    all_targets = _targets_for_deep_scan(state, limit=MAX_DISCOVERED_ASSETS + 1)
     all_findings: list[dict[str, Any]] = []
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"VulnNode: targets={len(targets)}")
-    for scan_target in targets:
+    if len(primary_targets) > 1:
+        state["logs_terminais"].append(f"VulnNode: targets={len(primary_targets)}")
+    for scan_target in primary_targets:
         vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "VulnNode")
         if vuln_findings:
             all_findings.extend(vuln_findings)
@@ -1568,6 +1569,23 @@ def vuln_node(state: AgentState) -> AgentState:
                 },
             }
         )
+
+    # Executa coleta de headers em todos os subdominios descobertos,
+    # mesmo quando a varredura completa de vulnerabilidades fica limitada.
+    extra_header_targets = [t for t in all_targets if t not in primary_targets]
+    if "curl-headers" in vuln_tools and extra_header_targets:
+        state["logs_terminais"].append(f"VulnNode: curl-headers extra_targets={len(extra_header_targets)}")
+        for scan_target in extra_header_targets:
+            header_findings, _, _, _ = _run_tools_and_collect(
+                state,
+                ["curl-headers"],
+                scan_target,
+                current,
+                "VulnNode:Headers",
+            )
+            if header_findings:
+                all_findings.extend(header_findings)
+
     state["logs_terminais"].append(f"VulnNode: {current}")
 
     if all_findings:

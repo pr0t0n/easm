@@ -55,6 +55,7 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState([]);
   const [wafSummary, setWafSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], vendors: [] });
   const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
+  const [vulnToolExecution, setVulnToolExecution] = useState({ scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
 
   useEffect(() => {
     const load = async () => {
@@ -91,6 +92,7 @@ export default function DashboardPage() {
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
+        setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -208,6 +210,46 @@ export default function DashboardPage() {
           </p>
         </section>
       </div>
+
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+        <h2 className="font-display text-lg font-semibold">Execução de Ferramentas (Vulnerabilidade)</h2>
+        <p className="mt-1 text-xs text-slate-400">
+          Evidência operacional do último scan processado
+          {vulnToolExecution?.scan_id ? ` (#${vulnToolExecution.scan_id} - ${vulnToolExecution.scan_target || "-"}, status ${vulnToolExecution.scan_status || "-"})` : ""}.
+        </p>
+        <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-300">
+          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Previstas: <strong>{vulnToolExecution?.summary?.requested_count || 0}</strong></div>
+          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Tentadas: <strong>{vulnToolExecution?.summary?.attempted_count || 0}</strong></div>
+          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Executadas: <strong>{vulnToolExecution?.summary?.executed_count || 0}</strong></div>
+        </div>
+        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-800">
+          <table className="min-w-full text-left text-sm">
+            <thead className="bg-slate-800/70 text-slate-300">
+              <tr>
+                <th className="px-3 py-2">Ferramenta</th>
+                <th className="px-3 py-2">Targets</th>
+                <th className="px-3 py-2">Executada</th>
+                <th className="px-3 py-2">RC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(vulnToolExecution?.tools || []).length === 0 && (
+                <tr>
+                  <td className="px-3 py-3 text-slate-500" colSpan={4}>Sem telemetria de execução para o último scan.</td>
+                </tr>
+              )}
+              {(vulnToolExecution?.tools || []).map((row, idx) => (
+                <tr key={`vuln-tool-${idx}`} className="border-t border-slate-800 text-slate-200">
+                  <td className="px-3 py-2 font-mono">{row.tool || "-"}</td>
+                  <td className="px-3 py-2">{row.targets_count || 0}</td>
+                  <td className="px-3 py-2">{(row.executed_events || 0) > 0 ? "sim" : "nao"}</td>
+                  <td className="px-3 py-2">{row.last_return_code ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <div className="grid gap-4 md:grid-cols-2">
         <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">

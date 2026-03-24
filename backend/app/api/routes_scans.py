@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, User
+from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User
 from app.models.models import WorkerHeartbeat
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
 from app.services.audit_service import log_audit
@@ -21,6 +21,7 @@ from app.services.policy_service import is_target_allowed
 from app.services.risk_service import build_priority_reason, compute_age_metrics, compute_fair_metrics
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
+from app.workers.worker_groups import get_worker_groups
 
 
 router = APIRouter(prefix="/api", tags=["scans"])
@@ -989,6 +990,10 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 7,
             "expected_external_exposure_index": 32,
+            "expected_financial_loss_exposure_index": 58,
+            "expected_data_sensitivity_risk_index": 70,
+            "expected_reliability_safety_impact_index": 63,
+            "expected_cyber_readiness_index": 68,
             "expected_third_party_risk_index": 44,
             "expected_identity_attack_pressure": 68,
         },
@@ -996,6 +1001,10 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 10,
             "expected_external_exposure_index": 39,
+            "expected_financial_loss_exposure_index": 52,
+            "expected_data_sensitivity_risk_index": 76,
+            "expected_reliability_safety_impact_index": 72,
+            "expected_cyber_readiness_index": 59,
             "expected_third_party_risk_index": 48,
             "expected_identity_attack_pressure": 57,
         },
@@ -1003,6 +1012,10 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 12,
             "expected_external_exposure_index": 41,
+            "expected_financial_loss_exposure_index": 46,
+            "expected_data_sensitivity_risk_index": 68,
+            "expected_reliability_safety_impact_index": 66,
+            "expected_cyber_readiness_index": 56,
             "expected_third_party_risk_index": 46,
             "expected_identity_attack_pressure": 52,
         },
@@ -1010,6 +1023,10 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 14,
             "expected_external_exposure_index": 47,
+            "expected_financial_loss_exposure_index": 38,
+            "expected_data_sensitivity_risk_index": 54,
+            "expected_reliability_safety_impact_index": 49,
+            "expected_cyber_readiness_index": 48,
             "expected_third_party_risk_index": 49,
             "expected_identity_attack_pressure": 51,
         },
@@ -1017,6 +1034,10 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 9,
             "expected_external_exposure_index": 43,
+            "expected_financial_loss_exposure_index": 55,
+            "expected_data_sensitivity_risk_index": 57,
+            "expected_reliability_safety_impact_index": 52,
+            "expected_cyber_readiness_index": 62,
             "expected_third_party_risk_index": 55,
             "expected_identity_attack_pressure": 61,
         },
@@ -1024,33 +1045,123 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
             "expected_patch_sla_days": 10,
             "expected_external_exposure_index": 40,
+            "expected_financial_loss_exposure_index": 50,
+            "expected_data_sensitivity_risk_index": 52,
+            "expected_reliability_safety_impact_index": 50,
+            "expected_cyber_readiness_index": 60,
             "expected_third_party_risk_index": 50,
             "expected_identity_attack_pressure": 58,
         },
     }
     segment_base = base.get(segment, base["Digital Services"])
 
-    target_pressure = (
-        int(severity_count.get("critical", 0)) * 20
-        + int(severity_count.get("high", 0)) * 9
-        + int(severity_count.get("medium", 0)) * 4
-        + int(severity_count.get("low", 0)) * 1
+    critical = int(severity_count.get("critical", 0) or 0)
+    high = int(severity_count.get("high", 0) or 0)
+    medium = int(severity_count.get("medium", 0) or 0)
+    low = int(severity_count.get("low", 0) or 0)
+
+    # Regra CRI solicitada:
+    # 1) Havendo criticos: score base 40 e -15 por critico adicional.
+    # 2) Sem criticos e com altas: score base 60 e -8 por alta adicional.
+    # 3) Medium/Low sempre penalizam: -3 por medium, -1 por low.
+    # 4) Piso minimo em 5.
+    if critical >= 1:
+        base_score = 40 - ((critical - 1) * 15)
+        critical_high_penalty = 60 + ((critical - 1) * 15)
+        score_rule = "critical"
+        base_formula = f"40 - (({critical} - 1) x 15)"
+    elif high >= 1:
+        base_score = 60 - ((high - 1) * 8)
+        critical_high_penalty = 40 + ((high - 1) * 8)
+        score_rule = "high"
+        base_formula = f"60 - (({high} - 1) x 8)"
+    else:
+        base_score = 100
+        critical_high_penalty = 0
+        score_rule = "clean"
+        base_formula = "100"
+
+    medium_low_penalty = (medium * 3) + (low * 1)
+    raw_score = base_score - medium_low_penalty
+    target_cri_score = max(5, min(100, int(raw_score)))
+    min_floor_applied = bool(raw_score < 5)
+
+    # Indices auxiliares exibidos no relatorio, coerentes com o score CRI calculado.
+    financial_loss_exposure_index = int(min(100, max(0, critical_high_penalty)))
+    data_sensitivity_risk_index = int(min(100, max(0, round((critical_high_penalty * 0.7) + (medium * 4) + low))))
+    reliability_safety_impact_index = int(min(100, max(0, round((critical_high_penalty * 0.6) + (medium * 5) + (low * 2)))))
+    cyber_readiness_index = int(target_cri_score)
+
+    segment_cri_score = int(
+        round(
+            max(
+                0.0,
+                min(
+                    100.0,
+                    (
+                        (100.0 - float(segment_base["expected_financial_loss_exposure_index"])) * 0.30
+                        + (100.0 - float(segment_base["expected_data_sensitivity_risk_index"])) * 0.25
+                        + (100.0 - float(segment_base["expected_reliability_safety_impact_index"])) * 0.25
+                        + (float(segment_base["expected_cyber_readiness_index"]) * 0.20)
+                    ),
+                ),
+            )
+        )
     )
-    target_exposure_index = min(100, max(0, target_pressure))
+
+    segment_exposure = int(segment_base["expected_external_exposure_index"])
+    target_exposure_index = max(0, min(100, 100 - int(target_cri_score)))
+    segment_exposure_index_from_cri = max(0, min(100, 100 - int(segment_cri_score)))
+
+    cri_diff = int(target_cri_score) - int(segment_cri_score)
+    if cri_diff > 3:
+        assessment = "melhor_que_o_benchmark"
+    elif cri_diff < -3:
+        assessment = "acima_do_benchmark"
+    else:
+        assessment = "similar_ao_benchmark"
 
     return {
         "segment": segment,
         "source": segment_base["source"],
         "wef_reference_year": 2025,
         "target_external_exposure_index": target_exposure_index,
-        "segment_external_exposure_index": int(segment_base["expected_external_exposure_index"]),
+        "segment_external_exposure_index": segment_exposure_index_from_cri,
+        "target_cri_score": target_cri_score,
+        "segment_cri_score": segment_cri_score,
+        "target_financial_loss_exposure_index": financial_loss_exposure_index,
+        "segment_financial_loss_exposure_index": int(segment_base["expected_financial_loss_exposure_index"]),
+        "target_data_sensitivity_risk_index": data_sensitivity_risk_index,
+        "segment_data_sensitivity_risk_index": int(segment_base["expected_data_sensitivity_risk_index"]),
+        "target_reliability_safety_impact_index": reliability_safety_impact_index,
+        "segment_reliability_safety_impact_index": int(segment_base["expected_reliability_safety_impact_index"]),
+        "target_cyber_readiness_index": cyber_readiness_index,
+        "segment_cyber_readiness_index": int(segment_base["expected_cyber_readiness_index"]),
         "segment_identity_attack_pressure": int(segment_base["expected_identity_attack_pressure"]),
         "segment_third_party_risk_index": int(segment_base["expected_third_party_risk_index"]),
         "segment_patch_sla_days": int(segment_base["expected_patch_sla_days"]),
+        "segment_external_exposure_reference": segment_exposure,
         "target_ale_open_usd": round(float(fair_open_usd or 0.0), 2),
-        "assessment": (
-            "acima_do_benchmark" if target_exposure_index > int(segment_base["expected_external_exposure_index"]) else "dentro_do_benchmark"
-        ),
+        "assessment": assessment,
+        "calculation": {
+            "severity_counts": {
+                "critical": critical,
+                "high": high,
+                "medium": medium,
+                "low": low,
+            },
+            "rule_applied": score_rule,
+            "base_formula": base_formula,
+            "base_score": int(base_score),
+            "medium_formula": f"{medium} x 3 = {medium * 3}",
+            "low_formula": f"{low} x 1 = {low * 1}",
+            "medium_low_penalty": int(medium_low_penalty),
+            "raw_score_before_floor": int(raw_score),
+            "min_floor": 5,
+            "floor_applied": min_floor_applied,
+            "final_score": int(target_cri_score),
+            "human_readable": f"score = max(5, ({base_formula}) - ({medium} x 3) - ({low} x 1)) = {int(target_cri_score)}",
+        },
     }
 
 
@@ -1488,6 +1599,96 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
     ]
 
 
+def _build_tool_execution_summary(job: ScanJob, scan_logs: list[ScanLog], tools: list[str]) -> dict:
+    state = job.state_data or {}
+    raw_runs = list(state.get("executed_tool_runs") or [])
+
+    targets_by_tool: dict[str, set[str]] = {}
+    status_by_tool: dict[str, dict[str, int]] = {}
+    return_codes_by_tool: dict[str, list[int]] = {}
+    commands_by_tool: dict[str, list[str]] = {}
+
+    for raw in raw_runs:
+        run = str(raw or "").strip().lower()
+        parts = run.split("|")
+        if len(parts) < 3:
+            continue
+        _, target, tool = parts[0], parts[1], parts[2]
+        if not tool:
+            continue
+        if target:
+            targets_by_tool.setdefault(tool, set()).add(target)
+
+    status_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+status=([a-z_\-]+)", re.IGNORECASE)
+    rc_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+return_code=([-0-9]+)", re.IGNORECASE)
+    cmd_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+cmd=(.+)$", re.IGNORECASE)
+
+    for log in scan_logs:
+        message = str(log.message or "")
+
+        status_match = status_re.search(message)
+        if status_match:
+            tool = str(status_match.group(1) or "").strip().lower()
+            st = str(status_match.group(2) or "unknown").strip().lower()
+            if tool:
+                bucket = status_by_tool.setdefault(tool, {})
+                bucket[st] = int(bucket.get(st, 0)) + 1
+
+        rc_match = rc_re.search(message)
+        if rc_match:
+            tool = str(rc_match.group(1) or "").strip().lower()
+            try:
+                rc = int(str(rc_match.group(2) or "").strip())
+            except Exception:
+                rc = None
+            if tool and rc is not None:
+                return_codes_by_tool.setdefault(tool, []).append(rc)
+
+        cmd_match = cmd_re.search(message)
+        if cmd_match:
+            tool = str(cmd_match.group(1) or "").strip().lower()
+            cmd = str(cmd_match.group(2) or "").strip()
+            if tool and cmd:
+                commands_by_tool.setdefault(tool, []).append(cmd)
+
+    normalized_tools = [str(t or "").strip().lower() for t in tools if str(t or "").strip()]
+    requested_tools = sorted(set(normalized_tools))
+
+    rows: list[dict] = []
+    for tool in requested_tools:
+        status_bucket = status_by_tool.get(tool, {})
+        return_codes = return_codes_by_tool.get(tool, [])
+        commands = commands_by_tool.get(tool, [])
+        targets = sorted(list(targets_by_tool.get(tool, set())))
+        attempted_events = int(sum(status_bucket.values()))
+        executed_events = int(status_bucket.get("executed", 0))
+        rows.append(
+            {
+                "tool": tool,
+                "targets": targets,
+                "targets_count": len(targets),
+                "attempted_events": attempted_events,
+                "executed_events": executed_events,
+                "status_breakdown": status_bucket,
+                "last_return_code": return_codes[-1] if return_codes else None,
+                "sample_command": commands[-1] if commands else "",
+            }
+        )
+
+    executed_tools_count = len([row for row in rows if row.get("executed_events", 0) > 0])
+    attempted_tools_count = len([row for row in rows if row.get("attempted_events", 0) > 0 or row.get("targets_count", 0) > 0])
+
+    return {
+        "requested_tools": requested_tools,
+        "tools": rows,
+        "summary": {
+            "requested_count": len(requested_tools),
+            "attempted_count": attempted_tools_count,
+            "executed_count": executed_tools_count,
+        },
+    }
+
+
 @router.delete("/scans/{scan_id}")
 def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
@@ -1514,9 +1715,14 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
 
 @router.post("/scans/reset-operational")
 def reset_operational_scans(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    scan_rows = db.query(ScanJob.id, ScanJob.status).all()
+    scan_rows = db.query(ScanJob.id, ScanJob.status, ScanJob.mode).all()
     scan_ids = [row.id for row in scan_rows]
     active_scan_ids = [row.id for row in scan_rows if row.status in {"queued", "running", "retrying"}]
+    # Regra operacional: preservar scans que ainda NAO aconteceram (fila).
+    # Limpa apenas execucoes historicas e em andamento.
+    resettable_statuses = {"running", "retrying", "completed", "failed", "stopped", "blocked"}
+    resettable_scan_ids = [row.id for row in scan_rows if row.status in resettable_statuses]
+    preserved_queued_scan_ids = [row.id for row in scan_rows if row.status == "queued"]
 
     revoked_task_ids: list[str] = []
     for scan_id in active_scan_ids:
@@ -1539,14 +1745,45 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             synchronize_session=False,
         )
 
-        deleted_audit_events = db.query(AuditEvent).filter(AuditEvent.scan_job_id.is_not(None)).delete(synchronize_session=False)
-        deleted_scan_logs = db.query(ScanLog).delete(synchronize_session=False)
-        deleted_findings = db.query(Finding).delete(synchronize_session=False)
-        deleted_scan_jobs = db.query(ScanJob).delete(synchronize_session=False)
+        deleted_audit_events = 0
+        deleted_scan_logs = 0
+        deleted_findings = 0
+        deleted_scan_jobs = 0
 
-        db.execute(text("ALTER SEQUENCE scan_jobs_id_seq RESTART WITH 1"))
-        db.execute(text("ALTER SEQUENCE findings_id_seq RESTART WITH 1"))
-        db.execute(text("ALTER SEQUENCE scan_logs_id_seq RESTART WITH 1"))
+        if resettable_scan_ids:
+            deleted_audit_events = (
+                db.query(AuditEvent)
+                .filter(AuditEvent.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_scan_logs = (
+                db.query(ScanLog)
+                .filter(ScanLog.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_findings = (
+                db.query(Finding)
+                .filter(Finding.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_scan_jobs = (
+                db.query(ScanJob)
+                .filter(ScanJob.id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+
+        # Reinicia sequencias apenas se nao houver registros, para evitar colisao de PK
+        remaining_scan_jobs = db.query(ScanJob.id).count()
+        remaining_findings = db.query(Finding.id).count()
+        remaining_scan_logs = db.query(ScanLog.id).count()
+        if remaining_scan_jobs == 0:
+            db.execute(text("ALTER SEQUENCE scan_jobs_id_seq RESTART WITH 1"))
+        if remaining_findings == 0:
+            db.execute(text("ALTER SEQUENCE findings_id_seq RESTART WITH 1"))
+        if remaining_scan_logs == 0:
+            db.execute(text("ALTER SEQUENCE scan_logs_id_seq RESTART WITH 1"))
+
+        preserved_schedules = db.query(ScheduledScan.id).filter(ScheduledScan.enabled.is_(True)).count()
 
         log_audit(
             db,
@@ -1555,6 +1792,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             actor_user_id=current_user.id,
             metadata={
                 "scan_ids": scan_ids,
+                "resettable_scan_ids": resettable_scan_ids,
+                "preserved_queued_scan_ids": preserved_queued_scan_ids,
+                "preserved_enabled_schedules": preserved_schedules,
                 "revoked_task_ids": revoked_task_ids,
                 "deleted": {
                     "scan_jobs": deleted_scan_jobs,
@@ -1573,6 +1813,10 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "findings": deleted_findings,
                 "scan_logs": deleted_scan_logs,
                 "audit_events": deleted_audit_events,
+            },
+            "preserved": {
+                "queued_scans": len(preserved_queued_scan_ids),
+                "enabled_schedules": preserved_schedules,
             },
             "revoked_task_ids": list(dict.fromkeys(revoked_task_ids)),
         }
@@ -2062,6 +2306,7 @@ def scan_report(
                 "port": technical.get("port") or "-",
                 "tool": technical.get("tool") or "-",
                 "command": technical.get("command") or "-",
+                "osint_tools": details.get("tools") if isinstance(details.get("tools"), list) else [],
                 "http_headers_raw": _sanitize_text(details.get("http_headers_raw") or ""),
                 "technical_context": _sanitize_text(
                     f"step={technical.get('step') or '-'}; node={technical.get('node') or '-'}; tool={technical.get('tool') or '-'}; asset={technical.get('asset') or '-'}; porta={technical.get('port') or '-'}; servico={technical.get('service') or '-'}"
@@ -2320,6 +2565,31 @@ def scan_report(
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     target_evolution = _build_target_evolution(db, job.target_query, scan_id)
 
+    scan_mode = str((job.state_data or {}).get("scan_mode") or ("scheduled" if str(job.mode or "").lower() == "scheduled" else "unit")).strip().lower()
+    groups = get_worker_groups("scheduled" if scan_mode == "scheduled" else "unit")
+    vuln_tools = list((groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
+    report_focus_tools = [
+        "nmap-vulscan",
+        "nuclei",
+        "nikto",
+        "wapiti",
+        "sqlmap",
+        "commix",
+        "tplmap",
+        "sslscan",
+        "shcheck",
+        "curl-headers",
+    ]
+    tool_execution_summary = _build_tool_execution_summary(job, scan_logs, vuln_tools)
+    focused_tool_execution = {
+        **tool_execution_summary,
+        "tools": [
+            row
+            for row in tool_execution_summary.get("tools", [])
+            if str(row.get("tool") or "") in report_focus_tools
+        ],
+    }
+
     # Assets summary and findings grouped by subdomain
     raw_assets_list: list[str] = list(
         (job.state_data or {}).get("lista_ativos") or []
@@ -2363,6 +2633,7 @@ def scan_report(
                 "category_scores": category_scores,
                 "assets_summary": assets_summary,
                 "findings_by_subdomain": findings_by_subdomain,
+                "tool_execution_summary": focused_tool_execution,
                 "vulnerability_table": open_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
@@ -2373,7 +2644,7 @@ def scan_report(
                 "waf_summary": {
                     "findings_count": waf_findings_count,
                     "assets_count": len(waf_assets),
-                    "assets": sorted(list(waf_assets))[:30],
+                    "assets": sorted(list(waf_assets)),
                     "vendors": [
                         {"name": name, "count": count}
                         for name, count in sorted(waf_vendors.items(), key=lambda item: item[1], reverse=True)
@@ -2382,7 +2653,7 @@ def scan_report(
                 "security_headers_summary": {
                     "findings_count": security_header_findings_count,
                     "assets_count": len(security_header_assets),
-                    "assets": sorted(list(security_header_assets))[:30],
+                    "assets": sorted(list(security_header_assets)),
                     "present_headers": [
                         {"header": name, "count": count}
                         for name, count in sorted(security_header_present.items(), key=lambda item: item[1], reverse=True)
@@ -2391,7 +2662,7 @@ def scan_report(
                         {"header": name, "count": count}
                         for name, count in sorted(security_header_missing.items(), key=lambda item: item[1], reverse=True)
                     ][:20],
-                    "samples": security_header_samples[:5],
+                    "samples": security_header_samples,
                     "owasp_top10_alignment": [
                         {
                             "owasp": "A05 Security Misconfiguration",
@@ -2408,8 +2679,8 @@ def scan_report(
                     "recon_findings": len(open_recon_table),
                     "osint_findings": len(open_osint_table),
                 },
-                "recon_findings": open_recon_table[:60],
-                "osint_findings": open_osint_table[:60],
+                "recon_findings": open_recon_table,
+                "osint_findings": open_osint_table,
                 "lifecycle": lifecycle,
                 "resolved_vulnerabilities": resolved_vulnerabilities,
                 "comparison": {
@@ -2732,6 +3003,31 @@ def dashboard_insights(
     jobs = jobs_query.order_by(ScanJob.created_at.desc()).all()
     findings = findings_query.all()
 
+    latest_scan = jobs[0] if jobs else None
+    latest_scan_logs: list[ScanLog] = []
+    vuln_tool_execution = {"requested_tools": [], "tools": [], "summary": {"requested_count": 0, "attempted_count": 0, "executed_count": 0}}
+    if latest_scan:
+        latest_scan_logs = (
+            db.query(ScanLog)
+            .filter(ScanLog.scan_job_id == latest_scan.id)
+            .order_by(ScanLog.created_at.asc())
+            .all()
+        )
+        latest_mode = str((latest_scan.state_data or {}).get("scan_mode") or ("scheduled" if str(latest_scan.mode or "").lower() == "scheduled" else "unit")).strip().lower()
+        latest_groups = get_worker_groups("scheduled" if latest_mode == "scheduled" else "unit")
+        latest_vuln_tools = list((latest_groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
+        focus_tools = ["nmap-vulscan", "nuclei", "nikto", "wapiti", "sqlmap", "commix", "tplmap", "sslscan", "shcheck", "curl-headers"]
+        base_summary = _build_tool_execution_summary(latest_scan, latest_scan_logs, latest_vuln_tools)
+        vuln_tool_execution = {
+            **base_summary,
+            "tools": [
+                row for row in base_summary.get("tools", []) if str(row.get("tool") or "") in focus_tools
+            ],
+            "scan_id": latest_scan.id,
+            "scan_target": latest_scan.target_query,
+            "scan_status": latest_scan.status,
+        }
+
     findings_by_scan: dict[int, list[Finding]] = {}
     for f in findings:
         findings_by_scan.setdefault(f.scan_job_id, []).append(f)
@@ -3017,6 +3313,7 @@ def dashboard_insights(
         "prioritized_actions": paged_prioritized,
         "filters": {"target": normalized_target},
         "targets": sorted(list({j.target_query for j in jobs if j.target_query})),
+        "vuln_tool_execution": vuln_tool_execution,
         "prioritized_actions_page": {
             "items": paged_prioritized,
             "total": len(prioritized_actions),
