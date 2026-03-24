@@ -215,7 +215,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "-u",
             url,
             "-severity",
-            "critical,high",
+            "critical,high, low, info",
         ]
         # Obrigatorio: usa sempre os templates customizados instalados no worker.
         cmd.extend(["-t", templates_path])
