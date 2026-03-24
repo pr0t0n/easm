@@ -80,6 +80,8 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
     "commix": {"url": "https://github.com/commixproject/commix", "requirements": "Python 3 e clone local do projeto para command injection."},
     "tplmap": {"url": "https://github.com/epinna/tplmap", "requirements": "Python 3 e dependências do projeto para SSTI."},
     "wafw00f": {"url": "https://github.com/EnableSecurity/wafw00f", "requirements": "Python 3 e pip para fingerprinting de WAF."},
+    "sslscan": {"url": "https://github.com/rbsec/sslscan", "requirements": "Binário sslscan instalado via apt no worker."},
+    "shcheck": {"url": "https://github.com/santoru/shcheck", "requirements": "Python 3 e pip install shcheck."},
 }
 
 INSTALL_SUPPORTED_TOOLS = {
@@ -88,6 +90,7 @@ INSTALL_SUPPORTED_TOOLS = {
     "dalfox", "kiterunner", "subjack", "wpscan", "nikto", "nmap-vulscan", "whatweb", "sublist3r", "waymore", "linkfinder",
     "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz", "sqlmap", "commix",
     "tplmap", "wafw00f",
+    "sslscan", "shcheck",
 }
 
 TOOL_BINARY_ALIASES = {

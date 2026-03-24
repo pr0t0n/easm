@@ -58,6 +58,8 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState([]);
   const [prioritizedActions, setPrioritizedActions] = useState([]);
   const [prioritizedPage, setPrioritizedPage] = useState({ total: 0, limit: 10, offset: 0 });
+  const [wafSummary, setWafSummary] = useState({ findings_count: 0, vendors: [] });
+  const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, missing_headers: [] });
 
   useEffect(() => {
     const load = async () => {
@@ -95,6 +97,8 @@ export default function DashboardPage() {
         setAssets(dashboard.assets || []);
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
         setPrioritizedActions(dashboard.prioritized_actions || []);
+        setWafSummary(dashboard.waf_summary || { findings_count: 0, vendors: [] });
+        setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, missing_headers: [] });
         setPrioritizedPage((prev) => ({
           ...prev,
           total: Number(dashboard.prioritized_actions_page?.total || 0),
@@ -150,6 +154,38 @@ export default function DashboardPage() {
         <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
         <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />
         <StatCard label="AGE Mercado/Exploit" value={`${stats.age_market_avg_days || 0}d / ${stats.age_exploit_avg_days || 0}d`} sub="mercado / exploit" />
+        <StatCard label="WAF Detectado" value={stats.waf_findings || 0} sub="achados no ciclo" color="text-blue-300" />
+        <StatCard label="Headers (Issues)" value={stats.security_header_findings || 0} sub="lacunas de hardening" color="text-indigo-300" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <h2 className="font-display text-lg font-semibold">WAF no Ambiente</h2>
+          <p className="mt-1 text-xs text-slate-400">Resumo de fornecedores WAF detectados.</p>
+          <div className="mt-3 space-y-2">
+            {(wafSummary.vendors || []).length === 0 && <p className="text-sm text-slate-500">Sem WAF identificado no momento.</p>}
+            {(wafSummary.vendors || []).map((item, idx) => (
+              <div key={`waf-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm">
+                <span>{item.name || "WAF nao identificado"}</span>
+                <span className="rounded-md border border-slate-600 px-2 py-0.5 text-xs">{item.count || 0}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <h2 className="font-display text-lg font-semibold">Headers de Segurança</h2>
+          <p className="mt-1 text-xs text-slate-400">Headers ausentes mais recorrentes.</p>
+          <div className="mt-3 space-y-2">
+            {(securityHeadersSummary.missing_headers || []).length === 0 && <p className="text-sm text-slate-500">Sem gaps de headers detectados.</p>}
+            {(securityHeadersSummary.missing_headers || []).map((item, idx) => (
+              <div key={`header-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm">
+                <span className="font-mono">{item.header || "header"}</span>
+                <span className="rounded-md border border-slate-600 px-2 py-0.5 text-xs">{item.count || 0}</span>
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

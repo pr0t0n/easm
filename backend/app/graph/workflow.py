@@ -17,6 +17,18 @@ GROUP_MISSION_ITEMS: list[str] = [
     "3. OSINT",
 ]
 
+KNOWN_WAF_MODELS: list[str] = [
+    "cloudflare",
+    "akamai",
+    "imperva",
+    "modsecurity",
+    "mod_security",
+    "f5",
+    "aws waf",
+    "barracuda",
+    "fortiweb",
+]
+
 
 class AgentState(TypedDict):
     scan_id: int
@@ -236,6 +248,13 @@ def _run_tools_and_collect(
         if asm_findings:
             all_findings.extend(asm_findings)
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} asm_findings={len(asm_findings)}")
+
+        tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
+        if tool_specific_findings:
+            all_findings.extend(tool_specific_findings)
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
+            )
 
         extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
         for port in extracted_ports:
@@ -601,6 +620,243 @@ def _extract_asm_findings(result: dict[str, Any], step_name: str, default_target
             }
         )
 
+    return findings
+
+
+def _extract_tool_output_findings(result: dict[str, Any], step_name: str, default_target: str) -> list[dict[str, Any]]:
+    tool = str(result.get("tool") or "").strip().lower()
+    stdout = str(result.get("stdout") or result.get("output") or "")
+    if not tool or not stdout.strip():
+        return []
+
+    if tool == "wafw00f":
+        return _extract_wafw00f_findings(stdout, step_name, default_target)
+    if tool == "shcheck":
+        return _extract_shcheck_findings(stdout, step_name, default_target)
+    if tool == "nikto":
+        return _extract_nikto_findings(stdout, step_name, default_target)
+    if tool in {"nmap-vulscan", "vulscan"}:
+        return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
+    if tool == "sslscan":
+        return _extract_sslscan_findings(stdout, step_name, default_target)
+    return []
+
+
+def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        match = re.search(r"is behind\s+(.+?)\s+WAF", line, re.IGNORECASE)
+        if match:
+            vendor = str(match.group(1) or "").strip()
+            lowered_vendor = vendor.lower()
+            known_vendor = next((model for model in KNOWN_WAF_MODELS if model in lowered_vendor), "")
+            normalized_vendor = known_vendor if known_vendor else vendor
+            findings.append(
+                {
+                    "title": f"WAF detectado: {normalized_vendor}",
+                    "severity": "info",
+                    "risk_score": 1,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "wafw00f",
+                        "evidence": line,
+                        "waf_vendor": normalized_vendor,
+                        "waf_model_match": bool(known_vendor),
+                        "waf_detected": True,
+                    },
+                }
+            )
+            break
+    return findings
+
+
+def _extract_shcheck_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen_headers: set[str] = set()
+    header_pattern = re.compile(
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        re.IGNORECASE,
+    )
+
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if "missing" not in lowered and "not set" not in lowered and "absent" not in lowered:
+            continue
+        header_match = header_pattern.search(line)
+        if not header_match:
+            continue
+        header = str(header_match.group(1) or "").strip().lower()
+        if header in seen_headers:
+            continue
+        seen_headers.add(header)
+        sev = "medium" if header in {"strict-transport-security", "content-security-policy", "x-frame-options"} else "low"
+        findings.append(
+            {
+                "title": f"Header de seguranca ausente: {header}",
+                "severity": sev,
+                "risk_score": 5 if sev == "medium" else 3,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "shcheck",
+                    "header_name": header,
+                    "header_issue": "missing",
+                    "evidence": line,
+                },
+            }
+        )
+    return findings
+
+
+def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    ignore_tokens = [
+        "target host",
+        "target ip",
+        "target port",
+        "start time",
+        "end time",
+        "no web server found",
+    ]
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line.startswith("+"):
+            continue
+        lowered = line.lower()
+        if any(token in lowered for token in ignore_tokens):
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        sev = "high" if ("cve-" in lowered or "osvdb" in lowered) else "medium"
+        findings.append(
+            {
+                "title": f"Nikto: {line.lstrip('+ ').strip()[:180]}",
+                "severity": sev,
+                "risk_score": 7 if sev == "high" else 5,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "nikto",
+                    "evidence": line,
+                },
+            }
+        )
+        if len(findings) >= 30:
+            break
+    return findings
+
+
+def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    db_refs: list[str] = []
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        cve_match = re.search(r"\bCVE-\d{4}-\d{4,7}\b", line, re.IGNORECASE)
+        if cve_match:
+            cve_id = str(cve_match.group(0) or "").upper()
+            if cve_id in seen:
+                continue
+            seen.add(cve_id)
+            findings.append(
+                {
+                    "title": f"nmap-vulscan: {cve_id}",
+                    "severity": "high",
+                    "risk_score": 7,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "nmap-vulscan",
+                        "vuln_db": "vulscan",
+                        "cve": cve_id,
+                        "evidence": line,
+                    },
+                }
+            )
+            continue
+
+        lowered = line.lower()
+        if any(token in lowered for token in ["exploitdb", "osvdb", "securityfocus", "packetstorm"]):
+            db_refs.append(line)
+
+    if not findings and db_refs:
+        findings.append(
+            {
+                "title": "nmap-vulscan: referencias de vulnerabilidade identificadas (sem CVE explícito)",
+                "severity": "medium",
+                "risk_score": 5,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "nmap-vulscan",
+                    "vuln_db": "vulscan",
+                    "evidence": " | ".join(db_refs[:5]),
+                },
+            }
+        )
+    return findings
+
+
+def _extract_sslscan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if "tlsv1.0" in lowered or "tlsv1.1" in lowered:
+            findings.append(
+                {
+                    "title": "TLS legado habilitado no endpoint",
+                    "severity": "medium",
+                    "risk_score": 5,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "sslscan",
+                        "evidence": line,
+                    },
+                }
+            )
+        if "self signed" in lowered or "certificate expired" in lowered:
+            findings.append(
+                {
+                    "title": "Problema de certificado TLS detectado",
+                    "severity": "high",
+                    "risk_score": 7,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": default_target,
+                        "tool": "sslscan",
+                        "evidence": line,
+                    },
+                }
+            )
     return findings
 
 

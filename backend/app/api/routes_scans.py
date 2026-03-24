@@ -135,6 +135,55 @@ def _sev_weight(severity: str) -> int:
     return {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(str(severity or "low").lower(), 1)
 
 
+KNOWN_WAF_MODELS: list[str] = [
+    "cloudflare",
+    "akamai",
+    "imperva",
+    "modsecurity",
+    "mod_security",
+    "f5",
+    "aws waf",
+    "barracuda",
+    "fortiweb",
+]
+
+
+def _severity_rank(severity: str) -> int:
+    return {
+        "critical": 5,
+        "high": 4,
+        "medium": 3,
+        "low": 2,
+        "info": 1,
+    }.get(str(severity or "low").strip().lower(), 0)
+
+
+def _risk_text(severity: str, confidence_score: int | float | None = None) -> str:
+    sev = str(severity or "low").strip().lower()
+    conf = int(confidence_score or 0)
+    if sev == "critical":
+        return "Crítico"
+    if sev == "high":
+        return "Alto"
+    if sev == "medium":
+        return "Médio"
+    if sev == "info":
+        return "Informativo"
+    if conf >= 80:
+        return "Baixo (alta confiança)"
+    return "Baixo"
+
+
+def _detect_waf_vendor(text: str | None) -> str:
+    blob = str(text or "").strip().lower()
+    if not blob:
+        return ""
+    for model in KNOWN_WAF_MODELS:
+        if model in blob:
+            return model
+    return ""
+
+
 def _sanitize_text(value: str | None) -> str:
     if not value:
         return ""
@@ -1554,6 +1603,7 @@ def scan_report(
                 "service": _sanitize_text(technical.get("service") or "-"),
                 "version": _sanitize_text(technical.get("version") or ""),
                 "cvss": details.get("cvss_score") or details.get("cvss") or finding.risk_score or "-",
+                "risk_text": _risk_text(sev, finding.confidence_score),
                 "severity": sev,
                 "category": category,
                 "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or "-"),
@@ -1660,6 +1710,52 @@ def scan_report(
         row["status"] = "open" if row["signature"] in prev_signatures else "new"
         row.pop("signature", None)
 
+    open_vulnerability_table.sort(
+        key=lambda item: (
+            -_severity_rank(str(item.get("severity") or "low")),
+            -int(item.get("risk_score") or 0),
+            str(item.get("name") or ""),
+        )
+    )
+
+    waf_vendors: dict[str, int] = {}
+    waf_assets: set[str] = set()
+    waf_findings_count = 0
+
+    security_header_missing: dict[str, int] = {}
+    security_header_assets: set[str] = set()
+    security_header_findings_count = 0
+    header_pattern = re.compile(
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        re.IGNORECASE,
+    )
+
+    for row in open_vulnerability_table:
+        tool = str(row.get("tool") or "").strip().lower()
+        title = str(row.get("name") or row.get("problem") or "")
+        evidence = str(row.get("evidence") or "")
+        blob = f"{title}\n{evidence}".lower()
+        target = str(row.get("target") or "").strip()
+
+        if tool == "wafw00f" or "waf" in blob:
+            waf_findings_count += 1
+            if target:
+                waf_assets.add(target)
+            vendor_match = re.search(r"behind\s+(.+?)\s+waf", f"{title} {evidence}", re.IGNORECASE)
+            parsed_vendor = str(vendor_match.group(1) or "").strip() if vendor_match else ""
+            vendor = _detect_waf_vendor(f"{parsed_vendor} {title} {evidence}") or parsed_vendor or "WAF nao identificado"
+            waf_vendors[vendor] = int(waf_vendors.get(vendor, 0)) + 1
+
+        if tool == "shcheck" or any(tok in blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
+            matched_headers = header_pattern.findall(f"{title}\n{evidence}")
+            if matched_headers:
+                security_header_findings_count += 1
+                if target:
+                    security_header_assets.add(target)
+                for header_name in matched_headers:
+                    normalized_header = str(header_name or "").strip().lower()
+                    security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+
     category_scores = _build_category_scores(open_vulnerability_table)
 
     # Fallback de evidencias para linhas sem payload/evidence explicitos.
@@ -1703,7 +1799,7 @@ def scan_report(
             "recommendation": row["recommendation"],
             "recommendation_structured": row.get("recommendation_structured") or {},
         }
-        for row in open_vulnerability_table[:50]
+        for row in open_vulnerability_table[:120]
     ]
     top_recommendations = _build_top_recommendations(open_vulnerability_table, detailed_recommendations)
 
@@ -1757,6 +1853,24 @@ def scan_report(
                 "technical_points": technical_points,
                 "segment_benchmark": benchmark,
                 "target_evolution": target_evolution,
+                "waf_summary": {
+                    "findings_count": waf_findings_count,
+                    "assets_count": len(waf_assets),
+                    "assets": sorted(list(waf_assets))[:30],
+                    "vendors": [
+                        {"name": name, "count": count}
+                        for name, count in sorted(waf_vendors.items(), key=lambda item: item[1], reverse=True)
+                    ][:10],
+                },
+                "security_headers_summary": {
+                    "findings_count": security_header_findings_count,
+                    "assets_count": len(security_header_assets),
+                    "assets": sorted(list(security_header_assets))[:30],
+                    "missing_headers": [
+                        {"header": name, "count": count}
+                        for name, count in sorted(security_header_missing.items(), key=lambda item: item[1], reverse=True)
+                    ][:20],
+                },
                 "lifecycle": lifecycle,
                 "resolved_vulnerabilities": resolved_vulnerabilities,
                 "comparison": {
@@ -2088,6 +2202,14 @@ def dashboard_insights(
     open_issues = total - mitigated
 
     sev_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    waf_vendors: dict[str, int] = {}
+    security_header_missing: dict[str, int] = {}
+    waf_findings_count = 0
+    security_header_findings_count = 0
+    header_pattern = re.compile(
+        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy)",
+        re.IGNORECASE,
+    )
     fair_total = 0.0
     ale_total = 0.0
     age_env_samples: list[int] = []
@@ -2104,6 +2226,23 @@ def dashboard_insights(
         vuln_counter[key] = vuln_counter.get(key, 0) + 1
 
         details = f.details or {}
+        nested_details = details.get("details") if isinstance(details.get("details"), dict) else {}
+        tool = str(details.get("tool") or nested_details.get("tool") or "").strip().lower()
+        evidence_text = str(details.get("evidence") or nested_details.get("evidence") or "")
+        title_blob = f"{f.title or ''}\n{evidence_text}".lower()
+        if tool == "wafw00f" or "waf" in title_blob:
+            waf_findings_count += 1
+            vendor_match = re.search(r"behind\s+(.+?)\s+waf", f"{f.title or ''} {evidence_text}", re.IGNORECASE)
+            parsed_vendor = str(vendor_match.group(1) or "").strip() if vendor_match else ""
+            vendor = _detect_waf_vendor(f"{parsed_vendor} {f.title or ''} {evidence_text}") or parsed_vendor or "WAF nao identificado"
+            waf_vendors[vendor] = int(waf_vendors.get(vendor, 0)) + 1
+
+        if tool == "shcheck" or any(tok in title_blob for tok in ["header", "hsts", "content-security-policy", "x-frame-options", "x-content-type-options"]):
+            for header_name in header_pattern.findall(f"{f.title or ''}\n{evidence_text}"):
+                normalized_header = str(header_name or "").strip().lower()
+                security_header_missing[normalized_header] = int(security_header_missing.get(normalized_header, 0)) + 1
+            security_header_findings_count += 1
+
         age = compute_age_metrics(f.created_at, details)
         fair = compute_fair_metrics(f.severity, f.confidence_score, details, age)
         fair_total += float(fair.get("fair_score") or 0.0)
@@ -2242,6 +2381,8 @@ def dashboard_insights(
             "age_env_avg_days": _avg(age_env_samples),
             "age_market_avg_days": _avg(age_market_samples),
             "age_exploit_avg_days": _avg(age_exploit_samples),
+            "waf_findings": waf_findings_count,
+            "security_header_findings": security_header_findings_count,
         },
         "frameworks": {
             "iso27001": {"score": max(0, 100 - open_issues)},
@@ -2253,6 +2394,20 @@ def dashboard_insights(
         "ongoing_scans": ongoing_scans,
         "top_vulns": top_vulns,
         "top_technologies": top_technologies,
+        "waf_summary": {
+            "findings_count": waf_findings_count,
+            "vendors": [
+                {"name": name, "count": count}
+                for name, count in sorted(waf_vendors.items(), key=lambda item: item[1], reverse=True)
+            ][:10],
+        },
+        "security_headers_summary": {
+            "findings_count": security_header_findings_count,
+            "missing_headers": [
+                {"header": name, "count": count}
+                for name, count in sorted(security_header_missing.items(), key=lambda item: item[1], reverse=True)
+            ][:20],
+        },
         "assets": assets,
         "activity": activity,
         "prioritized_actions": paged_prioritized,

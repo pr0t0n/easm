@@ -333,9 +333,19 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 }
             details.update(recommendations)
 
+            # Normaliza campos tecnicos no nivel raiz para facilitar consultas,
+            # dashboard e geração de relatorio sem depender de parsing profundo.
+            nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+            flattened_details = {**nested, **details}
+            if "details" in flattened_details:
+                flattened_details.pop("details", None)
+            flattened_details["source_worker"] = source_worker
+            flattened_details["scan_mode"] = scan_mode
+
             cve_id = enrichment_service.extract_cve(details, title=vuln.get("title"))
             if cve_id:
                 details.update(enrichment_service.enrich(cve_id))
+                flattened_details.update(enrichment_service.enrich(cve_id))
 
             db.add(
                 Finding(
@@ -345,7 +355,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                     cve=cve_id,
                     confidence_score=int(vuln.get("confidence_score", 50) or 50),
                     risk_score=vuln.get("risk_score", 1),
-                    details={"source_worker": source_worker, "scan_mode": scan_mode, **details},
+                    details=flattened_details,
                 )
             )
 

@@ -1183,6 +1183,11 @@ function metricTrendText(severity, lifecycle) {
   return { cls: "neutral", text: "Sem baseline mensal" };
 }
 
+function sevWeight(severity) {
+  const key = String(severity || "low").toLowerCase();
+  return { critical: 5, high: 4, medium: 3, low: 2, info: 1 }[key] || 0;
+}
+
 function buildQuickWins(recommendations = []) {
   const fallback = [
     "Implementar MFA em contas privilegiadas",
@@ -1288,11 +1293,18 @@ export default function ReportsPage() {
     const summary = v2.summary || {};
     const fair = v2.fair || {};
     const frameworks = v2.frameworks || {};
-    const vulnerabilities = v2.vulnerability_table || [];
+    const vulnerabilitiesRaw = v2.vulnerability_table || [];
+    const vulnerabilities = [...vulnerabilitiesRaw].sort((a, b) => {
+      const sevDelta = sevWeight(b?.severity) - sevWeight(a?.severity);
+      if (sevDelta !== 0) return sevDelta;
+      return String(a?.name || "").localeCompare(String(b?.name || ""));
+    });
     const categories = v2.category_scores || [];
     const lifecycle = v2.lifecycle || {};
     const benchmark = v2.segment_benchmark || {};
     const targetEvolution = v2.target_evolution || { timeline: [], recurring_findings: [] };
+    const wafSummary = v2.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] };
+    const securityHeadersSummary = v2.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], missing_headers: [] };
 
     const total = Number(summary.total || vulnerabilities.length || 0);
     const sev = {
@@ -1326,6 +1338,8 @@ export default function ReportsPage() {
       frameworks,
       vulnerabilities,
       categories,
+      wafSummary,
+      securityHeadersSummary,
       lifecycle,
       benchmark,
       targetEvolution,
@@ -1427,6 +1441,8 @@ export default function ReportsPage() {
               <li><span><span className="toc-number">06</span><span className="toc-title">Análise por Categoria</span></span><span className="toc-page">Seção VI</span></li>
               <li><span><span className="toc-number">07</span><span className="toc-title">Detalhamento Técnico</span></span><span className="toc-page">Seção VII</span></li>
               <li><span><span className="toc-number">08</span><span className="toc-title">Benchmark e Evolução por Alvo</span></span><span className="toc-page">Seção VIII</span></li>
+              <li><span><span className="toc-number">09</span><span className="toc-title">WAF no Ambiente</span></span><span className="toc-page">Seção IX</span></li>
+              <li><span><span className="toc-number">10</span><span className="toc-title">Headers de Segurança</span></span><span className="toc-page">Seção X</span></li>
             </ul>
           </div>
 
@@ -1446,6 +1462,8 @@ export default function ReportsPage() {
                 <a href="#categorias">Categorias</a>
                 <a href="#tecnico">Detalhamento Técnico</a>
                 <a href="#evolucao">Benchmark e Evolução</a>
+                <a href="#waf">WAF no Ambiente</a>
+                <a href="#headers">Headers de Segurança</a>
               </nav>
             </aside>
 
@@ -1538,7 +1556,7 @@ export default function ReportsPage() {
                         <th>Severidade</th>
                         <th>Categoria</th>
                         <th>Status</th>
-                        <th>CVSS</th>
+                        <th>Classificação de Risco</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1553,10 +1571,98 @@ export default function ReportsPage() {
                             <td><span className={`severity-badge ${SEVERITY_META[severity]?.css || "severity-low"}`}>{SEVERITY_META[severity]?.label || "Baixo"}</span></td>
                             <td>{row.category || "Application Security"}</td>
                             <td>{status}</td>
-                            <td>{row.cvss || "-"}</td>
+                            <td>{row.risk_text || "-"}</td>
                           </tr>
                         );
                       })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="waf" className="section page-break">
+                <div className="section-header">
+                  <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 18.9c-3.84-1.2-6.5-4.78-7-8.9V6.3l7-3.11 7 3.11V11c-.5 4.12-3.16 7.7-7 8.9z" /></svg></div>
+                  <div>
+                    <h2 className="section-title">WAF no Ambiente</h2>
+                    <p className="section-subtitle">Detecção de Web Application Firewall por ativo</p>
+                  </div>
+                </div>
+                <div className="metrics-grid">
+                  <div className="metric-card info no-break">
+                    <div className="metric-value">{Number(data.wafSummary.findings_count || 0)}</div>
+                    <div className="metric-label">Achados de WAF</div>
+                  </div>
+                  <div className="metric-card low no-break">
+                    <div className="metric-value">{Number(data.wafSummary.assets_count || 0)}</div>
+                    <div className="metric-label">Ativos com evidência</div>
+                  </div>
+                </div>
+                <div className="table-container no-break">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Fornecedor WAF</th>
+                        <th>Ocorrências</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.wafSummary.vendors || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={2}>Sem WAF identificado no scan atual.</td>
+                        </tr>
+                      ) : (
+                        (data.wafSummary.vendors || []).map((item, idx) => (
+                          <tr key={`waf-${idx}`}>
+                            <td>{item.name || "WAF nao identificado"}</td>
+                            <td>{item.count || 0}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section id="headers" className="section page-break">
+                <div className="section-header">
+                  <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M4 4h16v4H4V4zm0 6h16v10H4V10zm2 2v2h4v-2H6zm0 4v2h8v-2H6z" /></svg></div>
+                  <div>
+                    <h2 className="section-title">Headers de Segurança</h2>
+                    <p className="section-subtitle">Lacunas de hardening HTTP por cabeçalho</p>
+                  </div>
+                </div>
+                <div className="metrics-grid">
+                  <div className="metric-card medium no-break">
+                    <div className="metric-value">{Number(data.securityHeadersSummary.findings_count || 0)}</div>
+                    <div className="metric-label">Achados de headers</div>
+                  </div>
+                  <div className="metric-card low no-break">
+                    <div className="metric-value">{Number(data.securityHeadersSummary.assets_count || 0)}</div>
+                    <div className="metric-label">Ativos impactados</div>
+                  </div>
+                </div>
+                <div className="table-container no-break">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Header ausente</th>
+                        <th>Ocorrências</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.securityHeadersSummary.missing_headers || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={2}>Sem lacunas de headers detectadas no scan atual.</td>
+                        </tr>
+                      ) : (
+                        (data.securityHeadersSummary.missing_headers || []).map((item, idx) => (
+                          <tr key={`header-${idx}`}>
+                            <td>{item.header || "header"}</td>
+                            <td>{item.count || 0}</td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -1722,7 +1828,7 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
-                {data.vulnerabilities.slice(0, 12).map((row, index) => {
+                {data.vulnerabilities.slice(0, 24).map((row, index) => {
                   const sev = String(row.severity || "low").toLowerCase();
                   const badge = SEVERITY_META[sev] || SEVERITY_META.low;
                   const title = row.name || row.problem || "Vulnerabilidade identificada";
@@ -1747,7 +1853,9 @@ export default function ReportsPage() {
                         </div>
                         <div className="technical-detail">
                           <div className="technical-label">Contexto Técnico</div>
-                          <div className="technical-url">step={row.step || "-"} | node={row.node || "-"}</div>
+                          <div className="technical-url">
+                            step={row.step || "-"} | node={row.node || "-"} | tool={row.tool || "-"} | asset={row.asset || "-"} | porta={row.port || "-"} | servico={row.service || "-"} {row.version ? `| versao=${row.version}` : ""}
+                          </div>
                         </div>
                       </div>
                     </div>

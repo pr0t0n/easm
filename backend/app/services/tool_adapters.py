@@ -26,10 +26,13 @@ TOOL_TIMEOUT_SECONDS = 90
 # Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
 TOOL_SPECIFIC_TIMEOUTS = {
     "nmap": 180,
+    "nmap-vulscan": 300,
+    "vulscan": 300,
     "nuclei": 300,
     "katana": 180,
     "ffuf": 120,
     "wapiti": 240,
+    "nikto": 240,
     "sqlmap": 300,
     "subfinder": 120,
     "amass": 120,
@@ -160,7 +163,6 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "100",
             "-T4",
             f"--script={script_path}",
-            f"--script-args=vulscan/mincvss=4.0",
             host,
         ]
     if normalized == "naabu":
@@ -210,13 +212,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         if not templates_path:
             # Obrigatorio por requisito: sem templates customizados, nao executa nuclei.
             return ["__missing_nuclei_templates__"]
-        cmd = [
-            "nuclei",
-            "-u",
-            url,
-            "-severity",
-            "critical,high, low, info",
-        ]
+        cmd = ["nuclei", "-u", url]
         # Obrigatorio: usa sempre os templates customizados instalados no worker.
         cmd.extend(["-t", templates_path])
         return cmd
