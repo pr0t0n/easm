@@ -1,7 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { authStore } from "../store/auth";
 
-export default function Navbar() {
+export default function Navbar({ theme = "light", onToggleTheme = () => {} }) {
   const navigate = useNavigate();
   const me = authStore.me;
 
@@ -11,24 +11,31 @@ export default function Navbar() {
   };
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#cbd5e0] bg-white/95 px-4 py-3 backdrop-blur md:px-6">
+    <header className="app-header sticky top-0 z-30 border-b px-4 py-3 backdrop-blur md:px-6">
       <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between">
         <div>
-          <p className="font-display text-lg font-semibold tracking-tight text-[#1a365d]">Cyber Exposure Dashboard</p>
-          <p className="text-xs text-[#4a5568]">Monitoramento, risco e operacoes de superficie externa</p>
+          <p className="app-header-title font-display text-lg font-semibold tracking-tight">Cyber Exposure Dashboard</p>
+          <p className="app-header-subtitle text-xs">Monitoramento, risco e operacoes de superficie externa</p>
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={onToggleTheme}
+            className="app-btn-secondary rounded-lg border px-3 py-2 text-sm"
+            title={theme === "dark" ? "Alternar para modo claro" : "Alternar para modo escuro"}
+          >
+            {theme === "dark" ? "Modo Claro" : "Modo Escuro"}
+          </button>
           <Link
             to="/scan"
-            className="rounded-lg border border-[#2c5282] bg-[#1a365d] px-3 py-2 text-sm font-semibold text-white shadow-[0_0_18px_rgba(26,54,93,0.2)] hover:bg-[#2c5282]"
+            className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold shadow-[0_0_18px_rgba(26,54,93,0.2)]"
           >
             Novo Scan
           </Link>
-          <div className="hidden rounded-lg border border-[#cbd5e0] bg-[#f7fafc] px-3 py-2 text-xs text-[#4a5568] sm:block">
+          <div className="app-btn-secondary hidden rounded-lg border px-3 py-2 text-xs sm:block">
             {me?.email || "usuario"}
           </div>
-          <button onClick={logout} className="rounded-lg border border-[#cbd5e0] px-3 py-2 text-sm text-[#2d3748] hover:border-[#2c5282] hover:text-[#1a365d]">
+          <button onClick={logout} className="app-btn-secondary rounded-lg border px-3 py-2 text-sm">
             Sair
           </button>
         </div>

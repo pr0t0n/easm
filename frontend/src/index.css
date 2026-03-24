@@ -16,16 +16,83 @@
   --text-tertiary: #718096;
   --border: #e2e8f0;
   --border-light: #cbd5e0;
+  --bg-app-gradient:
+    radial-gradient(circle at 10% 10%, rgba(26, 54, 93, 0.08), transparent 35%),
+    radial-gradient(circle at 90% 0%, rgba(49, 130, 206, 0.08), transparent 26%),
+    linear-gradient(180deg, #f7fafc 0%, #edf2f7 100%);
+  --surface-strong: #ffffff;
+  --surface-soft: #f7fafc;
+  --header-bg: rgba(255, 255, 255, 0.95);
+  --header-border: #cbd5e0;
+  --header-title: #1a365d;
+  --header-subtitle: #4a5568;
+  --btn-primary-bg: #1a365d;
+  --btn-primary-hover: #2c5282;
+  --btn-primary-border: #2c5282;
+  --btn-secondary-bg: #f7fafc;
+  --btn-secondary-border: #cbd5e0;
+  --btn-secondary-text: #2d3748;
+  --sidebar-bg: #1a365d;
+  --sidebar-surface: #224874;
+  --sidebar-border: #2c5282;
+  --sidebar-text: #e2e8f0;
+  --sidebar-muted: #bfdbfe;
+  --table-row-hover: rgba(237, 242, 247, 0.9);
+  --override-slate-bg: #ffffff;
+  --override-slate-muted: var(--text-secondary);
+  --override-slate-dim: var(--text-tertiary);
+  --input-bg: #ffffff;
+  --input-border: var(--border-light);
+  --input-focus: var(--primary);
+}
+
+:root[data-theme="dark"] {
+  --bg-main: #0a0f1e;
+  --surface: #0d1527;
+  --surface-elevated: #111827;
+  --primary: #3b82f6;
+  --primary-light: #60a5fa;
+  --secondary: #22d3ee;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-tertiary: #64748b;
+  --border: #1e293b;
+  --border-light: #243044;
+  --bg-app-gradient:
+    radial-gradient(circle at 10% 10%, rgba(59, 130, 246, 0.15), transparent 35%),
+    radial-gradient(circle at 90% 0%, rgba(34, 211, 238, 0.12), transparent 26%),
+    linear-gradient(180deg, #060b17 0%, #0a0f1e 100%);
+  --surface-strong: #0d1527;
+  --surface-soft: #111827;
+  --header-bg: rgba(10, 15, 30, 0.92);
+  --header-border: #1e293b;
+  --header-title: #f1f5f9;
+  --header-subtitle: #94a3b8;
+  --btn-primary-bg: #1d4ed8;
+  --btn-primary-hover: #2563eb;
+  --btn-primary-border: #3b82f6;
+  --btn-secondary-bg: #111827;
+  --btn-secondary-border: #243044;
+  --btn-secondary-text: #cbd5e1;
+  --sidebar-bg: #060b17;
+  --sidebar-surface: #0d1527;
+  --sidebar-border: #1e293b;
+  --sidebar-text: #e2e8f0;
+  --sidebar-muted: #94a3b8;
+  --table-row-hover: rgba(30, 41, 59, 0.5);
+  --override-slate-bg: #111827;
+  --override-slate-muted: #94a3b8;
+  --override-slate-dim: #64748b;
+  --input-bg: #111827;
+  --input-border: #243044;
+  --input-focus: #3b82f6;
 }
 
 body {
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   min-height: 100vh;
   color: var(--text-primary);
-  background:
-    radial-gradient(circle at 10% 10%, rgba(26, 54, 93, 0.08), transparent 35%),
-    radial-gradient(circle at 90% 0%, rgba(49, 130, 206, 0.08), transparent 26%),
-    linear-gradient(180deg, #f7fafc 0%, #edf2f7 100%);
+  background: var(--bg-app-gradient);
   background-attachment: fixed;
   letter-spacing: 0.003em;
 }
@@ -39,8 +106,8 @@ body {
 .panel {
   @apply border rounded-lg;
   border-color: var(--border);
-  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
-  box-shadow: 0 6px 16px rgba(26, 54, 93, 0.08);
+  background: linear-gradient(135deg, var(--surface-strong) 0%, var(--surface-soft) 100%);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
 }
 
 .panel-header {
@@ -74,8 +141,8 @@ input:not([type="checkbox"]):not([type="radio"]),
 select,
 textarea {
   color: var(--text-primary);
-  border-color: var(--border-light) !important;
-  background-color: #ffffff !important;
+  border-color: var(--input-border) !important;
+  background-color: var(--input-bg) !important;
   transition: all 200ms ease;
   font-size: 0.875rem;
 }
@@ -89,10 +156,10 @@ textarea:hover {
 input:not([type="checkbox"]):not([type="radio"]):focus,
 select:focus,
 textarea:focus {
-  border-color: var(--primary) !important;
+  border-color: var(--input-focus) !important;
   box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.18);
   outline: none;
-  background-color: #ffffff !important;
+  background-color: var(--input-bg) !important;
 }
 
 button:focus-visible,
@@ -122,15 +189,15 @@ button.btn-primary:disabled {
 /* Secondary buttons */
 button.btn-secondary {
   @apply px-4 py-2 rounded-lg font-medium border;
-  color: #2d3748;
-  background: #edf2f7;
-  border-color: #cbd5e0;
+  color: var(--btn-secondary-text);
+  background: var(--btn-secondary-bg);
+  border-color: var(--btn-secondary-border);
   transition: all 200ms ease;
 }
 
 button.btn-secondary:hover {
-  border-color: #a0aec0;
-  background-color: #e2e8f0 !important;
+  border-color: var(--primary-light);
+  background-color: color-mix(in srgb, var(--btn-secondary-bg) 85%, #ffffff 15%) !important;
 }
 
 /* Danger buttons */
@@ -171,17 +238,17 @@ td {
 [class*="bg-slate-900/50"],
 [class*="bg-slate-950/60"],
 [class*="bg-slate-950/50"] {
-  background-color: #ffffff !important;
+  background-color: var(--override-slate-bg) !important;
 }
 
 [class*="text-slate-300"],
 [class*="text-slate-400"],
 [class*="text-slate-500"] {
-  color: var(--text-secondary) !important;
+  color: var(--override-slate-muted) !important;
 }
 
 [class*="text-slate-600"] {
-  color: var(--text-tertiary) !important;
+  color: var(--override-slate-dim) !important;
 }
 
 /* Normaliza contrastes de textos coloridos para o tema claro */
@@ -214,7 +281,59 @@ tbody tr {
 }
 
 tbody tr:hover {
-  background-color: rgba(237, 242, 247, 0.9);
+  background-color: var(--table-row-hover);
+}
+
+.app-header {
+  border-color: var(--header-border);
+  background: var(--header-bg);
+}
+
+.app-header-title {
+  color: var(--header-title);
+}
+
+.app-header-subtitle {
+  color: var(--header-subtitle);
+}
+
+.app-btn-primary {
+  border-color: var(--btn-primary-border);
+  background: var(--btn-primary-bg);
+  color: #ffffff;
+}
+
+.app-btn-primary:hover {
+  background: var(--btn-primary-hover);
+}
+
+.app-btn-secondary {
+  border-color: var(--btn-secondary-border);
+  background: var(--btn-secondary-bg);
+  color: var(--btn-secondary-text);
+}
+
+.app-btn-secondary:hover {
+  border-color: var(--primary-light);
+  color: var(--text-primary);
+}
+
+.app-sidebar {
+  border-color: var(--sidebar-border);
+  background: var(--sidebar-bg);
+}
+
+.app-sidebar-surface {
+  border-color: var(--sidebar-border);
+  background: var(--sidebar-surface);
+}
+
+.app-sidebar-text {
+  color: var(--sidebar-text);
+}
+
+.app-sidebar-muted {
+  color: var(--sidebar-muted);
 }
 
 /* Status badges */

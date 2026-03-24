@@ -217,14 +217,23 @@ export default function DashboardPage() {
           Evidência operacional do último scan processado
           {vulnToolExecution?.scan_id ? ` (#${vulnToolExecution.scan_id} - ${vulnToolExecution.scan_target || "-"}, status ${vulnToolExecution.scan_status || "-"})` : ""}.
         </p>
-        <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-300">
-          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Previstas: <strong>{vulnToolExecution?.summary?.requested_count || 0}</strong></div>
-          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Tentadas: <strong>{vulnToolExecution?.summary?.attempted_count || 0}</strong></div>
-          <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Executadas: <strong>{vulnToolExecution?.summary?.executed_count || 0}</strong></div>
+        <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-300 sm:grid-cols-3">
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Previstas</p>
+            <p className="mt-1 text-base font-semibold text-slate-100">{vulnToolExecution?.summary?.requested_count || 0}</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Tentadas</p>
+            <p className="mt-1 text-base font-semibold text-slate-100">{vulnToolExecution?.summary?.attempted_count || 0}</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Executadas</p>
+            <p className="mt-1 text-base font-semibold text-emerald-300">{vulnToolExecution?.summary?.executed_count || 0}</p>
+          </div>
         </div>
-        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-800">
+        <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700 bg-slate-800/30">
           <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-800/70 text-slate-300">
+            <thead className="bg-slate-800/80 text-[11px] uppercase tracking-wider text-slate-300">
               <tr>
                 <th className="px-3 py-2">Ferramenta</th>
                 <th className="px-3 py-2">Targets</th>
@@ -239,11 +248,29 @@ export default function DashboardPage() {
                 </tr>
               )}
               {(vulnToolExecution?.tools || []).map((row, idx) => (
-                <tr key={`vuln-tool-${idx}`} className="border-t border-slate-800 text-slate-200">
-                  <td className="px-3 py-2 font-mono">{row.tool || "-"}</td>
-                  <td className="px-3 py-2">{row.targets_count || 0}</td>
-                  <td className="px-3 py-2">{(row.executed_events || 0) > 0 ? "sim" : "nao"}</td>
-                  <td className="px-3 py-2">{row.last_return_code ?? "-"}</td>
+                <tr key={`vuln-tool-${idx}`} className="border-t border-slate-700/70 text-slate-200 transition-colors hover:bg-slate-800/50">
+                  <td className="px-3 py-2">
+                    <span className="rounded-md border border-slate-600 bg-slate-900/50 px-2 py-0.5 font-mono text-xs text-cyan-300">
+                      {row.tool || "-"}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-slate-100">{row.targets_count || 0}</td>
+                  <td className="px-3 py-2">
+                    {(row.executed_events || 0) > 0 ? (
+                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">Sim</span>
+                    ) : (
+                      <span className="inline-flex rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-xs font-semibold text-rose-300">Não</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {Number(row.last_return_code) === 0 ? (
+                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">0</span>
+                    ) : row.last_return_code == null ? (
+                      <span className="text-slate-500">-</span>
+                    ) : (
+                      <span className="inline-flex rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-300">{row.last_return_code}</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
