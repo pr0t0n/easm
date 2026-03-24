@@ -1355,6 +1355,8 @@ export default function ReportsPage() {
     const reconFindings = v2.recon_findings || [];
     const osintFindings = v2.osint_findings || [];
     const wafSummary = v2.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] };
+    const assetsSummary = v2.assets_summary || { domain: '', subdomains: [], subdomain_count: 0, total_assets: 0 };
+    const findingsBySubdomain = v2.findings_by_subdomain || {};
     const securityHeadersSummary = v2.security_headers_summary || {
       findings_count: 0,
       assets_count: 0,
@@ -1401,6 +1403,8 @@ export default function ReportsPage() {
       reconFindings,
       osintFindings,
       wafSummary,
+      assetsSummary,
+      findingsBySubdomain,
       securityHeadersSummary,
       lifecycle,
       benchmark,
@@ -1495,17 +1499,18 @@ export default function ReportsPage() {
           <div className="toc page-break">
             <h2>Sumário</h2>
             <ul className="toc-list">
-              <li><span><span className="toc-number">01</span><span className="toc-title">Resumo Executivo</span></span><span className="toc-page">Seção I</span></li>
-              <li><span><span className="toc-number">02</span><span className="toc-title">Visão Geral das Vulnerabilidades</span></span><span className="toc-page">Seção II</span></li>
-              <li><span><span className="toc-number">03</span><span className="toc-title">Métricas FAIR</span></span><span className="toc-page">Seção III</span></li>
-              <li><span><span className="toc-number">04</span><span className="toc-title">Conformidade com Frameworks</span></span><span className="toc-page">Seção IV</span></li>
-              <li><span><span className="toc-number">05</span><span className="toc-title">Top 5 Quick-Wins</span></span><span className="toc-page">Seção V</span></li>
-              <li><span><span className="toc-number">06</span><span className="toc-title">Análise por Categoria</span></span><span className="toc-page">Seção VI</span></li>
-              <li><span><span className="toc-number">07</span><span className="toc-title">Detalhamento Técnico</span></span><span className="toc-page">Seção VII</span></li>
-              <li><span><span className="toc-number">08</span><span className="toc-title">Benchmark e Evolução por Alvo</span></span><span className="toc-page">Seção VIII</span></li>
-              <li><span><span className="toc-number">09</span><span className="toc-title">WAF no Ambiente</span></span><span className="toc-page">Seção IX</span></li>
-              <li><span><span className="toc-number">10</span><span className="toc-title">Headers de Segurança</span></span><span className="toc-page">Seção X</span></li>
-              <li><span><span className="toc-number">11</span><span className="toc-title">Cobertura Recon e OSINT</span></span><span className="toc-page">Seção XI</span></li>
+              <li><span><span className="toc-number">01</span><span className="toc-title">Domínio e Subdomínios</span></span><span className="toc-page">Seção I</span></li>
+              <li><span><span className="toc-number">02</span><span className="toc-title">Resumo Executivo</span></span><span className="toc-page">Seção II</span></li>
+              <li><span><span className="toc-number">03</span><span className="toc-title">Visão Geral das Vulnerabilidades</span></span><span className="toc-page">Seção III</span></li>
+              <li><span><span className="toc-number">04</span><span className="toc-title">Métricas FAIR</span></span><span className="toc-page">Seção IV</span></li>
+              <li><span><span className="toc-number">05</span><span className="toc-title">Conformidade com Frameworks</span></span><span className="toc-page">Seção V</span></li>
+              <li><span><span className="toc-number">06</span><span className="toc-title">Top 5 Quick-Wins</span></span><span className="toc-page">Seção VI</span></li>
+              <li><span><span className="toc-number">07</span><span className="toc-title">Análise por Categoria</span></span><span className="toc-page">Seção VII</span></li>
+              <li><span><span className="toc-number">08</span><span className="toc-title">Detalhamento Técnico por Subdomínio</span></span><span className="toc-page">Seção VIII</span></li>
+              <li><span><span className="toc-number">09</span><span className="toc-title">Benchmark e Evolução por Alvo</span></span><span className="toc-page">Seção IX</span></li>
+              <li><span><span className="toc-number">10</span><span className="toc-title">WAF no Ambiente</span></span><span className="toc-page">Seção X</span></li>
+              <li><span><span className="toc-number">11</span><span className="toc-title">Headers de Segurança</span></span><span className="toc-page">Seção XI</span></li>
+              <li><span><span className="toc-number">12</span><span className="toc-title">Cobertura Recon e OSINT</span></span><span className="toc-page">Seção XII</span></li>
             </ul>
           </div>
 
@@ -1517,13 +1522,14 @@ export default function ReportsPage() {
                 </svg>
               </div>
               <nav className="sidebar-nav">
-                <a href="#resumo" className="active">Resumo Executivo</a>
+                <a href="#subdominios" className="active">Domínio e Subdomínios</a>
+                <a href="#resumo">Resumo Executivo</a>
                 <a href="#visao-geral">Visão Geral</a>
                 <a href="#fair">Métricas FAIR</a>
                 <a href="#frameworks">Frameworks</a>
                 <a href="#quickwins">Quick-Wins</a>
                 <a href="#categorias">Categorias</a>
-                <a href="#tecnico">Detalhamento Técnico</a>
+                <a href="#tecnico">Detalhamento por Subdomínio</a>
                 <a href="#evolucao">Benchmark e Evolução</a>
                 <a href="#waf">WAF no Ambiente</a>
                 <a href="#headers">Headers de Segurança</a>
@@ -1532,6 +1538,107 @@ export default function ReportsPage() {
             </aside>
 
             <main className="main-content">
+
+              {/* ── SEÇÃO I – Domínio e Subdomínios ── */}
+              <section id="subdominios" className="section page-break">
+                <div className="section-header">
+                  <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" /></svg></div>
+                  <div>
+                    <h2 className="section-title">Domínio e Subdomínios</h2>
+                    <p className="section-subtitle">Superfície de ataque mapeada — domínio principal e subdomínios descobertos</p>
+                  </div>
+                </div>
+
+                <div className="metrics-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', marginBottom: 24 }}>
+                  <div className="metric-card" style={{ borderLeft: '4px solid #3182ce' }}>
+                    <div className="metric-value" style={{ fontSize: 22 }}>{data.assetsSummary.domain || '-'}</div>
+                    <div className="metric-label">Domínio Principal</div>
+                  </div>
+                  <div className="metric-card" style={{ borderLeft: '4px solid #38a169' }}>
+                    <div className="metric-value">{data.assetsSummary.subdomain_count}</div>
+                    <div className="metric-label">Subdomínios</div>
+                  </div>
+                  <div className="metric-card" style={{ borderLeft: '4px solid #805ad5' }}>
+                    <div className="metric-value">{data.assetsSummary.total_assets}</div>
+                    <div className="metric-label">Total de Ativos</div>
+                  </div>
+                  {data.wafSummary.assets_count > 0 && (
+                    <div className="metric-card" style={{ borderLeft: '4px solid #dd6b20' }}>
+                      <div className="metric-value">{data.wafSummary.assets_count}</div>
+                      <div className="metric-label">Ativos com WAF</div>
+                    </div>
+                  )}
+                </div>
+
+                {data.wafSummary.vendors && data.wafSummary.vendors.length > 0 && (
+                  <div className="chart-container no-break" style={{ marginBottom: 24 }}>
+                    <div className="chart-header"><h3 className="chart-title">Proteção WAF Detectada</h3></div>
+                    <div className="table-container">
+                      <table>
+                        <thead><tr><th>Fornecedor WAF</th><th>Ativos Protegidos</th><th>Ativos</th></tr></thead>
+                        <tbody>
+                          {data.wafSummary.vendors.map((v, i) => (
+                            <tr key={`waf-head-${i}`}>
+                              <td><strong>{v.name || 'WAF não identificado'}</strong></td>
+                              <td>{v.count}</td>
+                              <td style={{ fontSize: 12, color: '#718096' }}>
+                                {(data.wafSummary.assets || []).slice(0, 10).join(', ')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {data.wafSummary.vendors.length === 0 && (
+                      <p style={{ padding: '12px 20px', color: '#718096', fontSize: 13 }}>
+                        Nenhum WAF identificado pelo scanner. Isso não significa ausência de proteção — alguns WAFs são difíceis de detectar passivamente.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <div className="chart-container no-break">
+                  <div className="chart-header">
+                    <h3 className="chart-title">Mapa de Subdomínios ({data.assetsSummary.subdomain_count})</h3>
+                  </div>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Subdomínio</th>
+                          <th>Vulnerabilidades</th>
+                          <th>WAF</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.assetsSummary.subdomains.map((sub, idx) => {
+                          const vulns = (data.findingsBySubdomain[sub] || []);
+                          const hasWaf = (data.wafSummary.assets || []).includes(sub);
+                          return (
+                            <tr key={`sub-${idx}`}>
+                              <td style={{ color: '#718096', fontSize: 12 }}>{idx + 1}</td>
+                              <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{sub}</td>
+                              <td>
+                                {vulns.length > 0 ? (
+                                  <span style={{ color: '#c53030', fontWeight: 600 }}>{vulns.length}</span>
+                                ) : (
+                                  <span style={{ color: '#38a169' }}>0</span>
+                                )}
+                              </td>
+                              <td>{hasWaf ? <span style={{ color: '#38a169', fontWeight: 600 }}>✓</span> : <span style={{ color: '#a0aec0' }}>—</span>}</td>
+                            </tr>
+                          );
+                        })}
+                        {data.assetsSummary.subdomains.length === 0 && (
+                          <tr><td colSpan={4} style={{ color: '#718096', textAlign: 'center', padding: 16 }}>Nenhum subdomínio mapeado neste scan.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+
               <section id="resumo" className="section page-break">
                 <div className="section-header">
                   <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z" /></svg></div>
@@ -2039,97 +2146,148 @@ export default function ReportsPage() {
                 <div className="section-header">
                   <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z" /></svg></div>
                   <div>
-                    <h2 className="section-title">Detalhamento Técnico</h2>
-                    <p className="section-subtitle">URLs afetadas, payloads e evidências</p>
+                    <h2 className="section-title">Detalhamento Técnico por Subdomínio</h2>
+                    <p className="section-subtitle">Vulnerabilidades agrupadas por subdomínio — URLs afetadas, payloads e evidências</p>
                   </div>
                 </div>
 
-                {data.vulnerabilities.slice(0, 24).map((row, index) => {
-                  const sev = String(row.severity || "low").toLowerCase();
-                  const badge = SEVERITY_META[sev] || SEVERITY_META.low;
-                  const title = row.name || row.problem || "Vulnerabilidade identificada";
-                  const urls = [row.full_url, row.target].filter(Boolean).join("\n");
-                  const methodEndpoint = `${row.http_method || "GET"} ${row.endpoint || "/"}`;
-                  const frameworkTitle = `${row.owasp || "-"}`;
-                  const contextSummary = row.technical_context || buildContextSummary(row);
-                  const controls = Array.isArray(row.recommendation_controls) ? row.recommendation_controls : [];
-                  const validations = Array.isArray(row.recommendation_validation) ? row.recommendation_validation : [];
-                  return (
-                    <div key={`tech-${index}-${row.id}`} className="technical-card no-break">
-                      <div className="technical-header">
-                        <div className="technical-title">
-                          <span className={`severity-badge ${badge.css}`}>{badge.label}</span>
-                          <h4>{row.id || `VUL-${String(index + 1).padStart(3, "0")}`}: {title}</h4>
+                {(() => {
+                  // Build ordered groups: subdomains with findings first (by count desc), then flat list of their rows
+                  const groups = Object.entries(data.findingsBySubdomain)
+                    .sort((a, b) => b[1].length - a[1].length);
+
+                  // If no grouping data, fall back to flat sorted list
+                  const rows = groups.length > 0
+                    ? groups.flatMap(([subdomain, subRows]) => subRows.map(r => ({ ...r, _subdomain: subdomain })))
+                    : data.vulnerabilities.slice(0, 24).map(r => ({ ...r, _subdomain: r.asset || r.target || data.assetsSummary.domain || '-' }));
+
+                  let currentSubdomain = null;
+                  let displayCount = 0;
+                  const elements = [];
+
+                  for (let index = 0; index < rows.length && displayCount < 30; index++) {
+                    const row = rows[index];
+                    const subdomainLabel = row._subdomain;
+
+                    // Subdomain header
+                    if (subdomainLabel !== currentSubdomain) {
+                      currentSubdomain = subdomainLabel;
+                      const subRows = data.findingsBySubdomain[subdomainLabel] || [];
+                      const hasWaf = (data.wafSummary.assets || []).includes(subdomainLabel);
+                      elements.push(
+                        <div key={`subdomain-header-${subdomainLabel}`} style={{
+                          margin: '32px 0 16px',
+                          padding: '14px 20px',
+                          background: 'linear-gradient(135deg, #1a365d, #2c5282)',
+                          borderRadius: 10,
+                          color: '#fff',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 16,
+                        }}>
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{ flexShrink: 0 }}>
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
+                          </svg>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontFamily: 'monospace', fontSize: 16, fontWeight: 700 }}>{subdomainLabel}</div>
+                            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                              {subRows.length} vulnerabilidade{subRows.length !== 1 ? 's' : ''} identificada{subRows.length !== 1 ? 's' : ''}
+                              {hasWaf ? ' · WAF protegido' : ''}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const sev = String(row.severity || "low").toLowerCase();
+                    const badge = SEVERITY_META[sev] || SEVERITY_META.low;
+                    const title = row.name || row.problem || "Vulnerabilidade identificada";
+                    const urls = [row.full_url, row.target].filter(Boolean).join("\n");
+                    const methodEndpoint = `${row.http_method || "GET"} ${row.endpoint || "/"}`;
+                    const frameworkTitle = `${row.owasp || "-"}`;
+                    const contextSummary = row.technical_context || buildContextSummary(row);
+                    const controls = Array.isArray(row.recommendation_controls) ? row.recommendation_controls : [];
+                    const validations = Array.isArray(row.recommendation_validation) ? row.recommendation_validation : [];
+
+                    elements.push(
+                      <div key={`tech-${index}-${row.id}`} className="technical-card no-break">
+                        <div className="technical-header">
+                          <div className="technical-title">
+                            <span className={`severity-badge ${badge.css}`}>{badge.label}</span>
+                            <h4>{row.id || `VUL-${String(displayCount + 1).padStart(3, "0")}`}: {title}</h4>
+                          </div>
+                        </div>
+                        <div className="technical-body">
+                          <div className="technical-detail">
+                            <div className="technical-label">Resumo Técnico</div>
+                            <div className="technical-url">
+                              severidade={badge.label} | endpoint={methodEndpoint} | parametro={row.parameter || "-"}
+                            </div>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Framework Afetado</div>
+                            <div className="technical-url">
+                              OWASP={frameworkTitle} | CWE={row.cwe || "-"} | Classe={row.vuln_class || "-"}
+                            </div>
+                            <div className="technical-url" style={{ marginTop: 6 }}>
+                              ISO={row.iso_control || "-"} | NIST={row.nist_control || "-"} | CIS={row.cis_control || "-"}
+                            </div>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Payload (Input de Ataque)</div>
+                            <pre className="technical-payload">{toMultiline(row.attack_input || row.payload || "-")}</pre>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Requisição Gerada (PoC)</div>
+                            <pre className="technical-payload">{toMultiline(row.poc_request || row.payload || row.command || "-")}</pre>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Evidência (Prova Técnica)</div>
+                            <div className="technical-url">Resposta HTTP: {toMultiline(row.response_http || "-")}</div>
+                            <pre className="technical-payload" style={{ marginTop: 6 }}>{toMultiline(row.response_application || row.evidence || row.error || "-")}</pre>
+                            <div className="technical-url" style={{ marginTop: 6 }}>Validação técnica: {toMultiline(row.technical_validation || "-")}</div>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Análise Técnica</div>
+                            <div className="technical-url">Comportamento esperado: {toMultiline(row.expected_behavior || "-")}</div>
+                            <div className="technical-url" style={{ marginTop: 6 }}>Comportamento observado: {toMultiline(row.observed_behavior || "-")}</div>
+                            <div className="technical-url" style={{ marginTop: 6 }}>Causa raiz: {toMultiline(row.root_cause || "-")}</div>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Recomendação Técnica</div>
+                            <pre className="technical-payload">{toMultiline(row.recommendation_required || row.recommendation || "-")}</pre>
+                            <div className="technical-url" style={{ marginTop: 6 }}>Controles complementares:</div>
+                            <ul style={{ marginTop: 6, marginLeft: 18 }}>
+                              {(controls.length > 0 ? controls : ["Aplicar correção específica do componente", "Executar hardening de configuração", "Revalidar com reteste técnico"]).map((item, idx) => (
+                                <li key={`ctrl-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
+                              ))}
+                            </ul>
+                            <div className="technical-url" style={{ marginTop: 6 }}>Validação pós-correção:</div>
+                            <ul style={{ marginTop: 6, marginLeft: 18 }}>
+                              {(validations.length > 0 ? validations : ["Reexecutar a PoC para confirmar correção", "Validar que não houve regressão funcional", "Registrar evidências do reteste no ticket"]).map((item, idx) => (
+                                <li key={`val-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
+                              ))}
+                            </ul>
+                          </div>
+
+                          <div className="technical-detail">
+                            <div className="technical-label">Contexto Técnico</div>
+                            <div className="technical-url">{contextSummary}</div>
+                            <div className="technical-url" style={{ marginTop: 6 }}>URLs afetadas: {urls || "Sem URL consolidada."}</div>
+                          </div>
                         </div>
                       </div>
-                      <div className="technical-body">
-                        <div className="technical-detail">
-                          <div className="technical-label">Resumo Técnico</div>
-                          <div className="technical-url">
-                            severidade={badge.label} | endpoint={methodEndpoint} | parametro={row.parameter || "-"}
-                          </div>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Framework Afetado</div>
-                          <div className="technical-url">
-                            OWASP={frameworkTitle} | CWE={row.cwe || "-"} | Classe={row.vuln_class || "-"}
-                          </div>
-                          <div className="technical-url" style={{ marginTop: 6 }}>
-                            ISO={row.iso_control || "-"} | NIST={row.nist_control || "-"} | CIS={row.cis_control || "-"}
-                          </div>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Payload (Input de Ataque)</div>
-                          <pre className="technical-payload">{toMultiline(row.attack_input || row.payload || "-")}</pre>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Requisição Gerada (PoC)</div>
-                          <pre className="technical-payload">{toMultiline(row.poc_request || row.payload || row.command || "-")}</pre>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Evidência (Prova Técnica)</div>
-                          <div className="technical-url">Resposta HTTP: {toMultiline(row.response_http || "-")}</div>
-                          <pre className="technical-payload" style={{ marginTop: 6 }}>{toMultiline(row.response_application || row.evidence || row.error || "-")}</pre>
-                          <div className="technical-url" style={{ marginTop: 6 }}>Validação técnica: {toMultiline(row.technical_validation || "-")}</div>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Análise Técnica</div>
-                          <div className="technical-url">Comportamento esperado: {toMultiline(row.expected_behavior || "-")}</div>
-                          <div className="technical-url" style={{ marginTop: 6 }}>Comportamento observado: {toMultiline(row.observed_behavior || "-")}</div>
-                          <div className="technical-url" style={{ marginTop: 6 }}>Causa raiz: {toMultiline(row.root_cause || "-")}</div>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Recomendação Técnica</div>
-                          <pre className="technical-payload">{toMultiline(row.recommendation_required || row.recommendation || "-")}</pre>
-                          <div className="technical-url" style={{ marginTop: 6 }}>Controles complementares:</div>
-                          <ul style={{ marginTop: 6, marginLeft: 18 }}>
-                            {(controls.length > 0 ? controls : ["Aplicar correção específica do componente", "Executar hardening de configuração", "Revalidar com reteste técnico"]).map((item, idx) => (
-                              <li key={`ctrl-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
-                            ))}
-                          </ul>
-                          <div className="technical-url" style={{ marginTop: 6 }}>Validação pós-correção:</div>
-                          <ul style={{ marginTop: 6, marginLeft: 18 }}>
-                            {(validations.length > 0 ? validations : ["Reexecutar a PoC para confirmar correção", "Validar que não houve regressão funcional", "Registrar evidências do reteste no ticket"] ).map((item, idx) => (
-                              <li key={`val-${index}-${idx}`} style={{ fontSize: 12, color: "#4a5568" }}>{item}</li>
-                            ))}
-                          </ul>
-                        </div>
-
-                        <div className="technical-detail">
-                          <div className="technical-label">Contexto Técnico</div>
-                          <div className="technical-url">{contextSummary}</div>
-                          <div className="technical-url" style={{ marginTop: 6 }}>URLs afetadas: {urls || "Sem URL consolidada."}</div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                    displayCount++;
+                  }
+                  return elements;
+                })()}
               </section>
 
               <section id="evolucao" className="section page-break">

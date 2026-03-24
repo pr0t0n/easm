@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import re
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import text
@@ -431,28 +432,55 @@ def _compute_framework_scores(vulnerability_rows: list[dict]) -> dict:
         },
     }
 
+    default_weight = {
+        "iso27001": 0.88,
+        "nist": 0.93,
+        "cis_v8": 0.9,
+        "pci": 0.96,
+    }
+
+    framework_multiplier = {
+        "iso27001": 1.0,
+        "nist": 0.94,
+        "cis_v8": 0.98,
+        "pci": 1.06,
+    }
+
+    valid_rows = [row for row in vulnerability_rows if not row.get("is_false_positive")]
+    if not valid_rows:
+        return {
+            "iso27001": {"score": 100},
+            "nist": {"score": 100},
+            "cis_v8": {"score": 100},
+            "pci": {"score": 100},
+        }
+
+    total_rows = len(valid_rows)
+    critical_count = sum(1 for row in valid_rows if str(row.get("severity") or "").lower() == "critical")
+    high_count = sum(1 for row in valid_rows if str(row.get("severity") or "").lower() == "high")
+    severe_pressure = (critical_count * 1.7 + high_count * 1.0) / max(1, total_rows)
+
     penalties = {"iso27001": 0.0, "nist": 0.0, "cis_v8": 0.0, "pci": 0.0}
-    for row in vulnerability_rows:
-        if row.get("is_false_positive"):
-            continue
+    for row in valid_rows:
         sev = str(row.get("severity") or "low").lower()
         category = str(row.get("category") or "Application Security")
-        base = _severity_penalty(sev)
+        base = float(_severity_penalty(sev))
         for fw in penalties.keys():
-            penalties[fw] += base * float(weights.get(fw, {}).get(category, 0.75))
+            weight = float(weights.get(fw, {}).get(category, default_weight[fw]))
+            penalties[fw] += base * weight
 
-    def score_from_penalty(value: float) -> int:
-        # Curva suavizada: evita queda excessiva de score por poucos achados.
-        safe_value = max(0.0, float(value))
-        if safe_value <= 0:
-            return 100
-        return max(55, min(100, int(round(100.0 / (1.0 + (safe_value / 55.0))))))
+    def score_from_penalty(fw: str, total_penalty: float) -> int:
+        # Usa média de risco por finding para evitar saturação em scans longos com muitos itens.
+        avg_penalty = float(total_penalty) / max(1, total_rows)
+        multiplier = float(framework_multiplier[fw])
+        raw = 100.0 - (avg_penalty * 4.1 * multiplier) - (severe_pressure * 12.0 * multiplier)
+        return max(0, min(100, int(round(raw))))
 
     return {
-        "iso27001": {"score": score_from_penalty(penalties["iso27001"])},
-        "nist": {"score": score_from_penalty(penalties["nist"])},
-        "cis_v8": {"score": score_from_penalty(penalties["cis_v8"])},
-        "pci": {"score": score_from_penalty(penalties["pci"])},
+        "iso27001": {"score": score_from_penalty("iso27001", penalties["iso27001"])},
+        "nist": {"score": score_from_penalty("nist", penalties["nist"])},
+        "cis_v8": {"score": score_from_penalty("cis_v8", penalties["cis_v8"])},
+        "pci": {"score": score_from_penalty("pci", penalties["pci"])},
     }
 
 
@@ -2292,6 +2320,32 @@ def scan_report(
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     target_evolution = _build_target_evolution(db, job.target_query, scan_id)
 
+    # Assets summary and findings grouped by subdomain
+    raw_assets_list: list[str] = list(
+        (job.state_data or {}).get("lista_ativos") or []
+    )
+    unique_assets_list: list[str] = sorted(
+        {str(a).strip() for a in raw_assets_list if str(a).strip()}
+    )
+    main_domain: str = str(job.target_query or "").strip()
+    subdomains_list: list[str] = [a for a in unique_assets_list if a != main_domain]
+    assets_summary = {
+        "domain": main_domain,
+        "subdomains": subdomains_list,
+        "subdomain_count": len(subdomains_list),
+        "total_assets": len(unique_assets_list),
+    }
+
+    findings_by_subdomain: dict[str, list[dict]] = {}
+    for _row in open_vulnerability_table:
+        _asset = str(_row.get("asset") or _row.get("target") or main_domain).strip()
+        if _asset.startswith(("http://", "https://")):
+            _parsed = urlparse(_asset)
+            _asset = _parsed.netloc or _asset
+        if not _asset:
+            _asset = main_domain
+        findings_by_subdomain.setdefault(_asset, []).append(_row)
+
     return ReportResponse(
         scan_id=scan_id,
         status=job.status,
@@ -2307,6 +2361,8 @@ def scan_report(
                 "fair": fair_total,
                 "frameworks": frameworks,
                 "category_scores": category_scores,
+                "assets_summary": assets_summary,
+                "findings_by_subdomain": findings_by_subdomain,
                 "vulnerability_table": open_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
