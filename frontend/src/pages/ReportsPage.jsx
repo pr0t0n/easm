@@ -1268,6 +1268,21 @@ export default function ReportsPage() {
 
   const selectedScan = scans.find((item) => String(item.id) === String(selectedId));
 
+  const groupedScanOptions = useMemo(() => {
+    const byTarget = new Map();
+    for (const scan of scans || []) {
+      const target = String(scan.target_query || "(sem alvo)");
+      const existing = byTarget.get(target);
+      if (!existing) {
+        byTarget.set(target, { target, latest: scan, count: 1 });
+        continue;
+      }
+      const latest = Number(scan.id) > Number(existing.latest.id) ? scan : existing.latest;
+      byTarget.set(target, { target, latest, count: existing.count + 1 });
+    }
+    return Array.from(byTarget.values()).sort((a, b) => Number(b.latest.id) - Number(a.latest.id));
+  }, [scans]);
+
   const data = useMemo(() => {
     const v2 = report?.state_data?.report_v2 || {};
     const summary = v2.summary || {};
@@ -1276,6 +1291,8 @@ export default function ReportsPage() {
     const vulnerabilities = v2.vulnerability_table || [];
     const categories = v2.category_scores || [];
     const lifecycle = v2.lifecycle || {};
+    const benchmark = v2.segment_benchmark || {};
+    const targetEvolution = v2.target_evolution || { timeline: [], recurring_findings: [] };
 
     const total = Number(summary.total || vulnerabilities.length || 0);
     const sev = {
@@ -1287,13 +1304,16 @@ export default function ReportsPage() {
     };
 
     const fairAvg = Number(fair.fair_avg_score || 0);
+    const fairLef = Number(fair.loss_event_frequency_avg || 0);
+    const fairLm = Number(fair.loss_magnitude_avg_usd || 0);
+    const fairPeakAle = Number(fair.ale_peak_usd || 0);
     const fairView = [
-      { name: "LEF (Loss Event Frequency)", value: Math.min(95, Math.max(10, Math.round(fairAvg * 1.05))), descr: "Probabilidade anual estimada de evento de perda" },
-      { name: "TEF (Threat Event Frequency)", value: Math.min(95, Math.max(10, Math.round(fairAvg * 0.9))), descr: "Frequência estimada de eventos de ameaça" },
-      { name: "Vulnerability (Probabilidade de Sucesso)", value: Math.min(95, Math.max(10, Math.round(fairAvg * 0.72))), descr: "Chance de sucesso do agente de ameaça" },
-      { name: "Primary Loss (Perda Primária)", valueText: fmtCurrency((fair.ale_total_open_usd || 0) * 0.65), value: 85, descr: "Perda direta estimada por incidente" },
-      { name: "Secondary Loss (Perda Secundária)", valueText: fmtCurrency((fair.ale_total_open_usd || 0) * 0.35), value: 60, descr: "Perda indireta (reputação, multas, etc.)" },
-      { name: "ALE (Annualized Loss Expectancy)", valueText: fmtCurrency(fair.ale_total_open_usd || 0), value: Math.min(95, Math.max(10, Math.round(fairAvg * 0.95))), descr: "Expectativa de perda anualizada total" },
+      { name: "LEF (Loss Event Frequency)", value: Math.min(100, Math.round(fairLef * 100)), descr: "Probabilidade anual média de evento de perda" },
+      { name: "TEF (Threat Event Frequency)", value: Math.min(100, Math.round((fairLef * 0.82) * 100)), descr: "Frequência estimada de eventos de ameaça" },
+      { name: "Vulnerability (Probabilidade de Sucesso)", value: Math.min(100, Math.round((fairLef * 0.68) * 100)), descr: "Chance de sucesso do agente de ameaça" },
+      { name: "Primary Loss (Perda Primária)", valueText: fmtCurrency((fairLm || 0) * 0.65), value: Math.min(100, Math.round((fairAvg || 0))), descr: "Perda direta média estimada por incidente" },
+      { name: "Secondary Loss (Perda Secundária)", valueText: fmtCurrency((fairLm || 0) * 0.35), value: Math.min(100, Math.round((fairAvg || 0) * 0.75)), descr: "Perda indireta (reputação, multas, etc.)" },
+      { name: "ALE (Annualized Loss Expectancy)", valueText: fmtCurrency(fair.ale_total_open_usd || 0), value: Math.min(100, Math.max(5, Math.round((fairPeakAle > 0 ? (fair.ale_total_open_usd / fairPeakAle) * 100 : fairAvg)))), descr: "Expectativa de perda anualizada total" },
     ];
 
     return {
@@ -1307,6 +1327,8 @@ export default function ReportsPage() {
       vulnerabilities,
       categories,
       lifecycle,
+      benchmark,
+      targetEvolution,
       quickWins: buildQuickWins(v2.recommendations || []),
     };
   }, [report]);
@@ -1341,10 +1363,10 @@ export default function ReportsPage() {
 
       <div className="toolbar no-print">
         <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
-          {scans.length === 0 && <option value="">Sem scans disponíveis</option>}
-          {scans.map((scan) => (
-            <option key={scan.id} value={scan.id}>
-              #{scan.id} - {scan.target_query}
+          {groupedScanOptions.length === 0 && <option value="">Sem scans disponíveis</option>}
+          {groupedScanOptions.map((entry) => (
+            <option key={entry.latest.id} value={entry.latest.id}>
+              {entry.target} - último #{entry.latest.id} ({entry.count} scans)
             </option>
           ))}
         </select>
@@ -1404,6 +1426,7 @@ export default function ReportsPage() {
               <li><span><span className="toc-number">05</span><span className="toc-title">Top 5 Quick-Wins</span></span><span className="toc-page">Seção V</span></li>
               <li><span><span className="toc-number">06</span><span className="toc-title">Análise por Categoria</span></span><span className="toc-page">Seção VI</span></li>
               <li><span><span className="toc-number">07</span><span className="toc-title">Detalhamento Técnico</span></span><span className="toc-page">Seção VII</span></li>
+              <li><span><span className="toc-number">08</span><span className="toc-title">Benchmark e Evolução por Alvo</span></span><span className="toc-page">Seção VIII</span></li>
             </ul>
           </div>
 
@@ -1422,6 +1445,7 @@ export default function ReportsPage() {
                 <a href="#quickwins">Quick-Wins</a>
                 <a href="#categorias">Categorias</a>
                 <a href="#tecnico">Detalhamento Técnico</a>
+                <a href="#evolucao">Benchmark e Evolução</a>
               </nav>
             </aside>
 
@@ -1702,7 +1726,7 @@ export default function ReportsPage() {
                   const sev = String(row.severity || "low").toLowerCase();
                   const badge = SEVERITY_META[sev] || SEVERITY_META.low;
                   const title = row.name || row.problem || "Vulnerabilidade identificada";
-                  const technicalPayload = row.exploit || row.evidence || row.error || "Sem payload/evidência detalhada para este item.";
+                  const technicalPayload = row.payload || row.exploit || row.evidence || row.error || "Sem payload/evidência detalhada para este item.";
                   const urls = [row.full_url, row.target].filter(Boolean).join("\n");
                   return (
                     <div key={`tech-${index}-${row.id}`} className="technical-card no-break">
@@ -1721,10 +1745,114 @@ export default function ReportsPage() {
                           <div className="technical-label">Payload/Evidência</div>
                           <div className="technical-payload">{technicalPayload}</div>
                         </div>
+                        <div className="technical-detail">
+                          <div className="technical-label">Contexto Técnico</div>
+                          <div className="technical-url">step={row.step || "-"} | node={row.node || "-"}</div>
+                        </div>
                       </div>
                     </div>
                   );
                 })}
+              </section>
+
+              <section id="evolucao" className="section page-break">
+                <div className="section-header">
+                  <div className="section-icon"><svg viewBox="0 0 24 24"><path d="M3 17h2v2H3v-2zm4-5h2v7H7v-7zm4-4h2v11h-2V8zm4 2h2v9h-2v-9zm4-6h2v15h-2V4z" /></svg></div>
+                  <div>
+                    <h2 className="section-title">Benchmark e Evolução por Alvo</h2>
+                    <p className="section-subtitle">Comparativo setorial (WEF) e histórico consolidado dos scans</p>
+                  </div>
+                </div>
+
+                <div className="chart-container no-break">
+                  <div className="chart-header"><h3 className="chart-title">Benchmark Setorial</h3></div>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Segmento</th>
+                          <th>Fonte</th>
+                          <th>Exposure Alvo</th>
+                          <th>Exposure Segmento</th>
+                          <th>SLA Patch (dias)</th>
+                          <th>Avaliação</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>{data.benchmark.segment || "-"}</td>
+                          <td>{data.benchmark.source || "-"}</td>
+                          <td>{data.benchmark.target_external_exposure_index ?? "-"}</td>
+                          <td>{data.benchmark.segment_external_exposure_index ?? "-"}</td>
+                          <td>{data.benchmark.segment_patch_sla_days ?? "-"}</td>
+                          <td>{data.benchmark.assessment || "-"}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="chart-container no-break">
+                  <div className="chart-header"><h3 className="chart-title">Evolução do Alvo entre Scans</h3></div>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Scan</th>
+                          <th>Data</th>
+                          <th>Status</th>
+                          <th>Open Findings</th>
+                          <th>Delta vs Anterior</th>
+                          <th>Crítico/Alto/Médio/Baixo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(data.targetEvolution.timeline || []).map((item) => (
+                          <tr key={`timeline-${item.scan_id}`}>
+                            <td>#{item.scan_id}{item.is_current ? " (atual)" : ""}</td>
+                            <td>{fmtDateTime(item.created_at)}</td>
+                            <td>{item.status || "-"}</td>
+                            <td>{item.open_findings ?? 0}</td>
+                            <td>{Number(item.delta_open_vs_previous || 0) > 0 ? `+${item.delta_open_vs_previous}` : item.delta_open_vs_previous || 0}</td>
+                            <td>
+                              {item?.severity?.critical || 0}/{item?.severity?.high || 0}/{item?.severity?.medium || 0}/{item?.severity?.low || 0}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="chart-container no-break">
+                  <div className="chart-header"><h3 className="chart-title">Achados Recorrentes no Alvo</h3></div>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Vulnerabilidade</th>
+                          <th>Severidade</th>
+                          <th>Ocorrências</th>
+                          <th>Primeiro Scan</th>
+                          <th>Último Scan</th>
+                          <th>Tendência</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(data.targetEvolution.recurring_findings || []).slice(0, 20).map((row, idx) => (
+                          <tr key={`recurring-${idx}-${row.signature}`}>
+                            <td>{row.title || "-"}</td>
+                            <td>{SEVERITY_META[String(row.severity || "low").toLowerCase()]?.label || row.severity || "-"}</td>
+                            <td>{row.occurrences ?? 0}</td>
+                            <td>#{row.first_scan_id || "-"}</td>
+                            <td>#{row.last_scan_id || "-"}</td>
+                            <td>{row.trend || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </section>
             </main>
           </div>

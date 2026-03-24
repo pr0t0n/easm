@@ -12,7 +12,6 @@ export default function ScansPage() {
   const [logs, setLogs] = useState([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [scanStatus, setScanStatus] = useState(null);
-  const [authorizationAccepted, setAuthorizationAccepted] = useState(false);
   const [authStatus, setAuthStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selectedScans, setSelectedScans] = useState(new Set());
@@ -89,21 +88,12 @@ export default function ScansPage() {
     };
   }, [selected]);
 
-  const authorizeTarget = async (singleTarget) => {
-    if (!singleTarget || !authorizationAccepted) {
-      throw new Error("Confirme a autorizacao do alvo antes de iniciar o scan.");
+  const prepareTargetCompliance = async (singleTarget) => {
+    if (!singleTarget) {
+      throw new Error("Informe um alvo valido para iniciar o scan.");
     }
 
-    setAuthStatus(`Validando autorizacao e policy para ${singleTarget}...`);
-    const req = await client.post("/api/compliance/authorizations/request", {
-      target_query: singleTarget,
-      ownership_proof: "Declaracao administrativa registrada via checkbox na tela de scans.",
-      notes: "Aprovacao administrativa simplificada via tela de scan.",
-    });
-    const code = req.data.authorization_code;
-    await client.put(`/api/compliance/authorizations/${req.data.authorization_id}/approve`, {
-      notes: "Aprovado pelo administrador para execucao.",
-    });
+    setAuthStatus(`Validando requisitos operacionais para ${singleTarget}...`);
 
     try {
       await client.post("/api/policy/allowlist", {
@@ -115,8 +105,7 @@ export default function ScansPage() {
       // A allowlist pode ja existir; o objetivo aqui e garantir o gate operacional.
     }
 
-    setAuthStatus(`Alvo ${singleTarget} autorizado e policy liberada para este scan.`);
-    return code;
+    setAuthStatus(`Alvo ${singleTarget} validado e policy liberada para este scan.`);
   };
 
   const createScan = async (e) => {
@@ -126,11 +115,6 @@ export default function ScansPage() {
       setAuthStatus("Informe ao menos um alvo antes de iniciar.");
       return;
     }
-    if (!authorizationAccepted) {
-      setAuthStatus("Marque a declaracao de autorizacao antes de iniciar o scan.");
-      return;
-    }
-
     setSubmitting(true);
     try {
       const created = [];
@@ -138,10 +122,9 @@ export default function ScansPage() {
 
       for (const singleTarget of parsedTargets) {
         try {
-          const authorizationCode = await authorizeTarget(singleTarget);
+          await prepareTargetCompliance(singleTarget);
           await client.post("/api/scans", {
             target_query: singleTarget,
-            authorization_code: authorizationCode,
             mode,
             access_group_id: accessGroupId ? Number(accessGroupId) : null,
           });
@@ -156,7 +139,6 @@ export default function ScansPage() {
 
       setTarget("");
       setAccessGroupId("");
-      setAuthorizationAccepted(false);
       if (failed.length === 0) {
         setAuthStatus(`${created.length} scan(s) criado(s) com sucesso.`);
       } else {
@@ -356,23 +338,9 @@ export default function ScansPage() {
                     </div>
                   </div>
 
-                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-4">
-                    <label className="flex gap-3 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={authorizationAccepted}
-                        onChange={(e) => setAuthorizationAccepted(e.target.checked)}
-                        className="mt-0.5 flex-shrink-0 form-checkbox rounded-md border-slate-600 text-blue-600"
-                      />
-                      <span className="text-xs leading-relaxed text-slate-300">
-                        Confirmo que possuo autorização formal para executar testes de segurança neste alvo e que as descobertas serão registradas conforme políticas de compliance.
-                      </span>
-                    </label>
-                  </div>
-
                   {authStatus && (
                     <div className={`rounded-lg px-4 py-3 text-xs ${
-                      authStatus.includes("sucesso") ? "bg-green-900/30 text-green-300 border border-green-800/50" : "bg-amber-900/30 text-amber-300 border border-amber-800/50"
+                      authStatus.includes("sucesso") ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-amber-50 text-amber-800 border border-amber-200"
                     }`}>
                       {authStatus}
                     </div>
@@ -380,7 +348,7 @@ export default function ScansPage() {
 
                   <button
                     type="submit"
-                    disabled={!authorizationAccepted || submitting}
+                    disabled={submitting}
                     className="btn-primary w-full"
                   >
                     {submitting ? "Iniciando..." : "Iniciar Varredura"}

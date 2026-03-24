@@ -20,15 +20,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libffi-dev \
 	libssl-dev \
 	libpcap-dev \
+	python3-setuptools \
 	dirb \
 	dnsenum \
 	dnsutils \
 	nmap \
+	perl \
+	sslscan \
 	whois \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Ferramentas Python
 RUN pip install --no-cache-dir \
+	setuptools \
 	arjun \
 	uro \
 	h8mail \
@@ -63,9 +67,20 @@ RUN set -eux; \
 # Ferramentas opcionais adicionais (best effort)
 RUN set -eux; \
 	apt-get update; \
-	apt-get install -y --no-install-recommends nikto whatweb massdns zaproxy || true; \
+	apt-get install -y --no-install-recommends whatweb massdns zaproxy seclists || true; \
+	mkdir -p /usr/share/seclists/Discovery/Web-Content; \
+	printf 'config.inc.php\nconfig/config.inc.php\nsetup/\njs/config.js\n' > /usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt; \
+	# nikto via git + wrapper perl (perl instalado na camada anterior)
+	git clone --depth 1 https://github.com/sullo/nikto.git /opt/nikto 2>/dev/null || true; \
+	if [ -f /opt/nikto/program/nikto.pl ]; then \
+		printf '#!/bin/sh\nexec perl /opt/nikto/program/nikto.pl "$@"\n' > /usr/local/bin/nikto; \
+		chmod +x /usr/local/bin/nikto; \
+	fi; \
+	# wordlist basica raft-medium-directories para feroxbuster/gobuster/ffuf
+	(curl -fsSL "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-directories.txt" \
+		-o /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt 2>/dev/null || true); \
 	rm -rf /var/lib/apt/lists/*; \
-	pip install --no-cache-dir sublist3r waymore linkfinder urlscanio dnspython || true; \
+	pip install --no-cache-dir sublist3r waymore linkfinder dnspython || true; \
 	go install github.com/projectdiscovery/alterx/cmd/alterx@latest || true; \
 	go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest || true; \
 	go install github.com/d3mondev/puredns/v2@latest || true; \
@@ -88,11 +103,19 @@ RUN set -eux; \
 	if [ -f /tmp/findomain.zip ]; then unzip -o /tmp/findomain.zip -d /usr/local/bin || true; chmod +x /usr/local/bin/findomain || true; fi; \
 	# cloudenum
 	git clone --depth 1 https://github.com/initstring/cloud_enum.git /opt/cloud_enum || true; \
+	if [ -f /opt/cloud_enum/requirements.txt ]; then pip install --no-cache-dir -r /opt/cloud_enum/requirements.txt || true; fi; \
 	ln -sf /opt/cloud_enum/cloud_enum.py /usr/local/bin/cloudenum || true; \
-	# SecretFinder
+	# SecretFinder + dependencias obrigatorias
 	git clone --depth 1 https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder || true; \
+	pip install --no-cache-dir jsbeautifier requests || true; \
+	if [ -f /opt/SecretFinder/requirements.txt ]; then pip install --no-cache-dir -r /opt/SecretFinder/requirements.txt || true; fi; \
 	ln -sf /opt/SecretFinder/SecretFinder.py /usr/local/bin/SecretFinder.py || true; \
 	chmod +x /usr/local/bin/SecretFinder.py || true; \
+	# LinkFinder (git clone para garantir binario linkfinder.py)
+	git clone --depth 1 https://github.com/GerbenJavado/LinkFinder.git /opt/linkfinder || true; \
+	if [ -f /opt/linkfinder/requirements.txt ]; then pip install --no-cache-dir -r /opt/linkfinder/requirements.txt || true; fi; \
+	ln -sf /opt/linkfinder/linkfinder.py /usr/local/bin/linkfinder.py || true; \
+	chmod +x /usr/local/bin/linkfinder.py || true; \
 	# sqlmap
 	git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap || true; \
 	ln -sf /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap.py || true; \
@@ -110,10 +133,19 @@ RUN set -eux; \
 	git clone --depth 1 https://github.com/Dionach/CMSmap.git /opt/CMSmap || true; \
 	ln -sf /opt/CMSmap/cmsmap.py /usr/local/bin/cmsmap || true; \
 	chmod +x /usr/local/bin/cmsmap || true; \
+	# metagoofil (from git since not in PyPI)
+	git clone --depth 1 https://github.com/opsdisk/metagoofil.git /opt/metagoofil || true; \
+	ln -sf /opt/metagoofil/metagoofil.py /usr/local/bin/metagoofil || true; \
+	chmod +x /usr/local/bin/metagoofil || true; \
+	if [ -f /opt/metagoofil/requirements.txt ]; then pip install --no-cache-dir -r /opt/metagoofil/requirements.txt || true; fi; \
 	# Wappalyzer CLI
 	npm install -g wappalyzer || true; \
 	# urlscan-cli (Node)
 	npm install -g urlscan || true; \
+	# postman-to-k6 (Node)
+	npm install -g @apideck/postman-to-k6 || true; \
+	# shcheck - analise de cabecalhos HTTP focada em seguranca
+	pip install --no-cache-dir shcheck || true; \
 	rm -rf /var/lib/apt/lists/* /tmp/*.zip
 
 # Ferramentas Ruby

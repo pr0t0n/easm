@@ -27,11 +27,11 @@ REQUEST_RETRY_BASE_SECONDS = 0.6
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Valida o fluxo E2E de autenticacao/autorizacao/scan/report")
+    parser = argparse.ArgumentParser(description="Valida o fluxo E2E de autenticacao/compliance/scan/report")
     parser.add_argument("--base-url", default=BASE_URL_DEFAULT, help="URL base da API (padrao: variavel VASM_BASE_URL)")
     parser.add_argument("--admin-email", default=ADMIN_EMAIL_DEFAULT, help="Email do admin (padrao: VASM_ADMIN_EMAIL)")
     parser.add_argument("--admin-password", default=ADMIN_PASSWORD_DEFAULT, help="Senha do admin (padrao: VASM_ADMIN_PASSWORD)")
-    parser.add_argument("--target", default=TARGET_DEFAULT, help="Alvo do scan/allowlist/autorizacao")
+    parser.add_argument("--target", default=TARGET_DEFAULT, help="Alvo do scan/allowlist")
     parser.add_argument("--timeout", type=int, default=TIMEOUT_SECONDS_DEFAULT, help="Timeout em segundos para conclusao do scan")
     parser.add_argument(
         "--scan-mode",
@@ -97,7 +97,7 @@ def main():
     TIMEOUT_SECONDS = max(1, int(args.timeout))
     requested_mode = "single" if args.scan_mode == "unit" else args.scan_mode
 
-    print("[1/8] Login admin")
+    print("[1/6] Login admin")
     status, payload = _request(
         "POST",
         "/api/auth/login",
@@ -107,32 +107,7 @@ def main():
     token = payload.get("access_token")
     _assert(bool(token), "Token nao retornado no login")
 
-    print("[2/8] Solicitar autorizacao de escopo")
-    status, payload = _request(
-        "POST",
-        "/api/compliance/authorizations/request",
-        {
-            "scope_ref": f"scan:{TARGET}",
-            "ownership_proof": "ticket-e2e-automation",
-            "notes": "validacao automatizada e2e",
-        },
-        token,
-    )
-    _assert(status == 200, f"Falha ao solicitar autorizacao: {status} {payload}")
-    authorization_id = payload.get("authorization_id")
-    authorization_code = payload.get("authorization_code")
-    _assert(bool(authorization_id and authorization_code), "authorization_id/code ausentes")
-
-    print("[3/8] Aprovar autorizacao")
-    status, payload = _request(
-        "PUT",
-        f"/api/compliance/authorizations/{authorization_id}/approve",
-        {"notes": "aprovado para validacao e2e"},
-        token,
-    )
-    _assert(status == 200, f"Falha ao aprovar autorizacao: {status} {payload}")
-
-    print("[4/8] Adicionar alvo na allowlist")
+    print("[2/6] Adicionar alvo na allowlist")
     status, payload = _request(
         "POST",
         "/api/policy/allowlist",
@@ -145,13 +120,12 @@ def main():
     )
     _assert(status == 200, f"Falha ao adicionar allowlist: {status} {payload}")
 
-    print("[5/8] Criar scan")
+    print("[3/6] Criar scan")
     status, payload = _request(
         "POST",
         "/api/scans",
         {
             "target_query": TARGET,
-            "authorization_code": authorization_code,
             "mode": requested_mode,
             "access_group_id": None,
         },
@@ -161,7 +135,7 @@ def main():
     scan_id = payload.get("id")
     _assert(bool(scan_id), "scan_id ausente")
 
-    print("[6/8] Aguardar conclusao")
+    print("[4/6] Aguardar conclusao")
     started = time.time()
     final_status = None
     while time.time() - started < TIMEOUT_SECONDS:
@@ -182,7 +156,7 @@ def main():
 
     _assert(final_status == "completed", f"Scan nao concluiu com sucesso. status={final_status}")
 
-    print("[7/8] Ler relatorio")
+    print("[5/6] Ler relatorio")
     status, report = _request("GET", f"/api/scans/{scan_id}/report", token=token)
     _assert(status == 200, f"Falha ao obter relatorio: {status} {report}")
     findings = report.get("findings", [])
@@ -194,7 +168,7 @@ def main():
     _assert("qwen_recomendacao_pt" in details, "Recomendacao qwen nao persistida")
     _assert("cloudcode_recomendacao_pt" in details, "Recomendacao cloudcode nao persistida")
 
-    print("[8/8] Validacao concluida")
+    print("[6/6] Validacao concluida")
     print(json.dumps({
         "ok": True,
         "scan_id": scan_id,

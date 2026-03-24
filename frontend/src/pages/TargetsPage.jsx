@@ -58,17 +58,6 @@ export default function TargetsPage() {
     setSubmitting(true);
     setStatusMessage("");
     try {
-      const { data: authReq } = await client.post("/api/compliance/authorizations/request", {
-        target_query: targetName,
-        ownership_proof: "Autorização para re-execução de scan via página de targets.",
-        notes: "Re-scan autorizado pelo administrador.",
-      });
-      const code = authReq.authorization_code;
-
-      await client.put(`/api/compliance/authorizations/${authReq.authorization_id}/approve`, {
-        notes: "Aprovado pelo administrador para re-execução.",
-      });
-
       try {
         await client.post("/api/policy/allowlist", {
           target_pattern: targetName,
@@ -81,7 +70,6 @@ export default function TargetsPage() {
 
       await client.post("/api/scans", {
         target_query: targetName,
-        authorization_code: code,
         mode: scanMode,
         access_group_id: null,
       });

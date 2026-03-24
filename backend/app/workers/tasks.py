@@ -119,40 +119,18 @@ def _get_scan_retry_policy(db: Session, owner_id: int) -> tuple[bool, int, int]:
 # Tasks de ferramentas — UNITARIOS (scan.unit / worker.unit.*)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@celery.task(name="worker.unit.recon.execute", queue="worker.unit.recon")
-def unit_recon_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("recon", tool, target, "unit", params)
+@celery.task(name="worker.unit.reconhecimento.execute", queue="worker.unit.reconhecimento")
+def unit_reconhecimento_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reconhecimento", tool, target, "unit", params)
 
 
-@celery.task(name="worker.unit.fuzzing.execute", queue="worker.unit.fuzzing")
-def unit_fuzzing_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("fuzzing", tool, target, "unit", params)
-
-
-@celery.task(name="worker.unit.vuln.execute", queue="worker.unit.vuln")
-def unit_vuln_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("vuln", tool, target, "unit", params)
-
-
-@celery.task(name="worker.unit.code_js.execute", queue="worker.unit.code_js")
-def unit_code_js_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("code_js", tool, target, "unit", params)
-
-
-@celery.task(name="worker.unit.api.execute", queue="worker.unit.api")
-def unit_api_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("api", tool, target, "unit", params)
-
-
-@celery.task(name="worker.unit.crawler.execute", queue="worker.unit.crawler")
-def unit_crawler_execute(tool: str, target: str, params: dict | None = None):
-    """httpx (probe vivo), katana (crawling rapido) e uro (URL dedup) — modo unitario."""
-    return _worker_result("crawler", tool, target, "unit", params)
+@celery.task(name="worker.unit.analise_vulnerabilidade.execute", queue="worker.unit.analise_vulnerabilidade")
+def unit_analise_vulnerabilidade_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("analise_vulnerabilidade", tool, target, "unit", params)
 
 
 @celery.task(name="worker.unit.osint.execute", queue="worker.unit.osint")
 def unit_osint_execute(tool: str, target: str, params: dict | None = None):
-    """theHarvester, shodan-cli, whatweb, urlscan-cli e subjack — OSINT rapido e exposicao externa."""
     return _worker_result("osint", tool, target, "unit", params)
 
 
@@ -167,46 +145,18 @@ def unit_dispatch_tool(tool: str, target: str, params: dict | None = None):
 # Tasks de ferramentas — AGENDADOS (scan.scheduled / worker.scheduled.*)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@celery.task(name="worker.scheduled.recon.execute", queue="worker.scheduled.recon")
-def scheduled_recon_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("recon", tool, target, "scheduled", params)
+@celery.task(name="worker.scheduled.reconhecimento.execute", queue="worker.scheduled.reconhecimento")
+def scheduled_reconhecimento_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reconhecimento", tool, target, "scheduled", params)
 
 
-@celery.task(name="worker.scheduled.fuzzing.execute", queue="worker.scheduled.fuzzing")
-def scheduled_fuzzing_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("fuzzing", tool, target, "scheduled", params)
-
-
-@celery.task(name="worker.scheduled.vuln.execute", queue="worker.scheduled.vuln")
-def scheduled_vuln_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("vuln", tool, target, "scheduled", params)
-
-
-@celery.task(name="worker.scheduled.code_js.execute", queue="worker.scheduled.code_js")
-def scheduled_code_js_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("code_js", tool, target, "scheduled", params)
-
-
-@celery.task(name="worker.scheduled.api.execute", queue="worker.scheduled.api")
-def scheduled_api_execute(tool: str, target: str, params: dict | None = None):
-    return _worker_result("api", tool, target, "scheduled", params)
-
-
-@celery.task(name="worker.scheduled.crawler.execute", queue="worker.scheduled.crawler")
-def scheduled_crawler_execute(tool: str, target: str, params: dict | None = None):
-    """httpx, katana, waymore, uro e gowitness — probe + crawl + screenshots (modo agendado)."""
-    return _worker_result("crawler", tool, target, "scheduled", params)
-
-
-@celery.task(name="worker.scheduled.fingerprint.execute", queue="worker.scheduled.fingerprint")
-def scheduled_fingerprint_execute(tool: str, target: str, params: dict | None = None):
-    """wappalyzer, whatweb, webanalyze e cmsmap — stack tech fingerprinting (Sn1per + modo agendado)."""
-    return _worker_result("fingerprint", tool, target, "scheduled", params)
+@celery.task(name="worker.scheduled.analise_vulnerabilidade.execute", queue="worker.scheduled.analise_vulnerabilidade")
+def scheduled_analise_vulnerabilidade_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("analise_vulnerabilidade", tool, target, "scheduled", params)
 
 
 @celery.task(name="worker.scheduled.osint.execute", queue="worker.scheduled.osint")
 def scheduled_osint_execute(tool: str, target: str, params: dict | None = None):
-    """theHarvester, h8mail, metagoofil, urlscan-cli, subjack, shodan-cli (Sn1per osint.sh)."""
     return _worker_result("osint", tool, target, "scheduled", params)
 
 
@@ -328,12 +278,39 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         for vuln in final_state.get("vulnerabilidades_encontradas", []):
             source_worker = vuln.get("source_worker", "vuln")
             details = dict(vuln)
+            nested_details = details.get("details") if isinstance(details.get("details"), dict) else {}
+
+            asset_hint = str(
+                vuln.get("asset")
+                or details.get("asset")
+                or nested_details.get("asset")
+                or nested_details.get("target")
+                or ""
+            ).strip().lower()
+            port_hint = str(
+                vuln.get("port")
+                or details.get("port")
+                or nested_details.get("port")
+                or ""
+            ).strip().lower()
+            step_hint = str(
+                vuln.get("step")
+                or details.get("step")
+                or nested_details.get("step")
+                or ""
+            ).strip().lower()
+            tool_hint = str(
+                vuln.get("tool")
+                or details.get("tool")
+                or nested_details.get("tool")
+                or ""
+            ).strip().lower()
 
             dedupe_key = (
                 str(vuln.get("title") or "").strip().lower(),
                 str(vuln.get("severity") or "low").strip().lower(),
                 str(source_worker).strip().lower(),
-                str((details.get("asset") or details.get("port") or details.get("step") or "")).strip().lower(),
+                "|".join([asset_hint, port_hint, step_hint, tool_hint]),
             )
             if dedupe_key in seen_findings:
                 continue

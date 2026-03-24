@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
+import { toastError, toastSuccess } from "../utils/toast";
 
 const emptyForm = {
   access_group_id: "",
-  authorization_code: "",
   targets_text: "",
   scan_type: "full",
   frequency: "daily",
@@ -31,21 +31,27 @@ export default function SchedulingPage() {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (editingId) {
-      await client.put(`/api/schedules/${editingId}`, form);
-    } else {
-      await client.post("/api/schedules", form);
+    try {
+      if (editingId) {
+        await client.put(`/api/schedules/${editingId}`, form);
+        toastSuccess("Agendamento atualizado com sucesso.");
+      } else {
+        await client.post("/api/schedules", form);
+        toastSuccess("Agendamento criado com sucesso.");
+      }
+      setForm(emptyForm);
+      setEditingId(null);
+      await loadSchedules();
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao salvar agendamento.");
     }
-    setForm(emptyForm);
-    setEditingId(null);
-    await loadSchedules();
   };
 
   const editRow = (row) => {
     setEditingId(row.id);
     setForm({
       access_group_id: row.access_group_id || "",
-      authorization_code: row.authorization_code || "",
       targets_text: row.targets_text,
       scan_type: row.scan_type,
       frequency: row.frequency,
@@ -57,13 +63,26 @@ export default function SchedulingPage() {
   };
 
   const deleteRow = async (id) => {
-    await client.delete(`/api/schedules/${id}`);
-    await loadSchedules();
+    try {
+      await client.delete(`/api/schedules/${id}`);
+      await loadSchedules();
+      toastSuccess("Agendamento removido.");
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao excluir agendamento.");
+    }
   };
 
   const runNow = async (id) => {
-    await client.post(`/api/schedules/${id}/execute`);
-    await loadSchedules();
+    try {
+      const { data } = await client.post(`/api/schedules/${id}/execute`);
+      const count = Array.isArray(data?.created_scans) ? data.created_scans.length : 0;
+      await loadSchedules();
+      toastSuccess(`Execucao iniciada. Scans criados: ${count}.`);
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao executar agendamento agora.");
+    }
   };
 
   return (
@@ -81,12 +100,12 @@ export default function SchedulingPage() {
             onChange={(e) => setForm({ ...form, targets_text: e.target.value })}
           />
 
-          <input
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
-            placeholder="Codigo de autorizacao para este agendamento"
-            value={form.authorization_code}
-            onChange={(e) => setForm({ ...form, authorization_code: e.target.value })}
-          />
+          <div className="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-slate-700 shadow-sm">
+            <p className="font-semibold text-slate-800">Execucao do Agendamento</p>
+            <p className="mt-1 leading-relaxed text-slate-700">
+              O agendamento executa scans nos alvos informados conforme a politica ativa do ambiente.
+            </p>
+          </div>
 
           <select
             className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
@@ -174,7 +193,9 @@ export default function SchedulingPage() {
           {schedules.map((row) => (
             <div key={row.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <p className="font-medium">#{row.id} | {row.scan_type} | {row.frequency}</p>
-              <p className="text-xs text-slate-300">grupo {row.access_group_id || "-"} | auth {row.authorization_code || "-"} | {row.targets_text}</p>
+              <p className="text-xs text-slate-300">
+                grupo {row.access_group_id || "-"} | {row.targets_text}
+              </p>
               <p className="text-xs text-slate-400">
                 Horario: {row.run_time} {row.day_of_week ? `| Dia semana: ${row.day_of_week}` : ""}
                 {row.day_of_month ? ` | Dia mes: ${row.day_of_month}` : ""}

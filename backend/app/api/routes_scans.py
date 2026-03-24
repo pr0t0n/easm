@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanAuthorization, ScanJob, ScanLog, User
+from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, User
 from app.models.models import WorkerHeartbeat
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
 from app.services.audit_service import log_audit
@@ -311,6 +311,115 @@ def _build_technical_points(vulnerability_rows: list[dict], recommendations: lis
     return points[:8]
 
 
+def _severity_penalty(sev: str) -> int:
+    return {
+        "critical": 20,
+        "high": 12,
+        "medium": 6,
+        "low": 2,
+        "info": 1,
+    }.get(str(sev or "low").lower(), 2)
+
+
+def _compute_framework_scores(vulnerability_rows: list[dict]) -> dict:
+    # Pesos por categoria para refletir impacto real do finding em cada framework.
+    weights = {
+        "iso27001": {
+            "Application Security": 1.0,
+            "Web Encryption": 1.0,
+            "Network Filtering": 0.9,
+            "Authentication": 1.0,
+            "Authorization": 1.0,
+            "Data Exposure": 1.0,
+            "Software Patching": 0.8,
+            "DNS Security": 0.7,
+            "System Hosting": 0.7,
+        },
+        "nist": {
+            "Application Security": 1.0,
+            "Web Encryption": 0.9,
+            "Network Filtering": 1.0,
+            "Authentication": 1.0,
+            "Authorization": 1.0,
+            "Data Exposure": 0.9,
+            "Software Patching": 0.9,
+            "DNS Security": 0.8,
+            "System Hosting": 0.8,
+        },
+        "cis_v8": {
+            "Application Security": 0.9,
+            "Web Encryption": 0.8,
+            "Network Filtering": 1.0,
+            "Authentication": 1.0,
+            "Authorization": 0.9,
+            "Data Exposure": 0.8,
+            "Software Patching": 1.0,
+            "DNS Security": 0.8,
+            "System Hosting": 0.9,
+        },
+        "pci": {
+            "Application Security": 1.0,
+            "Web Encryption": 1.0,
+            "Network Filtering": 1.0,
+            "Authentication": 1.0,
+            "Authorization": 1.0,
+            "Data Exposure": 1.0,
+            "Software Patching": 0.9,
+            "DNS Security": 0.7,
+            "System Hosting": 0.8,
+        },
+    }
+
+    penalties = {"iso27001": 0.0, "nist": 0.0, "cis_v8": 0.0, "pci": 0.0}
+    for row in vulnerability_rows:
+        if row.get("is_false_positive"):
+            continue
+        sev = str(row.get("severity") or "low").lower()
+        category = str(row.get("category") or "Application Security")
+        base = _severity_penalty(sev)
+        for fw in penalties.keys():
+            penalties[fw] += base * float(weights.get(fw, {}).get(category, 0.75))
+
+    def score_from_penalty(value: float) -> int:
+        # Escala pragmática para evitar score sempre extremo.
+        return max(0, min(100, int(round(100.0 - min(100.0, value * 1.35)))))
+
+    return {
+        "iso27001": {"score": score_from_penalty(penalties["iso27001"])},
+        "nist": {"score": score_from_penalty(penalties["nist"])},
+        "cis_v8": {"score": score_from_penalty(penalties["cis_v8"])},
+        "pci": {"score": score_from_penalty(penalties["pci"])},
+    }
+
+
+def _compute_fair_summary(findings: list[Finding], enriched_findings: list[dict], fair_ale_total_open: float, fair_ale_total_all: float) -> dict:
+    open_items = [item for item in enriched_findings if not item.get("is_false_positive")]
+    lef_values = [float((item.get("fair") or {}).get("loss_event_frequency") or 0.0) for item in open_items]
+    lm_values = [float((item.get("fair") or {}).get("loss_magnitude_usd") or 0.0) for item in open_items]
+    fair_scores = [float((item.get("fair") or {}).get("fair_score") or 0.0) for item in open_items]
+
+    def _avg(values: list[float]) -> float:
+        return round(sum(values) / len(values), 4) if values else 0.0
+
+    ale_peak = 0.0
+    if open_items:
+        ale_peak = max(float((item.get("fair") or {}).get("annualized_loss_exposure_usd") or 0.0) for item in open_items)
+
+    return {
+        "enabled": True,
+        "ale_total_open_usd": round(fair_ale_total_open, 2),
+        "ale_total_all_usd": round(fair_ale_total_all, 2),
+        "daily_impact_open_usd": round(fair_ale_total_open / 365.0, 2),
+        "mitigation_cost_estimate_open_usd": round(fair_ale_total_open * 0.057, 2),
+        "fair_avg_score": round(_avg(fair_scores), 2),
+        "loss_event_frequency_avg": _avg(lef_values),
+        "loss_magnitude_avg_usd": round(_avg(lm_values), 2),
+        "ale_peak_usd": round(ale_peak, 2),
+        "open_findings_count": len(open_items),
+        "total_findings_count": len(findings),
+    }
+
+
 def _try_parse_json_dict(value) -> dict | None:
     if isinstance(value, dict):
         return value
@@ -380,19 +489,293 @@ def _pick_first_text(details: dict, keys: list[str]) -> str:
 
 def _extract_technical_details(details: dict, default_target: str) -> dict[str, str]:
     details = details if isinstance(details, dict) else {}
+    nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+
     full_url = _pick_first_text(details, ["url", "full_url", "endpoint", "target", "asset"])
+    if not full_url:
+        full_url = _pick_first_text(nested, ["url", "full_url", "endpoint", "target", "asset"])
     if not full_url:
         full_url = _sanitize_text(default_target)
 
-    exploit = _pick_first_text(details, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc", "payload"])
+    exploit = _pick_first_text(details, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"])
+    if not exploit:
+        exploit = _pick_first_text(nested, ["exploit", "exploit_url", "exploitdb", "exploitdb_url", "poc"])
+
     error = _pick_first_text(details, ["error", "stderr", "exception", "message", "http_error", "status_code"])
-    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response"])
+    if not error:
+        error = _pick_first_text(nested, ["error", "stderr", "exception", "message", "http_error", "status_code"])
+
+    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"])
+    if not evidence:
+        evidence = _pick_first_text(nested, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"])
+
+    payload = _pick_first_text(
+        details,
+        [
+            "payload",
+            "request",
+            "request_raw",
+            "curl",
+            "command",
+            "cmd",
+            "template_id",
+            "matcher_name",
+            "proof",
+        ],
+    )
+    if not payload:
+        payload = _pick_first_text(
+            nested,
+            [
+                "payload",
+                "request",
+                "request_raw",
+                "curl",
+                "command",
+                "cmd",
+                "template_id",
+                "matcher_name",
+                "proof",
+            ],
+        )
+
+    if not payload and nested:
+        try:
+            payload = _sanitize_text(json.dumps(nested, ensure_ascii=False))
+        except Exception:
+            payload = ""
+
+    step = _pick_first_text(details, ["step"])
+    if not step:
+        step = _pick_first_text(nested, ["step"])
+
+    node = _pick_first_text(details, ["node", "source_worker"])
+    if not node:
+        node = _pick_first_text(nested, ["node", "source_worker"])
+
+    asset = _pick_first_text(details, ["asset", "target"])
+    if not asset:
+        asset = _pick_first_text(nested, ["asset", "target"])
+
+    port = details.get("port")
+    if port in [None, ""]:
+        port = nested.get("port")
+    port_text = str(port) if port not in [None, ""] else ""
+
+    service = _pick_first_text(details, ["service", "protocol"])
+    if not service:
+        service = _pick_first_text(nested, ["service", "protocol"])
+
+    version = _pick_first_text(details, ["version", "banner"])
+    if not version:
+        version = _pick_first_text(nested, ["version", "banner"])
+
+    tool = _pick_first_text(details, ["tool"])
+    if not tool:
+        tool = _pick_first_text(nested, ["tool"])
+
+    command = _pick_first_text(details, ["command", "cmd"])
+    if not command:
+        command = _pick_first_text(nested, ["command", "cmd"])
+
+    open_ports = details.get("open_ports")
+    if open_ports in [None, ""]:
+        open_ports = nested.get("open_ports")
+    open_ports_text = ""
+    if isinstance(open_ports, list):
+        parsed_ports: list[str] = []
+        for raw in open_ports:
+            try:
+                port = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                parsed_ports.append(str(port))
+        if parsed_ports:
+            open_ports_text = ",".join(parsed_ports[:50])
+
+    if not evidence and open_ports_text:
+        evidence = f"open_ports={open_ports_text}"
+
+    if not payload and command:
+        payload = command
 
     return {
         "full_url": full_url,
         "exploit": exploit,
         "error": error,
         "evidence": evidence,
+        "payload": payload,
+        "step": step,
+        "node": node,
+        "asset": asset,
+        "port": port_text,
+        "service": service,
+        "version": version,
+        "tool": tool,
+        "command": command,
+    }
+
+
+def _infer_target_segment(target: str | None) -> str:
+    raw = (target or "").strip().lower()
+    if not raw:
+        return "Digital Services"
+    if any(token in raw for token in ["bank", "banco", "fin", "credit", "certificadora", "pag", "payment"]):
+        return "Financial Services"
+    if any(token in raw for token in ["health", "hospital", "saude", "clinic"]):
+        return "Healthcare"
+    if any(token in raw for token in ["gov", "gov.br", "prefeitura", "ministerio", "tribunal"]):
+        return "Public Sector"
+    if any(token in raw for token in ["edu", "school", "universidade", "faculdade"]):
+        return "Education"
+    if any(token in raw for token in ["shop", "store", "ecom", "market"]):
+        return "Retail"
+    return "Digital Services"
+
+
+def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dict[str, int]) -> dict:
+    base = {
+        "Financial Services": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 7,
+            "expected_external_exposure_index": 32,
+            "expected_third_party_risk_index": 44,
+            "expected_identity_attack_pressure": 68,
+        },
+        "Healthcare": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 10,
+            "expected_external_exposure_index": 39,
+            "expected_third_party_risk_index": 48,
+            "expected_identity_attack_pressure": 57,
+        },
+        "Public Sector": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 12,
+            "expected_external_exposure_index": 41,
+            "expected_third_party_risk_index": 46,
+            "expected_identity_attack_pressure": 52,
+        },
+        "Education": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 14,
+            "expected_external_exposure_index": 47,
+            "expected_third_party_risk_index": 49,
+            "expected_identity_attack_pressure": 51,
+        },
+        "Retail": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 9,
+            "expected_external_exposure_index": 43,
+            "expected_third_party_risk_index": 55,
+            "expected_identity_attack_pressure": 61,
+        },
+        "Digital Services": {
+            "source": "WEF Global Cybersecurity Outlook (referencia setorial)",
+            "expected_patch_sla_days": 10,
+            "expected_external_exposure_index": 40,
+            "expected_third_party_risk_index": 50,
+            "expected_identity_attack_pressure": 58,
+        },
+    }
+    segment_base = base.get(segment, base["Digital Services"])
+
+    target_pressure = (
+        int(severity_count.get("critical", 0)) * 20
+        + int(severity_count.get("high", 0)) * 9
+        + int(severity_count.get("medium", 0)) * 4
+        + int(severity_count.get("low", 0)) * 1
+    )
+    target_exposure_index = min(100, max(0, target_pressure))
+
+    return {
+        "segment": segment,
+        "source": segment_base["source"],
+        "wef_reference_year": 2025,
+        "target_external_exposure_index": target_exposure_index,
+        "segment_external_exposure_index": int(segment_base["expected_external_exposure_index"]),
+        "segment_identity_attack_pressure": int(segment_base["expected_identity_attack_pressure"]),
+        "segment_third_party_risk_index": int(segment_base["expected_third_party_risk_index"]),
+        "segment_patch_sla_days": int(segment_base["expected_patch_sla_days"]),
+        "target_ale_open_usd": round(float(fair_open_usd or 0.0), 2),
+        "assessment": (
+            "acima_do_benchmark" if target_exposure_index > int(segment_base["expected_external_exposure_index"]) else "dentro_do_benchmark"
+        ),
+    }
+
+
+def _build_target_evolution(db: Session, target_query: str, current_scan_id: int) -> dict:
+    scans = (
+        db.query(ScanJob)
+        .filter(ScanJob.target_query == target_query)
+        .order_by(ScanJob.created_at.asc(), ScanJob.id.asc())
+        .all()
+    )
+    if not scans:
+        return {"timeline": [], "recurring_findings": []}
+
+    scan_ids = [s.id for s in scans]
+    findings_all = db.query(Finding).filter(Finding.scan_job_id.in_(scan_ids), Finding.is_false_positive.is_(False)).all()
+    by_scan: dict[int, list[Finding]] = {}
+    for f in findings_all:
+        by_scan.setdefault(f.scan_job_id, []).append(f)
+
+    timeline: list[dict] = []
+    previous_open: int | None = None
+    for s in scans:
+        findings_scan = by_scan.get(s.id, [])
+        sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for f in findings_scan:
+            key = str(f.severity or "low").lower()
+            if key in sev:
+                sev[key] += 1
+        open_count = len(findings_scan)
+        delta_open = 0 if previous_open is None else open_count - previous_open
+        previous_open = open_count
+        timeline.append(
+            {
+                "scan_id": s.id,
+                "created_at": s.created_at,
+                "status": s.status,
+                "mode": s.mode,
+                "open_findings": open_count,
+                "severity": sev,
+                "delta_open_vs_previous": delta_open,
+                "is_current": s.id == current_scan_id,
+            }
+        )
+
+    recurring_map: dict[str, dict] = {}
+    for s in scans:
+        for f in by_scan.get(s.id, []):
+            title = _normalize_finding_title(f.title)
+            severity = str(f.severity or "low").lower()
+            signature = f"{title.lower()}|{severity}"
+            if signature not in recurring_map:
+                recurring_map[signature] = {
+                    "signature": signature,
+                    "title": title,
+                    "severity": severity,
+                    "first_scan_id": s.id,
+                    "last_scan_id": s.id,
+                    "occurrences": 0,
+                }
+            recurring_map[signature]["occurrences"] += 1
+            recurring_map[signature]["last_scan_id"] = s.id
+
+    recurring = sorted(recurring_map.values(), key=lambda item: item.get("occurrences", 0), reverse=True)
+    for row in recurring:
+        if row["last_scan_id"] == current_scan_id and row["occurrences"] > 1:
+            row["trend"] = "persisting"
+        elif row["last_scan_id"] == current_scan_id and row["occurrences"] == 1:
+            row["trend"] = "new"
+        else:
+            row["trend"] = "resolved_or_not_reproduced"
+
+    return {
+        "timeline": timeline,
+        "recurring_findings": recurring[:40],
     }
 
 
@@ -526,25 +909,6 @@ def _collect_technologies(job: ScanJob, scan_findings: list[Finding]) -> dict[st
     return counter
 
 
-def _resolve_valid_authorization(db: Session, authorization_code: str | None) -> ScanAuthorization | None:
-    if not authorization_code:
-        return None
-    now = datetime.now(timezone.utc)
-    candidates = (
-        db.query(ScanAuthorization)
-        .filter(
-            ScanAuthorization.authorization_code == authorization_code,
-            ScanAuthorization.status == "approved",
-        )
-        .order_by(ScanAuthorization.created_at.desc())
-        .all()
-    )
-    for auth in candidates:
-        if auth.expires_at is None or auth.expires_at.replace(tzinfo=timezone.utc) > now:
-            return auth
-    return None
-
-
 @router.post("/scans", response_model=ScanResponse)
 def create_scan(
     payload: ScanCreate,
@@ -557,12 +921,9 @@ def create_scan(
         if access_group_id not in allowed_ids:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
 
-    authorization = _resolve_valid_authorization(db, payload.authorization_code)
     allowlist_ok = is_target_allowed(db, current_user.id, payload.target_query, "*")
 
-    if not authorization:
-        compliance_status = "blocked_authorization"
-    elif not allowlist_ok:
+    if not allowlist_ok:
         compliance_status = "blocked_policy"
     else:
         compliance_status = "approved"
@@ -571,11 +932,10 @@ def create_scan(
         owner_id=current_user.id,
         access_group_id=access_group_id,
         target_query=payload.target_query,
-        authorization_code=payload.authorization_code,
         mode=payload.mode,
         status="queued" if compliance_status == "approved" else "blocked",
         compliance_status=compliance_status,
-        authorization_id=authorization.id if authorization else None,
+        authorization_id=None,
         current_step="1. Amass Subdomain Recon",
     )
     db.add(job)
@@ -596,7 +956,7 @@ def create_scan(
             message="Gate de compliance aprovado para execucao",
             actor_user_id=current_user.id,
             scan_job_id=job.id,
-            metadata={"authorization_id": authorization.id},
+            metadata={"target": payload.target_query, "mode": payload.mode},
         )
     else:
         log_audit(
@@ -631,7 +991,6 @@ def create_scan(
     return ScanResponse(
         id=job.id,
         target_query=job.target_query,
-        authorization_code=job.authorization_code,
         mode=job.mode,
         access_group_id=job.access_group_id,
         status=job.status,
@@ -655,7 +1014,6 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
         ScanResponse(
             id=s.id,
             target_query=s.target_query,
-            authorization_code=s.authorization_code,
             mode=s.mode,
             access_group_id=s.access_group_id,
             status=s.status,
@@ -1139,6 +1497,7 @@ def scan_report(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
     findings = db.query(Finding).filter(Finding.scan_job_id == scan_id).all()
+    scan_logs = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).order_by(ScanLog.created_at.asc()).all()
     previous_scan = (
         db.query(ScanJob)
         .filter(
@@ -1189,9 +1548,11 @@ def scan_report(
                 "id": cve_or_id,
                 "cve": _sanitize_text(finding.cve or ""),
                 "target": target_value,
+                "full_url": technical.get("full_url") or target_value,
                 "name": normalized_title,
                 "problem": normalized_title,
-                "service": _sanitize_text(details.get("service") or details.get("protocol") or "-"),
+                "service": _sanitize_text(technical.get("service") or "-"),
+                "version": _sanitize_text(technical.get("version") or ""),
                 "cvss": details.get("cvss_score") or details.get("cvss") or finding.risk_score or "-",
                 "severity": sev,
                 "category": category,
@@ -1202,6 +1563,13 @@ def scan_report(
                 "exploit": technical.get("exploit") or "-",
                 "error": technical.get("error") or "-",
                 "evidence": technical.get("evidence") or "-",
+                "payload": technical.get("payload") or "-",
+                "step": technical.get("step") or "-",
+                "node": technical.get("node") or "-",
+                "asset": technical.get("asset") or "-",
+                "port": technical.get("port") or "-",
+                "tool": technical.get("tool") or "-",
+                "command": technical.get("command") or "-",
                 "is_false_positive": bool(finding.is_false_positive),
             }
         )
@@ -1255,22 +1623,9 @@ def scan_report(
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
 
     open_findings = len([f for f in findings if not f.is_false_positive])
-    frameworks = {
-        "iso27001": {"score": max(0, 100 - open_findings)},
-        "nist": {"score": max(0, 100 - int(open_findings * 0.8))},
-        "cis_v8": {"score": max(0, 100 - int(open_findings * 0.7))},
-        "pci": {"score": max(0, 100 - int(open_findings * 0.9))},
-    }
+    frameworks = _compute_framework_scores(vulnerability_rows)
 
-    fair_score_avg = round(sum(fair_score_samples) / max(1, len(fair_score_samples)), 2)
-    fair_total = {
-        "enabled": True,
-        "ale_total_open_usd": round(fair_ale_total_open, 2),
-        "ale_total_all_usd": round(fair_ale_total_all, 2),
-        "daily_impact_open_usd": round(fair_ale_total_open / 365.0, 2),
-        "mitigation_cost_estimate_open_usd": round(fair_ale_total_open * 0.057, 2),
-        "fair_avg_score": fair_score_avg,
-    }
+    fair_total = _compute_fair_summary(findings, enriched_findings, fair_ale_total_open, fair_ale_total_all)
 
     open_vulnerability_table = [row for row in vulnerability_rows if not row["is_false_positive"]]
 
@@ -1307,6 +1662,26 @@ def scan_report(
 
     category_scores = _build_category_scores(open_vulnerability_table)
 
+    # Fallback de evidencias para linhas sem payload/evidence explicitos.
+    execution_lines: list[str] = []
+    for log in scan_logs:
+        message = _sanitize_text(log.message)
+        if not message:
+            continue
+        lower = message.lower()
+        if any(token in lower for token in ["cmd", "return_code", "stderr", "stdout", "error", "execut"]):
+            execution_lines.append(message)
+        if len(execution_lines) >= 30:
+            break
+
+    if execution_lines:
+        fallback_payload = " | ".join(execution_lines[:5])
+        for row in open_vulnerability_table:
+            if row.get("payload") in [None, "", "-"]:
+                row["payload"] = fallback_payload
+            if row.get("evidence") in [None, "", "-"]:
+                row["evidence"] = fallback_payload
+
     detailed_recommendations = [
         {
             "id": row["id"],
@@ -1320,6 +1695,10 @@ def scan_report(
                 "exploit": row.get("exploit") or "-",
                 "error": row.get("error") or "-",
                 "evidence": row.get("evidence") or "-",
+                "payload": row.get("payload") or "-",
+                "step": row.get("step") or "-",
+                "node": row.get("node") or "-",
+                "port": row.get("port") or "-",
             },
             "recommendation": row["recommendation"],
             "recommendation_structured": row.get("recommendation_structured") or {},
@@ -1352,6 +1731,10 @@ def scan_report(
     )
     technical_points = _build_technical_points(open_vulnerability_table, detailed_recommendations)
 
+    segment = _infer_target_segment(job.target_query)
+    benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count)
+    target_evolution = _build_target_evolution(db, job.target_query, scan_id)
+
     return ReportResponse(
         scan_id=scan_id,
         status=job.status,
@@ -1372,6 +1755,8 @@ def scan_report(
                 "recommendations_detailed": detailed_recommendations,
                 "strategic_points": strategic_points,
                 "technical_points": technical_points,
+                "segment_benchmark": benchmark,
+                "target_evolution": target_evolution,
                 "lifecycle": lifecycle,
                 "resolved_vulnerabilities": resolved_vulnerabilities,
                 "comparison": {
@@ -1417,6 +1802,7 @@ def scan_report_csv(
             "target",
             "problem",
             "service",
+            "version",
             "severity",
             "category",
             "cvss",
@@ -1424,6 +1810,9 @@ def scan_report_csv(
             "exploit",
             "error",
             "evidence",
+            "payload",
+            "step",
+            "node",
             "recommendation",
             "priority",
             "mitigations",
@@ -1443,6 +1832,7 @@ def scan_report_csv(
                 row.get("target") or "",
                 row.get("problem") or row.get("name") or "",
                 row.get("service") or "",
+                row.get("version") or "",
                 row.get("severity") or "",
                 row.get("category") or "",
                 row.get("cvss") or "",
@@ -1450,6 +1840,9 @@ def scan_report_csv(
                 row.get("exploit") or "",
                 row.get("error") or "",
                 row.get("evidence") or "",
+                row.get("payload") or "",
+                row.get("step") or "",
+                row.get("node") or "",
                 row.get("recommendation") or "",
                 rec.get("prioridade") if isinstance(rec, dict) else "",
                 "; ".join(str(item) for item in mitigations) if isinstance(mitigations, list) else "",

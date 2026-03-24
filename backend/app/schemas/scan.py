@@ -6,7 +6,6 @@ from pydantic import BaseModel
 
 class ScanCreate(BaseModel):
     target_query: str
-    authorization_code: str | None = None
     mode: str = "single"
     access_group_id: int | None = None
     schedule_at: datetime | None = None
@@ -15,7 +14,6 @@ class ScanCreate(BaseModel):
 class ScanResponse(BaseModel):
     id: int
     target_query: str
-    authorization_code: str | None = None
     mode: str
     access_group_id: int | None = None
     status: str

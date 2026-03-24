@@ -184,6 +184,31 @@ td {
   color: var(--text-tertiary) !important;
 }
 
+/* Normaliza contrastes de textos coloridos para o tema claro */
+[class*="text-blue-100"],
+[class*="text-blue-200"],
+[class*="text-blue-300"] {
+  color: #1e40af !important;
+}
+
+[class*="text-emerald-100"],
+[class*="text-emerald-200"],
+[class*="text-emerald-300"] {
+  color: #166534 !important;
+}
+
+[class*="text-amber-100"],
+[class*="text-amber-200"],
+[class*="text-amber-300"] {
+  color: #92400e !important;
+}
+
+[class*="text-rose-100"],
+[class*="text-rose-200"],
+[class*="text-rose-300"] {
+  color: #9f1239 !important;
+}
+
 tbody tr {
   transition: background-color 200ms ease;
 }

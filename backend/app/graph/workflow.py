@@ -6,25 +6,16 @@ from urllib.parse import urlparse
 
 from langgraph.graph import END, StateGraph
 
-from app.graph.mission import MISSION_ITEMS
 from app.graph.checkpointer import create_checkpointer
-from app.services.tool_adapters import run_tool_execution
+from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Itens de missao reduzidos para scans UNITARIOS
-# Cobre os passos mais criticos: recon, ports, headers, injecoes, CVEs, relatorio
-# ──────────────────────────────────────────────────────────────────────────────
-UNIT_MISSION_ITEMS: list[str] = [item for item in MISSION_ITEMS if any(
-    kw in item for kw in [
-        "Amass", "Naabu", "Nmap", "HSTS/CSP", "Cookie Flags",
-        "SQLi", "SQLMap", "IDOR", "CSRF", "SecretFinder", "Nuclei Critical",
-        "Nuclei High", "Nikto", "JWT", "Command Injection", "Commix",
-        "SSRF", "XXE", "SSTI", "Tplmap", "Wapiti", "Gobuster",
-        "Vertical Privilege", "Horizontal Privilege", "Relatorio Final",
-    ]
-)]
+GROUP_MISSION_ITEMS: list[str] = [
+    "1. Reconhecimento",
+    "2. AnaliseVulnerabilidade",
+    "3. OSINT",
+]
 
 
 class AgentState(TypedDict):
@@ -66,80 +57,15 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
     state["node_history"].append(node_name)
 
 
-def _mission_step_keywords() -> list[tuple[str, str]]:
-    return [
-        ("osint", "osint"),
-        ("email", "osint"),
-        ("theharvester", "osint"),
-        ("h8mail", "osint"),
-        ("metagoofil", "osint"),
-        ("shodan", "osint"),
-        ("urlscan", "osint"),
-        ("subdomain", "recon"),
-        ("dns", "recon"),
-        ("asn", "recon"),
-        ("ip/infra", "recon"),
-        ("takeover", "recon"),
-        ("naabu", "scan"),
-        ("nmap", "scan"),
-        ("port", "scan"),
-        ("banner", "scan"),
-        ("robots.txt", "scan"),
-        ("sitemap.xml", "scan"),
-        ("headers", "scan"),
-        ("hsts", "scan"),
-        ("cookie", "scan"),
-        ("fingerprint", "fingerprint"),
-        ("whatweb", "fingerprint"),
-        ("wappalyzer", "fingerprint"),
-        ("cms", "fingerprint"),
-        ("ffuf", "fuzzing"),
-        ("feroxbuster", "fuzzing"),
-        ("wfuzz", "fuzzing"),
-        ("gobuster", "fuzzing"),
-        ("fuzz", "fuzzing"),
-        ("linkfinder", "code_js"),
-        ("secretfinder", "code_js"),
-        ("trufflehog", "code_js"),
-        ("javascript", "code_js"),
-        ("api", "api"),
-        ("kiterunner", "api"),
-        ("swagger", "api"),
-        ("openapi", "api"),
-        ("sqli", "vuln"),
-        ("sqli", "vuln"),
-        ("nosql", "vuln"),
-        ("idor", "vuln"),
-        ("csrf", "vuln"),
-        ("ssrf", "vuln"),
-        ("xxe", "vuln"),
-        ("lfi", "vuln"),
-        ("rfi", "vuln"),
-        ("ssti", "vuln"),
-        ("tplmap", "vuln"),
-        ("commix", "vuln"),
-        ("command injection", "vuln"),
-        ("jwt", "vuln"),
-        ("nuclei", "vuln"),
-        ("nikto", "vuln"),
-        ("wpscan", "vuln"),
-        ("nessus", "vuln"),
-        ("shellshock", "vuln"),
-        ("heartbleed", "vuln"),
-        ("relatorio final", "analista_ia"),
-    ]
-
-
 def _node_for_step(step_name: str, scan_mode: str) -> str:
     step = str(step_name or "").strip().lower()
     if step in {"", "done"}:
-        return "analista_ia"
-    if scan_mode == "unit" and "relatorio final" in step:
-        return "analista_ia"
-    for keyword, node in _mission_step_keywords():
-        if keyword in step:
-            return node
-    return "scan"
+        return "osint"
+    if "recon" in step:
+        return "recon"
+    if "analisevulnerabilidade" in step or "vulnerabilidade" in step:
+        return "vuln"
+    return "osint"
 
 
 def _mark_step_metric(state: AgentState, success: bool) -> None:
@@ -162,30 +88,6 @@ checkpointer = create_checkpointer()
 
 # Portas comuns de superficie externa para fallback quando o scanner nao retorna
 # uma lista real de portas abertas.
-FALLBACK_PORT_CANDIDATES = [
-    80,
-    81,
-    443,
-    8080,
-    8443,
-    8888,
-    8000,
-    8008,
-    3000,
-    5000,
-    22,
-    21,
-    25,
-    53,
-    110,
-    143,
-    3306,
-    5432,
-    6379,
-    9200,
-    27017,
-]
-
 MAX_DISCOVERED_ASSETS = 40
 
 
@@ -231,7 +133,7 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
 ]
 
 
-def _tool_for_step(step_name: str) -> str:
+def _tool_for_step(step_name: str) -> str | None:
     step = str(step_name or "").strip().lower()
     semantic_overrides = [
         (("score board", "administration surface"), "nuclei"),
@@ -249,7 +151,7 @@ def _tool_for_step(step_name: str) -> str:
     for keyword, tool in STEP_TOOL_MAP:
         if keyword in step:
             return tool
-    return "nmap"
+    return None
 
 
 def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
@@ -261,8 +163,12 @@ def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
 def _ordered_tools_for_step(scan_mode: str, group_name: str, step_name: str) -> list[str]:
     tools = _tools_for_group(scan_mode, group_name)
     primary_tool = _tool_for_step(step_name)
-    if primary_tool in tools:
+    if primary_tool and primary_tool in tools:
         return [primary_tool] + [tool for tool in tools if tool != primary_tool]
+    if primary_tool and primary_tool not in tools:
+        # Permite executar passos explicitos da missao (ex.: naabu/nmap)
+        # mesmo quando o grupo base do no nao inclui a ferramenta.
+        return [primary_tool] + tools
     return tools
 
 
@@ -273,10 +179,11 @@ def _run_tools_and_collect(
     step_name: str,
     log_prefix: str,
     root_domain: str = "",
-) -> tuple[list[dict[str, Any]], list[int], list[str]]:
+) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
     all_findings: list[dict[str, Any]] = []
     discovered_ports: set[int] = set()
     discovered_assets: set[str] = set()
+    port_evidence: dict[int, dict[str, str]] = {}
     step_success = False
 
     for tool in tools:
@@ -285,9 +192,21 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
             continue
 
-        result = run_tool_execution(tool, scan_target, scan_mode=state["scan_mode"])
+        result = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
         state["executed_tool_runs"].append(run_id)
         state["logs_terminais"].append(f"{log_prefix}: tool={tool} status={result.get('status', 'unknown')}")
+        if result.get("dispatch_task_name"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_task={result.get('dispatch_task_name')}"
+            )
+        if result.get("dispatch_task_id"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_id={result.get('dispatch_task_id')}"
+            )
+        if result.get("dispatch_error"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}"
+            )
         _register_tool_result_metric(state, str(result.get("status") or ""))
         if result.get("status") == "executed":
             step_success = True
@@ -318,14 +237,31 @@ def _run_tools_and_collect(
             all_findings.extend(asm_findings)
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} asm_findings={len(asm_findings)}")
 
-        for port in _extract_open_ports(result, step_name=step_name, tool_name=tool):
+        extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
+        for port in extracted_ports:
             discovered_ports.add(port)
+
+        for port, evidence in _extract_port_service_evidence(result, tool_name=tool).items():
+            if port not in port_evidence:
+                port_evidence[port] = evidence
+            else:
+                # Mantem o registro com mais contexto de versão/comando quando disponível.
+                existing = port_evidence.get(port, {})
+                if not existing.get("version") and evidence.get("version"):
+                    existing["version"] = evidence.get("version", "")
+                if not existing.get("service") and evidence.get("service"):
+                    existing["service"] = evidence.get("service", "")
+                if not existing.get("evidence") and evidence.get("evidence"):
+                    existing["evidence"] = evidence.get("evidence", "")
+                if not existing.get("command") and evidence.get("command"):
+                    existing["command"] = evidence.get("command", "")
+                port_evidence[port] = existing
 
         for asset in _extract_assets_from_result(result, root_domain=root_domain):
             discovered_assets.add(asset)
 
     _mark_step_metric(state, step_success)
-    return all_findings, sorted(discovered_ports), sorted(discovered_assets)
+    return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
 
 
 def _target_host(target: str) -> str:
@@ -395,6 +331,26 @@ def _register_discovered_assets(state: AgentState, root_domain: str, assets: lis
     )
 
 
+def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
+    root = str(state.get("target") or "").strip()
+    candidates: list[str] = []
+    if root:
+        candidates.append(root)
+
+    for asset in list(state.get("scanned_assets") or []):
+        host = str(asset or "").strip()
+        if host and host not in candidates:
+            candidates.append(host)
+
+    # Inclui parte da fila descoberta para ampliar cobertura em subdominios.
+    for asset in list(state.get("pending_asset_scans") or []):
+        host = str(asset or "").strip()
+        if host and host not in candidates:
+            candidates.append(host)
+
+    return candidates[: max(1, limit)]
+
+
 def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: str = "") -> list[int]:
     raw_ports = result.get("open_ports")
     if isinstance(raw_ports, list):
@@ -409,13 +365,132 @@ def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: 
         if parsed:
             return sorted(set(parsed))
 
-    # Fallback de portas somente em contexto explicito de mapeamento de portas.
-    explicit_step = str(step_name or "").lower()
-    explicit_tool = str(tool_name or "").lower()
-    allow_fallback = any(token in explicit_step for token in ["port scan", "porta", "ports"]) and explicit_tool in {"naabu", "nmap"}
-    if allow_fallback:
-        return FALLBACK_PORT_CANDIDATES.copy()
+    # Sem fallback sintético: se não houver prova do scanner, não geramos porta aberta.
     return []
+
+
+def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") -> dict[int, dict[str, str]]:
+    normalized_tool = str(tool_name or "").strip().lower()
+    stdout = str(result.get("stdout") or "")
+    command = _truncate_log(result.get("command"), 350)
+    evidence: dict[int, dict[str, str]] = {}
+
+    if normalized_tool in {"nmap", "nmap-vulscan", "vulscan"}:
+        # Exemplo: 22/tcp open ssh OpenSSH 8.2p1 Ubuntu 4ubuntu0.11
+        line_pattern = re.compile(r"^(?P<port>\d{1,5})/tcp\s+open\s+(?P<service>[a-zA-Z0-9\-_/\.]+)(?:\s+(?P<version>.*))?$")
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            match = line_pattern.match(line)
+            if not match:
+                continue
+            try:
+                port = int(match.group("port"))
+            except Exception:
+                continue
+            if not (1 <= port <= 65535):
+                continue
+            service = str(match.group("service") or "").strip()
+            version = str(match.group("version") or "").strip()
+            evidence[port] = {
+                "service": service,
+                "version": version,
+                "evidence": line,
+                "command": command,
+                "tool": normalized_tool,
+            }
+
+    if normalized_tool == "naabu":
+        # Exemplo comum: host:443
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            match = re.search(r":(\d{1,5})\b", line)
+            if not match:
+                continue
+            try:
+                port = int(match.group(1))
+            except Exception:
+                continue
+            if not (1 <= port <= 65535):
+                continue
+            if port not in evidence:
+                evidence[port] = {
+                    "service": "",
+                    "version": "",
+                    "evidence": line,
+                    "command": command,
+                    "tool": "naabu",
+                }
+
+    if normalized_tool in {"httpx", "whatweb"}:
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            url_match = re.search(r"https?://[^\s\]]+", line)
+            if not url_match:
+                continue
+            url_raw = url_match.group(0)
+            parsed = urlparse(url_raw)
+            if parsed.port:
+                port = parsed.port
+            elif parsed.scheme == "https":
+                port = 443
+            else:
+                port = 80
+            if not (1 <= int(port) <= 65535):
+                continue
+
+            service = "https" if parsed.scheme == "https" else "http"
+            version = ""
+            if normalized_tool == "whatweb":
+                server_match = re.search(r"Server\[([^\]]+)\]", line)
+                if server_match:
+                    version = str(server_match.group(1) or "").strip()
+
+            if int(port) not in evidence:
+                evidence[int(port)] = {
+                    "service": service,
+                    "version": version,
+                    "evidence": line,
+                    "command": command,
+                    "tool": normalized_tool,
+                }
+
+    if normalized_tool == "nikto":
+        target_port: int | None = None
+        target_proto = ""
+        target_host = ""
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            port_match = re.search(r"(?i)^\+\s*Target\s+Port:\s*(\d{1,5})\b", line)
+            if port_match:
+                try:
+                    parsed_port = int(port_match.group(1))
+                    if 1 <= parsed_port <= 65535:
+                        target_port = parsed_port
+                except Exception:
+                    pass
+            host_match = re.search(r"(?i)^\+\s*Target\s+Host(?:name)?:\s*(.+)$", line)
+            if host_match:
+                target_host = str(host_match.group(1) or "").strip()
+            proto_match = re.search(r"(?i)^\+\s*Target\s+IP:\s*\S+\s*\(([^\)]+)\)", line)
+            if proto_match:
+                target_proto = str(proto_match.group(1) or "").strip().lower()
+
+        if target_port is not None and target_port not in evidence:
+            service = "https" if target_port == 443 or "https" in target_proto else "http"
+            summary = f"Nikto target={target_host or '-'} port={target_port}"
+            evidence[target_port] = {
+                "service": service,
+                "version": "",
+                "evidence": summary,
+                "command": command,
+                "tool": "nikto",
+            }
+
+    return evidence
 
 
 def _truncate_log(value: Any, limit: int = 400) -> str:
@@ -531,7 +606,7 @@ def _extract_asm_findings(result: dict[str, Any], step_name: str, default_target
 
 def _step_name(state: AgentState) -> str:
     idx = state.get("mission_index", 0)
-    items = state.get("mission_items", MISSION_ITEMS)
+    items = state.get("mission_items", GROUP_MISSION_ITEMS)
     if idx >= len(items):
         return "done"
     return items[idx]
@@ -547,9 +622,13 @@ def recon_node(state: AgentState) -> AgentState:
     if state["target"] not in state["pending_asset_scans"] and state["target"] not in state["scanned_assets"]:
         state["pending_asset_scans"].append(state["target"])
 
-    recon_tools = _ordered_tools_for_step(state["scan_mode"], "recon", current)
+    recon_tools = _tools_for_group(state["scan_mode"], "reconhecimento")
+    # Ferramentas de port scan a serem executadas também nos subdomínios descobertos
+    PORT_SCAN_TOOLS = {"naabu", "nmap"}
+    port_scan_tools = [t for t in recon_tools if t in PORT_SCAN_TOOLS]
+
     root_domain = _target_host(state["target"])
-    recon_findings, recon_ports, recon_assets = _run_tools_and_collect(
+    recon_findings, recon_ports, recon_assets, recon_port_evidence = _run_tools_and_collect(
         state,
         recon_tools,
         state["target"],
@@ -564,6 +643,74 @@ def recon_node(state: AgentState) -> AgentState:
         state["pending_port_tests"] = state["discovered_ports"].copy()
     if recon_assets:
         _register_discovered_assets(state, root_domain=root_domain, assets=recon_assets)
+
+        # Executa port scan nos subdomínios recém-descobertos (naabu + nmap)
+        if port_scan_tools:
+            subdomain_targets = [
+                a for a in recon_assets[:MAX_DISCOVERED_ASSETS]
+                if _target_host(a) != root_domain
+            ]
+            if subdomain_targets:
+                state["logs_terminais"].append(
+                    f"ReconNode:PortScan: executando em {len(subdomain_targets)} subdominios descobertos"
+                )
+            for sub_asset in subdomain_targets:
+                _, sub_ports, _, sub_port_ev = _run_tools_and_collect(
+                    state,
+                    port_scan_tools,
+                    sub_asset,
+                    current,
+                    f"ReconNode:PortScan:{sub_asset}",
+                    root_domain=root_domain,
+                )
+                if sub_ports:
+                    state["discovered_ports"] = sorted(
+                        set((state.get("discovered_ports") or []) + sub_ports)
+                    )
+                    for port in sub_ports:
+                        technical = sub_port_ev.get(port, {})
+                        service_name = str(technical.get("service") or "").strip()
+                        state["vulnerabilidades_encontradas"].append(
+                            {
+                                "title": (
+                                    f"Porta aberta em subdominio: {sub_asset}:{port}"
+                                    + (f" ({service_name})" if service_name else "")
+                                ),
+                                "severity": "medium",
+                                "risk_score": 4,
+                                "source_worker": "reconhecimento",
+                                "details": {
+                                    "node": "recon",
+                                    "step": current,
+                                    "asset": sub_asset,
+                                    "port": port,
+                                    "service": service_name,
+                                    "version": str(technical.get("version") or "").strip(),
+                                    "tool": technical.get("tool") or "portscan",
+                                    "evidence": technical.get("evidence") or "",
+                                    "open_ports": [port],
+                                },
+                            }
+                        )
+                    state["logs_terminais"].append(
+                        f"ReconNode:PortScan:{sub_asset}: portas={sorted(sub_ports)}"
+                    )
+
+        for asset in recon_assets[:MAX_DISCOVERED_ASSETS]:
+            state["vulnerabilidades_encontradas"].append(
+                {
+                    "title": f"Ativo descoberto no reconhecimento: {asset}",
+                    "severity": "info",
+                    "risk_score": 1,
+                    "source_worker": "reconhecimento",
+                    "details": {
+                        "node": "recon",
+                        "step": current,
+                        "asset": asset,
+                        "tool": "reconhecimento",
+                    },
+                }
+            )
 
     state["vulnerabilidades_encontradas"].append(
         {
@@ -589,7 +736,7 @@ def scan_node(state: AgentState) -> AgentState:
     if state["scan_mode"] == "scheduled":
         scan_tools = scan_tools + _ordered_tools_for_step(state["scan_mode"], "fingerprint", current)
 
-    scan_findings, scan_ports, _ = _run_tools_and_collect(state, scan_tools, scan_target, current, "ScanNode")
+    scan_findings, scan_ports, _, scan_port_evidence = _run_tools_and_collect(state, scan_tools, scan_target, current, "ScanNode")
     if scan_findings:
         state["vulnerabilidades_encontradas"].extend(scan_findings)
 
@@ -601,16 +748,61 @@ def scan_node(state: AgentState) -> AgentState:
     state["port_followup_done"] = True
 
     if state["pending_port_tests"]:
+        aggregated_ports: list[int] = []
         for port in state["pending_port_tests"]:
+            technical = scan_port_evidence.get(port, {})
+            service_name = str(technical.get("service") or "").strip()
+            service_version = str(technical.get("version") or "").strip()
+            title = f"Servico externo identificado na porta {port}"
+            if service_name:
+                title = f"Servico externo identificado na porta {port} ({service_name})"
+            aggregated_ports.append(int(port))
             state["vulnerabilidades_encontradas"].append(
                 {
-                    "title": f"Servico externo identificado na porta {port}",
+                    "title": title,
                     "severity": "medium",
                     "risk_score": 4,
                     "source_worker": "scan",
-                    "details": {"node": "scan", "asset": scan_target, "port": port, "step": current},
+                    "details": {
+                        "node": "scan",
+                        "asset": scan_target,
+                        "port": port,
+                        "service": service_name,
+                        "version": service_version,
+                        "tool": technical.get("tool") or "scan",
+                        "evidence": technical.get("evidence") or "",
+                        "command": technical.get("command") or "",
+                        "payload": technical.get("command") or "",
+                        "open_ports": [int(port)],
+                        "step": current,
+                    },
                 }
             )
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"PortScan consolidado: {scan_target}",
+                "severity": "low",
+                "risk_score": 3,
+                "source_worker": "scan",
+                "details": {
+                    "node": "scan",
+                    "asset": scan_target,
+                    "tool": "portscan",
+                    "step": current,
+                    "open_ports": sorted(set(aggregated_ports)),
+                    "evidence": f"open_ports={','.join(str(p) for p in sorted(set(aggregated_ports)))}",
+                    "payload": "; ".join(
+                        sorted(
+                            {
+                                str((scan_port_evidence.get(p) or {}).get("command") or "").strip()
+                                for p in aggregated_ports
+                                if str((scan_port_evidence.get(p) or {}).get("command") or "").strip()
+                            }
+                        )
+                    )[:500],
+                },
+            }
+        )
         state["logs_terminais"].append(f"ScanNode: portas analisadas={len(state['pending_port_tests'])}")
         state["pending_port_tests"] = []
 
@@ -624,11 +816,14 @@ def fuzzing_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["logs_terminais"].append(f"FuzzingNode: {current}")
 
-    scan_target = state["target"]
     fuzz_tools = _ordered_tools_for_step(state["scan_mode"], "fuzzing", current)
-    fuzz_findings, _, _ = _run_tools_and_collect(state, fuzz_tools, scan_target, current, "FuzzingNode")
-    if fuzz_findings:
-        state["vulnerabilidades_encontradas"].extend(fuzz_findings)
+    targets = _targets_for_deep_scan(state, limit=8)
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"FuzzingNode: targets={len(targets)}")
+    for scan_target in targets:
+        fuzz_findings, _, _, _ = _run_tools_and_collect(state, fuzz_tools, scan_target, current, "FuzzingNode")
+        if fuzz_findings:
+            state["vulnerabilidades_encontradas"].extend(fuzz_findings)
 
     state["proxima_ferramenta"] = "vuln"
 
@@ -642,11 +837,14 @@ def fingerprint_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["logs_terminais"].append(f"FingerprintNode: {current}")
 
-    scan_target = state["target"]
     fingerprint_tools = _ordered_tools_for_step(state["scan_mode"], "fingerprint", current)
-    fingerprint_findings, _, _ = _run_tools_and_collect(state, fingerprint_tools, scan_target, current, "FingerprintNode")
-    if fingerprint_findings:
-        state["vulnerabilidades_encontradas"].extend(fingerprint_findings)
+    targets = _targets_for_deep_scan(state, limit=8)
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"FingerprintNode: targets={len(targets)}")
+    for scan_target in targets:
+        fingerprint_findings, _, _, _ = _run_tools_and_collect(state, fingerprint_tools, scan_target, current, "FingerprintNode")
+        if fingerprint_findings:
+            state["vulnerabilidades_encontradas"].extend(fingerprint_findings)
 
     state["proxima_ferramenta"] = "fuzzing"
     state["mission_index"] += 1
@@ -657,26 +855,35 @@ def fingerprint_node(state: AgentState) -> AgentState:
 def vuln_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    scan_target = state["target"]
-    vuln_tools = _ordered_tools_for_step(state["scan_mode"], "vuln", current)
-    vuln_findings, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "VulnNode")
+    vuln_tools = _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
+    targets = _targets_for_deep_scan(state, limit=8)
+    all_findings: list[dict[str, Any]] = []
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"VulnNode: targets={len(targets)}")
+    for scan_target in targets:
+        vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "VulnNode")
+        if vuln_findings:
+            all_findings.extend(vuln_findings)
+        all_findings.append(
+            {
+                "title": f"Analise de vulnerabilidade executada em {scan_target}",
+                "severity": "info",
+                "risk_score": 1,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": current,
+                    "asset": scan_target,
+                    "tool": "analise_vulnerabilidade",
+                },
+            }
+        )
     state["logs_terminais"].append(f"VulnNode: {current}")
 
-    if vuln_findings:
-        state["vulnerabilidades_encontradas"].extend(vuln_findings)
+    if all_findings:
+        state["vulnerabilidades_encontradas"].extend(all_findings)
     else:
-        finding = {
-            "title": f"Potential issue from step: {current}",
-            "severity": "medium",
-            "risk_score": 5,
-            "source_worker": "vuln",
-        }
-        known_patterns = [p.lower() for p in state.get("known_vulnerability_patterns", [])]
-        title_l = finding["title"].lower()
-        if any(k and (k in title_l or title_l in k) for k in known_patterns):
-            finding["risk_score"] = 7
-            finding["known_pattern_match"] = True
-        state["vulnerabilidades_encontradas"].append(finding)
+        state["logs_terminais"].append(f"VulnNode: sem achados tecnicos no passo {current}")
     state["proxima_ferramenta"] = "analista_ia"
     state["mission_index"] += 1
     _metric_end(state, "vuln", started_at)
@@ -702,11 +909,14 @@ def code_js_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["logs_terminais"].append(f"CodeJSNode: {current}")
 
-    scan_target = state["target"]
     code_tools = _ordered_tools_for_step(state["scan_mode"], "code_js", current)
-    code_findings, _, _ = _run_tools_and_collect(state, code_tools, scan_target, current, "CodeJSNode")
-    if code_findings:
-        state["vulnerabilidades_encontradas"].extend(code_findings)
+    targets = _targets_for_deep_scan(state, limit=6)
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"CodeJSNode: targets={len(targets)}")
+    for scan_target in targets:
+        code_findings, _, _, _ = _run_tools_and_collect(state, code_tools, scan_target, current, "CodeJSNode")
+        if code_findings:
+            state["vulnerabilidades_encontradas"].extend(code_findings)
 
     state["proxima_ferramenta"] = "api"
     state["mission_index"] += 1
@@ -719,11 +929,14 @@ def api_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["logs_terminais"].append(f"APINode: {current}")
 
-    scan_target = state["target"]
     api_tools = _ordered_tools_for_step(state["scan_mode"], "api", current)
-    api_findings, _, _ = _run_tools_and_collect(state, api_tools, scan_target, current, "APINode")
-    if api_findings:
-        state["vulnerabilidades_encontradas"].extend(api_findings)
+    targets = _targets_for_deep_scan(state, limit=6)
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"APINode: targets={len(targets)}")
+    for scan_target in targets:
+        api_findings, _, _, _ = _run_tools_and_collect(state, api_tools, scan_target, current, "APINode")
+        if api_findings:
+            state["vulnerabilidades_encontradas"].extend(api_findings)
 
     state["proxima_ferramenta"] = "osint"
     state["mission_index"] += 1
@@ -736,11 +949,28 @@ def osint_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["logs_terminais"].append(f"OSINTNode: {current}")
 
-    # Puxa a lista de ferramentas OSINT por modo para manter alinhamento com worker groups.
-    osint_tools = _ordered_tools_for_step(state["scan_mode"], "osint", current)
-    osint_findings, _, _ = _run_tools_and_collect(state, osint_tools, state["target"], current, "OSINTNode")
-    if osint_findings:
-        state["vulnerabilidades_encontradas"].extend(osint_findings)
+    osint_tools = _tools_for_group(state["scan_mode"], "osint")
+    targets = _targets_for_deep_scan(state, limit=6)
+    if len(targets) > 1:
+        state["logs_terminais"].append(f"OSINTNode: targets={len(targets)}")
+    for scan_target in targets:
+        osint_findings, _, _, _ = _run_tools_and_collect(state, osint_tools, scan_target, current, "OSINTNode")
+        if osint_findings:
+            state["vulnerabilidades_encontradas"].extend(osint_findings)
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"OSINT executado em {scan_target}",
+                "severity": "info",
+                "risk_score": 1,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "step": current,
+                    "asset": scan_target,
+                    "tool": "osint",
+                },
+            }
+        )
 
     if osint_tools:
         state["vulnerabilidades_encontradas"].append(
@@ -778,42 +1008,20 @@ def route_decision(state: AgentState) -> str:
 
     current = _step_name(state)
     nxt = _node_for_step(current, state.get("scan_mode", "unit"))
-    if nxt == "scanner":
-        return "scan"
-    if nxt == "fuzzing":
-        return "fuzzing"
-    if nxt == "fingerprint":
-        return "fingerprint"
     if nxt == "vuln":
         return "vuln"
-    if nxt == "analista_ia":
-        return "analista_ia"
-    if nxt == "code_js":
-        return "code_js"
-    if nxt == "api":
-        return "api"
     if nxt == "osint":
         return "osint"
     return "recon"
 
 
 def build_graph(mode: ScanMode = "unit"):
-    """
-    Constroi o grafo LangGraph para o modo informado.
-    - "unit": missao reduzida (UNIT_MISSION_ITEMS), comportamento focado
-    - "scheduled": missao completa (100 passos), cobertura maxima
-    """
+    """Constroi o grafo em 3 fases: Reconhecimento -> AnaliseVulnerabilidade -> OSINT."""
     graph = StateGraph(AgentState)
 
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("recon", recon_node)
-    graph.add_node("scan", scan_node)
-    graph.add_node("fingerprint", fingerprint_node)
-    graph.add_node("fuzzing", fuzzing_node)
     graph.add_node("vuln", vuln_node)
-    graph.add_node("analista_ia", analista_ia_node)
-    graph.add_node("code_js", code_js_node)
-    graph.add_node("api", api_node)
     graph.add_node("osint", osint_node)
 
     graph.set_entry_point("supervisor")
@@ -821,13 +1029,7 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_conditional_edges("supervisor", route_decision)
 
     graph.add_edge("recon", "supervisor")
-    graph.add_edge("scan", "supervisor")
-    graph.add_edge("fingerprint", "supervisor")
-    graph.add_edge("fuzzing", "supervisor")
     graph.add_edge("vuln", "supervisor")
-    graph.add_edge("analista_ia", "supervisor")
-    graph.add_edge("code_js", "supervisor")
-    graph.add_edge("api", "supervisor")
     graph.add_edge("osint", "supervisor")
 
     return graph.compile(checkpointer=checkpointer)
@@ -839,7 +1041,7 @@ def initial_state(
     scan_mode: ScanMode = "unit",
     known_vulnerability_patterns: list[str] | None = None,
 ) -> AgentState:
-    mission_items = UNIT_MISSION_ITEMS if scan_mode == "unit" else MISSION_ITEMS
+    mission_items = GROUP_MISSION_ITEMS.copy()
     return {
         "scan_id": scan_id,
         "target": target,

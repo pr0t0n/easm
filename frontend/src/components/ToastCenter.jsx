@@ -23,9 +23,9 @@ export default function ToastCenter() {
   }, []);
 
   const styleByType = {
-    success: "border-emerald-500/45 bg-emerald-500/15 text-emerald-100",
-    error: "border-rose-500/45 bg-rose-500/15 text-rose-100",
-    info: "border-blue-500/45 bg-blue-500/15 text-blue-100",
+    success: "border-emerald-300 bg-emerald-50 text-emerald-800",
+    error: "border-rose-300 bg-rose-50 text-rose-800",
+    info: "border-blue-300 bg-blue-50 text-blue-800",
   };
 
   return (

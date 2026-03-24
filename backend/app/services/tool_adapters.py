@@ -15,13 +15,25 @@ SAFE_TOOL_REGISTRY = {
     "recon": ["subfinder", "amass", "assetfinder", "dnsx", "naabu", "nessus"],
     "crawler": ["httpx", "katana", "waymore", "uro", "gowitness"],
     "fuzzing": ["ffuf", "feroxbuster", "arjun", "dirb", "gobuster", "wfuzz"],
-    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f"],
+    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck"],
     "code_js": ["linkfinder", "secretfinder", "trufflehog"],
     "api": ["kiterunner", "postman-to-k6"],
     "osint": ["theharvester", "h8mail", "metagoofil", "urlscan-cli", "subjack", "shodan-cli", "whatweb"],
 }
 
-TOOL_TIMEOUT_SECONDS = 45
+TOOL_TIMEOUT_SECONDS = 90
+
+# Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
+TOOL_SPECIFIC_TIMEOUTS = {
+    "nmap": 180,
+    "nuclei": 300,
+    "katana": 180,
+    "ffuf": 120,
+    "wapiti": 240,
+    "sqlmap": 300,
+    "subfinder": 120,
+    "amass": 120,
+}
 
 OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {
     "openvas": "OpenVAS requer stack dedicada/GVM e nao e suportado por execucao local direta no worker.",
@@ -127,7 +139,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     normalized = tool_name.strip().lower()
 
     if normalized == "nmap":
-        return ["nmap", "-Pn", "-T4", "--top-ports", "100", host]
+        # Top 100 portas + deteccao de versao/scripts default para baseline consistente.
+        return ["nmap", "-Pn", "-sV", "-sC", "--top-ports", "100", "-T4", host]
     if normalized == "nmap-vulscan" or normalized == "vulscan":
         # nmap com vulscan NSE script para vulnerability assessment
         # Requer git clone --depth=1 https://github.com/scipag/vulscan.git /root/vulscan
@@ -135,14 +148,14 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         if not os.path.exists(vulscan_path):
             vulscan_path = "/opt/vulscan"
         if not os.path.exists(vulscan_path):
-            # Fallback: sem vulscan, usa nmap simples
-            return ["nmap", "-Pn", "-sV", "--top-ports", "100", host]
+            # Fallback: sem vulscan, mantem varredura agressiva para enriquecer evidencia.
+            return ["nmap", "-Pn", "-A", "--top-ports", "100", host]
         # Com vulscan: versioning + vulnerability detection
         script_path = os.path.join(vulscan_path, "vulscan.nse")
         return [
             "nmap",
             "-Pn",
-            "-sV",
+            "-A",
             "--top-ports",
             "100",
             "-T4",
@@ -150,8 +163,10 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             f"--script-args=vulscan/mincvss=4.0",
             host,
         ]
+    if normalized == "naabu":
+        return ["naabu", "-host", host, "-top-ports", "100", "-silent", "-rate", "1000"]
     if normalized == "subfinder":
-        return ["subfinder", "-silent", "-d", host]
+        return ["subfinder", "-d", host, "-silent", "-t", "100"]
     if normalized == "findomain":
         return ["findomain", "-t", host, "-q"]
     if normalized == "chaos":
@@ -175,9 +190,9 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "alterx":
         return ["alterx", "-h"]
     if normalized == "httpx":
-        return ["httpx", "-silent", "-u", url]
+        return ["httpx", "-silent", "-title", "-tech-detect", "-status-code", "-u", url]
     if normalized == "katana":
-        return ["katana", "-u", url, "-silent", "-d", "1"]
+        return ["katana", "-u", url, "-silent", "-d", "3", "-c", "50", "-rl", "30", "-js-crawl"]
     if normalized == "gowitness":
         return ["gowitness", "scan", "single", "--url", url]
     if normalized == "wappalyzer":
@@ -199,16 +214,20 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "nuclei",
             "-u",
             url,
-            "-silent",
             "-severity",
-            "critical,high,medium,low,info",
+            "critical,high",
         ]
         # Obrigatorio: usa sempre os templates customizados instalados no worker.
         cmd.extend(["-t", templates_path])
         return cmd
     if normalized == "nikto":
-        return ["nikto", "-h", url]
+        return ["nikto", "-h", url, "-Tuning", "1234567890"]
+    if normalized == "sslscan":
+        return ["sslscan", "--no-colour", host]
+    if normalized == "shcheck":
+        return ["shcheck", url]
     if normalized == "wapiti":
+        # Modulos validos no wapiti 3.2.x (http_header e csp nao existem nessa versao)
         return [
             "wapiti",
             "-u",
@@ -218,15 +237,15 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "domain",
             "--format",
             "txt",
-            "-m",
-            "sql,xss,permanentxss,ssrf,xxe,exec,file,crlf,redirect,http_header,csp",
+            "--module",
+            "sql,xss,permanentxss,ssrf,xxe,exec,file,crlf,redirect,csrf,ldap",
         ]
     if normalized == "zap":
         return ["zaproxy", "-version"]
     if normalized == "dalfox":
         return ["dalfox", "url", url, "--silence"]
     if normalized == "sqlmap":
-        return ["python3", "/opt/sqlmap/sqlmap.py", "-u", url, "--batch", "--crawl=1", "--level=2", "--risk=1", "--random-agent"]
+        return ["python3", "/opt/sqlmap/sqlmap.py", "-u", url, "--batch", "--level", "2", "--risk", "1", "--random-agent", "--crawl=2"]
     if normalized == "commix":
         return ["python3", "/opt/commix/commix.py", "--url", url, "--batch", "--crawl=1"]
     if normalized == "tplmap":
@@ -234,14 +253,17 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "wpscan":
         return ["wpscan", "--url", url, "--no-update"]
     if normalized == "arjun":
-        return ["arjun", "-u", url, "--passive", "--stable"]
+        # -p nao e flag de metodo nessa versao do arjun; usa apenas --stable
+        return ["arjun", "-u", url, "--stable"]
     if normalized == "ffuf":
         wordlist = _first_existing_path([
-            "/usr/share/dirb/wordlists/common.txt",
+            "/usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt",
             "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt",
+            "/usr/share/dirb/wordlists/common.txt",
         ])
         if wordlist:
-            return ["ffuf", "-w", wordlist, "-u", f"{url.rstrip('/')}/FUZZ", "-mc", "200,204,301,302,307,401,403"]
+            return ["ffuf", "-w", wordlist, "-u", f"{url.rstrip('/')}/FUZZ", "-mc", "200,301,302,307", "-t", "50"]
         return ["ffuf", "-h"]
     if normalized == "wfuzz":
         wordlist = _first_existing_path([
@@ -252,14 +274,23 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             return ["wfuzz", "-c", "-z", f"file,{wordlist}", "--hc", "404", f"{url.rstrip('/')}/FUZZ"]
         return ["wfuzz", "-h"]
     if normalized == "feroxbuster":
-        return ["feroxbuster", "-u", url, "--silent", "--no-recursion"]
-    if normalized == "gobuster":
         wordlist = _first_existing_path([
-            "/usr/share/dirb/wordlists/common.txt",
+            "/usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt",
             "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/dirb/wordlists/common.txt",
         ])
         if wordlist:
-            return ["gobuster", "dir", "-u", url, "-w", wordlist, "-q", "-k"]
+            return ["feroxbuster", "-u", url, "--silent", "--no-recursion", "-t", "50", "-w", wordlist]
+        return ["feroxbuster", "-u", url, "--silent", "--no-recursion", "-t", "50"]
+    if normalized == "gobuster":
+        wordlist = _first_existing_path([
+            "/usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt",
+            "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/dirb/wordlists/common.txt",
+        ])
+        if wordlist:
+            return ["gobuster", "dir", "-u", url, "-w", wordlist, "-q", "-k", "-t", "50"]
         return ["gobuster", "help"]
     if normalized == "dirb":
         wordlist = _first_existing_path([
@@ -275,6 +306,9 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         return ["linkfinder.py", "-i", url, "-o", "cli"]
     if normalized == "secretfinder":
         return ["SecretFinder.py", "-i", url, "-o", "cli"]
+    if normalized == "trufflehog":
+        # trufflehog v3+ exige subcomando: 'git' para repositorios git
+        return ["trufflehog", "git", f"https://{host}", "--no-update"]
     if normalized == "kiterunner":
         return ["kr", "help"]
     if normalized == "postman-to-k6":
@@ -303,7 +337,7 @@ def _parse_open_ports(tool_name: str, stdout: str) -> list[int]:
     normalized = tool_name.strip().lower()
     ports: set[int] = set()
 
-    if normalized == "nmap":
+    if normalized in {"nmap", "nmap-vulscan", "vulscan"}:
         for match in re.findall(r"(?m)^(\d+)/tcp\s+open", stdout or ""):
             try:
                 ports.add(int(match))
@@ -317,6 +351,33 @@ def _parse_open_ports(tool_name: str, stdout: str) -> list[int]:
                 continue
             if 1 <= port <= 65535:
                 ports.add(port)
+    elif normalized == "nikto":
+        # Exemplo: + Target Port: 443
+        for match in re.findall(r"(?im)^\+\s*Target\s+Port:\s*(\d{1,5})\b", stdout or ""):
+            try:
+                port = int(match)
+            except ValueError:
+                continue
+            if 1 <= port <= 65535:
+                ports.add(port)
+    elif normalized in {"httpx", "whatweb"}:
+        # Heuristica: linhas com URL retornada pela ferramenta.
+        for raw in (stdout or "").splitlines():
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            url_match = re.search(r"https?://[^\s\]]+", line)
+            if not url_match:
+                continue
+            parsed = urlparse(url_match.group(0))
+            if parsed.port:
+                port = parsed.port
+            elif parsed.scheme == "https":
+                port = 443
+            else:
+                port = 80
+            if 1 <= int(port) <= 65535:
+                ports.add(int(port))
 
     return sorted(ports)
 
@@ -365,7 +426,7 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "stderr": "missing mandatory nuclei templates",
         }
 
-    timeout_seconds = 180 if normalized_tool == "nuclei" else TOOL_TIMEOUT_SECONDS
+    timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get(normalized_tool, TOOL_TIMEOUT_SECONDS)
     try:
         proc = subprocess.run(
             cmd,
@@ -420,7 +481,7 @@ def get_execution_mode() -> str:
 def resolve_worker_for_tool(tool_name: str, scan_mode: str = "unit") -> str:
     group = find_group_by_tool(tool_name, mode=scan_mode)
     groups = get_worker_groups(scan_mode)
-    queue = groups.get(group, {}).get("queue", f"worker.{scan_mode}.recon")
+    queue = groups.get(group, {}).get("queue", f"worker.{scan_mode}.reconhecimento")
     return str(queue)
 
 

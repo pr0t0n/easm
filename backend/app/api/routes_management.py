@@ -144,16 +144,13 @@ def _create_scan_from_schedule(
     db: Session,
     current_user: User,
     target: str,
-    authorization_code: str,
+    authorization_code: str | None,
     access_group_id: int | None,
     mode: str = "scheduled",
 ) -> ScanJob:
-    authorization = _resolve_valid_authorization_code(db, authorization_code)
     allowlist_ok = is_target_allowed(db, current_user.id, target, "*")
 
-    if not authorization:
-        compliance_status = "blocked_authorization"
-    elif not allowlist_ok:
+    if not allowlist_ok:
         compliance_status = "blocked_policy"
     else:
         compliance_status = "approved"
@@ -166,7 +163,7 @@ def _create_scan_from_schedule(
         mode=mode,
         status="queued" if compliance_status == "approved" else "blocked",
         compliance_status=compliance_status,
-        authorization_id=authorization.id if authorization else None,
+        authorization_id=None,
         current_step="1. Amass Subdomain Recon",
     )
     db.add(job)
@@ -434,7 +431,6 @@ def list_schedules(db: Session = Depends(get_db), current_user: User = Depends(g
         {
             "id": row.id,
             "access_group_id": row.access_group_id,
-            "authorization_code": row.authorization_code,
             "targets_text": row.targets_text,
             "targets": _parse_targets(row.targets_text),
             "scan_type": row.scan_type,
@@ -458,12 +454,6 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
     if frequency not in {"daily", "weekly", "monthly"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frequency invalido")
 
-    authorization_code = (payload.get("authorization_code") or "").strip()
-    if not authorization_code:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="authorization_code obrigatorio para agendamento")
-    if not _resolve_valid_authorization_code(db, authorization_code):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="authorization_code invalido ou nao aprovado")
-
     access_group_id = payload.get("access_group_id")
     if access_group_id in ["", 0]:
         access_group_id = None
@@ -477,7 +467,7 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
     row = ScheduledScan(
         owner_id=current_user.id,
         access_group_id=access_group_id,
-        authorization_code=authorization_code,
+        authorization_code=None,
         targets_text=targets_text,
         scan_type=(payload.get("scan_type") or "full").strip().lower(),
         frequency=frequency,
@@ -514,14 +504,6 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
         row.access_group_id = access_group_id
 
-    if "authorization_code" in payload:
-        new_code = (payload.get("authorization_code") or "").strip()
-        if not new_code:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="authorization_code obrigatorio para agendamento")
-        if not _resolve_valid_authorization_code(db, new_code):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="authorization_code invalido ou nao aprovado")
-        row.authorization_code = new_code
-
     for field in ["targets_text", "scan_type", "frequency", "run_time", "day_of_week", "day_of_month", "enabled"]:
         if field in payload:
             setattr(row, field, payload[field])
@@ -552,10 +534,6 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento nao encontrado")
     if not row.enabled:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento desabilitado")
-    if not row.authorization_code:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento sem authorization_code")
-    if not _resolve_valid_authorization_code(db, row.authorization_code):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="authorization_code invalido ou nao aprovado")
 
     created_scan_ids: list[int] = []
     targets = _parse_targets(row.targets_text)
@@ -564,7 +542,7 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
             db=db,
             current_user=current_user,
             target=target,
-            authorization_code=row.authorization_code,
+            authorization_code=None,
             access_group_id=row.access_group_id,
             mode="scheduled",
         )
