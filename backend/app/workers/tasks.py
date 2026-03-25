@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.graph.workflow import build_graph, initial_state
-from app.models.models import AppSetting, Finding, ScanJob, ScanLog, WorkerHeartbeat
+from app.models.models import AppSetting, Finding, ScanJob, ScanLog, ScheduledScan, WorkerHeartbeat
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cve_enrichment_service import enrichment_service
@@ -718,3 +718,106 @@ def run_scan_job(scan_id: int):
     finally:
         db.close()
     return _execute_scan(scan_id, mode)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scheduler tick — verifica ScheduledScan devidos e dispara ScanJobs
+# Executado a cada minuto pelo Celery Beat
+# ──────────────────────────────────────────────────────────────────────────────
+
+@celery.task(name="scheduler.tick")
+def scheduler_tick():
+    """
+    Roda a cada minuto (via Celery Beat).
+    Para cada ScheduledScan enabled=True, verifica se o horário configurado
+    bate com o minuto atual (fuso America/Sao_Paulo) e, se ainda não executou
+    neste slot (last_run_at), cria um ScanJob e o envia para a fila scheduled.
+    """
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    now = datetime.now(tz)
+    current_hhmm = now.strftime("%H:%M")
+    current_dow = now.strftime("%A").lower()   # monday, tuesday, …
+    current_dom = now.day                      # 1-31
+
+    db: Session = SessionLocal()
+    try:
+        schedules = db.query(ScheduledScan).filter(ScheduledScan.enabled.is_(True)).all()
+        fired = 0
+        for sched in schedules:
+            if sched.run_time != current_hhmm:
+                continue
+
+            # Filtro por dia da semana (frequency=weekly) ou dia do mês (monthly)
+            freq = (sched.frequency or "daily").lower()
+            if freq == "weekly":
+                if (sched.day_of_week or "").lower() != current_dow:
+                    continue
+            elif freq == "monthly":
+                if sched.day_of_month != current_dom:
+                    continue
+            # daily — sem filtro adicional
+
+            # Idempotência: já disparou neste slot (mesmo minuto)?
+            if sched.last_run_at is not None:
+                from zoneinfo import ZoneInfo as _ZI
+                slot_start = now.replace(second=0, microsecond=0)
+                last_run_local = sched.last_run_at.replace(tzinfo=_ZI("UTC")).astimezone(tz)
+                if last_run_local >= slot_start:
+                    continue
+
+            # Determina o owner (usa o primeiro owner do schedule)
+            owner_id = sched.owner_id
+
+            # Cria um ScanJob para cada target (separados por ; ou ,)
+            raw_targets = [t.strip() for t in sched.targets_text.replace(",", ";").split(";") if t.strip()]
+            if not raw_targets:
+                continue
+
+            # Agrupa todos os targets numa única query (compatível com o fluxo existente)
+            target_query = "; ".join(raw_targets)
+
+            job = ScanJob(
+                owner_id=owner_id,
+                access_group_id=sched.access_group_id,
+                target_query=target_query,
+                status="pending",
+                mode="scheduled",
+                compliance_status="approved",
+                current_step="Aguardando worker",
+                state_data={},
+            )
+            db.add(job)
+            db.flush()  # obtém job.id antes do commit
+
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="scheduler",
+                level="INFO",
+                message=(
+                    f"Scan agendado disparado automaticamente | "
+                    f"schedule_id={sched.id} | freq={freq} | run_time={sched.run_time}"
+                ),
+            ))
+
+            # Atualiza last_run_at (UTC) para idempotência
+            sched.last_run_at = datetime.utcnow()
+            db.add(sched)
+            db.commit()
+
+            # Envia para a fila do worker scheduled
+            celery.send_task(
+                "run_scan_job_scheduled",
+                kwargs={"scan_id": job.id},
+                queue=SCAN_SCHEDULED_QUEUE,
+            )
+            fired += 1
+
+        return {"ok": True, "checked": len(schedules), "fired": fired, "slot": current_hhmm}
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
+

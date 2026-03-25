@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -10,4 +11,14 @@ celery = Celery(
     include=["app.workers.tasks"],
 )
 
-celery.conf.update(task_track_started=True)
+celery.conf.update(
+    task_track_started=True,
+    beat_schedule={
+        # Dispara a cada minuto para verificar schedules devidos
+        "scheduler-tick": {
+            "task": "scheduler.tick",
+            "schedule": crontab(minute="*"),
+        },
+    },
+    timezone="America/Sao_Paulo",
+)
