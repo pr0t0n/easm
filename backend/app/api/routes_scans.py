@@ -3110,6 +3110,7 @@ def dashboard_insights(
     prioritized_limit: int = Query(default=10, ge=1, le=100),
     prioritized_offset: int = Query(default=0, ge=0, le=10000),
     target: str | None = Query(default=None),
+    access_group_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -3129,6 +3130,10 @@ def dashboard_insights(
     if normalized_target:
         jobs_query = jobs_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
         findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
+    
+    if access_group_id is not None:
+        jobs_query = jobs_query.filter(ScanJob.access_group_id == access_group_id)
+        findings_query = findings_query.filter(ScanJob.access_group_id == access_group_id)
 
     jobs = jobs_query.order_by(ScanJob.created_at.desc()).all()
     findings = findings_query.all()

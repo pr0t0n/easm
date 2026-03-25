@@ -72,13 +72,31 @@ export default function DashboardPage() {
   const [easmTrends, setEasmTrends] = useState(null);
   const [easmAlerts, setEasmAlerts] = useState([]);
   const [easmAssets, setEasmAssets] = useState([]);
+  
+  // Filters
+  const [accessGroups, setAccessGroups] = useState([]);
+  const [selectedGroup, setSelectedGroup] = useState("");
+  const [selectedTarget, setSelectedTarget] = useState("");
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/dashboard/insights");
+        // Carrega access groups
+        const groupsRes = await client.get("/api/access-groups").catch(() => ({ data: [] }));
+        setAccessGroups(groupsRes.data || []);
+
+        // Monta query params com filtros
+        const params = new URLSearchParams();
+        if (selectedTarget.trim()) {
+          params.append("target", selectedTarget.trim());
+        }
+        if (selectedGroup) {
+          params.append("access_group_id", selectedGroup);
+        }
+
+        const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
 
         setStats({
@@ -149,7 +167,7 @@ export default function DashboardPage() {
     };
 
     load();
-  }, []);
+  }, [selectedGroup, selectedTarget]);
 
   if (loading) {
     return (
@@ -171,6 +189,57 @@ export default function DashboardPage() {
 
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-5 pb-12">
+      <section className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
+        <h2 className="text-sm font-semibold text-slate-200 mb-3">Filtros</h2>
+        <div className="grid gap-3 md:grid-cols-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo/Cliente</label>
+            <select
+              value={selectedGroup}
+              onChange={(e) => setSelectedGroup(e.target.value)}
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
+            >
+              <option value="">Todos os grupos</option>
+              {accessGroups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-2">Domínio/Alvo</label>
+            <input
+              type="text"
+              value={selectedTarget}
+              onChange={(e) => setSelectedTarget(e.target.value)}
+              placeholder="Filtrar por domínio..."
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex items-end">
+            <button
+              onClick={() => {
+                setSelectedGroup("");
+                setSelectedTarget("");
+              }}
+              className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium text-slate-100 transition-colors"
+            >
+              Limpar Filtros
+            </button>
+          </div>
+        </div>
+        {(selectedGroup || selectedTarget) && (
+          <p className="mt-3 text-xs text-slate-400">
+            <span className="text-slate-300">Filtros ativos:</span>
+            {selectedGroup && ` Grupo: ${accessGroups.find(g => String(g.id) === String(selectedGroup))?.name || "desconhecido"}`}
+            {selectedTarget && ` | Domínio: "${selectedTarget}"`}
+          </p>
+        )}
+      </section>
+
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
         <div className="col-span-2 md:col-span-2">
           <StatCard label="Total de Scans" value={stats.scans} sub="todos os modos" />
