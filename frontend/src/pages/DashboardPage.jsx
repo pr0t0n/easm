@@ -115,6 +115,8 @@ export default function DashboardPage() {
           vulnerability_findings: dashboard.stats?.vulnerability_findings || 0,
           recon_findings: dashboard.stats?.recon_findings || 0,
           osint_findings: dashboard.stats?.osint_findings || 0,
+          waf_findings: dashboard.stats?.waf_findings || 0,
+          security_header_findings: dashboard.stats?.security_header_findings || 0,
           critical: dashboard.stats?.critical || 0,
           high: dashboard.stats?.high || 0,
           medium: dashboard.stats?.medium || 0,
