@@ -24,6 +24,7 @@ from app.services.risk_service import (
     compute_age_metrics,
     compute_continuous_rating,
     compute_fair_metrics,
+    get_methodology_changelog,
 )
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
@@ -2667,6 +2668,7 @@ def scan_report(
         age_market_avg_days=age_market_avg_days,
         lifecycle=lifecycle,
         recurring_findings_count=len([r for r in (target_evolution.get("recurring_findings") or []) if str(r.get("trend") or "") == "persisting"]),
+        segment=segment,
     )
     score = float(continuous_rating.get("score") or 0.0)
     grade = str(continuous_rating.get("grade") or "F")
@@ -3049,6 +3051,18 @@ def bulk_mark_false_positive(
     return {"ok": True, "updated": len(updated_ids), "ids": updated_ids}
 
 
+@router.get("/rating/methodology")
+def get_rating_methodology(current_user: User = Depends(get_current_user)):
+    """Retorna o changelog completo da metodologia de rating para uso executivo e auditoria.
+
+    Inclui:
+    - Versão atual da metodologia
+    - Pesos por segmento de mercado (BitSight/SecurityScorecard/IBM 2023 calibrated)
+    - Histórico de versões com justificativas e referências de mercado
+    """
+    return get_methodology_changelog()
+
+
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if current_user.is_admin:
@@ -3358,6 +3372,7 @@ def dashboard_insights(
         age_market_avg_days=float(_avg(age_market_samples)),
         lifecycle=lifecycle_global,
         recurring_findings_count=recurring_findings_count,
+        segment=None,  # dashboard não tem alvo único — usa peso padrão
     )
 
     scan_timeline_seed: list[dict] = []
