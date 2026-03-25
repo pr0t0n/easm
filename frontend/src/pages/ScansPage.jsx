@@ -16,6 +16,16 @@ export default function ScansPage() {
   const [authStatus, setAuthStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selectedScans, setSelectedScans] = useState(new Set());
+  const [llmRiskEnabled, setLlmRiskEnabled] = useState(false);
+  const [llmRiskUrl, setLlmRiskUrl] = useState("");
+  const [llmRiskAuthType, setLlmRiskAuthType] = useState("none");
+  const [llmRiskAuthHeader, setLlmRiskAuthHeader] = useState("X-API-Key");
+  const [llmRiskAuthValue, setLlmRiskAuthValue] = useState("");
+  const [llmRiskAuthUsername, setLlmRiskAuthUsername] = useState("");
+  const [llmRiskAuthPassword, setLlmRiskAuthPassword] = useState("");
+  const [llmRiskStrategyProfile, setLlmRiskStrategyProfile] = useState("balanced");
+  const [llmRiskRequestTemplate, setLlmRiskRequestTemplate] = useState('{"prompt":"{{prompt}}"}');
+  const [llmRiskResponseField, setLlmRiskResponseField] = useState("");
   const ACTIVE_SCAN_STATUS = ["queued", "running", "retrying"];
 
   const parseTargets = (raw) => {
@@ -116,6 +126,10 @@ export default function ScansPage() {
       setAuthStatus("Informe ao menos um alvo antes de iniciar.");
       return;
     }
+    if (llmRiskEnabled && !String(llmRiskUrl || "").trim()) {
+      setAuthStatus("Informe a URL do endpoint para o LLM Risk Assessment.");
+      return;
+    }
     setSubmitting(true);
     try {
       const created = [];
@@ -128,6 +142,16 @@ export default function ScansPage() {
             target_query: singleTarget,
             mode,
             access_group_id: accessGroupId ? Number(accessGroupId) : null,
+            llm_risk_enabled: llmRiskEnabled,
+            llm_risk_url: llmRiskEnabled ? llmRiskUrl : null,
+            llm_risk_auth_type: llmRiskAuthType,
+            llm_risk_auth_header: llmRiskEnabled ? llmRiskAuthHeader : null,
+            llm_risk_auth_value: llmRiskEnabled ? llmRiskAuthValue : null,
+            llm_risk_auth_username: llmRiskEnabled ? llmRiskAuthUsername : null,
+            llm_risk_auth_password: llmRiskEnabled ? llmRiskAuthPassword : null,
+            llm_risk_strategy_profile: llmRiskEnabled ? llmRiskStrategyProfile : null,
+            llm_risk_request_template: llmRiskEnabled ? llmRiskRequestTemplate : null,
+            llm_risk_response_field: llmRiskEnabled ? llmRiskResponseField : null,
           });
           created.push(singleTarget);
         } catch (err) {
@@ -140,6 +164,12 @@ export default function ScansPage() {
 
       setTarget("");
       setAccessGroupId("");
+      setLlmRiskUrl("");
+      setLlmRiskAuthValue("");
+      setLlmRiskAuthUsername("");
+      setLlmRiskAuthPassword("");
+      setLlmRiskRequestTemplate('{"prompt":"{{prompt}}"}');
+      setLlmRiskResponseField("");
       if (failed.length === 0) {
         setAuthStatus(`${created.length} scan(s) criado(s) com sucesso.`);
       } else {
@@ -338,6 +368,140 @@ export default function ScansPage() {
                         ))}
                       </select>
                     </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-700/70 bg-slate-900/20 p-4 space-y-4">
+                    <label className="flex items-center gap-2 text-sm text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={llmRiskEnabled}
+                        onChange={(e) => setLlmRiskEnabled(e.target.checked)}
+                      />
+                      Incluir LLM Risk Assessment
+                    </label>
+
+                    {llmRiskEnabled && (
+                      <>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">URL do endpoint LLM</label>
+                          <input
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
+                            placeholder="https://alvo/api/chat"
+                            value={llmRiskUrl}
+                            onChange={(e) => setLlmRiskUrl(e.target.value)}
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-400 mb-2">Autenticacao</label>
+                            <select
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                              value={llmRiskAuthType}
+                              onChange={(e) => setLlmRiskAuthType(e.target.value)}
+                            >
+                              <option value="none">Sem autenticacao</option>
+                              <option value="bearer">Bearer token</option>
+                              <option value="basic">Basic</option>
+                              <option value="api-key">API Key header</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-400 mb-2">Perfil de estrategia</label>
+                            <select
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                              value={llmRiskStrategyProfile}
+                              onChange={(e) => setLlmRiskStrategyProfile(e.target.value)}
+                            >
+                              <option value="balanced">Balanced</option>
+                              <option value="hardening">Hardening</option>
+                              <option value="nightly-hardening">Nightly Hardening</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {llmRiskAuthType === "api-key" && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-2">Header da API Key</label>
+                              <input
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                                value={llmRiskAuthHeader}
+                                onChange={(e) => setLlmRiskAuthHeader(e.target.value)}
+                                placeholder="X-API-Key"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-2">Valor da API Key</label>
+                              <input
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                                value={llmRiskAuthValue}
+                                onChange={(e) => setLlmRiskAuthValue(e.target.value)}
+                                placeholder="seu-token"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {llmRiskAuthType === "bearer" && (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-400 mb-2">Bearer token</label>
+                            <input
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                              value={llmRiskAuthValue}
+                              onChange={(e) => setLlmRiskAuthValue(e.target.value)}
+                              placeholder="eyJ..."
+                            />
+                          </div>
+                        )}
+
+                        {llmRiskAuthType === "basic" && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-2">Usuario</label>
+                              <input
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                                value={llmRiskAuthUsername}
+                                onChange={(e) => setLlmRiskAuthUsername(e.target.value)}
+                                placeholder="usuario"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-2">Senha</label>
+                              <input
+                                type="password"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                                value={llmRiskAuthPassword}
+                                onChange={(e) => setLlmRiskAuthPassword(e.target.value)}
+                                placeholder="senha"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Template JSON do request</label>
+                          <textarea
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
+                            rows={3}
+                            value={llmRiskRequestTemplate}
+                            onChange={(e) => setLlmRiskRequestTemplate(e.target.value)}
+                            placeholder='{"prompt":"{{prompt}}"}'
+                          />
+                          <p className="mt-1 text-xs text-slate-500">Use {'{{prompt}}'} onde o probe deve ser inserido. Ex: {'{"message":"{{prompt}}"}'}.</p>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Campo de resposta (opcional)</label>
+                          <input
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                            value={llmRiskResponseField}
+                            onChange={(e) => setLlmRiskResponseField(e.target.value)}
+                            placeholder="response.text (deixe vazio para auto-detecção)"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {authStatus && (

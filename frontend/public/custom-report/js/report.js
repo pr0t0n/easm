@@ -547,6 +547,36 @@ function applyTopVariables(report) {
   setText('footerTotal', total);
 }
 
+function renderLLMRisk(report) {
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const llm = v2.llm_risk || {};
+
+  setText('llmRiskStatus', llm.status || (llm.enabled === false ? 'disabled' : '-'));
+  setText('llmRiskLevel', llm.risk_level || '-');
+  setText('llmRiskTotal', llm.total_tests ?? '-');
+  setText('llmRiskFailed', llm.failed_tests ?? '-');
+  setText('llmRiskPassRate', llm.pass_rate != null ? `${llm.pass_rate}%` : '-');
+  setText('llmRiskStrategies', Array.isArray(llm.strategies) ? llm.strategies.join(', ') : '-');
+
+  const container = document.getElementById('llmRiskFindings');
+  if (!container) return;
+  const findings = Array.isArray(llm.findings) ? llm.findings : [];
+  if (!findings.length) {
+    container.innerHTML = '<div class="section-intro">Sem achados de LLM Risk para este scan.</div>';
+    return;
+  }
+
+  container.innerHTML = findings.slice(0, 20).map((row) => `
+    <div class="llm-risk-row">
+      <div class="llm-risk-row-top">
+        <strong>${esc(row.strategy || '-')}</strong>
+        <span class="llm-risk-sev">${esc(row.severity || 'low')}</span>
+      </div>
+      <div class="llm-risk-reason">${esc(row.reason || '-')}</div>
+    </div>
+  `).join('');
+}
+
 function assignPageNumbers() {
   document.querySelectorAll('.page').forEach((p, i) => {
     p.setAttribute('data-page', `Pág. ${i + 1}`);
@@ -608,6 +638,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const report = await loadReportFromApi();
     validateReportData(report);
     applyTopVariables(report);
+    renderLLMRisk(report);
     const v2 = (report?.state_data || {}).report_v2 || {};
     allVulns = Array.isArray(v2.vulnerability_table)
       ? v2.vulnerability_table

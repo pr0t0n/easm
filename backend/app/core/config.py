@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3"
     ollama_qwen_model: str = "qwen2.5:7b"
     ollama_cloudcode_model: str = "llama3.1:8b"
+    llm_risk_enabled: bool = False
+    llm_risk_provider: str = "ollama"
+    llm_risk_ollama_model: str = "qwen2.5:7b"
+    llm_risk_strategy_profile: str = "balanced"
+    llm_risk_strategies: str = "prompt-injection,jailbreak,jailbreak:composite"
+    llm_risk_num_tests: int = 5
+    llm_risk_timeout_seconds: int = 15
     ai_recommendations_use_ollama: bool = True
     ai_recommendations_timeout_seconds: int = 20
     frontend_origin: str = "http://localhost:5173"

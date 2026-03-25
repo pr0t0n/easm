@@ -11,6 +11,7 @@ from app.models.models import AppSetting, Finding, ScanJob, ScanLog, ScheduledSc
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cve_enrichment_service import enrichment_service
+from app.services.llm_risk_service import parse_scan_llm_risk_config, run_llm_risk_assessment
 from app.services.tool_adapters import run_tool_execution
 from app.workers.celery_app import celery
 from app.workers.worker_groups import (
@@ -422,6 +423,35 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 "recursion_limit": recursion_limit,
             },
         )
+
+        llm_risk_cfg = parse_scan_llm_risk_config(job.state_data or {})
+        if llm_risk_cfg.enabled:
+            db.add(
+                ScanLog(
+                    scan_job_id=job.id,
+                    source="llm-risk",
+                    level="INFO",
+                    message=(
+                        "LLM Risk Assessment iniciado "
+                        f"(profile={llm_risk_cfg.strategy_profile}, strategies={','.join(llm_risk_cfg.strategies)})"
+                    ),
+                )
+            )
+            db.commit()
+            llm_risk_report = run_llm_risk_assessment(llm_risk_cfg)
+            final_state["llm_risk_report"] = llm_risk_report
+            db.add(
+                ScanLog(
+                    scan_job_id=job.id,
+                    source="llm-risk",
+                    level="INFO",
+                    message=(
+                        "LLM Risk Assessment concluido "
+                        f"(failed={llm_risk_report.get('failed_tests', 0)}/{llm_risk_report.get('total_tests', 0)}, "
+                        f"risk={llm_risk_report.get('risk_level', '-')})"
+                    ),
+                )
+            )
 
         db.refresh(job)
         if job.status == "stopped":

@@ -9,6 +9,16 @@ class ScanCreate(BaseModel):
     mode: str = "single"
     access_group_id: int | None = None
     schedule_at: datetime | None = None
+    llm_risk_enabled: bool = False
+    llm_risk_url: str | None = None
+    llm_risk_auth_type: str = "none"
+    llm_risk_auth_header: str | None = None
+    llm_risk_auth_value: str | None = None
+    llm_risk_auth_username: str | None = None
+    llm_risk_auth_password: str | None = None
+    llm_risk_strategy_profile: str | None = None
+    llm_risk_request_template: str | None = None
+    llm_risk_response_field: str | None = None
 
 
 class ScanResponse(BaseModel):

@@ -877,6 +877,71 @@ body {
   border: 1px solid rgba(99,102,241,0.25);
 }
 
+.llm-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.llm-risk-card {
+  border: 1px solid #1e293b;
+  background: rgba(15, 23, 42, 0.7);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.llm-risk-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+}
+
+.llm-risk-value {
+  margin-top: 4px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.llm-risk-findings {
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.5);
+  padding: 10px;
+}
+
+.llm-risk-row {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.llm-risk-row:last-child {
+  margin-bottom: 0;
+}
+
+.llm-risk-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.llm-risk-sev {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #fbbf24;
+}
+
+.llm-risk-reason {
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
 .vuln-affected-pills {
   display: flex;
   flex-wrap: wrap;

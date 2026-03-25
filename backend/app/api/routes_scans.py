@@ -1562,6 +1562,23 @@ def create_scan(
     else:
         compliance_status = "approved"
 
+    llm_risk_auth_type = str(payload.llm_risk_auth_type or "none").strip().lower()
+    if payload.llm_risk_enabled and not str(payload.llm_risk_url or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="URL do LLM Risk Assessment e obrigatoria quando habilitado")
+
+    llm_risk_state = {
+        "enabled": bool(payload.llm_risk_enabled),
+        "target_url": str(payload.llm_risk_url or "").strip(),
+        "auth_type": llm_risk_auth_type,
+        "auth_header": str(payload.llm_risk_auth_header or "X-API-Key").strip(),
+        "auth_value": str(payload.llm_risk_auth_value or "").strip(),
+        "username": str(payload.llm_risk_auth_username or "").strip(),
+        "password": str(payload.llm_risk_auth_password or "").strip(),
+        "strategy_profile": str(payload.llm_risk_strategy_profile or "").strip() or "balanced",
+        "request_template": str(payload.llm_risk_request_template or "").strip(),
+        "response_field": str(payload.llm_risk_response_field or "").strip(),
+    }
+
     job = ScanJob(
         owner_id=current_user.id,
         access_group_id=access_group_id,
@@ -1571,6 +1588,7 @@ def create_scan(
         compliance_status=compliance_status,
         authorization_id=None,
         current_step="1. Amass Subdomain Recon",
+        state_data={"llm_risk": llm_risk_state},
     )
     db.add(job)
     db.flush()
@@ -2711,6 +2729,7 @@ def scan_report(
                 "vulnerability_table": consolidated_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
+                "llm_risk": (job.state_data or {}).get("llm_risk_report") or {},
                 "strategic_points": strategic_points,
                 "technical_points": technical_points,
                 "segment_benchmark": benchmark,
