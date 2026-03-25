@@ -97,6 +97,7 @@ export default function DashboardPage() {
 
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
+        const easmFallback = dashboard.easm_fallback || {};
         setDomainOptions(Array.isArray(dashboard.targets) ? dashboard.targets : []);
 
         setStats({
@@ -137,6 +138,26 @@ export default function DashboardPage() {
         setContinuousRating(dashboard.continuous_rating || { score: 0, grade: "F", factors: [] });
         setRatingTimeline(dashboard.rating_timeline || []);
 
+        // Fallback EASM summary from latest scan state when enterprise tables are empty
+        if (easmFallback?.rating) {
+          setEasmRating({
+            score: Number(easmFallback.rating.score || 0),
+            grade: String(easmFallback.rating.grade || "F"),
+            pillars: [],
+          });
+        }
+        if (easmFallback?.executive_summary) {
+          setEasmTrends((prev) => ({
+            ...(prev || {}),
+            temporal_narrative: easmFallback.executive_summary,
+            historical_ratings: [
+              {
+                pillars: easmFallback.fair_decomposition || {},
+              },
+            ],
+          }));
+        }
+
         // Load EASM data
         try {
           const [assetsResp, alertsResp] = await Promise.all([
@@ -161,6 +182,18 @@ export default function DashboardPage() {
             } catch (e) {
               // Silent fail
             }
+          } else if (easmFallback?.scan_target) {
+            // Surface latest scan target as pseudo-asset when EASM asset table has no rows yet
+            setEasmAssets([
+              {
+                id: `fallback-${easmFallback.scan_id || "latest"}`,
+                domain_or_ip: easmFallback.scan_target,
+                open_critical: dashboard.stats?.critical || 0,
+                open_high: dashboard.stats?.high || 0,
+                easm_grade: easmFallback?.rating?.grade || "F",
+                easm_rating: Number(easmFallback?.rating?.score || 0),
+              },
+            ]);
           }
         } catch (e) {
           // EASM endpoints may not be available yet

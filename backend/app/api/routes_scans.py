@@ -3389,6 +3389,12 @@ def dashboard_insights(
 
     avg_fair = round(fair_total / max(len(findings), 1), 2)
 
+    latest_state = (latest_scan.state_data or {}) if latest_scan else {}
+    latest_report_v2 = latest_state.get("report_v2") if isinstance(latest_state.get("report_v2"), dict) else {}
+    fallback_easm_rating = latest_report_v2.get("easm_rating") or latest_state.get("easm_rating") or {}
+    fallback_fair_decomposition = latest_report_v2.get("fair_decomposition") or latest_state.get("fair_decomposition") or {}
+    fallback_executive_summary = latest_report_v2.get("executive_summary") or latest_state.get("executive_summary") or ""
+
     recurring_findings_count = len([count for count in vuln_counter.values() if int(count) > 1])
     lifecycle_global = {
         "open": int(open_issues),
@@ -3514,6 +3520,16 @@ def dashboard_insights(
         },
         "targets": sorted(list({j.target_query for j in jobs if j.target_query})),
         "vuln_tool_execution": vuln_tool_execution,
+        "easm_fallback": {
+            "scan_id": latest_scan.id if latest_scan else None,
+            "scan_target": latest_scan.target_query if latest_scan else "",
+            "rating": {
+                "score": float(fallback_easm_rating.get("score") or 0.0),
+                "grade": str(fallback_easm_rating.get("grade") or "F"),
+            },
+            "fair_decomposition": fallback_fair_decomposition,
+            "executive_summary": str(fallback_executive_summary or "").strip(),
+        },
         "prioritized_actions_page": {
             "items": paged_prioritized,
             "total": len(prioritized_actions),
