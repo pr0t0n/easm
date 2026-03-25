@@ -93,7 +93,11 @@ export default function DashboardPage() {
           params.append("target", selectedTarget.trim());
         }
         if (selectedGroup) {
-          params.append("access_group_id", selectedGroup);
+          // Garante que é enviado como número
+          const groupId = String(selectedGroup).trim();
+          if (groupId && groupId !== "") {
+            params.append("access_group_id", groupId);
+          }
         }
 
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
@@ -196,12 +200,15 @@ export default function DashboardPage() {
             <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo/Cliente</label>
             <select
               value={selectedGroup}
-              onChange={(e) => setSelectedGroup(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedGroup(val === "" ? "" : String(val));
+              }}
               className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
             >
               <option value="">Todos os grupos</option>
               {accessGroups.map((g) => (
-                <option key={g.id} value={g.id}>
+                <option key={g.id} value={String(g.id)}>
                   {g.name}
                 </option>
               ))}
@@ -237,6 +244,14 @@ export default function DashboardPage() {
             {selectedGroup && ` Grupo: ${accessGroups.find(g => String(g.id) === String(selectedGroup))?.name || "desconhecido"}`}
             {selectedTarget && ` | Domínio: "${selectedTarget}"`}
           </p>
+        )}
+
+        {(selectedGroup || selectedTarget) && stats && stats.scans === 0 && (
+          <div className="mt-3 rounded-lg border border-slate-600 bg-slate-800/50 px-3 py-2">
+            <p className="text-xs text-slate-300">
+              ℹ️ Nenhum scan encontrado com esses filtros. O grupo/domínio pode não ter análises executadas ainda.
+            </p>
+          </div>
         )}
       </section>
 

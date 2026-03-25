@@ -3448,6 +3448,11 @@ def dashboard_insights(
         "ongoing_scans": ongoing_scans,
         "top_vulns": top_vulns,
         "top_technologies": top_technologies,
+        "filters": {
+            "target": normalized_target,
+            "access_group_id": access_group_id,
+            "applied": bool(normalized_target or access_group_id is not None),
+        },
         "waf_summary": {
             "findings_count": waf_findings_count,
             "assets_count": len(waf_assets),
