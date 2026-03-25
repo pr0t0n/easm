@@ -89,6 +89,122 @@
 
 <div class="page">
   <div class="page-header">
+    <span class="section-label">02</span>
+    <span class="section-title">Metodologia FAIR e Benchmark Cyber WEF</span>
+    <span class="page-tag">RISCO</span>
+  </div>
+
+  <p class="section-intro">
+    Quantificação de risco baseada em FAIR e benchmark setorial alinhado ao Cyber Readiness Index (WEF).
+    O score geral segue as regras formais de penalidade por severidade descritas abaixo.
+  </p>
+
+  <div class="fair-kpi-grid">
+    <div class="fair-kpi-card">
+      <div class="fair-kpi-label">FAIR Score Médio</div>
+      <div class="fair-kpi-value" id="fairAvgScore">-</div>
+    </div>
+    <div class="fair-kpi-card">
+      <div class="fair-kpi-label">ALE Total Aberto (USD)</div>
+      <div class="fair-kpi-value" id="fairAleOpen">-</div>
+    </div>
+    <div class="fair-kpi-card">
+      <div class="fair-kpi-label">Impacto Diário (USD)</div>
+      <div class="fair-kpi-value" id="fairDailyImpact">-</div>
+    </div>
+    <div class="fair-kpi-card">
+      <div class="fair-kpi-label">Mitigação Estimada (USD)</div>
+      <div class="fair-kpi-value" id="fairMitigation">-</div>
+    </div>
+  </div>
+
+  <div class="benchmark-head-grid">
+    <div class="benchmark-pill"><span>Score Geral (CRI)</span><strong id="benchmarkCriScore">-</strong></div>
+    <div class="benchmark-pill"><span>Grade</span><strong id="benchmarkGrade">-</strong></div>
+    <div class="benchmark-pill"><span>Segmento WEF</span><strong id="benchmarkSegment">-</strong></div>
+    <div class="benchmark-pill"><span>Avaliação</span><strong id="benchmarkAssessment">-</strong></div>
+  </div>
+
+  <div class="section-subtitle">Cálculo do Score Geral</div>
+  <table class="method-table" aria-label="Tabela da metodologia de cálculo do score geral">
+    <thead>
+      <tr>
+        <th>Etapa</th>
+        <th>Regra</th>
+        <th>Fórmula</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1. Vulnerabilidades Críticas</td>
+        <td>Se houver 1+ crítica, score ajusta para 40. A partir da 2ª crítica, subtrai 15 por ocorrência.</td>
+        <td><code>score = 40 - ((críticos - 1) × 15)</code></td>
+      </tr>
+      <tr>
+        <td>2. Vulnerabilidades Altas</td>
+        <td>Se não houver críticas e houver 1+ alta, score ajusta para 60. A partir da 2ª alta, subtrai 8 por ocorrência.</td>
+        <td><code>score = 60 - ((altas - 1) × 8)</code></td>
+      </tr>
+      <tr>
+        <td>3. Penalidade Médio/Baixo</td>
+        <td>Cada média subtrai 3 pontos e cada baixa subtrai 1 ponto.</td>
+        <td><code>score = score - (médios × 3) - (baixos × 1)</code></td>
+      </tr>
+      <tr>
+        <td>4. Piso mínimo</td>
+        <td>Se o resultado ficar abaixo de 5, aplica piso 5.</td>
+        <td><code>score = max(5, score)</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="calc-result-box">
+    <div class="calc-result-title">Resultado do cálculo neste scan</div>
+    <div class="calc-result-grid">
+      <div><span>Críticos</span><strong id="calcCritical">-</strong></div>
+      <div><span>Altos</span><strong id="calcHigh">-</strong></div>
+      <div><span>Médios</span><strong id="calcMedium">-</strong></div>
+      <div><span>Baixos</span><strong id="calcLow">-</strong></div>
+      <div><span>Base aplicada</span><strong id="calcBaseFormula">-</strong></div>
+      <div><span>Penalidade M/L</span><strong id="calcPenalty">-</strong></div>
+    </div>
+    <div class="calc-human" id="calcHuman">-</div>
+  </div>
+
+</div>
+
+<div class="page">
+  <div class="page-header">
+    <span class="section-label">03</span>
+    <span class="section-title">Faixas de Grade e Classificação</span>
+    <span class="page-tag">BENCHMARK</span>
+  </div>
+
+  <p class="section-intro">
+    Faixas de classificação utilizadas para o Score Geral do conjunto de domínio/subdomínio.
+  </p>
+
+  <table class="method-table method-table-grade" aria-label="Faixas de grade para score geral">
+    <thead>
+      <tr>
+        <th>Tipo</th>
+        <th>Grade</th>
+        <th>Mínimo</th>
+        <th>Máximo</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Domínio e Subdomínio</td><td>A</td><td>90</td><td>100</td></tr>
+      <tr><td>Domínio e Subdomínio</td><td>B</td><td>80</td><td>89</td></tr>
+      <tr><td>Domínio e Subdomínio</td><td>C</td><td>70</td><td>79</td></tr>
+      <tr><td>Domínio e Subdomínio</td><td>D</td><td>60</td><td>69</td></tr>
+      <tr><td>Domínio e Subdomínio</td><td>F</td><td>0</td><td>59</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="page">
+  <div class="page-header">
     <span class="section-label">04</span>
     <span class="section-title">Vulnerabilidades Identificadas</span>
     <span class="page-tag">TÉCNICO</span>

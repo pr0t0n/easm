@@ -1478,6 +1478,71 @@ def _collect_technologies(job: ScanJob, scan_findings: list[Finding]) -> dict[st
     return counter
 
 
+def _consolidate_vulnerability_table(rows: list[dict]) -> list[dict]:
+    """
+    Agrupa vulnerabilidades com mesmo título+severidade em um único registro.
+
+    Campos adicionados ao registro mesclado:
+      - affected_assets: list[str]  — hosts/subdomínios afetados únicos
+      - affected_ports:  list[str]  — portas únicas envolvidas
+      - affected_count:  int        — total de instâncias originais
+      - target_summary:  str        — resumo legível dos alvos (exibição no relatório)
+    """
+    from collections import OrderedDict as _OD
+    grouped: _OD = _OD()
+
+    for row in rows:
+        key = (
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("severity") or "low").strip().lower(),
+        )
+
+        raw_asset = str(row.get("asset") or row.get("target") or "").strip()
+        if raw_asset.startswith(("http://", "https://")):
+            _p = urlparse(raw_asset)
+            raw_asset = _p.netloc or raw_asset
+
+        raw_port = str(row.get("port") or "").strip()
+        port_valid = raw_port and raw_port != "-"
+
+        if key not in grouped:
+            merged = dict(row)
+            merged["affected_assets"] = [raw_asset] if raw_asset else []
+            merged["affected_ports"] = [raw_port] if port_valid else []
+            merged["affected_count"] = 1
+            grouped[key] = merged
+        else:
+            existing = grouped[key]
+            existing["affected_count"] = int(existing.get("affected_count") or 1) + 1
+            if raw_asset and raw_asset not in existing["affected_assets"]:
+                existing["affected_assets"].append(raw_asset)
+            if port_valid and raw_port not in existing.get("affected_ports", []):
+                existing.setdefault("affected_ports", []).append(raw_port)
+
+    result: list[dict] = []
+    for idx, (_, merged) in enumerate(grouped.items(), start=1):
+        assets: list[str] = merged.get("affected_assets") or []
+        ports: list[str] = merged.get("affected_ports") or []
+        count: int = int(merged.get("affected_count") or 1)
+
+        # Resumo legível dos alvos
+        if count == 1:
+            merged["target_summary"] = merged.get("target") or (assets[0] if assets else "-")
+        elif len(assets) <= 3:
+            merged["target_summary"] = ", ".join(assets)
+        else:
+            merged["target_summary"] = f"{', '.join(assets[:3])} (+{len(assets) - 3} alvos)"
+
+        # Para portas, atualiza o campo port com lista compacta
+        if ports:
+            merged["port"] = ", ".join(ports)
+
+        merged["index"] = idx
+        result.append(merged)
+
+    return result
+
+
 @router.post("/scans", response_model=ScanResponse)
 def create_scan(
     payload: ScanCreate,
@@ -2509,6 +2574,13 @@ def scan_report(
             if row.get("evidence") in [None, "", "-"]:
                 row["evidence"] = fallback_payload
 
+    # ── Consolidação: agrupa vulns com mesmo título+severidade ─────────────────
+    # open_vulnerability_table mantém linhas individuais (usado para métricas,
+    # security-headers, lifecycle, etc.). A tabela consolidada é a que vai para
+    # o relatório exibido (PDF/web): cada vulnerabilidade aparece uma vez, com
+    # a lista de alvos afetados em affected_assets / target_summary.
+    consolidated_vulnerability_table = _consolidate_vulnerability_table(open_vulnerability_table)
+
     detailed_recommendations = [
         {
             "id": row["id"],
@@ -2517,7 +2589,9 @@ def scan_report(
             "problem": row.get("problem") or row["name"],
             "category": row.get("category") or "Application Security",
             "severity": row["severity"],
-            "target": row["target"],
+            "target": row.get("target_summary") or row.get("target") or "-",
+            "affected_assets": row.get("affected_assets") or [],
+            "affected_count": int(row.get("affected_count") or 1),
             "technical": {
                 "exploit": row.get("exploit") or "-",
                 "error": row.get("error") or "-",
@@ -2530,9 +2604,9 @@ def scan_report(
             "recommendation": row["recommendation"],
             "recommendation_structured": row.get("recommendation_structured") or {},
         }
-        for row in open_vulnerability_table[:120]
+        for row in consolidated_vulnerability_table[:120]
     ]
-    top_recommendations = _build_top_recommendations(open_vulnerability_table, detailed_recommendations)
+    top_recommendations = _build_top_recommendations(consolidated_vulnerability_table, detailed_recommendations)
 
     lifecycle = {
         "open": len([r for r in open_vulnerability_table if r.get("status") == "open"]),
@@ -2634,7 +2708,7 @@ def scan_report(
                 "assets_summary": assets_summary,
                 "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
-                "vulnerability_table": open_vulnerability_table,
+                "vulnerability_table": consolidated_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
                 "strategic_points": strategic_points,

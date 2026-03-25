@@ -53,6 +53,100 @@ function setText(id, value) {
   if (el) el.textContent = value == null ? '-' : String(value);
 }
 
+function fmtCurrencyUSD(value) {
+  const num = Number(value || 0);
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(num);
+}
+
+function computeGrade(score) {
+  const n = Number(score || 0);
+  if (n >= 90) return 'A';
+  if (n >= 80) return 'B';
+  if (n >= 70) return 'C';
+  if (n >= 60) return 'D';
+  return 'F';
+}
+
+function calculateCriFromCounts(severityCounts) {
+  const critical = Number(severityCounts?.critical || 0);
+  const high = Number(severityCounts?.high || 0);
+  const medium = Number(severityCounts?.medium || 0);
+  const low = Number(severityCounts?.low || 0);
+
+  let baseScore = 100;
+  let baseFormula = '100';
+
+  if (critical >= 1) {
+    baseScore = 40 - ((critical - 1) * 15);
+    baseFormula = `40 - ((${critical} - 1) x 15)`;
+  } else if (high >= 1) {
+    baseScore = 60 - ((high - 1) * 8);
+    baseFormula = `60 - ((${high} - 1) x 8)`;
+  }
+
+  const mediumLowPenalty = (medium * 3) + (low * 1);
+  const rawScore = baseScore - mediumLowPenalty;
+  const finalScore = Math.max(5, Math.min(100, Math.round(rawScore)));
+
+  return {
+    critical,
+    high,
+    medium,
+    low,
+    baseFormula,
+    mediumLowPenalty,
+    finalScore,
+    humanReadable: `score = max(5, (${baseFormula}) - (${medium} x 3) - (${low} x 1)) = ${finalScore}`,
+  };
+}
+
+function renderFairAndBenchmark(report) {
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const fair = v2.fair || {};
+  const benchmark = v2.segment_benchmark || {};
+  const calc = benchmark.calculation || {};
+  const summary = v2.summary || {};
+
+  setText('fairAvgScore', Number(fair.fair_avg_score || 0).toFixed(2));
+  setText('fairAleOpen', fmtCurrencyUSD(fair.ale_total_open_usd || 0));
+  setText('fairDailyImpact', fmtCurrencyUSD(fair.daily_impact_open_usd || 0));
+  setText('fairMitigation', fmtCurrencyUSD(fair.mitigation_cost_estimate_open_usd || 0));
+
+  const severityCounts = calc.severity_counts || {
+    critical: Number(summary.critical || 0),
+    high: Number(summary.high || 0),
+    medium: Number(summary.medium || 0),
+    low: Number(summary.low || 0),
+  };
+
+  const fallbackCalc = calculateCriFromCounts(severityCounts);
+  const finalScore = Number(benchmark.target_cri_score ?? calc.final_score ?? fallbackCalc.finalScore);
+  const grade = String(v2.grade || computeGrade(finalScore));
+
+  const assessmentMap = {
+    melhor_que_o_benchmark: 'Melhor que o benchmark',
+    acima_do_benchmark: 'Acima do benchmark (maior exposição)',
+    similar_ao_benchmark: 'Similar ao benchmark',
+  };
+
+  setText('benchmarkCriScore', finalScore);
+  setText('benchmarkGrade', grade);
+  setText('benchmarkSegment', benchmark.segment || 'Digital Services');
+  setText('benchmarkAssessment', assessmentMap[benchmark.assessment] || benchmark.assessment || 'N/A');
+
+  setText('calcCritical', severityCounts.critical);
+  setText('calcHigh', severityCounts.high);
+  setText('calcMedium', severityCounts.medium);
+  setText('calcLow', severityCounts.low);
+  setText('calcBaseFormula', calc.base_formula || fallbackCalc.baseFormula);
+  setText('calcPenalty', calc.medium_low_penalty ?? fallbackCalc.mediumLowPenalty);
+  setText('calcHuman', calc.human_readable || fallbackCalc.humanReadable);
+}
+
 function resolveReportTarget(report, v2) {
   return report?.target
     || report?.scan_target
@@ -173,7 +267,12 @@ function renderVulnCard(vuln, index) {
   const cvss = vuln.cvss && vuln.cvss !== '-' ? Number(vuln.cvss).toFixed(1) : '-';
   const cve = vuln.cve && vuln.cve !== '-' ? vuln.cve : null;
   const id = `vuln-${index}`;
-  const target = vuln.target || vuln.asset || '-';
+
+  // Consolidação: usa target_summary quando disponível (contém resumo de todos os alvos)
+  const displayTarget = vuln.target_summary || vuln.target || vuln.asset || '-';
+  const affectedAssets = Array.isArray(vuln.affected_assets) ? vuln.affected_assets.filter(Boolean) : [];
+  const affectedCount = Number(vuln.affected_count || 0);
+  const affectedPorts = Array.isArray(vuln.affected_ports) ? vuln.affected_ports.filter(p => p && p !== '-') : [];
 
   const evidence = vuln.evidence && vuln.evidence !== '-' ? vuln.evidence : null;
   const payload = vuln.payload && vuln.payload !== '-' ? vuln.payload : null;
@@ -182,15 +281,28 @@ function renderVulnCard(vuln, index) {
     ? vuln.recommendation_validation.join(' | ')
     : '-';
 
+  // Bloco de alvos afetados — exibido quando há mais de 1 ativo afetado
+  const affectedBlock = affectedCount > 1 ? `
+      <div class="vuln-affected-box">
+        <div class="vuln-detail-label"><i class="fas fa-sitemap"></i> Alvos afetados (${affectedCount})</div>
+        <div class="vuln-affected-pills">
+          ${affectedAssets.map(a => `<span class="affected-pill">${esc(a)}</span>`).join('')}
+          ${affectedPorts.length ? `<span class="affected-pill affected-pill-port"><i class="fas fa-plug"></i> ${esc(affectedPorts.join(', '))}</span>` : ''}
+        </div>
+      </div>` : '';
+
+  // data-search inclui todos os alvos para que o filtro de texto funcione
+  const searchAttr = [vuln.name || vuln.problem, displayTarget, cve || '', ...affectedAssets].join(' ');
+
   return `
-<div class="vuln-card ${sev.cls}" data-sev="${String(vuln.severity || 'info').toLowerCase()}" data-search="${esc(vuln.name || vuln.problem)} ${esc(target)} ${esc(cve || '')}" id="${id}">
+<div class="vuln-card ${sev.cls}" data-sev="${String(vuln.severity || 'info').toLowerCase()}" data-search="${esc(searchAttr)}" id="${id}">
   <div class="vuln-card-header" onclick="toggleVuln('${id}')">
     <div>
       <span class="vuln-sev-badge"><i class="fas ${sev.icon}"></i> ${sev.label}</span>
     </div>
     <div>
       <div class="vuln-title">${esc(vuln.name || vuln.problem || 'Achado sem descrição')}</div>
-      <div class="vuln-target">${esc(target)}</div>
+      <div class="vuln-target">${esc(displayTarget)}${affectedCount > 1 ? ` <span class="affected-count-badge">${affectedCount} alvos</span>` : ''}</div>
     </div>
     <div class="vuln-cvss">CVSS ${cvss}</div>
     <div class="vuln-toggle"><i class="fas fa-chevron-down"></i></div>
@@ -213,6 +325,7 @@ function renderVulnCard(vuln, index) {
         <div class="vuln-detail-label"><i class="fas fa-tools"></i> Ferramenta</div>
         <div class="vuln-detail-value">${esc(vuln.tool || '-')}</div>
       </div>
+      ${affectedBlock}
       ${evidence ? `
       <div class="vuln-evidence-box">
         <div class="vuln-detail-label"><i class="fas fa-microscope"></i> Evidência</div>
@@ -426,6 +539,7 @@ function applyTopVariables(report) {
   setText('execIntroText', intro);
 
   renderCategoryBars(v2.category_scores || [], total);
+  renderFairAndBenchmark(report);
 
   setText('footerOrg', org);
   setText('footerDate', fmtDate(createdAt));
