@@ -483,3 +483,242 @@ def build_priority_reason(title: str, severity: str | None, fair: dict[str, Any]
         "operational": operational,
         "financial": financial,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EASM Continuous Rating Engine — FAIR + AGE Formula
+# Referência: Arquitetura BitSight-style com FAIR Institute Calibration Guide v2.0
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Impacto base de ativo por tipo detectado pelas ferramentas de reconhecimento.
+# Calibrado pelo FAIR Institute: quanto mais sensível o ativo, maior o peso.
+ASSET_IMPACT_WEIGHTS: dict[str, float] = {
+    "login":        90.0,   # painel de autenticação — vetor primário de comprometimento
+    "admin":        95.0,   # painel administrativo
+    "api":          85.0,   # endpoint de API exposto
+    "database":     100.0,  # banco de dados expostodiretamente
+    "ssh":          88.0,   # acesso remoto por SSH
+    "rdp":          88.0,   # acesso remoto por RDP
+    "ftp":          70.0,   # protocolo não criptografado
+    "smtp":         65.0,   # servidor de e-mail
+    "web":          60.0,   # aplicação web genérica
+    "default":      50.0,   # ativo sem classificação
+}
+
+# Pesos dos 3 pilares FAIR para decomposição executiva (calibrado por mercado)
+FAIR_PILLAR_WEIGHTS: dict[str, float] = {
+    "perimeter_resilience": 0.40,   # Resiliência de Perímetro (naabu + sqlmap)
+    "patching_hygiene":     0.30,   # Higiene e Patching (nuclei CVEs + AGE)
+    "osint_exposure":       0.30,   # Exposição OSINT (h8mail + shodan)
+}
+
+# Mapeamento de tools para pilares FAIR
+_TOOL_TO_PILAR: dict[str, str] = {
+    "naabu":        "perimeter_resilience",
+    "nmap":         "perimeter_resilience",
+    "nmap-vulscan": "patching_hygiene",
+    "nuclei":       "patching_hygiene",
+    "nikto":        "patching_hygiene",
+    "wapiti":       "patching_hygiene",
+    "sqlmap":       "perimeter_resilience",
+    "commix":       "perimeter_resilience",
+    "dalfox":       "perimeter_resilience",
+    "tplmap":       "perimeter_resilience",
+    "wafw00f":      "perimeter_resilience",
+    "sslscan":      "patching_hygiene",
+    "shcheck":      "patching_hygiene",
+    "curl-headers": "patching_hygiene",
+    "theharvester": "osint_exposure",
+    "h8mail":       "osint_exposure",
+    "metagoofil":   "osint_exposure",
+    "shodan-cli":   "osint_exposure",
+    "subjack":      "osint_exposure",
+    "whatweb":      "perimeter_resilience",
+    "trufflehog":   "osint_exposure",
+    "secretfinder": "osint_exposure",
+}
+
+# Severidade → CVSS sintético para findings sem CVSS explícito
+_SEV_TO_CVSS: dict[str, float] = {
+    "critical": 9.5,
+    "high":     7.5,
+    "medium":   5.0,
+    "low":      2.5,
+    "info":     1.0,
+}
+
+
+def compute_factor_age(days_open: int | float) -> float:
+    """Penalidade logarítmica de persistência.
+
+    Factor_AGE = 1 + log10(days_open + 1)
+
+    Calibração:
+      - 0 dias  → 1.0   (sem penalidade)
+      - 1 dia   → 1.30  (+30%)
+      - 7 dias  → 1.90  (+90%)
+      - 30 dias → 2.48  (+148%)
+      - 90 dias → 2.96  (+196%)
+
+    Ref.: EPSS v3 mostra que após ~30 dias a probabilidade de exploração
+    praticamente dobra; log10 modela esse crescimento sublinear corretamente.
+    """
+    return 1.0 + math.log10(max(1.0, float(days_open) + 1.0))
+
+
+def compute_asset_impact(asset_url: str | None, port: int | None = None) -> float:
+    """Deduz o peso de impacto do ativo a partir do título/URL/porta.
+
+    Ref.: FAIR — Loss Magnitude varia com sensibilidade do ativo.
+    """
+    raw = str(asset_url or "").lower()
+    for keyword, weight in ASSET_IMPACT_WEIGHTS.items():
+        if keyword in raw:
+            return weight
+    if port in {3306, 5432, 1433, 27017, 6379}:   # DB ports
+        return ASSET_IMPACT_WEIGHTS["database"]
+    if port in {22}:
+        return ASSET_IMPACT_WEIGHTS["ssh"]
+    if port in {3389}:
+        return ASSET_IMPACT_WEIGHTS["rdp"]
+    if port in {21}:
+        return ASSET_IMPACT_WEIGHTS["ftp"]
+    return ASSET_IMPACT_WEIGHTS["default"]
+
+
+def compute_asset_risk(
+    asset_url: str | None,
+    severity: str | None,
+    days_open: int | float = 0,
+    cvss: float | None = None,
+    port: int | None = None,
+) -> dict[str, Any]:
+    """Risco por ativo (Ra) — fórmula FAIR + AGE da spec.
+
+    Ra = (AssetImpact × CVSS_Severity) × (1 + log10(AGE + 1))
+
+    Returns dict com score de impacto decomponível para uso executivo.
+    """
+    factor_age = compute_factor_age(days_open)
+    cvss_val = float(cvss) if cvss is not None else _SEV_TO_CVSS.get(str(severity or "info").lower(), 1.0)
+    asset_impact = compute_asset_impact(asset_url, port=port)
+
+    # Normaliza: asset_impact/100 (0-1) × cvss/10 (0-1) = Ra bruto (0-1)
+    # Depois escala para 0-100 com factor_age amplificando o risco persitente
+    ra_raw = (asset_impact / 100.0) * (cvss_val / 10.0) * factor_age * 100.0
+
+    return {
+        "ra": round(min(100.0, ra_raw), 2),
+        "factor_age": round(factor_age, 3),
+        "days_open": int(days_open),
+        "cvss": round(cvss_val, 2),
+        "asset_impact": round(asset_impact, 2),
+        "severity": str(severity or "info").lower(),
+    }
+
+
+def compute_easm_rating(risk_per_asset: list[dict[str, Any]], n_assets: int) -> dict[str, Any]:
+    """Score global normalizado pelo tamanho da superfície digital.
+
+    Score = 100 − min(100, ΣRa / N_assets)
+
+    Normalizar por N_assets evita penalizar empresas maiores apenas por terem
+    mais ativos (BitSight-style Digital Footprint normalization).
+    """
+    total_ra = sum(float(r.get("ra") or 0.0) for r in risk_per_asset)
+    n = max(1, int(n_assets))
+    normalized_ra = total_ra / n
+    score = max(0.0, 100.0 - min(100.0, normalized_ra))
+
+    return {
+        "score": round(score, 2),
+        "grade": _grade_from_score(score),
+        "total_ra": round(total_ra, 2),
+        "n_assets": n,
+        "normalized_ra": round(normalized_ra, 2),
+        "methodology": "easm_fair_age_v1",
+    }
+
+
+def build_fair_decomposition(
+    findings: list[dict[str, Any]],
+    n_assets: int = 1,
+) -> dict[str, Any]:
+    """Decompõe os findings nos 3 pilares FAIR com peso, evidência e impacto na nota.
+
+    Pilares:
+      1. Resiliência de Perímetro (40%) — naabu, sqlmap, commix, dalfox
+      2. Higiene e Patching       (30%) — nuclei, nikto, sslscan, shcheck
+      3. Exposição OSINT          (30%) — h8mail, shodan-cli, theharvester
+
+    Retorna decomposição pronta para dashboard executivo e relatório.
+    """
+    # Acumula RA por pilar
+    pillar_ra: dict[str, list[float]] = {k: [] for k in FAIR_PILLAR_WEIGHTS}
+    pillar_evidence: dict[str, list[str]] = {k: [] for k in FAIR_PILLAR_WEIGHTS}
+
+    for finding in findings:
+        sev = str((finding.get("severity") or "info")).lower()
+        if sev in {"info"}:
+            continue
+        details = finding.get("details") or {}
+        tool = str(details.get("tool") or "").strip().lower()
+        pilar = _TOOL_TO_PILAR.get(tool, "patching_hygiene")
+
+        days = int(details.get("known_in_environment_days") or details.get("age_days") or 0)
+        cvss = details.get("cvss_score") or details.get("cvss")
+        asset = str(details.get("asset") or finding.get("title") or "")
+        port = details.get("port")
+
+        ra_dict = compute_asset_risk(
+            asset_url=asset,
+            severity=sev,
+            days_open=days,
+            cvss=float(cvss) if cvss is not None else None,
+            port=int(port) if port is not None else None,
+        )
+        pillar_ra[pilar].append(ra_dict["ra"])
+        evidence_str = f"{finding.get('title', tool)}: AGE={days}d, CVSS={ra_dict['cvss']}, FactorAGE={ra_dict['factor_age']}"
+        pillar_evidence[pilar].append(evidence_str)
+
+    n = max(1, n_assets)
+    pillars: list[dict[str, Any]] = []
+    total_impact_pts = 0.0
+
+    for pilar_id, weight in FAIR_PILLAR_WEIGHTS.items():
+        ra_values = pillar_ra[pilar_id]
+        pilar_score = max(0.0, 100.0 - min(100.0, sum(ra_values) / n)) if ra_values else 100.0
+        impact_pts = round((100.0 - pilar_score) * weight, 2)
+        total_impact_pts += impact_pts
+
+        pilar_names = {
+            "perimeter_resilience": "Resiliência de Perímetro",
+            "patching_hygiene":     "Higiene e Patching",
+            "osint_exposure":       "Exposição OSINT",
+        }
+        evidence_sample = pillar_evidence[pilar_id][:5]  # max 5 evidências
+        pillars.append({
+            "id":           pilar_id,
+            "name":         pilar_names[pilar_id],
+            "weight":       weight,
+            "weight_pct":   f"{int(weight * 100)}%",
+            "score":        round(pilar_score, 2),
+            "impact_pts":   impact_pts,
+            "finding_count": len(ra_values),
+            "evidence":     evidence_sample,
+            "tef_description": {
+                "perimeter_resilience": "Frequência de ameaça externa via portas/serviços expostos e vetores de injeção",
+                "patching_hygiene":     "Probabilidade de exploração amplificada pela persistência (AGE) de CVEs abertas",
+                "osint_exposure":       "Superfície OSINT: credenciais vazadas, IPs em blacklists e footprint público",
+            }.get(pilar_id, ""),
+        })
+
+    final_score = max(0.0, 100.0 - min(100.0, total_impact_pts))
+    return {
+        "score": round(final_score, 2),
+        "grade": _grade_from_score(final_score),
+        "pillars": pillars,
+        "total_impact_pts": round(total_impact_pts, 2),
+        "n_assets": n,
+        "methodology_version": METHODOLOGY_VERSION,
+    }

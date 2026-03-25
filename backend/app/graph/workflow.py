@@ -7,14 +7,23 @@ from urllib.parse import urlparse
 from langgraph.graph import END, StateGraph
 
 from app.graph.checkpointer import create_checkpointer
+from app.services.risk_service import (
+    build_fair_decomposition,
+    compute_easm_rating,
+    compute_asset_risk,
+    METHODOLOGY_VERSION,
+)
 from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
+# EASM 5-phase pipeline
 GROUP_MISSION_ITEMS: list[str] = [
-    "1. Reconhecimento",
-    "2. AnaliseVulnerabilidade",
-    "3. OSINT",
+    "1. AssetDiscovery",
+    "2. RiskAssessment",
+    "3. ThreatIntel",
+    "4. Governance",
+    "5. ExecutiveAnalysis",
 ]
 
 KNOWN_WAF_MODELS: list[str] = [
@@ -34,6 +43,7 @@ class AgentState(TypedDict):
     scan_id: int
     target: str
     scan_mode: str                          # "unit" | "scheduled"
+    easm_segment: str                       # Segmento de mercado inferido
     lista_ativos: list[str]
     logs_terminais: list[str]
     vulnerabilidades_encontradas: list[dict[str, Any]]
@@ -50,6 +60,12 @@ class AgentState(TypedDict):
     mission_items: list[str]
     known_vulnerability_patterns: list[str]
     executed_tool_runs: list[str]
+    # EASM Governance fields (preenchidos pelo GovernanceNode)
+    asset_fingerprints: dict[str, dict]     # asset -> {waf, tech, ports, cvss}
+    fair_decomposition: dict[str, Any]      # 3-pillar FAIR breakdown
+    easm_rating: dict[str, Any]             # {score, grade, factors, methodology}
+    # EASM Executive fields (preenchidos pelo ExecutiveAnalystNode)
+    executive_summary: str                  # Narrativa LLM gerada
 
 
 def _metric_start() -> float:
@@ -72,12 +88,12 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
 def _node_for_step(step_name: str, scan_mode: str) -> str:
     step = str(step_name or "").strip().lower()
     if step in {"", "done"}:
-        return "osint"
-    if "recon" in step:
-        return "recon"
-    if "analisevulnerabilidade" in step or "vulnerabilidade" in step:
-        return "vuln"
-    return "osint"
+        return "threat_intel"
+    if "asset" in step or "recon" in step or "discovery" in step:
+        return "asset_discovery"
+    if "risk" in step or "vuln" in step or "assessment" in step:
+        return "risk_assessment"
+    return "threat_intel"
 
 
 def _mark_step_metric(state: AgentState, success: bool) -> None:
@@ -1302,17 +1318,23 @@ def _step_name(state: AgentState) -> str:
     return items[idx]
 
 
-def recon_node(state: AgentState) -> AgentState:
+# ─────────────────────────────────────────────────────────────────────────────
+# EASM Agent 1: Asset Discovery
+# Descobre subdomínios, IPs, portas e tecnologias expostas.
+# Ferramentas: subfinder → amass → dnsx → naabu → httpx → gowitness
+# ─────────────────────────────────────────────────────────────────────────────
+def asset_discovery_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    state["proxima_ferramenta"] = "scanner"
-    state["logs_terminais"].append(f"ReconNode: {current}")
+    state["proxima_ferramenta"] = "risk_assessment"
+    state["logs_terminais"].append(f"AssetDiscovery: {current}")
     if state["target"] not in state["lista_ativos"]:
         state["lista_ativos"].append(state["target"])
     if state["target"] not in state["pending_asset_scans"] and state["target"] not in state["scanned_assets"]:
         state["pending_asset_scans"].append(state["target"])
 
-    recon_tools = _tools_for_group(state["scan_mode"], "reconhecimento")
+    # Usa asset_discovery group (que aponta para mesma fila reconhecimento)
+    recon_tools = _tools_for_group(state["scan_mode"], "asset_discovery") or _tools_for_group(state["scan_mode"], "reconhecimento")
     # Ferramentas de port scan a serem executadas também nos subdomínios descobertos
     PORT_SCAN_TOOLS = {"naabu", "nmap"}
     port_scan_tools = [t for t in recon_tools if t in PORT_SCAN_TOOLS]
@@ -1407,13 +1429,18 @@ def recon_node(state: AgentState) -> AgentState:
             "title": f"Ativo externo mapeado: {state['target']}",
             "severity": "low",
             "risk_score": 2,
-            "source_worker": "recon",
-            "details": {"node": "recon", "step": current},
+            "source_worker": "asset_discovery",
+            "details": {"node": "asset_discovery", "step": current},
         }
     )
     state["mission_index"] += 1
-    _metric_end(state, "recon", started_at)
+    _metric_end(state, "asset_discovery", started_at)
     return state
+
+
+# Alias legado para backward compat
+def recon_node(state: AgentState) -> AgentState:
+    return asset_discovery_node(state)
 
 
 def scan_node(state: AgentState) -> AgentState:
@@ -1542,60 +1569,71 @@ def fingerprint_node(state: AgentState) -> AgentState:
     return state
 
 
-def vuln_node(state: AgentState) -> AgentState:
+# ─────────────────────────────────────────────────────────────────────────────
+# EASM Agent 2: Risk Assessment
+# Avalia vulnerabilidades técnicas nos ativos descobertos.
+# Fase 1 (Fingerprint): wafw00f + whatweb
+# Fase 2 (Scan): nuclei + wapiti + nikto
+# Fase 3 (Exploitation, condicional): sqlmap / commix se indicado pelo nuclei
+# ─────────────────────────────────────────────────────────────────────────────
+def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    vuln_tools = _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
+    vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
     primary_targets = _targets_for_deep_scan(state, limit=8)
     all_targets = _targets_for_deep_scan(state, limit=MAX_DISCOVERED_ASSETS + 1)
     all_findings: list[dict[str, Any]] = []
     if len(primary_targets) > 1:
-        state["logs_terminais"].append(f"VulnNode: targets={len(primary_targets)}")
+        state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     for scan_target in primary_targets:
-        vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "VulnNode")
+        vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "RiskAssessment")
         if vuln_findings:
             all_findings.extend(vuln_findings)
         all_findings.append(
             {
-                "title": f"Analise de vulnerabilidade executada em {scan_target}",
+                "title": f"Avaliação de risco executada em {scan_target}",
                 "severity": "info",
                 "risk_score": 1,
-                "source_worker": "analise_vulnerabilidade",
+                "source_worker": "risk_assessment",
                 "details": {
-                    "node": "vuln",
+                    "node": "risk_assessment",
                     "step": current,
                     "asset": scan_target,
-                    "tool": "analise_vulnerabilidade",
+                    "tool": "risk_assessment",
                 },
             }
         )
 
-    # Executa coleta de headers em todos os subdominios descobertos,
-    # mesmo quando a varredura completa de vulnerabilidades fica limitada.
+    # Headers em todos os subdominios descobertos (mesmo fora do primary_targets)
     extra_header_targets = [t for t in all_targets if t not in primary_targets]
     if "curl-headers" in vuln_tools and extra_header_targets:
-        state["logs_terminais"].append(f"VulnNode: curl-headers extra_targets={len(extra_header_targets)}")
+        state["logs_terminais"].append(f"RiskAssessment: curl-headers extra_targets={len(extra_header_targets)}")
         for scan_target in extra_header_targets:
             header_findings, _, _, _ = _run_tools_and_collect(
                 state,
                 ["curl-headers"],
                 scan_target,
                 current,
-                "VulnNode:Headers",
+                "RiskAssessment:Headers",
             )
             if header_findings:
                 all_findings.extend(header_findings)
 
-    state["logs_terminais"].append(f"VulnNode: {current}")
+    state["logs_terminais"].append(f"RiskAssessment: {current}")
 
     if all_findings:
         state["vulnerabilidades_encontradas"].extend(all_findings)
     else:
-        state["logs_terminais"].append(f"VulnNode: sem achados tecnicos no passo {current}")
-    state["proxima_ferramenta"] = "analista_ia"
+        state["logs_terminais"].append(f"RiskAssessment: sem achados tecnicos no passo {current}")
+    state["proxima_ferramenta"] = "threat_intel"
     state["mission_index"] += 1
-    _metric_end(state, "vuln", started_at)
+    _metric_end(state, "risk_assessment", started_at)
     return state
+
+
+# Alias legado
+def vuln_node(state: AgentState) -> AgentState:
+    return risk_assessment_node(state)
 
 
 def analista_ia_node(state: AgentState) -> AgentState:
@@ -1652,30 +1690,35 @@ def api_node(state: AgentState) -> AgentState:
     return state
 
 
-def osint_node(state: AgentState) -> AgentState:
+# ─────────────────────────────────────────────────────────────────────────────
+# EASM Agent 3: Threat Intel
+# Coleta inteligência externa: credenciais vazadas, reputação de IPs, OSINT.
+# Ferramentas: theharvester → shodan-cli → h8mail → subjack
+# ─────────────────────────────────────────────────────────────────────────────
+def threat_intel_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    state["logs_terminais"].append(f"OSINTNode: {current}")
+    state["logs_terminais"].append(f"ThreatIntel: {current}")
 
-    osint_tools = _tools_for_group(state["scan_mode"], "osint")
+    osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
     targets = _targets_for_deep_scan(state, limit=6)
     if len(targets) > 1:
-        state["logs_terminais"].append(f"OSINTNode: targets={len(targets)}")
+        state["logs_terminais"].append(f"ThreatIntel: targets={len(targets)}")
     for scan_target in targets:
-        osint_findings, _, _, _ = _run_tools_and_collect(state, osint_tools, scan_target, current, "OSINTNode")
+        osint_findings, _, _, _ = _run_tools_and_collect(state, osint_tools, scan_target, current, "ThreatIntel")
         if osint_findings:
             state["vulnerabilidades_encontradas"].extend(osint_findings)
         state["vulnerabilidades_encontradas"].append(
             {
-                "title": f"OSINT executado em {scan_target}",
+                "title": f"Threat Intel executado em {scan_target}",
                 "severity": "info",
                 "risk_score": 1,
-                "source_worker": "osint",
+                "source_worker": "threat_intel",
                 "details": {
-                    "node": "osint",
+                    "node": "threat_intel",
                     "step": current,
                     "asset": scan_target,
-                    "tool": "osint",
+                    "tool": "threat_intel",
                 },
             }
         )
@@ -1686,59 +1729,186 @@ def osint_node(state: AgentState) -> AgentState:
                 "title": f"OSINT exposure indicators for {state['target']}",
                 "severity": "low",
                 "risk_score": 3,
-                "source_worker": "osint",
+                "source_worker": "threat_intel",
                 "details": {
-                    "node": "osint",
+                    "node": "threat_intel",
                     "tools": osint_tools,
                     "step": current,
                 },
             }
         )
 
-    state["proxima_ferramenta"] = "recon"
+    state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
-    _metric_end(state, "osint", started_at)
+    _metric_end(state, "threat_intel", started_at)
     return state
 
 
-def supervisor_node(state: AgentState) -> AgentState:
+# Alias legado
+def osint_node(state: AgentState) -> AgentState:
+    return threat_intel_node(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EASM Agent 4: Governance (The Rating Engine)
+# Agente Python puro — sem ferramentas externas.
+# Calcula FAIR+AGE por ativo e emite o rating contínuo com decomposição formal.
+# ─────────────────────────────────────────────────────────────────────────────
+def governance_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
-    current = _step_name(state)
-    nxt = state.get("proxima_ferramenta", "recon")
-    state["logs_terminais"].append(f"Supervisor: step={current} -> proxima={nxt}")
-    _metric_end(state, "supervisor", started_at)
+    state["logs_terminais"].append("Governance: calculando FAIR+AGE rating")
+
+    findings = state.get("vulnerabilidades_encontradas") or []
+    discovered = state.get("lista_ativos") or [state["target"]]
+    n_assets = max(1, len(discovered))
+
+    # Computa Ra por finding e coleta para o rating global
+    risk_per_asset: list[dict[str, Any]] = []
+    for f in findings:
+        sev = str(f.get("severity") or "info").lower()
+        if sev in {"info"}:
+            continue
+        details = f.get("details") or {}
+        asset = str(details.get("asset") or state["target"])
+        days = int(details.get("known_in_environment_days") or details.get("age_days") or 0)
+        cvss = details.get("cvss_score") or details.get("cvss")
+        port = details.get("port")
+        ra = compute_asset_risk(
+            asset_url=asset,
+            severity=sev,
+            days_open=days,
+            cvss=float(cvss) if cvss is not None else None,
+            port=int(port) if port is not None else None,
+        )
+        risk_per_asset.append(ra)
+
+    # Score global normalizado pela superfície digital
+    easm_rating = compute_easm_rating(risk_per_asset, n_assets=n_assets)
+
+    # Decomposição formal por 3 pilares FAIR
+    fair_decomp = build_fair_decomposition(findings, n_assets=n_assets)
+
+    state["easm_rating"] = {
+        **easm_rating,
+        "methodology": f"{METHODOLOGY_VERSION}/easm_fair_age_v1",
+        "n_assets_scanned": n_assets,
+    }
+    state["fair_decomposition"] = fair_decomp
+    state["logs_terminais"].append(
+        f"Governance: score={easm_rating['score']} grade={easm_rating['grade']} "
+        f"n_assets={n_assets} total_ra={easm_rating['total_ra']}"
+    )
+    state["mission_index"] += 1
+    _metric_end(state, "governance", started_at)
     return state
 
 
-def route_decision(state: AgentState) -> str:
-    if state["mission_index"] >= len(state["mission_items"]):
-        return END
+# ─────────────────────────────────────────────────────────────────────────────
+# EASM Agent 5: Executive Analyst
+# Usa LLM (Ollama) para gerar narrativa executiva baseada na decomposição FAIR.
+# Se Ollama não estiver disponível, gera template estruturado sem LLM.
+# ─────────────────────────────────────────────────────────────────────────────
+def executive_analyst_node(state: AgentState) -> AgentState:
+    started_at = _metric_start()
+    state["logs_terminais"].append("ExecutiveAnalyst: gerando narrativa executiva")
 
-    current = _step_name(state)
-    nxt = _node_for_step(current, state.get("scan_mode", "unit"))
-    if nxt == "vuln":
-        return "vuln"
-    if nxt == "osint":
-        return "osint"
-    return "recon"
+    easm_rating = state.get("easm_rating") or {}
+    fair_decomp = state.get("fair_decomposition") or {}
+    target = state.get("target", "alvo")
+    score = easm_rating.get("score", 0)
+    grade = easm_rating.get("grade", "F")
+    pillars = fair_decomp.get("pillars") or []
+    n_assets = easm_rating.get("n_assets_scanned", 1)
+
+    # Tenta gerar narrativa via Ollama; se falhar, usa template estruturado
+    try:
+        import httpx
+        from app.core.config import settings
+
+        pillar_lines = ""
+        for p in pillars:
+            pillar_lines += (
+                f"  - {p['name']} ({p['weight_pct']}): "
+                f"score={p['score']}, impact=-{p['impact_pts']}pts, "
+                f"{p['finding_count']} findings\n"
+            )
+        top_pilar = max(pillars, key=lambda x: x.get("impact_pts", 0), default={}) if pillars else {}
+
+        prompt = (
+            f"Atue como CISO. Converta os dados técnicos abaixo em uma análise executiva em português. "
+            f"Seja direto, use impacto financeiro e mencione urgência de remediação.\n\n"
+            f"Alvo: {target}\n"
+            f"Rating: {score}/100 (Grau {grade})\n"
+            f"Ativos mapeados: {n_assets}\n"
+            f"Decomposição FAIR:\n{pillar_lines}"
+            f"Principal detrator: {top_pilar.get('name', 'N/A')} (-{top_pilar.get('impact_pts', 0)}pts)\n\n"
+            f"Gere: (1) Resumo executivo 2 frases, (2) Principal risco com impacto de negócio, "
+            f"(3) Ação imediata recomendada. Máximo 150 palavras."
+        )
+        resp = httpx.post(
+            f"{settings.ollama_base_url}/api/generate",
+            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
+            timeout=20.0,
+        )
+        if resp.status_code == 200:
+            narrative = str(resp.json().get("response") or "").strip()
+            state["executive_summary"] = narrative if narrative else _fallback_executive_summary(easm_rating, fair_decomp, target)
+        else:
+            state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
+    except Exception as exc:
+        state["logs_terminais"].append(f"ExecutiveAnalyst: ollama_unavailable ({exc.__class__.__name__}), usando template")
+        state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
+
+    state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
+    state["mission_index"] += 1
+    _metric_end(state, "executive_analyst", started_at)
+    return state
+
+
+def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: str) -> str:
+    """Template estruturado usado quando o Ollama não está disponível."""
+    score = easm_rating.get("score", 0)
+    grade = easm_rating.get("grade", "F")
+    pillars = fair_decomp.get("pillars") or []
+    top_pilar = max(pillars, key=lambda x: x.get("impact_pts", 0), default={}) if pillars else {}
+    main_detractor = top_pilar.get("name", "vulnerabilidades não remediadas")
+    main_pts = top_pilar.get("impact_pts", 0)
+    finding_count = sum(p.get("finding_count", 0) for p in pillars)
+    return (
+        f"A postura de segurança externa de '{target}' recebeu rating {score}/100 (Grau {grade}). "
+        f"Foram identificados {finding_count} issues técnicos distribuídos em {len(pillars)} dimensões de risco. "
+        f"O principal detrator é '{main_detractor}', responsável por {main_pts} pontos de impacto no rating. "
+        f"Ação imediata: priorizar remediação dos findings críticos/altos — a penalidade AGE "
+        f"aumenta logaritmicamente a cada dia sem correção, amplificando o risco de exploração."
+    )
 
 
 def build_graph(mode: ScanMode = "unit"):
-    """Constroi o grafo em 3 fases: Reconhecimento -> AnaliseVulnerabilidade -> OSINT."""
+    """EASM 5-Agent Sequential Pipeline.
+
+    AssetDiscovery → RiskAssessment → ThreatIntel → Governance → ExecutiveAnalyst
+
+    - AssetDiscovery : subfinder / amass / dnsx / naabu / httpx / gowitness
+    - RiskAssessment : wafw00f → nuclei → wapiti → [sqlmap/commix] (condicional)
+    - ThreatIntel    : theharvester / shodan-cli / h8mail / subjack
+    - Governance     : FAIR+AGE rating engine (Python puro, sem ferramentas)
+    - ExecutiveAnalyst: narrativa LLM via Ollama (fallback para template)
+    """
     graph = StateGraph(AgentState)
 
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("recon", recon_node)
-    graph.add_node("vuln", vuln_node)
-    graph.add_node("osint", osint_node)
+    graph.add_node("asset_discovery",   asset_discovery_node)
+    graph.add_node("risk_assessment",   risk_assessment_node)
+    graph.add_node("threat_intel",      threat_intel_node)
+    graph.add_node("governance",        governance_node)
+    graph.add_node("executive_analyst", executive_analyst_node)
 
-    graph.set_entry_point("supervisor")
-
-    graph.add_conditional_edges("supervisor", route_decision)
-
-    graph.add_edge("recon", "supervisor")
-    graph.add_edge("vuln", "supervisor")
-    graph.add_edge("osint", "supervisor")
+    # Pipeline linear — cada agente conhece somente o próximo
+    graph.set_entry_point("asset_discovery")
+    graph.add_edge("asset_discovery",   "risk_assessment")
+    graph.add_edge("risk_assessment",   "threat_intel")
+    graph.add_edge("threat_intel",      "governance")
+    graph.add_edge("governance",        "executive_analyst")
+    graph.add_edge("executive_analyst", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -1748,16 +1918,18 @@ def initial_state(
     target: str,
     scan_mode: ScanMode = "unit",
     known_vulnerability_patterns: list[str] | None = None,
+    segment: str | None = None,
 ) -> AgentState:
     mission_items = GROUP_MISSION_ITEMS.copy()
     return {
         "scan_id": scan_id,
         "target": target,
         "scan_mode": scan_mode,
+        "easm_segment": segment or "Digital Services",
         "lista_ativos": [],
         "logs_terminais": [],
         "vulnerabilidades_encontradas": [],
-        "proxima_ferramenta": "recon",
+        "proxima_ferramenta": "asset_discovery",
         "discovered_ports": [],
         "pending_port_tests": [],
         "pending_asset_scans": [],
@@ -1775,4 +1947,9 @@ def initial_state(
         "mission_items": mission_items,
         "known_vulnerability_patterns": known_vulnerability_patterns or [],
         "executed_tool_runs": [],
+        # EASM fields (preenchidos pelos agents 4 e 5)
+        "asset_fingerprints": {},
+        "fair_decomposition": {},
+        "easm_rating": {},
+        "executive_summary": "",
     }

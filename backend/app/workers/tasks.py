@@ -550,30 +550,42 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 
         progress, progress_ctx = _progress_from_state(final_state)
         final_state["mission_progress_context"] = progress_ctx
+
+        # ── EASM: propaga campos dos agentes 4 e 5 para report_v2 ─────────────
+        existing_report_v2 = (job.state_data or {}).get("report_v2") or {}
+        existing_report_v2.update({
+            "easm_rating":        final_state.get("easm_rating") or {},
+            "fair_decomposition": final_state.get("fair_decomposition") or {},
+            "executive_summary":  final_state.get("executive_summary") or "",
+        })
+        final_state["report_v2"] = existing_report_v2
+        # ───────────────────────────────────────────────────────────────────────
+
         job.state_data = final_state
         job.mission_progress = progress
-        job.current_step = "100. Relatorio Final JSON"
+        job.current_step = "5. ExecutiveAnalysis"
         job.status = "completed"
         job.last_error = None
         job.next_retry_at = None
         
         # Log resumo final
         mission_summary = _format_mission_progress(final_state, job.current_step)
+        easm_rating = final_state.get("easm_rating") or {}
         db.add(ScanLog(
             scan_job_id=job.id,
             source="worker.summary",
             level="INFO",
             message=(
-                f"EXECUCAO CONCLUIDA COM SUCESSO!\n"
-                f"Tempo total: ~13+ minutos\n"
+                f"EXECUCAO EASM CONCLUIDA COM SUCESSO!\n"
                 f"\n"
-                f"RESULTADO DAS MISSOES:\n"
+                f"PIPELINE 5 AGENTES:\n"
                 f"{mission_summary}\n"
                 f"\n"
                 f"RESUMO:\n"
                 f"  • Vulnerabilidades encontradas: {len(final_state.get('vulnerabilidades_encontradas', []))}\n"
                 f"  • Portas descobertas: {len(final_state.get('discovered_ports', []))}\n"
                 f"  • Ativos mapeados: {len(final_state.get('lista_ativos', []))}\n"
+                f"  • Rating EASM: {easm_rating.get('score', 'N/A')}/100 (Grau {easm_rating.get('grade', 'N/A')})\n"
                 f"  • Taxa de sucesso: {progress_ctx.get('tools_success', 0)}/{progress_ctx.get('tools_attempted', 0)} ferramentas"
             )
         ))
