@@ -121,20 +121,18 @@ export function TemporalCurveCard({ trends }) {
 }
 
 export function ExecutiveSummaryCard({ summary, easm_rating }) {
+  const fallbackSummary = `Resumo executivo indisponivel no momento. Rating EASM atual: ${Number(easm_rating || 0).toFixed(1)}. Os dados de tendencia e narrativa automatica serao atualizados no proximo ciclo de analise.`;
+
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
       <p className="text-xs uppercase tracking-widest text-slate-400">Executive Summary</p>
       <div className="mt-4 space-y-3 text-sm text-slate-300">
         <div className="prose prose-invert max-w-none">
-          {summary ? (
-            summary.split("\n").map((line, idx) => (
+          {(summary || fallbackSummary).split("\n").map((line, idx) => (
               <p key={idx} className="text-slate-300 text-sm leading-relaxed">
                 {line}
               </p>
-            ))
-          ) : (
-            <p className="text-slate-500 italic">Aguardando análise do LLM...</p>
-          )}
+            ))}
         </div>
       </div>
     </div>
