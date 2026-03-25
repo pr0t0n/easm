@@ -345,26 +345,6 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if job.status == "stopped":
             return {"ok": False, "error": "scan_stopped", "retryable": False}
 
-        if job.compliance_status != "approved":
-            job.status = "blocked"
-            db.add(ScanLog(
-                scan_job_id=scan_id,
-                source="compliance",
-                level="WARNING",
-                message="Execucao bloqueada por gate de compliance",
-            ))
-            log_audit(
-                db,
-                event_type="scan.execution_blocked",
-                message="Worker interrompeu execucao: compliance nao aprovado",
-                scan_job_id=scan_id,
-                level="WARNING",
-                metadata={"compliance_status": job.compliance_status, "scan_mode": scan_mode},
-            )
-            _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
-            db.commit()
-            return {"ok": False, "error": "compliance_not_approved", "retryable": False}
-
         job.status = "running"
         job.current_step = "Iniciando grafo"
         _touch_worker_heartbeat(

@@ -1583,12 +1583,7 @@ def create_scan(
         if access_group_id not in allowed_ids:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
 
-    allowlist_ok = is_target_allowed(db, current_user.id, payload.target_query, "*")
-
-    if not allowlist_ok:
-        compliance_status = "blocked_policy"
-    else:
-        compliance_status = "approved"
+    compliance_status = "approved"
 
     llm_risk_auth_type = str(payload.llm_risk_auth_type or "none").strip().lower()
     if payload.llm_risk_enabled and not str(payload.llm_risk_url or "").strip():
