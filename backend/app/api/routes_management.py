@@ -191,14 +191,15 @@ def _resolve_valid_authorization_code(db: Session, authorization_code: str | Non
 
 def _create_scan_from_schedule(
     db: Session,
-    current_user: User,
+    actor_user: User,
+    owner_id: int,
     target: str,
     authorization_code: str | None,
     access_group_id: int | None,
     mode: str = "scheduled",
 ) -> ScanJob:
     batch_targets = _parse_targets(target)
-    allowlist_ok = all(is_target_allowed(db, current_user.id, t, "*") for t in batch_targets) if batch_targets else is_target_allowed(db, current_user.id, target, "*")
+    allowlist_ok = all(is_target_allowed(db, owner_id, t, "*") for t in batch_targets) if batch_targets else is_target_allowed(db, owner_id, target, "*")
 
     if not allowlist_ok:
         compliance_status = "blocked_policy"
@@ -206,7 +207,7 @@ def _create_scan_from_schedule(
         compliance_status = "approved"
 
     job = ScanJob(
-        owner_id=current_user.id,
+        owner_id=owner_id,
         access_group_id=access_group_id,
         target_query=target,
         authorization_code=authorization_code,
@@ -222,9 +223,9 @@ def _create_scan_from_schedule(
         db,
         event_type="scan.created_from_schedule",
         message=f"Scan criado via agendamento para alvo {target}",
-        actor_user_id=current_user.id,
+        actor_user_id=actor_user.id,
         scan_job_id=job.id,
-        metadata={"target": target, "mode": mode},
+        metadata={"target": target, "mode": mode, "owner_id": owner_id},
     )
     return job
 
@@ -621,7 +622,8 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
         target_batch = "; ".join(chunk)
         job = _create_scan_from_schedule(
             db=db,
-            current_user=current_user,
+            actor_user=current_user,
+            owner_id=row.owner_id,
             target=target_batch,
             authorization_code=None,
             access_group_id=row.access_group_id,
