@@ -124,6 +124,13 @@ def _parse_targets(targets_text: str) -> list[str]:
     return [item.strip() for item in targets_text.split(";") if item.strip()]
 
 
+SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
+
+
+def _chunk_targets(targets: list[str], chunk_size: int) -> list[list[str]]:
+    return [targets[i:i + chunk_size] for i in range(0, len(targets), chunk_size)]
+
+
 def _resolve_valid_authorization_code(db: Session, authorization_code: str | None) -> ScanAuthorization | None:
     if not authorization_code:
         return None
@@ -538,13 +545,18 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
     if not row.enabled:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento desabilitado")
 
-    created_scan_ids: list[int] = []
     targets = _parse_targets(row.targets_text)
-    for target in targets:
+    if not targets:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento sem alvos validos")
+
+    chunks = _chunk_targets(targets, SCHEDULE_TARGETS_PER_SCAN)
+    created_scan_ids: list[int] = []
+    for chunk in chunks:
+        target_batch = "; ".join(chunk)
         job = _create_scan_from_schedule(
             db=db,
             current_user=current_user,
-            target=target,
+            target=target_batch,
             authorization_code=None,
             access_group_id=row.access_group_id,
             mode="scheduled",
@@ -559,7 +571,13 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
         except Exception:
             run_scan_job(scan_id)
 
-    return {"ok": True, "created_scans": created_scan_ids}
+    return {
+        "ok": True,
+        "created_scans": created_scan_ids,
+        "total_targets": len(targets),
+        "batch_size": SCHEDULE_TARGETS_PER_SCAN,
+        "batches_created": len(created_scan_ids),
+    }
 
 
 @router.get("/config/shodan")

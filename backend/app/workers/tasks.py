@@ -25,6 +25,13 @@ from app.workers.worker_groups import (
 )
 
 
+SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
+
+
+def _chunk_targets(targets: list[str], chunk_size: int) -> list[list[str]]:
+    return [targets[i:i + chunk_size] for i in range(0, len(targets), chunk_size)]
+
+
 def _progress_from_state(final_state: dict) -> tuple[int, dict]:
     mission_items = final_state.get("mission_items") or []
     total_steps = max(1, len(mission_items))
@@ -817,44 +824,48 @@ def scheduler_tick():
             if not raw_targets:
                 continue
 
-            # Agrupa todos os targets numa única query (compatível com o fluxo existente)
-            target_query = "; ".join(raw_targets)
+            job_ids: list[int] = []
+            chunks = _chunk_targets(raw_targets, SCHEDULE_TARGETS_PER_SCAN)
+            for index, chunk in enumerate(chunks, start=1):
+                target_query = "; ".join(chunk)
+                job = ScanJob(
+                    owner_id=owner_id,
+                    access_group_id=sched.access_group_id,
+                    target_query=target_query,
+                    status="pending",
+                    mode="scheduled",
+                    compliance_status="approved",
+                    current_step="Aguardando worker",
+                    state_data={},
+                )
+                db.add(job)
+                db.flush()  # obtém job.id antes do commit
 
-            job = ScanJob(
-                owner_id=owner_id,
-                access_group_id=sched.access_group_id,
-                target_query=target_query,
-                status="pending",
-                mode="scheduled",
-                compliance_status="approved",
-                current_step="Aguardando worker",
-                state_data={},
-            )
-            db.add(job)
-            db.flush()  # obtém job.id antes do commit
-
-            db.add(ScanLog(
-                scan_job_id=job.id,
-                source="scheduler",
-                level="INFO",
-                message=(
-                    f"Scan agendado disparado automaticamente | "
-                    f"schedule_id={sched.id} | freq={freq} | run_time={sched.run_time}"
-                ),
-            ))
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="scheduler",
+                    level="INFO",
+                    message=(
+                        f"Scan agendado disparado automaticamente | "
+                        f"schedule_id={sched.id} | freq={freq} | run_time={sched.run_time} | "
+                        f"batch={index}/{len(chunks)} | targets={len(chunk)}"
+                    ),
+                ))
+                job_ids.append(job.id)
 
             # Atualiza last_run_at (UTC) para idempotência
             sched.last_run_at = datetime.utcnow()
             db.add(sched)
             db.commit()
 
-            # Envia para a fila do worker scheduled
-            celery.send_task(
-                "run_scan_job_scheduled",
-                kwargs={"scan_id": job.id},
-                queue=SCAN_SCHEDULED_QUEUE,
-            )
-            fired += 1
+            # Envia todos os batches para a fila scheduled
+            for job_id in job_ids:
+                celery.send_task(
+                    "run_scan_job_scheduled",
+                    kwargs={"scan_id": job_id},
+                    queue=SCAN_SCHEDULED_QUEUE,
+                )
+            fired += len(job_ids)
 
         return {"ok": True, "checked": len(schedules), "fired": fired, "slot": current_hhmm}
     except Exception as exc:

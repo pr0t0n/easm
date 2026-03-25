@@ -97,12 +97,9 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────────────────────
-  # Worker UNITARIO — processa scans manuais/pontuais (POST /api/scans)
-  #   Fila principal : scan.unit
-  #   Filas de tools : worker.unit.reconhecimento,
-  #                    worker.unit.analise_vulnerabilidade,
-  #                    worker.unit.osint
-  #   Perfil         : alta prioridade, concorrencia paralela
+  # Worker RECON (unificado) — processa scans unit + scheduled
+  #   Filas: scan.unit, scan.scheduled, worker.unit.reconhecimento,
+  #          worker.scheduled.reconhecimento
   # ──────────────────────────────────────────────────────────────────────────────
   worker_unit_recon:
     build:
@@ -112,8 +109,9 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=6,2
-      --queues=scan.unit,worker.unit.reconhecimento
+      --autoscale=12,4
+      --prefetch-multiplier=1
+      --queues=scan.unit,scan.scheduled,worker.unit.reconhecimento,worker.scheduled.reconhecimento
       --hostname=worker-unit-recon@%h
     env_file:
       - .env
@@ -139,74 +137,14 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=6,2
-      --queues=scan.unit,worker.unit.reconhecimento
+      --autoscale=12,4
+      --prefetch-multiplier=1
+      --queues=scan.unit,scan.scheduled,worker.unit.reconhecimento,worker.scheduled.reconhecimento
       --hostname=worker-unit-recon-prod@%h
     env_file:
       - .env
     environment:
       WORKER_MODE: unit
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
-  # ──────────────────────────────────────────────────────────────────────────────
-  # Worker AGENDADO — processa scans periodicos/batch (ScheduledScan)
-  #   Fila principal : scan.scheduled
-  #   Filas de tools : worker.scheduled.reconhecimento,
-  #                    worker.scheduled.analise_vulnerabilidade,
-  #                    worker.scheduled.osint
-  #   Perfil         : prioridade normal, concorrencia paralela
-  # ──────────────────────────────────────────────────────────────────────────────
-  worker_scheduled_recon:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_recon
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=4,1
-      --queues=scan.scheduled,worker.scheduled.reconhecimento
-      --hostname=worker-scheduled-recon@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  worker_scheduled_recon_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_recon_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=4,1
-      --queues=scan.scheduled,worker.scheduled.reconhecimento
-      --hostname=worker-scheduled-recon-prod@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
@@ -244,41 +182,14 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=16,4
-      --queues=worker.unit.analise_vulnerabilidade
+      --autoscale=28,8
+      --prefetch-multiplier=1
+      --queues=worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade
       --hostname=worker-unit-vuln@%h
     env_file:
       - .env
     environment:
       WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  worker_scheduled_vuln:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_vuln
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=20,4
-      --queues=worker.scheduled.analise_vulnerabilidade
-      --hostname=worker-scheduled-vuln@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
       EASM_TOOL_EXECUTION_MODE: distributed
       TZ: America/Sao_Paulo
     profiles: ["dev"]
@@ -300,41 +211,14 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=12,2
-      --queues=worker.unit.osint
+      --autoscale=20,4
+      --prefetch-multiplier=1
+      --queues=worker.unit.osint,worker.scheduled.osint
       --hostname=worker-unit-osint@%h
     env_file:
       - .env
     environment:
       WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  worker_scheduled_osint:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_osint
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=14,2
-      --queues=worker.scheduled.osint
-      --hostname=worker-scheduled-osint@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
       EASM_TOOL_EXECUTION_MODE: distributed
       TZ: America/Sao_Paulo
     profiles: ["dev"]
@@ -356,40 +240,14 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=16,4
-      --queues=worker.unit.analise_vulnerabilidade
+      --autoscale=28,8
+      --prefetch-multiplier=1
+      --queues=worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade
       --hostname=worker-unit-vuln-prod@%h
     env_file:
       - .env
     environment:
       WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
-  worker_scheduled_vuln_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_vuln_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=20,4
-      --queues=worker.scheduled.analise_vulnerabilidade
-      --hostname=worker-scheduled-vuln-prod@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
       EASM_TOOL_EXECUTION_MODE: distributed
       TZ: America/Sao_Paulo
     profiles: ["prod"]
@@ -410,40 +268,14 @@ services:
     command: >
       celery -A app.workers.celery_app.celery worker
       --loglevel=INFO
-      --autoscale=12,2
-      --queues=worker.unit.osint
+      --autoscale=20,4
+      --prefetch-multiplier=1
+      --queues=worker.unit.osint,worker.scheduled.osint
       --hostname=worker-unit-osint-prod@%h
     env_file:
       - .env
     environment:
       WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
-  worker_scheduled_osint_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_scheduled_osint_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=14,2
-      --queues=worker.scheduled.osint
-      --hostname=worker-scheduled-osint-prod@%h
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: scheduled
       EASM_TOOL_EXECUTION_MODE: distributed
       TZ: America/Sao_Paulo
     profiles: ["prod"]
