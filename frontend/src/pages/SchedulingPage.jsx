@@ -83,6 +83,7 @@ export default function SchedulingPage() {
         batch_size: data.batch_size || 25,
         batches_created: data.batches_created || count,
         created_scans: data.created_scans || [],
+        validated_domains: data.validated_domains || [],
       });
       await loadSchedules();
       toastSuccess(`✓ Execucao iniciada com sucesso\n${data.batches_created || count} jobs criados para ${data.total_targets || 0} alvo(s)`);
@@ -117,6 +118,10 @@ export default function SchedulingPage() {
               <div>
                 <p className="text-slate-400">Scans (IDs)</p>
                 <p className="text-sm text-slate-200">{executionInfo.created_scans.join(", ") || "-"}</p>
+              </div>
+              <div className="md:col-span-2">
+                <p className="text-slate-400">Dominios validados (schedule)</p>
+                <p className="text-sm text-slate-200 break-all">{(executionInfo.validated_domains || []).join("; ") || "-"}</p>
               </div>
             </div>
             <p className="mt-3 text-xs text-slate-400">
@@ -228,7 +233,7 @@ export default function SchedulingPage() {
             <div key={row.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <p className="font-medium">#{row.id} | {row.scan_type} | {row.frequency}</p>
               <p className="text-xs text-slate-300">
-                grupo {row.access_group_id || "-"} | {row.targets_text}
+                dominios: {(row.targets || []).join("; ") || row.targets_text || "-"}
               </p>
               <p className="text-xs text-slate-400">
                 Horario: {row.run_time} {row.day_of_week ? `| Dia semana: ${row.day_of_week}` : ""}

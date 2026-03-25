@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -122,6 +123,44 @@ def _tool_metadata(tool_name: str) -> dict[str, str | bool]:
 
 def _parse_targets(targets_text: str) -> list[str]:
     return [item.strip() for item in targets_text.split(";") if item.strip()]
+
+
+DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def _normalize_domain_candidate(raw_target: str) -> str | None:
+    raw = str(raw_target or "").strip().lower()
+    if not raw:
+        return None
+
+    if raw.startswith("http://"):
+        raw = raw[7:]
+    elif raw.startswith("https://"):
+        raw = raw[8:]
+
+    raw = raw.split("/")[0].split(":")[0].strip(".")
+    wildcard = raw.startswith("*.")
+    host = raw[2:] if wildcard else raw
+
+    if not host or not DOMAIN_RE.match(host):
+        return None
+    return f"*.{host}" if wildcard else host
+
+
+def _validate_schedule_targets(targets_text: str) -> tuple[list[str], list[str]]:
+    parsed = _parse_targets(targets_text)
+    valid_targets: list[str] = []
+    invalid_targets: list[str] = []
+
+    for target in parsed:
+        normalized = _normalize_domain_candidate(target)
+        if normalized:
+            valid_targets.append(normalized)
+        else:
+            invalid_targets.append(target)
+
+    deduped_valid = list(dict.fromkeys(valid_targets))
+    return deduped_valid, invalid_targets
 
 
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
@@ -460,6 +499,15 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
     if not targets_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="targets_text obrigatorio")
 
+    valid_targets, invalid_targets = _validate_schedule_targets(targets_text)
+    if invalid_targets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Dominios invalidos no agendamento: {', '.join(invalid_targets[:10])}",
+        )
+    if not valid_targets:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum dominio valido informado")
+
     frequency = (payload.get("frequency") or "daily").strip().lower()
     if frequency not in {"daily", "weekly", "monthly"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frequency invalido")
@@ -478,7 +526,7 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
         owner_id=current_user.id,
         access_group_id=access_group_id,
         authorization_code=None,
-        targets_text=targets_text,
+        targets_text="; ".join(valid_targets),
         scan_type=(payload.get("scan_type") or "full").strip().lower(),
         frequency=frequency,
         run_time=(payload.get("run_time") or "00:00").strip(),
@@ -516,7 +564,19 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
 
     for field in ["targets_text", "scan_type", "frequency", "run_time", "day_of_week", "day_of_month", "enabled"]:
         if field in payload:
-            setattr(row, field, payload[field])
+            if field == "targets_text":
+                candidate_targets = str(payload[field] or "").strip()
+                valid_targets, invalid_targets = _validate_schedule_targets(candidate_targets)
+                if invalid_targets:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Dominios invalidos no agendamento: {', '.join(invalid_targets[:10])}",
+                    )
+                if not valid_targets:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum dominio valido informado")
+                setattr(row, field, "; ".join(valid_targets))
+            else:
+                setattr(row, field, payload[field])
 
     db.commit()
     return {"ok": True}
@@ -545,9 +605,14 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
     if not row.enabled:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento desabilitado")
 
-    targets = _parse_targets(row.targets_text)
+    targets, invalid_targets = _validate_schedule_targets(row.targets_text)
+    if invalid_targets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Agendamento contem dominios invalidos: {', '.join(invalid_targets[:10])}",
+        )
     if not targets:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento sem alvos validos")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento sem dominios validos")
 
     chunks = _chunk_targets(targets, SCHEDULE_TARGETS_PER_SCAN)
     created_scan_ids: list[int] = []
@@ -575,6 +640,7 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
         "ok": True,
         "created_scans": created_scan_ids,
         "total_targets": len(targets),
+        "validated_domains": targets,
         "batch_size": SCHEDULE_TARGETS_PER_SCAN,
         "batches_created": len(created_scan_ids),
     }

@@ -68,6 +68,7 @@ function computeGrade(score) {
   if (n >= 80) return 'B';
   if (n >= 70) return 'C';
   if (n >= 60) return 'D';
+  if (n >= 50) return 'E';
   return 'F';
 }
 
@@ -125,7 +126,7 @@ function renderFairAndBenchmark(report) {
 
   const fallbackCalc = calculateCriFromCounts(severityCounts);
   const finalScore = Number(benchmark.target_cri_score ?? calc.final_score ?? fallbackCalc.finalScore);
-  const grade = String(v2.grade || computeGrade(finalScore));
+  const grade = computeGrade(finalScore);
 
   const assessmentMap = {
     melhor_que_o_benchmark: 'Melhor que o benchmark',
