@@ -74,6 +74,8 @@ export default function DashboardPage() {
   const [easmAssets, setEasmAssets] = useState([]);
   
   // Filters
+  const [groups, setGroups] = useState([]);
+  const [selectedGroup, setSelectedGroup] = useState("");
   const [domainOptions, setDomainOptions] = useState([]);
   const [selectedTarget, setSelectedTarget] = useState("");
   const [searchInput, setSearchInput] = useState("");
@@ -84,6 +86,13 @@ export default function DashboardPage() {
     setSelectedTarget(searchInput);
   };
 
+  // Carrega grupos disponíveis para o usuário
+  useEffect(() => {
+    client.get("/api/management/access-groups")
+      .then(({ data }) => setGroups(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     const load = async () => {
       setLoading(true);
@@ -91,6 +100,9 @@ export default function DashboardPage() {
       try {
         // Monta query params com filtros
         const params = new URLSearchParams();
+        if (selectedGroup) {
+          params.append("access_group_id", selectedGroup);
+        }
         if (selectedTarget.trim()) {
           params.append("target", selectedTarget.trim());
         }
@@ -210,7 +222,7 @@ export default function DashboardPage() {
     };
 
     load();
-  }, [selectedTarget]);
+  }, [selectedTarget, selectedGroup]);
 
   if (loading) {
     return (
@@ -242,6 +254,26 @@ export default function DashboardPage() {
         <h2 className="text-sm font-semibold text-slate-200 mb-3">Filtros</h2>
         <div className="grid gap-3 md:grid-cols-4">
           <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo / Cliente</label>
+            <select
+              value={selectedGroup}
+              onChange={(e) => {
+                setSelectedGroup(e.target.value);
+                setSelectedTarget("");
+                setSearchInput("");
+              }}
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
+            >
+              <option value="">Todos os grupos</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
             <label className="block text-xs font-semibold text-slate-400 mb-2">Domínios</label>
             <select
               value={selectedTarget}
@@ -261,7 +293,7 @@ export default function DashboardPage() {
             </select>
           </div>
           
-          <div className="md:col-span-2">
+          <div>
             <label className="block text-xs font-semibold text-slate-400 mb-2">Domínio/Alvo</label>
             <input
               type="text"
@@ -289,6 +321,7 @@ export default function DashboardPage() {
               onClick={() => {
                 setSelectedTarget("");
                 setSearchInput("");
+                setSelectedGroup("");
               }}
               className="flex-1 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium text-slate-100 transition-colors"
             >
@@ -296,9 +329,10 @@ export default function DashboardPage() {
             </button>
           </div>
         </div>
-        {selectedTarget && (
+        {(selectedGroup || selectedTarget) && (
           <p className="mt-3 text-xs text-slate-400">
             <span className="text-slate-300">Filtros ativos:</span>
+            {selectedGroup && ` | Grupo: "${groups.find((g) => String(g.id) === String(selectedGroup))?.name || selectedGroup}"`}
             {selectedTarget && ` | Domínio: "${selectedTarget}"`}
           </p>
         )}
