@@ -39,7 +39,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
     )
-    op.create_index("ix_assets_domain_or_ip", "assets", ["domain_or_ip"])
     op.create_index("ix_assets_owner_status", "assets", ["owner_id", "status"])
     op.create_index("ix_assets_criticality", "assets", ["criticality_score"], postgresql_where=sa.text("status = 'active'"))
 
@@ -71,8 +70,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
     )
-    op.create_index("ix_vulnerabilities_asset_id", "vulnerabilities", ["asset_id"])
-    op.create_index("ix_vulnerabilities_cve_id", "vulnerabilities", ["cve_id"])
     op.create_index("ix_vulnerabilities_severity", "vulnerabilities", ["severity"])
     op.create_index("ix_vulnerabilities_fair_pillar", "vulnerabilities", ["fair_pillar"])
     op.create_index("ix_vulnerabilities_remediated_at", "vulnerabilities", ["remediated_at"], postgresql_where=sa.text("remediated_at IS NOT NULL"))
