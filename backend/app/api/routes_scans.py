@@ -3114,6 +3114,9 @@ def dashboard_insights(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Log para debug
+    print(f"[dashboard_insights] access_group_id={access_group_id} (type: {type(access_group_id).__name__})")
+    
     if current_user.is_admin:
         jobs_query = db.query(ScanJob)
         findings_query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id)
@@ -3131,12 +3134,19 @@ def dashboard_insights(
         jobs_query = jobs_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
         findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
     
+    # Garante conversão para int se necessário
     if access_group_id is not None:
-        jobs_query = jobs_query.filter(ScanJob.access_group_id == access_group_id)
-        findings_query = findings_query.filter(ScanJob.access_group_id == access_group_id)
+        try:
+            group_id_int = int(access_group_id) if isinstance(access_group_id, str) else access_group_id
+            jobs_query = jobs_query.filter(ScanJob.access_group_id == group_id_int)
+            findings_query = findings_query.filter(ScanJob.access_group_id == group_id_int)
+            print(f"[dashboard_insights] Filtered by access_group_id={group_id_int}")
+        except (ValueError, TypeError) as e:
+            print(f"[dashboard_insights] Error converting access_group_id: {e}")
 
     jobs = jobs_query.order_by(ScanJob.created_at.desc()).all()
     findings = findings_query.all()
+    print(f"[dashboard_insights] Total jobs after filtering: {len(jobs)}, findings: {len(findings)}")
 
     latest_scan = jobs[0] if jobs else None
     latest_scan_logs: list[ScanLog] = []
@@ -3488,7 +3498,11 @@ def dashboard_insights(
         "assets": assets,
         "activity": activity,
         "prioritized_actions": paged_prioritized,
-        "filters": {"target": normalized_target},
+        "filters": {
+            "target": normalized_target,
+            "access_group_id": access_group_id,
+            "applied": bool(normalized_target or access_group_id is not None),
+        },
         "targets": sorted(list({j.target_query for j in jobs if j.target_query})),
         "vuln_tool_execution": vuln_tool_execution,
         "prioritized_actions_page": {

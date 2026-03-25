@@ -77,6 +77,13 @@ export default function DashboardPage() {
   const [accessGroups, setAccessGroups] = useState([]);
   const [selectedGroup, setSelectedGroup] = useState("");
   const [selectedTarget, setSelectedTarget] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+
+  const handleSearch = () => {
+    setIsSearching(true);
+    setSelectedTarget(searchInput);
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -167,16 +174,35 @@ export default function DashboardPage() {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
         setLoading(false);
+        setIsSearching(false);
       }
     };
 
     load();
   }, [selectedGroup, selectedTarget]);
 
+  useEffect(() => {
+    const loadGroups = async () => {
+      try {
+        const groupsRes = await client.get("/api/access-groups").catch(() => ({ data: [] }));
+        setAccessGroups(groupsRes.data || []);
+      } catch (err) {
+        console.log("Erro ao carregar grupos:", err);
+      }
+    };
+    loadGroups();
+  }, []);
+
   if (loading) {
     return (
-      <div className="flex h-64 items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-brand-500 border-t-transparent" />
+      <div className="flex h-screen items-center justify-center bg-slate-950">
+        <div className="text-center">
+          <div className="mb-6 flex justify-center">
+            <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-700 border-t-blue-500" />
+          </div>
+          <p className="text-lg font-semibold text-slate-200">Aguardando análise do LLM...</p>
+          <p className="mt-2 text-sm text-slate-400">Processando dados do dashboard</p>
+        </div>
       </div>
     );
   }
@@ -195,7 +221,7 @@ export default function DashboardPage() {
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-5 pb-12">
       <section className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
         <h2 className="text-sm font-semibold text-slate-200 mb-3">Filtros</h2>
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-4">
           <div>
             <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo/Cliente</label>
             <select
@@ -215,24 +241,37 @@ export default function DashboardPage() {
             </select>
           </div>
           
-          <div>
+          <div className="md:col-span-2">
             <label className="block text-xs font-semibold text-slate-400 mb-2">Domínio/Alvo</label>
             <input
               type="text"
-              value={selectedTarget}
-              onChange={(e) => setSelectedTarget(e.target.value)}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleSearch();
+                }
+              }}
               placeholder="Filtrar por domínio..."
               className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-blue-500 focus:outline-none"
             />
           </div>
 
-          <div className="flex items-end">
+          <div className="flex items-end gap-2">
+            <button
+              onClick={handleSearch}
+              disabled={loading || isSearching}
+              className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 px-3 py-2 text-sm font-medium text-white transition-colors"
+            >
+              {isSearching || loading ? "Buscando..." : "Buscar"}
+            </button>
             <button
               onClick={() => {
                 setSelectedGroup("");
                 setSelectedTarget("");
+                setSearchInput("");
               }}
-              className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium text-slate-100 transition-colors"
+              className="flex-1 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium text-slate-100 transition-colors"
             >
               Limpar Filtros
             </button>
@@ -254,6 +293,36 @@ export default function DashboardPage() {
           </div>
         )}
       </section>
+
+      {/* EASM Enterprise Section - Highlighted after filters */}
+      <div className="rounded-2xl border-2 border-blue-500/40 bg-gradient-to-br from-blue-950/60 to-slate-900/60 p-6 shadow-lg shadow-blue-500/10">
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="font-display text-2xl font-semibold text-blue-300">EASM Enterprise Dashboard</h2>
+          <div className="text-sm text-slate-400">Visão consolidada de ativos e riscos</div>
+        </div>
+        
+        <div className="mb-6 rounded-xl border border-blue-500/30 bg-blue-900/20 p-4">
+          <ExecutiveSummaryCard 
+            summary={easmTrends?.temporal_narrative} 
+            easm_rating={easmRating.score}
+          />
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2 mb-6">
+          <EASMRatingCard rating={easmRating.score} grade={easmRating.grade} />
+          <AlertsCard alerts={easmAlerts} />
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2 mb-6">
+          <FAIRPillarsCard decomposition={easmTrends?.historical_ratings?.[easmTrends.historical_ratings.length - 1]?.pillars} />
+          <TemporalCurveCard trends={easmTrends} />
+        </div>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
+          <h3 className="font-display text-lg font-semibold mb-4">Asset Inventory</h3>
+          <AssetListCard assets={easmAssets} />
+        </section>
+      </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
         <div className="col-span-2 md:col-span-2">
@@ -574,31 +643,6 @@ export default function DashboardPage() {
         </div>
         <p className="mt-3 text-xs text-slate-400">Total aberto: {stats.findings_open || 0} | Triados: {stats.findings_triaged || 0}</p>
       </section>
-
-      {/* EASM Enterprise Section */}
-      <div className="mt-8 border-t border-slate-800 pt-8">
-        <h2 className="font-display text-2xl font-semibold mb-6">EASM Enterprise Dashboard</h2>
-        
-        <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <EASMRatingCard rating={easmRating.score} grade={easmRating.grade} />
-          <AlertsCard alerts={easmAlerts} />
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <FAIRPillarsCard decomposition={easmTrends?.historical_ratings?.[easmTrends.historical_ratings.length - 1]?.pillars} />
-          <TemporalCurveCard trends={easmTrends} />
-        </div>
-
-        <ExecutiveSummaryCard 
-          summary={easmTrends?.temporal_narrative} 
-          easm_rating={easmRating.score}
-        />
-
-        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-          <h3 className="font-display text-lg font-semibold mb-4">Asset Inventory</h3>
-          <AssetListCard assets={easmAssets} />
-        </section>
-      </div>
     </main>
   );
 }
