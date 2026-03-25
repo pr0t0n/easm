@@ -56,6 +56,8 @@ export default function DashboardPage() {
   const [wafSummary, setWafSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], vendors: [] });
   const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
   const [vulnToolExecution, setVulnToolExecution] = useState({ scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
+  const [continuousRating, setContinuousRating] = useState({ score: 0, grade: "F", factors: [] });
+  const [ratingTimeline, setRatingTimeline] = useState([]);
 
   useEffect(() => {
     const load = async () => {
@@ -93,6 +95,8 @@ export default function DashboardPage() {
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
+        setContinuousRating(dashboard.continuous_rating || { score: 0, grade: "F", factors: [] });
+        setRatingTimeline(dashboard.rating_timeline || []);
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -141,6 +145,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatCard label="Rating Externo" value={Number(continuousRating?.score || 0).toFixed(1)} sub={`grade ${continuousRating?.grade || "-"}`} color="text-fuchsia-300" />
         <StatCard label="FAIR Medio" value={stats.fair_avg_score || 0} sub="score medio 0-100" color="text-cyan-300" />
         <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
         <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />
@@ -150,6 +155,49 @@ export default function DashboardPage() {
         <StatCard label="Cobertura OSINT" value={stats.osint_findings || 0} sub="eventos de inteligencia externa" color="text-sky-300" />
         <StatCard label="WAF Detectado" value={stats.waf_findings || 0} sub="achados no ciclo" color="text-blue-300" />
         <StatCard label="Headers (Issues)" value={stats.security_header_findings || 0} sub="lacunas de hardening" color="text-indigo-300" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <h2 className="font-display text-lg font-semibold">Decomposição Formal do Rating</h2>
+          <p className="mt-1 text-xs text-slate-400">Fatores com peso, evidência e impacto na nota final.</p>
+          <div className="mt-3 space-y-3">
+            {(continuousRating?.factors || []).length === 0 && <p className="text-sm text-slate-500">Sem fatores calculados.</p>}
+            {(continuousRating?.factors || []).map((f) => (
+              <div key={f.id} className="rounded-xl border border-slate-700 bg-slate-800/40 p-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-slate-100">{f.name}</p>
+                  <p className="text-xs text-slate-300">peso {Math.round((Number(f.weight || 0) * 100))}%</p>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-xs text-slate-400">
+                  <span>Score: {Number(f.score || 0).toFixed(2)}</span>
+                  <span>Impacto: {Number(f.impact_points || 0).toFixed(2)} pts</span>
+                </div>
+                <div className="mt-2 text-[11px] text-slate-400 break-all">Evidência: {JSON.stringify(f.evidence || {})}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <h2 className="font-display text-lg font-semibold">Curva Temporal do Rating</h2>
+          <p className="mt-1 text-xs text-slate-400">Evolução por scan com penalidade por persistência de risco.</p>
+          <div className="mt-3 space-y-2 max-h-72 overflow-y-auto pr-1">
+            {(ratingTimeline || []).length === 0 && <p className="text-sm text-slate-500">Sem histórico temporal suficiente.</p>}
+            {(ratingTimeline || []).slice(-15).reverse().map((row) => (
+              <div key={`rt-${row.scan_id}`} className="rounded-xl border border-slate-700 bg-slate-800/40 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between text-slate-200">
+                  <span>Scan #{row.scan_id}</span>
+                  <span className="font-semibold text-fuchsia-300">{Number(row.rating_score || 0).toFixed(2)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-slate-400">
+                  <span>Base: {Number(row.base_score || 0).toFixed(2)}</span>
+                  <span>Penalidade persistência: {Number(row.persistence_penalty || 0).toFixed(2)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

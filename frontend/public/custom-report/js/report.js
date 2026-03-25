@@ -145,6 +145,41 @@ function renderFairAndBenchmark(report) {
   setText('calcBaseFormula', calc.base_formula || fallbackCalc.baseFormula);
   setText('calcPenalty', calc.medium_low_penalty ?? fallbackCalc.mediumLowPenalty);
   setText('calcHuman', calc.human_readable || fallbackCalc.humanReadable);
+
+  const continuous = v2.continuous_rating || {};
+  const timeline = Array.isArray(v2.rating_timeline) ? v2.rating_timeline : [];
+  setText('contRatingScore', continuous.score != null ? Number(continuous.score).toFixed(2) : '-');
+  setText('contRatingGrade', continuous.grade || '-');
+  setText('contRatingMethod', continuous.methodology || '-');
+  setText('contRatingFactors', Array.isArray(continuous.factors) ? continuous.factors.length : 0);
+
+  const factorsTable = document.getElementById('ratingFactorsTable');
+  if (factorsTable) {
+    const factors = Array.isArray(continuous.factors) ? continuous.factors : [];
+    if (!factors.length) {
+      factorsTable.innerHTML = 'Sem decomposição disponível.';
+    } else {
+      factorsTable.innerHTML = `
+        <table class="method-table" aria-label="Decomposição formal do rating contínuo">
+          <thead><tr><th>Fator</th><th>Peso</th><th>Score</th><th>Impacto</th></tr></thead>
+          <tbody>
+            ${factors.map((f) => `<tr><td>${esc(f.name || '-')}</td><td>${Math.round((Number(f.weight || 0) * 100))}%</td><td>${Number(f.score || 0).toFixed(2)}</td><td>${Number(f.impact_points || 0).toFixed(2)}</td></tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+  }
+
+  const timelineBox = document.getElementById('ratingTimelineBox');
+  if (timelineBox) {
+    if (!timeline.length) {
+      timelineBox.innerHTML = 'Sem curva temporal disponível.';
+    } else {
+      const latest = timeline.slice(-8).reverse();
+      timelineBox.innerHTML = latest
+        .map((row) => `Scan #${esc(row.scan_id)} | score ${Number(row.rating_score || 0).toFixed(2)} | penalidade persistência ${Number(row.persistence_penalty || 0).toFixed(2)}`)
+        .join('<br/>');
+    }
+  }
 }
 
 function resolveReportTarget(report, v2) {

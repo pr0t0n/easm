@@ -18,7 +18,13 @@ from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanRespon
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
-from app.services.risk_service import build_priority_reason, compute_age_metrics, compute_fair_metrics
+from app.services.risk_service import (
+    build_priority_reason,
+    build_rating_timeline,
+    compute_age_metrics,
+    compute_continuous_rating,
+    compute_fair_metrics,
+)
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
 from app.workers.worker_groups import get_worker_groups
@@ -2449,21 +2455,6 @@ def scan_report(
         if sev in severity_count_vuln:
             severity_count_vuln[sev] += 1
 
-    score = max(
-        0,
-        min(
-            100,
-            100
-            - (
-                severity_count_vuln["critical"] * 30
-                + severity_count_vuln["high"] * 15
-                + severity_count_vuln["medium"] * 8
-                + severity_count_vuln["low"] * 2
-            ),
-        ),
-    )
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
-
     fair_total = _compute_fair_summary(findings, enriched_findings, fair_ale_total_open, fair_ale_total_all)
 
     frameworks = _compute_framework_scores(open_vulnerability_table)
@@ -2644,6 +2635,17 @@ def scan_report(
         "open": len(open_vulnerability_table),
         "triaged": triaged_vulnerability_count,
     }
+
+    age_env_avg_days = round(
+        sum(float((item.get("age") or {}).get("known_in_environment_days") or 0.0) for item in enriched_findings)
+        / max(1, len(enriched_findings)),
+        2,
+    )
+    age_market_avg_days = round(
+        sum(float((item.get("age") or {}).get("known_in_market_days") or 0.0) for item in enriched_findings)
+        / max(1, len(enriched_findings)),
+        2,
+    )
     strategic_points = _build_strategic_points(
         target=job.target_query,
         summary=summary_data,
@@ -2656,6 +2658,18 @@ def scan_report(
     segment = _infer_target_segment(job.target_query)
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     target_evolution = _build_target_evolution(db, job.target_query, scan_id)
+    rating_timeline = build_rating_timeline(target_evolution.get("timeline") or [])
+    continuous_rating = compute_continuous_rating(
+        severity_count=severity_count_vuln,
+        fair_avg_score=float(fair_total.get("fair_avg_score") or 0.0),
+        fair_ale_total_usd=float(fair_total.get("ale_total_open_usd") or 0.0),
+        age_env_avg_days=age_env_avg_days,
+        age_market_avg_days=age_market_avg_days,
+        lifecycle=lifecycle,
+        recurring_findings_count=len([r for r in (target_evolution.get("recurring_findings") or []) if str(r.get("trend") or "") == "persisting"]),
+    )
+    score = float(continuous_rating.get("score") or 0.0)
+    grade = str(continuous_rating.get("grade") or "F")
 
     scan_mode = str((job.state_data or {}).get("scan_mode") or ("scheduled" if str(job.mode or "").lower() == "scheduled" else "unit")).strip().lower()
     groups = get_worker_groups("scheduled" if scan_mode == "scheduled" else "unit")
@@ -2734,6 +2748,8 @@ def scan_report(
                 "technical_points": technical_points,
                 "segment_benchmark": benchmark,
                 "target_evolution": target_evolution,
+                "rating_timeline": rating_timeline,
+                "continuous_rating": continuous_rating,
                 "waf_summary": {
                     "findings_count": waf_findings_count,
                     "assets_count": len(waf_assets),
@@ -3328,6 +3344,40 @@ def dashboard_insights(
 
     avg_fair = round(fair_total / max(len(findings), 1), 2)
 
+    recurring_findings_count = len([count for count in vuln_counter.values() if int(count) > 1])
+    lifecycle_global = {
+        "open": int(open_issues),
+        "new": int(sev_count_vuln.get("critical", 0) + sev_count_vuln.get("high", 0)),
+        "corrected": int(mitigated),
+    }
+    continuous_rating = compute_continuous_rating(
+        severity_count=sev_count_vuln,
+        fair_avg_score=avg_fair,
+        fair_ale_total_usd=float(ale_total),
+        age_env_avg_days=float(_avg(age_env_samples)),
+        age_market_avg_days=float(_avg(age_market_samples)),
+        lifecycle=lifecycle_global,
+        recurring_findings_count=recurring_findings_count,
+    )
+
+    scan_timeline_seed: list[dict] = []
+    for s in sorted(jobs, key=lambda item: item.created_at or datetime.min):
+        frows = [f for f in findings_by_scan.get(s.id, []) if not f.is_false_positive]
+        sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for f in frows:
+            k = str(f.severity or "low").lower()
+            if k in sev:
+                sev[k] += 1
+        scan_timeline_seed.append(
+            {
+                "scan_id": s.id,
+                "created_at": s.created_at,
+                "open_findings": len(frows),
+                "severity": sev,
+            }
+        )
+    rating_timeline = build_rating_timeline(scan_timeline_seed)
+
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
     risk_points = (
@@ -3358,6 +3408,8 @@ def dashboard_insights(
             "recon_findings": recon_findings_count,
             "osint_findings": osint_findings_count,
             "vulnerability_findings": vulnerability_findings_count,
+            "external_rating_score": continuous_rating.get("score"),
+            "external_rating_grade": continuous_rating.get("grade"),
         },
         "frameworks": {
             "iso27001": {"score": base_framework_score},
@@ -3413,4 +3465,6 @@ def dashboard_insights(
             "limit": prioritized_limit,
             "offset": prioritized_offset,
         },
+        "continuous_rating": continuous_rating,
+        "rating_timeline": rating_timeline,
     }
