@@ -74,8 +74,7 @@ export default function DashboardPage() {
   const [easmAssets, setEasmAssets] = useState([]);
   
   // Filters
-  const [accessGroups, setAccessGroups] = useState([]);
-  const [selectedGroup, setSelectedGroup] = useState("");
+  const [domainOptions, setDomainOptions] = useState([]);
   const [selectedTarget, setSelectedTarget] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
@@ -90,25 +89,15 @@ export default function DashboardPage() {
       setLoading(true);
       setError("");
       try {
-        // Carrega access groups
-        const groupsRes = await client.get("/api/access-groups").catch(() => ({ data: [] }));
-        setAccessGroups(groupsRes.data || []);
-
         // Monta query params com filtros
         const params = new URLSearchParams();
         if (selectedTarget.trim()) {
           params.append("target", selectedTarget.trim());
         }
-        if (selectedGroup) {
-          // Garante que é enviado como número
-          const groupId = String(selectedGroup).trim();
-          if (groupId && groupId !== "") {
-            params.append("access_group_id", groupId);
-          }
-        }
 
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
+        setDomainOptions(Array.isArray(dashboard.targets) ? dashboard.targets : []);
 
         setStats({
           scans: dashboard.stats?.scans || 0,
@@ -186,19 +175,7 @@ export default function DashboardPage() {
     };
 
     load();
-  }, [selectedGroup, selectedTarget]);
-
-  useEffect(() => {
-    const loadGroups = async () => {
-      try {
-        const groupsRes = await client.get("/api/access-groups").catch(() => ({ data: [] }));
-        setAccessGroups(groupsRes.data || []);
-      } catch (err) {
-        console.log("Erro ao carregar grupos:", err);
-      }
-    };
-    loadGroups();
-  }, []);
+  }, [selectedTarget]);
 
   if (loading) {
     return (
@@ -230,19 +207,20 @@ export default function DashboardPage() {
         <h2 className="text-sm font-semibold text-slate-200 mb-3">Filtros</h2>
         <div className="grid gap-3 md:grid-cols-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo/Cliente</label>
+            <label className="block text-xs font-semibold text-slate-400 mb-2">Domínios</label>
             <select
-              value={selectedGroup}
+              value={selectedTarget}
               onChange={(e) => {
-                const val = e.target.value;
-                setSelectedGroup(val === "" ? "" : String(val));
+                const val = String(e.target.value || "");
+                setSelectedTarget(val);
+                setSearchInput(val);
               }}
               className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
             >
-              <option value="">Todos os grupos</option>
-              {accessGroups.map((g) => (
-                <option key={g.id} value={String(g.id)}>
-                  {g.name}
+              <option value="">Todos os domínios</option>
+              {domainOptions.map((domain) => (
+                <option key={domain} value={domain}>
+                  {domain}
                 </option>
               ))}
             </select>
@@ -274,7 +252,6 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => {
-                setSelectedGroup("");
                 setSelectedTarget("");
                 setSearchInput("");
               }}
@@ -284,18 +261,17 @@ export default function DashboardPage() {
             </button>
           </div>
         </div>
-        {(selectedGroup || selectedTarget) && (
+        {selectedTarget && (
           <p className="mt-3 text-xs text-slate-400">
             <span className="text-slate-300">Filtros ativos:</span>
-            {selectedGroup && ` Grupo: ${accessGroups.find(g => String(g.id) === String(selectedGroup))?.name || "desconhecido"}`}
             {selectedTarget && ` | Domínio: "${selectedTarget}"`}
           </p>
         )}
 
-        {(selectedGroup || selectedTarget) && stats && stats.scans === 0 && (
+        {selectedTarget && stats && stats.scans === 0 && (
           <div className="mt-3 rounded-lg border border-slate-600 bg-slate-800/50 px-3 py-2">
             <p className="text-xs text-slate-300">
-              ℹ️ Nenhum scan encontrado com esses filtros. O grupo/domínio pode não ter análises executadas ainda.
+              ℹ️ Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
             </p>
           </div>
         )}
