@@ -728,6 +728,35 @@ body {
   border-bottom: none;
 }
 
+.benchmark-average-box {
+  margin: 10px 0 14px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.benchmark-average-box > div {
+  background: rgba(59,130,246,0.08);
+  border: 1px solid rgba(59,130,246,0.24);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.benchmark-average-box span {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+}
+
+.benchmark-average-box strong {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
 .vuln-filters {
   display: flex;
   align-items: center;
@@ -1120,9 +1149,10 @@ body {
   }
 
   body {
-    background: #0d1527;
+    background: #ffffff;
     margin: 0;
     padding: 0;
+    color: #111827 !important;
   }
 
   .page {
@@ -1137,26 +1167,62 @@ body {
     page-break-after: always;
     page-break-inside: auto;
     overflow: visible;
-    background: #0d1527 !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+
+  .page::before {
+    display: none !important;
   }
 
   .cover-page {
-    background: #060b17 !important;
+    background: #ffffff !important;
     min-height: calc(297mm - 20mm) !important;
     max-height: none !important;
     padding: 18mm 12mm !important;
+    color: #111827 !important;
+    border: none !important;
   }
 
   /* Remove efeitos decorativos que podem rasterizar como retangulo cinza em alguns drivers de impressao */
+  .cover-page::before,
   .cover-page::after,
   .cover-page .bg-grid {
     display: none !important;
     background: none !important;
   }
 
-  .brand-shield,
+  .cover-title {
+    background: none !important;
+    -webkit-text-fill-color: #111827 !important;
+    color: #111827 !important;
+  }
+
+  .cover-subtitle,
+  .cover-confidential,
+  .cover-org-label,
+  .meta-label,
+  .brand-sub,
+  .brand-powered,
+  .page-tag {
+    color: #374151 !important;
+  }
+
   .cover-org,
   .cover-meta-item,
+  .cover-badge,
+  .report-footer-box,
+  .calc-result-box,
+  .cri-calc-box,
+  .benchmark-segment-info,
+  .benchmark-pill,
+  .benchmark-average-box > div {
+    background: #ffffff !important;
+    border-color: #d1d5db !important;
+    color: #111827 !important;
+  }
+
+  .brand-shield,
   .cover-badge {
     box-shadow: none !important;
     filter: none !important;
@@ -1232,7 +1298,8 @@ body {
 
   .kpi-grid { grid-template-columns: repeat(3, 1fr); }
   .fair-kpi-grid,
-  .benchmark-head-grid { grid-template-columns: 1fr 1fr; }
+  .benchmark-head-grid,
+  .benchmark-average-box { grid-template-columns: 1fr 1fr; }
   .calc-result-grid { grid-template-columns: 1fr; }
   .cover-meta-grid { grid-template-columns: 1fr 1fr; }
   .glossary-grid { grid-template-columns: 1fr; }

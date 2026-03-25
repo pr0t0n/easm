@@ -222,7 +222,8 @@
 
   <p class="section-intro">
     Comparação dos índices de risco calculados para o alvo versus os benchmarks esperados para o segmento identificado.
-    Valores abaixo do benchmark indicam melhor postura de segurança.
+    Regra comparativa: quando o valor do alvo for menor que o benchmark, o status é pior (vermelho);
+    quando o valor do alvo for maior que o benchmark, o status é melhor (verde).
   </p>
 
   <div class="benchmark-segment-box">
@@ -247,6 +248,13 @@
       <tr><td colspan="5" style="text-align:center;color:#888;">Carregando dados...</td></tr>
     </tbody>
   </table>
+
+  <div class="benchmark-average-box">
+    <div><span>Média Target</span><strong id="avgTarget">-</strong></div>
+    <div><span>Média Benchmark</span><strong id="avgBenchmark">-</strong></div>
+    <div><span>Diferença Média</span><strong id="avgDiff">-</strong></div>
+    <div><span>Nota Comparativa</span><strong id="avgGrade">-</strong></div>
+  </div>
 
   <div class="benchmark-cri-detail">
     <div class="cri-calc-box">
