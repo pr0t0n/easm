@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import csv
 import io
 import json
+import math
 import re
 from urllib.parse import urlparse
 
@@ -1100,28 +1101,41 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
     target_cri_score = max(5, min(100, int(raw_score)))
     min_floor_applied = bool(raw_score < 5)
 
-    # Indices auxiliares exibidos no relatorio, coerentes com o score CRI calculado.
-    financial_loss_exposure_index = int(min(100, max(0, critical_high_penalty)))
-    data_sensitivity_risk_index = int(min(100, max(0, round((critical_high_penalty * 0.7) + (medium * 4) + low))))
-    reliability_safety_impact_index = int(min(100, max(0, round((critical_high_penalty * 0.6) + (medium * 5) + (low * 2)))))
-    cyber_readiness_index = int(target_cri_score)
-
-    segment_cri_score = int(
-        round(
+    # Indices auxiliares exibidos no relatorio.
+    # Incorporam severidade + impacto financeiro (ALE) para evitar inconsistencias
+    # como CRI muito baixo com exposicao financeira artificialmente zerada.
+    ale_component = min(35.0, math.log10(max(float(fair_open_usd or 0.0), 0.0) + 1.0) * 8.0)
+    financial_loss_exposure_index = int(
+        min(
+            100,
             max(
-                0.0,
-                min(
-                    100.0,
-                    (
-                        (100.0 - float(segment_base["expected_financial_loss_exposure_index"])) * 0.30
-                        + (100.0 - float(segment_base["expected_data_sensitivity_risk_index"])) * 0.25
-                        + (100.0 - float(segment_base["expected_reliability_safety_impact_index"])) * 0.25
-                        + (float(segment_base["expected_cyber_readiness_index"]) * 0.20)
-                    ),
-                ),
-            )
+                0,
+                round((critical * 28) + (high * 16) + (medium * 6) + (low * 2) + ale_component),
+            ),
         )
     )
+    data_sensitivity_risk_index = int(
+        min(
+            100,
+            max(
+                0,
+                round((financial_loss_exposure_index * 0.55) + (critical * 12) + (high * 7) + (medium * 3) + (low * 1.5)),
+            ),
+        )
+    )
+    reliability_safety_impact_index = int(
+        min(
+            100,
+            max(
+                0,
+                round((financial_loss_exposure_index * 0.50) + (critical * 10) + (high * 8) + (medium * 4) + (low * 2)),
+            ),
+        )
+    )
+    cyber_readiness_index = int(target_cri_score)
+
+    # O score CRI esperado do benchmark deve ser consistente com o readiness esperado do segmento.
+    segment_cri_score = int(segment_base["expected_cyber_readiness_index"])
 
     segment_exposure = int(segment_base["expected_external_exposure_index"])
     target_exposure_index = max(0, min(100, 100 - int(target_cri_score)))
