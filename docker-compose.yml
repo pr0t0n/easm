@@ -106,13 +106,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_recon
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=12,4
-      --prefetch-multiplier=1
-      --queues=scan.unit,scan.scheduled,worker.unit.reconhecimento,worker.scheduled.reconhecimento
-      --hostname=worker-unit-recon@%h
+    command: sh /app/scripts/start_celery_worker.sh recon worker-recon
     env_file:
       - .env
     environment:
@@ -134,13 +128,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_recon_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=12,4
-      --prefetch-multiplier=1
-      --queues=scan.unit,scan.scheduled,worker.unit.reconhecimento,worker.scheduled.reconhecimento
-      --hostname=worker-unit-recon-prod@%h
+    command: sh /app/scripts/start_celery_worker.sh recon worker-recon-prod
     env_file:
       - .env
     environment:
@@ -179,13 +167,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_vuln
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=28,8
-      --prefetch-multiplier=1
-      --queues=worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade
-      --hostname=worker-unit-vuln@%h
+    command: sh /app/scripts/start_celery_worker.sh vuln worker-vuln
     env_file:
       - .env
     environment:
@@ -208,13 +190,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_osint
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=20,4
-      --prefetch-multiplier=1
-      --queues=worker.unit.osint,worker.scheduled.osint
-      --hostname=worker-unit-osint@%h
+    command: sh /app/scripts/start_celery_worker.sh osint worker-osint
     env_file:
       - .env
     environment:
@@ -237,13 +213,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_vuln_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=28,8
-      --prefetch-multiplier=1
-      --queues=worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade
-      --hostname=worker-unit-vuln-prod@%h
+    command: sh /app/scripts/start_celery_worker.sh vuln worker-vuln-prod
     env_file:
       - .env
     environment:
@@ -265,13 +235,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: easm_worker_unit_osint_prod
-    command: >
-      celery -A app.workers.celery_app.celery worker
-      --loglevel=INFO
-      --autoscale=20,4
-      --prefetch-multiplier=1
-      --queues=worker.unit.osint,worker.scheduled.osint
-      --hostname=worker-unit-osint-prod@%h
+    command: sh /app/scripts/start_celery_worker.sh osint worker-osint-prod
     env_file:
       - .env
     environment:
