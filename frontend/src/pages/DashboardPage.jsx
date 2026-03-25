@@ -115,6 +115,13 @@ export default function DashboardPage() {
           findings_total: dashboard.stats?.findings_total || 0,
           findings_open: dashboard.stats?.findings_open || 0,
           findings_triaged: dashboard.stats?.findings_triaged || 0,
+          fair_avg_score: dashboard.stats?.fair_avg_score || 0,
+          fair_ale_total_usd: dashboard.stats?.fair_ale_total_usd || 0,
+          age_env_avg_days: dashboard.stats?.age_env_avg_days || 0,
+          age_market_avg_days: dashboard.stats?.age_market_avg_days || 0,
+          age_exploit_avg_days: dashboard.stats?.age_exploit_avg_days || 0,
+          external_rating_score: dashboard.stats?.external_rating_score || 0,
+          external_rating_grade: dashboard.stats?.external_rating_grade || "F",
           vulnerability_findings: dashboard.stats?.vulnerability_findings || 0,
           recon_findings: dashboard.stats?.recon_findings || 0,
           osint_findings: dashboard.stats?.osint_findings || 0,
@@ -342,7 +349,12 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatCard label="Rating Externo" value={Number(continuousRating?.score || 0).toFixed(1)} sub={`grade ${continuousRating?.grade || "-"}`} color="text-fuchsia-300" />
+        <StatCard
+          label="Rating Externo"
+          value={Number(continuousRating?.score ?? stats.external_rating_score ?? 0).toFixed(1)}
+          sub={`grade ${continuousRating?.grade || stats.external_rating_grade || "-"}`}
+          color="text-fuchsia-300"
+        />
         <StatCard label="FAIR Medio" value={stats.fair_avg_score || 0} sub="score medio 0-100" color="text-cyan-300" />
         <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
         <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />

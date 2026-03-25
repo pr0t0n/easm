@@ -182,6 +182,96 @@ function renderFairAndBenchmark(report) {
   }
 }
 
+function renderBenchmarkComparison(report) {
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const benchmark = v2.segment_benchmark || {};
+
+  setText('benchmarkSegmentName', benchmark.segment || 'Digital Services');
+  setText('benchmarkSegmentSource', benchmark.source || 'WEF Global Cybersecurity Outlook');
+  
+  const assessmentMap = {
+    melhor_que_o_benchmark: 'Melhor que o benchmark (menor exposição)',
+    acima_do_benchmark: 'Acima do benchmark (maior exposição)',
+    similar_ao_benchmark: 'Similar ao benchmark',
+  };
+  setText('benchmarkSegmentAssessment', assessmentMap[benchmark.assessment] || benchmark.assessment || 'N/A');
+
+  // Renderizar tabela de comparação
+  const comparisonTable = document.getElementById('benchmarkComparisonTable');
+  if (!comparisonTable) return;
+
+  const indices = [
+    {
+      label: 'Cyber Readiness Index',
+      target: benchmark.target_cyber_readiness_index,
+      segment: benchmark.segment_cyber_readiness_index,
+      higherIsBetter: true,
+    },
+    {
+      label: 'Financial Loss Exposure Index',
+      target: benchmark.target_financial_loss_exposure_index,
+      segment: benchmark.segment_financial_loss_exposure_index,
+      higherIsBetter: false,
+    },
+    {
+      label: 'Data Sensitivity Risk Index',
+      target: benchmark.target_data_sensitivity_risk_index,
+      segment: benchmark.segment_data_sensitivity_risk_index,
+      higherIsBetter: false,
+    },
+    {
+      label: 'Reliability/Safety Impact Index',
+      target: benchmark.target_reliability_safety_impact_index,
+      segment: benchmark.segment_reliability_safety_impact_index,
+      higherIsBetter: false,
+    },
+    {
+      label: 'External Exposure Index',
+      target: benchmark.target_external_exposure_index,
+      segment: benchmark.segment_external_exposure_index || benchmark.segment_external_exposure_reference,
+      higherIsBetter: false,
+    },
+  ];
+
+  const rows = indices.map((item) => {
+    const targetVal = Number(item.target || 0);
+    const segmentVal = Number(item.segment || 0);
+    const diff = targetVal - segmentVal;
+    const delta = item.higherIsBetter ? diff : (segmentVal - targetVal);
+    const status = delta > 10 ? 'Melhor' : Math.abs(delta) <= 10 ? 'Similar' : 'Pior';
+    const statusColor = delta > 10 ? '#16a34a' : Math.abs(delta) <= 10 ? '#ea580c' : '#dc2626';
+
+    return `<tr>
+      <td>${esc(item.label)}</td>
+      <td style="text-align:center;font-weight:bold;">${targetVal}</td>
+      <td style="text-align:center;font-weight:bold;">${segmentVal}</td>
+      <td style="text-align:center;font-weight:bold;color:${statusColor};">${diff > 0 ? '+' : ''}${diff}</td>
+      <td style="text-align:center;color:${statusColor};font-weight:600;">${status}</td>
+    </tr>`;
+  }).join('');
+
+  comparisonTable.innerHTML = rows || '<tr><td colspan="5">Sem dados de benchmark disponível.</td></tr>';
+
+  // Detalhes do CRI
+  setText('detailTargetCRI', Number(benchmark.target_cri_score || 0));
+  setText('detailBenchmarkCRI', Number(benchmark.segment_cri_score || 0));
+  
+  const criDiff = Number(benchmark.target_cri_score || 0) - Number(benchmark.segment_cri_score || 0);
+  setText('detailCRIDiff', criDiff > 0 ? `+${criDiff}` : `${criDiff}`);
+  const expectedCriGrade = computeGrade(Number(benchmark.segment_cri_score || 0));
+  setText('detailExpectedCRIGrade', expectedCriGrade);
+
+  let criInterpretation = '';
+  if (criDiff > 3) {
+    criInterpretation = 'Postura melhor que o benchmark setorial — exposição abaixo do esperado para o setor.';
+  } else if (criDiff < -3) {
+    criInterpretation = 'Postura acima do benchmark setorial — exposição maior que o esperado para o setor. Requer atenção prioritária.';
+  } else {
+    criInterpretation = 'Postura similar ao benchmark setorial — alinhada com expectativas para o setor.';
+  }
+  setText('detailCRIInterpretation', criInterpretation);
+}
+
 function resolveReportTarget(report, v2) {
   return report?.target
     || report?.scan_target
@@ -575,6 +665,7 @@ function applyTopVariables(report) {
 
   renderCategoryBars(v2.category_scores || [], total);
   renderFairAndBenchmark(report);
+  renderBenchmarkComparison(report);
 
   setText('footerOrg', org);
   setText('footerDate', fmtDate(createdAt));

@@ -215,6 +215,70 @@
 
 <div class="page">
   <div class="page-header">
+    <span class="section-label">03A</span>
+    <span class="section-title">Comparativo: Target vs Benchmark Setorial (WEF)</span>
+    <span class="page-tag">ANÁLISE</span>
+  </div>
+
+  <p class="section-intro">
+    Comparação dos índices de risco calculados para o alvo versus os benchmarks esperados para o segmento identificado.
+    Valores abaixo do benchmark indicam melhor postura de segurança.
+  </p>
+
+  <div class="benchmark-segment-box">
+    <div class="benchmark-segment-info">
+      <span><strong>Segmento:</strong> <span id="benchmarkSegmentName">-</span></span>
+      <span><strong>Referência:</strong> <span id="benchmarkSegmentSource">WEF Global Cybersecurity Outlook</span></span>
+      <span><strong>Avaliação:</strong> <span id="benchmarkSegmentAssessment">-</span></span>
+    </div>
+  </div>
+
+  <table class="method-table" aria-label="Comparativa de índices de risco: target vs benchmark">
+    <thead>
+      <tr>
+        <th>Índice de Risco</th>
+        <th style="width:120px;">Target</th>
+        <th style="width:120px;">Benchmark</th>
+        <th style="width:100px;">Diferença</th>
+        <th style="width:150px;">Status</th>
+      </tr>
+    </thead>
+    <tbody id="benchmarkComparisonTable">
+      <tr><td colspan="5" style="text-align:center;color:#888;">Carregando dados...</td></tr>
+    </tbody>
+  </table>
+
+  <div class="benchmark-cri-detail">
+    <div class="cri-calc-box">
+      <div class="cri-header">Detalhamento do Cálculo CRI</div>
+      <table class="cri-calc-table"  aria-label="Detalhamento do cálculo do Cyber Readiness Index">
+        <tr>
+          <td><strong>Score CRI do Target</strong></td>
+          <td style="font-weight:bold;text-align:right;" id="detailTargetCRI">-</td>
+        </tr>
+        <tr>
+          <td><strong>Score CRI Esperado (Benchmark Setorial)</strong></td>
+          <td style="font-weight:bold;text-align:right;" id="detailBenchmarkCRI">-</td>
+        </tr>
+        <tr>
+          <td><strong>Nota Esperada do CRI (Benchmark)</strong></td>
+          <td style="font-weight:bold;text-align:right;" id="detailExpectedCRIGrade">-</td>
+        </tr>
+        <tr>
+          <td><strong>Diferença</strong></td>
+          <td style="font-weight:bold;text-align:right;" id="detailCRIDiff">-</td>
+        </tr>
+        <tr>
+          <td><strong>Interpretação</strong></td>
+          <td style="font-style:italic;" id="detailCRIInterpretation">-</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="page">
+  <div class="page-header">
     <span class="section-label">04</span>
     <span class="section-title">Vulnerabilidades Identificadas</span>
     <span class="page-tag">TÉCNICO</span>

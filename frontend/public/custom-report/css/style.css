@@ -677,6 +677,57 @@ body {
   padding: 8px;
 }
 
+.benchmark-segment-box {
+  margin-bottom: 12px;
+}
+
+.benchmark-segment-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: rgba(59,130,246,0.08);
+  border: 1px solid rgba(59,130,246,0.24);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.benchmark-cri-detail {
+  margin-top: 10px;
+}
+
+.cri-calc-box {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+
+.cri-header {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.cri-calc-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cri-calc-table td {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 6px;
+}
+
+.cri-calc-table tr:last-child td {
+  border-bottom: none;
+}
+
 .vuln-filters {
   display: flex;
   align-items: center;
