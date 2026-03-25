@@ -28,6 +28,12 @@ def is_target_allowed(db: Session, owner_id: int, target: str, tool_group: str =
         .filter(PolicyAllowlistEntry.policy_id == policy.id, PolicyAllowlistEntry.is_active.is_(True))
         .all()
     )
+
+    # Sem allowlist ativa => compliance não configurado explicitamente.
+    # Nesse caso, não bloquear execução por política.
+    if not entries:
+        return True
+
     normalized_target = target.strip().lower()
     normalized_group = tool_group.strip().lower()
 

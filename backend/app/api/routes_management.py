@@ -197,7 +197,8 @@ def _create_scan_from_schedule(
     access_group_id: int | None,
     mode: str = "scheduled",
 ) -> ScanJob:
-    allowlist_ok = is_target_allowed(db, current_user.id, target, "*")
+    batch_targets = _parse_targets(target)
+    allowlist_ok = all(is_target_allowed(db, current_user.id, t, "*") for t in batch_targets) if batch_targets else is_target_allowed(db, current_user.id, target, "*")
 
     if not allowlist_ok:
         compliance_status = "blocked_policy"
