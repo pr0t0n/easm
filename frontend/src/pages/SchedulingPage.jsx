@@ -18,6 +18,7 @@ export default function SchedulingPage() {
   const [schedules, setSchedules] = useState([]);
   const [groups, setGroups] = useState([]);
   const [editingId, setEditingId] = useState(null);
+  const [executionInfo, setExecutionInfo] = useState(null);
 
   const loadSchedules = async () => {
     const { data } = await client.get("/api/schedules");
@@ -77,8 +78,14 @@ export default function SchedulingPage() {
     try {
       const { data } = await client.post(`/api/schedules/${id}/execute`);
       const count = Array.isArray(data?.created_scans) ? data.created_scans.length : 0;
+      setExecutionInfo({
+        total_targets: data.total_targets || 0,
+        batch_size: data.batch_size || 25,
+        batches_created: data.batches_created || count,
+        created_scans: data.created_scans || [],
+      });
       await loadSchedules();
-      toastSuccess(`Execucao iniciada. Scans criados: ${count}.`);
+      toastSuccess(`✓ Execucao iniciada com sucesso\n${data.batches_created || count} jobs criados para ${data.total_targets || 0} alvo(s)`);
     } catch (error) {
       const detail = error?.response?.data?.detail;
       toastError(typeof detail === "string" ? detail : "Falha ao executar agendamento agora.");
@@ -91,6 +98,33 @@ export default function SchedulingPage() {
         <h2 className="text-xl font-semibold">Agendamento</h2>
         <p className="mt-1 text-sm text-slate-300">Informe alvos separados por ; e configure recorrencia.</p>
 
+        {executionInfo && (
+          <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4">
+            <h3 className="font-semibold text-emerald-300">Ultima Execucao</h3>
+            <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
+              <div>
+                <p className="text-slate-400">Total de alvos</p>
+                <p className="text-lg font-semibold text-white">{executionInfo.total_targets}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Tamanho do lote</p>
+                <p className="text-lg font-semibold text-white">{executionInfo.batch_size}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Lotes criados</p>
+                <p className="text-lg font-semibold text-white">{executionInfo.batches_created}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Scans (IDs)</p>
+                <p className="text-sm text-slate-200">{executionInfo.created_scans.join(", ") || "-"}</p>
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              <strong>Como funciona:</strong> Com {executionInfo.total_targets} alvo(s) e lotes de {executionInfo.batch_size} alvos, foram criados {executionInfo.batches_created} job(s) de scans distribuidos entre os workers unificados (recon, vuln, osint). Cada job processa seu lote em paralelo com escalamento automatico de CPU.
+            </p>
+          </div>
+        )}
+
         <form onSubmit={submit} className="mt-4 grid gap-3 md:grid-cols-2">
           <textarea
             className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
@@ -101,9 +135,9 @@ export default function SchedulingPage() {
           />
 
           <div className="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-slate-700 shadow-sm">
-            <p className="font-semibold text-slate-800">Execucao do Agendamento</p>
+            <p className="font-semibold text-slate-800">Execucao do Agendamento com Batching Inteligente</p>
             <p className="mt-1 leading-relaxed text-slate-700">
-              O agendamento executa scans nos alvos informados conforme a politica ativa do ambiente.
+              O agendamento executa scans nos alvos informados em lotes de ~25 alvos. Cada lote gera um ScanJob distribuido para o pool unificado de workers (recon, vuln, osint) com autoscalagem dinamica baseada em CPU. Exemplo: 100 alvos → 4 jobs em paralelo.
             </p>
           </div>
 
