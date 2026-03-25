@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.Column("pillar_scores", postgresql.JSONB(astext_type=sa.Text()), nullable=False, default="{}"),  # {perimeter_resilience: 85, ...}
         sa.Column("recorded_at", sa.DateTime(), nullable=False, index=True),
     )
-    op.create_index("ix_asset_rating_history_asset_id", "asset_rating_history", ["asset_id", "recorded_at"])
+    op.create_index("ix_asset_rating_history_asset_recorded_at", "asset_rating_history", ["asset_id", "recorded_at"])
 
     # ────────────────────────────────────────────────────────────────────────
     # Tabela: easm_alerts (webhooks, desvio de postura)
@@ -114,8 +114,7 @@ def upgrade() -> None:
         sa.Column("webhook_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True, default="{}"),
         sa.Column("created_at", sa.DateTime(), nullable=False, index=True),
     )
-    op.create_index("ix_easm_alerts_owner_id", "easm_alerts", ["owner_id", "is_resolved"])
-    op.create_index("ix_easm_alerts_asset_id", "easm_alerts", ["asset_id"])
+    op.create_index("ix_easm_alerts_owner_resolved", "easm_alerts", ["owner_id", "is_resolved"])
 
     # ────────────────────────────────────────────────────────────────────────
     # Tabela: easm_alert_rules (configuração de gatilhos)
