@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
+import {
+  EASMRatingCard,
+  FAIRPillarsCard,
+  TemporalCurveCard,
+  ExecutiveSummaryCard,
+  AlertsCard,
+  AssetListCard,
+} from "../components/EASMDashboard";
 
 const SEV_COLOR = {
   critical: "text-red-400 bg-red-500/10 border-red-500/30",
@@ -58,6 +66,12 @@ export default function DashboardPage() {
   const [vulnToolExecution, setVulnToolExecution] = useState({ scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
   const [continuousRating, setContinuousRating] = useState({ score: 0, grade: "F", factors: [] });
   const [ratingTimeline, setRatingTimeline] = useState([]);
+  
+  // EASM Enterprise
+  const [easmRating, setEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
+  const [easmTrends, setEasmTrends] = useState(null);
+  const [easmAlerts, setEasmAlerts] = useState([]);
+  const [easmAssets, setEasmAssets] = useState([]);
 
   useEffect(() => {
     const load = async () => {
@@ -97,6 +111,36 @@ export default function DashboardPage() {
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
         setContinuousRating(dashboard.continuous_rating || { score: 0, grade: "F", factors: [] });
         setRatingTimeline(dashboard.rating_timeline || []);
+
+        // Load EASM data
+        try {
+          const [assetsResp, alertsResp] = await Promise.all([
+            client.get("/api/dashboard/assets").catch(() => ({ data: [] })),
+            client.get("/api/easm/alerts").catch(() => ({ data: [] })),
+          ]);
+          
+          setEasmAssets(assetsResp.data || []);
+          setEasmAlerts(alertsResp.data || []);
+          
+          // Get latest asset for trends
+          if (assetsResp.data && assetsResp.data.length > 0) {
+            const topAsset = assetsResp.data[0];
+            try {
+              const trendsResp = await client.get(`/api/dashboard/trends/${topAsset.id}`);
+              setEasmTrends(trendsResp.data);
+              setEasmRating({
+                score: topAsset.easm_rating,
+                grade: topAsset.easm_grade,
+                pillars: [],
+              });
+            } catch (e) {
+              // Silent fail
+            }
+          }
+        } catch (e) {
+          // EASM endpoints may not be available yet
+          console.log("EASM endpoints not available");
+        }
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -446,6 +490,31 @@ export default function DashboardPage() {
         </div>
         <p className="mt-3 text-xs text-slate-400">Total aberto: {stats.findings_open || 0} | Triados: {stats.findings_triaged || 0}</p>
       </section>
+
+      {/* EASM Enterprise Section */}
+      <div className="mt-8 border-t border-slate-800 pt-8">
+        <h2 className="font-display text-2xl font-semibold mb-6">EASM Enterprise Dashboard</h2>
+        
+        <div className="grid gap-4 lg:grid-cols-2 mb-6">
+          <EASMRatingCard rating={easmRating.score} grade={easmRating.grade} />
+          <AlertsCard alerts={easmAlerts} />
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2 mb-6">
+          <FAIRPillarsCard decomposition={easmTrends?.historical_ratings?.[easmTrends.historical_ratings.length - 1]?.pillars} />
+          <TemporalCurveCard trends={easmTrends} />
+        </div>
+
+        <ExecutiveSummaryCard 
+          summary={easmTrends?.temporal_narrative} 
+          easm_rating={easmRating.score}
+        />
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
+          <h3 className="font-display text-lg font-semibold mb-4">Asset Inventory</h3>
+          <AssetListCard assets={easmAssets} />
+        </section>
+      </div>
     </main>
   );
 }

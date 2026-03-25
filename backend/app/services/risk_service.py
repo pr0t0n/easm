@@ -722,3 +722,249 @@ def build_fair_decomposition(
         "n_assets": n,
         "methodology_version": METHODOLOGY_VERSION,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TEMPORAL CURVES & REMEDIATION VELOCITY (Enterprise EASM)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def compute_remediation_velocity(
+    historical_ratings: list[dict],
+    period_days: int = 7,
+) -> dict[str, float]:
+    """
+    Calcula velocidade de remediação:
+    - Quão rápido o time de TI fecha as falhas?
+    - % de vulnerabilidades remediadas por semana
+    - Tendência: melhorando ou piorando?
+
+    Args:
+        historical_ratings: [
+            {"ts": "2026-03-18", "open_critical": 5, "open_high": 12, "remediated": 2},
+            {"ts": "2026-03-25", "open_critical": 3, "open_high": 10, "remediated": 4},
+            ...
+        ]
+        period_days: janela de análise (default: 7 dias = 1 semana)
+
+    Returns:
+        {
+            "velocity_pct": 25.0,  # % remediadas na últimas N dias
+            "trend": "improving" | "stable" | "degrading",
+            "remediation_rate_per_day": 0.57,  # vulnerabilidades/dia
+            "days_to_critical_zero": 5.25,  # estimativa se mantiver taxa
+        }
+    """
+    if not historical_ratings or len(historical_ratings) < 2:
+        return {
+            "velocity_pct": 0.0,
+            "trend": "unknown",
+            "remediation_rate_per_day": 0.0,
+            "days_to_critical_zero": float("inf"),
+        }
+
+    # Sort by timestamp descending (mais recente primeiro)
+    sorted_hist = sorted(historical_ratings, key=lambda x: x.get("ts", ""), reverse=True)
+    recent = sorted_hist[0]
+    older = sorted_hist[-1] if len(sorted_hist) > 1 else sorted_hist[0]
+
+    remediated_total = recent.get("remediated", 0) - older.get("remediated", 0)
+    total_vulns_before = (
+        older.get("open_critical", 0) +
+        older.get("open_high", 0) +
+        older.get("open_medium", 0) +
+        older.get("open_low", 0)
+    )
+
+    if total_vulns_before == 0:
+        velocity_pct = 100.0 if remediated_total > 0 else 0.0
+    else:
+        velocity_pct = (remediated_total / total_vulns_before) * 100.0
+
+    # Daily rate
+    remediation_rate_per_day = remediated_total / max(1, period_days)
+
+    # Estimate days to zero criticals
+    open_critical_now = recent.get("open_critical", 0)
+    days_to_critical_zero = (
+        open_critical_now / remediation_rate_per_day
+        if remediation_rate_per_day > 0
+        else float("inf")
+    )
+
+    # Trend analysis (if we have 3+ data points)
+    trend = "stable"
+    if len(sorted_hist) >= 3:
+        prev_remediated = sorted_hist[1].get("remediated", 0)
+        velocity_delta = remediated_total - (prev_remediated - older.get("remediated", 0))
+        if velocity_delta > remediated_total * 0.1:  # +10% improvement
+            trend = "improving"
+        elif velocity_delta < -remediated_total * 0.1:  # -10% degradation
+            trend = "degrading"
+
+    return {
+        "velocity_pct": round(min(100.0, max(0.0, velocity_pct)), 2),
+        "trend": trend,
+        "remediation_rate_per_day": round(remediation_rate_per_day, 3),
+        "days_to_critical_zero": round(days_to_critical_zero, 2),
+    }
+
+
+def compute_posture_deviation(
+    current_rating: float,
+    previous_rating: float,
+    period_hours: int = 24,
+) -> dict[str, Any]:
+    """
+    Detecta desvios de postura:
+    - Rating caiu sem novas vulnerabilidades? AGE está agindo
+    - Rating caiu por novas falhas? Novo ataque descoberto
+    - Rating subiu? Remediação aconteceu
+
+    Args:
+        current_rating: Score EASM atual (0-100)
+        previous_rating: Score EASM anterior (0-100)
+        period_hours: período que caiu (default: 24h)
+
+    Returns:
+        {
+            "deviation": -5.2,  # pontos de queda
+            "deviation_pct": -5.2,  # % relativamente
+            "is_critical_deviation": True,  # caiu >10 pontos em 24h
+            "cause": "age_factor" | "new_findings" | "remediation" | "stable",
+            "alert_severity": "critical" | "high" | "medium" | None,
+        }
+    """
+    deviation = current_rating - previous_rating
+
+    if abs(deviation) < 0.01:  # Mudança negligenciável
+        return {
+            "deviation": 0.0,
+            "deviation_pct": 0.0,
+            "is_critical_deviation": False,
+            "cause": "stable",
+            "alert_severity": None,
+        }
+
+    deviation_pct = (deviation / max(1.0, abs(previous_rating))) * 100.0
+    is_critical = abs(deviation) >= 10.0  # >10 pontos de queda é crítico
+
+    # Causa estimada (heurística)
+    if deviation < 0:  # Rating caiu
+        cause = "age_factor" if abs(deviation_pct) < 5 else "new_findings"
+    else:  # Rating subiu
+        cause = "remediation"
+
+    alert_severity = None
+    if is_critical and deviation < 0:
+        alert_severity = "critical"
+    elif abs(deviation) >= 5 and deviation < 0:
+        alert_severity = "high"
+
+    return {
+        "deviation": round(deviation, 2),
+        "deviation_pct": round(deviation_pct, 2),
+        "is_critical_deviation": is_critical,
+        "cause": cause,
+        "alert_severity": alert_severity,
+    }
+
+
+def build_temporal_narrative(
+    current_rating: float,
+    current_grade: str,
+    historical_ratings: list[dict],
+    remediation_velocity: dict,
+    posture_deviation: dict,
+) -> str:
+    """
+    Gera narrativa executiva sobre a CURVA TEMPORAL do rating.
+
+    Exemplo:
+    "Sua postura de segurança caiu 5 pontos em 24 horas (de 78 para 73), impulsionada por
+    inércia de 10 vulnerabilidades críticas não remediadas há >7 dias. Taxa de remediação
+    atual: 2 por semana. Se mantiver, terá zero críticas em 5 dias."
+
+    """
+    narrative = f"**Score Atual: {current_rating} ({current_grade})**\n\n"
+
+    # Trend
+    if historical_ratings:
+        prev_rating = historical_ratings[-1].get("score", current_rating) if len(historical_ratings) > 1 else current_rating
+        deviation_text = posture_deviation.get("cause", "stable")
+        
+        if posture_deviation["is_critical_deviation"] and posture_deviation["deviation"] < 0:
+            narrative += f"⚠️ **DESVIO CRÍTICO**: A postura caiu {abs(posture_deviation['deviation'])} pontos em 24h (por {deviation_text}).\n\n"
+        elif posture_deviation["deviation"] != 0:
+            direction = "subiu" if posture_deviation["deviation"] > 0 else "caiu"
+            narrative += f"📊 A postura {direction} {abs(posture_deviation['deviation'])} pontos (por {deviation_text}).\n\n"
+
+    # Remediation velocity
+    if remediation_velocity["remediation_rate_per_day"] > 0:
+        vel_text = remediation_velocity["trend"]
+        rate = remediation_velocity["remediation_rate_per_day"]
+        narrative += f"✅ **Taxa de Remediação**: {rate} falhas/dia ({vel_text}).\n"
+        if remediation_velocity["days_to_critical_zero"] < float("inf"):
+            days = remediation_velocity["days_to_critical_zero"]
+            narrative += f"   Se mantiver: **zero críticas em {days:.1f} dias**.\n\n"
+    else:
+        narrative += "❌ **Nenhuma remediação detectada nos últimos 7 dias.**\n\n"
+
+    return narrative.strip()
+
+
+def forecast_rating_30days(
+    current_rating: float,
+    remediation_velocity: dict,
+    new_findings_per_week: int = 0,
+    age_decay_per_week: float = -2.0,
+) -> dict[str, Any]:
+    """
+    Projeta rating para os próximos 30 dias.
+
+    Variáveis:
+    - Remediação esperada (diminui rating positivamente)
+    - Novas falhas descobertas (diminui rating negativamente)
+    - Decaimento por AGE (diminui rating por inércia)
+
+    Retorna:
+        {
+            "current_rating": 75.0,
+            "forecast_30d": 72.5,  # estimado
+            "delta": -2.5,  # mudança esperada
+            "confidence": "medium",  # low/medium/high
+            "key_drivers": ["age_decay", "remediation"],
+        }
+    """
+    weeks_30d = 30 / 7.0  # ~4.3 semanas
+
+    # Impacto por remediação (positivo = melhora)
+    remediation_impact = remediation_velocity.get("velocity_pct", 0) / 100.0 * 5.0  # max +5 pontos
+
+    # Impacto por novas falhas (negativo = piora)
+    new_findings_impact = max(0, new_findings_per_week * weeks_30d * 0.5)  # ~0.5 pts por finding
+
+    # Impacto por AGE (negativo = decaimento)
+    age_impact = age_decay_per_week * weeks_30d
+
+    total_delta = remediation_impact - new_findings_impact + age_impact
+    forecast_rating = max(0.0, min(100.0, current_rating + total_delta))
+
+    # Confidence (baseado em dados históricos)
+    confidence = "high" if remediation_velocity.get("velocity_pct", 0) > 0 else "medium"
+
+    drivers = []
+    if remediation_impact > 0:
+        drivers.append("remediation")
+    if new_findings_impact > 0:
+        drivers.append("new_findings")
+    if age_impact < 0:
+        drivers.append("age_decay")
+
+    return {
+        "current_rating": round(current_rating, 2),
+        "forecast_30d": round(forecast_rating, 2),
+        "delta": round(total_delta, 2),
+        "confidence": confidence,
+        "key_drivers": drivers,
+    }

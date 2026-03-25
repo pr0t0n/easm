@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EASM Report - External Attack Surface Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    @page {
+      margin: 1cm;
+      size: A4;
+    }
+    body {
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    .print-only {
+      display: none;
+    }
+    @media print {
+      .no-print {
+        display: none !important;
+      }
+      .print-only {
+        display: block;
+      }
+      body {
+        background: white;
+        color: black;
+      }
+      .dark\:bg-slate-900\/60 {
+        background: #f8f9fa !important;
+      }
+      .dark\:border-slate-800 {
+        border-color: #e0e0e0 !important;
+      }
+      .dark\:text-slate-300 {
+        color: #333 !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200">
+  <div id="app" class="min-h-screen">
+    <div class="flex items-center justify-center py-12">
+      <div class="text-center">
+        <p class="text-lg text-slate-400">Carregando relatório EASM...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Constants
+    const GRADE_COLORS = {
+      A: { bg: "bg-emerald-50", border: "border-emerald-300", text: "text-emerald-900" },
+      B: { bg: "bg-cyan-50", border: "border-cyan-300", text: "text-cyan-900" },
+      C: { bg: "bg-yellow-50", border: "border-yellow-300", text: "text-yellow-900" },
+      D: { bg: "bg-orange-50", border: "border-orange-300", text: "text-orange-900" },
+      F: { bg: "bg-red-50", border: "border-red-300", text: "text-red-900" },
+    };
+
+    // Main render function
+    async function loadAndRenderReport() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const scanId = params.get("scan_id");
+
+        if (!scanId) {
+          document.getElementById("app").innerHTML = '<div class="p-6 text-center"><p class="text-red-400">Erro: scan_id não fornecido</p></div>';
+          return;
+        }
+
+        // Fetch report data
+        const response = await fetch(`/api/scans/${scanId}/easm-report`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Erro ao carregar relatório: ${response.statusText}`);
+        }
+
+        const report = await response.json();
+        renderReport(report);
+      } catch (error) {
+        console.error("Erro ao renderizar relatório:", error);
+        document.getElementById("app").innerHTML = `
+          <div class="p-6 text-center text-red-400">
+            <p>Erro ao carregar o relatório: ${error.message}</p>
+            <p class="text-sm mt-2 text-slate-400">Verifique se o scan_id é válido e você tem acesso a este relatório.</p>
+          </div>
+        `;
+      }
+    }
+
+    function renderReport(report) {
+      const { easm_rating = {}, fair_decomposition = {}, executive_summary = "", findings_count = 0 } = report;
+      const { score = 0, grade = "F" } = easm_rating;
+      const gradeColor = GRADE_COLORS[grade] || GRADE_COLORS.F;
+
+      const html = `
+        <div class="max-w-6xl mx-auto p-4 md:p-6">
+          <!-- Header -->
+          <header class="mb-8">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <h1 class="text-4xl font-bold text-white">🛡️ EASM Report</h1>
+                <p class="text-slate-400 mt-2">External Attack Surface Management Assessment</p>
+              </div>
+              <div class="text-right">
+                <p class="text-sm text-slate-400">Scan ID: ${report.scan_id || "N/A"}</p>
+                <p class="text-sm text-slate-400">Target: ${report.target || "N/A"}</p>
+              </div>
+            </div>
+          </header>
+
+          <!-- Executive Summary -->
+          <section class="mb-8 rounded-lg border border-slate-700 bg-slate-900 p-6">
+            <h2 class="text-2xl font-bold mb-4 text-white">Executive Summary</h2>
+            <div class="space-y-4">
+              <div class="flex items-center gap-6">
+                <div class="${gradeColor.bg} ${gradeColor.border} ${gradeColor.text} rounded-lg border-2 p-6 text-center min-w-28">
+                  <p class="text-4xl font-bold">${grade}</p>
+                  <p class="text-sm font-semibold">${score.toFixed(1)}/100</p>
+                </div>
+                <div class="flex-1">
+                  <p class="text-slate-300">${executive_summary || "Sem narrativa executiva disponível."}</p>
+                  <p class="text-sm text-slate-500 mt-4">${findings_count} achados | Status: ${report.status || "Unknown"}</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- FAIR Decomposition -->
+          ${renderFAIRDecomposition(fair_decomposition)}
+
+          <!-- Findings Summary -->
+          <section class="mb-8 rounded-lg border border-slate-700 bg-slate-900 p-6">
+            <h2 class="text-2xl font-bold mb-4 text-white">Findings Summary</h2>
+            <p class="text-slate-400 mb-4">${findings_count} vulnerabilidades descobertas neste scan.</p>
+            <div class="grid grid-cols-4 gap-4">
+              <div class="rounded-lg bg-red-500/10 border border-red-500/30 p-4 text-center">
+                <p class="text-red-400 text-2xl font-bold" id="count-critical">0</p>
+                <p class="text-xs text-red-300 mt-1">CRÍTICO</p>
+              </div>
+              <div class="rounded-lg bg-orange-500/10 border border-orange-500/30 p-4 text-center">
+                <p class="text-orange-400 text-2xl font-bold" id="count-high">0</p>
+                <p class="text-xs text-orange-300 mt-1">ALTO</p>
+              </div>
+              <div class="rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4 text-center">
+                <p class="text-yellow-400 text-2xl font-bold" id="count-medium">0</p>
+                <p class="text-xs text-yellow-300 mt-1">MÉDIO</p>
+              </div>
+              <div class="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-4 text-center">
+                <p class="text-emerald-400 text-2xl font-bold" id="count-low">0</p>
+                <p class="text-xs text-emerald-300 mt-1">BAIXO</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Recommendations -->
+          <section class="mb-8 rounded-lg border border-slate-700 bg-slate-900 p-6 no-print">
+            <h2 class="text-2xl font-bold mb-4 text-white">Recommended Actions</h2>
+            <div class="space-y-3">
+              <div class="rounded-lg bg-red-500/10 border border-red-500/30 p-4">
+                <p class="font-semibold text-red-300">🔴 Immediate (Critical)</p>
+                <p class="text-sm text-slate-400 mt-2">Remediate critical vulnerabilities within 24-48 hours. Apply compensating controls (WAF, network isolation) if patching is not immediately available.</p>
+              </div>
+              <div class="rounded-lg bg-orange-500/10 border border-orange-500/30 p-4">
+                <p class="font-semibold text-orange-300">🟠 Urgent (High)</p>
+                <p class="text-sm text-slate-400 mt-2">Schedule patching for this sprint. Risk assessment and compensating controls required for business continuity.</p>
+              </div>
+              <div class="rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4">
+                <p class="font-semibold text-yellow-300">🟡 Short-term (Medium)</p>
+                <p class="text-sm text-slate-400 mt-2">Plan remediation in the next 1-2 sprints. Implement hardening measures to reduce overall attack surface.</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Print Button -->
+          <div class="flex gap-4 justify-center no-print mb-8">
+            <button onclick="window.print()" class="px-6 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 transition">
+              📄 Imprimir / PDF
+            </button>
+            <button onclick="window.location.href='/dashboard'" class="px-6 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition">
+              ← Voltar ao Dashboard
+            </button>
+          </div>
+
+          <!-- Footer -->
+          <footer class="text-center text-slate-500 text-xs py-4 border-t border-slate-700">
+            <p>Relatório gerado em ${new Date().toLocaleString("pt-BR")} | EASM v1.2 | Confidencial</p>
+          </footer>
+        </div>
+      `;
+
+      document.getElementById("app").innerHTML = html;
+    }
+
+    function renderFAIRDecomposition(fair) {
+      if (!fair || !fair.pillars || fair.pillars.length === 0) {
+        return `<p class="text-slate-400">Decomposição FAIR não disponível.</p>`;
+      }
+
+      const pillars = fair.pillars || [];
+      const totalScore = fair.score || 0;
+
+      return `
+        <section class="mb-8 rounded-lg border border-slate-700 bg-slate-900 p-6">
+          <h2 class="text-2xl font-bold mb-4 text-white">FAIR Pillar Decomposition</h2>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            ${pillars.map((pillar) => `
+              <div class="rounded-lg bg-slate-800/50 border border-slate-700 p-4">
+                <p class="font-semibold text-slate-200">${pillar.name || pillar.id}</p>
+                <p class="text-3xl font-bold mt-2 text-cyan-400">${pillar.score?.toFixed(1) || 0}</p>
+                <p class="text-xs text-slate-500 mt-1">${pillar.weight_pct || "0%"} weight • ${pillar.finding_count || 0} findings</p>
+                <div class="mt-3 h-2 rounded-full bg-slate-700">
+                  <div class="h-full rounded-full bg-gradient-to-r from-cyan-500 to-cyan-400" 
+                       style="width: ${(pillar.score / 100 * 100) || 0}%"></div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <p class="text-sm text-slate-400">
+            <strong>Metodologia:</strong> Os três pilares FAIR (Perimeter Resilience, Patching Hygiene, OSINT Exposure) 
+            são ponderados para gerar um score de postura de segurança contínuo de 0-100. 
+            Cada pilar reflete uma dimensão crítica de exposição externa.
+          </p>
+        </section>
+      `;
+    }
+
+    // Load report on page load
+    loadAndRenderReport();
+  </script>
+</body>
+</html>

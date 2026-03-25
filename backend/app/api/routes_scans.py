@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User
-from app.models.models import WorkerHeartbeat
+from app.models.models import (
+    AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
+    WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert,
+)
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
@@ -25,7 +27,12 @@ from app.services.risk_service import (
     compute_continuous_rating,
     compute_fair_metrics,
     get_methodology_changelog,
+    compute_remediation_velocity,
+    compute_posture_deviation,
+    build_temporal_narrative,
+    forecast_rating_30days,
 )
+from app.services.orchestrator import TemporalTracker
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
 from app.workers.worker_groups import get_worker_groups
@@ -3483,3 +3490,324 @@ def dashboard_insights(
         "continuous_rating": continuous_rating,
         "rating_timeline": rating_timeline,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EASM ENTERPRISE ENDPOINTS (Assets, Temporal Curves, Alerts)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/dashboard/assets")
+def get_easm_assets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    status_filter: str = Query("active", regex="^(active|inactive|archived)$"),
+    min_criticality: float = Query(0, ge=0, le=100),
+    sort_by: str = Query("last_seen", regex="^(criticality|last_seen|scan_count|rating)$"),
+):
+    """
+    Lista ativos EASM com rating e criticality
+
+    Retorna:
+    [{
+        "id": 1,
+        "domain_or_ip": "example.com",
+        "criticality_score": 85.0,
+        "status": "active",
+        "last_scan_id": 123,
+        "open_critical": 2,
+        "open_high": 5,
+        "easm_rating": 72.5,
+        "easm_grade": "C",
+        "last_seen": "2026-03-25T10:00:00Z",
+    }]
+    """
+    query = db.query(Asset).filter(
+        Asset.owner_id == current_user.id if not current_user.is_admin else True,
+        Asset.status == status_filter,
+        Asset.criticality_score >= min_criticality,
+    )
+
+    if sort_by == "criticality":
+        query = query.order_by(Asset.criticality_score.desc())
+    elif sort_by == "rating":
+        # TODO: JOIN com AssetRatingHistory
+        pass
+    else:
+        query = query.order_by(Asset.last_seen.desc())
+
+    assets = query.all()
+    result = []
+
+    for asset in assets:
+        # Get latest vulnerability counts
+        vuln_counts = {
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+        }
+        for vuln in asset.vulnerabilities:
+            if not vuln.remediated_at:
+                sev = str(vuln.severity or "low").lower()
+                if sev in vuln_counts:
+                    vuln_counts[sev] += 1
+
+        # Get latest rating
+        latest_rating = (
+            db.query(AssetRatingHistory)
+            .filter(AssetRatingHistory.asset_id == asset.id)
+            .order_by(AssetRatingHistory.recorded_at.desc())
+            .first()
+        )
+
+        result.append({
+            "id": asset.id,
+            "domain_or_ip": asset.domain_or_ip,
+            "port": asset.port,
+            "asset_type": asset.asset_type,
+            "criticality_score": asset.criticality_score,
+            "status": asset.status,
+            "open_critical": vuln_counts["critical"],
+            "open_high": vuln_counts["high"],
+            "open_medium": vuln_counts["medium"],
+            "easm_rating": latest_rating.easm_rating if latest_rating else 100.0,
+            "easm_grade": latest_rating.easm_grade if latest_rating else "A",
+            "scan_count": asset.scan_count,
+            "last_seen": asset.last_seen.isoformat() if asset.last_seen else None,
+        })
+
+    return result
+
+
+@router.get("/dashboard/vulnerabilities")
+def get_easm_vulnerabilities(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    open_only: bool = Query(True),
+    severity_filter: str = Query("", regex="^(|critical|high|medium|low|info)$"),
+    asset_id: int | None = Query(None),
+):
+    """
+    Lista vulnerabilidades EASM com temporal tracking
+
+    Retorna histórico de quando foram descobertas, detectadas repetidamente, remediadas.
+    """
+    query = db.query(Vulnerability).join(Asset, Asset.id == Vulnerability.asset_id)
+
+    if not current_user.is_admin:
+        query = query.filter(Asset.owner_id == current_user.id)
+
+    if open_only:
+        query = query.filter(Vulnerability.remediated_at == None)
+
+    if severity_filter:
+        query = query.filter(Vulnerability.severity == severity_filter)
+
+    if asset_id:
+        query = query.filter(Vulnerability.asset_id == asset_id)
+
+    vulns = query.order_by(Vulnerability.first_detected.desc()).limit(100).all()
+
+    result = []
+    for vuln in vulns:
+        result.append({
+            "id": vuln.id,
+            "asset_id": vuln.asset_id,
+            "asset_name": vuln.asset.domain_or_ip if vuln.asset else "",
+            "cve_id": vuln.cve_id,
+            "title": vuln.title,
+            "severity": vuln.severity,
+            "cvss_score": vuln.cvss_score,
+            "tool_source": vuln.tool_source,
+            "fair_pillar": vuln.fair_pillar,
+            "age_factor": vuln.age_factor,
+            "ra_score": vuln.ra_score,
+            "detection_count": vuln.detection_count,
+            "first_detected": vuln.first_detected.isoformat(),
+            "last_detected": vuln.last_detected.isoformat(),
+            "remediated_at": vuln.remediated_at.isoformat() if vuln.remediated_at else None,
+            "remediation_notes": vuln.remediation_notes,
+        })
+
+    return result
+
+
+@router.get("/dashboard/trends/{asset_id}")
+def get_easm_trends(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    days: int = Query(30, ge=7, le=365),
+):
+    """
+    Curva temporal de um asset:
+    - Histórico de ratings
+    - Velocidade de remediação
+    - Desvio de postura
+    - Forecast 30 dias
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset não encontrado")
+
+    if asset.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+
+    # Historical ratings
+    history = TemporalTracker.get_rating_history(db, asset_id, days=days)
+    history_data = [
+        {
+            "ts": h.recorded_at.isoformat(),
+            "score": h.easm_rating,
+            "grade": h.easm_grade,
+            "open_critical": h.open_critical_count,
+            "open_high": h.open_high_count,
+            "open_medium": h.open_medium_count,
+            "remediated": h.remediated_this_period,
+            "pillars": h.pillar_scores,
+        }
+        for h in history
+    ]
+
+    # Remediation velocity
+    velocity = compute_remediation_velocity(history_data, period_days=7)
+
+    # Current state
+    current = history[-1] if history else None
+    if current:
+        previous = history[-2] if len(history) > 1 else None
+        posture_dev = compute_posture_deviation(
+            current.easm_rating,
+            previous.easm_rating if previous else current.easm_rating,
+            period_hours=24,
+        )
+        narrative = build_temporal_narrative(
+            current.easm_rating,
+            current.easm_grade,
+            history_data,
+            velocity,
+            posture_dev,
+        )
+    else:
+        posture_dev = {
+            "deviation": 0.0,
+            "deviation_pct": 0.0,
+            "is_critical_deviation": False,
+            "cause": "no_data",
+            "alert_severity": None,
+        }
+        narrative = "Sem histórico de ratings ainda."
+
+    # Forecast
+    forecast = forecast_rating_30days(
+        current.easm_rating if current else 75.0,
+        velocity,
+        new_findings_per_week=2,  # heurística
+    )
+
+    return {
+        "asset": {
+            "id": asset.id,
+            "domain_or_ip": asset.domain_or_ip,
+            "criticality_score": asset.criticality_score,
+        },
+        "historical_ratings": history_data,
+        "remediation_velocity": velocity,
+        "posture_deviation": posture_dev,
+        "temporal_narrative": narrative,
+        "forecast_30d": forecast,
+    }
+
+
+@router.get("/scans/{scan_id}/easm-report")
+def get_easm_report(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Relatório completo EASM para um scan:
+    - FAIR decomposition
+    - Vulnerabilidades por pillar
+    - Assets afetados
+    - Recomendações executivas
+    """
+    scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    if scan.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+
+    state_data = scan.state_data or {}
+    report_v2 = state_data.get("report_v2", {})
+
+    return {
+        "scan_id": scan.id,
+        "target": scan.target_query,
+        "status": scan.status,
+        "easm_rating": report_v2.get("easm_rating", {}),
+        "fair_decomposition": report_v2.get("fair_decomposition", {}),
+        "executive_summary": report_v2.get("executive_summary", ""),
+        "findings_count": len(scan.findings),
+        "completed_at": scan.updated_at.isoformat() if scan.updated_at else None,
+    }
+
+
+@router.get("/easm/alerts")
+def get_easm_alerts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    unresolved_only: bool = Query(True),
+    severity_filter: str = Query("", regex="^(|critical|high|medium)$"),
+):
+    """Lista alertas EASM de desvio de postura"""
+    query = db.query(EASMAlert).filter(EASMAlert.owner_id == current_user.id)
+
+    if unresolved_only:
+        query = query.filter(EASMAlert.is_resolved == False)
+
+    if severity_filter:
+        query = query.filter(EASMAlert.severity == severity_filter)
+
+    alerts = query.order_by(EASMAlert.created_at.desc()).limit(50).all()
+
+    return [
+        {
+            "id": a.id,
+            "alert_type": a.alert_type,
+            "severity": a.severity,
+            "title": a.title,
+            "description": a.description,
+            "asset_id": a.asset_id,
+            "is_resolved": a.is_resolved,
+            "created_at": a.created_at.isoformat(),
+            "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+        }
+        for a in alerts
+    ]
+
+
+@router.post("/easm/alerts/{alert_id}/resolve")
+def resolve_easm_alert(
+    alert_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Marca alerta como resolvido"""
+    alert = db.query(EASMAlert).filter(
+        EASMAlert.id == alert_id,
+        EASMAlert.owner_id == current_user.id,
+    ).first()
+
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerta não encontrado")
+
+    alert.is_resolved = True
+    alert.resolved_at = datetime.now(timezone.utc)
+    alert.resolved_notes = payload.get("notes", "")
+    db.commit()
+
+    return {"message": "Alerta resolvido", "alert_id": alert.id}

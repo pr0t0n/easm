@@ -220,3 +220,123 @@ class PolicyAllowlistEntry(Base):
     tool_group: Mapped[str] = mapped_column(String(50), default="*")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EASM ENTERPRISE INFRASTRUCTURE (Assets, Vulnerabilities, Temporal Tracking)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class Asset(Base):
+    """EASM Asset - memória de estado de superfície"""
+
+    __tablename__ = "assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    domain_or_ip: Mapped[str] = mapped_column(String(500), index=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    protocol: Mapped[str] = mapped_column(String(20), default="http", nullable=True)
+    asset_type: Mapped[str] = mapped_column(String(50), default="web", nullable=True)  # web, login, database, ssh, ftp
+    criticality_score: Mapped[float] = mapped_column(sa.Float, default=50.0)  # 0-100
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)  # active, inactive, archived
+    first_seen: Mapped[datetime] = mapped_column(DateTime)
+    last_seen: Mapped[datetime] = mapped_column(DateTime)
+    scan_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True)
+    metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    vulnerabilities = relationship("Vulnerability", back_populates="asset", cascade="all, delete-orphan")
+    rating_history = relationship("AssetRatingHistory", back_populates="asset", cascade="all, delete-orphan")
+
+
+class Vulnerability(Base):
+    """EASM Vulnerability - histórico com AGE factor"""
+
+    __tablename__ = "vulnerabilities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
+    finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
+    tool_source: Mapped[str] = mapped_column(String(100))  # nuclei, sqlmap, nessus, shodan, etc
+    cve_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    severity: Mapped[str] = mapped_column(String(20))  # critical, high, medium, low, info
+    cvss_score: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_detected: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_detected: Mapped[datetime] = mapped_column(DateTime)
+    remediated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    detection_count: Mapped[int] = mapped_column(Integer, default=1)
+    fair_pillar: Mapped[str] = mapped_column(String(50), default="perimeter_resilience")
+    age_factor: Mapped[float] = mapped_column(sa.Float, default=1.0)  # 1 + log10(days_open + 1)
+    ra_score: Mapped[float] = mapped_column(sa.Float, default=0.0)  # Risk score EASM
+    remediation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    asset = relationship("Asset", back_populates="vulnerabilities")
+    finding = relationship("Finding", foreign_keys=[finding_id])
+
+
+class AssetRatingHistory(Base):
+    """EASM Temporal curve - rating history per asset per scan"""
+
+    __tablename__ = "asset_rating_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
+    scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True)
+    easm_rating: Mapped[float] = mapped_column(sa.Float)  # 0-100 score
+    easm_grade: Mapped[str] = mapped_column(String(10))  # A, B, C, D, F
+    open_critical_count: Mapped[int] = mapped_column(Integer, default=0)
+    open_high_count: Mapped[int] = mapped_column(Integer, default=0)
+    open_medium_count: Mapped[int] = mapped_column(Integer, default=0)
+    remediated_this_period: Mapped[int] = mapped_column(Integer, default=0)
+    velocity_score: Mapped[float] = mapped_column(sa.Float, default=0.0)  # % remediação por semana
+    pillar_scores: Mapped[dict] = mapped_column(JSONB, default=dict)  # {perimeter_resilience: 85, ...}
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+    asset = relationship("Asset", back_populates="rating_history")
+
+
+class EASMAlert(Base):
+    """EASM Alert - desvio de postura, webhooks"""
+
+    __tablename__ = "easm_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id"), nullable=True)
+    alert_type: Mapped[str] = mapped_column(String(50))  # rating_drop, crown_jewel_age, critical_spike
+    severity: Mapped[str] = mapped_column(String(20))  # critical, high, medium
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    trigger_value: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    threshold_value: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class EASMAlertRule(Base):
+    """EASM Alert Rule - configuração de gatilhos"""
+
+    __tablename__ = "easm_alert_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    rule_type: Mapped[str] = mapped_column(String(50))  # rating_drop, age_threshold, velocity
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    condition: Mapped[dict] = mapped_column(JSONB)  # {threshold: 10, period_hours: 24, ...}
+    webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    notify_channels: Mapped[dict] = mapped_column(JSONB, default=dict)  # ["email", "slack", "pagerduty"]
+    asset_filter: Mapped[dict] = mapped_column(JSONB, default=dict)  # {min_criticality: 70, types: [...]}
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
