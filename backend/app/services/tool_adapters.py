@@ -151,14 +151,28 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     url = parts["url"]
     normalized = tool_name.strip().lower()
 
-    if normalized in {"nmap", "nmap-vulscan", "vulscan"}:
+    if normalized in {"nmap-vulscan", "vulscan"}:
+        return [
+            "nmap",
+            "-Pn",
+            "-n",
+            "-sV",
+            "-T3",
+            "-p",
+            "80,81,443,444,8080,8443,8888",
+            "--script=vulscan/",
+            "--script-args",
+            "vulscandb=cve.csv",
+            host,
+        ]
+    if normalized == "nmap":
         return [
             "nmap",
             "-sS",
             "-sV",
             "-A",
             "-p-",
-            "--script=vulscan",
+            "--script=vulscan/",
             "--script-args",
             "vulscandb=cve.csv",
             host,
@@ -463,6 +477,11 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
 
     open_ports = _parse_open_ports(tool_name, stdout)
     status = "executed" if proc.returncode == 0 else "error"
+
+    # Nikto em algumas imagens exige modulo Perl JSON; trata como dependencia ausente.
+    if normalized_tool == "nikto" and "Required module not found: JSON" in stderr:
+        status = "skipped"
+
     return {
         "status": status,
         "output": combined[:output_limit],

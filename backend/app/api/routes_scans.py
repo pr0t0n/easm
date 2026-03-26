@@ -2006,34 +2006,39 @@ def list_targets_summary(db: Session = Depends(get_db), current_user: User = Dep
 
     targets: dict[str, dict] = {}
     for scan in scans:
-        key = str(scan.target_query)
-        item = targets.get(key)
-        if not item:
-            item = {
-                "target": key,
-                "scans": 0,
-                "last_status": scan.status,
-                "last_mode": scan.mode,
-                "last_scan_at": scan.created_at,
-                "findings_total": 0,
-                "findings_open": 0,
-                "highest_severity": "low",
-            }
-            targets[key] = item
+        raw_target_query = str(scan.target_query or "").strip()
+        split_targets = [t.strip() for t in re.split(r"[;,]", raw_target_query) if str(t or "").strip()]
+        if not split_targets and raw_target_query:
+            split_targets = [raw_target_query]
 
-        item["scans"] += 1
-        if scan.created_at and scan.created_at >= item["last_scan_at"]:
-            item["last_status"] = scan.status
-            item["last_mode"] = scan.mode
-            item["last_scan_at"] = scan.created_at
+        for key in split_targets:
+            item = targets.get(key)
+            if not item:
+                item = {
+                    "target": key,
+                    "scans": 0,
+                    "last_status": scan.status,
+                    "last_mode": scan.mode,
+                    "last_scan_at": scan.created_at,
+                    "findings_total": 0,
+                    "findings_open": 0,
+                    "highest_severity": "low",
+                }
+                targets[key] = item
 
-        current_findings = findings_by_scan.get(scan.id, [])
-        item["findings_total"] += len(current_findings)
-        item["findings_open"] += len([f for f in current_findings if not f.is_false_positive])
-        for finding in current_findings:
-            sev = str(finding.severity or "low").lower()
-            if _sev_weight(sev) > _sev_weight(item["highest_severity"]):
-                item["highest_severity"] = sev
+            item["scans"] += 1
+            if scan.created_at and scan.created_at >= item["last_scan_at"]:
+                item["last_status"] = scan.status
+                item["last_mode"] = scan.mode
+                item["last_scan_at"] = scan.created_at
+
+            current_findings = findings_by_scan.get(scan.id, [])
+            item["findings_total"] += len(current_findings)
+            item["findings_open"] += len([f for f in current_findings if not f.is_false_positive])
+            for finding in current_findings:
+                sev = str(finding.severity or "low").lower()
+                if _sev_weight(sev) > _sev_weight(item["highest_severity"]):
+                    item["highest_severity"] = sev
 
     rows = list(targets.values())
     rows.sort(key=lambda item: item["last_scan_at"] or datetime.min, reverse=True)

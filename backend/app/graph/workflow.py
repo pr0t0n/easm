@@ -468,7 +468,10 @@ def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
     root = str(state.get("target") or "").strip()
     candidates: list[str] = []
     if root:
-        candidates.append(root)
+        for token in re.split(r"[;,]", root):
+            value = str(token or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
 
     for asset in list(state.get("scanned_assets") or []):
         host = str(asset or "").strip()
