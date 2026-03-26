@@ -1,6 +1,17 @@
-// EASM Dashboard Components - FAIR Pillars, Temporal Curves, Executive Summary
+// vASM Dashboard Components - FAIR Pillars, Temporal Curves, Score Highlight
 
-export function EASMRatingCard({ rating, grade }) {
+function aggregationSubtitle(mode, targets) {
+  const n = Number(targets || 1);
+  if (mode === "target") {
+    return `Contexto: Alvo (${n} alvo)`;
+  }
+  if (mode === "group_avg") {
+    return `Contexto: Media do Grupo (${n} alvos)`;
+  }
+  return `Contexto: Global (${n} alvos)`;
+}
+
+export function EASMRatingCard({ rating, grade, aggregationMode = "global", aggregationTargets = 1 }) {
   const gradeColors = {
     A: "text-emerald-400 border-emerald-500/50",
     B: "text-cyan-400 border-cyan-500/50",
@@ -14,7 +25,8 @@ export function EASMRatingCard({ rating, grade }) {
 
   return (
     <div className={`rounded-2xl border ${color} bg-slate-900/60 p-6`}>
-      <p className="text-xs uppercase tracking-widest text-slate-400">EASM Rating</p>
+      <p className="text-xs uppercase tracking-widest text-slate-400">vASM Rating</p>
+      <p className="mt-1 text-xs text-slate-500">{aggregationSubtitle(aggregationMode, aggregationTargets)}</p>
       <div className="mt-3 flex items-baseline gap-3">
         <p className={`text-5xl font-bold ${scoreColor}`}>{rating.toFixed(1)}</p>
         <p className={`text-4xl font-bold ${color}`}>{grade}</p>
@@ -120,19 +132,23 @@ export function TemporalCurveCard({ trends }) {
   );
 }
 
-export function ExecutiveSummaryCard({ summary, easm_rating }) {
-  const fallbackSummary = `Resumo executivo indisponivel no momento. Rating EASM atual: ${Number(easm_rating || 0).toFixed(1)}. Os dados de tendencia e narrativa automatica serao atualizados no proximo ciclo de analise.`;
+export function ExecutiveSummaryCard({ easm_rating, easm_grade }) {
+  const score = Number(easm_rating || 0);
+  const grade = String(easm_grade || "F");
+  const scoreColor = score >= 80 ? "text-emerald-300" : score >= 60 ? "text-yellow-300" : "text-rose-300";
 
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-      <p className="text-xs uppercase tracking-widest text-slate-400">Executive Summary</p>
-      <div className="mt-4 space-y-3 text-sm text-slate-300">
-        <div className="prose prose-invert max-w-none">
-          {(summary || fallbackSummary).split("\n").map((line, idx) => (
-              <p key={idx} className="text-slate-300 text-sm leading-relaxed">
-                {line}
-              </p>
-            ))}
+    <div className="rounded-2xl border border-cyan-500/30 bg-gradient-to-r from-cyan-900/30 to-blue-900/30 p-6">
+      <p className="text-xs uppercase tracking-widest text-slate-300">vASM</p>
+      <p className="mt-2 text-sm text-slate-300">Nota consolidada da analise principal</p>
+      <div className="mt-4 flex items-end justify-between gap-4">
+        <div className="flex items-baseline gap-3">
+          <p className={`text-6xl font-bold font-display ${scoreColor}`}>{score.toFixed(1)}</p>
+          <p className="text-2xl font-semibold text-cyan-200">/100</p>
+        </div>
+        <div className="rounded-lg border border-cyan-400/40 bg-cyan-500/10 px-3 py-2 text-right">
+          <p className="text-xs uppercase tracking-widest text-cyan-200">Grade</p>
+          <p className="text-3xl font-bold text-cyan-100">{grade}</p>
         </div>
       </div>
     </div>
@@ -187,7 +203,7 @@ export function AssetListCard({ assets }) {
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-      <p className="text-xs uppercase tracking-widest text-slate-400 mb-4">Top Assets (EASM Rating)</p>
+      <p className="text-xs uppercase tracking-widest text-slate-400 mb-4">Top Assets (vASM Rating)</p>
       <div className="space-y-2">
         {assets.slice(0, 10).map((asset) => (
           <div key={asset.id} className="flex items-center justify-between rounded border border-slate-700 p-3 hover:bg-slate-800/40 transition">

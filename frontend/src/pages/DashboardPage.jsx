@@ -458,19 +458,24 @@ export default function DashboardPage() {
       {/* EASM Enterprise Section - Highlighted after filters */}
       <div className="rounded-2xl border-2 border-blue-500/40 bg-gradient-to-br from-blue-950/60 to-slate-900/60 p-6 shadow-lg shadow-blue-500/10">
         <div className="mb-6 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-semibold text-blue-300">EASM Enterprise Dashboard</h2>
+          <h2 className="font-display text-2xl font-semibold text-blue-300">vASM Enterprise Dashboard</h2>
           <div className="text-sm text-slate-400">Visão consolidada de ativos e riscos</div>
         </div>
         
         <div className="mb-6 rounded-xl border border-blue-500/30 bg-blue-900/20 p-4">
           <ExecutiveSummaryCard 
-            summary={easmTrends?.temporal_narrative} 
             easm_rating={easmRating.score}
+            easm_grade={easmRating.grade}
           />
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <EASMRatingCard rating={easmRating.score} grade={easmRating.grade} />
+          <EASMRatingCard
+            rating={easmRating.score}
+            grade={easmRating.grade}
+            aggregationMode={stats?.aggregation_mode || "global"}
+            aggregationTargets={stats?.aggregation_targets || 1}
+          />
           <AlertsCard alerts={easmAlerts} />
         </div>
 
