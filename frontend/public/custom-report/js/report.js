@@ -105,6 +105,23 @@ function calculateCriFromCounts(severityCounts) {
   };
 }
 
+function hasRealFindings(v2) {
+  const summary = v2.summary || {};
+  const calc = (v2.segment_benchmark || {}).calculation || {};
+  const sev = calc.severity_counts || {};
+  return (
+    Number(summary.total || 0) > 0 ||
+    Number(summary.critical || 0) > 0 ||
+    Number(summary.high || 0) > 0 ||
+    Number(summary.medium || 0) > 0 ||
+    Number(summary.low || 0) > 0 ||
+    Number(sev.critical || 0) > 0 ||
+    Number(sev.high || 0) > 0 ||
+    Number(sev.medium || 0) > 0 ||
+    Number(sev.low || 0) > 0
+  );
+}
+
 function renderFairAndBenchmark(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
   const fair = v2.fair || {};
@@ -112,10 +129,26 @@ function renderFairAndBenchmark(report) {
   const calc = benchmark.calculation || {};
   const summary = v2.summary || {};
 
-  setText('fairAvgScore', Number(fair.fair_avg_score || 0).toFixed(2));
-  setText('fairAleOpen', fmtCurrencyUSD(fair.ale_total_open_usd || 0));
-  setText('fairDailyImpact', fmtCurrencyUSD(fair.daily_impact_open_usd || 0));
-  setText('fairMitigation', fmtCurrencyUSD(fair.mitigation_cost_estimate_open_usd || 0));
+  // Os índices FAIR e CRI só fazem sentido com findings reais
+  const hasData = hasRealFindings(v2);
+  const noDataPlaceholder = (id) => setText(id, 'N/A — scan sem findings');
+
+  setText('fairAvgScore', hasData ? Number(fair.fair_avg_score || 0).toFixed(2) : '-');
+  setText('fairAleOpen', hasData ? fmtCurrencyUSD(fair.ale_total_open_usd || 0) : '-');
+  setText('fairDailyImpact', hasData ? fmtCurrencyUSD(fair.daily_impact_open_usd || 0) : '-');
+  setText('fairMitigation', hasData ? fmtCurrencyUSD(fair.mitigation_cost_estimate_open_usd || 0) : '-');
+
+  if (!hasData) {
+    ['benchmarkCriScore', 'benchmarkGrade', 'benchmarkAssessment',
+     'calcCritical', 'calcHigh', 'calcMedium', 'calcLow',
+     'calcBaseFormula', 'calcPenalty', 'calcHuman'].forEach((id) => setText(id, '-'));
+    setText('benchmarkSegment', benchmark.segment || 'Digital Services');
+    const factorsTable = document.getElementById('ratingFactorsTable');
+    if (factorsTable) factorsTable.innerHTML = 'Sem dados — scan não concluído ou sem findings.';
+    const timelineBox = document.getElementById('ratingTimelineBox');
+    if (timelineBox) timelineBox.innerHTML = 'Sem curva temporal disponível.';
+    return;
+  }
 
   const severityCounts = calc.severity_counts || {
     critical: Number(summary.critical || 0),
@@ -188,8 +221,23 @@ function renderBenchmarkComparison(report) {
   const benchmark = v2.segment_benchmark || {};
 
   setText('benchmarkSegmentName', benchmark.segment || 'Digital Services');
-  setText('benchmarkSegmentSource', benchmark.source || 'WEF Global Cybersecurity Outlook');
-  
+  setText('benchmarkSegmentSource', benchmark.source || 'WEF Global Cybersecurity Outlook (referencia setorial)');
+
+  const comparisonTable = document.getElementById('benchmarkComparisonTable');
+
+  // Só exibir comparativo quando o scan tiver findings reais
+  if (!hasRealFindings(v2)) {
+    const emptyMsg = '<tr><td colspan="5" style="text-align:center;padding:28px 16px;color:#64748b;font-size:0.85rem;">' +
+      '<span style="display:block;margin-bottom:6px;font-size:1.2rem;">&#8212;</span>' +
+      'Benchmark indisponível — execute um scan completo para gerar os índices comparativos.' +
+      '</td></tr>';
+    if (comparisonTable) comparisonTable.innerHTML = emptyMsg;
+    ['benchmarkSegmentAssessment', 'avgTarget', 'avgBenchmark', 'avgDiff', 'avgGrade',
+     'detailTargetCRI', 'detailBenchmarkCRI', 'detailCRIDiff',
+     'detailExpectedCRIGrade', 'detailCRIInterpretation'].forEach((id) => setText(id, '-'));
+    return;
+  }
+
   const assessmentMap = {
     melhor_que_o_benchmark: 'Melhor que o benchmark (menor exposição)',
     acima_do_benchmark: 'Acima do benchmark (maior exposição)',
@@ -198,7 +246,6 @@ function renderBenchmarkComparison(report) {
   setText('benchmarkSegmentAssessment', assessmentMap[benchmark.assessment] || benchmark.assessment || 'N/A');
 
   // Renderizar tabela de comparação
-  const comparisonTable = document.getElementById('benchmarkComparisonTable');
   if (!comparisonTable) return;
 
   const indices = [
@@ -206,26 +253,31 @@ function renderBenchmarkComparison(report) {
       label: 'Cyber Readiness Index',
       target: benchmark.target_cyber_readiness_index,
       segment: benchmark.segment_cyber_readiness_index,
+      higherIsBetter: true,  // mais readiness = melhor
     },
     {
       label: 'Financial Loss Exposure Index',
       target: benchmark.target_financial_loss_exposure_index,
       segment: benchmark.segment_financial_loss_exposure_index,
+      higherIsBetter: false, // mais exposição financeira = pior
     },
     {
       label: 'Data Sensitivity Risk Index',
       target: benchmark.target_data_sensitivity_risk_index,
       segment: benchmark.segment_data_sensitivity_risk_index,
+      higherIsBetter: false, // mais sensibilidade = pior
     },
     {
       label: 'Reliability/Safety Impact Index',
       target: benchmark.target_reliability_safety_impact_index,
       segment: benchmark.segment_reliability_safety_impact_index,
+      higherIsBetter: false, // mais impacto = pior
     },
     {
       label: 'External Exposure Index',
       target: benchmark.target_external_exposure_index,
       segment: benchmark.segment_external_exposure_index || benchmark.segment_external_exposure_reference,
+      higherIsBetter: false, // mais exposição externa = pior
     },
   ];
 
@@ -233,8 +285,11 @@ function renderBenchmarkComparison(report) {
     const targetVal = Number(item.target || 0);
     const segmentVal = Number(item.segment || 0);
     const diff = targetVal - segmentVal;
-    const status = diff > 0 ? 'Melhor' : diff < 0 ? 'Pior' : 'Similar';
-    const statusColor = diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : '#ea580c';
+    // Para índices de exposição (higherIsBetter=false): target menor que benchmark é MELHOR
+    const isBetter = item.higherIsBetter ? diff > 0 : diff < 0;
+    const isWorse  = item.higherIsBetter ? diff < 0 : diff > 0;
+    const status = isBetter ? 'Melhor' : isWorse ? 'Pior' : 'Similar';
+    const statusColor = isBetter ? '#16a34a' : isWorse ? '#dc2626' : '#ea580c';
 
     return `<tr>
       <td>${esc(item.label)}</td>
