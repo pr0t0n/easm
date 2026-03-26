@@ -20,6 +20,8 @@ def _tool_queue_name(scan_mode: str, tool_name: str) -> str:
 
 def _timeout_for_tool(tool_name: str) -> int:
     name = str(tool_name or "").strip().lower()
+    if name in {"burp", "burp-cli"}:
+        return 900
     if name in {"nuclei", "nessus", "nmap-vulscan", "vulscan", "zap"}:
         return 240
     if name in {"amass", "katana", "waymore", "wpscan", "nikto", "sqlmap"}:
@@ -49,6 +51,19 @@ def _normalize_result(tool_name: str, target: str, scan_mode: str, result: Any) 
     }
 
 
+def _dispatch_params_from_env() -> dict[str, str]:
+    params: dict[str, str] = {}
+    burp_key = str(os.getenv("BURP_LICENSE_KEY", "")).strip()
+    if burp_key:
+        params["burp_license_key"] = burp_key
+
+    shodan_key = str(os.getenv("SHODAN_API_KEY", "")).strip()
+    if shodan_key:
+        params["shodan_api_key"] = shodan_key
+
+    return params
+
+
 def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "unit") -> dict[str, Any]:
     execution_mode = str(os.getenv("EASM_TOOL_EXECUTION_MODE", "distributed")).strip().lower()
     if execution_mode == "local":
@@ -73,11 +88,12 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
     task_name = _tool_task_name(scan_mode=scan_mode, tool_name=tool_name)
     queue_name = _tool_queue_name(scan_mode=scan_mode, tool_name=tool_name)
     timeout = _timeout_for_tool(tool_name)
+    dispatch_params = _dispatch_params_from_env()
 
     try:
         async_result = celery.send_task(
             task_name,
-            kwargs={"tool": tool_name, "target": target, "params": {}},
+            kwargs={"tool": tool_name, "target": target, "params": dispatch_params},
             queue=queue_name,
         )
         result = async_result.get(timeout=timeout, propagate=False)
@@ -86,21 +102,9 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
         normalized.setdefault("dispatch_task_name", task_name)
         return normalized
     except Exception as exc:
-        if type(exc).__name__.lower() != "timeouterror":
-            fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
-            fallback.setdefault("dispatch_error", str(exc))
-            fallback.setdefault("dispatch_task_name", task_name)
-            return fallback
-        return {
-            "tool": tool_name,
-            "target": target,
-            "scan_mode": scan_mode,
-            "status": "error",
-            "output": f"Timeout aguardando worker task {task_name} ({timeout}s)",
-            "open_ports": [],
-            "return_code": None,
-            "command": "",
-            "stdout": "",
-            "stderr": "",
-            "dispatch_task_name": task_name,
-        }
+        fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
+        fallback.setdefault("dispatch_error", str(exc))
+        fallback.setdefault("dispatch_task_name", task_name)
+        if type(exc).__name__.lower() == "timeouterror":
+            fallback.setdefault("dispatch_timeout", timeout)
+        return fallback

@@ -57,6 +57,7 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         [
             "wafw00f",           # 1º: detecta WAF antes de escanear
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "nessus",
             "wapiti",
@@ -141,6 +142,7 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "[UNITÁRIO] Análise técnica de vulnerabilidades (alias → risk_assessment)",
         [
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "nessus",
             "wapiti",
@@ -224,6 +226,7 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         [
             "wafw00f",           # 1º: fingerprint de WAF
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "dalfox",
             "wapiti",
@@ -322,6 +325,7 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "[AGENDADO] Analise profunda de vulnerabilidades por ativo (alias → risk_assessment)",
         [
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "dalfox",
             "wapiti",
@@ -439,6 +443,7 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "[UNITARIO] Analise tecnica de vulnerabilidades em ativos descobertos",
         [
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "nessus",
             "wapiti",
@@ -518,6 +523,7 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "[AGENDADO] Analise profunda de vulnerabilidades por ativo",
         [
             "nmap-vulscan",
+            "burp-cli",
             "nuclei",
             "dalfox",
             "wapiti",

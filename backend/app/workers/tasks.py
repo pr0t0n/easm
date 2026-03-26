@@ -60,14 +60,36 @@ def _progress_from_state(final_state: dict) -> tuple[int, dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _worker_result(group: str, tool: str, target: str, mode: ScanMode, params: dict | None = None):
-    execution = run_tool_execution(tool_name=tool, target=target, scan_mode=mode)
+    run_params = params or {}
+
+    # Recebe segredos do dispatcher para manter execucao consistente entre workers.
+    old_env: dict[str, str | None] = {
+        "BURP_LICENSE_KEY": os.getenv("BURP_LICENSE_KEY"),
+        "SHODAN_API_KEY": os.getenv("SHODAN_API_KEY"),
+    }
+    burp_key = str(run_params.get("burp_license_key", "") or "").strip()
+    shodan_key = str(run_params.get("shodan_api_key", "") or "").strip()
+    if burp_key:
+        os.environ["BURP_LICENSE_KEY"] = burp_key
+    if shodan_key:
+        os.environ["SHODAN_API_KEY"] = shodan_key
+
+    try:
+        execution = run_tool_execution(tool_name=tool, target=target, scan_mode=mode)
+    finally:
+        for env_key, old_value in old_env.items():
+            if old_value is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = old_value
+
     return {
         "ok": execution.get("status") == "executed",
         "group": group,
         "tool": tool,
         "target": target,
         "mode": mode,
-        "params": params or {},
+        "params": run_params,
         "queue": execution.get("worker", group_queue(group, mode)),
         "status": execution.get("status", "error"),
         "command": execution.get("command", ""),
@@ -123,6 +145,21 @@ def _get_scan_retry_policy(db: Session, owner_id: int) -> tuple[bool, int, int]:
     except (TypeError, ValueError):
         delay_seconds = 10
     return enabled, max(1, min(10, max_attempts)), max(5, min(3600, delay_seconds))
+
+
+def _get_burp_runtime_config(db: Session, owner_id: int) -> tuple[bool, str]:
+    rows = (
+        db.query(AppSetting)
+        .filter(
+            AppSetting.owner_id == owner_id,
+            AppSetting.key.in_(["burp_enabled", "burp_license_key"]),
+        )
+        .all()
+    )
+    values = {row.key: row.value for row in rows}
+    enabled = str(values.get("burp_enabled", "false")).lower() == "true"
+    license_key = str(values.get("burp_license_key", "") or "").strip()
+    return enabled, license_key
 
 
 def _format_mission_progress(state_data: dict, current_step: str) -> str:
@@ -389,6 +426,24 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.commit()
 
         stop_pulse = _start_scan_progress_pulse(scan_id=job.id, scan_mode=scan_mode, interval_seconds=20)
+
+        burp_enabled, burp_license_key = _get_burp_runtime_config(db, job.owner_id)
+        if burp_enabled and burp_license_key:
+            os.environ["BURP_LICENSE_KEY"] = burp_license_key
+        else:
+            os.environ.pop("BURP_LICENSE_KEY", None)
+
+        shodan_api_key = str(
+            (
+                db.query(AppSetting.value)
+                .filter(AppSetting.owner_id == job.owner_id, AppSetting.key == "shodan_api_key")
+                .scalar()
+            ) or ""
+        ).strip()
+        if shodan_api_key:
+            os.environ["SHODAN_API_KEY"] = shodan_api_key
+        else:
+            os.environ.pop("SHODAN_API_KEY", None)
 
         app = build_graph(mode=scan_mode)
         known_patterns = [
@@ -754,7 +809,7 @@ def run_scan_job(scan_id: int):
 # Executado a cada minuto pelo Celery Beat
 # ──────────────────────────────────────────────────────────────────────────────
 
-@celery.task(name="scheduler.tick")
+@celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
 def scheduler_tick():
     """
     Roda a cada minuto (via Celery Beat).

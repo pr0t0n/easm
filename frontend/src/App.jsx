@@ -32,25 +32,10 @@ function AdminOnly({ children }) {
 
 export default function App() {
   const [ready, setReady] = useState(false);
-  const [theme, setTheme] = useState("light");
 
   useEffect(() => {
-    const stored = localStorage.getItem("theme");
-    const initial = stored === "dark" || stored === "light"
-      ? stored
-      : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    setTheme(initial);
-    document.documentElement.setAttribute("data-theme", initial);
+    document.documentElement.setAttribute("data-theme", "dark");
   }, []);
-
-  const toggleTheme = () => {
-    setTheme((prev) => {
-      const next = prev === "dark" ? "light" : "dark";
-      localStorage.setItem("theme", next);
-      document.documentElement.setAttribute("data-theme", next);
-      return next;
-    });
-  };
 
   useEffect(() => {
     const syncMe = async () => {
@@ -84,7 +69,7 @@ export default function App() {
               <div className="min-h-screen md:flex" style={{ backgroundColor: "var(--bg-main)" }}>
                 <Sidebar />
                 <div className="flex min-h-screen flex-1 flex-col">
-                  <Navbar theme={theme} onToggleTheme={toggleTheme} />
+                  <Navbar />
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<ReportsPage />} />

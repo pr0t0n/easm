@@ -77,38 +77,36 @@ export default function LoginPage() {
           </div>
         </section>
 
-        <section className="panel relative overflow-hidden border-slate-200 bg-white p-6 lg:p-8">
+        <section className="panel relative overflow-hidden border-slate-700 bg-slate-900 p-6 lg:p-8">
           <div className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(90deg,#2563EB,#1D4ED8,#2563EB)]" />
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Acesso corporativo</p>
-          <h2 className="mt-3 font-display text-3xl font-semibold text-slate-900">Entrar na operacao</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">
+          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Acesso corporativo</p>
+          <h2 className="mt-3 font-display text-3xl font-semibold text-slate-100">Entrar na operacao</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
             Acompanhe execucoes, postura de risco e status das integrações em um painel único. O cadastro de usuarios é realizado exclusivamente por administradores.
           </p>
 
           <form onSubmit={submit} className="mt-6 space-y-3">
             <input
-              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 placeholder-slate-500 outline-none"
+              className="w-full rounded-xl border border-slate-700 px-4 py-3 text-slate-100 placeholder-slate-500 outline-none"
               placeholder="email corporativo"
-              value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
             <input
               type="password"
-              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 placeholder-slate-500 outline-none"
+              className="w-full rounded-xl border border-slate-700 px-4 py-3 text-slate-100 placeholder-slate-500 outline-none"
               placeholder="senha"
-              value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
 
-            {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+            {error && <div className="rounded-xl border border-rose-800/50 bg-rose-900/30 px-4 py-3 text-sm text-rose-300">{error}</div>}
 
             <button disabled={submitting} className="w-full rounded-xl border border-blue-500/70 bg-blue-600 px-4 py-3 font-semibold text-white shadow-[0_0_20px_rgba(37,99,235,0.22)] disabled:opacity-50 hover:bg-blue-500">
               {submitting ? "Processando..." : "Entrar"}
             </button>
           </form>
 
-          <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-            <p className="font-semibold text-slate-900">Fluxo recomendado</p>
+          <div className="mt-6 rounded-xl border border-slate-700 bg-slate-800 p-4 text-sm text-slate-300">
+            <p className="font-semibold text-slate-100">Fluxo recomendado</p>
             <p className="mt-2">1. Configure credenciais externas e ferramentas.</p>
             <p>2. Defina grupos, política e alvos autorizados.</p>
             <p>3. Execute scans com trilha de auditoria e acompanhamento em tempo real.</p>

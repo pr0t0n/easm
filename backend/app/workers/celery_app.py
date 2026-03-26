@@ -4,6 +4,7 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core.config import settings
+from app.workers.worker_groups import SCAN_SCHEDULED_QUEUE
 
 
 celery = Celery(
@@ -25,6 +26,7 @@ celery.conf.update(
         "scheduler-tick": {
             "task": "scheduler.tick",
             "schedule": crontab(minute="*"),
+            "options": {"queue": SCAN_SCHEDULED_QUEUE},
         },
     },
     timezone="America/Sao_Paulo",

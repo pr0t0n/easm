@@ -351,7 +351,7 @@ def _sanitize_multiline_text(value: str | None) -> str:
 def _normalize_finding_title(value: str | None) -> str:
     title = _sanitize_text(value)
     lowered = title.lower()
-    for prefix in ["nuclei:", "nuclei -", "nikto:", "ffuf:"]:
+    for prefix in ["nuclei:", "nuclei -", "nikto:", "ffuf:", "nmap-vulscan:", "vulscan:", "asm rule:", "asm rule match:"]:
         if lowered.startswith(prefix):
             title = title[len(prefix):].strip(" -:")
             break
@@ -3442,7 +3442,8 @@ def dashboard_insights(
                 sev_count_vuln[sev] += 1
                 target_metric["severity_vuln"][sev] = int(target_metric["severity_vuln"].get(sev, 0)) + 1
 
-        key = (str(f.title or "Finding"), sev)
+        normalized_title = _normalize_finding_title(f.title)
+        key = (normalized_title or "Finding", sev)
         vuln_counter[key] = vuln_counter.get(key, 0) + 1
 
         tool = str(details.get("tool") or nested_details.get("tool") or "").strip().lower()
@@ -3500,11 +3501,11 @@ def dashboard_insights(
             target_metric["age_exploit"].append(int(age["exploit_published_days"]))
 
         if not f.is_false_positive:
-            reasons = build_priority_reason(f.title, f.severity, fair, age)
+            reasons = build_priority_reason(normalized_title, f.severity, fair, age)
             prioritized_actions.append(
                 {
                     "finding_id": f.id,
-                    "title": f.title,
+                    "title": normalized_title,
                     "severity": f.severity,
                     "target_query": f.scan_job.target_query if f.scan_job else None,
                     "fair_score": fair["fair_score"],
@@ -3742,6 +3743,13 @@ def dashboard_insights(
         recurring_findings_count=recurring_findings_count,
         segment=None,  # dashboard não tem alvo único — usa peso padrão
     )
+
+    if float(effective_scans or 0) <= 0:
+        continuous_rating = {
+            "score": 0.0,
+            "grade": "F",
+            "factors": [],
+        }
 
     scan_timeline_seed: list[dict] = []
     for s in sorted(jobs, key=lambda item: item.created_at or datetime.min):

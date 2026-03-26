@@ -202,7 +202,7 @@ export default function UserManagementPage() {
                     onChange={(e) => updateDraft(u.id, "email", e.target.value)}
                   />
                   <div className="mt-3 grid gap-2 md:grid-cols-2">
-                    <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-100 px-3 py-2 text-sm text-slate-700">
+                    <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300">
                       <input
                         type="checkbox"
                         checked={Boolean(drafts[u.id]?.is_admin)}
@@ -210,7 +210,7 @@ export default function UserManagementPage() {
                       />
                       Administrador
                     </label>
-                    <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-100 px-3 py-2 text-sm text-slate-700">
+                    <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300">
                       <input
                         type="checkbox"
                         checked={Boolean(drafts[u.id]?.is_active)}
@@ -221,8 +221,8 @@ export default function UserManagementPage() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-300 bg-slate-100 p-3 text-sm text-slate-700">
-                  <p className="font-medium text-slate-800">#{u.id}</p>
+                <div className="rounded-xl border border-slate-700 bg-slate-800 p-3 text-sm text-slate-300">
+                  <p className="font-medium text-slate-200">#{u.id}</p>
                   <p className="mt-1">Estado atual: admin {String(u.is_admin)} | ativo {String(u.is_active)}</p>
                   <p className="mt-1">Grupos atuais: {(u.group_ids || []).join(", ") || "nenhum"}</p>
                 </div>
@@ -230,7 +230,7 @@ export default function UserManagementPage() {
 
               <div className="mt-3 flex flex-wrap gap-2 text-xs">
                 {groups.map((g) => (
-                  <label key={g.id} className="flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-700">
+                  <label key={g.id} className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-slate-300">
                     <input type="checkbox" checked={(drafts[u.id]?.group_ids || []).includes(g.id)} onChange={() => toggleDraftGroup(u.id, g.id)} />
                     {g.name}
                   </label>

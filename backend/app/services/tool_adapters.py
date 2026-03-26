@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -15,7 +17,7 @@ SAFE_TOOL_REGISTRY = {
     "recon": ["subfinder", "amass", "assetfinder", "dnsx", "naabu", "nessus"],
     "crawler": ["httpx", "katana", "waymore", "uro", "gowitness"],
     "fuzzing": ["ffuf", "feroxbuster", "arjun", "dirb", "gobuster", "wfuzz"],
-    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
+    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "burp-cli", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
     "code_js": ["linkfinder", "secretfinder", "trufflehog"],
     "api": ["kiterunner", "postman-to-k6"],
     "osint": ["theharvester", "h8mail", "metagoofil", "urlscan-cli", "subjack", "shodan-cli", "whatweb"],
@@ -42,6 +44,8 @@ TOOL_SPECIFIC_TIMEOUTS = {
     # Nuclei e Nmap podem levar ~10min por alvo em varreduras completas.
     "nmap": 600,
     "nmap-vulscan": 600,
+    "burp-cli": 900,
+    "shodan-cli": 60,
     "vulscan": 600,
     "nuclei": 600,
     "sqlmap": 300,
@@ -154,6 +158,7 @@ def _tool_binary(tool_name: str) -> str:
         "sqlmap": "sqlmap.py",
         "tplmap": "python3",
         "commix": "python3",
+        "burp": "burp-cli",
     }
     normalized = tool_name.strip().lower()
     return aliases.get(normalized, normalized)
@@ -180,6 +185,12 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "vulscandb=cve.csv",
             host,
         ]
+    if normalized in {"burp", "burp-cli"}:
+        license_key = str(os.getenv("BURP_LICENSE_KEY", "")).strip()
+        if not license_key:
+            return ["__missing_burp_license__"]
+        # Preferimos JSON em stdout para parser unificado no workflow.
+        return ["burp-cli", "scan", "--url", url, "--format", "json", "--license-key", license_key]
     if normalized == "nmap":
         return [
             "nmap",
@@ -432,6 +443,31 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "stderr": "missing mandatory nuclei templates",
         }
 
+    if normalized_tool in {"burp", "burp-cli"} and not str(os.getenv("BURP_LICENSE_KEY", "")).strip():
+        return {
+            "status": "error",
+            "output": "BURP_LICENSE_KEY nao configurada para execucao do burp-cli.",
+            "open_ports": [],
+            "return_code": 2,
+            "command": "burp-cli scan --url <target> --format json --license-key <key>",
+            "stdout": "",
+            "stderr": "missing burp license",
+        }
+
+    if normalized_tool in {"shodan", "shodan-cli"} and not str(os.getenv("SHODAN_API_KEY", "")).strip():
+        return {
+            "status": "skipped",
+            "output": "SHODAN_API_KEY nao configurada — shodan-cli ignorado.",
+            "open_ports": [],
+            "return_code": 0,
+            "command": "shodan search hostname:<target>",
+            "stdout": "",
+            "stderr": "missing shodan api key",
+        }
+
+    if normalized_tool in {"shodan", "shodan-cli"}:
+        return _run_shodan_python_query(target)
+
     binary = _tool_binary(tool_name)
     if shutil.which(binary) is None:
         return {
@@ -453,6 +489,16 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "command": "nuclei -u <target> -t /root/.nuclei/templates",
             "stdout": "",
             "stderr": "missing mandatory nuclei templates",
+        }
+    if cmd and cmd[0] == "__missing_burp_license__":
+        return {
+            "status": "error",
+            "output": "BURP_LICENSE_KEY nao configurada para execucao do burp-cli.",
+            "open_ports": [],
+            "return_code": 2,
+            "command": "burp-cli scan --url <target> --format json --license-key <key>",
+            "stdout": "",
+            "stderr": "missing burp license",
         }
 
     timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get(normalized_tool, TOOL_TIMEOUT_SECONDS)
@@ -639,6 +685,100 @@ def _run_curl_headers_tool(target: str) -> dict[str, Any]:
     }
 
 
+def _run_shodan_python_query(target: str) -> dict[str, Any]:
+    """Executa consulta Shodan via biblioteca Python, sem depender do binario CLI."""
+    parsed = urlparse(target if "://" in target else f"https://{target}")
+    host = (parsed.hostname or str(target or "").strip()).strip()
+    if not host:
+        return {
+            "status": "error",
+            "output": "Target vazio para shodan-cli.",
+            "open_ports": [],
+            "return_code": 2,
+            "command": "shodan search hostname:<target>",
+            "stdout": "",
+            "stderr": "target vazio",
+        }
+
+    script = "\n".join([
+        "import shodan, json, os",
+        "api = shodan.Shodan(os.environ.get('SHODAN_API_KEY', ''))",
+        f"host = {repr(host)}",
+        "try:",
+        "    results = api.search(f'hostname:\"{host}\"', limit=50)",
+        "    print(json.dumps(results))",
+        "except Exception as e:",
+        "    print(json.dumps({'error': str(e), 'matches': [], 'total': 0}))",
+    ])
+
+    timeout_secs = TOOL_SPECIFIC_TIMEOUTS.get("shodan-cli", 60)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "output": f"Timeout ao executar shodan-cli em {timeout_secs}s.",
+            "open_ports": [],
+            "return_code": -1,
+            "command": f"shodan search hostname:\"{host}\"",
+            "stdout": "",
+            "stderr": "timeout",
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "output": f"Falha ao executar shodan-cli: {exc}",
+            "open_ports": [],
+            "return_code": 1,
+            "command": f"shodan search hostname:\"{host}\"",
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+
+    # Verifica erro retornado pelo script Python
+    try:
+        parsed_out = json.loads(stdout) if stdout else {}
+        if isinstance(parsed_out, dict) and parsed_out.get("error"):
+            return {
+                "status": "error",
+                "output": f"Shodan API error: {parsed_out['error']}",
+                "open_ports": [],
+                "return_code": 1,
+                "command": f"shodan search hostname:\"{host}\"",
+                "stdout": stdout[:1500],
+                "stderr": stderr[:1500],
+            }
+    except Exception:
+        pass
+
+    try:
+        json.loads(stdout)
+    except Exception:
+        stdout = ""
+
+    status = "executed" if stdout else "error"
+    output = stdout or stderr or "shodan-cli executado sem output textual."
+    # stdout precisa carregar o JSON completo para que _extract_shodan_findings consiga parsear.
+    return {
+        "status": status,
+        "output": output[:300],
+        "open_ports": [],
+        "return_code": proc.returncode,
+        "command": f"shodan search hostname:\"{host}\"",
+        "stdout": stdout,          # JSON completo — sem truncagem
+        "stderr": stderr[:1500],
+    }
+
+
 def get_execution_mode() -> str:
     return os.getenv("TOOL_EXECUTION_MODE", "controlled").strip().lower()
 
@@ -726,11 +866,9 @@ def run_tool_execution(tool_name: str, target: str, scan_mode: str = "unit") -> 
 
     execution = _run_cli_tool(tool_name=tool_name, target=target)
     
-    # Aplicar ASM rules evaluation ao output da ferramenta
+    # Mantemos apenas achados nativos das ferramentas (ASM rules desativado).
     asm_findings = []
     tool_output = execution.get("output", "") or execution.get("stdout", "")
-    if tool_output:
-        asm_findings = evaluate_asm_rules(tool_output, tool_name=tool_name)
 
     # Fallback especifico para nuclei: transforma stdout em achados estruturados.
     if tool_name.strip().lower() == "nuclei" and not asm_findings:

@@ -189,7 +189,7 @@ export default function VulnerabilitiesPage() {
             <button
               disabled={!hasPrev}
               onClick={() => setPage((p) => ({ ...p, offset: Math.max(0, p.offset - p.limit) }))}
-              className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Anterior
             </button>

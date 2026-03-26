@@ -19,27 +19,25 @@ export default function ConfigurationPage() {
   const [workerGroups, setWorkerGroups] = useState({});
   const [overview, setOverview] = useState(null);
   const [lines, setLines] = useState([]);
-  const [allowlist, setAllowlist] = useState({ policy: null, entries: [] });
-  const [allowlistForm, setAllowlistForm] = useState({ target_pattern: "", tool_group: "*", is_active: true });
-  const [groups, setGroups] = useState([]);
-  const [groupForm, setGroupForm] = useState({ name: "", description: "" });
-  const [newLine, setNewLine] = useState({ name: "", category: "recon", position: 0, enabled: true });
+  const [newLine, setNewLine] = useState({ name: "", category: "reconhecimento", position: 0, enabled: true });
   const [toolsCatalog, setToolsCatalog] = useState({ unit: [], scheduled: [] });
   const [nessusMeta, setNessusMeta] = useState({ enabled: false, configured: false, pynessus_installed: false, url: "" });
   const [nessusConfig, setNessusConfig] = useState({ enabled: false, url: "", access_key: "", secret_key: "", verify_tls: true });
+  const [burpMeta, setBurpMeta] = useState({ enabled: false, configured: false, burp_cli_installed: false, status: "desativado" });
+  const [burpConfig, setBurpConfig] = useState({ enabled: false, license_key: "" });
   const [supervisorTrail, setSupervisorTrail] = useState({ summary: null, scans: [] });
 
   const loadAll = async () => {
-    const [shodanRes, runtimeRes, statusRes, workerGroupsRes, linesRes, overviewRes, allowlistRes, toolsRes, nessusRes, supervisorRes] = await Promise.all([
+    const [shodanRes, runtimeRes, statusRes, workerGroupsRes, linesRes, overviewRes, toolsRes, nessusRes, burpRes, supervisorRes] = await Promise.all([
       client.get("/api/config/shodan"),
       client.get("/api/config/runtime"),
       client.get("/api/config/ai-status"),
       client.get("/api/worker-manager/groups"),
       client.get("/api/worker-manager/lines"),
       client.get("/api/worker-manager/overview"),
-      client.get("/api/policy/allowlist"),
       client.get("/api/config/tools"),
       client.get("/api/config/nessus"),
+      client.get("/api/config/burp"),
       client.get("/api/worker-manager/supervisor-trail", { params: { limit: 20 } }),
     ]);
     setShodanApiKey(shodanRes.data.api_key || "");
@@ -48,7 +46,6 @@ export default function ConfigurationPage() {
     setWorkerGroups(workerGroupsRes.data || {});
     setLines(linesRes.data);
     setOverview(overviewRes.data || null);
-    setAllowlist(allowlistRes.data || { policy: null, entries: [] });
     setToolsCatalog(toolsRes.data?.catalog || { unit: [], scheduled: [] });
     setNessusMeta(toolsRes.data?.nessus || { enabled: false, configured: false, pynessus_installed: false, url: "" });
     setNessusConfig({
@@ -58,14 +55,17 @@ export default function ConfigurationPage() {
       secret_key: "",
       verify_tls: Boolean(nessusRes.data?.verify_tls),
     });
+    setBurpMeta(toolsRes.data?.burp || { enabled: false, configured: false, burp_cli_installed: false, status: "desativado" });
+    setBurpConfig({
+      enabled: Boolean(burpRes.data?.enabled),
+      license_key: burpRes.data?.license_key || "",
+    });
     setSupervisorTrail(supervisorRes.data || { summary: null, scans: [] });
     setShodanMeta({
       configured: Boolean(shodanRes.data?.configured),
       enabled: Boolean(shodanRes.data?.enabled),
       status: shodanRes.data?.status || "desativado",
     });
-    const groupsRes = await client.get("/api/access-groups");
-    setGroups(groupsRes.data);
   };
 
   useEffect(() => {
@@ -86,20 +86,14 @@ export default function ConfigurationPage() {
     await loadAll();
   };
 
+  const saveBurp = async () => {
+    await client.put("/api/config/burp", burpConfig);
+    await loadAll();
+  };
+
   const addLine = async () => {
     await client.post("/api/worker-manager/lines", { ...newLine, definition: {} });
-    setNewLine({ name: "", category: "recon", position: 0, enabled: true });
-    await loadAll();
-  };
-
-  const addGroup = async () => {
-    await client.post("/api/access-groups", groupForm);
-    setGroupForm({ name: "", description: "" });
-    await loadAll();
-  };
-
-  const deleteGroup = async (groupId) => {
-    await client.delete(`/api/access-groups/${groupId}`);
+    setNewLine({ name: "", category: "reconhecimento", position: 0, enabled: true });
     await loadAll();
   };
 
@@ -113,30 +107,14 @@ export default function ConfigurationPage() {
     await loadAll();
   };
 
-  const addAllowlist = async () => {
-    await client.post("/api/policy/allowlist", allowlistForm);
-    setAllowlistForm({ target_pattern: "", tool_group: "*", is_active: true });
-    await loadAll();
-  };
-
-  const toggleAllowlist = async (entry) => {
-    await client.put(`/api/policy/allowlist/${entry.id}`, { is_active: !entry.is_active });
-    await loadAll();
-  };
-
-  const deleteAllowlist = async (entryId) => {
-    await client.delete(`/api/policy/allowlist/${entryId}`);
-    await loadAll();
-  };
 
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
       <section className="panel p-4">
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Runtime</button>
-          <button onClick={() => setActiveTab("tools")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "tools" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Ferramentas</button>
-          <button onClick={() => setActiveTab("policy")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "policy" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Policy e Acesso</button>
-          <button onClick={() => setActiveTab("workers")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "workers" ? "bg-[#1A365D] text-white" : "border border-slate-300 bg-white text-slate-700"}`}>Workers</button>
+          <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Runtime</button>
+          <button onClick={() => setActiveTab("tools")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "tools" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Ferramentas</button>
+          <button onClick={() => setActiveTab("workers")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "workers" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Workers</button>
         </div>
       </section>
 
@@ -144,27 +122,7 @@ export default function ConfigurationPage() {
       <section className="panel p-5">
         <h2 className="text-xl font-semibold">Configuracao</h2>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm text-slate-300">Shodan API Key</label>
-            <input
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-              value={shodanApiKey}
-              onChange={(e) => setShodanApiKey(e.target.value)}
-              placeholder="insira a chave"
-            />
-            <button onClick={saveShodan} className="mt-2 rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar chave</button>
-            <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
-              <p>
-                Status Shodan:{" "}
-                <span className={shodanMeta.configured ? "text-emerald-300" : "text-amber-300"}>{shodanMeta.status}</span>
-              </p>
-              <p className="mt-1 text-xs text-slate-400">
-                {shodanMeta.configured ? "A integracao pode enriquecer ativos e exposicoes externas." : "Desativado ate que uma API key valida seja salva."}
-              </p>
-            </div>
-          </div>
-
+        <div className="mt-4">
           <div>
             <h3 className="text-sm font-semibold">Modo de Execucao / Logs</h3>
             <label className="mt-2 flex items-center gap-2 text-sm">
@@ -281,11 +239,11 @@ export default function ConfigurationPage() {
               Workers: stale={aiStatus.runtime.worker_health_stale_after_seconds}s | orphan_cutoff={aiStatus.runtime.worker_orphan_cutoff_minutes}min | orphan_limit={aiStatus.runtime.worker_orphan_requeue_limit}
             </p>
 
-            <div className="rounded-xl border border-slate-300 bg-slate-50 p-3">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <h4 className="font-semibold">Ultimos erros</h4>
               {(aiStatus.recent_errors || []).length === 0 && <p className="text-slate-400">Sem erros recentes.</p>}
               {(aiStatus.recent_errors || []).map((err) => (
-                <p key={err.id} className="font-mono text-xs text-rose-700">
+                <p key={err.id} className="font-mono text-xs text-rose-300">
                   [{new Date(err.created_at).toLocaleString()}] {err.source}: {err.message}
                 </p>
               ))}
@@ -382,84 +340,6 @@ export default function ConfigurationPage() {
       </section>
       )}
 
-      {activeTab === "policy" && (
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Policy / Allowlist por Cliente</h3>
-        <p className="mt-1 text-xs text-slate-300">Apenas alvos permitidos na allowlist passam no gate de policy.</p>
-        <div className="mt-3 grid gap-2 md:grid-cols-4">
-          <input
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            placeholder="*.empresa.com"
-            value={allowlistForm.target_pattern}
-            onChange={(e) => setAllowlistForm({ ...allowlistForm, target_pattern: e.target.value })}
-          />
-          <select
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            value={allowlistForm.tool_group}
-            onChange={(e) => setAllowlistForm({ ...allowlistForm, tool_group: e.target.value })}
-          >
-            <option value="*">*</option>
-            <option value="recon">recon</option>
-            <option value="fuzzing">fuzzing</option>
-            <option value="vuln">vuln</option>
-            <option value="code_js">code_js</option>
-            <option value="api">api</option>
-            <option value="osint">osint</option>
-          </select>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={allowlistForm.is_active}
-              onChange={(e) => setAllowlistForm({ ...allowlistForm, is_active: e.target.checked })}
-            />
-            Ativo
-          </label>
-          <button onClick={addAllowlist} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Adicionar</button>
-        </div>
-        <div className="mt-3 space-y-2">
-          {(allowlist.entries || []).map((entry) => (
-            <div key={entry.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <p className="text-sm">{entry.target_pattern} | group: {entry.tool_group} | ativo: {String(entry.is_active)}</p>
-              <div className="mt-2 flex gap-2">
-                <button onClick={() => toggleAllowlist(entry)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Alternar</button>
-                <button onClick={() => deleteAllowlist(entry.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-      )}
-
-      {activeTab === "policy" && (
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Grupos de Acesso</h3>
-        <div className="mt-3 grid gap-2 md:grid-cols-3">
-          <input
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            placeholder="Nome do grupo"
-            value={groupForm.name}
-            onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
-          />
-          <input
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            placeholder="Descricao"
-            value={groupForm.description}
-            onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })}
-          />
-          <button onClick={addGroup} className="rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar grupo</button>
-        </div>
-        <div className="mt-3 space-y-2">
-          {groups.map((g) => (
-            <div key={g.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <p className="font-medium">#{g.id} - {g.name}</p>
-              <p className="text-xs text-slate-300">{g.description || "Sem descricao"}</p>
-              <button onClick={() => deleteGroup(g.id)} className="mt-2 rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir grupo</button>
-            </div>
-          ))}
-        </div>
-      </section>
-      )}
-
       {activeTab === "workers" && (
       <section className="panel p-5">
         <h3 className="text-lg font-semibold">Worker Manager</h3>
@@ -475,11 +355,8 @@ export default function ConfigurationPage() {
             value={newLine.category}
             onChange={(e) => setNewLine({ ...newLine, category: e.target.value })}
           >
-            <option value="recon">recon</option>
-            <option value="fuzzing">fuzzing</option>
-            <option value="vuln">vuln</option>
-            <option value="code_js">code_js</option>
-            <option value="api">api</option>
+            <option value="reconhecimento">reconhecimento</option>
+            <option value="analise_vulnerabilidade">analise_vulnerabilidade</option>
             <option value="osint">osint</option>
           </select>
           <input
@@ -536,6 +413,27 @@ export default function ConfigurationPage() {
 
       {activeTab === "tools" && (
         <section className="panel p-5">
+          <h3 className="text-lg font-semibold">Shodan</h3>
+          <p className="mt-1 text-xs text-slate-300">Enriquecimento de ativos e exposicoes externas via API Shodan.</p>
+          <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
+            <p>Status: <span className={shodanMeta.configured ? "text-emerald-300" : "text-amber-300"}>{shodanMeta.status}</span></p>
+            <p className="mt-1 text-xs text-slate-400">{shodanMeta.configured ? "A integracao pode enriquecer ativos e exposicoes externas." : "Desativado ate que uma API key valida seja salva."}</p>
+          </div>
+          <div className="mt-3">
+            <label className="mb-1 block text-sm text-slate-300">Shodan API Key</label>
+            <input
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+              value={shodanApiKey}
+              onChange={(e) => setShodanApiKey(e.target.value)}
+              placeholder="insira a chave"
+            />
+            <button onClick={saveShodan} className="mt-3 rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar chave</button>
+          </div>
+        </section>
+      )}
+
+      {activeTab === "tools" && (
+        <section className="panel p-5">
           <h3 className="text-lg font-semibold">Nessus (pynessus)</h3>
           <p className="mt-1 text-xs text-slate-300">Habilita o Nessus como discovery/scanner/analista de vulnerabilidade.</p>
           <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
@@ -560,6 +458,31 @@ export default function ConfigurationPage() {
             <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Secret Key (deixe vazio para manter)" value={nessusConfig.secret_key} onChange={(e) => setNessusConfig({ ...nessusConfig, secret_key: e.target.value })} />
           </div>
           <button onClick={saveNessus} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar Nessus</button>
+        </section>
+      )}
+
+      {activeTab === "tools" && (
+        <section className="panel p-5">
+          <h3 className="text-lg font-semibold">Burp Professional CLI</h3>
+          <p className="mt-1 text-xs text-slate-300">Integra o Burp CLI no worker de vulnerabilidade e usa a licenca salva no settings.</p>
+          <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
+            <p>Status: <span className={burpMeta.configured ? "text-emerald-300" : "text-amber-300"}>{burpMeta.status || (burpMeta.configured ? "ativo" : "desativado")}</span></p>
+            <p>burp-cli instalado: <span className={burpMeta.burp_cli_installed ? "text-emerald-300" : "text-rose-300"}>{String(burpMeta.burp_cli_installed)}</span></p>
+            <p>Licenca configurada: <span className={burpMeta.configured ? "text-emerald-300" : "text-amber-300"}>{String(burpMeta.configured)}</span></p>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            <label className="flex items-center gap-2 text-sm md:col-span-2">
+              <input type="checkbox" checked={burpConfig.enabled} onChange={(e) => setBurpConfig({ ...burpConfig, enabled: e.target.checked })} />
+              Habilitar Burp CLI
+            </label>
+            <input
+              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
+              placeholder="Burp license key (deixe mascarada para manter)"
+              value={burpConfig.license_key}
+              onChange={(e) => setBurpConfig({ ...burpConfig, license_key: e.target.value })}
+            />
+          </div>
+          <button onClick={saveBurp} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar Burp</button>
         </section>
       )}
     </main>

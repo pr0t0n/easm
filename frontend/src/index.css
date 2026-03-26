@@ -5,48 +5,6 @@
 @tailwind utilities;
 
 :root {
-  --bg-main: #f7fafc;
-  --surface: #ffffff;
-  --surface-elevated: #edf2f7;
-  --primary: #1a365d;
-  --primary-light: #2c5282;
-  --secondary: #3182ce;
-  --text-primary: #2d3748;
-  --text-secondary: #4a5568;
-  --text-tertiary: #718096;
-  --border: #e2e8f0;
-  --border-light: #cbd5e0;
-  --bg-app-gradient:
-    radial-gradient(circle at 10% 10%, rgba(26, 54, 93, 0.08), transparent 35%),
-    radial-gradient(circle at 90% 0%, rgba(49, 130, 206, 0.08), transparent 26%),
-    linear-gradient(180deg, #f7fafc 0%, #edf2f7 100%);
-  --surface-strong: #ffffff;
-  --surface-soft: #f7fafc;
-  --header-bg: rgba(255, 255, 255, 0.95);
-  --header-border: #cbd5e0;
-  --header-title: #1a365d;
-  --header-subtitle: #4a5568;
-  --btn-primary-bg: #1a365d;
-  --btn-primary-hover: #2c5282;
-  --btn-primary-border: #2c5282;
-  --btn-secondary-bg: #f7fafc;
-  --btn-secondary-border: #cbd5e0;
-  --btn-secondary-text: #2d3748;
-  --sidebar-bg: #1a365d;
-  --sidebar-surface: #224874;
-  --sidebar-border: #2c5282;
-  --sidebar-text: #e2e8f0;
-  --sidebar-muted: #bfdbfe;
-  --table-row-hover: rgba(237, 242, 247, 0.9);
-  --override-slate-bg: #ffffff;
-  --override-slate-muted: var(--text-secondary);
-  --override-slate-dim: var(--text-tertiary);
-  --input-bg: #ffffff;
-  --input-border: var(--border-light);
-  --input-focus: var(--primary);
-}
-
-:root[data-theme="dark"] {
   --bg-main: #0a0f1e;
   --surface: #0d1527;
   --surface-elevated: #111827;
@@ -249,31 +207,6 @@ td {
 
 [class*="text-slate-600"] {
   color: var(--override-slate-dim) !important;
-}
-
-/* Normaliza contrastes de textos coloridos para o tema claro */
-[class*="text-blue-100"],
-[class*="text-blue-200"],
-[class*="text-blue-300"] {
-  color: #1e40af !important;
-}
-
-[class*="text-emerald-100"],
-[class*="text-emerald-200"],
-[class*="text-emerald-300"] {
-  color: #166534 !important;
-}
-
-[class*="text-amber-100"],
-[class*="text-amber-200"],
-[class*="text-amber-300"] {
-  color: #92400e !important;
-}
-
-[class*="text-rose-100"],
-[class*="text-rose-200"],
-[class*="text-rose-300"] {
-  color: #9f1239 !important;
 }
 
 tbody tr {

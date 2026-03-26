@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from time import perf_counter
@@ -299,11 +300,6 @@ def _run_tools_and_collect(
             all_findings.extend(nuclei_findings)
             state["logs_terminais"].append(f"{log_prefix}: tool=nuclei findings_extraidas={len(nuclei_findings)}")
 
-        asm_findings = _extract_asm_findings(result, step_name, scan_target)
-        if asm_findings:
-            all_findings.extend(asm_findings)
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} asm_findings={len(asm_findings)}")
-
         tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
         if tool_specific_findings:
             all_findings.extend(tool_specific_findings)
@@ -443,6 +439,33 @@ def _target_host(target: str) -> str:
     if not host:
         host = raw.split("/")[0].split(":")[0].strip().lower()
     return host.lstrip("*.").strip(".")
+
+
+def _is_local_target(target: str) -> bool:
+    host = _target_host(target)
+    return host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+
+
+def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
+    if not _is_local_target(target):
+        return tools
+
+    preferred = ["httpx", "katana", "gowitness", "naabu"]
+    filtered = [tool for tool in preferred if tool in tools]
+    return filtered or [tool for tool in tools if tool in {"httpx", "naabu"}] or tools[:1]
+
+
+def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
+    if not _is_local_target(target):
+        return tools
+
+    preferred = ["burp-cli", "nuclei", "wafw00f", "nikto", "shcheck", "curl-headers"]
+    filtered = [tool for tool in preferred if tool in tools]
+    if filtered:
+        return filtered
+    if "burp-cli" in tools:
+        return ["burp-cli"]
+    return tools[:3]
 
 
 def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> list[str]:
@@ -825,13 +848,121 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_curl_headers_findings(stdout, step_name, default_target)
     if tool == "nikto":
         return _extract_nikto_findings(stdout, step_name, default_target)
+    if tool == "burp-cli":
+        return _extract_burp_cli_findings(stdout, step_name, default_target)
     if tool in {"nmap-vulscan", "vulscan"}:
         return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
     if tool == "sslscan":
         return _extract_sslscan_findings(stdout, step_name, default_target)
     if tool == "wapiti":
         return _extract_wapiti_findings(stdout, step_name, default_target)
+    if tool == "shodan-cli":
+        return _extract_shodan_findings(stdout, step_name, default_target)
     return []
+
+
+def _extract_shodan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai CVEs e portas abertas da resposta JSON da API Shodan."""
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    matches = data.get("matches", [])
+    if not matches or not isinstance(matches, list):
+        return []
+
+    findings: list[dict[str, Any]] = []
+    seen_cves: set[str] = set()
+    open_ports_per_ip: dict[str, list[str]] = {}
+
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        ip_str = str(match.get("ip_str") or default_target)
+        port = match.get("port")
+        transport = str(match.get("transport") or "tcp")
+        product = _sanitize_cli_text(str(match.get("product") or ""))
+        version = _sanitize_cli_text(str(match.get("version") or ""))
+
+        # Agrupa portas por IP para finding informativo consolidado
+        if port:
+            service_label = f"{port}/{transport}"
+            if product:
+                service_label += f" ({product}"
+                if version:
+                    service_label += f" {version}"
+                service_label += ")"
+            open_ports_per_ip.setdefault(ip_str, []).append(service_label)
+
+        # CVEs reportados pelo Shodan para este host/servico
+        vulns = match.get("vulns") or {}
+        if not isinstance(vulns, dict):
+            continue
+        for cve_id, vuln_info in vulns.items():
+            cve_id = str(cve_id or "").upper().strip()
+            if not cve_id.startswith("CVE-"):
+                continue
+            if cve_id in seen_cves:
+                continue
+            seen_cves.add(cve_id)
+
+            cvss = 0.0
+            summary = ""
+            if isinstance(vuln_info, dict):
+                try:
+                    cvss = float(vuln_info.get("cvss") or 0)
+                except (TypeError, ValueError):
+                    cvss = 0.0
+                summary = _sanitize_cli_text(str(vuln_info.get("summary") or ""))
+
+            if cvss >= 9.0:
+                severity = "critical"
+            elif cvss >= 7.0:
+                severity = "high"
+            elif cvss >= 4.0:
+                severity = "medium"
+            else:
+                severity = "low"
+
+            risk_score = min(10, max(1, int(round(cvss))))
+            evidence = summary[:500] if summary else f"{cve_id} identificado pelo Shodan para {ip_str}"
+
+            findings.append({
+                "title": cve_id,
+                "severity": severity,
+                "risk_score": risk_score,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "step": step_name,
+                    "asset": ip_str,
+                    "tool": "shodan-cli",
+                    "evidence": evidence,
+                    "cvss": cvss,
+                    "cve_id": cve_id,
+                },
+            })
+
+    # Um finding informativo por IP com as portas expostas
+    for ip_str, ports in open_ports_per_ip.items():
+        ports_str = ", ".join(ports[:20])
+        findings.append({
+            "title": f"Portas expostas publicamente (Shodan): {ip_str}",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "osint",
+            "details": {
+                "node": "osint",
+                "step": step_name,
+                "asset": ip_str,
+                "tool": "shodan-cli",
+                "evidence": f"Portas detectadas pelo Shodan: {ports_str}",
+                "open_ports": ports,
+            },
+        })
+
+    return findings
 
 
 def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
@@ -1153,7 +1284,7 @@ def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: 
             seen.add(cve_id)
             findings.append(
                 {
-                    "title": f"nmap-vulscan: {cve_id}",
+                    "title": cve_id,
                     "severity": "high",
                     "risk_score": 7,
                     "source_worker": "analise_vulnerabilidade",
@@ -1177,7 +1308,7 @@ def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: 
     if not findings and db_refs:
         findings.append(
             {
-                "title": "nmap-vulscan: referencias de vulnerabilidade identificadas (sem CVE explícito)",
+                "title": "Referencias de vulnerabilidade identificadas (sem CVE explicito)",
                 "severity": "medium",
                 "risk_score": 5,
                 "source_worker": "analise_vulnerabilidade",
@@ -1191,6 +1322,113 @@ def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: 
                 },
             }
         )
+    return findings
+
+
+def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    severity_map = {
+        "critical": ("critical", 10),
+        "high": ("high", 8),
+        "medium": ("medium", 5),
+        "low": ("low", 3),
+        "info": ("low", 2),
+        "information": ("low", 2),
+    }
+
+    payload: dict[str, Any] = {}
+    issues: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(stdout or "{}")
+        if isinstance(parsed, dict):
+            payload = parsed
+        elif isinstance(parsed, list):
+            issues = [item for item in parsed if isinstance(item, dict)]
+    except Exception:
+        payload = {}
+
+    if not issues:
+        # Burp mock imprime logs antes do JSON; tenta extrair apenas o bloco JSON-array.
+        json_block_match = re.search(r"(\[\s*\{.*\}\s*\])", stdout or "", re.DOTALL)
+        if json_block_match:
+            try:
+                parsed_block = json.loads(json_block_match.group(1))
+                if isinstance(parsed_block, list):
+                    issues = [item for item in parsed_block if isinstance(item, dict)]
+            except Exception:
+                pass
+
+    if not issues:
+        issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    if isinstance(payload.get("results"), list) and not issues:
+        issues = payload.get("results")
+
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        name = _sanitize_cli_text(
+            str(issue.get("name") or issue.get("title") or issue.get("issue_name") or "Burp finding")
+        )
+        sev_raw = str(issue.get("severity") or "medium").strip().lower()
+        sev, risk_score = severity_map.get(sev_raw, ("medium", 5))
+        evidence = _sanitize_cli_text(
+            str(issue.get("evidence") or issue.get("description") or issue.get("detail") or "")
+        )
+
+        cve_match = re.search(r"\bCVE-\d{4}-\d{4,7}\b", f"{name} {evidence}", re.IGNORECASE)
+        cve_id = str(cve_match.group(0) or "").upper() if cve_match else ""
+        title = cve_id or name
+
+        dedupe = f"{title}|{sev}|{default_target}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+
+        findings.append(
+            {
+                "title": title,
+                "severity": sev,
+                "risk_score": risk_score,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "burp-cli",
+                    "cve": cve_id or None,
+                    "evidence": evidence,
+                },
+            }
+        )
+
+    if findings:
+        return findings
+
+    # Fallback simples: extrai CVEs do stdout livre quando burp-cli nao retorna JSON estruturado.
+    for match in re.findall(r"\bCVE-\d{4}-\d{4,7}\b", stdout or "", re.IGNORECASE):
+        cve_id = str(match or "").upper()
+        if cve_id in seen:
+            continue
+        seen.add(cve_id)
+        findings.append(
+            {
+                "title": cve_id,
+                "severity": "high",
+                "risk_score": 7,
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "burp-cli",
+                    "cve": cve_id,
+                    "evidence": "cve_extraida_do_stdout",
+                },
+            }
+        )
+
     return findings
 
 
@@ -1373,6 +1611,11 @@ def asset_discovery_node(state: AgentState) -> AgentState:
 
     # Usa asset_discovery group (que aponta para mesma fila reconhecimento)
     recon_tools = _tools_for_group(state["scan_mode"], "asset_discovery") or _tools_for_group(state["scan_mode"], "reconhecimento")
+    recon_tools = _adapt_recon_tools_for_target(state["target"], recon_tools)
+    if _is_local_target(state["target"]):
+        state["logs_terminais"].append(
+            f"AssetDiscovery: local_target detected, reduced_tools={','.join(recon_tools)}"
+        )
     # Ferramentas de port scan a serem executadas também nos subdomínios descobertos
     PORT_SCAN_TOOLS = {"naabu", "nmap"}
     port_scan_tools = [t for t in recon_tools if t in PORT_SCAN_TOOLS]
@@ -1618,15 +1861,36 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
     vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
+    vuln_tools = _adapt_vuln_tools_for_target(state.get("target", ""), vuln_tools)
+    if _is_local_target(state.get("target", "")):
+        state["logs_terminais"].append(
+            f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
+        )
     primary_targets = _targets_for_deep_scan(state, limit=8)
     all_targets = _targets_for_deep_scan(state, limit=MAX_DISCOVERED_ASSETS + 1)
     all_findings: list[dict[str, Any]] = []
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
+    
+    # Separar ferramentas: Burp executará em TODOS os alvos, outras ferramentas apenas em primary
+    burp_tools = ["burp-cli"] if "burp-cli" in vuln_tools else []
+    other_vuln_tools = [t for t in vuln_tools if t != "burp-cli"]
+    
+    # 1. Executar Burp CLI em TODOS os alvos (domínios e subdomínios)
+    if burp_tools:
+        state["logs_terminais"].append(f"RiskAssessment:Burp: scanning {len(all_targets)} targets")
+        for scan_target in all_targets:
+            burp_findings, _, _, _ = _run_tools_and_collect(state, burp_tools, scan_target, current, "RiskAssessment:Burp")
+            if burp_findings:
+                all_findings.extend(burp_findings)
+    
+    # 2. Executar outras ferramentas de vulnerabilidade apenas em primary_targets (economia de recursos)
     for scan_target in primary_targets:
-        vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "RiskAssessment")
-        if vuln_findings:
-            all_findings.extend(vuln_findings)
+        if other_vuln_tools:
+            vuln_findings, _, _, _ = _run_tools_and_collect(state, other_vuln_tools, scan_target, current, "RiskAssessment")
+            if vuln_findings:
+                all_findings.extend(vuln_findings)
+        
         all_findings.append(
             {
                 "title": f"Avaliação de risco executada em {scan_target}",
@@ -1642,7 +1906,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
             }
         )
 
-    # Headers em todos os subdominios descobertos (mesmo fora do primary_targets)
+    # Headers em todos os subdomínios descobertos (mesmo fora do primary_targets)
     extra_header_targets = [t for t in all_targets if t not in primary_targets]
     if "curl-headers" in vuln_tools and extra_header_targets:
         state["logs_terminais"].append(f"RiskAssessment: curl-headers extra_targets={len(extra_header_targets)}")

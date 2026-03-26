@@ -8,7 +8,7 @@ function aggregationSubtitle(mode, targets) {
   if (mode === "group_avg") {
     return `Contexto: Media do Grupo (${n} alvos)`;
   }
-  return `Contexto: Global (${n} alvos)`;
+  return `Contexto: Global (media dos scanners, ${n} alvos)`;
 }
 
 export function EASMRatingCard({ rating, grade, aggregationMode = "global", aggregationTargets = 1 }) {
@@ -29,7 +29,6 @@ export function EASMRatingCard({ rating, grade, aggregationMode = "global", aggr
       <p className="mt-1 text-xs text-slate-500">{aggregationSubtitle(aggregationMode, aggregationTargets)}</p>
       <div className="mt-3 flex items-baseline gap-3">
         <p className={`text-5xl font-bold ${scoreColor}`}>{rating.toFixed(1)}</p>
-        <p className={`text-4xl font-bold ${color}`}>{grade}</p>
       </div>
       <div className="mt-4 h-2 rounded-full bg-slate-800">
         <div
@@ -132,7 +131,7 @@ export function TemporalCurveCard({ trends }) {
   );
 }
 
-export function ExecutiveSummaryCard({ easm_rating, easm_grade }) {
+export function ExecutiveSummaryCard({ easm_rating, easm_grade, ratingTimeline = [] }) {
   const score = Number(easm_rating || 0);
   const grade = String(easm_grade || "F");
   const scoreColor = score >= 80 ? "text-emerald-300" : score >= 60 ? "text-yellow-300" : "text-rose-300";
@@ -157,11 +156,7 @@ export function ExecutiveSummaryCard({ easm_rating, easm_grade }) {
 
 export function AlertsCard({ alerts }) {
   if (!alerts || alerts.length === 0) {
-    return (
-      <div className="rounded-2xl border border-emerald-800/50 bg-emerald-900/20 p-6">
-        <p className="text-sm font-medium text-emerald-400">✓ Nenhum alerta ativo</p>
-      </div>
-    );
+    return null;
   }
 
   const severityColor = {

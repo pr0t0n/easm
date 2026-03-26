@@ -10,12 +10,12 @@ const RISK_COLOR = {
 };
 
 const STATUS_BADGE = {
-  completed: "border-emerald-300 bg-emerald-200 text-emerald-900",
-  running: "border-blue-300 bg-blue-700 text-white",
-  retrying: "border-amber-300 bg-amber-200 text-amber-900",
-  queued: "border-slate-300 bg-slate-200 text-slate-900",
-  failed: "border-rose-300 bg-rose-700 text-white",
-  blocked: "border-rose-300 bg-rose-700 text-white",
+  completed: "border-emerald-500 bg-emerald-900/40 text-emerald-300",
+  running: "border-blue-500 bg-blue-900/40 text-blue-300",
+  retrying: "border-amber-500 bg-amber-900/40 text-amber-300",
+  queued: "border-slate-600 bg-slate-700 text-slate-300",
+  failed: "border-rose-500 bg-rose-900/40 text-rose-300",
+  blocked: "border-rose-500 bg-rose-900/40 text-rose-300",
 };
 
 export default function TargetsPage() {

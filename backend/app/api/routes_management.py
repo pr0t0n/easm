@@ -23,6 +23,7 @@ from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit
 from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS
+from app.graph.mission import MISSION_ITEMS
 
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -46,6 +47,7 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
     "nikto": {"url": "https://github.com/sullo/nikto", "requirements": "Perl/apt compatível; pode exigir instalação manual."},
     "wpscan": {"url": "https://github.com/wpscanteam/wpscan", "requirements": "Ruby, gem e acesso HTTP/HTTPS."},
     "zap": {"url": "https://www.zaproxy.org/", "requirements": "Java 11+ ou container dedicado; recomendado serviço separado."},
+    "burp-cli": {"url": "https://portswigger.net/burp/documentation/desktop/tools/command-line", "requirements": "Burp Professional CLI instalado e chave de licenca valida configurada."},
     "secretfinder": {"url": "https://github.com/m4ll0k/SecretFinder", "requirements": "Python e instalação manual do projeto."},
     "trufflehog": {"url": "https://github.com/trufflesecurity/trufflehog", "requirements": "Go moderno e acesso a repositórios/targets."},
     "kiterunner": {"url": "https://github.com/assetnote/kiterunner", "requirements": "Go moderno; binário pode variar por arquitetura."},
@@ -91,7 +93,7 @@ INSTALL_SUPPORTED_TOOLS = {
     "dalfox", "kiterunner", "subjack", "wpscan", "nikto", "nmap-vulscan", "whatweb", "sublist3r", "waymore", "linkfinder",
     "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz", "sqlmap", "commix",
     "tplmap", "wafw00f",
-    "sslscan", "shcheck",
+    "sslscan", "shcheck", "burp-cli",
 }
 
 TOOL_BINARY_ALIASES = {
@@ -104,6 +106,7 @@ TOOL_BINARY_ALIASES = {
     "sublist3r": "python3",
     "nmap-vulscan": "nmap",
     "zap": "zaproxy",
+    "burp-cli": "burp-cli",
     "sqlmap": "sqlmap.py",
     "tplmap": "tplmap.py",
 }
@@ -117,7 +120,7 @@ def _tool_metadata(tool_name: str) -> dict[str, str | bool]:
         "url": str(base.get("url") or ""),
         "requirements": requirements,
         "install_supported": normalized in INSTALL_SUPPORTED_TOOLS,
-        "requires_credentials": normalized in {"nessus", "shodan-cli", "urlscan-cli", "chaos"},
+        "requires_credentials": normalized in {"nessus", "shodan-cli", "urlscan-cli", "chaos", "burp-cli"},
     }
 
 
@@ -323,8 +326,19 @@ def revoke_authorization(authorization_id: int, payload: dict, db: Session = Dep
 
 
 @router.get("/audit/events")
-def list_audit_events(limit: int = 100, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    rows = db.query(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(max(1, min(limit, 500))).all()
+def list_audit_events(
+    limit: int = 100,
+    active_only: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    query = db.query(AuditEvent)
+    if active_only:
+        existing_ids = db.query(ScanJob.id)
+        query = query.filter(
+            (AuditEvent.scan_job_id == None) | (AuditEvent.scan_job_id.in_(existing_ids))  # noqa: E711
+        )
+    rows = query.order_by(AuditEvent.created_at.desc()).limit(max(1, min(limit, 500))).all()
     return [
         {
             "id": row.id,
@@ -751,6 +765,9 @@ def _tool_installed(tool_name: str) -> bool:
             or os.path.exists("/opt/nikto/program/nikto.pl")
         )
 
+    if normalized == "burp-cli":
+        return shutil.which("burp-cli") is not None
+
     cmd = TOOL_BINARY_ALIASES.get(normalized, normalized)
     return shutil.which(cmd) is not None
 
@@ -820,6 +837,7 @@ def _install_tool(tool_name: str) -> bool:
         "sqlmap": [["git", "clone", "--depth", "1", "https://github.com/sqlmapproject/sqlmap.git", "/opt/sqlmap"], ["ln", "-sf", "/opt/sqlmap/sqlmap.py", "/usr/local/bin/sqlmap.py"]],
         "commix": [["git", "clone", "--depth", "1", "https://github.com/commixproject/commix.git", "/opt/commix"], ["ln", "-sf", "/opt/commix/commix.py", "/usr/local/bin/commix"]],
         "tplmap": [["git", "clone", "--depth", "1", "https://github.com/epinna/tplmap.git", "/opt/tplmap"], ["ln", "-sf", "/opt/tplmap/tplmap.py", "/usr/local/bin/tplmap.py"], [sys.executable, "-m", "pip", "install", "-r", "/opt/tplmap/requirements.txt"]],
+        "burp-cli": [["sh", "-lc", "npm install -g @portswigger/burp-cli || npm install -g burp-cli"]],
     }
 
     commands = install_map.get(normalized)
@@ -963,6 +981,8 @@ def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depen
 
     nessus_enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
     nessus_url = _get_setting(db, current_user.id, "nessus_url", "")
+    burp_enabled = _get_setting(db, current_user.id, "burp_enabled", "false") == "true"
+    burp_license_key = _get_setting(db, current_user.id, "burp_license_key", "")
     shodan_key = _get_setting(db, current_user.id, "shodan_api_key", "")
 
     unique_tools: dict[str, dict] = {}
@@ -988,6 +1008,12 @@ def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depen
             "pynessus_installed": _tool_installed("nessus"),
             "configured": bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")),
             "status": "ativo" if bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")) else "desativado",
+        },
+        "burp": {
+            "enabled": burp_enabled,
+            "configured": bool(burp_license_key),
+            "burp_cli_installed": _tool_installed("burp-cli"),
+            "status": "ativo" if bool(burp_enabled and burp_license_key) else "desativado",
         },
         "shodan": {
             "configured": bool(shodan_key),
@@ -1058,6 +1084,30 @@ def save_nessus_config(payload: dict, db: Session = Depends(get_db), current_use
     return {"ok": True}
 
 
+@router.get("/config/burp")
+def get_burp_config(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    enabled = _get_setting(db, current_user.id, "burp_enabled", "false") == "true"
+    license_key = _get_setting(db, current_user.id, "burp_license_key", "")
+    return {
+        "enabled": enabled,
+        "license_key": f"***{license_key[-4:]}" if license_key else "",
+        "configured": bool(license_key),
+        "burp_cli_installed": _tool_installed("burp-cli"),
+    }
+
+
+@router.put("/config/burp")
+def save_burp_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    enabled = _parse_bool(payload, "enabled", False)
+    license_key = str(payload.get("license_key") or "").strip()
+
+    _set_setting(db, current_user.id, "burp_enabled", "true" if enabled else "false")
+    if license_key and not license_key.startswith("***"):
+        _set_setting(db, current_user.id, "burp_license_key", license_key)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/worker-manager/lines")
 def list_operation_lines(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     rows = (
@@ -1084,6 +1134,106 @@ def list_worker_groups_config(current_user: User = Depends(require_admin)):
     return {
         "unit": UNIT_WORKER_GROUPS,
         "scheduled": SCHEDULED_WORKER_GROUPS,
+    }
+
+
+@router.get("/worker-manager/pipeline")
+def worker_manager_pipeline(current_user: User = Depends(require_admin)):
+    """Retorna a definição completa do pipeline EASM 5-agent com missões mapeadas."""
+
+    # Mapeamento de quais itens da lista de 100 pertencem a cada agente
+    AGENT_MISSION_RANGES: dict[str, list[int]] = {
+        "asset_discovery":   list(range(1, 26)),    # 1–25: recon, enumeration, fingerprinting
+        "risk_assessment":   list(range(26, 100)),   # 26–99: all vuln analysis
+        "threat_intel":      [10, 19, 20, 88],       # WAF, S3, takeover, TruffleHog — cross-cutting OSINT
+        "governance":        [],                     # Pure computation — no external steps
+        "executive_analyst": [100],                  # Step 100: final report
+    }
+
+    # Mapeia índice 1-based → texto do item
+    items_by_index: dict[int, str] = {i + 1: item for i, item in enumerate(MISSION_ITEMS)}
+
+    pipeline_agents = [
+        {
+            "id": "asset_discovery",
+            "label": "EASM Agent 1",
+            "name": "Asset Discovery",
+            "color": "cyan",
+            "node": "asset_discovery",
+            "queue_suffix": "reconhecimento",
+            "purpose": "Enumera subdomínios, mapeia IPs, realiza port scan e faz fingerprinting da superfície exposta.",
+            "internal_only": False,
+            "tools": UNIT_WORKER_GROUPS.get("reconhecimento", {}).get("tools", []),
+            "mission_items": [
+                items_by_index[i] for i in AGENT_MISSION_RANGES["asset_discovery"] if i in items_by_index
+            ],
+        },
+        {
+            "id": "risk_assessment",
+            "label": "EASM Agent 2",
+            "name": "Risk Assessment",
+            "color": "amber",
+            "node": "risk_assessment",
+            "queue_suffix": "analise_vulnerabilidade",
+            "purpose": "Executa análise completa de vulnerabilidades: SQLi, IDOR, CSRF, SSRF, SSTI, XSS, LFI, RFI, XXE, Nuclei templates, Nikto, WPScan, Nessus.",
+            "internal_only": False,
+            "tools": UNIT_WORKER_GROUPS.get("analise_vulnerabilidade", {}).get("tools", []),
+            "mission_items": [
+                items_by_index[i] for i in AGENT_MISSION_RANGES["risk_assessment"] if i in items_by_index
+            ],
+        },
+        {
+            "id": "threat_intel",
+            "label": "EASM Agent 3",
+            "name": "Threat Intel / OSINT",
+            "color": "violet",
+            "node": "threat_intel",
+            "queue_suffix": "osint",
+            "purpose": "Coleta inteligência externa: emails vazados, exposições em Shodan, subdomain takeover, metadados públicos, S3 buckets, secrets em repositórios.",
+            "internal_only": False,
+            "tools": UNIT_WORKER_GROUPS.get("osint", {}).get("tools", []),
+            "mission_items": [
+                items_by_index[i] for i in AGENT_MISSION_RANGES["threat_intel"] if i in items_by_index
+            ],
+        },
+        {
+            "id": "governance",
+            "label": "EASM Agent 4",
+            "name": "Governance / Rating",
+            "color": "emerald",
+            "node": "governance",
+            "queue_suffix": "governance",
+            "purpose": "Calcula o rating contínuo FAIR+AGE por ativo e compõe a decomposição formal de risco (pirâmide 3-pilares). Processamento interno Python puro — sem ferramentas externas.",
+            "internal_only": True,
+            "tools": [],
+            "mission_items": [],
+        },
+        {
+            "id": "executive_analyst",
+            "label": "EASM Agent 5",
+            "name": "Executive Analyst",
+            "color": "rose",
+            "node": "executive_analyst",
+            "queue_suffix": "executive_analyst",
+            "purpose": "Gera narrativa executiva via LLM Ollama. Consolida todos os achados em um relatório de alto nível com priorização de ações. Fallback para template estruturado quando Ollama está offline.",
+            "internal_only": True,
+            "tools": [],
+            "mission_items": [items_by_index[100]] if 100 in items_by_index else [],
+        },
+    ]
+
+    return {
+        "linear_flow": [a["id"] for a in pipeline_agents],
+        "edges": [
+            {"from": "asset_discovery",   "to": "risk_assessment"},
+            {"from": "risk_assessment",   "to": "threat_intel"},
+            {"from": "threat_intel",      "to": "governance"},
+            {"from": "governance",        "to": "executive_analyst"},
+            {"from": "executive_analyst", "to": "END"},
+        ],
+        "agents": pipeline_agents,
+        "mission_items_full": MISSION_ITEMS,
+        "total_mission_items": len(MISSION_ITEMS),
     }
 
 

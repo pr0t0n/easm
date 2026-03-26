@@ -1,13 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
-import {
-  EASMRatingCard,
-  FAIRPillarsCard,
-  TemporalCurveCard,
-  ExecutiveSummaryCard,
-  AlertsCard,
-  AssetListCard,
-} from "../components/EASMDashboard";
 
 const SEV_COLOR = {
   critical: "text-red-400 bg-red-500/10 border-red-500/30",
@@ -124,7 +116,53 @@ function StatCard({ label, value, sub, color = "text-white" }) {
 function aggregationLabel(mode) {
   if (mode === "target") return "Visão por Alvo";
   if (mode === "group_avg") return "Média do Grupo";
-  return "Visão Global";
+  return "Visão Global (média dos scanners)";
+}
+
+function gradeFromScore(score) {
+  const s = Number(score || 0);
+  if (s >= 90) return "A";
+  if (s >= 80) return "B";
+  if (s >= 70) return "C";
+  if (s >= 60) return "D";
+  return "F";
+}
+
+function targetHost(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    return String(parsed.hostname || "").toLowerCase();
+  } catch {
+    return raw.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].toLowerCase();
+  }
+}
+
+function RatingBadge({ letter, score, label }) {
+  const numeric = Number(score || 0);
+  const tone =
+    numeric >= 80
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+      : numeric >= 60
+        ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+        : "border-rose-500/40 bg-rose-500/10 text-rose-100";
+
+  return (
+    <div className={`rounded-2xl border p-4 shadow-lg ${tone}`}>
+      <p className="text-[11px] uppercase tracking-[0.18em] opacity-80">{label}</p>
+      <div className="mt-3 flex items-end justify-between gap-3">
+        <div>
+          <p className="text-4xl font-black leading-none">{letter || "F"}</p>
+          <p className="mt-1 text-sm font-semibold opacity-90">Rating</p>
+        </div>
+        <p className="text-3xl font-black tabular-nums">{numeric.toFixed(1)}</p>
+      </div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/20">
+        <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500" style={{ width: `${Math.max(0, Math.min(100, numeric))}%` }} />
+      </div>
+    </div>
+  );
 }
 
 export default function DashboardPage() {
@@ -143,10 +181,10 @@ export default function DashboardPage() {
   const [ratingTimeline, setRatingTimeline] = useState([]);
   
   // EASM Enterprise
-  const [easmRating, setEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
+  const [globalEasmRating, setGlobalEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
+  const [scopedEasmRating, setScopedEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
   const [easmTrends, setEasmTrends] = useState(null);
   const [easmAlerts, setEasmAlerts] = useState([]);
-  const [easmAssets, setEasmAssets] = useState([]);
   
   // Filters
   const [groups, setGroups] = useState([]);
@@ -155,9 +193,13 @@ export default function DashboardPage() {
   const [selectedTarget, setSelectedTarget] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const hasScopedSelection = Boolean(selectedGroup || selectedTarget.trim());
+  const [globalVasmMeta, setGlobalVasmMeta] = useState({ aggregationTargets: 1, scanCount: 0 });
+  const [prioritizedActions, setPrioritizedActions] = useState([]);
 
   const handleSearch = () => {
     setIsSearching(true);
+    setSelectedGroup("");
     setSelectedTarget(searchInput);
   };
 
@@ -184,6 +226,15 @@ export default function DashboardPage() {
 
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
+        let globalDashboard = dashboard;
+        if (selectedGroup || selectedTarget.trim()) {
+          try {
+            const { data: globalData } = await client.get("/api/dashboard/insights");
+            globalDashboard = globalData || dashboard;
+          } catch (e) {
+            globalDashboard = dashboard;
+          }
+        }
         const easmFallback = dashboard.easm_fallback || {};
         setDomainOptions(Array.isArray(dashboard.targets) ? dashboard.targets : []);
 
@@ -226,17 +277,60 @@ export default function DashboardPage() {
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
-        setContinuousRating(dashboard.continuous_rating || { score: 0, grade: "F", factors: [] });
-        setRatingTimeline(dashboard.rating_timeline || []);
+        setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
+        const resolvedContinuous = dashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
+        const resolvedTimeline = dashboard.rating_timeline || [];
+        setContinuousRating(resolvedContinuous);
+        setRatingTimeline(resolvedTimeline);
 
-        // Fallback EASM summary from latest scan state when enterprise tables are empty
-        if (easmFallback?.rating) {
-          setEasmRating({
-            score: Number(easmFallback.rating.score || 0),
-            grade: String(easmFallback.rating.grade || "F"),
-            pillars: [],
-          });
-        }
+        const scopedTimelineAvgScore = resolvedTimeline.length
+          ? (resolvedTimeline.reduce((acc, item) => acc + Number(item?.rating_score || 0), 0) / resolvedTimeline.length)
+          : null;
+        const scopedPreferredScore = Number(
+          scopedTimelineAvgScore
+          ?? resolvedContinuous?.score
+          ?? easmFallback?.rating?.score
+          ?? 0
+        );
+        const scopedPreferredGrade = String(
+          gradeFromScore(scopedPreferredScore)
+          || resolvedContinuous?.grade
+          || easmFallback?.rating?.grade
+          || "F"
+        );
+
+        const globalContinuous = globalDashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
+        const globalTimeline = globalDashboard.rating_timeline || [];
+        const globalTimelineAvgScore = globalTimeline.length
+          ? (globalTimeline.reduce((acc, item) => acc + Number(item?.rating_score || 0), 0) / globalTimeline.length)
+          : null;
+        const globalPreferredScore = Number(
+          globalTimelineAvgScore
+          ?? globalContinuous?.score
+          ?? easmFallback?.rating?.score
+          ?? 0
+        );
+        const globalPreferredGrade = String(
+          gradeFromScore(globalPreferredScore)
+          || globalContinuous?.grade
+          || easmFallback?.rating?.grade
+          || "F"
+        );
+        setGlobalVasmMeta({
+          aggregationTargets: Number(globalDashboard.stats?.aggregation_targets || 1),
+          scanCount: Number(globalTimeline.length || 0),
+        });
+        setScopedEasmRating({
+          score: scopedPreferredScore,
+          grade: scopedPreferredGrade,
+          pillars: [],
+        });
+        setGlobalEasmRating({
+          score: globalPreferredScore,
+          grade: globalPreferredGrade,
+          pillars: [],
+        });
+
         if (easmFallback?.executive_summary) {
           setEasmTrends((prev) => ({
             ...(prev || {}),
@@ -254,20 +348,6 @@ export default function DashboardPage() {
         // Load EASM data
         try {
           if (hasActiveFilter) {
-            if (easmFallback?.scan_target) {
-              setEasmAssets([
-                {
-                  id: `fallback-${easmFallback.scan_id || "latest"}`,
-                  domain_or_ip: easmFallback.scan_target,
-                  open_critical: dashboard.stats?.critical || 0,
-                  open_high: dashboard.stats?.high || 0,
-                  easm_grade: easmFallback?.rating?.grade || "F",
-                  easm_rating: Number(easmFallback?.rating?.score || 0),
-                },
-              ]);
-            } else {
-              setEasmAssets([]);
-            }
             setEasmAlerts([]);
             return;
           }
@@ -277,7 +357,6 @@ export default function DashboardPage() {
             client.get("/api/easm/alerts").catch(() => ({ data: [] })),
           ]);
           
-          setEasmAssets(assetsResp.data || []);
           setEasmAlerts(alertsResp.data || []);
           
           // Get latest asset for trends
@@ -286,26 +365,9 @@ export default function DashboardPage() {
             try {
               const trendsResp = await client.get(`/api/dashboard/trends/${topAsset.id}`);
               setEasmTrends(trendsResp.data);
-              setEasmRating({
-                score: topAsset.easm_rating,
-                grade: topAsset.easm_grade,
-                pillars: [],
-              });
             } catch (e) {
               // Silent fail
             }
-          } else if (easmFallback?.scan_target) {
-            // Surface latest scan target as pseudo-asset when EASM asset table has no rows yet
-            setEasmAssets([
-              {
-                id: `fallback-${easmFallback.scan_id || "latest"}`,
-                domain_or_ip: easmFallback.scan_target,
-                open_critical: dashboard.stats?.critical || 0,
-                open_high: dashboard.stats?.high || 0,
-                easm_grade: easmFallback?.rating?.grade || "F",
-                easm_rating: Number(easmFallback?.rating?.score || 0),
-              },
-            ]);
           }
         } catch (e) {
           // EASM endpoints may not be available yet
@@ -321,6 +383,41 @@ export default function DashboardPage() {
 
     load();
   }, [selectedTarget, selectedGroup]);
+
+  const distributedRows = useMemo(() => {
+    const byTarget = new Map();
+    for (const item of prioritizedActions) {
+      const target = String(item?.target_query || "").trim();
+      if (!target) continue;
+      byTarget.set(target, (byTarget.get(target) || 0) + 1);
+    }
+
+    const rows = [...byTarget.entries()]
+      .map(([target, vulnCount]) => {
+        const host = targetHost(target);
+        const subdomainCount = (domainOptions || []).filter((opt) => {
+          const h = targetHost(opt);
+          return h && host && h !== host && h.endsWith(`.${host}`);
+        }).length;
+        const score = Math.max(0, 100 - vulnCount * 4 - subdomainCount * 2);
+        return {
+          target,
+          vulnCount,
+          subdomainCount,
+          score,
+          grade: gradeFromScore(score),
+        };
+      })
+      .sort((a, b) => b.vulnCount - a.vulnCount)
+      .slice(0, 5);
+
+    return rows;
+  }, [prioritizedActions, domainOptions]);
+
+  const distributedScore = distributedRows.length
+    ? distributedRows.reduce((acc, row) => acc + row.score, 0) / distributedRows.length
+    : Number(scopedEasmRating?.score || 0);
+  const distributedGrade = gradeFromScore(distributedScore);
 
   if (loading) {
     return (
@@ -377,6 +474,7 @@ export default function DashboardPage() {
               value={selectedTarget}
               onChange={(e) => {
                 const val = String(e.target.value || "");
+                setSelectedGroup("");
                 setSelectedTarget(val);
                 setSearchInput(val);
               }}
@@ -455,74 +553,134 @@ export default function DashboardPage() {
         )}
       </section>
 
-      {/* EASM Enterprise Section - Highlighted after filters */}
-      <div className="rounded-2xl border-2 border-blue-500/40 bg-gradient-to-br from-blue-950/60 to-slate-900/60 p-6 shadow-lg shadow-blue-500/10">
-        <div className="mb-6 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-semibold text-blue-300">vASM Enterprise Dashboard</h2>
-          <div className="text-sm text-slate-400">Visão consolidada de ativos e riscos</div>
-        </div>
-        
-        <div className="mb-6 rounded-xl border border-blue-500/30 bg-blue-900/20 p-4">
-          <ExecutiveSummaryCard 
-            easm_rating={easmRating.score}
-            easm_grade={easmRating.grade}
-          />
+      <section className="rounded-2xl border-2 border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950/60 p-6 shadow-[0_22px_60px_rgba(2,6,23,0.5)]">
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="font-display text-2xl font-extrabold tracking-tight text-cyan-200">vASM Enterprise Dashboard</h2>
+          <p className="text-xs uppercase tracking-[0.2em] text-cyan-100/70">Visão consolidada de risco e maturidade</p>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <EASMRatingCard
-            rating={easmRating.score}
-            grade={easmRating.grade}
-            aggregationMode={stats?.aggregation_mode || "global"}
-            aggregationTargets={stats?.aggregation_targets || 1}
-          />
-          <AlertsCard alerts={easmAlerts} />
+        <div className="grid gap-4 xl:grid-cols-12">
+          <div className="xl:col-span-3">
+            <RatingBadge
+              label="Rating Atual do Alvo"
+              letter={scopedEasmRating.grade}
+              score={scopedEasmRating.score}
+            />
+          </div>
+          <div className="xl:col-span-3">
+            <RatingBadge
+              label="Rating Atual do Grupo"
+              letter={globalEasmRating.grade}
+              score={globalEasmRating.score}
+            />
+          </div>
+          <div className="xl:col-span-6 rounded-2xl border border-cyan-500/30 bg-slate-900/70 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-100/80">Rating Distribuído</p>
+                <p className="text-xs text-slate-400">Top 5 alvos/subdomínios com maior volume de vulnerabilidades</p>
+              </div>
+              <div className="text-right">
+                <p className="text-3xl font-black text-cyan-200">{distributedGrade} {Number(distributedScore || 0).toFixed(1)}</p>
+              </div>
+            </div>
+            <div className="overflow-x-auto rounded-xl border border-slate-700/80">
+              <table className="min-w-full text-left text-xs">
+                <thead className="bg-slate-800/90 text-slate-300">
+                  <tr>
+                    <th className="px-3 py-2">Alvo</th>
+                    <th className="px-3 py-2">Subdomínios</th>
+                    <th className="px-3 py-2">Vulnerabilidades</th>
+                    <th className="px-3 py-2">Rating</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {distributedRows.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-3 text-slate-500" colSpan={4}>Sem dados suficientes para distribuição.</td>
+                    </tr>
+                  )}
+                  {distributedRows.map((row) => (
+                    <tr key={`dist-${row.target}`} className="border-t border-slate-700/70 bg-slate-900/40">
+                      <td className="px-3 py-2 font-mono text-cyan-100">{row.target}</td>
+                      <td className="px-3 py-2">{row.subdomainCount}</td>
+                      <td className="px-3 py-2">{row.vulnCount}</td>
+                      <td className="px-3 py-2 font-semibold">{row.grade} {row.score.toFixed(1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <FAIRPillarsCard decomposition={easmTrends?.historical_ratings?.[easmTrends.historical_ratings.length - 1]?.pillars} />
-          <TemporalCurveCard trends={easmTrends} />
+        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+          <section className="rounded-2xl border border-indigo-500/30 bg-indigo-950/20 p-4">
+            <h3 className="text-sm font-semibold text-indigo-200">Maturidade por Framework</h3>
+            <p className="mt-1 text-xs text-slate-400">Conformidade por framework de segurança</p>
+            <div className="mt-4 space-y-4">
+              {frameworks.map((info) => (
+                <div key={`secure-${info.name}`}>
+                  <div className="mb-1 flex items-center justify-between text-sm">
+                    <span className="font-medium text-slate-200">{info.name}</span>
+                    <span className="font-bold text-indigo-100">{info.score}%</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className={`h-2 rounded-full bg-gradient-to-r transition-all duration-700 ${BAR_COLOR[info.name] || "from-cyan-500 to-blue-400"}`}
+                      style={{ width: `${info.score}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-fuchsia-500/30 bg-fuchsia-950/20 p-4">
+            <h3 className="text-sm font-semibold text-fuchsia-200">Atividade Operacional</h3>
+            <p className="mt-1 text-xs text-slate-400">Atividade dos últimos 7 dias</p>
+            <div className="mt-4 flex h-40 items-end gap-2">
+              {activity.map((d) => (
+                <div key={`bitsight-${d.day}`} className="flex flex-1 flex-col items-center gap-1">
+                  <span className="text-[10px] text-slate-400">{d.findings}</span>
+                  <div
+                    className="w-full rounded-t-sm bg-gradient-to-t from-fuchsia-500 via-purple-500 to-cyan-400"
+                    style={{ height: `${Math.round((d.findings / maxFindings) * 100)}%`, minHeight: "4px" }}
+                  />
+                  <span className="text-[10px] text-slate-500">{d.day}</span>
+                </div>
+              ))}
+            </div>
+          </section>
         </div>
 
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-          <h3 className="font-display text-lg font-semibold mb-4">Asset Inventory</h3>
-          <AssetListCard assets={easmAssets} />
-        </section>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
-        <div className="col-span-2 md:col-span-2">
-          <StatCard label="Total de Scans" value={stats.scans} sub="todos os modos" />
+        <div className="mt-5">
+          <section className="rounded-2xl border border-rose-500/30 bg-slate-900/70 p-4">
+            <h3 className="text-sm font-semibold text-rose-200">Risco Operacional</h3>
+            <p className="mt-1 text-xs text-slate-400">Rossio operacional por severidade</p>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
+                <p className="text-xs uppercase text-red-300">Crítico</p>
+                <p className="mt-1 text-2xl font-bold text-red-200">{stats.critical || 0}</p>
+              </div>
+              <div className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3 text-sm">
+                <p className="text-xs uppercase text-orange-300">Alto</p>
+                <p className="mt-1 text-2xl font-bold text-orange-200">{stats.high || 0}</p>
+              </div>
+              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
+                <p className="text-xs uppercase text-yellow-300">Médio</p>
+                <p className="mt-1 text-2xl font-bold text-yellow-200">{stats.medium || 0}</p>
+              </div>
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">
+                <p className="text-xs uppercase text-emerald-300">Baixo</p>
+                <p className="mt-1 text-2xl font-bold text-emerald-200">{stats.low || 0}</p>
+              </div>
+            </div>
+          </section>
         </div>
-        <div className="col-span-2 md:col-span-2">
-          <StatCard label="Findings Totais" value={stats.findings_total} sub={`${stats.findings_open} abertos`} />
-        </div>
-        <StatCard label="Critico" value={stats.critical} color="text-red-400" />
-        <StatCard label="Alto" value={stats.high} color="text-orange-400" />
-        <StatCard label="Medio" value={stats.medium} color="text-yellow-400" />
-        <StatCard label="Baixo" value={stats.low} color="text-emerald-400" />
-      </div>
+      </section>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatCard
-          label="Rating Externo"
-          value={Number(continuousRating?.score ?? stats.external_rating_score ?? 0).toFixed(1)}
-          sub={`grade ${continuousRating?.grade || stats.external_rating_grade || "-"}`}
-          color="text-fuchsia-300"
-        />
-        <StatCard label="FAIR Medio" value={stats.fair_avg_score || 0} sub="score medio 0-100" color="text-cyan-300" />
-        <StatCard label="ALE Total (USD)" value={Number(stats.fair_ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} sub="perda anual esperada" color="text-amber-300" />
-        <StatCard label="AGE Ambiente" value={`${stats.age_env_avg_days || 0}d`} sub="tempo medio conhecido internamente" />
-        <StatCard label="AGE Mercado/Exploit" value={`${stats.age_market_avg_days || 0}d / ${stats.age_exploit_avg_days || 0}d`} sub="mercado / exploit" />
-        <StatCard label="Cobertura Vuln" value={stats.vulnerability_findings || 0} sub="achados de vulnerabilidade" color="text-rose-300" />
-        <StatCard label="Cobertura Recon" value={stats.recon_findings || 0} sub="eventos de reconhecimento" color="text-emerald-300" />
-        <StatCard label="Cobertura OSINT" value={stats.osint_findings || 0} sub="eventos de inteligencia externa" color="text-sky-300" />
-        <StatCard label="WAF Detectado" value={stats.waf_findings || 0} sub="achados no ciclo" color="text-blue-300" />
-        <StatCard label="Headers (Issues)" value={stats.security_header_findings || 0} sub="lacunas de hardening" color="text-indigo-300" />
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
           <h2 className="font-display text-lg font-semibold">Decomposição Formal do Rating</h2>
           <p className="mt-1 text-xs text-slate-400">Fatores com peso, evidência e impacto na nota final.</p>
           <div className="mt-3 space-y-3">
@@ -576,275 +734,8 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-        </section>
-
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Curva Temporal do Rating</h2>
-          <p className="mt-1 text-xs text-slate-400">Evolução por scan com penalidade por persistência de risco.</p>
-          <div className="mt-3 space-y-2 max-h-72 overflow-y-auto pr-1">
-            {(ratingTimeline || []).length === 0 && <p className="text-sm text-slate-500">Sem histórico temporal suficiente.</p>}
-            {(ratingTimeline || []).slice(-15).reverse().map((row) => (
-              <div key={`rt-${row.scan_id}`} className="rounded-xl border border-slate-700 bg-slate-800/40 px-3 py-2 text-xs">
-                <div className="flex items-center justify-between text-slate-200">
-                  <span>Scan #{row.scan_id}</span>
-                  <span className="font-semibold text-fuchsia-300">{Number(row.rating_score || 0).toFixed(2)}</span>
-                </div>
-                <div className="mt-1 flex items-center justify-between text-slate-400">
-                  <span>Base: {Number(row.base_score || 0).toFixed(2)}</span>
-                  <span>Penalidade persistência: {Number(row.persistence_penalty || 0).toFixed(2)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">WAF no Ambiente</h2>
-          <p className="mt-1 text-xs text-slate-400">Resumo de fornecedores WAF detectados (quais e quantos).</p>
-          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
-            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Achados: <strong>{wafSummary.findings_count || 0}</strong></div>
-            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Ativos: <strong>{wafSummary.assets_count || 0}</strong></div>
-          </div>
-          <div className="mt-3 space-y-2">
-            {(wafSummary.vendors || []).length === 0 && <p className="text-sm text-slate-500">Sem WAF identificado no momento.</p>}
-            {(wafSummary.vendors || []).map((item, idx) => (
-              <div key={`waf-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm">
-                <span>{item.name || "WAF nao identificado"}</span>
-                <span className="rounded-md border border-slate-600 px-2 py-0.5 text-xs">{item.count || 0}</span>
-              </div>
-            ))}
-          </div>
-          <p className="mt-3 text-xs text-slate-400">
-            {(wafSummary.vendors || []).length === 0
-              ? "Nenhum WAF identificado no ciclo atual."
-              : (wafSummary.vendors || []).map((item) => `${item.name || "WAF nao identificado"}: ${item.count || 0}`).join(" | ")}
-          </p>
-        </section>
-
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Headers de Segurança</h2>
-          <p className="mt-1 text-xs text-slate-400">Headers presentes e ausentes mais recorrentes.</p>
-          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
-            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Achados: <strong>{securityHeadersSummary.findings_count || 0}</strong></div>
-            <div className="rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-1">Ativos: <strong>{securityHeadersSummary.assets_count || 0}</strong></div>
-          </div>
-          <div className="mt-3 space-y-2">
-            {(securityHeadersSummary.present_headers || []).length === 0 && (securityHeadersSummary.missing_headers || []).length === 0 && (
-              <p className="text-sm text-slate-500">Sem gaps de headers detectados.</p>
-            )}
-            {(securityHeadersSummary.present_headers || []).map((item, idx) => (
-              <div key={`header-present-${idx}`} className="flex items-center justify-between rounded-xl border border-emerald-700/50 bg-emerald-900/10 px-3 py-2 text-sm">
-                <span className="font-mono">{item.header || "header"} (presente)</span>
-                <span className="rounded-md border border-emerald-700/60 px-2 py-0.5 text-xs">{item.count || 0}</span>
-              </div>
-            ))}
-            {(securityHeadersSummary.missing_headers || []).length === 0 && (securityHeadersSummary.present_headers || []).length > 0 && (
-              <p className="text-sm text-slate-500">Sem headers ausentes detectados no ciclo atual.</p>
-            )}
-            {(securityHeadersSummary.missing_headers || []).map((item, idx) => (
-              <div key={`header-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm">
-                <span className="font-mono">{item.header || "header"}</span>
-                <span className="rounded-md border border-slate-600 px-2 py-0.5 text-xs">{item.count || 0}</span>
-              </div>
-            ))}
-          </div>
-          <p className="mt-3 text-xs text-slate-400">
-            {(securityHeadersSummary.owasp_top10_alignment || []).length === 0
-              ? "A05 Security Misconfiguration: headers HTTP mitiga configuracao insegura. A03 Injection: CSP reduz impacto de XSS no browser."
-              : (securityHeadersSummary.owasp_top10_alignment || []).map((item) => `${item.owasp}: ${item.coverage}`).join(" | ")}
-          </p>
-        </section>
-      </div>
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-        <h2 className="font-display text-lg font-semibold">Execução de Ferramentas (Vulnerabilidade)</h2>
-        <p className="mt-1 text-xs text-slate-400">
-          Evidência operacional do último scan processado
-          {vulnToolExecution?.scan_id ? ` (#${vulnToolExecution.scan_id} - ${vulnToolExecution.scan_target || "-"}, status ${vulnToolExecution.scan_status || "-"})` : ""}.
-        </p>
-        <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-300 sm:grid-cols-3">
-          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Previstas</p>
-            <p className="mt-1 text-base font-semibold text-slate-100">{vulnToolExecution?.summary?.requested_count || 0}</p>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Tentadas</p>
-            <p className="mt-1 text-base font-semibold text-slate-100">{vulnToolExecution?.summary?.attempted_count || 0}</p>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-800/50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Executadas</p>
-            <p className="mt-1 text-base font-semibold text-emerald-300">{vulnToolExecution?.summary?.executed_count || 0}</p>
-          </div>
-        </div>
-        <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700 bg-slate-800/30">
-          <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-800/80 text-[11px] uppercase tracking-wider text-slate-300">
-              <tr>
-                <th className="px-3 py-2">Ferramenta</th>
-                <th className="px-3 py-2">Targets</th>
-                <th className="px-3 py-2">Executada</th>
-                <th className="px-3 py-2">RC</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(vulnToolExecution?.tools || []).length === 0 && (
-                <tr>
-                  <td className="px-3 py-3 text-slate-500" colSpan={4}>Sem telemetria de execução para o último scan.</td>
-                </tr>
-              )}
-              {(vulnToolExecution?.tools || []).map((row, idx) => (
-                <tr key={`vuln-tool-${idx}`} className="border-t border-slate-700/70 text-slate-200 transition-colors hover:bg-slate-800/50">
-                  <td className="px-3 py-2">
-                    <span className="rounded-md border border-slate-600 bg-slate-900/50 px-2 py-0.5 font-mono text-xs text-cyan-300">
-                      {row.tool || "-"}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-slate-100">{row.targets_count || 0}</td>
-                  <td className="px-3 py-2">
-                    {(row.executed_events || 0) > 0 ? (
-                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">Sim</span>
-                    ) : (
-                      <span className="inline-flex rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-xs font-semibold text-rose-300">Não</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {Number(row.last_return_code) === 0 ? (
-                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">0</span>
-                    ) : row.last_return_code == null ? (
-                      <span className="text-slate-500">-</span>
-                    ) : (
-                      <span className="inline-flex rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-300">{row.last_return_code}</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </section>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Maturidade por Framework</h2>
-          <div className="mt-4 space-y-4">
-            {frameworks.map((info) => (
-              <div key={info.name}>
-                <div className="mb-1 flex items-center justify-between text-sm">
-                  <span className="font-medium">{info.name}</span>
-                  <span className="font-bold text-white">{info.score}%</span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                  <div
-                    className={`h-2 rounded-full bg-gradient-to-r transition-all duration-700 ${BAR_COLOR[info.name] || "from-brand-500 to-cyan-400"}`}
-                    style={{ width: `${info.score}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Atividade (7 dias)</h2>
-          <div className="mt-4 flex h-36 items-end gap-2">
-            {activity.map((d) => (
-              <div key={d.day} className="flex flex-1 flex-col items-center gap-1">
-                <span className="text-[10px] text-slate-400">{d.findings}</span>
-                <div
-                  className="w-full rounded-t-sm bg-gradient-to-t from-brand-500 to-cyan-400"
-                  style={{ height: `${Math.round((d.findings / maxFindings) * 100)}%`, minHeight: "4px" }}
-                />
-                <span className="text-[10px] text-slate-500">{d.day}</span>
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-slate-500">Findings detectados por dia de execucao</p>
-        </section>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Scans Recentes</h2>
-          <div className="mt-3 divide-y divide-slate-800">
-            {recentScans.length === 0 && <p className="py-3 text-sm text-slate-500">Sem scans para exibir.</p>}
-            {recentScans.map((scan) => (
-              <div key={scan.id} className="flex items-center justify-between py-3 text-sm">
-                <div>
-                  <p className="font-medium">{scan.target_query}</p>
-                  <p className="text-xs text-slate-400">
-                    #{scan.id} &middot; {scan.mode === "unit" ? "Unitario" : "Agendado"} &middot;{" "}
-                    {new Date(scan.created_at).toLocaleString("pt-BR")}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className={`text-xs font-semibold uppercase ${STATUS_COLOR[scan.status] || "text-slate-300"}`}>
-                    {scan.status}
-                  </p>
-                  <p className="text-xs text-slate-400">progresso {scan.mission_progress}%</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Top Vulnerabilidades</h2>
-          <div className="mt-3 space-y-2">
-            {topVulns.length === 0 && <p className="text-sm text-slate-500">Sem findings agregados ainda.</p>}
-            {topVulns.map((v, i) => (
-              <div key={`${v.title}-${i}`} className={`flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${SEV_COLOR[v.severity] || SEV_COLOR.low}`}>
-                <span className="flex-1">{v.title}</span>
-                <div className="ml-3 flex items-center gap-2">
-                  <span className="text-xs uppercase font-semibold">{v.severity}</span>
-                  <span className="rounded-full border border-slate-300 bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-900">×{v.count}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-        <h2 className="font-display text-lg font-semibold">Ativos Externos Descobertos</h2>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {assets.length === 0 && <p className="text-sm text-slate-500">Sem ativos para exibir.</p>}
-          {assets.map((asset) => (
-            <div key={asset.name} className="rounded-xl border border-slate-700 bg-slate-800/50 p-3">
-              <div className="flex items-center gap-2">
-                <span className={`mt-0.5 h-2.5 w-2.5 flex-shrink-0 rounded-full ${RISK_DOT[asset.risk] || RISK_DOT.low}`} />
-                <p className="truncate font-mono text-sm font-medium">{asset.name}</p>
-              </div>
-              <p className="mt-1 text-xs text-slate-400 capitalize">{asset.type}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-        <h2 className="font-display text-lg font-semibold">Risco Operacional</h2>
-        <p className="mt-1 text-xs text-slate-400">Visão resumida por severidade e volume de achados abertos.</p>
-        <div className="mt-4 grid gap-3 md:grid-cols-4">
-          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
-            <p className="text-xs uppercase text-red-300">Crítico</p>
-            <p className="mt-1 text-2xl font-bold text-red-200">{stats.critical || 0}</p>
-          </div>
-          <div className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3 text-sm">
-            <p className="text-xs uppercase text-orange-300">Alto</p>
-            <p className="mt-1 text-2xl font-bold text-orange-200">{stats.high || 0}</p>
-          </div>
-          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
-            <p className="text-xs uppercase text-yellow-300">Médio</p>
-            <p className="mt-1 text-2xl font-bold text-yellow-200">{stats.medium || 0}</p>
-          </div>
-          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">
-            <p className="text-xs uppercase text-emerald-300">Baixo</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-200">{stats.low || 0}</p>
-          </div>
-        </div>
-        <p className="mt-3 text-xs text-slate-400">Total aberto: {stats.findings_open || 0} | Triados: {stats.findings_triaged || 0}</p>
-      </section>
     </main>
   );
 }

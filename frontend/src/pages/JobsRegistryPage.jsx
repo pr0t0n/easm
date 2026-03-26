@@ -52,7 +52,7 @@ export default function JobsRegistryPage() {
               <div key={job.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="font-mono font-semibold">#{job.id} - {job.target_query}</p>
-                  <span className="rounded-md border border-slate-300 bg-slate-100 px-2 py-0.5 text-xs uppercase text-slate-700">{job.status}</span>
+                  <span className="rounded-md border border-slate-600 bg-slate-700/50 px-2 py-0.5 text-xs uppercase text-slate-200">{job.status}</span>
                 </div>
                 <p className="mt-1 text-xs text-slate-300">{job.mode} | compliance: {job.compliance_status} | findings: {job.findings_count}</p>
                 <p className="text-xs text-slate-400">retry {job.retry_attempt || 0}/{job.retry_max || 0} | progresso {job.mission_progress}%</p>
@@ -70,7 +70,7 @@ export default function JobsRegistryPage() {
           <div className="mt-3 space-y-2">
             {events.map((event) => (
               <div key={event.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs">
-                <p className="font-semibold text-slate-800">{event.event_type}</p>
+                <p className="font-semibold text-slate-100">{event.event_type}</p>
                 <p className="mt-1 text-slate-300">{event.message}</p>
                 <p className="mt-1 text-slate-500">{new Date(event.created_at).toLocaleString("pt-BR")}</p>
               </div>
