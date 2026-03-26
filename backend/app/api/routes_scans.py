@@ -4,6 +4,7 @@ import io
 import json
 import math
 import re
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -164,6 +165,18 @@ KNOWN_WAF_MODELS: list[str] = [
     "fortiweb",
 ]
 
+WAF_VENDOR_ALIASES: list[tuple[str, tuple[str, ...]]] = [
+    ("Cloudflare", ("cloudflare",)),
+    ("Akamai", ("akamai",)),
+    ("Imperva", ("imperva", "incapsula")),
+    ("ModSecurity", ("modsecurity", "mod_security")),
+    ("F5", ("f5", "big-ip asm", "bigip asm")),
+    ("AWS WAF", ("aws waf", "amazon waf", "amazon web application firewall")),
+    ("Barracuda", ("barracuda",)),
+    ("FortiWeb", ("fortiweb",)),
+    ("Google Cloud Armor", ("google cloud armor", "google cloud app armor", "app armor (google cloud)", "gcp armor")),
+]
+
 
 def _severity_rank(severity: str) -> int:
     return {
@@ -191,21 +204,134 @@ def _risk_text(severity: str, confidence_score: int | float | None = None) -> st
     return "Baixo"
 
 
+def _score_to_grade(score: float) -> str:
+    val = float(score or 0.0)
+    if val >= 90:
+        return "A"
+    if val >= 80:
+        return "B"
+    if val >= 70:
+        return "C"
+    if val >= 60:
+        return "D"
+    return "F"
+
+
+def _target_tokens(value: str | None) -> list[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return []
+    return [token.strip() for token in re.split(r"[;,]", raw) if token.strip()]
+
+
+def _primary_target_token(value: str | None) -> str:
+    tokens = _target_tokens(value)
+    return tokens[0] if tokens else str(value or "").strip().lower()
+
+
+def _extract_scan_easm_payload(scan: ScanJob | None) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if not scan:
+        return {}, {}, ""
+    state = (scan.state_data or {}) if isinstance(scan.state_data, dict) else {}
+    report_v2 = state.get("report_v2") if isinstance(state.get("report_v2"), dict) else {}
+    rating = report_v2.get("easm_rating") or state.get("easm_rating") or {}
+    decomp = report_v2.get("fair_decomposition") or state.get("fair_decomposition") or {}
+    summary = report_v2.get("executive_summary") or state.get("executive_summary") or ""
+    return rating if isinstance(rating, dict) else {}, decomp if isinstance(decomp, dict) else {}, str(summary or "").strip()
+
+
+def _aggregate_fair_decomposition(values: list[dict[str, Any]]) -> dict[str, Any]:
+    valid = [item for item in values if isinstance(item, dict) and item]
+    if not valid:
+        return {}
+    if len(valid) == 1:
+        return valid[0]
+
+    bucket: dict[str, dict[str, Any]] = {}
+    total_score = 0.0
+    total_impact = 0.0
+    total_assets = 0
+    methodology = ""
+
+    for item in valid:
+        total_score += float(item.get("score") or 0.0)
+        total_impact += float(item.get("total_impact_pts") or 0.0)
+        total_assets += int(item.get("n_assets") or 0)
+        if not methodology:
+            methodology = str(item.get("methodology_version") or "")
+        for pillar in item.get("pillars") or []:
+            if not isinstance(pillar, dict):
+                continue
+            pid = str(pillar.get("id") or "").strip()
+            if not pid:
+                continue
+            row = bucket.setdefault(
+                pid,
+                {
+                    "id": pid,
+                    "name": str(pillar.get("name") or pid),
+                    "weight": float(pillar.get("weight") or 0.0),
+                    "weight_pct": str(pillar.get("weight_pct") or ""),
+                    "score_sum": 0.0,
+                    "impact_sum": 0.0,
+                    "finding_count": 0,
+                    "samples": 0,
+                },
+            )
+            row["score_sum"] += float(pillar.get("score") or 0.0)
+            row["impact_sum"] += float(pillar.get("impact_pts") or 0.0)
+            row["finding_count"] += int(pillar.get("finding_count") or 0)
+            row["samples"] += 1
+
+    pillars: list[dict[str, Any]] = []
+    for pid in ["perimeter_resilience", "patching_hygiene", "osint_exposure"]:
+        row = bucket.get(pid)
+        if not row:
+            continue
+        samples = max(1, int(row.get("samples") or 1))
+        pillars.append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "weight": row["weight"],
+                "weight_pct": row["weight_pct"],
+                "score": round(float(row["score_sum"]) / samples, 2),
+                "impact_pts": round(float(row["impact_sum"]) / samples, 2),
+                "finding_count": int(row["finding_count"]),
+                "evidence": [],
+            }
+        )
+
+    avg_score = round(total_score / len(valid), 2)
+    return {
+        "score": avg_score,
+        "grade": _score_to_grade(avg_score),
+        "pillars": pillars,
+        "total_impact_pts": round(total_impact / len(valid), 2),
+        "n_assets": max(1, total_assets),
+        "methodology_version": methodology or "easm_fair_age_v1",
+    }
+
+
 def _detect_waf_vendor(text: str | None) -> str:
-    blob = str(text or "").strip().lower()
+    blob = _sanitize_text(text).lower()
     if not blob:
         return ""
+    for canonical, aliases in WAF_VENDOR_ALIASES:
+        if any(alias in blob for alias in aliases):
+            return canonical
     for model in KNOWN_WAF_MODELS:
         if model in blob:
-            return model
+            return model.title()
     return ""
 
 
 def _sanitize_text(value: str | None) -> str:
     if not value:
         return ""
-    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
-    sanitized = ansi_pattern.sub("", str(value))
+    sanitized = str(value)
+    sanitized = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", sanitized)
+    sanitized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", sanitized)
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
     return sanitized
 
@@ -3181,6 +3307,20 @@ def dashboard_insights(
     jobs = jobs_query.order_by(ScanJob.created_at.desc()).all()
     findings = findings_query.all()
 
+    if normalized_target:
+        normalized_target_lc = normalized_target.lower()
+        exact_jobs = [
+            j for j in jobs
+            if normalized_target_lc in _target_tokens(j.target_query)
+        ]
+        filtered_jobs = exact_jobs if exact_jobs else [
+            j for j in jobs
+            if normalized_target_lc in str(j.target_query or "").lower()
+        ]
+        allowed_ids = {j.id for j in filtered_jobs}
+        jobs = filtered_jobs
+        findings = [f for f in findings if f.scan_job_id in allowed_ids]
+
     latest_scan = jobs[0] if jobs else None
     latest_scan_logs: list[ScanLog] = []
     vuln_tool_execution = {"requested_tools": [], "tools": [], "summary": {"requested_count": 0, "attempted_count": 0, "executed_count": 0}}
@@ -3209,6 +3349,44 @@ def dashboard_insights(
     findings_by_scan: dict[int, list[Finding]] = {}
     for f in findings:
         findings_by_scan.setdefault(f.scan_job_id, []).append(f)
+
+    target_scan_counts: dict[str, int] = {}
+    for job in jobs:
+        target_key = _primary_target_token(job.target_query)
+        if not target_key:
+            continue
+        target_scan_counts[target_key] = int(target_scan_counts.get(target_key, 0)) + 1
+
+    def _new_target_metric() -> dict[str, Any]:
+        return {
+            "findings_total": 0,
+            "findings_triaged": 0,
+            "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "severity_vuln": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "fair_total": 0.0,
+            "fair_count": 0,
+            "ale_total": 0.0,
+            "recon": 0,
+            "osint": 0,
+            "vulnerability": 0,
+            "waf": 0,
+            "security_headers": 0,
+            "age_env": [],
+            "age_market": [],
+            "age_exploit": [],
+        }
+
+    target_metrics: dict[str, dict[str, Any]] = {}
+
+    def _metric_for_target(target_query_value: str | None) -> dict[str, Any]:
+        key = _primary_target_token(target_query_value)
+        if not key:
+            key = "_unknown"
+        metric = target_metrics.get(key)
+        if metric is None:
+            metric = _new_target_metric()
+            target_metrics[key] = metric
+        return metric
 
     total = len(findings)
     mitigated = len([f for f in findings if f.is_false_positive])
@@ -3240,20 +3418,29 @@ def dashboard_insights(
     technologies_counter: dict[str, int] = {}
     for f in findings:
         sev = str(f.severity or "low").lower()
+        target_metric = _metric_for_target(f.scan_job.target_query if f.scan_job else "")
+        target_metric["findings_total"] = int(target_metric.get("findings_total", 0)) + 1
+        if f.is_false_positive:
+            target_metric["findings_triaged"] = int(target_metric.get("findings_triaged", 0)) + 1
         if sev in sev_count:
             sev_count[sev] += 1
+            target_metric["severity"][sev] = int(target_metric["severity"].get(sev, 0)) + 1
 
         details = f.details or {}
         nested_details = details.get("details") if isinstance(details.get("details"), dict) else {}
         source_group = _source_group_from_details(details)
         if source_group == "recon":
             recon_findings_count += 1
+            target_metric["recon"] = int(target_metric.get("recon", 0)) + 1
         elif source_group == "osint":
             osint_findings_count += 1
+            target_metric["osint"] = int(target_metric.get("osint", 0)) + 1
         elif source_group == "vuln" or sev in {"critical", "high", "medium"}:
             vulnerability_findings_count += 1
+            target_metric["vulnerability"] = int(target_metric.get("vulnerability", 0)) + 1
             if sev in sev_count_vuln:
                 sev_count_vuln[sev] += 1
+                target_metric["severity_vuln"][sev] = int(target_metric["severity_vuln"].get(sev, 0)) + 1
 
         key = (str(f.title or "Finding"), sev)
         vuln_counter[key] = vuln_counter.get(key, 0) + 1
@@ -3263,6 +3450,7 @@ def dashboard_insights(
         title_blob = f"{f.title or ''}\n{evidence_text}".lower()
         if tool == "wafw00f" or "waf" in title_blob:
             waf_findings_count += 1
+            target_metric["waf"] = int(target_metric.get("waf", 0)) + 1
             target_query = str(f.scan_job.target_query or "").strip() if f.scan_job else ""
             if target_query:
                 waf_assets.add(target_query)
@@ -3277,6 +3465,7 @@ def dashboard_insights(
             matched_headers = [header_name] if header_name else [str(h or "").strip().lower() for h in header_pattern.findall(f"{f.title or ''}\n{evidence_text}")]
             if matched_headers:
                 security_header_findings_count += 1
+                target_metric["security_headers"] = int(target_metric.get("security_headers", 0)) + 1
                 target_query = str(f.scan_job.target_query or "").strip() if f.scan_job else ""
                 if target_query:
                     security_header_assets.add(target_query)
@@ -3296,13 +3485,19 @@ def dashboard_insights(
         fair = compute_fair_metrics(f.severity, f.confidence_score, details, age)
         fair_total += float(fair.get("fair_score") or 0.0)
         ale_total += float(fair.get("annualized_loss_exposure_usd") or 0.0)
+        target_metric["fair_total"] = float(target_metric.get("fair_total") or 0.0) + float(fair.get("fair_score") or 0.0)
+        target_metric["fair_count"] = int(target_metric.get("fair_count") or 0) + 1
+        target_metric["ale_total"] = float(target_metric.get("ale_total") or 0.0) + float(fair.get("annualized_loss_exposure_usd") or 0.0)
 
         if age.get("known_in_environment_days") is not None:
             age_env_samples.append(int(age["known_in_environment_days"]))
+            target_metric["age_env"].append(int(age["known_in_environment_days"]))
         if age.get("known_in_market_days") is not None:
             age_market_samples.append(int(age["known_in_market_days"]))
+            target_metric["age_market"].append(int(age["known_in_market_days"]))
         if age.get("exploit_published_days") is not None:
             age_exploit_samples.append(int(age["exploit_published_days"]))
+            target_metric["age_exploit"].append(int(age["exploit_published_days"]))
 
         if not f.is_false_positive:
             reasons = build_priority_reason(f.title, f.severity, fair, age)
@@ -3412,25 +3607,137 @@ def dashboard_insights(
         return round(sum(values) / len(values), 2) if values else 0.0
 
     avg_fair = round(fair_total / max(len(findings), 1), 2)
+    agg_mode = "target" if normalized_target else ("group_avg" if access_group_id is not None else "global")
 
-    latest_state = (latest_scan.state_data or {}) if latest_scan else {}
-    latest_report_v2 = latest_state.get("report_v2") if isinstance(latest_state.get("report_v2"), dict) else {}
-    fallback_easm_rating = latest_report_v2.get("easm_rating") or latest_state.get("easm_rating") or {}
-    fallback_fair_decomposition = latest_report_v2.get("fair_decomposition") or latest_state.get("fair_decomposition") or {}
-    fallback_executive_summary = latest_report_v2.get("executive_summary") or latest_state.get("executive_summary") or ""
+    effective_scans = len(jobs)
+    effective_total = total
+    effective_open_issues = open_issues
+    effective_mitigated = mitigated
+    effective_sev_count = dict(sev_count)
+    effective_sev_count_vuln = dict(sev_count_vuln)
+    effective_avg_fair = avg_fair
+    effective_ale_total = float(ale_total)
+    effective_age_env = float(_avg(age_env_samples))
+    effective_age_market = float(_avg(age_market_samples))
+    effective_age_exploit = float(_avg(age_exploit_samples))
+    effective_waf_findings = waf_findings_count
+    effective_security_header_findings = security_header_findings_count
+    effective_recon_findings = recon_findings_count
+    effective_osint_findings = osint_findings_count
+    effective_vulnerability_findings = vulnerability_findings_count
+
+    scope_targets = sorted(set(target_scan_counts.keys()) | set(target_metrics.keys()))
+    if agg_mode == "group_avg" and scope_targets:
+        n_scope = len(scope_targets)
+
+        def _metric_value(key: str) -> dict[str, Any]:
+            return target_metrics.get(key) or _new_target_metric()
+
+        def _avg_scope(values: list[float]) -> float:
+            return round(sum(values) / max(1, len(values)), 2) if values else 0.0
+
+        effective_scans = round(sum(float(target_scan_counts.get(k, 0)) for k in scope_targets) / n_scope, 2)
+        effective_total = round(sum(float(_metric_value(k).get("findings_total") or 0) for k in scope_targets) / n_scope, 2)
+        effective_mitigated = round(sum(float(_metric_value(k).get("findings_triaged") or 0) for k in scope_targets) / n_scope, 2)
+        effective_open_issues = round(effective_total - effective_mitigated, 2)
+
+        effective_sev_count = {
+            "critical": int(round(sum(float((_metric_value(k).get("severity") or {}).get("critical", 0)) for k in scope_targets) / n_scope)),
+            "high": int(round(sum(float((_metric_value(k).get("severity") or {}).get("high", 0)) for k in scope_targets) / n_scope)),
+            "medium": int(round(sum(float((_metric_value(k).get("severity") or {}).get("medium", 0)) for k in scope_targets) / n_scope)),
+            "low": int(round(sum(float((_metric_value(k).get("severity") or {}).get("low", 0)) for k in scope_targets) / n_scope)),
+        }
+        effective_sev_count_vuln = {
+            "critical": int(round(sum(float((_metric_value(k).get("severity_vuln") or {}).get("critical", 0)) for k in scope_targets) / n_scope)),
+            "high": int(round(sum(float((_metric_value(k).get("severity_vuln") or {}).get("high", 0)) for k in scope_targets) / n_scope)),
+            "medium": int(round(sum(float((_metric_value(k).get("severity_vuln") or {}).get("medium", 0)) for k in scope_targets) / n_scope)),
+            "low": int(round(sum(float((_metric_value(k).get("severity_vuln") or {}).get("low", 0)) for k in scope_targets) / n_scope)),
+        }
+
+        fair_by_target: list[float] = []
+        ale_by_target: list[float] = []
+        age_env_by_target: list[float] = []
+        age_market_by_target: list[float] = []
+        age_exploit_by_target: list[float] = []
+        waf_by_target: list[float] = []
+        sec_headers_by_target: list[float] = []
+        recon_by_target: list[float] = []
+        osint_by_target: list[float] = []
+        vuln_by_target: list[float] = []
+
+        for key in scope_targets:
+            metric = _metric_value(key)
+            fair_count = int(metric.get("fair_count") or 0)
+            fair_by_target.append((float(metric.get("fair_total") or 0.0) / fair_count) if fair_count > 0 else 0.0)
+            ale_by_target.append(float(metric.get("ale_total") or 0.0))
+            age_env_by_target.append(_avg(metric.get("age_env") or []))
+            age_market_by_target.append(_avg(metric.get("age_market") or []))
+            age_exploit_by_target.append(_avg(metric.get("age_exploit") or []))
+            waf_by_target.append(float(metric.get("waf") or 0.0))
+            sec_headers_by_target.append(float(metric.get("security_headers") or 0.0))
+            recon_by_target.append(float(metric.get("recon") or 0.0))
+            osint_by_target.append(float(metric.get("osint") or 0.0))
+            vuln_by_target.append(float(metric.get("vulnerability") or 0.0))
+
+        effective_avg_fair = _avg_scope(fair_by_target)
+        effective_ale_total = _avg_scope(ale_by_target)
+        effective_age_env = _avg_scope(age_env_by_target)
+        effective_age_market = _avg_scope(age_market_by_target)
+        effective_age_exploit = _avg_scope(age_exploit_by_target)
+        effective_waf_findings = _avg_scope(waf_by_target)
+        effective_security_header_findings = _avg_scope(sec_headers_by_target)
+        effective_recon_findings = _avg_scope(recon_by_target)
+        effective_osint_findings = _avg_scope(osint_by_target)
+        effective_vulnerability_findings = _avg_scope(vuln_by_target)
+
+    latest_scan_by_target: dict[str, ScanJob] = {}
+    selected_target_lc = normalized_target.lower()
+    for job in jobs:
+        tokens = _target_tokens(job.target_query)
+        if selected_target_lc:
+            key = selected_target_lc if selected_target_lc in tokens else ""
+        else:
+            key = tokens[0] if tokens else str(job.target_query or "").strip().lower()
+        if not key or key in latest_scan_by_target:
+            continue
+        latest_scan_by_target[key] = job
+
+    selected_latest_scans = list(latest_scan_by_target.values()) or ([latest_scan] if latest_scan else [])
+    ratings_payload: list[dict[str, Any]] = []
+    fair_payload: list[dict[str, Any]] = []
+    summary_payload: list[str] = []
+    for scan in selected_latest_scans:
+        rating_data, fair_data, summary_data = _extract_scan_easm_payload(scan)
+        if rating_data:
+            ratings_payload.append(rating_data)
+        if fair_data:
+            fair_payload.append(fair_data)
+        if summary_data:
+            summary_payload.append(summary_data)
+
+    if ratings_payload:
+        avg_rating_score = round(sum(float(item.get("score") or 0.0) for item in ratings_payload) / len(ratings_payload), 2)
+        fallback_easm_rating = {
+            "score": avg_rating_score,
+            "grade": _score_to_grade(avg_rating_score),
+        }
+    else:
+        fallback_easm_rating = {}
+    fallback_fair_decomposition = _aggregate_fair_decomposition(fair_payload)
+    fallback_executive_summary = "\n\n".join(summary_payload[:2]) if summary_payload else ""
 
     recurring_findings_count = len([count for count in vuln_counter.values() if int(count) > 1])
     lifecycle_global = {
-        "open": int(open_issues),
-        "new": int(sev_count_vuln.get("critical", 0) + sev_count_vuln.get("high", 0)),
-        "corrected": int(mitigated),
+        "open": int(effective_open_issues),
+        "new": int(effective_sev_count_vuln.get("critical", 0) + effective_sev_count_vuln.get("high", 0)),
+        "corrected": int(effective_mitigated),
     }
     continuous_rating = compute_continuous_rating(
-        severity_count=sev_count_vuln,
-        fair_avg_score=avg_fair,
-        fair_ale_total_usd=float(ale_total),
-        age_env_avg_days=float(_avg(age_env_samples)),
-        age_market_avg_days=float(_avg(age_market_samples)),
+        severity_count=effective_sev_count_vuln,
+        fair_avg_score=effective_avg_fair,
+        fair_ale_total_usd=float(effective_ale_total),
+        age_env_avg_days=float(effective_age_env),
+        age_market_avg_days=float(effective_age_market),
         lifecycle=lifecycle_global,
         recurring_findings_count=recurring_findings_count,
         segment=None,  # dashboard não tem alvo único — usa peso padrão
@@ -3457,35 +3764,37 @@ def dashboard_insights(
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
     risk_points = (
-        int(sev_count_vuln.get("critical", 0)) * 6
-        + int(sev_count_vuln.get("high", 0)) * 4
-        + int(sev_count_vuln.get("medium", 0)) * 2
-        + int(sev_count_vuln.get("low", 0))
+        int(effective_sev_count_vuln.get("critical", 0)) * 6
+        + int(effective_sev_count_vuln.get("high", 0)) * 4
+        + int(effective_sev_count_vuln.get("medium", 0)) * 2
+        + int(effective_sev_count_vuln.get("low", 0))
     )
     base_framework_score = max(55, min(100, int(round(100.0 / (1.0 + (risk_points / 55.0))))))
 
     return {
         "stats": {
-            "scans": len(jobs),
-            "findings_total": total,
-            "findings_open": open_issues,
-            "findings_triaged": mitigated,
-            "critical": sev_count["critical"],
-            "high": sev_count["high"],
-            "medium": sev_count["medium"],
-            "low": sev_count["low"],
-            "fair_avg_score": avg_fair,
-            "fair_ale_total_usd": round(ale_total, 2),
-            "age_env_avg_days": _avg(age_env_samples),
-            "age_market_avg_days": _avg(age_market_samples),
-            "age_exploit_avg_days": _avg(age_exploit_samples),
-            "waf_findings": waf_findings_count,
-            "security_header_findings": security_header_findings_count,
-            "recon_findings": recon_findings_count,
-            "osint_findings": osint_findings_count,
-            "vulnerability_findings": vulnerability_findings_count,
+            "scans": effective_scans,
+            "findings_total": effective_total,
+            "findings_open": effective_open_issues,
+            "findings_triaged": effective_mitigated,
+            "critical": effective_sev_count["critical"],
+            "high": effective_sev_count["high"],
+            "medium": effective_sev_count["medium"],
+            "low": effective_sev_count["low"],
+            "fair_avg_score": effective_avg_fair,
+            "fair_ale_total_usd": round(effective_ale_total, 2),
+            "age_env_avg_days": effective_age_env,
+            "age_market_avg_days": effective_age_market,
+            "age_exploit_avg_days": effective_age_exploit,
+            "waf_findings": effective_waf_findings,
+            "security_header_findings": effective_security_header_findings,
+            "recon_findings": effective_recon_findings,
+            "osint_findings": effective_osint_findings,
+            "vulnerability_findings": effective_vulnerability_findings,
             "external_rating_score": continuous_rating.get("score"),
             "external_rating_grade": continuous_rating.get("grade"),
+            "aggregation_mode": agg_mode,
+            "aggregation_targets": len(scope_targets) if scope_targets else 1,
         },
         "frameworks": {
             "iso27001": {"score": base_framework_score},

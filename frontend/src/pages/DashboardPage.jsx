@@ -39,6 +39,75 @@ const RISK_DOT = {
   low: "bg-emerald-500",
 };
 
+const FACTOR_VISUAL = {
+  "Exposição Técnica": {
+    icon: (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M4 7h16M4 12h10M4 17h7" />
+      </svg>
+    ),
+    accent: "text-rose-300 border-rose-500/40 bg-rose-500/10",
+  },
+  "Persistência Temporal (AGE)": {
+    icon: (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 8v5l3 2" />
+      </svg>
+    ),
+    accent: "text-amber-300 border-amber-500/40 bg-amber-500/10",
+  },
+  "Impacto Econômico (FAIR)": {
+    icon: (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M12 3v18M16 7.5c0-1.9-1.8-3.5-4-3.5s-4 1.6-4 3.5 1.8 3.5 4 3.5 4 1.6 4 3.5-1.8 3.5-4 3.5-4-1.6-4-3.5" />
+      </svg>
+    ),
+    accent: "text-emerald-300 border-emerald-500/40 bg-emerald-500/10",
+  },
+  "Resiliência Operacional": {
+    icon: (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z" />
+      </svg>
+    ),
+    accent: "text-cyan-300 border-cyan-500/40 bg-cyan-500/10",
+  },
+};
+
+function formatFactorEvidence(name, evidence) {
+  const ev = evidence || {};
+  if (name === "Exposição Técnica") {
+    return [
+      `Críticas: ${Number(ev.critical || 0)}`,
+      `Altas: ${Number(ev.high || 0)}`,
+      `Médias: ${Number(ev.medium || 0)}`,
+      `Baixas: ${Number(ev.low || 0)}`,
+    ];
+  }
+  if (name === "Persistência Temporal (AGE)") {
+    return [
+      `Média ambiente: ${Number(ev.age_env_avg_days || 0)} dias`,
+      `Média mercado: ${Number(ev.age_market_avg_days || 0)} dias`,
+      `Recorrências: ${Number(ev.recurring_findings || 0)}`,
+    ];
+  }
+  if (name === "Impacto Econômico (FAIR)") {
+    return [
+      `FAIR médio: ${Number(ev.fair_avg_score || 0).toFixed(2)}`,
+      `ALE total: USD ${Number(ev.ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}`,
+    ];
+  }
+  if (name === "Resiliência Operacional") {
+    return [
+      `Abertos: ${Number(ev.open || 0)}`,
+      `Novos: ${Number(ev.new || 0)}`,
+      `Corrigidos: ${Number(ev.corrected || 0)}`,
+    ];
+  }
+  return Object.entries(ev).map(([k, v]) => `${k}: ${v}`);
+}
+
 
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
 
@@ -50,6 +119,12 @@ function StatCard({ label, value, sub, color = "text-white" }) {
       {sub && <p className="mt-1 text-xs text-slate-500">{sub}</p>}
     </div>
   );
+}
+
+function aggregationLabel(mode) {
+  if (mode === "target") return "Visão por Alvo";
+  if (mode === "group_avg") return "Média do Grupo";
+  return "Visão Global";
 }
 
 export default function DashboardPage() {
@@ -133,6 +208,8 @@ export default function DashboardPage() {
           high: dashboard.stats?.high || 0,
           medium: dashboard.stats?.medium || 0,
           low: dashboard.stats?.low || 0,
+          aggregation_mode: dashboard.stats?.aggregation_mode || "global",
+          aggregation_targets: dashboard.stats?.aggregation_targets || 1,
         });
 
         setFrameworks([
@@ -172,8 +249,29 @@ export default function DashboardPage() {
           }));
         }
 
+        const hasActiveFilter = Boolean(selectedGroup || selectedTarget.trim());
+
         // Load EASM data
         try {
+          if (hasActiveFilter) {
+            if (easmFallback?.scan_target) {
+              setEasmAssets([
+                {
+                  id: `fallback-${easmFallback.scan_id || "latest"}`,
+                  domain_or_ip: easmFallback.scan_target,
+                  open_critical: dashboard.stats?.critical || 0,
+                  open_high: dashboard.stats?.high || 0,
+                  easm_grade: easmFallback?.rating?.grade || "F",
+                  easm_rating: Number(easmFallback?.rating?.score || 0),
+                },
+              ]);
+            } else {
+              setEasmAssets([]);
+            }
+            setEasmAlerts([]);
+            return;
+          }
+
           const [assetsResp, alertsResp] = await Promise.all([
             client.get("/api/dashboard/assets").catch(() => ({ data: [] })),
             client.get("/api/easm/alerts").catch(() => ({ data: [] })),
@@ -337,6 +435,17 @@ export default function DashboardPage() {
           </p>
         )}
 
+        {!!stats && (
+          <div className="mt-3 flex items-center justify-between rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
+            <p className="text-xs font-semibold text-blue-200">
+              {aggregationLabel(stats.aggregation_mode)}
+            </p>
+            <p className="text-[11px] text-blue-100/80">
+              {Number(stats.aggregation_targets || 1)} alvo(s) considerados
+            </p>
+          </div>
+        )}
+
         {selectedTarget && stats && stats.scans === 0 && (
           <div className="mt-3 rounded-lg border border-slate-600 bg-slate-800/50 px-3 py-2">
             <p className="text-xs text-slate-300">
@@ -389,10 +498,6 @@ export default function DashboardPage() {
         <StatCard label="Baixo" value={stats.low} color="text-emerald-400" />
       </div>
 
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
-        Tempo esperado de execução: Nuclei e Nmap podem levar em torno de 10 minutos por alvo, dependendo da superfície e conectividade.
-      </div>
-
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard
           label="Rating Externo"
@@ -419,15 +524,50 @@ export default function DashboardPage() {
             {(continuousRating?.factors || []).length === 0 && <p className="text-sm text-slate-500">Sem fatores calculados.</p>}
             {(continuousRating?.factors || []).map((f) => (
               <div key={f.id} className="rounded-xl border border-slate-700 bg-slate-800/40 p-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-slate-100">{f.name}</p>
-                  <p className="text-xs text-slate-300">peso {Math.round((Number(f.weight || 0) * 100))}%</p>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-flex h-7 w-7 items-center justify-center rounded-lg border ${FACTOR_VISUAL[f.name]?.accent || "text-slate-300 border-slate-600 bg-slate-700/40"}`}>
+                      {FACTOR_VISUAL[f.name]?.icon || (
+                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                      )}
+                    </span>
+                    <p className="text-sm font-semibold text-slate-100">{f.name}</p>
+                  </div>
+                  <p className="rounded-md border border-slate-600 bg-slate-900/60 px-2 py-0.5 text-xs text-slate-300">
+                    peso {Math.round((Number(f.weight || 0) * 100))}%
+                  </p>
                 </div>
-                <div className="mt-1 flex items-center justify-between text-xs text-slate-400">
-                  <span>Score: {Number(f.score || 0).toFixed(2)}</span>
-                  <span>Impacto: {Number(f.impact_points || 0).toFixed(2)} pts</span>
+
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1">
+                    <p className="text-slate-400">Score</p>
+                    <p className="font-semibold text-slate-100">{Number(f.score || 0).toFixed(2)}</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1">
+                    <p className="text-slate-400">Impacto</p>
+                    <p className="font-semibold text-slate-100">{Number(f.impact_points || 0).toFixed(2)} pts</p>
+                  </div>
                 </div>
-                <div className="mt-2 text-[11px] text-slate-400 break-all">Evidência: {JSON.stringify(f.evidence || {})}</div>
+
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-700/70">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400"
+                    style={{ width: `${Math.max(0, Math.min(100, Number(f.score || 0)))}%` }}
+                  />
+                </div>
+
+                <div className="mt-2 rounded-lg border border-slate-700/80 bg-slate-900/40 px-2 py-2 text-[11px] text-slate-300">
+                  <p className="mb-1 text-slate-400">Evidências</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {formatFactorEvidence(f.name, f.evidence).map((line) => (
+                      <span key={`${f.id}-${line}`} className="rounded-md border border-slate-600 bg-slate-800/60 px-2 py-0.5">
+                        {line}
+                      </span>
+                    ))}
+                  </div>
+                </div>
               </div>
             ))}
           </div>

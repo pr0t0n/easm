@@ -36,7 +36,44 @@ KNOWN_WAF_MODELS: list[str] = [
     "aws waf",
     "barracuda",
     "fortiweb",
+    "google cloud armor",
+    "google cloud app armor",
 ]
+
+WAF_VENDOR_ALIASES: list[tuple[str, tuple[str, ...]]] = [
+    ("Cloudflare", ("cloudflare",)),
+    ("Akamai", ("akamai",)),
+    ("Imperva", ("imperva", "incapsula")),
+    ("ModSecurity", ("modsecurity", "mod_security")),
+    ("F5", ("f5", "big-ip asm", "bigip asm")),
+    ("AWS WAF", ("aws waf", "amazon waf", "amazon web application firewall")),
+    ("Barracuda", ("barracuda",)),
+    ("FortiWeb", ("fortiweb",)),
+    ("Google Cloud Armor", ("google cloud armor", "google cloud app armor", "app armor (google cloud)", "gcp armor")),
+]
+
+
+def _sanitize_cli_text(value: str | None) -> str:
+    if not value:
+        return ""
+    sanitized = str(value)
+    sanitized = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", sanitized)
+    sanitized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", sanitized)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    return sanitized
+
+
+def _normalize_waf_vendor(value: str | None) -> str:
+    blob = _sanitize_cli_text(value).lower()
+    if not blob:
+        return ""
+    for canonical, aliases in WAF_VENDOR_ALIASES:
+        if any(alias in blob for alias in aliases):
+            return canonical
+    for model in KNOWN_WAF_MODELS:
+        if model in blob:
+            return model.title()
+    return ""
 
 
 class AgentState(TypedDict):
@@ -800,15 +837,13 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
 def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
+        line = _sanitize_cli_text(raw_line)
         if not line:
             continue
         match = re.search(r"is behind\s+(.+?)\s+WAF", line, re.IGNORECASE)
         if match:
-            vendor = str(match.group(1) or "").strip()
-            lowered_vendor = vendor.lower()
-            known_vendor = next((model for model in KNOWN_WAF_MODELS if model in lowered_vendor), "")
-            normalized_vendor = known_vendor if known_vendor else vendor
+            vendor = _sanitize_cli_text(match.group(1) or "")
+            normalized_vendor = _normalize_waf_vendor(vendor or line) or vendor
             findings.append(
                 {
                     "title": f"WAF detectado: {normalized_vendor}",
@@ -822,7 +857,7 @@ def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) 
                         "tool": "wafw00f",
                         "evidence": line,
                         "waf_vendor": normalized_vendor,
-                        "waf_model_match": bool(known_vendor),
+                        "waf_model_match": bool(_normalize_waf_vendor(normalized_vendor)),
                         "waf_detected": True,
                     },
                 }
