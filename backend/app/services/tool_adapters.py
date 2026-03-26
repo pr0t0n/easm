@@ -23,6 +23,20 @@ SAFE_TOOL_REGISTRY = {
 
 TOOL_TIMEOUT_SECONDS = 90
 
+VULSCAN_PRIORITY_TCP_PORTS = [
+    20, 21, 22, 23,
+    25, 53,
+    80, 81, 110, 119, 123,
+    135, 139, 143, 161, 162,
+    389, 443, 444, 445, 465, 587, 636,
+    993, 995,
+    1433, 3306, 3389,
+    5060,
+    5432, 6379,
+    8080, 8443, 8888,
+    27017,
+]
+
 # Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
 TOOL_SPECIFIC_TIMEOUTS = {
     # Nuclei e Nmap podem levar ~10min por alvo em varreduras completas.
@@ -152,6 +166,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     normalized = tool_name.strip().lower()
 
     if normalized in {"nmap-vulscan", "vulscan"}:
+        ports_csv = ",".join(str(p) for p in VULSCAN_PRIORITY_TCP_PORTS)
         return [
             "nmap",
             "-Pn",
@@ -159,7 +174,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "-sV",
             "-T3",
             "-p",
-            "80,81,443,444,8080,8443,8888",
+            ports_csv,
             "--script=vulscan/",
             "--script-args",
             "vulscandb=cve.csv",
