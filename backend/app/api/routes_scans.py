@@ -3537,7 +3537,16 @@ def dashboard_insights(
             "access_group_id": access_group_id,
             "applied": bool(normalized_target or access_group_id is not None),
         },
-        "targets": sorted(list({j.target_query for j in jobs if j.target_query})),
+        "targets": sorted(
+            list(
+                {
+                    token.strip()
+                    for j in jobs
+                    for token in re.split(r"[;,]", str(j.target_query or ""))
+                    if token.strip()
+                }
+            )
+        ),
         "vuln_tool_execution": vuln_tool_execution,
         "easm_fallback": {
             "scan_id": latest_scan.id if latest_scan else None,
