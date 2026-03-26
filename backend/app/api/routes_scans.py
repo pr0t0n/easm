@@ -3144,8 +3144,32 @@ def dashboard_insights(
     if access_group_id is not None:
         try:
             group_id_int = int(access_group_id) if isinstance(access_group_id, str) else access_group_id
-            jobs_query = jobs_query.filter(ScanJob.access_group_id == group_id_int)
-            findings_query = findings_query.filter(ScanJob.access_group_id == group_id_int)
+            group_schedules = (
+                db.query(ScheduledScan)
+                .filter(ScheduledScan.access_group_id == group_id_int)
+                .all()
+            )
+            group_targets: set[str] = set()
+            for schedule in group_schedules:
+                raw = str(schedule.targets_text or "").strip()
+                if not raw:
+                    continue
+                group_targets.add(raw)
+                for part in raw.split(";"):
+                    token = part.strip()
+                    if token:
+                        group_targets.add(token)
+
+            if group_targets:
+                jobs_query = jobs_query.filter(
+                    (ScanJob.access_group_id == group_id_int) | (ScanJob.target_query.in_(list(group_targets)))
+                )
+                findings_query = findings_query.filter(
+                    (ScanJob.access_group_id == group_id_int) | (ScanJob.target_query.in_(list(group_targets)))
+                )
+            else:
+                jobs_query = jobs_query.filter(ScanJob.access_group_id == group_id_int)
+                findings_query = findings_query.filter(ScanJob.access_group_id == group_id_int)
         except (ValueError, TypeError):
             access_group_id = None
 
