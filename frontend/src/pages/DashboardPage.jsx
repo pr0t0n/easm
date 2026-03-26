@@ -88,7 +88,7 @@ export default function DashboardPage() {
 
   // Carrega grupos disponíveis para o usuário
   useEffect(() => {
-    client.get("/api/management/access-groups")
+    client.get("/api/access-groups")
       .then(({ data }) => setGroups(Array.isArray(data) ? data : []))
       .catch(() => {});
   }, []);
