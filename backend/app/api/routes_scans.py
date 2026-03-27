@@ -1989,6 +1989,16 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     if job.status in {"queued", "running", "retrying"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir scan em execucao")
 
+    # Evita violacao de FK quando algum heartbeat ainda referencia este scan.
+    db.query(WorkerHeartbeat).filter(WorkerHeartbeat.current_scan_id == scan_id).update(
+        {
+            WorkerHeartbeat.current_scan_id: None,
+            WorkerHeartbeat.status: "idle",
+            WorkerHeartbeat.last_task_name: None,
+        },
+        synchronize_session=False,
+    )
+
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
     
