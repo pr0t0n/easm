@@ -188,7 +188,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         ]
     if normalized in {"burp", "burp-cli"}:
         # Preferimos JSON em stdout para parser unificado no workflow.
-        return ["burp-cli", "scan", "--url", url, "--format", "json"]
+        # Flag -a fornece verbosidade completa dos resultados
+        return ["burp-cli", "scan", "-a", "--url", url, "--format", "json"]
     if normalized == "nmap":
         return [
             "nmap",
