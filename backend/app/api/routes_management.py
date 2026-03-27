@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta
+import json
 import os
 import re
 import secrets
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from importlib.util import find_spec
 
 import httpx
@@ -851,6 +854,125 @@ def _install_tool(tool_name: str) -> bool:
     return _tool_installed(normalized)
 
 
+def _burp_api_host() -> str:
+    host = str(os.getenv("BURP_API_HOST", "burp_rest")).strip()
+    return host or "burp_rest"
+
+
+def _burp_api_port() -> str:
+    port = str(os.getenv("BURP_API_PORT", "1337")).strip()
+    return port or "1337"
+
+
+def _burp_api_key() -> str:
+    return str(os.getenv("BURP_API_KEY", "")).strip()
+
+
+def _burp_api_base_url() -> str:
+    host = _burp_api_host()
+    port = _burp_api_port()
+    api_key = _burp_api_key()
+    if api_key:
+        return f"http://{host}:{port}/{api_key}/v0.1"
+    return f"http://{host}:{port}/v0.1"
+
+
+def _burp_cli_list_scans_output() -> str:
+    cli = shutil.which("burp-api-cli") or shutil.which("burp-cli")
+    if not cli:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="burp-cli nao instalado no backend")
+
+    cmd = [cli, "-t", _burp_api_host(), "-p", _burp_api_port(), "-L"]
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"falha ao listar scans burp: {exc}")
+
+    text = "\n".join(part for part in [proc.stdout or "", proc.stderr or ""] if part).strip()
+    if proc.returncode != 0 and text:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=text[:500])
+    return text
+
+
+def _parse_burp_cli_list_output(output: str) -> list[dict[str, str]]:
+    scans: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+
+    # burp-cli -L pode retornar tabela em largura fixa com quebras de linha.
+    # Fazemos busca no texto inteiro para capturar id/url/status mesmo quebrados.
+    pattern = re.compile(
+        r"(?<!\d)(?P<id>\d+)\s+(?P<url>https?://\S+|scan_\d+)\s+(?P<status>paused|auditing|running|succeeded|failed|cancelled)\b",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(output or ""):
+        scan_id = str(match.group("id") or "").strip()
+        if not scan_id or scan_id in seen_ids:
+            continue
+        seen_ids.add(scan_id)
+        scans.append(
+            {
+                "id": scan_id,
+                "url": str(match.group("url") or "").strip(),
+                "status": str(match.group("status") or "").strip().lower(),
+            }
+        )
+    return scans
+
+
+def _burp_api_call(method: str, path: str, timeout: int = 12) -> tuple[bool, int, str]:
+    req = urllib.request.Request(_burp_api_base_url() + path, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            body = (response.read() or b"").decode("utf-8", "ignore")
+            return True, int(response.status), body
+    except urllib.error.HTTPError as exc:
+        body = (exc.read() or b"").decode("utf-8", "ignore")
+        return False, int(getattr(exc, "code", 0) or 0), body
+    except Exception as exc:
+        return False, 0, str(exc)
+
+
+def _burp_cli_history_path() -> str:
+    custom_path = str(os.getenv("BURP_CLI_HISTORY_FILE", "")).strip()
+    if custom_path:
+        return custom_path
+    return "/root/.burp-cli/scan_history.json"
+
+
+def _prune_burp_cli_history(scan_ids_to_remove: list[str]) -> int:
+    targets = {str(item).strip() for item in (scan_ids_to_remove or []) if str(item).strip()}
+    if not targets:
+        return 0
+
+    path = _burp_cli_history_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return 0
+
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        return 0
+
+    kept_records = [
+        row
+        for row in records
+        if str((row or {}).get("scan_id") or "").strip() not in targets
+    ]
+    removed = len(records) - len(kept_records)
+    if removed <= 0:
+        return 0
+
+    payload["records"] = kept_records
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    except Exception:
+        return 0
+    return removed
+
+
 @router.get("/config/runtime")
 def get_runtime_flags(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     debug_mode = _get_setting(db, current_user.id, "debug_mode", "false") == "true"
@@ -1106,6 +1228,111 @@ def save_burp_config(payload: dict, db: Session = Depends(get_db), current_user:
         _set_setting(db, current_user.id, "burp_license_key", license_key)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/config/burp/scans")
+def get_burp_scans(current_user: User = Depends(require_admin)):
+    raw_output = _burp_cli_list_scans_output()
+    scans = _parse_burp_cli_list_output(raw_output)
+
+    by_status: dict[str, int] = {
+        "running": 0,
+        "auditing": 0,
+        "paused": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancelled": 0,
+    }
+    for scan in scans:
+        st = str(scan.get("status") or "").lower()
+        if st in by_status:
+            by_status[st] += 1
+
+    return {
+        "total": len(scans),
+        "status_counts": by_status,
+        "scans": scans,
+        "api_host": _burp_api_host(),
+        "api_port": _burp_api_port(),
+    }
+
+
+@router.post("/config/burp/scans/actions")
+def burp_scans_actions(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    action = str(payload.get("action") or "").strip().lower()
+    scan_ids_payload = payload.get("scan_ids") or []
+    only_active = bool(payload.get("only_active", False))
+
+    if action not in {"cancel", "remove", "cancel_and_remove"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="acao invalida")
+
+    known_scans = _parse_burp_cli_list_output(_burp_cli_list_scans_output())
+    known_ids = {str(item.get("id") or "").strip() for item in known_scans}
+    active_ids = {
+        str(item.get("id") or "").strip()
+        for item in known_scans
+        if str(item.get("status") or "").strip().lower() in {"running", "auditing", "paused"}
+    }
+
+    requested_ids = [str(v).strip() for v in scan_ids_payload if str(v).strip()]
+    if not requested_ids:
+        requested_ids = sorted(active_ids if only_active else known_ids)
+
+    scan_ids = [sid for sid in requested_ids if sid in known_ids]
+
+    results: list[dict[str, object]] = []
+    for scan_id in scan_ids:
+        row: dict[str, object] = {"scan_id": scan_id, "cancel": None, "remove": None}
+
+        if action in {"cancel", "cancel_and_remove"}:
+            ok, code, _ = _burp_api_call("POST", f"/scan/{scan_id}/cancel")
+            row["cancel"] = {"ok": ok, "code": code}
+
+        if action in {"remove", "cancel_and_remove"}:
+            ok, code, _ = _burp_api_call("DELETE", f"/scan/{scan_id}")
+            row["remove"] = {"ok": ok, "code": code}
+
+        results.append(row)
+
+    removed_history_count = 0
+    if action in {"remove", "cancel_and_remove"}:
+        removable_ids = [
+            str(item.get("scan_id") or "").strip()
+            for item in results
+            if isinstance(item.get("remove"), dict)
+            and bool(item.get("remove", {}).get("ok"))
+            and int(item.get("remove", {}).get("code") or 0) in {200, 202, 204, 404}
+        ]
+        removed_history_count = _prune_burp_cli_history(removable_ids)
+
+    # Mantem o tracker local consistente para o -L
+    refresh_output = _burp_cli_list_scans_output()
+    refresh_scans = _parse_burp_cli_list_output(refresh_output)
+
+    log_audit(
+        db,
+        event_type="burp.scans.action",
+        message=f"Acao em scans Burp: {action}",
+        actor_user_id=current_user.id,
+        metadata={
+            "action": action,
+            "requested": requested_ids,
+            "applied": scan_ids,
+            "results": results,
+            "removed_history_count": removed_history_count,
+        },
+    )
+    db.commit()
+
+    return {
+        "ok": True,
+        "action": action,
+        "requested": requested_ids,
+        "applied": scan_ids,
+        "results": results,
+        "removed_history_count": removed_history_count,
+        "remaining_total": len(refresh_scans),
+    }
 
 
 @router.get("/worker-manager/lines")

@@ -204,6 +204,9 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_SCAN_TIMEOUT: "2400"
+      BURP_PAUSE_MAX_RETRIES: "15"
+      BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -229,6 +232,9 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_SCAN_TIMEOUT: "2400"
+      BURP_PAUSE_MAX_RETRIES: "15"
+      BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:

@@ -8,6 +8,7 @@ BURP_API_PORT="${BURP_API_PORT:-1337}"
 BURP_API_KEY="${BURP_API_KEY:-}"
 BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1800}"
 BURP_PAUSE_MAX_RETRIES="${BURP_PAUSE_MAX_RETRIES:-10}"
+BURP_PREFLIGHT_CONNECT_TIMEOUT="${BURP_PREFLIGHT_CONNECT_TIMEOUT:-6}"
 
 api_is_alive() {
     python3 - <<'PY' "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
@@ -114,6 +115,53 @@ run_real_cli() {
     fi
 }
 
+alternate_seed_url() {
+    case "$1" in
+        http://*)
+            printf '%s\n' "https://${1#http://}"
+            ;;
+        https://*)
+            printf '%s\n' "http://${1#https://}"
+            ;;
+        *)
+            printf '%s\n' ""
+            ;;
+    esac
+}
+
+preflight_target_reachable() {
+    python3 - <<'PY' "$1" "$BURP_PREFLIGHT_CONNECT_TIMEOUT"
+import socket
+import sys
+from urllib.parse import urlparse
+
+raw_url = str(sys.argv[1] or "").strip()
+timeout_s = float(sys.argv[2] or 6)
+
+if not raw_url:
+    raise SystemExit(2)
+
+if "://" not in raw_url:
+    raw_url = f"http://{raw_url}"
+
+parsed = urlparse(raw_url)
+host = parsed.hostname
+if not host:
+    raise SystemExit(2)
+
+if parsed.port:
+    port = int(parsed.port)
+else:
+    port = 443 if (parsed.scheme or "").lower() == "https" else 80
+
+try:
+    with socket.create_connection((host, port), timeout=timeout_s):
+        raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 legacy_scan() {
     url=""
     output_file=""
@@ -150,6 +198,11 @@ legacy_scan() {
         exit 2
     fi
 
+    if ! preflight_target_reachable "$url"; then
+        echo "Seed URL inacessivel no preflight (host/porta indisponiveis): $url" >&2
+        exit 3
+    fi
+
     ensure_api
 
     tmpdir="$(mktemp -d)"
@@ -177,6 +230,7 @@ legacy_scan() {
 
     attempts=0
     last_status="unknown"
+    alternate_url="$(alternate_seed_url "$url")"
     while [ "$attempts" -lt "$BURP_PAUSE_MAX_RETRIES" ]; do
         attempts=$((attempts + 1))
 
@@ -194,12 +248,18 @@ legacy_scan() {
         if [ "$poll_rc" -eq 2 ] || [ "$last_status" = "paused" ]; then
             echo "Scan Burp ${scan_id} pausado. Tentando reativar (${attempts}/${BURP_PAUSE_MAX_RETRIES})..." >&2
 
+            retry_url="$url"
+            if [ -n "$alternate_url" ]; then
+                retry_url="$alternate_url"
+                echo "Tentando esquema alternativo para seed URL: $retry_url" >&2
+            fi
+
             set +e
             if [ -n "$config_file" ]; then
-                restart_output="$(run_real_cli -s "$url" -cf "$config_file" 2>&1)"
+                restart_output="$(run_real_cli -s "$retry_url" -cf "$config_file" 2>&1)"
                 restart_rc=$?
             else
-                restart_output="$(run_real_cli -s "$url" 2>&1)"
+                restart_output="$(run_real_cli -s "$retry_url" 2>&1)"
                 restart_rc=$?
             fi
             set -e
@@ -212,6 +272,8 @@ legacy_scan() {
             new_scan_id="$(extract_scan_id "$restart_output")" || true
             if [ -n "$new_scan_id" ]; then
                 scan_id="$new_scan_id"
+                url="$retry_url"
+                alternate_url="$(alternate_seed_url "$url")"
             fi
             continue
         fi

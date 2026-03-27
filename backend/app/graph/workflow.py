@@ -82,6 +82,7 @@ class AgentState(TypedDict):
     target: str
     scan_mode: str                          # "unit" | "scheduled"
     easm_segment: str                       # Segmento de mercado inferido
+    input_targets: list[str]
     lista_ativos: list[str]
     logs_terminais: list[str]
     vulnerabilidades_encontradas: list[dict[str, Any]]
@@ -551,6 +552,19 @@ def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
             candidates.append(host)
 
     return candidates[: max(1, limit)]
+
+
+def _split_input_targets(raw_target: str) -> list[str]:
+    raw = str(raw_target or "").strip()
+    if not raw:
+        return []
+
+    targets: list[str] = []
+    for token in re.split(r"[;,\n]", raw):
+        value = str(token or "").strip()
+        if value and value not in targets:
+            targets.append(value)
+    return targets
 
 
 def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: str = "") -> list[int]:
@@ -1673,10 +1687,15 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     state["proxima_ferramenta"] = "threat_intel"
     state["logs_terminais"].append(f"AssetDiscovery: {current}")
-    if state["target"] not in state["lista_ativos"]:
-        state["lista_ativos"].append(state["target"])
-    if state["target"] not in state["pending_asset_scans"] and state["target"] not in state["scanned_assets"]:
-        state["pending_asset_scans"].append(state["target"])
+    seed_targets = list(state.get("input_targets") or [])
+    if not seed_targets:
+        seed_targets = _split_input_targets(state.get("target") or "") or [state["target"]]
+
+    for seed in seed_targets:
+        if seed not in state["lista_ativos"]:
+            state["lista_ativos"].append(seed)
+        if seed not in state["pending_asset_scans"] and seed not in state["scanned_assets"]:
+            state["pending_asset_scans"].append(seed)
 
     # Usa asset_discovery group (que aponta para mesma fila reconhecimento)
     recon_tools = _tools_for_group(state["scan_mode"], "asset_discovery") or _tools_for_group(state["scan_mode"], "reconhecimento")
@@ -2289,12 +2308,16 @@ def initial_state(
     known_vulnerability_patterns: list[str] | None = None,
     segment: str | None = None,
 ) -> AgentState:
+    parsed_targets = _split_input_targets(target)
+    primary_target = parsed_targets[0] if parsed_targets else str(target or "").strip()
+
     mission_items = GROUP_MISSION_ITEMS.copy()
     return {
         "scan_id": scan_id,
-        "target": target,
+        "target": primary_target,
         "scan_mode": scan_mode,
         "easm_segment": segment or "Digital Services",
+        "input_targets": parsed_targets or ([primary_target] if primary_target else []),
         "lista_ativos": [],
         "logs_terminais": [],
         "vulnerabilidades_encontradas": [],

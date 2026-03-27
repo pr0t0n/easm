@@ -80,6 +80,12 @@ RUN set -eux; \
 		printf '#!/bin/sh\nexec perl /opt/nikto/program/nikto.pl "$@"\n' > /usr/local/bin/nikto; \
 		chmod +x /usr/local/bin/nikto; \
 	fi; \
+	# garante modulo JSON para Nikto em runtime (algumas bases arm podem falhar na primeira camada)
+	if ! perl -MJSON -e 1 >/dev/null 2>&1; then \
+		apt-get update; \
+		apt-get install -y --no-install-recommends libjson-perl libjson-pp-perl libjson-xs-perl; \
+	fi; \
+	perl -MJSON -e 1 >/dev/null 2>&1; \
 	# wordlist basica raft-medium-directories para feroxbuster/gobuster/ffuf
 	(curl -fsSL "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-directories.txt" \
 		-o /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt 2>/dev/null || true); \
