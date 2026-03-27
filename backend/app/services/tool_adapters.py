@@ -212,7 +212,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "amass":
         return ["amass", "enum", "-passive", "-d", host]
     if normalized == "sublist3r":
-        return ["python3", "-m", "sublist3r", "-d", host]
+        return ["sublist3r", "-d", host]
     if normalized == "assetfinder":
         return ["assetfinder", "--subs-only", host]
     if normalized == "cloudenum":
@@ -951,4 +951,339 @@ def _run_nessus_scan(target: str, worker: str, mode: str, scan_mode: str) -> dic
             "mode": mode,
             "status": "error",
             "output": f"Falha ao executar Nessus via pynessus: {exc}",
+        }
+
+
+# ============================================================================
+# Burp Suite Advanced Testing (Repeater + Intruder)
+# ============================================================================
+
+def get_burp_advanced_config() -> dict[str, Any]:
+    """
+    Get Burp Suite advanced testing configuration.
+    Returns paths to wordlists and configuration files for IDOR and SQLi testing.
+    """
+    from pathlib import Path
+    
+    config_dir = Path("/opt/burp-config")
+    wordlist_dir = Path("/opt/burp-wordlists")
+    
+    config = {
+        "burp_config_dir": str(config_dir),
+        "burp_wordlist_dir": str(wordlist_dir),
+        "available": bool(wordlist_dir.exists() and config_dir.exists()),
+        "configurations": {},
+        "wordlists": {}
+    }
+    
+    # Load configuration files if available
+    if config_dir.exists():
+        for config_file in config_dir.glob("*.yaml"):
+            config["configurations"][config_file.stem] = str(config_file)
+        for config_file in config_dir.glob("*.json"):
+            config["configurations"][config_file.stem] = str(config_file)
+    
+    # List available wordlists
+    if wordlist_dir.exists():
+        for category_dir in wordlist_dir.iterdir():
+            if category_dir.is_dir():
+                wordlists = [f.name for f in category_dir.glob("*.txt")]
+                if wordlists:
+                    config["wordlists"][category_dir.name] = {
+                        "path": str(category_dir),
+                        "files": wordlists,
+                        "count": len(wordlists)
+                    }
+    
+    return config
+
+
+def configure_burp_intruder_attack(
+    target_url: str,
+    parameter: str,
+    wordlist_type: str = "discovery"
+) -> dict[str, Any]:
+    """
+    Configure a Burp Intruder attack for fuzzing.
+    
+    Args:
+        target_url: Target URL for attack
+        parameter: Parameter name to fuzz
+        wordlist_type: Type of wordlist (discovery, vulnerabilities, common, credentials)
+    
+    Returns:
+        Configuration dictionary for Burp Intruder
+    """
+    from pathlib import Path
+    
+    wordlist_dir = Path("/opt/burp-wordlists")
+    
+    # Map wordlist types to files
+    wordlist_mapping = {
+        "discovery": [
+            "directory_list_2.3_medium.txt",
+            "fuzz_php_special.txt",
+            "lfi_all.txt",
+        ],
+        "vulnerabilities": [
+            "sql_inj.txt",
+            "xss.txt",
+            "ssti.txt",
+            "all_attacks.txt",
+        ],
+        "common": ["common.txt", "common_sql_tables.txt"],
+        "credentials": ["portuguese.txt", "rockyou.txt"],
+    }
+    
+    wordlist_choices = wordlist_mapping.get(wordlist_type, [])
+    
+    # Find first available wordlist
+    selected_wordlist = None
+    for wl in wordlist_choices:
+        candidate = wordlist_dir / wordlist_type / wl
+        if candidate.exists():
+            selected_wordlist = str(candidate)
+            break
+    
+    if not selected_wordlist:
+        return {
+            "status": "error",
+            "message": f"No wordlists found for type '{wordlist_type}'",
+            "target_url": target_url,
+            "parameter": parameter,
+        }
+    
+    # Determine attack parameters based on wordlist type
+    attack_config = {
+        "target": {
+            "url": target_url,
+            "parameter": parameter,
+        },
+        "attack": {
+            "type": "Sniper",
+            "wordlist": selected_wordlist,
+            "wordlist_count": 0,
+            "threads": 10,
+            "timeout": 30,
+        },
+        "filters": {},
+    }
+    
+    # Apply intelligent filters based on wordlist type
+    if wordlist_type == "discovery":
+        attack_config["attack"]["threads"] = 10
+        attack_config["filters"]["response_code"] = "!404"
+        attack_config["description"] = "Directory and parameter discovery fuzzing"
+    elif wordlist_type == "vulnerabilities":
+        attack_config["attack"]["threads"] = 5
+        attack_config["filters"]["response_code"] = ["500", "502", "503"]
+        attack_config["filters"]["keywords"] = ["error", "exception", "warning"]
+        attack_config["description"] = "Vulnerability payload testing"
+    elif wordlist_type == "credentials":
+        attack_config["attack"]["threads"] = 3
+        attack_config["attack"]["timeout"] = 60
+        attack_config["filters"]["response_length"] = "!=<baseline>"
+        attack_config["description"] = "Credential/password brute-force testing"
+    
+    # Count lines in wordlist
+    try:
+        with open(selected_wordlist, 'r') as f:
+            attack_config["attack"]["wordlist_count"] = sum(1 for _ in f)
+    except:
+        pass
+    
+    return attack_config
+
+
+def configure_burp_repeater_idor(
+    target_url: str,
+    parameter: str,
+    original_value: str,
+    test_type: str = "sequential"
+) -> dict[str, Any]:
+    """
+    Configure Burp Repeater for IDOR (Insecure Direct Object Reference) testing.
+    
+    Args:
+        target_url: Target URL
+        parameter: Parameter prone to IDOR (id, user_id, etc.)
+        original_value: Original parameter value
+        test_type: Type of IDOR test (sequential, hash, uuid, timestamp)
+    
+    Returns:
+        Configuration and test payloads for manual testing in Repeater
+    """
+    try:
+        from app.services.burp_advanced_testing import IDORTester
+        
+        tester = IDORTester()
+        
+        config = {
+            "status": "ready",
+            "target_url": target_url,
+            "parameter": parameter,
+            "original_value": original_value,
+            "test_type": test_type,
+            "test_payloads": [],
+            "instructions": {}
+        }
+        
+        # Generate test payloads based on type
+        if test_type == "sequential":
+            payloads = tester.generate_sequential_payloads(parameter, original_value, count=20)
+            config["instructions"]["description"] = "Test sequential ID increments (1, 2, 3, ...)"
+            config["instructions"]["expected"] = "Same data format returned for different IDs"
+        elif test_type == "hash":
+            payloads = tester.generate_hash_payloads(parameter, original_value)
+            config["instructions"]["description"] = "Test hash/UUID variations"
+            config["instructions"]["expected"] = "Predictable hash patterns or collisions"
+        elif test_type == "uuid":
+            payloads = tester.generate_uuid_payloads(parameter)
+            config["instructions"]["description"] = "Test common UUID patterns"
+            config["instructions"]["expected"] = "UUID collision or predictability"
+        elif test_type == "timestamp":
+            payloads = tester.generate_timestamp_payloads(parameter)
+            config["instructions"]["description"] = "Test timestamp-based ID prediction"
+            config["instructions"]["expected"] = "Time-based ID correlation"
+        else:
+            payloads = []
+            config["status"] = "error"
+            config["message"] = f"Unknown test_type: {test_type}"
+        
+        # Format test payloads
+        config["test_payloads"] = [
+            {
+                "value": p.test_value,
+                "type": p.payload_type,
+                "description": p.description,
+                "url_with_payload": target_url.replace(
+                    f"{parameter}={original_value}",
+                    f"{parameter}={p.test_value}"
+                ),
+            }
+            for p in payloads
+        ]
+        
+        return config
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "burp_advanced_testing module not available",
+        }
+
+
+def configure_burp_repeater_sqli(
+    target_url: str,
+    parameter: str,
+    payload_type: str = "union"
+) -> dict[str, Any]:
+    """
+    Configure Burp Repeater for SQL Injection (SQLi) testing.
+    
+    Args:
+        target_url: Target URL
+        parameter: SQL-injectable parameter
+        payload_type: Type of SQLi test (union, boolean, time, error, all)
+    
+    Returns:
+        Configuration and test payloads for manual testing in Repeater
+    """
+    try:
+        from app.services.burp_advanced_testing import SQLiTester
+        
+        tester = SQLiTester()
+        
+        config = {
+            "status": "ready",
+            "target_url": target_url,
+            "parameter": parameter,
+            "payload_type": payload_type,
+            "test_payloads": [],
+            "instructions": {}
+        }
+        
+        # Generate appropriate payloads
+        if payload_type == "time":
+            payloads = tester.generate_timing_payloads(parameter, delay=5)
+            config["instructions"]["description"] = "Time-based blind SQLi detection"
+            config["instructions"]["expected"] = "Response time increases by ~5 seconds"
+            config["instructions"]["detection"] = "baseline_time + 4s or more"
+        else:
+            payloads = tester.generate_basic_payloads(parameter, payload_type)
+            if payload_type == "union":
+                config["instructions"]["description"] = "Union-based SQLi enumeration"
+                config["instructions"]["expected"] = "Database version, user, or data in response"
+            elif payload_type == "boolean":
+                config["instructions"]["description"] = "Boolean-based blind SQLi"
+                config["instructions"]["expected"] = "Different response for true vs false condition"
+            elif payload_type == "error":
+                config["instructions"]["description"] = "Error-based SQLi"
+                config["instructions"]["expected"] = "SQL error messages in response"
+            elif payload_type == "all":
+                config["instructions"]["description"] = "Comprehensive SQLi testing"
+                config["instructions"]["expected"] = "Various SQLi vulnerability indicators"
+        
+        # Format test payloads
+        config["test_payloads"] = [
+            {
+                "payload": p.payload,
+                "type": p.payload_type,
+                "encoding": p.encoding,
+                "description": p.description,
+                "test_request": target_url.replace(
+                    f"{parameter}=",
+                    f"{parameter}={p.payload}"
+                ),
+            }
+            for p in payloads[:15]  # Limit to 15 for manual testing
+        ]
+        
+        return config
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "burp_advanced_testing module not available",
+        }
+
+
+def detect_burp_sqli_timing(
+    baseline_time: float,
+    test_time: float,
+    threshold: float = 2.0
+) -> dict[str, Any]:
+    """
+    Detect SQL Injection vulnerability based on timing analysis.
+    
+    Args:
+        baseline_time: Response time for normal request (seconds)
+        test_time: Response time for SQLi payload request (seconds)
+        threshold: Multiplier threshold for detection
+    
+    Returns:
+        Analysis result with vulnerability indicators
+    """
+    try:
+        from app.services.burp_advanced_testing import SQLiTester
+        
+        tester = SQLiTester()
+        is_vulnerable, confidence = tester.detect_timing_based_sqli(
+            "test_param",
+            baseline_time,
+            test_time,
+            threshold
+        )
+        
+        return {
+            "status": "analyzed",
+            "is_vulnerable": is_vulnerable,
+            "confidence_score": confidence,
+            "baseline_response_time": baseline_time,
+            "test_response_time": test_time,
+            "delay_ratio": test_time / baseline_time if baseline_time > 0 else 0,
+            "interpretation": "Time-based blind SQLi likely vulnerable" if is_vulnerable else "No timing-based SQLi detected",
+        }
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "burp_advanced_testing module not available",
         }

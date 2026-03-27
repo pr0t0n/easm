@@ -9,7 +9,39 @@ BURP_API_KEY="${BURP_API_KEY:-}"
 BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1800}"
 BURP_PAUSE_MAX_RETRIES="${BURP_PAUSE_MAX_RETRIES:-10}"
 
+api_is_alive() {
+    python3 - <<'PY' "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
+import sys
+import urllib.request
+
+host, port, api_key = sys.argv[1:4]
+if api_key:
+    url = f"http://{host}:{port}/{api_key}/v0.1/"
+else:
+    url = f"http://{host}:{port}/v0.1/"
+
+try:
+    with urllib.request.urlopen(url, timeout=3) as response:
+        raise SystemExit(0 if int(response.status) >= 200 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 ensure_api() {
+    if api_is_alive; then
+        return 0
+    fi
+
+    case "$BURP_API_HOST" in
+        127.0.0.1|localhost|0.0.0.0)
+            ;;
+        *)
+            echo "Burp REST API indisponivel em ${BURP_API_HOST}:${BURP_API_PORT} e host remoto configurado; nao sera iniciado Burp local." >&2
+            exit 1
+            ;;
+    esac
+
     "$START_SCRIPT" >/tmp/burp-start-wrapper.log 2>&1 || {
         cat /tmp/burp-start-wrapper.log >&2 || true
         exit 1

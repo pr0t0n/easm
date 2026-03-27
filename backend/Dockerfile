@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	dnsutils \
 	nmap \
 	perl \
+	libjson-perl \
 	sslscan \
 	whois \
 	&& rm -rf /var/lib/apt/lists/*
@@ -141,6 +142,12 @@ RUN set -eux; \
 	ln -sf /opt/metagoofil/metagoofil.py /usr/local/bin/metagoofil || true; \
 	chmod +x /usr/local/bin/metagoofil || true; \
 	if [ -f /opt/metagoofil/requirements.txt ]; then pip install --no-cache-dir -r /opt/metagoofil/requirements.txt || true; fi; \
+	# Sublist3r (modulo python costuma variar por distro; instala via git e cria wrapper fixo)
+	git clone --depth 1 https://github.com/aboul3la/Sublist3r.git /opt/Sublist3r || true; \
+	if [ -f /opt/Sublist3r/requirements.txt ]; then pip install --no-cache-dir -r /opt/Sublist3r/requirements.txt || true; fi; \
+	printf '#!/bin/sh\nexec python3 /opt/Sublist3r/sublist3r.py "$@"\n' > /usr/local/bin/sublist3r; \
+	chmod +x /usr/local/bin/sublist3r; \
+	ln -sf /opt/Sublist3r/sublist3r.py /usr/local/bin/sublist3r.py || true; \
 	# Wappalyzer CLI
 	npm install -g wappalyzer || true; \
 	# urlscan-cli (Node)
@@ -173,5 +180,8 @@ RUN mkdir -p /root/.easm && \
 
 # Setup Burp CLI (Java + burp-cli-scan)
 RUN bash /app/setup_burp.sh
+
+# Download and configure Burp Suite wordlists for Repeater/Intruder
+RUN bash /app/scripts/configure_burp_advanced.sh || echo "[!] Burp advanced config failed (non-critical)"
 
 CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]

@@ -136,6 +136,8 @@ services:
       - .env
     environment:
       WORKER_MODE: unit
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -158,6 +160,8 @@ services:
       - .env
     environment:
       WORKER_MODE: unit
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
@@ -198,6 +202,8 @@ services:
     environment:
       WORKER_MODE: unit
       EASM_TOOL_EXECUTION_MODE: distributed
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -221,6 +227,8 @@ services:
     environment:
       WORKER_MODE: unit
       EASM_TOOL_EXECUTION_MODE: distributed
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -244,6 +252,8 @@ services:
     environment:
       WORKER_MODE: unit
       EASM_TOOL_EXECUTION_MODE: distributed
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
@@ -266,6 +276,8 @@ services:
     environment:
       WORKER_MODE: unit
       EASM_TOOL_EXECUTION_MODE: distributed
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
