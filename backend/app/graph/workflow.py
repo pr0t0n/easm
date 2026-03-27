@@ -18,11 +18,11 @@ from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
-# EASM 5-phase pipeline
+# EASM pipeline
 GROUP_MISSION_ITEMS: list[str] = [
     "1. AssetDiscovery",
-    "2. RiskAssessment",
-    "3. ThreatIntel",
+    "2. ThreatIntel",
+    "3. RiskAssessment",
     "4. Governance",
     "5. ExecutiveAnalysis",
 ]
@@ -206,7 +206,6 @@ def _tool_for_step(step_name: str) -> str | None:
     semantic_overrides = [
         (("score board", "administration surface"), "nuclei"),
         (("sqli",), "sqlmap"),
-        (("ssrf", "xxe", "directory traversal", "rfi", "lfi", "header injection", "crlf"), "wapiti"),
         (("ssti", "tplmap"), "tplmap"),
         (("command injection", "commix"), "commix"),
         (("waf",), "wafw00f"),
@@ -456,10 +455,17 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
+    # Escopo atual de analise tecnica definido para producao:
+    # Burp + Nmap Vulscan + Nikto.
+    preferred_global = ["burp-cli", "nmap-vulscan", "nikto"]
+    selected_global = [tool for tool in preferred_global if tool in tools]
+    if selected_global:
+        tools = selected_global
+
     if not _is_local_target(target):
         return tools
 
-    preferred = ["burp-cli", "nuclei", "wafw00f", "nikto", "shcheck", "curl-headers"]
+    preferred = ["burp-cli", "nmap-vulscan", "nikto"]
     filtered = [tool for tool in preferred if tool in tools]
     if filtered:
         return filtered
@@ -1350,7 +1356,7 @@ def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str)
         payload = {}
 
     if not issues:
-        # Burp mock imprime logs antes do JSON; tenta extrair apenas o bloco JSON-array.
+        # Alguns formatos de output imprimem logs antes do bloco JSON.
         json_block_match = re.search(r"(\[\s*\{.*\}\s*\])", stdout or "", re.DOTALL)
         if json_block_match:
             try:
@@ -1365,9 +1371,16 @@ def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str)
     if isinstance(payload.get("results"), list) and not issues:
         issues = payload.get("results")
 
-    for issue in issues:
+    for raw_issue in issues:
+        if not isinstance(raw_issue, dict):
+            continue
+
+        # Burp_export.json costuma trazer eventos no formato:
+        # [{"id":..., "type":"issue_found", "issue": {...}}]
+        issue = raw_issue.get("issue") if isinstance(raw_issue.get("issue"), dict) else raw_issue
         if not isinstance(issue, dict):
             continue
+
         name = _sanitize_cli_text(
             str(issue.get("name") or issue.get("title") or issue.get("issue_name") or "Burp finding")
         )
@@ -1377,14 +1390,73 @@ def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str)
             str(issue.get("evidence") or issue.get("description") or issue.get("detail") or "")
         )
 
+        issue_url = _sanitize_cli_text(
+            str(issue.get("url") or issue.get("full_url") or issue.get("endpoint") or "")
+        )
+        if not issue_url:
+            origin = _sanitize_cli_text(str(issue.get("origin") or ""))
+            path = _sanitize_cli_text(str(issue.get("path") or ""))
+            if origin and path:
+                issue_url = f"{origin.rstrip('/')}/{path.lstrip('/')}"
+            elif origin:
+                issue_url = origin
+            elif path:
+                issue_url = path
+        if not issue_url:
+            issue_url = default_target
+        http_method = _sanitize_cli_text(str(issue.get("method") or issue.get("http_method") or "GET")).upper() or "GET"
+        issue_parameter = _sanitize_cli_text(str(issue.get("parameter") or issue.get("param") or issue.get("field") or ""))
+
+        # Extrai payload se disponível
+        payload = _sanitize_cli_text(
+            str(
+                issue.get("payload")
+                or issue.get("injected_payload")
+                or issue.get("attack")
+                or issue.get("input")
+                or issue.get("vector")
+                or ""
+            )
+        )
+
+        if not issue_parameter and "?" in issue_url:
+            try:
+                query_part = issue_url.split("?", 1)[1]
+                first_param = query_part.split("&", 1)[0].split("=", 1)[0].strip()
+                issue_parameter = _sanitize_cli_text(first_param)
+            except Exception:
+                issue_parameter = ""
+
         cve_match = re.search(r"\bCVE-\d{4}-\d{4,7}\b", f"{name} {evidence}", re.IGNORECASE)
         cve_id = str(cve_match.group(0) or "").upper() if cve_match else ""
         title = cve_id or name
 
-        dedupe = f"{title}|{sev}|{default_target}"
+        dedupe = f"{title}|{sev}|{issue_url or default_target}|{issue_parameter}"
         if dedupe in seen:
             continue
         seen.add(dedupe)
+
+        finding_details = {
+            "node": "vuln",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "burp-cli",
+            "cve": cve_id or None,
+            "evidence": evidence,
+            "url": issue_url or default_target,
+            "full_url": issue_url or default_target,
+            "http_method": http_method,
+        }
+        if issue_parameter:
+            finding_details["parameter"] = issue_parameter
+        if payload:
+            finding_details["payload"] = payload
+
+        if not finding_details.get("evidence"):
+            finding_details["evidence"] = (
+                f"Burp identificou potencial vulnerabilidade em {http_method} {issue_url or default_target}."
+                + (f" Parametro: {issue_parameter}." if issue_parameter else "")
+            )
 
         findings.append(
             {
@@ -1392,14 +1464,7 @@ def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str)
                 "severity": sev,
                 "risk_score": risk_score,
                 "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "burp-cli",
-                    "cve": cve_id or None,
-                    "evidence": evidence,
-                },
+                "details": finding_details,
             }
         )
 
@@ -1569,6 +1634,10 @@ def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -
                 "tool": "wapiti",
                 "evidence": line[:500],
             }
+            # Extrai payload se disponível na linha
+            payload_match = re.search(r"payload=([^\s]+)", line)
+            if payload_match:
+                details["payload"] = payload_match.group(1)
             if header_name:
                 details["header_name"] = header_name
                 details["header_issue"] = "missing"
@@ -1602,7 +1671,7 @@ def _step_name(state: AgentState) -> str:
 def asset_discovery_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     current = _step_name(state)
-    state["proxima_ferramenta"] = "risk_assessment"
+    state["proxima_ferramenta"] = "threat_intel"
     state["logs_terminais"].append(f"AssetDiscovery: {current}")
     if state["target"] not in state["lista_ativos"]:
         state["lista_ativos"].append(state["target"])
@@ -1851,11 +1920,9 @@ def fingerprint_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 2: Risk Assessment
+# EASM Agent 3: Risk Assessment
 # Avalia vulnerabilidades técnicas nos ativos descobertos.
-# Fase 1 (Fingerprint): wafw00f + whatweb
-# Fase 2 (Scan): nuclei + wapiti + nikto
-# Fase 3 (Exploitation, condicional): sqlmap / commix se indicado pelo nuclei
+# Ferramentas ativas: burp-cli + nmap-vulscan + nikto
 # ─────────────────────────────────────────────────────────────────────────────
 def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
@@ -1927,7 +1994,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         state["vulnerabilidades_encontradas"].extend(all_findings)
     else:
         state["logs_terminais"].append(f"RiskAssessment: sem achados tecnicos no passo {current}")
-    state["proxima_ferramenta"] = "threat_intel"
+    state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
     _metric_end(state, "risk_assessment", started_at)
     return state
@@ -1993,7 +2060,7 @@ def api_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 3: Threat Intel
+# EASM Agent 2: Threat Intel
 # Coleta inteligência externa: credenciais vazadas, reputação de IPs, OSINT.
 # Ferramentas: theharvester → shodan-cli → h8mail → subjack
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2040,7 +2107,7 @@ def threat_intel_node(state: AgentState) -> AgentState:
             }
         )
 
-    state["proxima_ferramenta"] = "governance"
+    state["proxima_ferramenta"] = "risk_assessment"
     state["mission_index"] += 1
     _metric_end(state, "threat_intel", started_at)
     return state
@@ -2188,11 +2255,11 @@ def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: st
 def build_graph(mode: ScanMode = "unit"):
     """EASM 5-Agent Sequential Pipeline.
 
-    AssetDiscovery → RiskAssessment → ThreatIntel → Governance → ExecutiveAnalyst
+    AssetDiscovery → ThreatIntel → RiskAssessment → Governance → ExecutiveAnalyst
 
     - AssetDiscovery : subfinder / amass / dnsx / naabu / httpx / gowitness
-    - RiskAssessment : wafw00f → nuclei → wapiti → [sqlmap/commix] (condicional)
     - ThreatIntel    : theharvester / shodan-cli / h8mail / subjack
+    - RiskAssessment : burp-cli → nmap-vulscan → nikto
     - Governance     : FAIR+AGE rating engine (Python puro, sem ferramentas)
     - ExecutiveAnalyst: narrativa LLM via Ollama (fallback para template)
     """
@@ -2206,9 +2273,9 @@ def build_graph(mode: ScanMode = "unit"):
 
     # Pipeline linear — cada agente conhece somente o próximo
     graph.set_entry_point("asset_discovery")
-    graph.add_edge("asset_discovery",   "risk_assessment")
-    graph.add_edge("risk_assessment",   "threat_intel")
-    graph.add_edge("threat_intel",      "governance")
+    graph.add_edge("asset_discovery",   "threat_intel")
+    graph.add_edge("threat_intel",      "risk_assessment")
+    graph.add_edge("risk_assessment",   "governance")
     graph.add_edge("governance",        "executive_analyst")
     graph.add_edge("executive_analyst", END)
 

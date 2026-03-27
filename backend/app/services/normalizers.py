@@ -1,3 +1,142 @@
+class NucleiNormalizer:
+    @staticmethod
+    def parse_json(content: str) -> List[Dict[str, Any]]:
+        vulnerabilities = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            vuln = {
+                "tool": "nuclei",
+                "title": str(item.get("name") or item.get("template-id") or "Nuclei finding"),
+                "host": str(item.get("host") or "").strip(),
+                "matched_at": str(item.get("matched-at") or "").strip(),
+                "severity": str(item.get("severity") or "medium").lower(),
+                "description": str(item.get("description") or ""),
+                "cve_id": str(item.get("cve-id") or "").strip() or None,
+                "cvss_score": float(item.get("cvss-score") or 0),
+                "fair_pillar": "patching_hygiene",
+                "timestamp": str(item.get("timestamp") or datetime.utcnow().isoformat()),
+            }
+            if item.get("payload"):
+                vuln["payload"] = str(item.get("payload"))
+            vulnerabilities.append(vuln)
+        return vulnerabilities
+
+class NiktoNormalizer:
+    @staticmethod
+    def parse_json(content: str) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        vulnerabilities = []
+        scan = data.get("scan", {})
+        site = str(scan.get("site") or "").strip()
+        niktoscan = scan.get("niktoscan", {})
+        items = niktoscan.get("item", [])
+        if not isinstance(items, list):
+            items = [items]
+        for item in items:
+            severity_map = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low", "INFO": "info"}
+            severity = severity_map.get(str(item.get("severity", "").upper()), "medium")
+            vuln = {
+                "tool": "nikto",
+                "title": str(item.get("description") or "Nikto finding"),
+                "host": site,
+                "uri": str(item.get("uri") or ""),
+                "severity": severity,
+                "http_code": str(item.get("http_code") or ""),
+                "osvdb": str(item.get("osvdb") or ""),
+                "fair_pillar": "patching_hygiene",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            if item.get("payload"):
+                vuln["payload"] = str(item.get("payload"))
+            vulnerabilities.append(vuln)
+        return vulnerabilities
+
+class SQLMapNormalizer:
+    @staticmethod
+    def parse_json(content: str) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        vulnerabilities = []
+        scan = data.get("scan", {})
+        target = scan.get("target", {})
+        url = str(target.get("url") or "").strip()
+        for result in scan.get("results", []):
+            vuln = {
+                "tool": "sqlmap",
+                "title": f"SQL Injection - {result.get('technique', 'SQL Injection')}",
+                "host": url,
+                "parameter": str(result.get("parameter") or ""),
+                "place": str(result.get("place") or ""),
+                "dbms": str(result.get("dbms") or ""),
+                "confidence": int(result.get("confidence", 0)),
+                "severity": "critical" if int(result.get("confidence", 0)) >= 100 else "high",
+                "fair_pillar": "patching_hygiene",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            if result.get("payload"):
+                vuln["payload"] = str(result.get("payload"))
+            vulnerabilities.append(vuln)
+        return vulnerabilities
+
+class NessusNormalizer:
+    @staticmethod
+    def parse_xml_string(content: str) -> List[Dict[str, Any]]:
+        vulnerabilities = []
+        report_item_pattern = r"<ReportItem.*?Port=\"(\d+)\".*?pluginID=\"(\d+)\".*?severity=\"(\d+)\".*?>(.*?)</ReportItem>"
+        for match in re.finditer(report_item_pattern, content, re.DOTALL):
+            port, plugin_id, severity, content_inner = match.groups()
+            plugin_name_match = re.search(r"<plugin_name>(.*?)</plugin_name>", content_inner)
+            plugin_name = plugin_name_match.group(1) if plugin_name_match else f"Plugin {plugin_id}"
+            desc_match = re.search(r"<description>(.*?)</description>", content_inner)
+            description = desc_match.group(1) if desc_match else ""
+            severity_map = {"4": "critical", "3": "high", "2": "medium", "1": "low", "0": "info"}
+            severity_text = severity_map.get(severity, "medium")
+            vuln = {
+                "tool": "nessus",
+                "title": plugin_name,
+                "port": int(port),
+                "plugin_id": plugin_id,
+                "description": description,
+                "severity": severity_text,
+                "fair_pillar": "patching_hygiene",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            vulnerabilities.append(vuln)
+        return vulnerabilities
+
+class DalfoxNormalizer:
+    @staticmethod
+    def parse_json(content: str) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        findings = []
+        for item in data.get("data", []):
+            vuln = {
+                "tool": "dalfox",
+                "title": str(item.get("type") or "Dalfox finding"),
+                "host": str(item.get("url") or "").strip(),
+                "severity": str(item.get("severity") or "medium").lower(),
+                "description": str(item.get("description") or ""),
+                "fair_pillar": "patching_hygiene",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            if item.get("payload"):
+                vuln["payload"] = str(item.get("payload"))
+            findings.append(vuln)
+        return findings
 """
 Normalizers for converting tool-specific outputs into unified EASM evidence format.
 
@@ -246,12 +385,12 @@ class NiktoNormalizer:
             "niktoscan": {
               "item": [
                 {
-                  "description": "...",
-                  "uri": "/path",
-                  "method": "GET",
-                  "osvdb": "123",
-                  "http_code": "200",
-                  "severity": "HIGH"
+                @staticmethod
+                def parse_json(content: str) -> List[Dict[str, Any]]:
+                "method": "GET",
+                "osvdb": "123",
+                "http_code": "200",
+                "severity": "HIGH"
                 }
               ]
             }
@@ -287,70 +426,10 @@ class NiktoNormalizer:
                 "fair_pillar": "patching_hygiene",
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            if item.get("payload"):
+                vuln["payload"] = str(item.get("payload"))
             vulnerabilities.append(vuln)
 
-        return vulnerabilities
-
-
-class SQLMapNormalizer:
-    """Normaliza SQLMap JSON -> Vulnerability Evidence"""
-
-    @staticmethod
-    def parse_json(content: str) -> List[Dict[str, Any]]:
-        """
-        SQLMap JSON:
-        {
-          "scan": {
-            "target": {
-              "url": "http://example.com",
-              "parameter": "id"
-            },
-            "log": [
-              {
-                "type": 1,
-                "level": 1,
-                "message": "..."
-              }
-            ],
-            "results": [
-              {
-                "parameter": "id",
-                "place": "GET",
-                "technique": "UNION query-based SQL injection",
-                "dbms": "MySQL",
-                "confidence": 100,
-                "payload": "..."
-              }
-            ]
-          }
-        }
-        """
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return []
-
-        vulnerabilities = []
-        scan = data.get("scan", {})
-        target = scan.get("target", {})
-        url = str(target.get("url") or "").strip()
-
-        for result in scan.get("results", []):
-            vuln = {
-                "tool": "sqlmap",
-                "title": f"SQL Injection - {result.get('technique', 'SQL Injection')}",
-                "host": url,
-                "parameter": str(result.get("parameter") or ""),
-                "place": str(result.get("place") or ""),
-                "dbms": str(result.get("dbms") or ""),
-                "confidence": int(result.get("confidence", 0)),
-                "severity": "critical" if int(result.get("confidence", 0)) >= 100 else "high",
-                "fair_pillar": "patching_hygiene",
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-            vulnerabilities.append(vuln)
-
-        return vulnerabilities
 
 
 class NessusNormalizer:
@@ -370,19 +449,12 @@ class NessusNormalizer:
         
         for match in re.finditer(report_item_pattern, content, re.DOTALL):
             port, plugin_id, severity, content_inner = match.groups()
-            
-            # Extract plugin name
             plugin_name_match = re.search(r"<plugin_name>(.*?)</plugin_name>", content_inner)
             plugin_name = plugin_name_match.group(1) if plugin_name_match else f"Plugin {plugin_id}"
-            
-            # Extract description
             desc_match = re.search(r"<description>(.*?)</description>", content_inner)
             description = desc_match.group(1) if desc_match else ""
-            
-            # Map severity number to text
             severity_map = {"4": "critical", "3": "high", "2": "medium", "1": "low", "0": "info"}
             severity_text = severity_map.get(severity, "medium")
-            
             vuln = {
                 "tool": "nessus",
                 "title": plugin_name,
@@ -394,7 +466,6 @@ class NessusNormalizer:
                 "timestamp": datetime.utcnow().isoformat(),
             }
             vulnerabilities.append(vuln)
-
         return vulnerabilities
 
 
@@ -416,38 +487,41 @@ class EvidenceNormalizer:
         "nikto": NiktoNormalizer,
         "sqlmap": SQLMapNormalizer,
         "nessus": NessusNormalizer,
+        "dalfox": DalfoxNormalizer,
     }
 
+
+class DalfoxNormalizer:
     @staticmethod
-    def normalize(tool: str, content: str, format_type: str = "json") -> List[Dict[str, Any]]:
-        """
-        Normaliza output de qualquer ferramenta para formato EASM
+    def parse_json(content: str) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        findings = []
+        for item in data.get("data", []):
+            vuln = {
+                "tool": "dalfox",
+                "title": str(item.get("type") or "Dalfox finding"),
+                "host": str(item.get("url") or "").strip(),
+                "severity": str(item.get("severity") or "medium").lower(),
+                "description": str(item.get("description") or ""),
+                "fair_pillar": "patching_hygiene",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            # Extrai payload se disponível
+            if item.get("payload"):
+                vuln["payload"] = str(item.get("payload"))
+            findings.append(vuln)
+        return findings
 
-        Args:
-            tool: "subfinder", "nuclei", "nikto", etc
-            content: Raw output (JSON string ou XML string)
-            format_type: "json" ou "xml"
-
-        Returns:
-            Lista de evidências normalizadas
-        """
-        tool_lower = str(tool or "").strip().lower()
-        normalizer_cls = EvidenceNormalizer.NORMALIZERS.get(tool_lower)
-
-        if not normalizer_cls:
-            raise ValueError(f"Normalizer para ferramenta '{tool}' não encontrado")
-
-        if format_type == "xml":
-            return normalizer_cls.parse_xml_string(content)
-        else:
-            return normalizer_cls.parse_json(content)
+EvidenceNormalizer.NORMALIZERS["dalfox"] = DalfoxNormalizer
 
     @staticmethod
     def deduplicate_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remove duplicatas por signature"""
         seen = set()
         unique = []
-
         for finding in findings:
             # Signature: host + title + severity
             signature = (
@@ -456,9 +530,7 @@ class EvidenceNormalizer:
                 finding.get("severity") or "unknown",
             )
             sig_str = "|".join(str(s) for s in signature).lower()
-
             if sig_str not in seen:
                 seen.add(sig_str)
                 unique.append(finding)
-
         return unique

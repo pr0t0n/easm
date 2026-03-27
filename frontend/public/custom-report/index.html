@@ -96,7 +96,9 @@
 
   <p class="section-intro">
     Quantificação de risco baseada em FAIR e benchmark setorial alinhado ao Cyber Readiness Index (WEF).
-    O score geral segue as regras formais de penalidade por severidade descritas abaixo.
+    O CRI segue as regras formais por severidade descritas abaixo e os índices auxiliares
+    (Financial Loss, Data Sensitivity, Reliability/Safety e External Exposure) são calculados
+    dinamicamente por scan, combinando distribuição de severidade e ALE (exposição financeira).
   </p>
 
   <div class="fair-kpi-grid">
@@ -137,21 +139,16 @@
     <tbody>
       <tr>
         <td>1. Vulnerabilidades Críticas</td>
-        <td>Se houver 1+ crítica, score ajusta para 40. A partir da 2ª crítica, subtrai 15 por ocorrência.</td>
-        <td><code>score = 40 - ((críticos - 1) × 15)</code></td>
+        <td>Se houver 1+ crítica, score ajusta para 40. A partir da 2ª crítica, subtrai 5 por ocorrência.</td>
+        <td><code>score = 40 - ((críticos - 1) × 5)</code></td>
       </tr>
       <tr>
         <td>2. Vulnerabilidades Altas</td>
-        <td>Se não houver críticas e houver 1+ alta, score ajusta para 60. A partir da 2ª alta, subtrai 8 por ocorrência.</td>
-        <td><code>score = 60 - ((altas - 1) × 8)</code></td>
+        <td>Se não houver críticas e houver 1+ alta, score ajusta para 60. A partir da 2ª alta, subtrai 2 por ocorrência.</td>
+        <td><code>score = score - ((altas - 1) × 2)</code></td>
       </tr>
       <tr>
-        <td>3. Penalidade Médio/Baixo</td>
-        <td>Cada média subtrai 3 pontos e cada baixa subtrai 1 ponto.</td>
-        <td><code>score = score - (médios × 3) - (baixos × 1)</code></td>
-      </tr>
-      <tr>
-        <td>4. Piso mínimo</td>
+        <td>3. Piso mínimo</td>
         <td>Se o resultado ficar abaixo de 5, aplica piso 5.</td>
         <td><code>score = max(5, score)</code></td>
       </tr>
@@ -166,7 +163,7 @@
       <div><span>Médios</span><strong id="calcMedium">-</strong></div>
       <div><span>Baixos</span><strong id="calcLow">-</strong></div>
       <div><span>Base aplicada</span><strong id="calcBaseFormula">-</strong></div>
-      <div><span>Penalidade M/L</span><strong id="calcPenalty">-</strong></div>
+      <div><span>Penalidade Altas (2ª+)</span><strong id="calcPenalty">-</strong></div>
     </div>
     <div class="calc-human" id="calcHuman">-</div>
   </div>
@@ -208,8 +205,7 @@
       <tr><td>Domínio e Subdomínio</td><td>B</td><td>80</td><td>89</td></tr>
       <tr><td>Domínio e Subdomínio</td><td>C</td><td>70</td><td>79</td></tr>
       <tr><td>Domínio e Subdomínio</td><td>D</td><td>60</td><td>69</td></tr>
-      <tr><td>Domínio e Subdomínio</td><td>E</td><td>50</td><td>59</td></tr>
-      <tr><td>Domínio e Subdomínio</td><td>F</td><td>0</td><td>49</td></tr>
+      <tr><td>Domínio e Subdomínio</td><td>F</td><td>0</td><td>59</td></tr>
     </tbody>
   </table>
 </div>
@@ -223,8 +219,8 @@
 
   <p class="section-intro">
     Comparação dos índices de risco calculados para o alvo versus os benchmarks esperados para o segmento identificado.
-    Regra comparativa: quando o valor do alvo for menor que o benchmark, o status é pior (vermelho);
-    quando o valor do alvo for maior que o benchmark, o status é melhor (verde).
+    Regra comparativa adotada: diferença positiva (Target - Benchmark) aparece como Melhor (verde),
+    diferença negativa aparece como Pior (vermelho) e diferença zero como Similar.
   </p>
 
   <div class="benchmark-segment-box">

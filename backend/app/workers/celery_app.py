@@ -28,6 +28,12 @@ celery.conf.update(
             "schedule": crontab(minute="*"),
             "options": {"queue": SCAN_SCHEDULED_QUEUE},
         },
+        # Guarda de saude do Burp: detecta scans pausados e tenta reativacao.
+        "burp-scan-guard": {
+            "task": "burp.scan_guard",
+            "schedule": crontab(minute="*"),
+            "options": {"queue": "worker.unit.analise_vulnerabilidade"},
+        },
     },
     timezone="America/Sao_Paulo",
 )

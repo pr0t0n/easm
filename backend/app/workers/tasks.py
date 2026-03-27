@@ -1,8 +1,15 @@
 import os
+import re
+import shutil
+import subprocess
 import threading
 import time
+import urllib.request
+import json
 from datetime import datetime, timedelta
+from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -26,10 +33,56 @@ from app.workers.worker_groups import (
 
 
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
+BURP_GUARD_MAX_ATTEMPTS = max(1, min(10, int(os.getenv("BURP_GUARD_MAX_ATTEMPTS", "10"))))
 
 
 def _chunk_targets(targets: list[str], chunk_size: int) -> list[list[str]]:
     return [targets[i:i + chunk_size] for i in range(0, len(targets), chunk_size)]
+
+
+def _get_scan_retry_policy(db: Session, owner_id: int) -> tuple[bool, int, int]:
+    defaults = {
+        "scan_retry_enabled": "true",
+        "scan_retry_max_attempts": "3",
+        "scan_retry_delay_seconds": "10",
+    }
+
+    rows = (
+        db.query(AppSetting.key, AppSetting.value)
+        .filter(
+            AppSetting.owner_id == owner_id,
+            AppSetting.key.in_(list(defaults.keys())),
+        )
+        .all()
+    )
+    values = {k: v for k, v in rows}
+
+    def _as_int(raw: str, default: int, min_v: int, max_v: int) -> int:
+        try:
+            return max(min_v, min(max_v, int(raw)))
+        except Exception:
+            return default
+
+    retry_enabled = str(values.get("scan_retry_enabled", defaults["scan_retry_enabled"]).strip()).lower() == "true"
+    max_attempts = _as_int(str(values.get("scan_retry_max_attempts", defaults["scan_retry_max_attempts"])), 3, 1, 10)
+    delay_seconds = _as_int(str(values.get("scan_retry_delay_seconds", defaults["scan_retry_delay_seconds"])), 10, 5, 3600)
+
+    return retry_enabled, max_attempts, delay_seconds
+
+
+def _get_burp_runtime_config(db: Session, owner_id: int) -> tuple[bool, str]:
+    rows = (
+        db.query(AppSetting.key, AppSetting.value)
+        .filter(
+            AppSetting.owner_id == owner_id,
+            AppSetting.key.in_(["burp_enabled", "burp_license_key"]),
+        )
+        .all()
+    )
+    values = {k: v for k, v in rows}
+    enabled = str(values.get("burp_enabled", "false")).strip().lower() == "true"
+    license_key = str(values.get("burp_license_key", "")).strip()
+    return enabled, license_key
 
 
 def _progress_from_state(final_state: dict) -> tuple[int, dict]:
@@ -44,122 +97,380 @@ def _progress_from_state(final_state: dict) -> tuple[int, dict]:
     step_ratio = min(1.0, steps_done / total_steps)
     quality_ratio = (tools_success / tools_attempted) if tools_attempted > 0 else 0.0
     progress = int(round((step_ratio * 0.85 + quality_ratio * 0.15) * 100))
-
-    normalized = {
-        "total_steps": total_steps,
+    return progress, {
         "steps_done": steps_done,
         "steps_success": steps_success,
         "tools_attempted": tools_attempted,
         "tools_success": tools_success,
+        "total_steps": total_steps,
     }
-    return max(0, min(100, progress)), normalized
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers de resultado por execucao de ferramenta
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _worker_result(group: str, tool: str, target: str, mode: ScanMode, params: dict | None = None):
-    run_params = params or {}
-
-    # Recebe segredos do dispatcher para manter execucao consistente entre workers.
-    old_env: dict[str, str | None] = {
-        "BURP_LICENSE_KEY": os.getenv("BURP_LICENSE_KEY"),
-        "SHODAN_API_KEY": os.getenv("SHODAN_API_KEY"),
-    }
-    burp_key = str(run_params.get("burp_license_key", "") or "").strip()
-    shodan_key = str(run_params.get("shodan_api_key", "") or "").strip()
-    if burp_key:
-        os.environ["BURP_LICENSE_KEY"] = burp_key
-    if shodan_key:
-        os.environ["SHODAN_API_KEY"] = shodan_key
-
-    try:
-        execution = run_tool_execution(tool_name=tool, target=target, scan_mode=mode)
-    finally:
-        for env_key, old_value in old_env.items():
-            if old_value is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = old_value
-
-    return {
-        "ok": execution.get("status") == "executed",
-        "group": group,
-        "tool": tool,
-        "target": target,
-        "mode": mode,
-        "params": run_params,
-        "queue": execution.get("worker", group_queue(group, mode)),
-        "status": execution.get("status", "error"),
-        "command": execution.get("command", ""),
-        "return_code": execution.get("return_code"),
-        "stdout": execution.get("stdout", ""),
-        "stderr": execution.get("stderr", ""),
-        "output": execution.get("output", ""),
-        "open_ports": execution.get("open_ports", []),
-    }
-
-
-def _worker_name(scan_mode: ScanMode) -> str:
-    # Em container, HOSTNAME reflete o nome unico do worker process.
-    return os.getenv("HOSTNAME", f"worker-{scan_mode}")
 
 
 def _touch_worker_heartbeat(
     db: Session,
+    *,
     scan_mode: ScanMode,
     status: str,
     scan_id: int | None = None,
     task_name: str | None = None,
-):
-    name = _worker_name(scan_mode)
-    row = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_name == name).first()
-    if not row:
-        row = WorkerHeartbeat(worker_name=name, mode=scan_mode)
-        db.add(row)
-    row.mode = scan_mode
-    row.status = status
-    row.current_scan_id = scan_id
-    row.last_task_name = task_name
-    row.last_seen_at = datetime.utcnow()
+) -> WorkerHeartbeat:
+    worker_name = os.getenv("WORKER_NAME") or os.getenv("HOSTNAME") or "unknown-worker"
+    hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_name == worker_name).first()
+    if hb is None:
+        hb = WorkerHeartbeat(worker_name=worker_name)
 
-
-def _get_scan_retry_policy(db: Session, owner_id: int) -> tuple[bool, int, int]:
-    rows = (
-        db.query(AppSetting)
-        .filter(
-            AppSetting.owner_id == owner_id,
-            AppSetting.key.in_(["scan_retry_enabled", "scan_retry_max_attempts", "scan_retry_delay_seconds"]),
-        )
-        .all()
-    )
-    values = {row.key: row.value for row in rows}
-    enabled = str(values.get("scan_retry_enabled", "true")).lower() == "true"
+    hb.mode = scan_mode
+    hb.status = status
+    hb.current_scan_id = scan_id
+    hb.last_task_name = task_name
+    hb.last_seen_at = datetime.utcnow()
+    db.add(hb)
     try:
-        max_attempts = int(values.get("scan_retry_max_attempts", "3"))
-    except (TypeError, ValueError):
-        max_attempts = 3
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_name == worker_name).first()
+        if hb is None:
+            raise
+        hb.mode = scan_mode
+        hb.status = status
+        hb.current_scan_id = scan_id
+        hb.last_task_name = task_name
+        hb.last_seen_at = datetime.utcnow()
+        db.add(hb)
+        db.flush()
+    return hb
+
+
+def _burp_api_host() -> str:
+    host = str(os.getenv("BURP_API_HOST", "burp_rest")).strip() or "burp_rest"
+    if host in {"0.0.0.0", "127.0.0.1", "localhost"} and os.path.exists("/.dockerenv"):
+        return "burp_rest"
+    return host
+
+
+def _burp_api_port() -> str:
+    return str(os.getenv("BURP_API_PORT", "1337")).strip() or "1337"
+
+
+def _burp_cli_base_cmd() -> list[str]:
+    cli = shutil.which("burp-api-cli") or shutil.which("burp-cli") or "burp-api-cli"
+    return [cli, "-t", _burp_api_host(), "-p", _burp_api_port()]
+
+
+def _run_burp_cli(args: list[str], timeout: int = 120) -> tuple[bool, str]:
+    cmd = _burp_cli_base_cmd() + args
     try:
-        delay_seconds = int(values.get("scan_retry_delay_seconds", "10"))
-    except (TypeError, ValueError):
-        delay_seconds = 10
-    return enabled, max(1, min(10, max_attempts)), max(5, min(3600, delay_seconds))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except Exception as exc:
+        return False, f"run_error={exc}"
+    out = "\n".join(part for part in [proc.stdout or "", proc.stderr or ""] if part).strip()
+    return proc.returncode == 0, out
 
 
-def _get_burp_runtime_config(db: Session, owner_id: int) -> tuple[bool, str]:
-    rows = (
-        db.query(AppSetting)
-        .filter(
-            AppSetting.owner_id == owner_id,
-            AppSetting.key.in_(["burp_enabled", "burp_license_key"]),
-        )
-        .all()
+def _burp_api_alive() -> bool:
+    url = f"http://{_burp_api_host()}:{_burp_api_port()}/v0.1/"
+    try:
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            return int(resp.status) >= 200
+    except Exception:
+        return False
+
+
+def _parse_burp_list_output(output: str) -> list[dict[str, str]]:
+    scans: list[dict[str, str]] = []
+    if not output:
+        return scans
+
+    line_re = re.compile(
+        r"^\s*(?P<id>\d+)\s+(?P<url>\S+)\s+(?P<status>paused|auditing|running|succeeded|failed|cancelled)\b",
+        re.IGNORECASE,
     )
-    values = {row.key: row.value for row in rows}
-    enabled = str(values.get("burp_enabled", "false")).lower() == "true"
-    license_key = str(values.get("burp_license_key", "") or "").strip()
-    return enabled, license_key
+    for raw in output.splitlines():
+        line = str(raw or "").rstrip()
+        m = line_re.match(line)
+        if not m:
+            continue
+        scans.append(
+            {
+                "id": str(m.group("id") or "").strip(),
+                "url": str(m.group("url") or "").strip(),
+                "status": str(m.group("status") or "").strip().lower(),
+            }
+        )
+    return scans
+
+
+def _extract_scan_id_from_cli_output(output: str) -> str:
+    for pattern in [r"\bID\s+(\d+)\b", r"/scan/(\d+)\b", r"\btask\s+(\d+)\b"]:
+        m = re.search(pattern, output or "", re.IGNORECASE)
+        if m:
+            return str(m.group(1) or "").strip()
+    return ""
+
+
+def _scan_status(scan_id: str) -> str:
+    ok, out = _run_burp_cli(["-S", scan_id, "-M"], timeout=90)
+    if not out:
+        return "unknown"
+    m = re.search(r"Scan status\s+([a-zA-Z_]+)", out, re.IGNORECASE)
+    if m:
+        return str(m.group(1) or "").strip().lower()
+    m2 = re.search(r'"scan_status"\s*:\s*"([^"]+)"', out, re.IGNORECASE)
+    if m2:
+        return str(m2.group(1) or "").strip().lower()
+    return "unknown"
+
+
+def _scan_metrics(scan_id: str) -> dict[str, Any]:
+    if not scan_id:
+        return {}
+    url = f"http://{_burp_api_host()}:{_burp_api_port()}/v0.1/scan/{scan_id}"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            raw = (resp.read() or b"").decode("utf-8", "ignore").strip()
+    except Exception:
+        return {}
+
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_scan_target(scan: dict[str, str]) -> str:
+    scan_id = str(scan.get("id") or "").strip()
+    listed_url = str(scan.get("url") or "").strip()
+    if listed_url and not listed_url.startswith("scan_"):
+        return listed_url
+
+    metrics_payload = _scan_metrics(scan_id)
+    scan_metrics = metrics_payload.get("scan_metrics") if isinstance(metrics_payload, dict) else {}
+    if isinstance(scan_metrics, dict):
+        current_url = str(scan_metrics.get("current_url") or "").strip()
+        if current_url and current_url.startswith(("http://", "https://")):
+            return current_url
+        caption = str(scan_metrics.get("crawl_and_audit_caption") or "")
+        match = re.search(r"https?://[^\s\"']+", caption, re.IGNORECASE)
+        if match:
+            return str(match.group(0) or "").strip()
+
+    return ""
+
+
+def _restart_paused_scan(url: str, max_attempts: int = 10) -> dict[str, Any]:
+    if not url or url.startswith("scan_"):
+        return {"ok": False, "attempts": 0, "reason": "target_url_indisponivel"}
+
+    active_statuses = {"running", "auditing", "crawling", "succeeded"}
+    attempts = 0
+    last_status = "unknown"
+    last_scan_id = ""
+
+    for attempt in range(1, max_attempts + 1):
+        attempts = attempt
+        ok, out = _run_burp_cli(["-s", url], timeout=120)
+        if not ok:
+            continue
+        scan_id = _extract_scan_id_from_cli_output(out)
+        if not scan_id:
+            continue
+        last_scan_id = scan_id
+        time.sleep(3)
+        last_status = _scan_status(scan_id)
+        if last_status in active_statuses:
+            return {
+                "ok": True,
+                "attempts": attempts,
+                "scan_id": scan_id,
+                "status": last_status,
+            }
+
+    return {
+        "ok": False,
+        "attempts": attempts,
+        "scan_id": last_scan_id,
+        "status": last_status,
+    }
+
+
+@celery.task(name="burp.scan_guard", queue="worker.unit.analise_vulnerabilidade")
+def burp_scan_guard() -> dict[str, Any]:
+    """Beat de saude do Burp: detecta scans pausados e tenta reativar ate 10x."""
+    if not _burp_api_alive():
+        return {"ok": False, "api_alive": False, "fixed": 0, "paused": 0}
+
+    ok, list_out = _run_burp_cli(["-L"], timeout=90)
+    if not ok:
+        return {"ok": False, "api_alive": True, "error": "list_scans_failed", "fixed": 0, "paused": 0}
+
+    scans = _parse_burp_list_output(list_out)
+    paused_scans = [s for s in scans if s.get("status") == "paused"]
+    fixed = 0
+    failed = 0
+    skipped = 0
+    actions: list[dict[str, Any]] = []
+
+    for scan in paused_scans:
+        target_url = _resolve_scan_target(scan)
+        if not target_url:
+            skipped += 1
+            actions.append(
+                {
+                    "paused_scan_id": scan.get("id"),
+                    "target": str(scan.get("url") or "").strip(),
+                    "ok": False,
+                    "attempts": 0,
+                    "reason": "target_url_indisponivel",
+                    "status": "skipped",
+                }
+            )
+            continue
+
+        result = _restart_paused_scan(target_url, max_attempts=BURP_GUARD_MAX_ATTEMPTS)
+        actions.append(
+            {
+                "paused_scan_id": scan.get("id"),
+                "target": target_url,
+                **result,
+            }
+        )
+        if result.get("ok"):
+            fixed += 1
+        else:
+            failed += 1
+
+    return {
+        "ok": True,
+        "api_alive": True,
+        "total": len(scans),
+        "paused": len(paused_scans),
+        "skipped": skipped,
+        "recoverable_paused": max(0, len(paused_scans) - skipped),
+        "fixed": fixed,
+        "failed": failed,
+        "actions": actions,
+    }
+
+
+# Executado a cada minuto pelo Celery Beat (já existente)
+@celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
+
+def scheduler_tick():
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Sao_Paulo")
+    now = datetime.now(tz)
+
+    current_hhmm = now.strftime("%H:%M")
+    current_dow = now.strftime("%A").lower()
+    current_dom = now.day
+
+    db: Session = SessionLocal()
+    try:
+        schedules = db.query(ScheduledScan).filter(ScheduledScan.enabled.is_(True)).all()
+        fired = 0
+
+        for sched in schedules:
+            # horário
+            if sched.run_time != current_hhmm:
+                continue
+
+            # frequência
+            freq = (sched.frequency or "daily").lower()
+
+            if freq == "weekly" and (sched.day_of_week or "").lower() != current_dow:
+                continue
+
+            if freq == "monthly" and sched.day_of_month != current_dom:
+                continue
+
+            # idempotência (não rodar 2x no mesmo minuto)
+            if sched.last_run_at:
+                from zoneinfo import ZoneInfo as _ZI
+                slot_start = now.replace(second=0, microsecond=0)
+                last_run_local = sched.last_run_at.replace(tzinfo=_ZI("UTC")).astimezone(tz)
+                if last_run_local >= slot_start:
+                    continue
+
+            # targets
+            raw_targets = [
+                t.strip()
+                for t in sched.targets_text.replace(",", ";").split(";")
+                if t.strip()
+            ]
+
+            if not raw_targets:
+                continue
+
+            job_ids = []
+            chunks = _chunk_targets(raw_targets, SCHEDULE_TARGETS_PER_SCAN)
+
+            for index, chunk in enumerate(chunks, start=1):
+                job = ScanJob(
+                    owner_id=sched.owner_id,
+                    access_group_id=sched.access_group_id,
+                    target_query="; ".join(chunk),
+                    status="pending",
+                    mode="scheduled",
+                    compliance_status="approved",
+                    current_step="Aguardando worker",
+                    state_data={},
+                )
+
+                db.add(job)
+                db.flush()
+
+                db.add(
+                    ScanLog(
+                        scan_job_id=job.id,
+                        source="scheduler",
+                        level="INFO",
+                        message=(
+                            f"Scan agendado disparado automaticamente | "
+                            f"schedule_id={sched.id} | freq={freq} | "
+                            f"batch={index}/{len(chunks)} | targets={len(chunk)}"
+                        ),
+                    )
+                )
+
+                job_ids.append(job.id)
+
+            # marca execução
+            sched.last_run_at = datetime.utcnow()
+            db.add(sched)
+            db.commit()
+
+            # envia para fila
+            for job_id in job_ids:
+                celery.send_task(
+                    "run_scan_job_scheduled",
+                    kwargs={"scan_id": job_id},
+                    queue=SCAN_SCHEDULED_QUEUE,
+                )
+
+            fired += len(job_ids)
+
+        return {
+            "ok": True,
+            "checked": len(schedules),
+            "fired": fired,
+            "slot": current_hhmm,
+        }
+
+    finally:
+        db.close()
+
+
+# Scheduler separado
+@celery.on_after_configure.connect
+def setup_periodic_tasks(sender, **kwargs):
+    sender.add_periodic_task(
+        30.0,
+        worker_heartbeat.s(),
+        name="worker-heartbeat"
+    )
 
 
 def _format_mission_progress(state_data: dict, current_step: str) -> str:
@@ -174,8 +485,8 @@ def _format_mission_progress(state_data: dict, current_step: str) -> str:
     """
     mission_items = state_data.get("mission_items", [
         "1. Reconhecimento",
-        "2. Analise de Vulnerabilidade", 
-        "3. OSINT"
+        "2. OSINT",
+        "3. Analise de Vulnerabilidade"
     ])
     mission_index = state_data.get("mission_index", 0)
     node_history = state_data.get("node_history", [])
@@ -410,8 +721,8 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             message=(
                 "PLANO DE EXECUCAO:\n"
                 "  1️⃣  Reconhecimento - Descoberta de hosts, portas, tecnologias e WAF\n"
-                "  2️⃣  Analise de Vulnerabilidade - Nuclei, ESM Hunter, Wapiti, Nmap Vulscan\n"
-                "  3️⃣  OSINT - Consultas OSINT, Shodan, certificados SSL\n"
+                "  2️⃣  OSINT - Consultas OSINT, Shodan, certificados SSL\n"
+                "  3️⃣  Analise de Vulnerabilidade - Burp, Nmap Vulscan, Nikto\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "Acompanhe o progresso nos logs abaixo com source=worker.progress_detail"
             ),
@@ -809,103 +1120,4 @@ def run_scan_job(scan_id: int):
 # Executado a cada minuto pelo Celery Beat
 # ──────────────────────────────────────────────────────────────────────────────
 
-@celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
-def scheduler_tick():
-    """
-    Roda a cada minuto (via Celery Beat).
-    Para cada ScheduledScan enabled=True, verifica se o horário configurado
-    bate com o minuto atual (fuso America/Sao_Paulo) e, se ainda não executou
-    neste slot (last_run_at), cria um ScanJob e o envia para a fila scheduled.
-    """
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("America/Sao_Paulo")
-    now = datetime.now(tz)
-    current_hhmm = now.strftime("%H:%M")
-    current_dow = now.strftime("%A").lower()   # monday, tuesday, …
-    current_dom = now.day                      # 1-31
-
-    db: Session = SessionLocal()
-    try:
-        schedules = db.query(ScheduledScan).filter(ScheduledScan.enabled.is_(True)).all()
-        fired = 0
-        for sched in schedules:
-            if sched.run_time != current_hhmm:
-                continue
-
-            # Filtro por dia da semana (frequency=weekly) ou dia do mês (monthly)
-            freq = (sched.frequency or "daily").lower()
-            if freq == "weekly":
-                if (sched.day_of_week or "").lower() != current_dow:
-                    continue
-            elif freq == "monthly":
-                if sched.day_of_month != current_dom:
-                    continue
-            # daily — sem filtro adicional
-
-            # Idempotência: já disparou neste slot (mesmo minuto)?
-            if sched.last_run_at is not None:
-                from zoneinfo import ZoneInfo as _ZI
-                slot_start = now.replace(second=0, microsecond=0)
-                last_run_local = sched.last_run_at.replace(tzinfo=_ZI("UTC")).astimezone(tz)
-                if last_run_local >= slot_start:
-                    continue
-
-            # Determina o owner (usa o primeiro owner do schedule)
-            owner_id = sched.owner_id
-
-            # Cria um ScanJob para cada target (separados por ; ou ,)
-            raw_targets = [t.strip() for t in sched.targets_text.replace(",", ";").split(";") if t.strip()]
-            if not raw_targets:
-                continue
-
-            job_ids: list[int] = []
-            chunks = _chunk_targets(raw_targets, SCHEDULE_TARGETS_PER_SCAN)
-            for index, chunk in enumerate(chunks, start=1):
-                target_query = "; ".join(chunk)
-                job = ScanJob(
-                    owner_id=owner_id,
-                    access_group_id=sched.access_group_id,
-                    target_query=target_query,
-                    status="pending",
-                    mode="scheduled",
-                    compliance_status="approved",
-                    current_step="Aguardando worker",
-                    state_data={},
-                )
-                db.add(job)
-                db.flush()  # obtém job.id antes do commit
-
-                db.add(ScanLog(
-                    scan_job_id=job.id,
-                    source="scheduler",
-                    level="INFO",
-                    message=(
-                        f"Scan agendado disparado automaticamente | "
-                        f"schedule_id={sched.id} | freq={freq} | run_time={sched.run_time} | "
-                        f"batch={index}/{len(chunks)} | targets={len(chunk)}"
-                    ),
-                ))
-                job_ids.append(job.id)
-
-            # Atualiza last_run_at (UTC) para idempotência
-            sched.last_run_at = datetime.utcnow()
-            db.add(sched)
-            db.commit()
-
-            # Envia todos os batches para a fila scheduled
-            for job_id in job_ids:
-                celery.send_task(
-                    "run_scan_job_scheduled",
-                    kwargs={"scan_id": job_id},
-                    queue=SCAN_SCHEDULED_QUEUE,
-                )
-            fired += len(job_ids)
-
-        return {"ok": True, "checked": len(schedules), "fired": fired, "slot": current_hhmm}
-    except Exception as exc:
-        db.rollback()
-        return {"ok": False, "error": str(exc)}
-    finally:
-        db.close()
 

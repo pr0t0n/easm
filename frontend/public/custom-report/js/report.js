@@ -53,6 +53,31 @@ function setText(id, value) {
   if (el) el.textContent = value == null ? '-' : String(value);
 }
 
+function computeDisplayedSummary(v2Summary, vulnerabilityTable) {
+  const rows = Array.isArray(vulnerabilityTable) ? vulnerabilityTable : [];
+  if (!rows.length) {
+    return {
+      total: Number(v2Summary?.total || 0),
+      critical: Number(v2Summary?.critical || 0),
+      high: Number(v2Summary?.high || 0),
+      medium: Number(v2Summary?.medium || 0),
+      low: Number(v2Summary?.low || 0),
+      info: Number(v2Summary?.info || 0),
+    };
+  }
+
+  const acc = { total: rows.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const row of rows) {
+    const sev = String(row?.severity || "info").toLowerCase();
+    if (sev === "critical") acc.critical += 1;
+    else if (sev === "high") acc.high += 1;
+    else if (sev === "medium") acc.medium += 1;
+    else if (sev === "low") acc.low += 1;
+    else acc.info += 1;
+  }
+  return acc;
+}
+
 function fmtCurrencyUSD(value) {
   const num = Number(value || 0);
   return new Intl.NumberFormat('en-US', {
@@ -68,40 +93,40 @@ function computeGrade(score) {
   if (n >= 80) return 'B';
   if (n >= 70) return 'C';
   if (n >= 60) return 'D';
-  if (n >= 50) return 'E';
   return 'F';
 }
 
 function calculateCriFromCounts(severityCounts) {
   const critical = Number(severityCounts?.critical || 0);
   const high = Number(severityCounts?.high || 0);
-  const medium = Number(severityCounts?.medium || 0);
-  const low = Number(severityCounts?.low || 0);
 
-  let baseScore = 100;
+  let health = 100;
   let baseFormula = '100';
 
   if (critical >= 1) {
-    baseScore = 40 - ((critical - 1) * 15);
-    baseFormula = `40 - ((${critical} - 1) x 15)`;
-  } else if (high >= 1) {
-    baseScore = 60 - ((high - 1) * 8);
-    baseFormula = `60 - ((${high} - 1) x 8)`;
+    health = 40 - ((critical - 1) * 5);
+    baseFormula = `40 - ((${critical} - 1) x 5)`;
+  }
+  if (high >= 1) {
+    if (critical === 0) {
+      health = 60;
+      baseFormula = '60';
+    }
+    health = health - ((high - 1) * 2);
   }
 
-  const mediumLowPenalty = (medium * 3) + (low * 1);
-  const rawScore = baseScore - mediumLowPenalty;
-  const finalScore = Math.max(5, Math.min(100, Math.round(rawScore)));
+  const highAdditionalPenalty = high >= 2 ? (high - 1) * 2 : 0;
+  const finalScore = Math.max(5, Math.min(100, Math.round(health)));
 
   return {
     critical,
     high,
-    medium,
-    low,
     baseFormula,
-    mediumLowPenalty,
+    highAdditionalPenalty,
     finalScore,
-    humanReadable: `score = max(5, (${baseFormula}) - (${medium} x 3) - (${low} x 1)) = ${finalScore}`,
+    humanReadable: high >= 1
+      ? `score = max(5, ${baseFormula} - ((${high} - 1) x 2)) = ${finalScore}`
+      : `score = max(5, ${baseFormula}) = ${finalScore}`,
   };
 }
 
@@ -177,7 +202,7 @@ function renderFairAndBenchmark(report) {
   setText('calcMedium', severityCounts.medium);
   setText('calcLow', severityCounts.low);
   setText('calcBaseFormula', calc.base_formula || fallbackCalc.baseFormula);
-  setText('calcPenalty', calc.medium_low_penalty ?? fallbackCalc.mediumLowPenalty);
+  setText('calcPenalty', calc.critical_high_penalty_points ?? fallbackCalc.highAdditionalPenalty);
   setText('calcHuman', calc.human_readable || fallbackCalc.humanReadable);
 
   const continuous = v2.continuous_rating || {};
@@ -285,9 +310,9 @@ function renderBenchmarkComparison(report) {
     const targetVal = Number(item.target || 0);
     const segmentVal = Number(item.segment || 0);
     const diff = targetVal - segmentVal;
-    // Para índices de exposição (higherIsBetter=false): target menor que benchmark é MELHOR
-    const isBetter = item.higherIsBetter ? diff > 0 : diff < 0;
-    const isWorse  = item.higherIsBetter ? diff < 0 : diff > 0;
+    // Regra solicitada: diferença positiva (target > benchmark) = MELHOR.
+    const isBetter = diff > 0;
+    const isWorse  = diff < 0;
     const status = isBetter ? 'Melhor' : isWorse ? 'Pior' : 'Similar';
     const statusColor = isBetter ? '#16a34a' : isWorse ? '#dc2626' : '#ea580c';
 
@@ -714,6 +739,7 @@ async function ensureAccessToken() {
 function applyTopVariables(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
   const summary = v2.summary || {};
+  const displayed = computeDisplayedSummary(summary, v2.vulnerability_table);
 
   const org = resolveReportTarget(report, v2);
   const createdAt = report?.created_at || new Date().toISOString();
@@ -722,13 +748,13 @@ function applyTopVariables(report) {
   setText('scanDate', fmtDate(createdAt));
   setText('scanRef', `scan_${report?.scan_id || SCAN_ID}_report`);
 
-  setText('kpiCritical', summary.critical || 0);
-  setText('kpiHigh', summary.high || 0);
-  setText('kpiMedium', summary.medium || 0);
-  setText('kpiLow', summary.low || 0);
-  setText('kpiInfo', summary.info || 0);
+  setText('kpiCritical', displayed.critical);
+  setText('kpiHigh', displayed.high);
+  setText('kpiMedium', displayed.medium);
+  setText('kpiLow', displayed.low);
+  setText('kpiInfo', displayed.info);
 
-  const total = Number(summary.total || (v2.vulnerability_table || []).length || 0);
+  const total = Number(displayed.total || 0);
   const intro = `Esta avaliação de segurança identificou ${total} achados na superfície de ataque externa do domínio ${org}. A análise consolidada foi carregada diretamente da base de dados via API do backend.`;
   setText('execIntroText', intro);
 

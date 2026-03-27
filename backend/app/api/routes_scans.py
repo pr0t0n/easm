@@ -765,6 +765,21 @@ def _extract_http_response_status(evidence: str) -> str:
     return f"HTTP {str(match.group(1) or '').strip()}"
 
 
+def _looks_like_generic_evidence(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or text == "-":
+        return True
+    generic_tokens = [
+        "caracteres especiais detectados",
+        "special characters detected",
+        "possible injection",
+        "possible sql injection",
+        "indicador detectado",
+        "heuristic",
+    ]
+    return len(text) < 50 or any(token in text for token in generic_tokens)
+
+
 def _framework_context(category: str, title: str, details: dict) -> dict[str, str]:
     cat = str(category or "Application Security")
     title_blob = str(title or "").lower()
@@ -942,9 +957,9 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     details = details if isinstance(details, dict) else {}
     nested = details.get("details") if isinstance(details.get("details"), dict) else {}
 
-    full_url = _pick_first_text(details, ["url", "full_url", "endpoint", "target", "asset"])
+    full_url = _pick_first_text(details, ["url", "full_url", "endpoint", "uri", "request_uri", "path", "target", "asset"])
     if not full_url:
-        full_url = _pick_first_text(nested, ["url", "full_url", "endpoint", "target", "asset"])
+        full_url = _pick_first_text(nested, ["url", "full_url", "endpoint", "uri", "request_uri", "path", "target", "asset"])
     if not full_url:
         full_url = _sanitize_text(default_target)
 
@@ -956,9 +971,9 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     if not error:
         error = _pick_first_text(nested, ["error", "stderr", "exception", "message", "http_error", "status_code"], preserve_linebreaks=True)
 
-    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"], preserve_linebreaks=True)
+    evidence = _pick_first_text(details, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner", "reason", "description", "finding", "match_reason"], preserve_linebreaks=True)
     if not evidence:
-        evidence = _pick_first_text(nested, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner"], preserve_linebreaks=True)
+        evidence = _pick_first_text(nested, ["evidence", "stdout", "output", "matched", "matched_at", "response", "banner", "reason", "description", "finding", "match_reason"], preserve_linebreaks=True)
 
     payload = _pick_first_text(
         details,
@@ -972,6 +987,11 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
             "template_id",
             "matcher_name",
             "proof",
+            "attack_input",
+            "injected_payload",
+            "payload_raw",
+            "vector",
+            "payloads",
         ],
         preserve_linebreaks=True,
     )
@@ -988,6 +1008,11 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
                 "template_id",
                 "matcher_name",
                 "proof",
+                "attack_input",
+                "injected_payload",
+                "payload_raw",
+                "vector",
+                "payloads",
             ],
             preserve_linebreaks=True,
         )
@@ -1027,9 +1052,9 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     if not tool:
         tool = _pick_first_text(nested, ["tool"])
 
-    command = _pick_first_text(details, ["command", "cmd"])
+    command = _pick_first_text(details, ["command", "cmd", "command_line"])
     if not command:
-        command = _pick_first_text(nested, ["command", "cmd"])
+        command = _pick_first_text(nested, ["command", "cmd", "command_line"])
 
     open_ports = details.get("open_ports")
     if open_ports in [None, ""]:
@@ -1056,6 +1081,34 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
     method, endpoint = _extract_method_and_endpoint(full_url, payload, evidence, command)
     parameter = _extract_parameter_name(payload, evidence, " ".join([details.get("title") or "", details.get("name") or ""]))
     response_http = _extract_http_response_status(evidence)
+
+    sql_blob = " ".join([
+        str(details.get("title") or ""),
+        str(details.get("name") or ""),
+        payload or "",
+        evidence or "",
+        command or "",
+    ]).lower()
+    is_sql_injection = any(token in sql_blob for token in ["sql injection", "sqli", "sqlmap", "injectable", "sql syntax"])
+
+    if is_sql_injection and _looks_like_generic_evidence(evidence):
+        evidence_lines = [
+            "Evidência técnica consolidada de potencial SQL Injection.",
+            f"Endpoint: {method} {endpoint}",
+            f"Alvo: {full_url or default_target}",
+            f"Parâmetro: {parameter}",
+        ]
+        if response_http != "-":
+            evidence_lines.append(f"Resposta HTTP observada: {response_http}")
+        if command:
+            evidence_lines.append(f"Comando/Ferramenta: {command[:300]}")
+        evidence = "\n".join(evidence_lines)
+
+    if is_sql_injection and not payload:
+        if command:
+            payload = f"Payload de injeção não retornado pela ferramenta; comando executado: {command[:500]}"
+        else:
+            payload = "Payload de injeção não retornado pela ferramenta no resultado bruto deste scan."
 
     response_application = ""
     if evidence:
@@ -1202,41 +1255,44 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
     low = int(severity_count.get("low", 0) or 0)
 
     # Regra CRI solicitada:
-    # 1) Havendo criticos: score base 40 e -15 por critico adicional.
-    # 2) Sem criticos e com altas: score base 60 e -8 por alta adicional.
-    # 3) Medium/Low sempre penalizam: -3 por medium, -1 por low.
-    # 4) Piso minimo em 5.
+    # 1) Havendo criticos: score base 40 e -5 por critico adicional.
+    # 2) Sem criticos e com altas: score base 60 e -2 por alta adicional.
+    # 3) Piso minimo em 5.
     if critical >= 1:
-        base_score = 40 - ((critical - 1) * 15)
-        critical_high_penalty = 60 + ((critical - 1) * 15)
+        base_score = 40 - ((critical - 1) * 5)
+        critical_high_penalty = 60 + ((critical - 1) * 5)
         score_rule = "critical"
-        base_formula = f"40 - (({critical} - 1) x 15)"
+        base_formula = f"40 - (({critical} - 1) x 5)"
     elif high >= 1:
-        base_score = 60 - ((high - 1) * 8)
-        critical_high_penalty = 40 + ((high - 1) * 8)
+        base_score = 60 - ((high - 1) * 2)
+        critical_high_penalty = 40 + ((high - 1) * 2)
         score_rule = "high"
-        base_formula = f"60 - (({high} - 1) x 8)"
+        base_formula = f"60 - (({high} - 1) x 2)"
     else:
         base_score = 100
         critical_high_penalty = 0
         score_rule = "clean"
         base_formula = "100"
 
-    medium_low_penalty = (medium * 3) + (low * 1)
-    raw_score = base_score - medium_low_penalty
-    target_cri_score = max(5, min(100, int(raw_score)))
+    medium_low_penalty = 0
+    raw_score = base_score
+    target_cri_score = max(5, min(100, int(round(raw_score))))
     min_floor_applied = bool(raw_score < 5)
 
-    # Indices auxiliares exibidos no relatorio.
-    # Incorporam severidade + impacto financeiro (ALE) para evitar inconsistencias
-    # como CRI muito baixo com exposicao financeira artificialmente zerada.
-    ale_component = min(35.0, math.log10(max(float(fair_open_usd or 0.0), 0.0) + 1.0) * 8.0)
+    # Índices auxiliares dinâmicos: combinam pressão por severidade + ALE,
+    # evitando congelamento em extremos (0/100).
+    total_findings = max(1, critical + high + medium + low)
+    weighted_pressure_raw = (critical * 10.0) + (high * 5.0) + (medium * 2.0) + (low * 1.0)
+    weighted_pressure_norm = min(100.0, (weighted_pressure_raw / (total_findings * 10.0)) * 100.0)
+
+    # 1k -> ~50, 10k -> ~66, 100k -> ~83, 1M -> ~100
+    ale_component = min(100.0, (math.log10(max(float(fair_open_usd or 0.0), 0.0) + 1.0) / 6.0) * 100.0)
     financial_loss_exposure_index = int(
         min(
             100,
             max(
                 0,
-                round((critical * 28) + (high * 16) + (medium * 6) + (low * 2) + ale_component),
+                round((weighted_pressure_norm * 0.60) + (ale_component * 0.40)),
             ),
         )
     )
@@ -1245,7 +1301,7 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             100,
             max(
                 0,
-                round((financial_loss_exposure_index * 0.55) + (critical * 12) + (high * 7) + (medium * 3) + (low * 1.5)),
+                round((financial_loss_exposure_index * 0.65) + (weighted_pressure_norm * 0.35)),
             ),
         )
     )
@@ -1254,7 +1310,7 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             100,
             max(
                 0,
-                round((financial_loss_exposure_index * 0.50) + (critical * 10) + (high * 8) + (medium * 4) + (low * 2)),
+                round((financial_loss_exposure_index * 0.55) + (weighted_pressure_norm * 0.45)),
             ),
         )
     )
@@ -1264,7 +1320,8 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
     segment_cri_score = int(segment_base["expected_cyber_readiness_index"])
 
     segment_exposure = int(segment_base["expected_external_exposure_index"])
-    target_exposure_index = max(0, min(100, 100 - int(target_cri_score)))
+    cri_exposure = max(0.0, min(100.0, 100.0 - float(target_cri_score)))
+    target_exposure_index = int(round(max(0.0, min(100.0, (cri_exposure * 0.70) + (weighted_pressure_norm * 0.30)))))
     segment_exposure_index_from_cri = max(0, min(100, 100 - int(segment_cri_score)))
 
     cri_diff = int(target_cri_score) - int(segment_cri_score)
@@ -1307,14 +1364,16 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
             "rule_applied": score_rule,
             "base_formula": base_formula,
             "base_score": int(base_score),
-            "medium_formula": f"{medium} x 3 = {medium * 3}",
-            "low_formula": f"{low} x 1 = {low * 1}",
+            "medium_formula": "n/a",
+            "low_formula": "n/a",
             "medium_low_penalty": int(medium_low_penalty),
             "raw_score_before_floor": int(raw_score),
             "min_floor": 5,
             "floor_applied": min_floor_applied,
             "final_score": int(target_cri_score),
-            "human_readable": f"score = max(5, ({base_formula}) - ({medium} x 3) - ({low} x 1)) = {int(target_cri_score)}",
+            "weighted_pressure_norm": round(float(weighted_pressure_norm), 2),
+            "ale_component": round(float(ale_component), 2),
+            "human_readable": f"score = max(5, ({base_formula})) = {int(target_cri_score)} | pressure={round(float(weighted_pressure_norm), 2)} | ale={round(float(ale_component), 2)}",
         },
     }
 
@@ -1488,7 +1547,7 @@ def _source_group_from_details(details: dict) -> str:
         return "osint"
     if node in {"vuln", "fuzzing", "api", "code_js"} or worker in {"analise_vulnerabilidade", "vuln"}:
         return "vuln"
-    if tool in {"nuclei", "nikto", "sqlmap", "commix", "tplmap", "wapiti", "dalfox", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
+    if tool in {"burp-cli", "nikto", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
         return "vuln"
     return "other"
 
@@ -2218,6 +2277,20 @@ def list_assets(db: Session = Depends(get_db), current_user: User = Depends(get_
                 item["risk"] = scan_risk
 
     rows = list(assets_map.values())
+    # Mapeia domínios principais para contagem de subdomínios
+    domain_to_subdomains = {}
+    for item in rows:
+        if item["type"] == "domain":
+            domain = item["name"].lower()
+            domain_to_subdomains[domain] = 0
+    for item in rows:
+        name = item["name"].lower()
+        for domain in domain_to_subdomains:
+            if name != domain and name.endswith(f'.{domain}'):
+                domain_to_subdomains[domain] += 1
+    for item in rows:
+        if item["type"] == "domain":
+            item["subdomain_count"] = domain_to_subdomains.get(item["name"].lower(), 0)
     rows.sort(key=lambda item: item["last_seen_at"] or datetime.min, reverse=True)
     return rows[:500]
 
@@ -2711,25 +2784,8 @@ def scan_report(
 
     category_scores = _build_category_scores(open_vulnerability_table)
 
-    # Fallback de evidencias para linhas sem payload/evidence explicitos.
-    execution_lines: list[str] = []
-    for log in scan_logs:
-        message = _sanitize_text(log.message)
-        if not message:
-            continue
-        lower = message.lower()
-        if any(token in lower for token in ["cmd", "return_code", "stderr", "stdout", "error", "execut"]):
-            execution_lines.append(message)
-        if len(execution_lines) >= 30:
-            break
-
-    if execution_lines:
-        fallback_payload = " | ".join(execution_lines[:5])
-        for row in open_vulnerability_table:
-            if row.get("payload") in [None, "", "-"]:
-                row["payload"] = fallback_payload
-            if row.get("evidence") in [None, "", "-"]:
-                row["evidence"] = fallback_payload
+    # Não usar logs genéricos como fallback de payload/evidência para evitar
+    # contaminação com saída de outras ferramentas no relatório final.
 
     # ── Consolidação: agrupa vulns com mesmo título+severidade ─────────────────
     # open_vulnerability_table mantém linhas individuais (usado para métricas,
@@ -2824,16 +2880,9 @@ def scan_report(
     groups = get_worker_groups("scheduled" if scan_mode == "scheduled" else "unit")
     vuln_tools = list((groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
     report_focus_tools = [
+        "burp-cli",
         "nmap-vulscan",
-        "nuclei",
         "nikto",
-        "wapiti",
-        "sqlmap",
-        "commix",
-        "tplmap",
-        "sslscan",
-        "shcheck",
-        "curl-headers",
     ]
     tool_execution_summary = _build_tool_execution_summary(job, scan_logs, vuln_tools)
     focused_tool_execution = {
@@ -3334,7 +3383,7 @@ def dashboard_insights(
         latest_mode = str((latest_scan.state_data or {}).get("scan_mode") or ("scheduled" if str(latest_scan.mode or "").lower() == "scheduled" else "unit")).strip().lower()
         latest_groups = get_worker_groups("scheduled" if latest_mode == "scheduled" else "unit")
         latest_vuln_tools = list((latest_groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
-        focus_tools = ["nmap-vulscan", "nuclei", "nikto", "wapiti", "sqlmap", "commix", "tplmap", "sslscan", "shcheck", "curl-headers"]
+        focus_tools = ["burp-cli", "nmap-vulscan", "nikto"]
         base_summary = _build_tool_execution_summary(latest_scan, latest_scan_logs, latest_vuln_tools)
         vuln_tool_execution = {
             **base_summary,
@@ -3886,6 +3935,22 @@ def dashboard_insights(
             "limit": prioritized_limit,
             "offset": prioritized_offset,
         },
+        "target_statistics": [
+            {
+                "target": target,
+                "vulnerabilities_total": metrics.get("findings_total", 0),
+                "vulnerabilities_open": metrics.get("findings_total", 0) - metrics.get("findings_triaged", 0),
+                "critical": metrics.get("severity", {}).get("critical", 0),
+                "high": metrics.get("severity", {}).get("high", 0),
+                "medium": metrics.get("severity", {}).get("medium", 0),
+                "low": metrics.get("severity", {}).get("low", 0),
+            }
+            for target, metrics in sorted(
+                target_metrics.items(),
+                key=lambda item: item[1].get("findings_total", 0),
+                reverse=True
+            )[:10]
+        ],
         "continuous_rating": continuous_rating,
         "rating_timeline": rating_timeline,
     }

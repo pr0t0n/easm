@@ -47,6 +47,29 @@ services:
       OLLAMA_NUM_GPU: "0"
       TZ: America/Sao_Paulo
 
+  # ──────────────────────────────────────────────────────────────────────────────
+  # Burp Suite Professional — container dedicado com Xvfb + REST API (porta 1337)
+  #   O JAR deve estar em burp/burpsuite_pro.jar antes do build.
+  #   A EULA é aceite automaticamente na primeira inicialização via FIFO stdin.
+  #   O estado (EULA, configuração) é persistido no volume burp_home.
+  # ──────────────────────────────────────────────────────────────────────────────
+  burp_rest:
+    build:
+      context: ./burp
+      dockerfile: Dockerfile
+    container_name: easm_burp
+    environment:
+      BURP_API_HOST: "0.0.0.0"
+      BURP_API_PORT: "1337"
+      BURP_LICENSE_KEY: "${BURP_LICENSE_KEY:-}"
+      TZ: America/Sao_Paulo
+    ports:
+      - "1337:1337"
+    profiles: ["dev", "prod"]
+    volumes:
+      - burp_home:/root/.BurpSuite
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -58,6 +81,8 @@ services:
       - .env
     environment:
       TZ: America/Sao_Paulo
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,6 +107,8 @@ services:
       - .env
     environment:
       TZ: America/Sao_Paulo
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "1337"
     profiles: ["prod"]
     depends_on:
       postgres:
@@ -322,3 +349,4 @@ services:
 volumes:
   postgres_data:
   ollama_data:
+  burp_home:

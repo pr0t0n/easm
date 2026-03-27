@@ -1,0 +1,4 @@
+# O JAR do Burp Pro não deve ir para o repositório (>600 MB).
+# Coloque o arquivo burpsuite_pro.jar neste diretório antes de executar
+# o docker compose build.
+burpsuite_pro.jar

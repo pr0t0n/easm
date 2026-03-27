@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	curl \
 	git \
+	openjdk-21-jre-headless \
+	openjdk-21-jdk-headless \
+	maven \
 	golang-go \
 	nodejs \
 	npm \
@@ -168,7 +171,7 @@ RUN git clone --depth 1 https://github.com/scipag/vulscan.git /usr/share/nmap/sc
 RUN mkdir -p /root/.easm && \
 	(if [ -d /app/asm-rules ]; then rm -rf /root/.easm/rules && cp -R /app/asm-rules /root/.easm/rules; else python3 /app/scripts/download_asm_rules.py || echo "[!] ASM rules download failed (non-critical)"; fi)
 
-# Setup Burp CLI Mock
+# Setup Burp CLI (Java + burp-cli-scan)
 RUN bash /app/setup_burp.sh
 
 CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]

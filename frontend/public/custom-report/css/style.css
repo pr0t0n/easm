@@ -1149,10 +1149,10 @@ body {
   }
 
   body {
-    background: #ffffff;
+    background: #0f172a !important;
     margin: 0;
     padding: 0;
-    color: #111827 !important;
+    color: #f1f5f9 !important;
   }
 
   .page {
@@ -1167,8 +1167,8 @@ body {
     page-break-after: always;
     page-break-inside: auto;
     overflow: visible;
-    background: #ffffff !important;
-    color: #111827 !important;
+    background: #1e293b !important;
+    color: #f1f5f9 !important;
   }
 
   .page::before {
@@ -1176,11 +1176,11 @@ body {
   }
 
   .cover-page {
-    background: #ffffff !important;
+    background: #1e293b !important;
     min-height: calc(297mm - 20mm) !important;
     max-height: none !important;
     padding: 18mm 12mm !important;
-    color: #111827 !important;
+    color: #f1f5f9 !important;
     border: none !important;
   }
 
@@ -1194,8 +1194,8 @@ body {
 
   .cover-title {
     background: none !important;
-    -webkit-text-fill-color: #111827 !important;
-    color: #111827 !important;
+    -webkit-text-fill-color: #f1f5f9 !important;
+    color: #f1f5f9 !important;
   }
 
   .cover-subtitle,
@@ -1205,7 +1205,7 @@ body {
   .brand-sub,
   .brand-powered,
   .page-tag {
-    color: #374151 !important;
+    color: #a5b4fc !important;
   }
 
   .cover-org,
@@ -1217,9 +1217,9 @@ body {
   .benchmark-segment-info,
   .benchmark-pill,
   .benchmark-average-box > div {
-    background: #ffffff !important;
-    border-color: #d1d5db !important;
-    color: #111827 !important;
+    background: #1e293b !important;
+    border-color: #334155 !important;
+    color: #f1f5f9 !important;
   }
 
   .brand-shield,

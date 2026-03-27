@@ -1,0 +1,33 @@
+{
+    "user_options": {
+        "display": {
+            "user_interface": {
+                "font_size": 13,
+                "look_and_feel": "Light"
+            }
+        },
+        "misc": {
+            "api": {
+                "address": "127.0.0.1",
+                "enabled": true,
+                "insecure_mode": true,
+                "keys": [],
+                "listen_mode": "loopback_only",
+                "port": 1337
+            },
+            "automatic_project_backup": {
+                "delete_on_shutdown": true,
+                "enabled": true,
+                "in_scope_only": false,
+                "interval": 30,
+                "show_progress": false
+            },
+            "embedded_browser": {
+                "allow_saving_browser_settings": false,
+                "browser_data_directory": ""
+            },
+            "enable_proxy_interception_at_startup": "never",
+            "exceptions_log_directory": ""
+        }
+    }
+}

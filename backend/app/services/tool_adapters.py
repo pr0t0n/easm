@@ -17,7 +17,7 @@ SAFE_TOOL_REGISTRY = {
     "recon": ["subfinder", "amass", "assetfinder", "dnsx", "naabu", "nessus"],
     "crawler": ["httpx", "katana", "waymore", "uro", "gowitness"],
     "fuzzing": ["ffuf", "feroxbuster", "arjun", "dirb", "gobuster", "wfuzz"],
-    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "burp-cli", "wapiti", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
+    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "burp-cli", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
     "code_js": ["linkfinder", "secretfinder", "trufflehog"],
     "api": ["kiterunner", "postman-to-k6"],
     "osint": ["theharvester", "h8mail", "metagoofil", "urlscan-cli", "subjack", "shodan-cli", "whatweb"],
@@ -66,6 +66,7 @@ TOOL_SPECIFIC_TIMEOUTS = {
 
 OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {
     "openvas": "OpenVAS requer stack dedicada/GVM e nao e suportado por execucao local direta no worker.",
+    "wapiti": "Wapiti desativado temporariamente por decisao de arquitetura; analise de vulnerabilidade usa Burp + Nmap Vulscan + Nikto.",
 }
 
 
@@ -186,11 +187,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             host,
         ]
     if normalized in {"burp", "burp-cli"}:
-        license_key = str(os.getenv("BURP_LICENSE_KEY", "")).strip()
-        if not license_key:
-            return ["__missing_burp_license__"]
         # Preferimos JSON em stdout para parser unificado no workflow.
-        return ["burp-cli", "scan", "--url", url, "--format", "json", "--license-key", license_key]
+        return ["burp-cli", "scan", "--url", url, "--format", "json"]
     if normalized == "nmap":
         return [
             "nmap",
@@ -443,17 +441,6 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "stderr": "missing mandatory nuclei templates",
         }
 
-    if normalized_tool in {"burp", "burp-cli"} and not str(os.getenv("BURP_LICENSE_KEY", "")).strip():
-        return {
-            "status": "error",
-            "output": "BURP_LICENSE_KEY nao configurada para execucao do burp-cli.",
-            "open_ports": [],
-            "return_code": 2,
-            "command": "burp-cli scan --url <target> --format json --license-key <key>",
-            "stdout": "",
-            "stderr": "missing burp license",
-        }
-
     if normalized_tool in {"shodan", "shodan-cli"} and not str(os.getenv("SHODAN_API_KEY", "")).strip():
         return {
             "status": "skipped",
@@ -490,17 +477,6 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "stdout": "",
             "stderr": "missing mandatory nuclei templates",
         }
-    if cmd and cmd[0] == "__missing_burp_license__":
-        return {
-            "status": "error",
-            "output": "BURP_LICENSE_KEY nao configurada para execucao do burp-cli.",
-            "open_ports": [],
-            "return_code": 2,
-            "command": "burp-cli scan --url <target> --format json --license-key <key>",
-            "stdout": "",
-            "stderr": "missing burp license",
-        }
-
     timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get(normalized_tool, TOOL_TIMEOUT_SECONDS)
     try:
         proc = subprocess.run(

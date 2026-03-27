@@ -70,18 +70,25 @@ def main():
         {
             "issue_name": "SQL Injection",
             "severity": "Critical",
+            "method": "GET",
             "url": f"{args['url']}/search?q=test",
-            "evidence": "Caracteres especiais detectados em parametro"
+            "parameter": "q",
+            "payload": "' OR 1=1 --",
+            "evidence": "Resposta da aplicação alterada após teste de injeção no parâmetro q em /search."
         },
         {
             "issue_name": "Cross-site Scripting (XSS)",
             "severity": "High",
+            "method": "POST",
             "url": f"{args['url']}/comment",
-            "evidence": "Input nao sanitizado detectado"
+            "parameter": "comment",
+            "payload": "<script>alert(1)</script>",
+            "evidence": "Input refletido sem sanitização no endpoint /comment."
         },
         {
             "issue_name": "Weak SSL Configuration",
             "severity": "Medium",
+            "method": "GET",
             "url": args["url"],
             "evidence": "Protocolo TLS 1.0 habilitado"
         }

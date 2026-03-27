@@ -1,0 +1,14 @@
+{
+    "user_options": {
+        "misc": {
+            "api": {
+                "address": "0.0.0.0",
+                "enabled": true,
+                "insecure_mode": true,
+                "keys": [],
+                "listen_mode": "all_interfaces",
+                "port": 1337
+            }
+        }
+    }
+}

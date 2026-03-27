@@ -128,6 +128,24 @@ function gradeFromScore(score) {
   return "F";
 }
 
+function calculateGeneralHealthScore({ critical = 0, high = 0 }) {
+  const criticalCount = Number(critical || 0);
+  const highCount = Number(high || 0);
+
+  let health = 100;
+  if (criticalCount >= 1) {
+    health = 40 - ((criticalCount - 1) * 5);
+  }
+  if (highCount >= 1) {
+    if (criticalCount === 0) {
+      health = 60;
+    }
+    health = health - ((highCount - 1) * 2);
+  }
+
+  return Math.max(5, Math.round(health));
+}
+
 function targetHost(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -149,16 +167,16 @@ function RatingBadge({ letter, score, label }) {
         : "border-rose-500/40 bg-rose-500/10 text-rose-100";
 
   return (
-    <div className={`rounded-2xl border p-4 shadow-lg ${tone}`}>
-      <p className="text-[11px] uppercase tracking-[0.18em] opacity-80">{label}</p>
-      <div className="mt-3 flex items-end justify-between gap-3">
+    <div className={`rounded-2xl border p-6 min-h-[260px] shadow-lg ${tone}`}>
+      <p className="text-xs uppercase tracking-[0.2em] opacity-80">{label}</p>
+      <div className="mt-5 flex items-end justify-between gap-4">
         <div>
-          <p className="text-4xl font-black leading-none">{letter || "F"}</p>
-          <p className="mt-1 text-sm font-semibold opacity-90">Rating</p>
+          <p className="text-8xl leading-none font-black">{letter || "F"}</p>
+          <p className="mt-2 text-base font-semibold opacity-90">Rating</p>
         </div>
-        <p className="text-3xl font-black tabular-nums">{numeric.toFixed(1)}</p>
+        <p className="text-5xl font-black tabular-nums">{numeric.toFixed(1)}</p>
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/20">
+      <div className="mt-5 h-3 overflow-hidden rounded-full bg-black/20">
         <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500" style={{ width: `${Math.max(0, Math.min(100, numeric))}%` }} />
       </div>
     </div>
@@ -196,6 +214,7 @@ export default function DashboardPage() {
   const hasScopedSelection = Boolean(selectedGroup || selectedTarget.trim());
   const [globalVasmMeta, setGlobalVasmMeta] = useState({ aggregationTargets: 1, scanCount: 0 });
   const [prioritizedActions, setPrioritizedActions] = useState([]);
+  const [targetStatistics, setTargetStatistics] = useState([]);
 
   const handleSearch = () => {
     setIsSearching(true);
@@ -227,7 +246,9 @@ export default function DashboardPage() {
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
         let globalDashboard = dashboard;
-        if (selectedGroup || selectedTarget.trim()) {
+        // Keep group rating scoped to the selected group.
+        // Fetch global data only for target-only filtering.
+        if (!selectedGroup && selectedTarget.trim()) {
           try {
             const { data: globalData } = await client.get("/api/dashboard/insights");
             globalDashboard = globalData || dashboard;
@@ -278,6 +299,7 @@ export default function DashboardPage() {
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
         setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
+        setTargetStatistics(Array.isArray(dashboard.target_statistics) ? dashboard.target_statistics : []);
         const resolvedContinuous = dashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
         const resolvedTimeline = dashboard.rating_timeline || [];
         setContinuousRating(resolvedContinuous);
@@ -385,6 +407,24 @@ export default function DashboardPage() {
   }, [selectedTarget, selectedGroup]);
 
   const distributedRows = useMemo(() => {
+    // Use target_statistics from API if available, otherwise fall back to old method
+    if (targetStatistics && targetStatistics.length > 0) {
+      return targetStatistics.map((stat) => {
+        const vulnCount = stat.vulnerabilities_total || 0;
+        const score = calculateGeneralHealthScore({
+          critical: stat.critical,
+          high: stat.high,
+        });
+        return {
+          target: stat.target,
+          vulnCount,
+          score,
+          grade: gradeFromScore(score),
+        };
+      });
+    }
+
+    // Fallback to old method if target_statistics not available
     const byTarget = new Map();
     for (const item of prioritizedActions) {
       const target = String(item?.target_query || "").trim();
@@ -412,7 +452,7 @@ export default function DashboardPage() {
       .slice(0, 5);
 
     return rows;
-  }, [prioritizedActions, domainOptions]);
+  }, [targetStatistics, prioritizedActions, domainOptions]);
 
   const distributedScore = distributedRows.length
     ? distributedRows.reduce((acc, row) => acc + row.score, 0) / distributedRows.length
@@ -560,25 +600,25 @@ export default function DashboardPage() {
         </div>
 
         <div className="grid gap-4 xl:grid-cols-12">
-          <div className="xl:col-span-3">
+          <div className="xl:col-span-4">
             <RatingBadge
               label="Rating Atual do Alvo"
               letter={scopedEasmRating.grade}
               score={scopedEasmRating.score}
             />
           </div>
-          <div className="xl:col-span-3">
+          <div className="xl:col-span-4">
             <RatingBadge
               label="Rating Atual do Grupo"
               letter={globalEasmRating.grade}
               score={globalEasmRating.score}
             />
           </div>
-          <div className="xl:col-span-6 rounded-2xl border border-cyan-500/30 bg-slate-900/70 p-4">
+          <div className="xl:col-span-4 rounded-2xl border border-cyan-500/30 bg-slate-900/70 p-4">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-100/80">Rating Distribuído</p>
-                <p className="text-xs text-slate-400">Top 5 alvos/subdomínios com maior volume de vulnerabilidades</p>
+                <p className="text-xs text-slate-400">Top 5 alvos com maior volume de vulnerabilidades</p>
               </div>
               <div className="text-right">
                 <p className="text-3xl font-black text-cyan-200">{distributedGrade} {Number(distributedScore || 0).toFixed(1)}</p>
@@ -589,7 +629,6 @@ export default function DashboardPage() {
                 <thead className="bg-slate-800/90 text-slate-300">
                   <tr>
                     <th className="px-3 py-2">Alvo</th>
-                    <th className="px-3 py-2">Subdomínios</th>
                     <th className="px-3 py-2">Vulnerabilidades</th>
                     <th className="px-3 py-2">Rating</th>
                   </tr>
@@ -597,13 +636,12 @@ export default function DashboardPage() {
                 <tbody>
                   {distributedRows.length === 0 && (
                     <tr>
-                      <td className="px-3 py-3 text-slate-500" colSpan={4}>Sem dados suficientes para distribuição.</td>
+                      <td className="px-3 py-3 text-slate-500" colSpan={3}>Sem dados suficientes para distribuição.</td>
                     </tr>
                   )}
                   {distributedRows.map((row) => (
                     <tr key={`dist-${row.target}`} className="border-t border-slate-700/70 bg-slate-900/40">
                       <td className="px-3 py-2 font-mono text-cyan-100">{row.target}</td>
-                      <td className="px-3 py-2">{row.subdomainCount}</td>
                       <td className="px-3 py-2">{row.vulnCount}</td>
                       <td className="px-3 py-2 font-semibold">{row.grade} {row.score.toFixed(1)}</td>
                     </tr>
@@ -614,7 +652,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <div className="mt-5 grid gap-4 lg:grid-cols-3">
           <section className="rounded-2xl border border-indigo-500/30 bg-indigo-950/20 p-4">
             <h3 className="text-sm font-semibold text-indigo-200">Maturidade por Framework</h3>
             <p className="mt-1 text-xs text-slate-400">Conformidade por framework de segurança</p>
@@ -633,6 +671,29 @@ export default function DashboardPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-cyan-500/30 bg-cyan-950/20 p-4">
+            <h3 className="text-sm font-semibold text-cyan-200">Faixas de Grade</h3>
+            <p className="mt-1 text-xs text-slate-400">Domínio e Subdomínio</p>
+            <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700/80">
+              <table className="min-w-full text-left text-xs">
+                <thead className="bg-slate-800/90 text-slate-300">
+                  <tr>
+                    <th className="px-3 py-2">Grade</th>
+                    <th className="px-3 py-2">Mínimo</th>
+                    <th className="px-3 py-2">Máximo</th>
+                  </tr>
+                </thead>
+                <tbody className="text-slate-200">
+                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">A</td><td className="px-3 py-2">90</td><td className="px-3 py-2">100</td></tr>
+                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">B</td><td className="px-3 py-2">80</td><td className="px-3 py-2">89</td></tr>
+                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">C</td><td className="px-3 py-2">70</td><td className="px-3 py-2">79</td></tr>
+                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">D</td><td className="px-3 py-2">60</td><td className="px-3 py-2">69</td></tr>
+                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">F</td><td className="px-3 py-2">0</td><td className="px-3 py-2">59</td></tr>
+                </tbody>
+              </table>
             </div>
           </section>
 
