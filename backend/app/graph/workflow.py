@@ -493,9 +493,11 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
-    # Escopo atual de analise tecnica definido para producao:
-    # Burp + Nmap Vulscan + Nikto.
-    preferred_global = ["burp-cli", "nmap-vulscan", "nikto"]
+    # Escopo de analise tecnica: core (Burp/Nmap/Nikto) + suporte
+    # (Nuclei, WPScan, Wfuzz, WAF/Headers) quando disponivel.
+    preferred_global = [
+        "burp-cli", "nmap-vulscan", "nikto", "nuclei", "wpscan", "wfuzz", "wafw00f", "curl-headers",
+    ]
     selected_global = [tool for tool in preferred_global if tool in tools]
     if selected_global:
         tools = selected_global
@@ -503,13 +505,15 @@ def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
     if not _is_local_target(target):
         return tools
 
-    preferred = ["burp-cli", "nmap-vulscan", "nikto"]
+    preferred = [
+        "burp-cli", "nmap-vulscan", "nikto", "nuclei", "wpscan", "wfuzz", "wafw00f", "curl-headers",
+    ]
     filtered = [tool for tool in preferred if tool in tools]
     if filtered:
         return filtered
     if "burp-cli" in tools:
         return ["burp-cli"]
-    return tools[:3]
+    return tools[:8]
 
 
 def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> list[str]:
@@ -2749,7 +2753,7 @@ def governance_node(state: AgentState) -> AgentState:
         f"Governance: score={easm_rating['score']} grade={easm_rating['grade']} "
         f"n_assets={n_assets} total_ra={easm_rating['total_ra']}"
     )
-    state["mission_index"] += 1
+    # mission_index já foi incrementado pelos agentes paralelos (threat_intel + risk_assessment)
     _metric_end(state, "governance", started_at)
     return state
 
@@ -2854,10 +2858,11 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_node("governance",        governance_node)
     graph.add_node("executive_analyst", executive_analyst_node)
 
-    # Pipeline linear — cada agente conhece somente o próximo
+    # Pipeline paralelo — Asset Discovery dispara Threat Intel e Risk Assessment simultaneamente
     graph.set_entry_point("asset_discovery")
     graph.add_edge("asset_discovery",   "threat_intel")
-    graph.add_edge("threat_intel",      "risk_assessment")
+    graph.add_edge("asset_discovery",   "risk_assessment")
+    graph.add_edge("threat_intel",      "governance")
     graph.add_edge("risk_assessment",   "governance")
     graph.add_edge("governance",        "executive_analyst")
     graph.add_edge("executive_analyst", END)

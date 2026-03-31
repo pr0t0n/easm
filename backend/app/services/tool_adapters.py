@@ -272,7 +272,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         cmd.extend(["-t", templates_path])
         return cmd
     if normalized == "nikto":
-        return ["nikto", "-h", url, "-Tuning", "1234567890"]
+        return ["nikto", "-h", url, "-C", "all", "-Tuning", "1234567890"]
     if normalized == "sslscan":
         return ["sslscan", "--no-colour", host]
     if normalized == "shcheck":
@@ -304,7 +304,9 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "tplmap":
         return ["python3", "/opt/tplmap/tplmap.py", "-u", url]
     if normalized == "wpscan":
-        return ["wpscan", "--url", url, "--no-update"]
+        # Evita falha imediata quando o banco local ainda nao existe.
+        # O WPScan atualiza metadata automaticamente quando necessario.
+        return ["wpscan", "--url", url, "--disable-tls-checks", "--random-user-agent"]
     if normalized == "arjun":
         # -p nao e flag de metodo nessa versao do arjun; usa apenas --stable
         return ["arjun", "-u", url, "--stable"]
@@ -324,8 +326,10 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "/usr/share/seclists/Discovery/Web-Content/common.txt",
         ])
         if wordlist:
-            return ["wfuzz", "-c", "-z", f"file,{wordlist}", "--hc", "404", f"{url.rstrip('/')}/FUZZ"]
-        return ["wfuzz", "-h"]
+            # wfuzz upstream ainda depende do modulo `imp`, removido no Python 3.12.
+            # Fallback operacional: usa ffuf com wordlist equivalente.
+            return ["ffuf", "-w", wordlist, "-u", f"{url.rstrip('/')}/FUZZ", "-mc", "200,301,302,307", "-t", "50"]
+        return ["ffuf", "-h"]
     if normalized == "feroxbuster":
         wordlist = _first_existing_path([
             "/usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt",
@@ -542,6 +546,10 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
 
     # Nikto em algumas imagens exige modulo Perl JSON; trata como dependencia ausente.
     if normalized_tool == "nikto" and "Required module not found: JSON" in stderr:
+        status = "skipped"
+
+    # WPScan em alvos que nao sao WordPress nao deve ser tratado como erro de execucao.
+    if normalized_tool == "wpscan" and "does not seem to be running WordPress" in combined:
         status = "skipped"
 
     return {

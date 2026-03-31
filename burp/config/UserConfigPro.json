@@ -1,5 +1,17 @@
 {
     "user_options": {
+        "extender": {
+            "extensions": [
+                {
+                    "errors": "ui",
+                    "extension_file": "/opt/burp/extensions/easm-scan-manager.jar",
+                    "extension_type": "java",
+                    "loaded": true,
+                    "name": "EASM Scan Manager",
+                    "output": "ui"
+                }
+            ]
+        },
         "misc": {
             "api": {
                 "address": "0.0.0.0",

@@ -4212,12 +4212,20 @@ def get_easm_report(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Relatório completo EASM para um scan:
-    - FAIR decomposition
-    - Vulnerabilidades por pillar
-    - Assets afetados
-    - Recomendações executivas
+    Relatório EASM completo: análise de risco, ativos, vulnerabilidades,
+    execução de ferramentas, e métricas temporais.
+    
+    Inclui:
+    - FAIR decomposition com scores por pilar
+    - Asset List com risk scores individuais
+    - Vulnerability Details (CVE, CVSS, description)
+    - Tool Execution Stats
+    - Remediation tracking e Age Analysis
+    - Activity metrics por node
     """
+    from datetime import datetime, timezone
+    import json
+    
     scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
@@ -4227,16 +4235,361 @@ def get_easm_report(
 
     state_data = scan.state_data or {}
     report_v2 = state_data.get("report_v2", {})
-
+    
+    # ── 1. EASM RATING E FAIR DECOMPOSITION ──────────────────────────────────
+    easm_rating = report_v2.get("easm_rating", {})
+    fair_decomp = report_v2.get("fair_decomposition", {})
+    
+    # ── 2. ASSET LIST COM RISK SCORES ───────────────────────────────────────
+    discovered_assets = state_data.get("lista_ativos", [])
+    asset_details = []
+    
+    for asset_addr in discovered_assets:
+        # Query vulnerabilities para este asset
+        asset_vulns = db.query(Vulnerability).filter(
+            Vulnerability.asset_id == db.query(Asset).filter(
+                Asset.owner_id == scan.owner_id,
+                Asset.domain_or_ip == asset_addr,
+            ).with_entities(Asset.id),
+        ).all()
+        
+        critical_ct = sum(1 for v in asset_vulns if v.severity == "critical")
+        high_ct = sum(1 for v in asset_vulns if v.severity == "high")
+        medium_ct = sum(1 for v in asset_vulns if v.severity == "medium")
+        
+        asset_details.append({
+            "address": asset_addr,
+            "vulnerability_count": len(asset_vulns),
+            "critical_count": critical_ct,
+            "high_count": high_ct,
+            "medium_count": medium_ct,
+            "avg_age_days": int(sum(
+                (datetime.now(timezone.utc) - v.first_detected).days 
+                for v in asset_vulns if v.first_detected
+            ) / max(1, len(asset_vulns))) if asset_vulns else 0,
+        })
+    
+    # ── 3. VULNERABILITY DETAILS ────────────────────────────────────────────
+    findings_list = []
+    recommendations_set = set()
+    recommendations_with_severity = []
+    
+    for finding in scan.findings[:100]:  # Limita a 100 findings por performance
+        findings_list.append({
+            "id": finding.id,
+            "title": finding.title,
+            "severity": finding.severity,
+            "cve": finding.cve,
+            "cvss": finding.cvss,
+            "domain": finding.domain,
+            "tool": finding.tool,
+            "risk_score": finding.risk_score,
+            "confidence_score": finding.confidence_score,
+            "created_at": finding.created_at.isoformat() if finding.created_at else None,
+            "is_false_positive": finding.is_false_positive,
+            "recommendation": finding.recommendation or "-",
+        })
+        
+        # Coleta recomendações únicas
+        if finding.recommendation and finding.recommendation.strip():
+            rec_text = finding.recommendation.strip()
+            if rec_text not in recommendations_set:
+                recommendations_set.add(rec_text)
+                recommendations_with_severity.append({
+                    "text": rec_text,
+                    "severity": finding.severity,
+                    "priority": 0 if finding.severity == "critical" else 1 if finding.severity == "high" else 2,
+                })
+    
+    # Sort por severidade (críticas primeiro)
+    recommendations_with_severity.sort(key=lambda x: x["priority"])
+    
+    # ── 4. TOOL EXECUTION STATS ─────────────────────────────────────────────
+    executed_tools = state_data.get("executed_tool_runs", [])
+    tool_stats = {}
+    for tool_run in executed_tools:
+        if isinstance(tool_run, str):
+            tool_name = tool_run.split("@")[0] if "@" in tool_run else tool_run
+            tool_stats[tool_name] = tool_stats.get(tool_name, 0) + 1
+    
+    # ── 5. ACTIVITY METRICS POR NODE ────────────────────────────────────────
+    activity_metrics = state_data.get("activity_metrics", [])
+    node_metrics = {}
+    for metric in activity_metrics:
+        if isinstance(metric, dict):
+            node = metric.get("node", "unknown")
+            if node not in node_metrics:
+                node_metrics[node] = {"count": 0, "total_duration_ms": 0}
+            node_metrics[node]["count"] += 1
+            node_metrics[node]["total_duration_ms"] += metric.get("duration_ms", 0)
+    
+    # Calcula média por node
+    for node in node_metrics:
+        count = node_metrics[node]["count"]
+        node_metrics[node]["avg_duration_ms"] = round(
+            node_metrics[node]["total_duration_ms"] / max(1, count), 2
+        )
+        del node_metrics[node]["total_duration_ms"]
+    
+    # ── 6. REMEDIATION TRACKING ─────────────────────────────────────────────
+    remediation_stats = {
+        "total_vulnerabilities": len(scan.findings),
+        "remediated_count": sum(1 for f in scan.findings if f.retest_status == "confirmed" and f.is_false_positive),
+        "pending_retest": sum(1 for f in scan.findings if f.retest_status == "pending_retest"),
+        "confirmed_false_positives": sum(1 for f in scan.findings if f.is_false_positive),
+    }
+    
+    # ── 7. NODE HISTORY ─────────────────────────────────────────────────────
+    node_history = state_data.get("node_history", [])
+    
+    # ── 8. BURP ASYNC STATUS ────────────────────────────────────────────────
+    burp_info = {
+        "status": state_data.get("burp_status", "none"),
+        "findings_count": state_data.get("burp_findings_count", 0),
+        "targets_count": state_data.get("burp_async_target_count", 0),
+    }
+    
     return {
+        # Metadata
         "scan_id": scan.id,
         "target": scan.target_query,
         "status": scan.status,
-        "easm_rating": report_v2.get("easm_rating", {}),
-        "fair_decomposition": report_v2.get("fair_decomposition", {}),
-        "executive_summary": report_v2.get("executive_summary", ""),
-        "findings_count": len(scan.findings),
+        "created_at": scan.created_at.isoformat() if scan.created_at else None,
         "completed_at": scan.updated_at.isoformat() if scan.updated_at else None,
+        "execution_duration_seconds": int(
+            (scan.updated_at - scan.created_at).total_seconds()
+        ) if scan.updated_at and scan.created_at else 0,
+        
+        # FAIR Rating and Decomposition
+        "easm_rating": {
+            "score": easm_rating.get("score", 0),
+            "grade": easm_rating.get("grade", "F"),
+            "methodology": easm_rating.get("methodology", ""),
+            "n_assets_scanned": easm_rating.get("n_assets_scanned", 0),
+            "total_ra": easm_rating.get("total_ra", 0),  # Total Risk Assessment
+            "factors": easm_rating.get("factors", {}),  # Decomposição de fatores
+        },
+        "fair_decomposition": {
+            "pillars": fair_decomp.get("pillars", []),
+            "total_findings": fair_decomp.get("total_findings", 0),
+            "methodology": fair_decomp.get("methodology", ""),
+        },
+        "executive_summary": report_v2.get("executive_summary", ""),
+        
+        # Asset List
+        "assets": {
+            "discovered_count": len(discovered_assets),
+            "assets_detail": asset_details,
+        },
+        
+        # Vulnerabilities
+        "vulnerabilities": {
+            "total_count": len(scan.findings),
+            "findings": findings_list[:50],  # Amostra de 50 para resposta JSON
+            "by_severity": {
+                "critical": sum(1 for f in scan.findings if f.severity == "critical"),
+                "high": sum(1 for f in scan.findings if f.severity == "high"),
+                "medium": sum(1 for f in scan.findings if f.severity == "medium"),
+                "low": sum(1 for f in scan.findings if f.severity == "low"),
+                "info": sum(1 for f in scan.findings if f.severity == "info"),
+            },
+        },
+        
+        # Top Recommendations
+        "recommendations": {
+            "total_unique": len(recommendations_set),
+            "recommendations": recommendations_with_severity[:20],  # Top 20 recomendações
+        },
+        
+        # Tool Execution
+        "tool_execution": {
+            "executed_tools": tool_stats,
+            "tool_count": len(tool_stats),
+            "total_executions": len(executed_tools),
+        },
+        
+        # Remediation
+        "remediation": remediation_stats,
+        
+        # Activity Metrics
+        "activity_metrics": {
+            "node_execution_stats": node_metrics,
+            "node_sequence": node_history,
+            "total_nodes_executed": len(node_history),
+        },
+        
+        # Burp Async
+        "burp_async": burp_info,
+    }
+
+
+@router.get("/scans/{scan_id}/temporal-analysis")
+def get_temporal_analysis(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Análises temporais EASM: remediation velocity, posture deviation,
+    age distribution, e 30-day forecast.
+    
+    Inclui:
+    - Velocidade de remediação (% por semana)
+    - Desvio de postura (mudança em 24h)
+    - Análise de AGE (distribuição de dias aberto)
+    - Forecast de rating para 30 dias
+    """
+    from datetime import datetime, timezone, timedelta
+    
+    scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    if scan.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+
+    state_data = scan.state_data or {}
+    easm_rating = state_data.get("easm_rating", {})
+    fair_decomp = state_data.get("fair_decomposition", {})
+    
+    # ── 1. VULNERABILITY AGE ANALYSIS ───────────────────────────────────────
+    findings = scan.findings
+    age_distribution = {"0_to_7_days": 0, "8_to_30_days": 0, "31_to_60_days": 0, "over_60_days": 0}
+    critical_aging = []
+    
+    now = datetime.now(timezone.utc)
+    for finding in findings:
+        if finding.created_at:
+            age_days = (now - finding.created_at).days
+            if age_days <= 7:
+                age_distribution["0_to_7_days"] += 1
+            elif age_days <= 30:
+                age_distribution["8_to_30_days"] += 1
+            elif age_days <= 60:
+                age_distribution["31_to_60_days"] += 1
+            else:
+                age_distribution["over_60_days"] += 1
+            
+            # Critical ou High and old
+            if finding.severity in ["critical", "high"] and age_days > 30:
+                critical_aging.append({
+                    "finding_id": finding.id,
+                    "title": finding.title,
+                    "severity": finding.severity,
+                    "age_days": age_days,
+                    "cve": finding.cve,
+                })
+    
+    # ── 2. REMEDIATION TRACKING ────────────────────────────────────────────
+    remediated_findings = [f for f in findings if f.retest_status == "confirmed"]
+    remediation_rate = (len(remediated_findings) / max(1, len(findings))) * 100 if findings else 0
+    
+    # Estimativa de velocidade (findings remediados em período)
+    days_elapsed = (now - scan.created_at).days if scan.created_at else 1
+    weekly_remediation_rate = (len(remediated_findings) / max(1, days_elapsed)) * 7 * 100
+    
+    # ── 3. HISTORICAL RATINGS (via AssetRatingHistory) ──────────────────────
+    discovered_assets = state_data.get("lista_ativos", [])
+    historical_ratings = []
+    
+    for asset_addr in discovered_assets[:5]:  # Limita a 5 assets por performance
+        asset = db.query(Asset).filter(
+            Asset.owner_id == scan.owner_id,
+            Asset.domain_or_ip == asset_addr,
+        ).first()
+        
+        if asset:
+            history = db.query(AssetRatingHistory).filter(
+                AssetRatingHistory.asset_id == asset.id,
+            ).order_by(AssetRatingHistory.recorded_at.desc()).limit(10).all()
+            
+            if history:
+                historical_ratings.append({
+                    "asset": asset_addr,
+                    "history": [
+                        {
+                            "timestamp": h.recorded_at.isoformat(),
+                            "rating": h.easm_rating,
+                            "grade": h.easm_grade,
+                            "open_critical": h.open_critical_count,
+                            "open_high": h.open_high_count,
+                            "remediated": h.remediated_this_period,
+                        }
+                        for h in history
+                    ],
+                })
+    
+    # ── 4. POSTURE DEVIATION (mudança vs último scan) ───────────────────────
+    current_score = float(easm_rating.get("score", 0))
+    deviation_24h = "unknown"  # Seria calculado com histórico real
+    deviation_pct_change = 0
+    
+    if historical_ratings and historical_ratings[0]["history"]:
+        last_history = historical_ratings[0]["history"][1] if len(historical_ratings[0]["history"]) > 1 else None
+        if last_history:
+            last_score = float(last_history["rating"])
+            deviation_pct_change = round(((current_score - last_score) / max(1, last_score)) * 100, 2)
+            deviation_24h = "improved" if deviation_pct_change > 0 else "degraded" if deviation_pct_change < 0 else "stable"
+    
+    # ── 5. 30-DAY FORECAST ─────────────────────────────────────────────────
+    # Projeção simples com remediação linear
+    days_to_zero = None
+    if weekly_remediation_rate > 0:
+        remaining_findings = len([f for f in findings if f.retest_status != "confirmed"])
+        weeks_to_zero = remaining_findings / max(0.1, weekly_remediation_rate / 7)
+        days_to_zero = int(weeks_to_zero * 7)
+    
+    # Simulação de rating em 30 dias (simplificado)
+    projected_score_30d = current_score
+    if weekly_remediation_rate > 0:
+        # Assume 4 semanas, cada semana reduz X%
+        projected_score_30d = current_score * (1 + (weekly_remediation_rate / 100 / 4))
+        projected_score_30d = min(100, max(0, projected_score_30d))
+    
+    return {
+        "scan_id": scan.id,
+        "target": scan.target_query,
+        "current_rating": {
+            "score": current_score,
+            "grade": easm_rating.get("grade", "F"),
+        },
+        
+        # Age Analysis
+        "age_analysis": {
+            "distribution": age_distribution,
+            "critical_and_aging": critical_aging,
+            "aging_critical_count": len(critical_aging),
+            "notes": "Vulnerabilidades críticas/altas abertas há mais de 30 dias",
+        },
+        
+        # Remediation Tracking
+        "remediation": {
+            "remediated_count": len(remediated_findings),
+            "total_findings": len(findings),
+            "remediation_rate_pct": round(remediation_rate, 2),
+            "weekly_remediation_rate_pct": round(weekly_remediation_rate, 2),
+            "estimated_days_to_zero": days_to_zero,
+        },
+        
+        # Posture Deviation
+        "posture_deviation": {
+            "change_24h": deviation_24h,
+            "pct_change": deviation_pct_change,
+            "alert_threshold_exceeded": abs(deviation_pct_change) > 10,
+        },
+        
+        # Historical Trends
+        "historical_trends": historical_ratings,
+        
+        # 30-Day Forecast
+        "forecast_30_days": {
+            "projected_score": round(projected_score_30d, 2),
+            "confidence": "medium",
+            "drivers": [
+                "Remediação contínua em taxa de " + str(round(weekly_remediation_rate, 2)) + "% semana",
+                "Efeito do fator AGE sobre vulnerabilidades não remediadas",
+            ] if weekly_remediation_rate > 0 else ["Sem progresso de remediação"],
+        },
     }
 
 

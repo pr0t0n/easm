@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Ferramentas Python
 RUN pip install --no-cache-dir \
-	setuptools \
+	setuptools==80.9.0 \
 	arjun \
 	uro \
 	h8mail \
@@ -184,6 +184,8 @@ RUN gem install --no-document wpscan || true
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# wfuzz depende de pkg_resources (presente ate setuptools 80.x).
+RUN pip install --no-cache-dir setuptools==80.9.0
 
 COPY . .
 

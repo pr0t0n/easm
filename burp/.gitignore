@@ -2,3 +2,6 @@
 # Coloque o arquivo burpsuite_pro.jar neste diretório antes de executar
 # o docker compose build.
 burpsuite_pro.jar
+
+# Build artifacts da extensão Maven
+extension/target/

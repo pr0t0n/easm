@@ -28,6 +28,29 @@ api.update(
     keys=api.get("keys", []) or [],
 )
 
+# Garante que a extensão EASM Scan Manager esteja registrada e habilitada
+ext_jar = "/opt/burp/extensions/easm-scan-manager.jar"
+extender = cfg.setdefault("user_options", {}).setdefault("extender", {})
+extensions = extender.setdefault("extensions", [])
+
+easm_found = False
+for ext in extensions:
+    if ext.get("extension_file") == ext_jar:
+        ext["loaded"] = True
+        ext["extension_type"] = "java"
+        easm_found = True
+        break
+
+if not easm_found and os.path.exists(ext_jar):
+    extensions.append({
+        "errors": "ui",
+        "extension_file": ext_jar,
+        "extension_type": "java",
+        "loaded": True,
+        "name": "EASM Scan Manager",
+        "output": "ui",
+    })
+
 with open(target, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=4)
 

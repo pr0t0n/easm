@@ -81,7 +81,7 @@ export default function ReportsPage() {
       scan_id: String(selectedId),
       api_url: apiUrl,
     });
-    return `/custom-report/index.html?${params.toString()}`;
+    return `/easm-report/index.html?${params.toString()}`;
   }, [selectedId, apiUrl]);
 
   const handleOpenNewTab = () => {

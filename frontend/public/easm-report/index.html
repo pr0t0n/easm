@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Relatório EASM Avançado</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; width: 100%; }
+    body {
+      font-family: "Inter", sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #e2e8f0;
+      line-height: 1.6;
+      padding: 0;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 32px;
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .header::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 300px;
+      height: 300px;
+      background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+      border-radius: 50%;
+    }
+
+    .header-content {
+      position: relative;
+      z-index: 1;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #f1f5f9;
+    }
+
+    .header p {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-bottom: 16px;
+    }
+
+    .header-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid #475569;
+    }
+
+    .meta-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .meta-label {
+      font-size: 12px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .meta-value {
+      font-size: 14px;
+      color: #f1f5f9;
+      font-weight: 500;
+    }
+
+    .section {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .section-title i {
+      color: #3b82f6;
+      font-size: 22px;
+    }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .kpi-card {
+      background: linear-gradient(135deg, #334155 0%, #475569 100%);
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+
+    .kpi-icon {
+      font-size: 28px;
+      margin-bottom: 8px;
+      color: #3b82f6;
+    }
+
+    .kpi-label {
+      font-size: 12px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+
+    .kpi-sub {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 4px;
+    }
+
+    .kpi-card.critical .kpi-icon { color: #ef4444; }
+    .kpi-card.high .kpi-icon { color: #f97316; }
+    .kpi-card.medium .kpi-icon { color: #eab308; }
+    .kpi-card.low .kpi-icon { color: #06b6d4; }
+
+    .rating-badge {
+      display: inline-block;
+      padding: 12px 24px;
+      background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+      border-radius: 8px;
+      font-weight: 700;
+      color: white;
+      margin-right: 12px;
+      font-size: 18px;
+    }
+
+    .grade-a { background: linear-gradient(135deg, #10b981 0%, #34d399 100%); }
+    .grade-b { background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%); }
+    .grade-c { background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%); }
+    .grade-d { background: linear-gradient(135deg, #f97316 0%, #fb923c 100%); }
+    .grade-f { background: linear-gradient(135deg, #ef4444 0%, #f87171 100%); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 16px;
+    }
+
+    th {
+      background: #0f172a;
+      border-bottom: 2px solid #475569;
+      padding: 12px;
+      text-align: left;
+      font-weight: 600;
+      color: #94a3b8;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    td {
+      border-bottom: 1px solid #334155;
+      padding: 12px;
+      color: #cbd5e1;
+    }
+
+    tr:hover { background: rgba(59, 130, 246, 0.1); }
+
+    .asset-item {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .asset-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #334155;
+    }
+
+    .asset-address {
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 600;
+      color: #f1f5f9;
+      font-size: 14px;
+    }
+
+    .asset-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+    }
+
+    .stat-badge {
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .stat-badge strong {
+      display: block;
+      font-size: 18px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .tool-badge {
+      display: inline-block;
+      background: #334155;
+      border-radius: 4px;
+      padding: 6px 12px;
+      font-size: 12px;
+      margin-right: 6px;
+      margin-bottom: 6px;
+    }
+
+    .node-item {
+      background: #0f172a;
+      border-left: 3px solid #3b82f6;
+      border-radius: 4px;
+      padding: 12px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .node-name {
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+
+    .node-metric {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+
+    .fair-pillar {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .pillar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .pillar-name {
+      font-weight: 600;
+      color: #f1f5f9;
+      font-size: 14px;
+    }
+
+    .pillar-score {
+      font-size: 24px;
+      font-weight: 700;
+      color: #3b82f6;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background: #334155;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%);
+      border-radius: 3px;
+    }
+
+    .error-box {
+      background: #7f1d1d;
+      border: 1px solid #b91c1c;
+      border-radius: 8px;
+      padding: 16px;
+      color: #fecaca;
+      margin-bottom: 24px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 48px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .spinner {
+      border: 3px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .print-button {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+      border: none;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 8px 32px rgba(59, 130, 246, 0.4);
+      z-index: 1000;
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    .print-button:hover {
+      box-shadow: 0 12px 48px rgba(59, 130, 246, 0.6);
+      transform: translateY(-2px);
+    }
+
+    @media print {
+      body { background: white; }
+      .container { padding: 0; }
+      .print-button { display: none; }
+      .section { page-break-inside: avoid; }
+    }
+
+    .remediation-stat {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px;
+      background: #0f172a;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      border-left: 3px solid #3b82f6;
+    }
+
+    .remediation-label {
+      color: #94a3b8;
+      font-size: 14px;
+    }
+
+    .remediation-value {
+      font-weight: 700;
+      font-size: 18px;
+      color: #f1f5f9;
+    }
+
+    .burp-status {
+      background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .burp-status-badge {
+      font-size: 18px;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 12px;
+    }
+
+    .burp-stats {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .activity-timeline {
+      position: relative;
+      padding-left: 20px;
+    }
+
+    .timeline-item {
+      position: relative;
+      padding: 12px;
+      margin-bottom: 16px;
+      background: #0f172a;
+      border-radius: 4px;
+      border-left: 3px solid #3b82f6;
+    }
+
+    .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -11px;
+      top: 20px;
+      width: 8px;
+      height: 8px;
+      background: #3b82f6;
+      border-radius: 50%;
+      border: 2px solid #1e293b;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 48px;
+      color: #64748b;
+    }
+
+    .empty-state i {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-content">
+      <h1>Relatório EASM Avançado</h1>
+      <p>Análise Completa de Superfície de Ataque Externa</p>
+      <div class="header-meta">
+        <div class="meta-item">
+          <span class="meta-label">ID do Scan</span>
+          <span class="meta-value" id="scanId">-</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Alvo</span>
+          <span class="meta-value" id="targetName">-</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Status</span>
+          <span class="meta-value" id="scanStatus">-</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Data de Conclusão</span>
+          <span class="meta-value" id="completedDate">-</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Duração</span>
+          <span class="meta-value" id="duration">-</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  <div id="loadingState" class="section loading">
+    <div class="spinner"></div>
+    <p>Carregando relatório EASM...</p>
+  </div>
+
+  <!-- Error State -->
+  <div id="errorState" style="display: none;">
+    <div class="error-box">
+      <i class="fas fa-exclamation-circle"></i>
+      <strong>Erro ao carregar relatório</strong>
+      <p id="errorMessage" style="margin-top: 8px; font-size: 14px;"></p>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div id="mainContent" style="display: none;">
+
+    <!-- 1. EASM Rating & FAIR Decomposition -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-shield-halved"></i> Rating EASM e Decomposição FAIR
+      </div>
+      
+      <div style="display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap;">
+        <div>
+          <span class="meta-label">Score EASM</span>
+          <div style="margin-top: 8px;">
+            <span class="rating-badge" id="easmScore">-</span>
+            <span class="rating-badge" id="easmGrade" style="font-size: 18px;">F</span>
+          </div>
+        </div>
+        <div>
+          <span class="meta-label">Ativos Avaliados</span>
+          <div style="margin-top: 8px; font-size: 24px; font-weight: 700; color: #f1f5f9;">
+            <span id="assetsCount">0</span>
+          </div>
+        </div>
+        <div>
+          <span class="meta-label">Total RA (Risk Assessment)</span>
+          <div style="margin-top: 8px; font-size: 24px; font-weight: 700; color: #f1f5f9;">
+            <span id="totalRa">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-title" style="font-size: 16px; margin-top: 24px;">Pilares FAIR</div>
+      <div id="fairPillars" style="margin-top: 12px;"></div>
+    </div>
+
+    <!-- 2. Vulnerability Summary -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-exclamation-triangle"></i> Resumo de Vulnerabilidades
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi-card critical">
+          <div class="kpi-icon"><i class="fas fa-skull-crossbones"></i></div>
+          <div class="kpi-label">Críticas</div>
+          <div class="kpi-value" id="vulnCritical">0</div>
+          <div class="kpi-sub">CVSS ≥ 9.0</div>
+        </div>
+        <div class="kpi-card high">
+          <div class="kpi-icon"><i class="fas fa-fire"></i></div>
+          <div class="kpi-label">Altas</div>
+          <div class="kpi-value" id="vulnHigh">0</div>
+          <div class="kpi-sub">CVSS 7.0 - 8.9</div>
+        </div>
+        <div class="kpi-card medium">
+          <div class="kpi-icon"><i class="fas fa-exclamation-circle"></i></div>
+          <div class="kpi-label">Médias</div>
+          <div class="kpi-value" id="vulnMedium">0</div>
+          <div class="kpi-sub">CVSS 4.0 - 6.9</div>
+        </div>
+        <div class="kpi-card low">
+          <div class="kpi-icon"><i class="fas fa-info-circle"></i></div>
+          <div class="kpi-label">Baixas</div>
+          <div class="kpi-value" id="vulnLow">0</div>
+          <div class="kpi-sub">CVSS 1.0 - 3.9</div>
+        </div>
+      </div>
+
+      <div class="section-title" style="font-size: 16px; margin-top: 24px;">Achados Detalhados (Amostra de 50)</div>
+      <div id="vulnTable" style="margin-top: 12px;"></div>
+    </div>
+
+    <!-- 2.5. Top Recommendations -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-lightbulb"></i> Recomendações Prioritárias
+      </div>
+      <div class="meta-label" style="margin-bottom: 16px;">Total: <strong id="recCountBadge">0</strong> recomendações únicas</div>
+      <div id="recList"></div>
+    </div>
+
+    <!-- 3. Asset Details -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-sitemap"></i> Ativos Descobertos
+      </div>
+      <div class="meta-label" style="margin-bottom: 16px;">Total: <strong id="assetCountBadge">0</strong> ativos</div>
+      <div id="assetsList"></div>
+    </div>
+
+    <!-- 4. Tool Execution -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-tools"></i> Execução de Ferramentas
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Ferramentas Utilizadas</div>
+          <div class="kpi-value" id="toolCount">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Execuções Totais</div>
+          <div class="kpi-value" id="execCount">0</div>
+        </div>
+      </div>
+      <div class="section-title" style="font-size: 14px;">Breakdown por Ferramenta</div>
+      <div id="toolBreakdown" style="margin-top: 12px;"></div>
+    </div>
+
+    <!-- 5. Activity Metrics -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-clock"></i> Métricas de Atividade por Nó
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px;">
+        <div class="kpi-card">
+          <div class="kpi-label">Nós Executados</div>
+          <div class="kpi-value" id="nodeCount">0</div>
+        </div>
+      </div>
+      <div id="activityMetrics"></div>
+    </div>
+
+    <!-- 6. Remediation -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-check-circle"></i> Rastreamento de Remediação
+      </div>
+      <div id="remediationStats"></div>
+    </div>
+
+    <!-- 7. Burp Async -->
+    <div class="section">
+      <div class="section-title">
+        <i class="fas fa-spinner"></i> Status Burp Async
+      </div>
+      <div class="burp-status">
+        <div class="burp-status-badge" id="burpStatus">-</div>
+        <div class="burp-stats" id="burpStats"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<button class="print-button" onclick="window.print();">
+  <i class="fas fa-print"></i> Imprimir / PDF
+</button>
+
+<script src="js/easm-report.js"></script>
+</body>
+</html>

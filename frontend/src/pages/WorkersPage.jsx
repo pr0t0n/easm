@@ -242,7 +242,10 @@ export default function WorkersPage() {
           {/* Pipeline visual */}
           <section className="panel p-5">
             <h3 className="mb-1 text-base font-semibold text-slate-100">Fluxo de Execução</h3>
-            <p className="mb-4 text-xs text-slate-500">Pipeline linear sequencial — cada agente passa o estado ao próximo</p>
+            <p className="mb-4 text-xs text-slate-500">
+              Pipeline com paralelismo — Asset Discovery dispara ThreatIntel e RiskAssessment simultaneamente, 
+              convergindo em Governance → Executive Analysis
+            </p>
             {loading && !pipeline && <p className="text-sm text-slate-400">Carregando pipeline…</p>}
 
             {/* Cards horizontais com setas */}

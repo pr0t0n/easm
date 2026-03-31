@@ -65,6 +65,7 @@ services:
       TZ: America/Sao_Paulo
     ports:
       - "1337:1337"
+      - "8888:8888"
     profiles: ["dev", "prod"]
     volumes:
       - burp_home:/root/.BurpSuite
@@ -138,6 +139,7 @@ services:
       WORKER_MODE: unit
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -162,6 +164,7 @@ services:
       WORKER_MODE: unit
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
@@ -204,6 +207,7 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       BURP_SCAN_TIMEOUT: "2400"
       BURP_PAUSE_MAX_RETRIES: "15"
       BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
@@ -232,6 +236,7 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       BURP_SCAN_TIMEOUT: "2400"
       BURP_PAUSE_MAX_RETRIES: "15"
       BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
@@ -260,6 +265,7 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:
@@ -284,6 +290,7 @@ services:
       EASM_TOOL_EXECUTION_MODE: distributed
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "1337"
+      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
     profiles: ["prod"]
     depends_on:

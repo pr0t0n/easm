@@ -1,3 +1,12 @@
+# ─── Stage 1: Compilar extensão Java (Montoya API) ───────────────────────────
+FROM maven:3.9-eclipse-temurin-21-jammy AS ext-builder
+WORKDIR /ext
+COPY extension/pom.xml .
+RUN mvn dependency:resolve -q
+COPY extension/src/ src/
+RUN mvn package -q -DskipTests
+
+# ─── Stage 2: Runtime ────────────────────────────────────────────────────────
 # eclipse-temurin:21-jre-jammy = Ubuntu 22.04 + Java 21 JRE pré-instalado,
 # funciona em amd64 e arm64 sem precisar adicionar repositórios extras.
 FROM eclipse-temurin:21-jre-jammy
@@ -51,12 +60,15 @@ RUN chmod +x /opt/burp/scripts/*.sh /opt/burp/scripts/*.py 2>/dev/null || true
 # Cria o diretório do browser esperado pelo Burp para evitar erro de path
 RUN mkdir -p "/opt/burpsuite/bin/burpbrowser/${BURP_BROWSER_VERSION}"
 
+# Copia extensão EASM compilada no stage anterior
+COPY --from=ext-builder /ext/target/easm-scan-manager-1.0.0.jar /opt/burp/extensions/easm-scan-manager.jar
+
 # Volume para persistir o estado (EULA aceite, config, projetos)
 VOLUME ["/root/.BurpSuite"]
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=10 \
     CMD python3 -c "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('BURP_API_PORT','1337')+'/v0.1/',timeout=4)"
 
-EXPOSE 1337
+EXPOSE 1337 8888
 
 ENTRYPOINT ["/opt/burp/scripts/entrypoint.sh"]

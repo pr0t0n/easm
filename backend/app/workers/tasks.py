@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.graph.workflow import build_graph, initial_state
-from app.models.models import AppSetting, Finding, ScanJob, ScanLog, ScheduledScan, WorkerHeartbeat
+from app.models.models import AppSetting, Asset, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cve_enrichment_service import enrichment_service
@@ -35,6 +35,107 @@ from app.workers.worker_groups import (
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
 BURP_GUARD_MAX_ATTEMPTS = max(1, min(10, int(os.getenv("BURP_GUARD_MAX_ATTEMPTS", "10"))))
 
+# ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
+_TOOL_FAIR_PILLAR: dict[str, str] = {
+    "naabu": "perimeter_resilience", "nmap": "perimeter_resilience",
+    "nmap-vulscan": "patching_hygiene", "nuclei": "patching_hygiene",
+    "nikto": "patching_hygiene", "wapiti": "patching_hygiene",
+    "sqlmap": "perimeter_resilience", "commix": "perimeter_resilience",
+    "dalfox": "perimeter_resilience", "tplmap": "perimeter_resilience",
+    "wafw00f": "perimeter_resilience", "sslscan": "patching_hygiene",
+    "shcheck": "patching_hygiene", "curl-headers": "patching_hygiene",
+    "burp-cli": "patching_hygiene", "theharvester": "osint_exposure",
+    "h8mail": "osint_exposure", "shodan-cli": "osint_exposure",
+    "subjack": "osint_exposure", "whatweb": "perimeter_resilience",
+    "trufflehog": "osint_exposure",
+}
+
+_SEV_CVSS_FALLBACK: dict[str, float] = {
+    "critical": 9.5, "high": 7.5, "medium": 5.0, "low": 2.5, "info": 0.5,
+}
+
+
+def _get_or_create_asset(
+    db: Session, owner_id: int, domain_or_ip: str, scan_job_id: int,
+    port: int | None = None, protocol: str = "http",
+) -> Asset:
+    """Upsert an Asset row keyed on (owner_id, domain_or_ip, port)."""
+    now = datetime.utcnow()
+    q = db.query(Asset).filter(
+        Asset.owner_id == owner_id,
+        Asset.domain_or_ip == domain_or_ip,
+    )
+    if port is not None:
+        q = q.filter(Asset.port == port)
+    else:
+        q = q.filter(Asset.port.is_(None))
+    asset = q.first()
+    if asset:
+        asset.last_seen = now
+        asset.scan_count = (asset.scan_count or 0) + 1
+        asset.last_scan_id = scan_job_id
+        asset.status = "active"
+    else:
+        asset = Asset(
+            owner_id=owner_id,
+            domain_or_ip=domain_or_ip,
+            port=port,
+            protocol=protocol,
+            first_seen=now,
+            last_seen=now,
+            scan_count=1,
+            last_scan_id=scan_job_id,
+        )
+        db.add(asset)
+        db.flush()
+    return asset
+
+
+def _upsert_vulnerability(
+    db: Session, asset: Asset, finding: Finding,
+    tool: str, cve_id: str | None, cvss: float | None,
+    severity: str, title: str,
+) -> None:
+    """Create or update a Vulnerability row linked to the given asset/finding."""
+    import math
+
+    now = datetime.utcnow()
+    fair_pillar = _TOOL_FAIR_PILLAR.get(tool, "patching_hygiene")
+    cvss_score = cvss or _SEV_CVSS_FALLBACK.get(severity, 5.0)
+
+    existing = db.query(Vulnerability).filter(
+        Vulnerability.asset_id == asset.id,
+        Vulnerability.tool_source == tool,
+        Vulnerability.title == title[:255],
+    ).first()
+
+    if existing:
+        existing.last_detected = now
+        existing.detection_count = (existing.detection_count or 1) + 1
+        existing.finding_id = finding.id
+        existing.remediated_at = None
+        days_open = max(0, (now - existing.first_detected).days)
+        existing.age_factor = round(1 + math.log10(days_open + 1), 3)
+        existing.ra_score = round(cvss_score * existing.age_factor, 2)
+        if cve_id:
+            existing.cve_id = cve_id
+        if cvss is not None:
+            existing.cvss_score = cvss
+    else:
+        db.add(Vulnerability(
+            asset_id=asset.id,
+            finding_id=finding.id,
+            tool_source=tool[:100],
+            cve_id=cve_id,
+            severity=severity,
+            cvss_score=cvss_score,
+            title=title[:255],
+            first_detected=now,
+            last_detected=now,
+            fair_pillar=fair_pillar,
+            age_factor=1.0,
+            ra_score=round(cvss_score * 1.0, 2),
+        ))
 
 def _chunk_targets(targets: list[str], chunk_size: int) -> list[list[str]]:
     return [targets[i:i + chunk_size] for i in range(0, len(targets), chunk_size)]
@@ -549,7 +650,7 @@ def run_burp_scan(
                 flattened.get("asset") or flattened.get("target") or target or ""
             ).strip()[:255] or None
 
-            db.add(Finding(
+            burp_finding = Finding(
                 scan_job_id=parent_job_id,
                 title=title,
                 severity=severity,
@@ -561,7 +662,24 @@ def run_burp_scan(
                 confidence_score=int(vuln.get("confidence_score", 50) or 50),
                 risk_score=vuln.get("risk_score", 5),
                 details=flattened,
-            ))
+            )
+            db.add(burp_finding)
+
+            # ── Persist Vulnerability + Asset (Burp async) ───────────────────
+            if _domain:
+                try:
+                    asset_obj = _get_or_create_asset(
+                        db, parent_job.owner_id, _domain, parent_job_id,
+                        protocol="https",
+                    )
+                    db.flush()
+                    _upsert_vulnerability(
+                        db, asset_obj, burp_finding,
+                        tool="burp-cli", cve_id=cve_id, cvss=_cvss,
+                        severity=severity, title=title,
+                    )
+                except Exception:
+                    pass
             new_count += 1
 
         # ── RUNNING → COMPLETED ───────────────────────────────────────────────
@@ -1368,8 +1486,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 or ""
             ).strip() or None
 
-            db.add(
-                Finding(
+            finding_obj = Finding(
                     scan_job_id=job.id,
                     title=vuln.get("title", "Potential issue"),
                     severity=vuln.get("severity", "low"),
@@ -1382,7 +1499,32 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                     risk_score=vuln.get("risk_score", 1),
                     details=flattened_details,
                 )
-            )
+            db.add(finding_obj)
+
+            # ── Persist Vulnerability + Asset ────────────────────────────────
+            if _domain_col:
+                try:
+                    _port_int = None
+                    if port_hint:
+                        try:
+                            _port_int = int(port_hint)
+                        except (TypeError, ValueError):
+                            pass
+                    _proto = "https" if "443" in str(port_hint) else "http"
+                    asset_obj = _get_or_create_asset(
+                        db, job.owner_id, _domain_col, job.id,
+                        port=_port_int, protocol=_proto,
+                    )
+                    db.flush()
+                    _upsert_vulnerability(
+                        db, asset_obj, finding_obj,
+                        tool=_tool_col or "unknown",
+                        cve_id=cve_id, cvss=_cvss,
+                        severity=vuln.get("severity", "low"),
+                        title=vuln.get("title", "Potential issue"),
+                    )
+                except Exception:
+                    pass
 
         progress, progress_ctx = _progress_from_state(final_state)
         final_state["mission_progress_context"] = progress_ctx
@@ -1395,6 +1537,56 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             "executive_summary":  final_state.get("executive_summary") or "",
         })
         final_state["report_v2"] = existing_report_v2
+        # ───────────────────────────────────────────────────────────────────────
+
+        # ── EASM: Persistir histórico de ratings (AssetRatingHistory) ────────
+        from app.models.models import Asset, AssetRatingHistory
+        easm_rating = final_state.get("easm_rating") or {}
+        fair_decomp = final_state.get("fair_decomposition") or {}
+        discovered_assets = final_state.get("lista_ativos", [])
+        
+        for asset_addr in discovered_assets:
+            # Encontra ou cria o asset
+            asset = db.query(Asset).filter(
+                Asset.owner_id == job.owner_id,
+                Asset.domain_or_ip == asset_addr,
+            ).first()
+            
+            if asset:
+                # Calcula contagem de vulnerabilidades por severidade
+                asset_vulns = db.query(Vulnerability).filter(
+                    Vulnerability.asset_id == asset.id
+                ).all()
+                
+                open_counts = {
+                    "critical": sum(1 for v in asset_vulns if v.severity == "critical" and not v.remediated_at),
+                    "high": sum(1 for v in asset_vulns if v.severity == "high" and not v.remediated_at),
+                    "medium": sum(1 for v in asset_vulns if v.severity == "medium" and not v.remediated_at),
+                }
+                remediated_count = sum(1 for v in asset_vulns if v.remediated_at)
+                
+                # Extrai scores dos pillares
+                pillar_scores = {}
+                if isinstance(fair_decomp, dict) and "pillars" in fair_decomp:
+                    for pillar in fair_decomp.get("pillars", []):
+                        pillar_scores[pillar.get("name", "unknown")] = pillar.get("score", 0)
+                
+                # Grava histórico
+                history = AssetRatingHistory(
+                    asset_id=asset.id,
+                    scan_id=job.id,
+                    easm_rating=float(easm_rating.get("score", 0)),
+                    easm_grade=easm_rating.get("grade", "F"),
+                    open_critical_count=open_counts.get("critical", 0),
+                    open_high_count=open_counts.get("high", 0),
+                    open_medium_count=open_counts.get("medium", 0),
+                    remediated_this_period=remediated_count,
+                    pillar_scores=pillar_scores,
+                    recorded_at=datetime.utcnow(),
+                )
+                db.add(history)
+        
+        db.flush()
         # ───────────────────────────────────────────────────────────────────────
 
         # ── Burp Async: cria ScanJobs filhos e dispara chord ────────────────

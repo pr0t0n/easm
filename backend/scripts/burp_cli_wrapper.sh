@@ -10,6 +10,7 @@ BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1500}"
 BURP_STALE_TIMEOUT="${BURP_STALE_TIMEOUT:-180}"
 BURP_PAUSE_MAX_RETRIES="${BURP_PAUSE_MAX_RETRIES:-10}"
 BURP_PREFLIGHT_CONNECT_TIMEOUT="${BURP_PREFLIGHT_CONNECT_TIMEOUT:-6}"
+BURP_EXT_PORT="${BURP_EXT_PORT:-}"
 
 api_is_alive() {
     python3 - <<'PY' "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
@@ -56,14 +57,42 @@ ensure_api() {
     }
 }
 
-cancel_scan() {
-    # Cancela um scan no Burp REST API via DELETE (best-effort)
-    python3 - <<'PY' "$1" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
+ext_api_is_alive() {
+    python3 - <<'PY' "$BURP_API_HOST" "$BURP_EXT_PORT"
 import sys
 import urllib.request
 
-scan_id, host, port, api_key = sys.argv[1:5]
-if api_key:
+host, port = sys.argv[1:3]
+try:
+    with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=3) as r:
+        raise SystemExit(0 if r.status == 200 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+ensure_ext_api() {
+    [ -z "$BURP_EXT_PORT" ] && return 1
+    _retries=0
+    while [ "$_retries" -lt 10 ]; do
+        if ext_api_is_alive; then return 0; fi
+        _retries=$((_retries + 1))
+        [ "$_retries" -lt 10 ] && sleep 3
+    done
+    echo "Extension API indisponivel em ${BURP_API_HOST}:${BURP_EXT_PORT} apos 10 tentativas." >&2
+    return 1
+}
+
+cancel_scan() {
+    # Cancela um scan via Extension API (DELETE real) ou REST API nativa (best-effort)
+    python3 - <<'PY' "$1" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY" "$BURP_EXT_PORT"
+import sys
+import urllib.request
+
+scan_id, host, port, api_key, ext_port = sys.argv[1:6]
+if ext_port:
+    url = f"http://{host}:{ext_port}/scan/{scan_id}"
+elif api_key:
     url = f"http://{host}:{port}/{api_key}/v0.1/scan/{scan_id}"
 else:
     url = f"http://{host}:{port}/v0.1/scan/{scan_id}"
@@ -78,17 +107,19 @@ PY
 }
 
 poll_scan_status() {
-    python3 - <<'PY' "$1" "$BURP_SCAN_TIMEOUT" "$BURP_STALE_TIMEOUT" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
+    python3 - <<'PY' "$1" "$BURP_SCAN_TIMEOUT" "$BURP_STALE_TIMEOUT" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY" "$BURP_EXT_PORT"
 import json
 import sys
 import time
 import urllib.request
 
-scan_id, timeout_s, stale_s, host, port, api_key = sys.argv[1:7]
+scan_id, timeout_s, stale_s, host, port, api_key, ext_port = sys.argv[1:8]
 timeout_s = int(timeout_s)
 stale_s = int(stale_s)
 
-if api_key:
+if ext_port:
+    url = f"http://{host}:{ext_port}/scan/{scan_id}"
+elif api_key:
     url = f"http://{host}:{port}/{api_key}/v0.1/scan/{scan_id}"
 else:
     url = f"http://{host}:{port}/v0.1/scan/{scan_id}"
@@ -120,7 +151,8 @@ while time.time() < deadline:
             prev_audit = cur_audit
             prev_audit_ts = time.time()
         elif stale_s > 0 and (time.time() - prev_audit_ts) > stale_s:
-            n_issues = len(payload.get("issue_events", []))
+            ie = metrics.get("issue_events") or payload.get("issue_events") or []
+            n_issues = ie if isinstance(ie, int) else len(ie)
             print(f"stale (audit stuck at {cur_audit} for {stale_s}s, {n_issues} issues found)", file=sys.stderr)
             # Exit 3 = stale — caller should export partial results
             raise SystemExit(3)
@@ -161,6 +193,56 @@ run_real_cli() {
     else
         "$REAL_CLI" -t "$BURP_API_HOST" -p "$BURP_API_PORT" "$@"
     fi
+}
+
+start_scan_ext() {
+    # Inicia scan via Extension API (POST /scan), retorna scan_id
+    python3 - <<'PY' "$1" "$BURP_API_HOST" "$BURP_EXT_PORT"
+import json
+import sys
+import urllib.request
+
+url, host, ext_port = sys.argv[1:4]
+api_url = f"http://{host}:{ext_port}/scan"
+data = json.dumps({"url": url}).encode("utf-8")
+req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+        scan_id = body.get("scan_id")
+        if scan_id is not None:
+            print(scan_id)
+            raise SystemExit(0)
+        print(f"Resposta inesperada: {body}", file=sys.stderr)
+        raise SystemExit(1)
+except urllib.error.HTTPError as e:
+    err = e.read().decode("utf-8", errors="replace")
+    print(f"Extension API erro {e.code}: {err}", file=sys.stderr)
+    raise SystemExit(1)
+except Exception as exc:
+    print(f"Falha ao iniciar scan via extension: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+export_scan_ext() {
+    # Exporta issues do scan via Extension API → arquivo JSON
+    python3 - <<'PY' "$1" "$2" "$BURP_API_HOST" "$BURP_EXT_PORT"
+import sys
+import urllib.request
+
+scan_id, output_file, host, ext_port = sys.argv[1:5]
+api_url = f"http://{host}:{ext_port}/scan/{scan_id}/issues"
+try:
+    with urllib.request.urlopen(api_url, timeout=30) as resp:
+        data = resp.read()
+        with open(output_file, "wb") as f:
+            f.write(data)
+    raise SystemExit(0)
+except Exception as exc:
+    print(f"Falha ao exportar issues via extension: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
 alternate_seed_url() {
@@ -253,6 +335,13 @@ legacy_scan() {
 
     ensure_api
 
+    # Tenta usar Extension API se porta configurada
+    _use_ext=""
+    if [ -n "$BURP_EXT_PORT" ] && ensure_ext_api; then
+        _use_ext="1"
+        echo "Usando Extension API (porta ${BURP_EXT_PORT}) para gerenciamento de scans." >&2
+    fi
+
     tmpdir="$(mktemp -d)"
     _active_scan_id=""
     cleanup_and_cancel() {
@@ -264,7 +353,10 @@ legacy_scan() {
     trap 'cleanup_and_cancel' EXIT INT TERM
 
     set +e
-    if [ -n "$config_file" ]; then
+    if [ -n "$_use_ext" ]; then
+        scan_id="$(start_scan_ext "$url")"
+        start_rc=$?
+    elif [ -n "$config_file" ]; then
         start_output="$(run_real_cli -s "$url" -cf "$config_file" 2>&1)"
         start_rc=$?
     else
@@ -273,15 +365,17 @@ legacy_scan() {
     fi
     set -e
 
-    printf '%s\n' "$start_output" >&2
-    if [ "$start_rc" -ne 0 ]; then
-        exit "$start_rc"
+    if [ -n "$_use_ext" ]; then
+        if [ "$start_rc" -ne 0 ]; then exit "$start_rc"; fi
+        echo "Extension API: scan_id=$scan_id" >&2
+    else
+        printf '%s\n' "$start_output" >&2
+        if [ "$start_rc" -ne 0 ]; then exit "$start_rc"; fi
+        scan_id="$(extract_scan_id "$start_output")" || {
+            echo "Nao foi possivel identificar o scan ID retornado pelo burp-api-cli." >&2
+            exit 1
+        }
     fi
-
-    scan_id="$(extract_scan_id "$start_output")" || {
-        echo "Nao foi possivel identificar o scan ID retornado pelo burp-api-cli." >&2
-        exit 1
-    }
     _active_scan_id="$scan_id"
 
     attempts=0
@@ -318,7 +412,10 @@ legacy_scan() {
             fi
 
             set +e
-            if [ -n "$config_file" ]; then
+            if [ -n "$_use_ext" ]; then
+                new_scan_id="$(start_scan_ext "$retry_url" 2>&1)"
+                restart_rc=$?
+            elif [ -n "$config_file" ]; then
                 restart_output="$(run_real_cli -s "$retry_url" -cf "$config_file" 2>&1)"
                 restart_rc=$?
             else
@@ -327,12 +424,13 @@ legacy_scan() {
             fi
             set -e
 
-            printf '%s\n' "$restart_output" >&2
-            if [ "$restart_rc" -ne 0 ]; then
-                continue
+            if [ -n "$_use_ext" ]; then
+                if [ "$restart_rc" -ne 0 ]; then continue; fi
+            else
+                printf '%s\n' "$restart_output" >&2
+                if [ "$restart_rc" -ne 0 ]; then continue; fi
+                new_scan_id="$(extract_scan_id "$restart_output")" || true
             fi
-
-            new_scan_id="$(extract_scan_id "$restart_output")" || true
             if [ -n "$new_scan_id" ]; then
                 # Cancela o scan anterior antes de trocar para o novo
                 cancel_scan "$scan_id" 2>/dev/null || true
@@ -356,18 +454,28 @@ legacy_scan() {
     # Scan com sucesso — não queremos que o trap cancele ele
     _active_scan_id=""
 
-    set +e
-    run_real_cli -S "$scan_id" -e "$tmpdir" >/tmp/burp-export-wrapper.log 2>&1
-    export_rc=$?
-    set -e
-    if [ "$export_rc" -ne 0 ]; then
-        cat /tmp/burp-export-wrapper.log >&2 || true
-        exit "$export_rc"
-    fi
+    if [ -n "$_use_ext" ]; then
+        # Exporta via Extension API
+        json_file="$tmpdir/ext_issues.json"
+        set +e
+        export_scan_ext "$scan_id" "$json_file"
+        export_rc=$?
+        set -e
+        if [ "$export_rc" -ne 0 ]; then exit "$export_rc"; fi
+    else
+        set +e
+        run_real_cli -S "$scan_id" -e "$tmpdir" >/tmp/burp-export-wrapper.log 2>&1
+        export_rc=$?
+        set -e
+        if [ "$export_rc" -ne 0 ]; then
+            cat /tmp/burp-export-wrapper.log >&2 || true
+            exit "$export_rc"
+        fi
 
-    json_file="$tmpdir/Burp_export.json"
-    if [ ! -f "$json_file" ]; then
-        json_file="$(find "$tmpdir" -maxdepth 1 -name '*.json' | head -n 1)"
+        json_file="$tmpdir/Burp_export.json"
+        if [ ! -f "$json_file" ]; then
+            json_file="$(find "$tmpdir" -maxdepth 1 -name '*.json' | head -n 1)"
+        fi
     fi
 
     if [ -z "$json_file" ] || [ ! -f "$json_file" ]; then

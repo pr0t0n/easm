@@ -1,9 +1,9 @@
 MISSION_ITEMS = [
     "1. Amass Subdomain Recon", "2. Sublist3r Expansion", "3. DNSenum Active Enum", "4. MassDNS Validation", "5. IP/Infra Mapping",
     "6. ASN/Network Block Mapping", "7. Naabu Fast Port Scan", "8. Nmap Detailed Scan", "9. Service Banner Grabbing", "10. Wafw00f Detection",
-    "11. HSTS/CSP Header Audit", "12. X-Frame-Options Clickjacking Check", "13. Cookie Flags (Secure/HttpOnly)", "14. Server/X-Powered-By Exposure", "15. Tech Fingerprint WhatWeb/Wappalyzer",
-    "16. FFUF Vhost Fuzzing (Host Header)", "17. Gobuster Content Discovery", "18. Gobuster Fuzzed Headers and Params", "19. S3 Bucket Discovery (CloudEnum)", "20. Subdomain Takeover Check",
-    "21. Robots.txt Analysis", "22. Sitemap.xml Mapping", "23. Juice Shop Score Board Discovery", "24. Juice Shop Administration Surface", "25. Identify Variables: search, user, password, id",
+    "11. HSTS/CSP Header Audit", "12. X-Frame-Options Clickjacking Check", "13. Server/X-Powered-By Exposure", "14. Tech Fingerprint WhatWeb/Wappalyzer", "15. Gobuster Content Discovery",
+    "16. S3 Bucket Discovery (CloudEnum)", "17. Subdomain Takeover Check", "18. Robots.txt Analysis", "19. Sitemap.xml Mapping", "20. Identify Variables: search, user, password, id",
+    "21. Katana URL Crawl Mapping", "22. HTTPX Status/Tech Mapping", "23. Chaos Dataset Correlation", "24. Waymore Historical URL Expansion", "25. Gowitness Screenshot Baseline",
     "26. SQLi Error-based (search)", "27. SQLi Boolean-based (search)", "28. SQLi Auth Bypass (user)", "29. SQLi Auth Bypass (username)", "30. Blind SQLi Time-based (password)",
     "31. SQLMap Assisted Injection Validation", "32. NoSQL Injection (JSON Payloads)", "33. SQLi in Headers (User-Agent/XFF)", "34. IDOR GET (id parameter)", "35. IDOR Profile View (uuid)",
     "36. IDOR POST (Data Change)", "37. IDOR PUT (Update Profile)", "38. IDOR DELETE (Object Removal)", "39. IDOR Export/Download Endpoints", "40. CSRF Password Change (No Token)",
