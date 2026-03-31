@@ -599,7 +599,7 @@ def run_burp_scan(
             os.environ["BURP_LICENSE_KEY"] = burp_license_key
 
         # ── Executa Burp ──────────────────────────────────────────────────────
-        result = run_tool_execution("burp-cli", target, timeout=900)
+        result = run_tool_execution("burp-cli", target, scan_mode=scan_mode)
 
         stdout = result.get("stdout", "")
         return_code = result.get("return_code")

@@ -2487,29 +2487,27 @@ def fingerprint_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Burp Async Scheduling
-# Marca alvos para execução assíncrona do Burp via Celery chord.
-# Não bloqueia o pipeline — os scans são disparados por tasks.py
-# após graph.invoke() retornar.
+# Burp Scheduling (legado)
+# Mantido apenas por compatibilidade de estado/histórico.
+# O fluxo principal atual executa Burp de forma síncrona no RiskAssessment.
 # ─────────────────────────────────────────────────────────────────────────────
 def schedule_burp(state: AgentState, targets: list[str]) -> None:
-    """Agenda scan Burp assíncrono para os alvos fornecidos.
+    """Compatibilidade legada.
 
-    O pipeline continua sem bloquear.  Após ``graph.invoke()`` retornar,
-    ``tasks.py`` lê ``state["burp_targets"]`` e dispara um Celery chord
-    (``run_burp_scan`` × N alvos  →  ``burp_post_process`` callback).
+    Esta função permanece disponível para leitura de estados antigos.
+    O pipeline principal não depende mais de agendamento assíncrono do Burp.
     """
     state["burp_targets"] = list(targets)
     state["burp_status"] = "scheduled"
     state["logs_terminais"].append(
-        f"RiskAssessment:Burp: {len(targets)} alvos agendados para scan assíncrono"
+        f"RiskAssessment:Burp(legado): {len(targets)} alvos marcados em estado"
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EASM Agent 3: Risk Assessment
 # Avalia vulnerabilidades técnicas nos ativos descobertos.
-# Ferramentas ativas: burp-cli (async) + nmap-vulscan + nikto (sync)
+# Ferramentas ativas: burp-cli (sync) + nmap-vulscan + nikto (sync)
 # ─────────────────────────────────────────────────────────────────────────────
 def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
@@ -2527,15 +2525,32 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     
-    # Separar ferramentas: Burp executará assincronamente, outras ferramentas sincronamente
+    # Burp é a ferramenta principal de vulnerabilidade e executa de forma síncrona.
+    # Outras ferramentas também executam de forma síncrona.
     burp_tools = ["burp-cli"] if "burp-cli" in vuln_tools else []
     other_vuln_tools = [t for t in vuln_tools if t != "burp-cli"]
-    
-    # 1. Agendar Burp CLI assíncrono para TODOS os alvos (não bloqueia o pipeline)
+
+    # 1. Executar Burp CLI de forma síncrona em TODOS os alvos do escopo de análise.
     if burp_tools:
-        schedule_burp(state, all_targets)
-    
-    # 2. Executar outras ferramentas de vulnerabilidade apenas em primary_targets (economia de recursos)
+        state["logs_terminais"].append(
+            f"RiskAssessment:Burp: executando de forma síncrona em {len(all_targets)} alvos"
+        )
+        for scan_target in all_targets:
+            burp_findings, _, _, _ = _run_tools_and_collect(
+                state,
+                burp_tools,
+                scan_target,
+                current,
+                "RiskAssessment:Burp",
+            )
+            if burp_findings:
+                all_findings.extend(burp_findings)
+
+        state["burp_targets"] = list(all_targets)
+        state["burp_status"] = "completed"
+        state["burp_async_task_ids"] = []
+
+    # 2. Executar outras ferramentas de vulnerabilidade nos primary_targets.
     for scan_target in primary_targets:
         if other_vuln_tools:
             vuln_findings, _, _, _ = _run_tools_and_collect(state, other_vuln_tools, scan_target, current, "RiskAssessment")
