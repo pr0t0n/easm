@@ -18,6 +18,39 @@ from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
+def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
+    """Persiste current_step e mission_index no ScanJob durante execução do grafo.
+
+    Chamado no início de cada node para que o frontend veja progresso em tempo
+    real, sem depender do pulse thread.
+    """
+    scan_id = state.get("scan_id")
+    if not scan_id:
+        return
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ScanJob
+        _db = SessionLocal()
+        try:
+            job = _db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+            if job and job.status not in ("completed", "failed", "stopped"):
+                job.current_step = step_label
+                mission_items = state.get("mission_items") or []
+                mi = state.get("mission_index", 0)
+                total = max(1, len(mission_items))
+                job.mission_progress = int(round(min(mi, total) / total * 100))
+                # Snapshot mínimo para o frontend consultar via /status
+                sd = dict(job.state_data or {})
+                sd["mission_index"] = mi
+                sd["mission_items"] = mission_items
+                sd["burp_status"] = state.get("burp_status", "none")
+                job.state_data = sd
+                _db.commit()
+        finally:
+            _db.close()
+    except Exception:
+        pass  # Não pode bloquear o pipeline por falha de IO
+
 # EASM pipeline
 GROUP_MISSION_ITEMS: list[str] = [
     "1. AssetDiscovery",
@@ -2194,6 +2227,7 @@ def _step_name(state: AgentState) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 def asset_discovery_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
+    _sync_step_to_db(state, "1. AssetDiscovery")
     current = _step_name(state)
     state["proxima_ferramenta"] = "threat_intel"
     state["logs_terminais"].append(f"AssetDiscovery: {current}")
@@ -2475,6 +2509,7 @@ def schedule_burp(state: AgentState, targets: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
+    _sync_step_to_db(state, "3. RiskAssessment")
     current = _step_name(state)
     vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
     vuln_tools = _adapt_vuln_tools_for_target(state.get("target", ""), vuln_tools)
@@ -2611,6 +2646,7 @@ def api_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 def threat_intel_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
+    _sync_step_to_db(state, "2. ThreatIntel")
     current = _step_name(state)
     state["logs_terminais"].append(f"ThreatIntel: {current}")
 
@@ -2670,6 +2706,7 @@ def osint_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 def governance_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
+    _sync_step_to_db(state, "4. Governance")
     state["logs_terminais"].append("Governance: calculando FAIR+AGE rating")
 
     findings = state.get("vulnerabilidades_encontradas") or []
@@ -2724,6 +2761,7 @@ def governance_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 def executive_analyst_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
+    _sync_step_to_db(state, "5. ExecutiveAnalysis")
     state["logs_terminais"].append("ExecutiveAnalyst: gerando narrativa executiva")
 
     easm_rating = state.get("easm_rating") or {}

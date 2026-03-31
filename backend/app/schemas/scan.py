@@ -58,6 +58,9 @@ class ScanStatusResponse(BaseModel):
     compliance_status: str
     current_step: str
     mission_progress: int
+    mission_index: int = 0
+    mission_items: list[str] = []
+    burp_status: str = "none"
     discovered_ports: list[int]
     pending_port_tests: list[int]
     retry_attempt: int = 0

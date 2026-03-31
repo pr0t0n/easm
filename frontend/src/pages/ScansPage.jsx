@@ -639,7 +639,7 @@ export default function ScansPage() {
             <div className="space-y-6 lg:sticky lg:top-8">
               {/* Mission Progress */}
               {selected && (
-                <MissionProgress scan={selected} logs={logs} />
+                <MissionProgress scan={selected} scanStatus={scanStatus} />
               )}
 
               {/* Logs */}

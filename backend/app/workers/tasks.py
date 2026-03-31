@@ -1002,6 +1002,18 @@ def _start_scan_progress_pulse(scan_id: int, scan_mode: ScanMode, interval_secon
                 elapsed = int(max(0, time.time() - started_at))
                 current_step = str(job.current_step or "em execucao")
                 state_data = job.state_data or {}
+
+                # ── Propaga mission_index / current_step do state para o job ──
+                mi = state_data.get("mission_index")
+                mission_items = state_data.get("mission_items") or []
+                if mi is not None and isinstance(mi, int) and mission_items:
+                    step_label = mission_items[mi] if mi < len(mission_items) else mission_items[-1]
+                    if job.current_step != step_label:
+                        job.current_step = step_label
+                        current_step = step_label
+                    # Também atualiza mission_progress em tempo real
+                    total = max(1, len(mission_items))
+                    job.mission_progress = int(round(min(mi, total) / total * 100))
                 
                 # Emite log simples de progresso a cada pulse
                 pulse_db.add(
