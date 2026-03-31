@@ -6,7 +6,8 @@ START_SCRIPT="${BURP_START_SCRIPT:-/usr/local/bin/start-burp-rest}"
 BURP_API_HOST="${BURP_API_HOST:-burp_rest}"
 BURP_API_PORT="${BURP_API_PORT:-1337}"
 BURP_API_KEY="${BURP_API_KEY:-}"
-BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1800}"
+BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1500}"
+BURP_STALE_TIMEOUT="${BURP_STALE_TIMEOUT:-180}"
 BURP_PAUSE_MAX_RETRIES="${BURP_PAUSE_MAX_RETRIES:-10}"
 BURP_PREFLIGHT_CONNECT_TIMEOUT="${BURP_PREFLIGHT_CONNECT_TIMEOUT:-6}"
 
@@ -55,15 +56,37 @@ ensure_api() {
     }
 }
 
+cancel_scan() {
+    # Cancela um scan no Burp REST API via DELETE (best-effort)
+    python3 - <<'PY' "$1" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
+import sys
+import urllib.request
+
+scan_id, host, port, api_key = sys.argv[1:5]
+if api_key:
+    url = f"http://{host}:{port}/{api_key}/v0.1/scan/{scan_id}"
+else:
+    url = f"http://{host}:{port}/v0.1/scan/{scan_id}"
+try:
+    req = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        pass
+    print(f"Scan {scan_id} cancelado.", file=sys.stderr)
+except Exception as exc:
+    print(f"Falha ao cancelar scan {scan_id}: {exc}", file=sys.stderr)
+PY
+}
+
 poll_scan_status() {
-    python3 - <<'PY' "$1" "$BURP_SCAN_TIMEOUT" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
+    python3 - <<'PY' "$1" "$BURP_SCAN_TIMEOUT" "$BURP_STALE_TIMEOUT" "$BURP_API_HOST" "$BURP_API_PORT" "$BURP_API_KEY"
 import json
 import sys
 import time
 import urllib.request
 
-scan_id, timeout_s, host, port, api_key = sys.argv[1:6]
+scan_id, timeout_s, stale_s, host, port, api_key = sys.argv[1:7]
 timeout_s = int(timeout_s)
+stale_s = int(stale_s)
 
 if api_key:
     url = f"http://{host}:{port}/{api_key}/v0.1/scan/{scan_id}"
@@ -73,6 +96,11 @@ else:
 deadline = time.time() + timeout_s
 last_status = "unknown"
 
+# Stale detection: se audit_requests_made não muda por stale_s segundos, considerar
+# o scan como "stale" e forçar export dos resultados parciais.
+prev_audit = -1
+prev_audit_ts = time.time()
+
 while time.time() < deadline:
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
@@ -80,10 +108,24 @@ while time.time() < deadline:
         metrics = payload.get("scan_metrics") or {}
         last_status = str(metrics.get("scan_status") or payload.get("scan_status") or "unknown").strip().lower()
         print(last_status)
+
         if last_status == "paused":
             raise SystemExit(2)
         if last_status in {"succeeded", "failed", "cancelled"}:
             raise SystemExit(0)
+
+        # Stale detection
+        cur_audit = int(metrics.get("audit_requests_made", 0))
+        if cur_audit != prev_audit:
+            prev_audit = cur_audit
+            prev_audit_ts = time.time()
+        elif stale_s > 0 and (time.time() - prev_audit_ts) > stale_s:
+            n_issues = len(payload.get("issue_events", []))
+            print(f"stale (audit stuck at {cur_audit} for {stale_s}s, {n_issues} issues found)", file=sys.stderr)
+            # Exit 3 = stale — caller should export partial results
+            raise SystemExit(3)
+    except SystemExit:
+        raise
     except Exception:
         print(last_status)
     time.sleep(5)
@@ -212,7 +254,14 @@ legacy_scan() {
     ensure_api
 
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    _active_scan_id=""
+    cleanup_and_cancel() {
+        if [ -n "$_active_scan_id" ]; then
+            cancel_scan "$_active_scan_id" 2>/dev/null || true
+        fi
+        rm -rf "$tmpdir"
+    }
+    trap 'cleanup_and_cancel' EXIT INT TERM
 
     set +e
     if [ -n "$config_file" ]; then
@@ -233,6 +282,7 @@ legacy_scan() {
         echo "Nao foi possivel identificar o scan ID retornado pelo burp-api-cli." >&2
         exit 1
     }
+    _active_scan_id="$scan_id"
 
     attempts=0
     last_status="unknown"
@@ -248,6 +298,13 @@ legacy_scan() {
         last_status="$(printf '%s\n' "$poll_output" | tail -n 1 | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
 
         if [ "$poll_rc" -eq 0 ]; then
+            break
+        fi
+
+        # Stale scan: audit requests não progridem → exportar resultados parciais
+        if [ "$poll_rc" -eq 3 ]; then
+            last_status="succeeded"
+            echo "Scan Burp ${scan_id} estagnado (stale). Exportando resultados parciais." >&2
             break
         fi
 
@@ -277,7 +334,10 @@ legacy_scan() {
 
             new_scan_id="$(extract_scan_id "$restart_output")" || true
             if [ -n "$new_scan_id" ]; then
+                # Cancela o scan anterior antes de trocar para o novo
+                cancel_scan "$scan_id" 2>/dev/null || true
                 scan_id="$new_scan_id"
+                _active_scan_id="$scan_id"
                 url="$retry_url"
                 alternate_url="$(alternate_seed_url "$url")"
             fi
@@ -292,6 +352,9 @@ legacy_scan() {
         echo "Scan Burp ${scan_id} terminou com status ${last_status}." >&2
         exit 1
     fi
+
+    # Scan com sucesso — não queremos que o trap cancele ele
+    _active_scan_id=""
 
     set +e
     run_real_cli -S "$scan_id" -e "$tmpdir" >/tmp/burp-export-wrapper.log 2>&1

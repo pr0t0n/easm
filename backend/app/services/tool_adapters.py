@@ -44,7 +44,7 @@ TOOL_SPECIFIC_TIMEOUTS = {
     # Nuclei e Nmap podem levar ~10min por alvo em varreduras completas.
     "nmap": 600,
     "nmap-vulscan": 600,
-    "burp-cli": 900,
+    "burp-cli": 1860,
     "shodan-cli": 60,
     "vulscan": 600,
     "nuclei": 600,
