@@ -19,6 +19,7 @@ from app.models.models import (
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
+from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
@@ -374,6 +375,54 @@ def _normalize_recommendation(details: dict) -> str:
     if severity == "medium":
         return "Planejar correcao em curto prazo e monitorar exposicao residual."
     return "Registrar no backlog de seguranca, corrigir e confirmar por reteste."
+
+
+def _build_cve_recommendation(cve_id: str, technical: dict, details: dict, severity: str) -> dict[str, object]:
+    normalized_cve = _sanitize_text(cve_id or "")
+    if not normalized_cve:
+        return {
+            "summary": "",
+            "actions": [],
+            "priority": "",
+            "validation": [],
+        }
+
+    service = _sanitize_text(technical.get("service") or details.get("service") or "")
+    version = _sanitize_text(technical.get("version") or details.get("version") or "")
+    endpoint = _sanitize_text(technical.get("endpoint") or details.get("endpoint") or "/")
+    known_exploited = bool(details.get("known_exploited"))
+    cvss_severity = _sanitize_text(details.get("cvss_severity") or severity or "")
+
+    if service and version:
+        primary_action = f"Atualizar {service} da versao {version} para release corrigida pelo fornecedor referente ao {normalized_cve}."
+    elif service:
+        primary_action = f"Aplicar patch ou upgrade suportado pelo fornecedor do servico {service} referente ao {normalized_cve}."
+    else:
+        primary_action = f"Aplicar o patch oficial, hotfix ou mitigacao compensatoria publicada para o {normalized_cve}."
+
+    exposure_action = (
+        f"Restringir temporariamente a exposicao do endpoint {endpoint} e revisar controles de acesso ate a correcao ser validada."
+        if endpoint and endpoint != "/"
+        else "Restringir a exposicao externa do servico afetado ate a correcao ser validada em producao."
+    )
+
+    threat_action = (
+        "Tratar como prioridade maxima, pois o CVE consta em fontes de exploracao conhecida e requer janela emergencial."
+        if known_exploited
+        else "Validar exploitabilidade no ambiente e priorizar a janela de correcao conforme criticidade do ativo afetado."
+    )
+
+    summary = f"CVE {normalized_cve}: vulnerabilidade {cvss_severity or severity or 'relevante'} que exige remediacao orientada ao servico e ao contexto exposto."
+
+    return {
+        "summary": summary,
+        "actions": [primary_action, exposure_action, threat_action],
+        "priority": "critica" if known_exploited or str(severity).lower() == "critical" else str(severity or "media").lower(),
+        "validation": [
+            f"Confirmar em reteste que o {normalized_cve} nao esta mais detectavel no ativo afetado.",
+            "Validar versao corrigida, resposta esperada da aplicacao e inexistencia de regressao funcional.",
+        ],
+    }
 
 
 def _extract_ports_from_text(value: str | None) -> set[int]:
@@ -2567,12 +2616,33 @@ def scan_report(
     for finding in findings:
         details = finding.details or {}
         normalized_title = _normalize_finding_title(finding.title)
-        recommendation_payload = _extract_recommendation_payload(details)
+        sev = str(finding.severity or "low").lower()
+        stored_ai_recommendation = any(
+            isinstance(details.get(key), str) and str(details.get(key)).strip()
+            for key in ["qwen_recomendacao_pt", "cloudcode_recomendacao_pt"]
+        )
+        ai_recommendations = {}
+        if not stored_ai_recommendation:
+            try:
+                ai_recommendations = generate_portuguese_recommendations(
+                    {
+                        "title": normalized_title,
+                        "severity": sev,
+                        "cve": finding.cve,
+                        "details": details,
+                    }
+                )
+            except Exception:
+                ai_recommendations = {}
+
+        recommendation_source = {**details, **ai_recommendations}
+        recommendation_payload = _extract_recommendation_payload(recommendation_source)
         technical = _extract_technical_details(details, job.target_query)
         category = _infer_category(normalized_title, details)
-        sev = str(finding.severity or "low").lower()
         framework_ctx = _framework_context(category, normalized_title, details)
         recommendation_ctx = _technical_recommendation(category, normalized_title, sev)
+        cve_recommendation = _build_cve_recommendation(_sanitize_text(finding.cve or ""), technical, details, sev)
+        
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
         reasons = build_priority_reason(normalized_title, finding.severity, fair, age)
@@ -2614,8 +2684,15 @@ def scan_report(
                 "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or framework_ctx.get("nist") or "-"),
                 "iso_control": _sanitize_text(details.get("iso_control") or details.get("iso27001") or framework_ctx.get("iso") or "-"),
                 "cis_control": _sanitize_text(details.get("cis_control") or framework_ctx.get("cis") or "-"),
-                "recommendation": _normalize_recommendation({**details, "severity": sev}),
+                "recommendation": _normalize_recommendation({**recommendation_source, "severity": sev}),
                 "recommendation_structured": recommendation_payload,
+                "recommendation_llm": recommendation_payload,
+                "recommendation_environment": {
+                    "required_fix": _sanitize_multiline_text(str(recommendation_ctx.get("required_fix") or "")),
+                    "controls": recommendation_ctx.get("controls") or [],
+                    "validations": recommendation_ctx.get("validations") or [],
+                },
+                "recommendation_cve": cve_recommendation,
                 "recommendation_required": _sanitize_multiline_text(str(recommendation_ctx.get("required_fix") or "")),
                 "recommendation_controls": recommendation_ctx.get("controls") or [],
                 "recommendation_validation": recommendation_ctx.get("validations") or [],

@@ -496,6 +496,17 @@ function renderVulnCard(vuln, index) {
   const evidence = vuln.evidence && vuln.evidence !== '-' ? vuln.evidence : null;
   const payload = vuln.payload && vuln.payload !== '-' ? vuln.payload : null;
   const rec = vuln.recommendation || 'Ver documentação do achado.';
+  const llmRecommendation = vuln.recommendation_llm || vuln.recommendation_structured || {};
+  const llmSummary = llmRecommendation.resumo || '';
+  const llmMitigations = Array.isArray(llmRecommendation.mitigacoes) ? llmRecommendation.mitigacoes.filter(Boolean) : [];
+  const environmentRecommendation = vuln.recommendation_environment || {};
+  const envRequiredFix = environmentRecommendation.required_fix || vuln.recommendation_required || '';
+  const envControls = Array.isArray(environmentRecommendation.controls)
+    ? environmentRecommendation.controls.filter(Boolean)
+    : (Array.isArray(vuln.recommendation_controls) ? vuln.recommendation_controls.filter(Boolean) : []);
+  const cveRecommendation = vuln.recommendation_cve || {};
+  const cveSummary = cveRecommendation.summary || '';
+  const cveActions = Array.isArray(cveRecommendation.actions) ? cveRecommendation.actions.filter(Boolean) : [];
   const validation = Array.isArray(vuln?.recommendation_validation) && vuln.recommendation_validation.length
     ? vuln.recommendation_validation.join(' | ')
     : '-';
@@ -555,8 +566,26 @@ function renderVulnCard(vuln, index) {
         <div class="vuln-detail-label" style="color:#facc15"><i class="fas fa-terminal"></i> Payload</div>
         <div class="vuln-code" style="color:#facc15">${esc(truncate(payload, 500))}</div>
       </div>` : ''}
+      ${cve && (cveSummary || cveActions.length) ? `
+      <div class="vuln-rec-box" style="border-left-color:#fb7185">
+        <div class="vuln-detail-label" style="color:#fb7185"><i class="fas fa-bug"></i> Recomendação orientada ao CVE</div>
+        <div class="vuln-detail-value">${esc(cveSummary || `Aplicar correção específica para ${cve}.`)}</div>
+        ${cveActions.length ? `<div class="vuln-detail-value" style="margin-top:8px">${cveActions.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
+      </div>` : ''}
+      ${envRequiredFix || envControls.length ? `
+      <div class="vuln-rec-box" style="border-left-color:#60a5fa">
+        <div class="vuln-detail-label" style="color:#60a5fa"><i class="fas fa-server"></i> Recomendação para o ambiente</div>
+        <div class="vuln-detail-value">${esc(envRequiredFix || rec)}</div>
+        ${envControls.length ? `<div class="vuln-detail-value" style="margin-top:8px">${envControls.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
+      </div>` : ''}
+      ${llmSummary || llmMitigations.length ? `
+      <div class="vuln-rec-box" style="border-left-color:#34d399">
+        <div class="vuln-detail-label" style="color:#34d399"><i class="fas fa-brain"></i> Recomendação gerada por IA</div>
+        <div class="vuln-detail-value">${esc(llmSummary || rec)}</div>
+        ${llmMitigations.length ? `<div class="vuln-detail-value" style="margin-top:8px">${llmMitigations.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
+      </div>` : ''}
       <div class="vuln-rec-box">
-        <div class="vuln-detail-label"><i class="fas fa-wrench"></i> Recomendação</div>
+        <div class="vuln-detail-label"><i class="fas fa-wrench"></i> Resumo consolidado</div>
         <div class="vuln-detail-value">${esc(rec)}</div>
       </div>
       <div class="vuln-detail-item">
