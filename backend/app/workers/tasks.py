@@ -358,150 +358,169 @@ def burp_scan_guard() -> dict[str, Any]:
 # Burp Async: execução desacoplada do pipeline principal
 # ─────────────────────────────────────────────────────────────────────────────
 
+def dispatch_burp_async(
+    db: Session,
+    parent_job: ScanJob,
+    targets: list[str],
+    scan_mode: str,
+) -> list[str]:
+    """Cria ScanJobs filhos (tool=burp) e dispara chord Celery.
+
+    Chamado por ``_execute_scan`` após ``graph.invoke()`` retornar, quando
+    ``state["burp_status"] == "scheduled"``.
+
+    Retorna lista de Celery task IDs disparados.
+    """
+    from celery import chord as celery_chord, group as celery_group
+
+    vuln_queue = group_queue("analise_vulnerabilidade", mode=scan_mode)
+
+    task_signatures = []
+    burp_job_ids: list[int] = []
+
+    for target in targets:
+        # Requisito 2: cria ScanJob no banco com tool="burp"
+        burp_job = ScanJob(
+            owner_id=parent_job.owner_id,
+            access_group_id=parent_job.access_group_id,
+            target_query=target,
+            status="pending",
+            mode=scan_mode,
+            compliance_status="approved",
+            current_step="Burp async (aguardando)",
+            state_data={
+                "parent_scan_job_id": parent_job.id,
+                "tool": "burp",
+                "target": target,
+            },
+        )
+        db.add(burp_job)
+        db.flush()
+        burp_job_ids.append(burp_job.id)
+
+        db.add(ScanLog(
+            scan_job_id=burp_job.id,
+            source="burp.dispatch",
+            level="INFO",
+            message=f"ScanJob criado para Burp async: target={target} parent={parent_job.id}",
+        ))
+
+        # Requisito 2: dispara run_burp_scan.delay(job_id)
+        task_signatures.append(
+            run_burp_scan.s(
+                burp_job_id=burp_job.id,
+                parent_job_id=parent_job.id,
+                target=target,
+                scan_mode=scan_mode,
+            ).set(queue=vuln_queue)
+        )
+
+    db.add(ScanLog(
+        scan_job_id=parent_job.id,
+        source="burp.dispatch",
+        level="INFO",
+        message=f"Chord Burp disparado: {len(targets)} alvos, jobs={burp_job_ids}",
+    ))
+    log_audit(
+        db,
+        event_type="burp.dispatch",
+        message=f"Burp async dispatched: {len(targets)} targets",
+        scan_job_id=parent_job.id,
+        metadata={"burp_job_ids": burp_job_ids, "targets": targets},
+    )
+    db.commit()
+
+    # Dispara chord: group(run_burp_scan × N) → burp_post_process callback
+    celery_chord(celery_group(task_signatures))(
+        burp_post_process.s(parent_job_id=parent_job.id).set(queue=vuln_queue)
+    )
+
+    return [str(j) for j in burp_job_ids]
+
+
 @celery.task(
     name="burp.run_scan",
     bind=True,
-    queue="worker.unit.analise_vulnerabilidade",
     max_retries=2,
     default_retry_delay=60,
     acks_late=True,
 )
-def run_burp_scan(self, scan_job_id: int, target: str, scan_mode: str = "unit"):
+def run_burp_scan(
+    self,
+    burp_job_id: int,
+    parent_job_id: int,
+    target: str,
+    scan_mode: str = "unit",
+):
     """Executa scan Burp assíncrono para um único alvo.
 
-    Retorna dict com findings parseados (usados pelo chord callback).
+    Requisito 4: controla completamente o ciclo de vida do Burp.
+    - Atualiza ScanJob: PENDING → RUNNING → COMPLETED/FAILED
+    - Salva findings no banco
+    - Registra logs e heartbeat
     """
     from app.graph.workflow import _extract_burp_cli_findings
 
     db: Session = SessionLocal()
     try:
-        job = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
-        if not job:
+        burp_job = db.query(ScanJob).filter(ScanJob.id == burp_job_id).first()
+        parent_job = db.query(ScanJob).filter(ScanJob.id == parent_job_id).first()
+        if not burp_job or not parent_job:
             return {"ok": False, "error": "job_not_found", "target": target, "findings": []}
 
-        # Configura license key do Burp a partir do DB
-        burp_enabled, burp_license_key = _get_burp_runtime_config(db, job.owner_id)
-        if burp_enabled and burp_license_key:
-            os.environ["BURP_LICENSE_KEY"] = burp_license_key
-
+        # ── PENDING → RUNNING ─────────────────────────────────────────────────
+        burp_job.status = "running"
+        burp_job.current_step = f"Burp scanning: {target}"
+        _touch_worker_heartbeat(
+            db,
+            scan_mode=scan_mode,
+            status="busy",
+            scan_id=burp_job.id,
+            task_name="burp.run_scan",
+        )
         db.add(ScanLog(
-            scan_job_id=scan_job_id,
+            scan_job_id=burp_job.id,
             source="burp.async",
             level="INFO",
-            message=f"Burp async scan iniciado: {target}",
+            message=f"Burp scan RUNNING: {target}",
+        ))
+        db.add(ScanLog(
+            scan_job_id=parent_job_id,
+            source="burp.async",
+            level="INFO",
+            message=f"Burp async scan iniciado: {target} (job={burp_job_id})",
         ))
         db.commit()
 
+        # Configura license key do Burp a partir do DB
+        burp_enabled, burp_license_key = _get_burp_runtime_config(db, parent_job.owner_id)
+        if burp_enabled and burp_license_key:
+            os.environ["BURP_LICENSE_KEY"] = burp_license_key
+
+        # ── Executa Burp ──────────────────────────────────────────────────────
         result = run_tool_execution("burp-cli", target, timeout=900)
 
         stdout = result.get("stdout", "")
         return_code = result.get("return_code")
-
         findings = _extract_burp_cli_findings(stdout, "risk_assessment", target)
 
-        db.add(ScanLog(
-            scan_job_id=scan_job_id,
-            source="burp.async",
-            level="INFO",
-            message=f"Burp async scan concluído: {target} findings={len(findings)} rc={return_code}",
-        ))
-        db.commit()
-
-        return {
-            "ok": True,
-            "scan_job_id": scan_job_id,
-            "target": target,
-            "findings": findings,
-            "return_code": return_code,
-        }
-    except Exception as exc:
-        db.rollback()
-        try:
-            db.add(ScanLog(
-                scan_job_id=scan_job_id,
-                source="burp.async",
-                level="ERROR",
-                message=f"Burp async scan falhou: {target} error={exc}",
-            ))
-            db.commit()
-        except Exception:
-            pass
-        raise self.retry(exc=exc)
-    finally:
-        db.close()
-
-
-@celery.task(name="burp.post_process", queue="worker.unit.analise_vulnerabilidade")
-def burp_post_process(burp_results: list, scan_job_id: int):
-    """Chord callback: persiste findings do Burp e recomputa Governance + Executive.
-
-    Executado automaticamente quando todos os ``run_burp_scan`` do chord terminam.
-    Recebe ``burp_results`` (lista de dicts retornados por cada task) como primeiro
-    argumento (injetado pelo Celery chord).
-    """
-    from app.graph.workflow import governance_node, executive_analyst_node
-    from sqlalchemy.orm.attributes import flag_modified
-
-    db: Session = SessionLocal()
-    try:
-        job = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
-        if not job:
-            return {"ok": False, "error": "job_not_found"}
-
-        # ── 1. Coleta findings de todos os Burp scans ────────────────────────
-        all_burp_findings: list[dict] = []
-        successful_scans = 0
-        failed_scans = 0
-        for result in (burp_results or []):
-            if isinstance(result, dict) and result.get("ok"):
-                all_burp_findings.extend(result.get("findings", []))
-                successful_scans += 1
-            else:
-                failed_scans += 1
-
-        db.add(ScanLog(
-            scan_job_id=scan_job_id,
-            source="burp.post_process",
-            level="INFO",
-            message=(
-                f"Burp post-process iniciado: {len(all_burp_findings)} findings "
-                f"de {successful_scans} scans OK, {failed_scans} falhas"
-            ),
-        ))
-        db.commit()
-
-        # ── 2. Persiste findings do Burp (com dedup) ─────────────────────────
+        # ── Persiste findings no banco (Requisito 4) ──────────────────────────
         known_patterns = [
             row[0]
             for row in db.query(Finding.title).filter(Finding.title.isnot(None)).distinct().limit(500).all()
             if row and row[0]
         ]
-        existing_keys: set[tuple[str, str, str, str]] = set()
-        for f in db.query(Finding).filter(Finding.scan_job_id == scan_job_id).all():
-            existing_keys.add((
-                str(f.title or "").strip().lower(),
-                str(f.severity or "low").strip().lower(),
-                str((f.details or {}).get("source_worker", "")).strip().lower(),
-                str(f.tool or "").strip().lower(),
-            ))
-
         new_count = 0
-        for vuln in all_burp_findings:
+        for vuln in findings:
             details = dict(vuln)
             nested = details.get("details") if isinstance(details.get("details"), dict) else {}
             flattened = {**nested, **details}
             flattened.pop("details", None)
             flattened["source_worker"] = "burp_async"
-            flattened["scan_mode"] = job.mode or "unit"
+            flattened["scan_mode"] = scan_mode
 
             title = str(vuln.get("title", "Burp finding")).strip()
             severity = str(vuln.get("severity", "medium")).strip().lower()
-            tool_hint = str(flattened.get("tool") or "burp-cli").strip().lower()
-
-            dedupe_key = (title.lower(), severity, "burp_async", tool_hint)
-            if dedupe_key in existing_keys:
-                continue
-            existing_keys.add(dedupe_key)
 
             try:
                 recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
@@ -527,11 +546,11 @@ def burp_post_process(burp_results: list, scan_job_id: int):
             ).strip() or None
 
             _domain = str(
-                flattened.get("asset") or flattened.get("target") or job.target_query or ""
+                flattened.get("asset") or flattened.get("target") or target or ""
             ).strip()[:255] or None
 
             db.add(Finding(
-                scan_job_id=scan_job_id,
+                scan_job_id=parent_job_id,
                 title=title,
                 severity=severity,
                 cve=cve_id,
@@ -545,11 +564,126 @@ def burp_post_process(burp_results: list, scan_job_id: int):
             ))
             new_count += 1
 
+        # ── RUNNING → COMPLETED ───────────────────────────────────────────────
+        burp_job.status = "completed"
+        burp_job.current_step = "Burp concluído"
+        burp_job.state_data = {
+            **(burp_job.state_data or {}),
+            "findings_count": new_count,
+            "return_code": return_code,
+            "completed_at": datetime.utcnow().isoformat(),
+        }
+        _touch_worker_heartbeat(
+            db,
+            scan_mode=scan_mode,
+            status="idle",
+            scan_id=None,
+            task_name=None,
+        )
+        db.add(ScanLog(
+            scan_job_id=burp_job.id,
+            source="burp.async",
+            level="INFO",
+            message=f"Burp scan COMPLETED: {target} findings={new_count} rc={return_code}",
+        ))
+        db.add(ScanLog(
+            scan_job_id=parent_job_id,
+            source="burp.async",
+            level="INFO",
+            message=f"Burp async concluído: {target} findings={new_count} (job={burp_job_id})",
+        ))
         db.commit()
 
-        # ── 3. Recomputa Governance + Executive com TODAS as findings ─────────
+        return {
+            "ok": True,
+            "burp_job_id": burp_job_id,
+            "parent_job_id": parent_job_id,
+            "target": target,
+            "findings_count": new_count,
+            "return_code": return_code,
+        }
+    except Exception as exc:
+        db.rollback()
+        try:
+            # ── RUNNING → FAILED ──────────────────────────────────────────────
+            burp_job = db.query(ScanJob).filter(ScanJob.id == burp_job_id).first()
+            if burp_job:
+                burp_job.status = "failed"
+                burp_job.last_error = str(exc)
+                burp_job.current_step = "Burp falhou"
+            _touch_worker_heartbeat(
+                db,
+                scan_mode=scan_mode,
+                status="error",
+                scan_id=burp_job_id,
+                task_name="burp.run_scan",
+            )
+            db.add(ScanLog(
+                scan_job_id=burp_job_id,
+                source="burp.async",
+                level="ERROR",
+                message=f"Burp scan FAILED: {target} error={exc}",
+            ))
+            db.add(ScanLog(
+                scan_job_id=parent_job_id,
+                source="burp.async",
+                level="ERROR",
+                message=f"Burp async falhou: {target} error={exc} (job={burp_job_id})",
+            ))
+            db.commit()
+        except Exception:
+            pass
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery.task(name="burp.post_process")
+def burp_post_process(burp_results: list, parent_job_id: int):
+    """Chord callback: recomputa Governance + Executive com findings completos.
+
+    Requisito 5: após finalização do Burp, dispara reprocessamento parcial
+    atualizando diretamente os dados consumidos pelos agentes posteriores.
+
+    Requisito 6: pipeline suporta dois momentos:
+    - execução inicial (sem Burp completo) — já feita pelo graph.invoke()
+    - execução complementar (com Burp completo) — este callback
+    """
+    from app.graph.workflow import governance_node, executive_analyst_node
+    from sqlalchemy.orm.attributes import flag_modified
+
+    db: Session = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == parent_job_id).first()
+        if not job:
+            return {"ok": False, "error": "job_not_found"}
+
+        # ── 1. Contabiliza resultados do chord ────────────────────────────────
+        successful_scans = 0
+        failed_scans = 0
+        total_findings = 0
+        for result in (burp_results or []):
+            if isinstance(result, dict) and result.get("ok"):
+                successful_scans += 1
+                total_findings += result.get("findings_count", 0)
+            else:
+                failed_scans += 1
+
+        db.add(ScanLog(
+            scan_job_id=parent_job_id,
+            source="burp.post_process",
+            level="INFO",
+            message=(
+                f"Burp post-process iniciado: {total_findings} findings "
+                f"de {successful_scans} scans OK, {failed_scans} falhas"
+            ),
+        ))
+        db.commit()
+
+        # ── 2. Recomputa Governance + Executive com TODAS as findings ─────────
+        # Findings do Burp já foram persistidas por cada run_burp_scan (Req 4)
         all_db_findings = db.query(Finding).filter(
-            Finding.scan_job_id == scan_job_id
+            Finding.scan_job_id == parent_job_id
         ).all()
 
         vulns_for_governance = []
@@ -563,9 +697,8 @@ def burp_post_process(burp_results: list, scan_job_id: int):
             })
 
         state_data = dict(job.state_data or {})
-        # Reconstrói estado mínimo para os nodes de Governance e Executive
         mini_state = {
-            "scan_id": scan_job_id,
+            "scan_id": parent_job_id,
             "target": job.target_query or "",
             "scan_mode": job.mode or "unit",
             "easm_segment": state_data.get("easm_segment", "Digital Services"),
@@ -587,21 +720,20 @@ def burp_post_process(burp_results: list, scan_job_id: int):
             mini_state = executive_analyst_node(mini_state)
         except Exception as gov_exc:
             db.add(ScanLog(
-                scan_job_id=scan_job_id,
+                scan_job_id=parent_job_id,
                 source="burp.post_process",
                 level="WARNING",
                 message=f"Recompute governance/executive falhou: {gov_exc}",
             ))
 
-        # ── 4. Atualiza state_data do ScanJob ────────────────────────────────
+        # ── 3. Atualiza state_data do ScanJob (Requisito 7: consistência) ─────
         state_data["easm_rating"] = mini_state.get("easm_rating") or state_data.get("easm_rating") or {}
         state_data["fair_decomposition"] = mini_state.get("fair_decomposition") or state_data.get("fair_decomposition") or {}
         state_data["executive_summary"] = mini_state.get("executive_summary") or state_data.get("executive_summary") or ""
         state_data["burp_status"] = "completed"
         state_data["burp_completed_at"] = datetime.utcnow().isoformat()
-        state_data["burp_findings_count"] = new_count
+        state_data["burp_findings_count"] = total_findings
 
-        # Atualiza report_v2
         report_v2 = state_data.get("report_v2") or {}
         report_v2.update({
             "easm_rating": state_data["easm_rating"],
@@ -614,11 +746,11 @@ def burp_post_process(burp_results: list, scan_job_id: int):
         flag_modified(job, "state_data")
 
         db.add(ScanLog(
-            scan_job_id=scan_job_id,
+            scan_job_id=parent_job_id,
             source="burp.post_process",
             level="INFO",
             message=(
-                f"Burp post-process concluído: {new_count} findings persistidos, "
+                f"Burp post-process concluído: {total_findings} findings, "
                 f"rating={state_data['easm_rating'].get('score', 'N/A')}/100 "
                 f"(Grau {state_data['easm_rating'].get('grade', 'N/A')})"
             ),
@@ -626,17 +758,21 @@ def burp_post_process(burp_results: list, scan_job_id: int):
         log_audit(
             db,
             event_type="burp.post_process_completed",
-            message=f"Burp async concluído: {new_count} findings, governance recomputada",
-            scan_job_id=scan_job_id,
-            metadata={"burp_findings": new_count, "successful_scans": successful_scans, "failed_scans": failed_scans},
+            message=f"Burp async concluído: {total_findings} findings, governance recomputada",
+            scan_job_id=parent_job_id,
+            metadata={
+                "burp_findings": total_findings,
+                "successful_scans": successful_scans,
+                "failed_scans": failed_scans,
+            },
         )
         db.commit()
-        return {"ok": True, "findings_count": new_count, "successful_scans": successful_scans}
+        return {"ok": True, "findings_count": total_findings, "successful_scans": successful_scans}
     except Exception as exc:
         db.rollback()
         try:
             db.add(ScanLog(
-                scan_job_id=scan_job_id,
+                scan_job_id=parent_job_id,
                 source="burp.post_process",
                 level="ERROR",
                 message=f"Burp post-process falhou: {exc}",
@@ -1249,27 +1385,14 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         final_state["report_v2"] = existing_report_v2
         # ───────────────────────────────────────────────────────────────────────
 
-        # ── Burp Async: dispara chord se houver alvos agendados ───────────────
+        # ── Burp Async: cria ScanJobs filhos e dispara chord ────────────────
         burp_targets = final_state.get("burp_targets") or []
         if burp_targets and final_state.get("burp_status") == "scheduled":
-            from celery import chord as celery_chord, group as celery_group
-
-            burp_group = celery_group(
-                run_burp_scan.s(scan_job_id=job.id, target=t, scan_mode=scan_mode)
-                for t in burp_targets
-            )
-            celery_chord(burp_group)(
-                burp_post_process.s(scan_job_id=job.id)
-            )
+            burp_job_ids = dispatch_burp_async(db, job, burp_targets, scan_mode)
             final_state["burp_status"] = "pending"
+            final_state["burp_async_task_ids"] = burp_job_ids
             final_state["burp_async_dispatched_at"] = datetime.utcnow().isoformat()
             final_state["burp_async_target_count"] = len(burp_targets)
-            db.add(ScanLog(
-                scan_job_id=job.id,
-                source="burp.dispatch",
-                level="INFO",
-                message=f"Chord Burp disparado: {len(burp_targets)} alvos (post-process será executado ao final)",
-            ))
         # ───────────────────────────────────────────────────────────────────────
 
         job.state_data = final_state
