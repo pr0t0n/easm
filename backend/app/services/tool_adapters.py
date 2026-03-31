@@ -188,7 +188,9 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         ]
     if normalized in {"burp", "burp-cli"}:
         # Preferimos JSON em stdout para parser unificado no workflow.
-        # Flag -a fornece verbosidade completa dos resultados
+        # Flag -a fornece verbosidade completa dos resultados.
+        # O wrapper burp-cli lê BURP_API_HOST/BURP_API_PORT das env vars
+        # (set via docker-compose), então NÃO passamos -t/-p no comando.
         return ["burp-cli", "scan", "-a", "--url", url, "--format", "json"]
     if normalized == "nmap":
         return [
@@ -219,6 +221,21 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "cloudenum":
         return ["python3", "/opt/cloud_enum/cloud_enum.py", "-k", host]
     if normalized == "massdns":
+        resolvers = _first_existing_path([
+            "/usr/share/massdns/lists/resolvers.txt",
+            "/opt/massdns/lists/resolvers.txt",
+            "/root/go/pkg/mod/github.com/owasp-amass/resolve@v0.6.21/example/resolvers.txt",
+            "/usr/local/lib/python3.12/site-packages/wapitiCore/data/attacks/resolvers.txt",
+        ])
+        wordlist = _first_existing_path([
+            "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+            "/root/go/pkg/mod/github.com/owasp-amass/amass/v4@v4.2.0/examples/wordlists/subdomains-top1mil-5000.txt",
+            "/usr/share/seclists/Discovery/DNS/namelist.txt",
+        ])
+        if resolvers and wordlist:
+            return ["sh", "-c", f"cat {wordlist} | sed 's/$/.{host}/' | massdns -r {resolvers} -t A -o S -q"]
+        if resolvers:
+            return ["sh", "-c", f"echo {host} | massdns -r {resolvers} -t A -o S -q"]
         return ["massdns", "-h"]
     if normalized == "dnsenum":
         return ["dnsenum", host]
@@ -354,7 +371,14 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "metagoofil":
         return ["metagoofil", "-h"]
     if normalized == "subjack":
-        return ["subjack", "-h"]
+        fingerprints = _first_existing_path([
+            "/opt/subjack/fingerprints.json",
+            "/usr/share/subjack/fingerprints.json",
+            "/go/pkg/mod/github.com/haccer/subjack*/fingerprints.json",
+        ])
+        if fingerprints:
+            return ["subjack", "-d", host, "-ssl", "-t", "100", "-timeout", "30", "-c", fingerprints]
+        return ["subjack", "-d", host, "-ssl", "-t", "100", "-timeout", "30"]
     if normalized == "urlscan-cli":
         return ["urlscan", "-h"]
     if normalized == "theharvester":

@@ -1,6 +1,6 @@
-# VALID EASM — Plataforma Enterprise de Gestão de Superfície de Ataque Externo
+# EASM — Plataforma Enterprise de Gestão de Superfície de Ataque Externo
 
-**VALID EASM** é uma plataforma de **External Attack Surface Management** de nível enterprise, voltada para escanear, inventariar, quantificar e monitorar continuamente a superfície externa de organizações. Centraliza descoberta de ativos, triagem de vulnerabilidades, priorização financeira (em USD), rastreamento temporal com alertas baseados em desvios de postura, auditoria completa e dashboards executivos.
+**EASM** é uma plataforma de **External Attack Surface Management** de nível enterprise, voltada para escanear, inventariar, quantificar e monitorar continuamente a superfície externa de organizações. Centraliza descoberta de ativos, triagem de vulnerabilidades, priorização financeira (em USD), rastreamento temporal com alertas baseados em desvios de postura, auditoria completa e dashboards executivos.
 
 ## Aviso de Segurança
 
@@ -591,4 +591,4 @@ easm/
 
 **Last Updated**: Março 2026  
 **Maintainer**: Security Platform Team  
-**License**: Proprietary — VALID
+**License**: Proprietary

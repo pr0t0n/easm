@@ -3,7 +3,7 @@ set -eu
 
 REAL_CLI="${BURP_REAL_CLI:-/usr/local/bin/burp-api-cli}"
 START_SCRIPT="${BURP_START_SCRIPT:-/usr/local/bin/start-burp-rest}"
-BURP_API_HOST="${BURP_API_HOST:-127.0.0.1}"
+BURP_API_HOST="${BURP_API_HOST:-burp_rest}"
 BURP_API_PORT="${BURP_API_PORT:-1337}"
 BURP_API_KEY="${BURP_API_KEY:-}"
 BURP_SCAN_TIMEOUT="${BURP_SCAN_TIMEOUT:-1800}"
@@ -30,15 +30,21 @@ PY
 }
 
 ensure_api() {
-    if api_is_alive; then
-        return 0
-    fi
+    # Tenta até 3 vezes com intervalo de 5s antes de desistir (burp_rest pode demorar a ficar healthy)
+    _retries=0
+    while [ "$_retries" -lt 3 ]; do
+        if api_is_alive; then
+            return 0
+        fi
+        _retries=$((_retries + 1))
+        [ "$_retries" -lt 3 ] && sleep 5
+    done
 
     case "$BURP_API_HOST" in
         127.0.0.1|localhost|0.0.0.0)
             ;;
         *)
-            echo "Burp REST API indisponivel em ${BURP_API_HOST}:${BURP_API_PORT} e host remoto configurado; nao sera iniciado Burp local." >&2
+            echo "Burp REST API indisponivel em ${BURP_API_HOST}:${BURP_API_PORT} apos 3 tentativas; host remoto configurado, nao sera iniciado Burp local." >&2
             exit 1
             ;;
     esac

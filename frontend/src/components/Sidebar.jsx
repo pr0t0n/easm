@@ -54,7 +54,7 @@ export default function Sidebar() {
   return (
     <aside className="app-sidebar w-full border-b p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r">
       <div className="app-sidebar-surface rounded-xl border p-4">
-        <h1 className="font-display text-xl font-bold tracking-tight text-white">VALID ASM</h1>
+        <h1 className="font-display text-xl font-bold tracking-tight text-white">VASM</h1>
         <p className="app-sidebar-muted mt-1 text-xs">Enterprise Security Platform</p>
       </div>
 

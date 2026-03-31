@@ -37,7 +37,7 @@ export default function LoginPage() {
       <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-7xl items-center gap-8 lg:grid-cols-[1.2fr_0.8fr]">
         <section className="rounded-2xl border border-[#374151] bg-[#111827]/85 p-8 lg:p-10">
           <div className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-blue-200">
-            VALID VASM
+            VASM
           </div>
           <h1 className="mt-6 max-w-3xl font-display text-4xl font-semibold leading-tight text-[#F9FAFB] lg:text-6xl">
             Superficie de ataque externa com leitura executiva, operacao governada e evidencia acionavel.

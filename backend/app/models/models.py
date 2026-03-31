@@ -1,6 +1,6 @@
 from datetime import datetime
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Table, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -87,6 +87,10 @@ class Finding(Base):
     # Mapeamento P1-P5 do Sn1per: P1=critical, P2=high, P3=medium, P4=low, P5=info
     sn1per_priority: Mapped[str | None] = mapped_column(String(10), nullable=True)
     cve: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    cvss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    domain: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    tool: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer, default=1)
     # Confianca (0-100): derivada do CVSS/nuclei severity para reduzir FP noise
     confidence_score: Mapped[int] = mapped_column(Integer, default=50)

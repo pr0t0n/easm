@@ -105,6 +105,10 @@ class AgentState(TypedDict):
     easm_rating: dict[str, Any]             # {score, grade, factors, methodology}
     # EASM Executive fields (preenchidos pelo ExecutiveAnalystNode)
     executive_summary: str                  # Narrativa LLM gerada
+    # Burp async fields (preenchidos pelo schedule_burp)
+    burp_targets: list[str]                 # Alvos agendados para Burp assíncrono
+    burp_status: str                        # "none" | "scheduled" | "pending" | "completed"
+    burp_async_task_ids: list[str]          # Celery task IDs do chord Burp
 
 
 def _metric_start() -> float:
@@ -878,6 +882,28 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_wapiti_findings(stdout, step_name, default_target)
     if tool == "shodan-cli":
         return _extract_shodan_findings(stdout, step_name, default_target)
+    if tool == "amass":
+        return _extract_amass_findings(stdout, step_name, default_target)
+    if tool == "sublist3r":
+        return _extract_sublist3r_findings(stdout, step_name, default_target)
+    if tool == "dnsenum":
+        return _extract_dnsenum_findings(stdout, step_name, default_target)
+    if tool == "massdns":
+        return _extract_massdns_findings(stdout, step_name, default_target)
+    if tool == "subjack":
+        return _extract_subjack_findings(stdout, step_name, default_target)
+    if tool == "ffuf":
+        return _extract_ffuf_findings(stdout, step_name, default_target)
+    if tool == "gobuster":
+        return _extract_gobuster_findings(stdout, step_name, default_target)
+    if tool == "cloudenum":
+        return _extract_cloudenum_findings(stdout, step_name, default_target)
+    if tool == "whatweb":
+        return _extract_whatweb_findings(stdout, step_name, default_target)
+    if tool == "wappalyzer":
+        return _extract_whatweb_findings(stdout, step_name, default_target)
+    if tool == "katana":
+        return _extract_katana_findings(stdout, step_name, default_target)
     return []
 
 
@@ -1669,6 +1695,490 @@ def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -
     return findings
 
 
+# ── Parsers de ferramentas parcialmente implementadas ────────────────────────
+
+
+def _extract_amass_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai subdomínios descobertos pelo amass enum."""
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_line in (stdout or "").splitlines():
+        subdomain = raw_line.strip().lower()
+        if not subdomain or subdomain in seen:
+            continue
+        if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", subdomain):
+            continue
+        seen.add(subdomain)
+    if not seen:
+        return []
+    subdomains_list = sorted(seen)
+    findings.append({
+        "title": f"Subdominios descobertos (amass): {len(subdomains_list)} encontrados",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "amass",
+            "evidence": ", ".join(subdomains_list[:50]),
+            "subdomains": subdomains_list[:200],
+            "count": len(subdomains_list),
+        },
+    })
+    return findings
+
+
+def _extract_sublist3r_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai subdomínios descobertos pelo sublist3r."""
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip().lower()
+        if not line or "sublist3r" in line or line.startswith("[") or line.startswith("-"):
+            continue
+        if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", line):
+            continue
+        seen.add(line)
+    if not seen:
+        return []
+    subdomains_list = sorted(seen)
+    findings.append({
+        "title": f"Subdominios descobertos (sublist3r): {len(subdomains_list)} encontrados",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "sublist3r",
+            "evidence": ", ".join(subdomains_list[:50]),
+            "subdomains": subdomains_list[:200],
+            "count": len(subdomains_list),
+        },
+    })
+    return findings
+
+
+def _extract_dnsenum_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai registros DNS do dnsenum."""
+    findings: list[dict[str, Any]] = []
+    records: list[str] = []
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("dnsenum") or line.startswith("--"):
+            continue
+        if re.search(r"\d+\.\d+\.\d+\.\d+", line) or re.search(r"(NS|MX|A|AAAA|TXT|SOA|CNAME)\s", line, re.IGNORECASE):
+            records.append(line[:200])
+    if not records:
+        return []
+    findings.append({
+        "title": f"Registros DNS enumerados (dnsenum): {len(records)} registros",
+        "severity": "info",
+        "risk_score": 1,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "dnsenum",
+            "evidence": "\n".join(records[:30]),
+            "dns_records": records[:100],
+            "count": len(records),
+        },
+    })
+    # Zone Transfer detection
+    if re.search(r"zone\s+transfer|AXFR", stdout, re.IGNORECASE):
+        findings.append({
+            "title": "Transferencia de zona DNS permitida (AXFR)",
+            "severity": "high",
+            "risk_score": 8,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "dnsenum",
+                "evidence": "Zone transfer (AXFR) habilitado — expoe toda a estrutura DNS do dominio.",
+            },
+        })
+    return findings
+
+
+def _extract_massdns_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai subdomínios validados pelo massdns (formato: subdomain. A ip)."""
+    findings: list[dict[str, Any]] = []
+    resolved: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # formato massdns -o S: sub.domain.com. A 1.2.3.4
+        parts = line.split()
+        if len(parts) >= 3:
+            subdomain = parts[0].rstrip(".").lower()
+            record_type = parts[1].upper()
+            value = parts[2]
+            if subdomain not in seen and re.match(r"^[a-z0-9\-\.]+\.[a-z]{2,}$", subdomain):
+                seen.add(subdomain)
+                resolved.append({"subdomain": subdomain, "type": record_type, "value": value})
+    if not resolved:
+        return []
+    findings.append({
+        "title": f"Subdominios validados (massdns): {len(resolved)} resolvidos",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "massdns",
+            "evidence": ", ".join(r["subdomain"] for r in resolved[:50]),
+            "resolved_records": resolved[:200],
+            "count": len(resolved),
+        },
+    })
+    return findings
+
+
+def _extract_subjack_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai subdominios vulneraveis a takeover do subjack."""
+    findings: list[dict[str, Any]] = []
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # formato subjack: [Vulnerable] sub.domain.com  [service]
+        m = re.search(r"\[Vulnerable\]\s+(\S+)", line, re.IGNORECASE)
+        if m:
+            subdomain = m.group(1).strip().lower()
+            service_m = re.search(r"\[(\w+)\]\s*$", line)
+            service = service_m.group(1) if service_m else "unknown"
+            findings.append({
+                "title": f"Subdomain Takeover: {subdomain}",
+                "severity": "high",
+                "risk_score": 9,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "step": step_name,
+                    "asset": subdomain,
+                    "tool": "subjack",
+                    "evidence": line[:500],
+                    "takeover_service": service,
+                },
+            })
+    return findings
+
+
+def _extract_ffuf_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai paths/vhosts descobertos pelo ffuf."""
+    findings: list[dict[str, Any]] = []
+    paths: list[dict[str, str]] = []
+    # Tenta JSON primeiro (ffuf -of json)
+    try:
+        data = json.loads(stdout)
+        for result in (data.get("results") or []):
+            url = result.get("url", "")
+            status_code = result.get("status", 0)
+            length = result.get("length", 0)
+            paths.append({"url": url, "status": str(status_code), "length": str(length)})
+    except (json.JSONDecodeError, ValueError):
+        # Parse formato texto: /path [Status: 200, Size: 1234, Words: 56]
+        for raw_line in (stdout or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("::") or line.startswith("_"):
+                continue
+            m = re.match(r"^(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+)", line)
+            if m:
+                paths.append({"url": m.group(1), "status": m.group(2), "length": m.group(3)})
+    if not paths:
+        return []
+    findings.append({
+        "title": f"Paths descobertos (ffuf): {len(paths)} endpoints",
+        "severity": "info",
+        "risk_score": 3,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "ffuf",
+            "evidence": "\n".join(f"{p['url']} [{p['status']}]" for p in paths[:30]),
+            "discovered_paths": paths[:200],
+            "count": len(paths),
+        },
+    })
+    return findings
+
+
+def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai paths descobertos pelo gobuster dir."""
+    findings: list[dict[str, Any]] = []
+    paths: list[dict[str, str]] = []
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("=") or line.startswith("Gobuster"):
+            continue
+        # formato: /path (Status: 200) [Size: 1234]
+        m = re.match(r"^(/\S*)\s+\(Status:\s*(\d+)\)", line)
+        if m:
+            paths.append({"path": m.group(1), "status": m.group(2)})
+            continue
+        # formato quiet (-q): /path
+        m2 = re.match(r"^(/[^\s]+)$", line)
+        if m2:
+            paths.append({"path": m2.group(1), "status": "200"})
+    if not paths:
+        return []
+    sensitive_patterns = re.compile(r"(admin|backup|config|\.env|\.git|\.htaccess|wp-admin|phpmyadmin|api|debug|test|staging)", re.IGNORECASE)
+    sensitive_paths = [p for p in paths if sensitive_patterns.search(p["path"])]
+    if sensitive_paths:
+        findings.append({
+            "title": f"Paths sensiveis expostos (gobuster): {len(sensitive_paths)} encontrados",
+            "severity": "medium",
+            "risk_score": 6,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "gobuster",
+                "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in sensitive_paths[:20]),
+                "sensitive_paths": sensitive_paths[:100],
+                "count": len(sensitive_paths),
+            },
+        })
+    findings.append({
+        "title": f"Content Discovery (gobuster): {len(paths)} paths",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "gobuster",
+            "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in paths[:30]),
+            "discovered_paths": paths[:200],
+            "count": len(paths),
+        },
+    })
+    return findings
+
+
+def _extract_cloudenum_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai buckets/blobs/containers do cloud_enum."""
+    findings: list[dict[str, Any]] = []
+    buckets: list[str] = []
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # cloud_enum imprime: [+] Open S3 bucket: https://bucket.s3.amazonaws.com
+        # ou: OPEN S3 BUCKET: name
+        if re.search(r"(OPEN|found|bucket|blob|container)", line, re.IGNORECASE):
+            url_m = re.search(r"(https?://\S+)", line)
+            if url_m:
+                buckets.append(url_m.group(1))
+            elif ":" in line:
+                buckets.append(line.split(":", 1)[1].strip())
+    if not buckets:
+        return []
+    findings.append({
+        "title": f"Cloud Storage Expostos: {len(buckets)} recursos",
+        "severity": "high",
+        "risk_score": 8,
+        "source_worker": "osint",
+        "details": {
+            "node": "osint",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "cloudenum",
+            "evidence": "\n".join(buckets[:20]),
+            "cloud_resources": buckets[:100],
+            "count": len(buckets),
+        },
+    })
+    return findings
+
+
+def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai tecnologias fingerprinted pelo whatweb/wappalyzer."""
+    findings: list[dict[str, Any]] = []
+    technologies: list[str] = []
+    server_header = ""
+    powered_by = ""
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # whatweb: http://target [200 OK] Apache[2.4], PHP[7.4], ...
+        for m in re.finditer(r"\b([A-Za-z][A-Za-z0-9\-_.]+)\[([^\]]+)\]", line):
+            tech_name = m.group(1).strip()
+            tech_version = m.group(2).strip()
+            technologies.append(f"{tech_name}/{tech_version}")
+            if tech_name.lower() in {"apache", "nginx", "iis", "lighttpd", "server"}:
+                server_header = f"{tech_name}/{tech_version}"
+            if tech_name.lower() in {"php", "asp.net", "x-powered-by"}:
+                powered_by = f"{tech_name}/{tech_version}"
+        # JSON de wappalyzer
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict):
+                for tech in data.get("technologies", []):
+                    if isinstance(tech, dict):
+                        name = tech.get("name", "")
+                        version = tech.get("version", "")
+                        technologies.append(f"{name}/{version}" if version else name)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    if not technologies:
+        return []
+    tech_unique = sorted(set(technologies))
+    findings.append({
+        "title": f"Tecnologias detectadas: {len(tech_unique)} componentes",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "osint",
+        "details": {
+            "node": "osint",
+            "step": step_name,
+            "asset": default_target,
+            "tool": "whatweb",
+            "evidence": ", ".join(tech_unique[:30]),
+            "technologies": tech_unique[:100],
+            "count": len(tech_unique),
+        },
+    })
+    if server_header:
+        findings.append({
+            "title": f"Header Server Exposto: {server_header}",
+            "severity": "low",
+            "risk_score": 3,
+            "source_worker": "osint",
+            "details": {
+                "node": "osint",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "whatweb",
+                "evidence": f"Server header expoe versao: {server_header}",
+                "header_name": "server",
+                "header_value": server_header,
+            },
+        })
+    if powered_by:
+        findings.append({
+            "title": f"Header X-Powered-By Exposto: {powered_by}",
+            "severity": "low",
+            "risk_score": 3,
+            "source_worker": "osint",
+            "details": {
+                "node": "osint",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "whatweb",
+                "evidence": f"X-Powered-By expoe tecnologia: {powered_by}",
+                "header_name": "x-powered-by",
+                "header_value": powered_by,
+            },
+        })
+    return findings
+
+
+def _extract_katana_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Extrai URLs descobertas pelo katana, incluindo robots.txt e sitemap.xml."""
+    findings: list[dict[str, Any]] = []
+    urls: list[str] = []
+    robots_entries: list[str] = []
+    sitemap_entries: list[str] = []
+    forms: list[str] = []
+    sensitive_params: list[str] = []
+    param_pattern = re.compile(r"[?&](search|user|username|password|passwd|id|token|key|api_key|secret|session|auth)=", re.IGNORECASE)
+
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^https?://", line):
+            urls.append(line)
+            path_lower = line.lower()
+            if "/robots.txt" in path_lower:
+                robots_entries.append(line)
+            if "/sitemap" in path_lower and ".xml" in path_lower:
+                sitemap_entries.append(line)
+            if param_pattern.search(line):
+                sensitive_params.append(line)
+
+    if robots_entries:
+        findings.append({
+            "title": "Robots.txt acessivel",
+            "severity": "info",
+            "risk_score": 2,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(robots_entries[:10]),
+                "robots_urls": robots_entries[:20],
+            },
+        })
+    if sitemap_entries:
+        findings.append({
+            "title": "Sitemap.xml acessivel",
+            "severity": "info",
+            "risk_score": 2,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(sitemap_entries[:10]),
+                "sitemap_urls": sitemap_entries[:20],
+            },
+        })
+    if sensitive_params:
+        findings.append({
+            "title": f"Parametros sensiveis identificados: {len(sensitive_params)} URLs",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(sensitive_params[:20]),
+                "sensitive_urls": sensitive_params[:100],
+                "count": len(sensitive_params),
+            },
+        })
+    if urls:
+        findings.append({
+            "title": f"URLs crawled (katana): {len(urls)} endpoints",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(urls[:30]),
+                "discovered_urls": urls[:200],
+                "count": len(urls),
+            },
+        })
+    return findings
+
+
 def _step_name(state: AgentState) -> str:
     idx = state.get("mission_index", 0)
     items = state.get("mission_items", GROUP_MISSION_ITEMS)
@@ -1939,9 +2449,29 @@ def fingerprint_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Burp Async Scheduling
+# Marca alvos para execução assíncrona do Burp via Celery chord.
+# Não bloqueia o pipeline — os scans são disparados por tasks.py
+# após graph.invoke() retornar.
+# ─────────────────────────────────────────────────────────────────────────────
+def schedule_burp(state: AgentState, targets: list[str]) -> None:
+    """Agenda scan Burp assíncrono para os alvos fornecidos.
+
+    O pipeline continua sem bloquear.  Após ``graph.invoke()`` retornar,
+    ``tasks.py`` lê ``state["burp_targets"]`` e dispara um Celery chord
+    (``run_burp_scan`` × N alvos  →  ``burp_post_process`` callback).
+    """
+    state["burp_targets"] = list(targets)
+    state["burp_status"] = "scheduled"
+    state["logs_terminais"].append(
+        f"RiskAssessment:Burp: {len(targets)} alvos agendados para scan assíncrono"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EASM Agent 3: Risk Assessment
 # Avalia vulnerabilidades técnicas nos ativos descobertos.
-# Ferramentas ativas: burp-cli + nmap-vulscan + nikto
+# Ferramentas ativas: burp-cli (async) + nmap-vulscan + nikto (sync)
 # ─────────────────────────────────────────────────────────────────────────────
 def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
@@ -1958,17 +2488,13 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     
-    # Separar ferramentas: Burp executará em TODOS os alvos, outras ferramentas apenas em primary
+    # Separar ferramentas: Burp executará assincronamente, outras ferramentas sincronamente
     burp_tools = ["burp-cli"] if "burp-cli" in vuln_tools else []
     other_vuln_tools = [t for t in vuln_tools if t != "burp-cli"]
     
-    # 1. Executar Burp CLI em TODOS os alvos (domínios e subdomínios)
+    # 1. Agendar Burp CLI assíncrono para TODOS os alvos (não bloqueia o pipeline)
     if burp_tools:
-        state["logs_terminais"].append(f"RiskAssessment:Burp: scanning {len(all_targets)} targets")
-        for scan_target in all_targets:
-            burp_findings, _, _, _ = _run_tools_and_collect(state, burp_tools, scan_target, current, "RiskAssessment:Burp")
-            if burp_findings:
-                all_findings.extend(burp_findings)
+        schedule_burp(state, all_targets)
     
     # 2. Executar outras ferramentas de vulnerabilidade apenas em primary_targets (economia de recursos)
     for scan_target in primary_targets:
@@ -2344,4 +2870,8 @@ def initial_state(
         "fair_decomposition": {},
         "easm_rating": {},
         "executive_summary": "",
+        # Burp async fields
+        "burp_targets": [],
+        "burp_status": "none",
+        "burp_async_task_ids": [],
     }

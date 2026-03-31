@@ -354,6 +354,307 @@ def burp_scan_guard() -> dict[str, Any]:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Burp Async: execução desacoplada do pipeline principal
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery.task(
+    name="burp.run_scan",
+    bind=True,
+    queue="worker.unit.analise_vulnerabilidade",
+    max_retries=2,
+    default_retry_delay=60,
+    acks_late=True,
+)
+def run_burp_scan(self, scan_job_id: int, target: str, scan_mode: str = "unit"):
+    """Executa scan Burp assíncrono para um único alvo.
+
+    Retorna dict com findings parseados (usados pelo chord callback).
+    """
+    from app.graph.workflow import _extract_burp_cli_findings
+
+    db: Session = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
+        if not job:
+            return {"ok": False, "error": "job_not_found", "target": target, "findings": []}
+
+        # Configura license key do Burp a partir do DB
+        burp_enabled, burp_license_key = _get_burp_runtime_config(db, job.owner_id)
+        if burp_enabled and burp_license_key:
+            os.environ["BURP_LICENSE_KEY"] = burp_license_key
+
+        db.add(ScanLog(
+            scan_job_id=scan_job_id,
+            source="burp.async",
+            level="INFO",
+            message=f"Burp async scan iniciado: {target}",
+        ))
+        db.commit()
+
+        result = run_tool_execution("burp-cli", target, timeout=900)
+
+        stdout = result.get("stdout", "")
+        return_code = result.get("return_code")
+
+        findings = _extract_burp_cli_findings(stdout, "risk_assessment", target)
+
+        db.add(ScanLog(
+            scan_job_id=scan_job_id,
+            source="burp.async",
+            level="INFO",
+            message=f"Burp async scan concluído: {target} findings={len(findings)} rc={return_code}",
+        ))
+        db.commit()
+
+        return {
+            "ok": True,
+            "scan_job_id": scan_job_id,
+            "target": target,
+            "findings": findings,
+            "return_code": return_code,
+        }
+    except Exception as exc:
+        db.rollback()
+        try:
+            db.add(ScanLog(
+                scan_job_id=scan_job_id,
+                source="burp.async",
+                level="ERROR",
+                message=f"Burp async scan falhou: {target} error={exc}",
+            ))
+            db.commit()
+        except Exception:
+            pass
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery.task(name="burp.post_process", queue="worker.unit.analise_vulnerabilidade")
+def burp_post_process(burp_results: list, scan_job_id: int):
+    """Chord callback: persiste findings do Burp e recomputa Governance + Executive.
+
+    Executado automaticamente quando todos os ``run_burp_scan`` do chord terminam.
+    Recebe ``burp_results`` (lista de dicts retornados por cada task) como primeiro
+    argumento (injetado pelo Celery chord).
+    """
+    from app.graph.workflow import governance_node, executive_analyst_node
+    from sqlalchemy.orm.attributes import flag_modified
+
+    db: Session = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
+        if not job:
+            return {"ok": False, "error": "job_not_found"}
+
+        # ── 1. Coleta findings de todos os Burp scans ────────────────────────
+        all_burp_findings: list[dict] = []
+        successful_scans = 0
+        failed_scans = 0
+        for result in (burp_results or []):
+            if isinstance(result, dict) and result.get("ok"):
+                all_burp_findings.extend(result.get("findings", []))
+                successful_scans += 1
+            else:
+                failed_scans += 1
+
+        db.add(ScanLog(
+            scan_job_id=scan_job_id,
+            source="burp.post_process",
+            level="INFO",
+            message=(
+                f"Burp post-process iniciado: {len(all_burp_findings)} findings "
+                f"de {successful_scans} scans OK, {failed_scans} falhas"
+            ),
+        ))
+        db.commit()
+
+        # ── 2. Persiste findings do Burp (com dedup) ─────────────────────────
+        known_patterns = [
+            row[0]
+            for row in db.query(Finding.title).filter(Finding.title.isnot(None)).distinct().limit(500).all()
+            if row and row[0]
+        ]
+        existing_keys: set[tuple[str, str, str, str]] = set()
+        for f in db.query(Finding).filter(Finding.scan_job_id == scan_job_id).all():
+            existing_keys.add((
+                str(f.title or "").strip().lower(),
+                str(f.severity or "low").strip().lower(),
+                str((f.details or {}).get("source_worker", "")).strip().lower(),
+                str(f.tool or "").strip().lower(),
+            ))
+
+        new_count = 0
+        for vuln in all_burp_findings:
+            details = dict(vuln)
+            nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+            flattened = {**nested, **details}
+            flattened.pop("details", None)
+            flattened["source_worker"] = "burp_async"
+            flattened["scan_mode"] = job.mode or "unit"
+
+            title = str(vuln.get("title", "Burp finding")).strip()
+            severity = str(vuln.get("severity", "medium")).strip().lower()
+            tool_hint = str(flattened.get("tool") or "burp-cli").strip().lower()
+
+            dedupe_key = (title.lower(), severity, "burp_async", tool_hint)
+            if dedupe_key in existing_keys:
+                continue
+            existing_keys.add(dedupe_key)
+
+            try:
+                recommendations = generate_portuguese_recommendations(vuln, known_patterns=known_patterns)
+            except Exception:
+                recommendations = {
+                    "qwen_recomendacao_pt": '{"resumo":"Recomendacao indisponivel","impacto":"IA indisponivel","mitigacoes":["Hardening baseline"],"prioridade":"media","validacoes":["Reteste"]}',
+                }
+            flattened.update(recommendations)
+
+            cve_id = enrichment_service.extract_cve(flattened, title=title)
+            if cve_id:
+                flattened.update(enrichment_service.enrich(cve_id))
+
+            _cvss = None
+            if flattened.get("cvss") is not None:
+                try:
+                    _cvss = float(flattened["cvss"])
+                except (TypeError, ValueError):
+                    pass
+
+            _recommendation = str(
+                flattened.get("qwen_recomendacao_pt") or flattened.get("cloudcode_recomendacao_pt") or ""
+            ).strip() or None
+
+            _domain = str(
+                flattened.get("asset") or flattened.get("target") or job.target_query or ""
+            ).strip()[:255] or None
+
+            db.add(Finding(
+                scan_job_id=scan_job_id,
+                title=title,
+                severity=severity,
+                cve=cve_id,
+                cvss=_cvss,
+                domain=_domain,
+                tool="burp-cli",
+                recommendation=_recommendation,
+                confidence_score=int(vuln.get("confidence_score", 50) or 50),
+                risk_score=vuln.get("risk_score", 5),
+                details=flattened,
+            ))
+            new_count += 1
+
+        db.commit()
+
+        # ── 3. Recomputa Governance + Executive com TODAS as findings ─────────
+        all_db_findings = db.query(Finding).filter(
+            Finding.scan_job_id == scan_job_id
+        ).all()
+
+        vulns_for_governance = []
+        for f in all_db_findings:
+            vulns_for_governance.append({
+                "title": f.title,
+                "severity": f.severity,
+                "risk_score": f.risk_score,
+                "source_worker": (f.details or {}).get("source_worker", "unknown"),
+                "details": f.details or {},
+            })
+
+        state_data = dict(job.state_data or {})
+        # Reconstrói estado mínimo para os nodes de Governance e Executive
+        mini_state = {
+            "scan_id": scan_job_id,
+            "target": job.target_query or "",
+            "scan_mode": job.mode or "unit",
+            "easm_segment": state_data.get("easm_segment", "Digital Services"),
+            "lista_ativos": state_data.get("lista_ativos") or [job.target_query or ""],
+            "vulnerabilidades_encontradas": vulns_for_governance,
+            "logs_terminais": [],
+            "activity_metrics": [],
+            "mission_index": 3,
+            "mission_items": state_data.get("mission_items") or [],
+            "mission_metrics": state_data.get("mission_metrics") or {},
+            "asset_fingerprints": state_data.get("asset_fingerprints") or {},
+            "fair_decomposition": {},
+            "easm_rating": {},
+            "executive_summary": "",
+        }
+
+        try:
+            mini_state = governance_node(mini_state)
+            mini_state = executive_analyst_node(mini_state)
+        except Exception as gov_exc:
+            db.add(ScanLog(
+                scan_job_id=scan_job_id,
+                source="burp.post_process",
+                level="WARNING",
+                message=f"Recompute governance/executive falhou: {gov_exc}",
+            ))
+
+        # ── 4. Atualiza state_data do ScanJob ────────────────────────────────
+        state_data["easm_rating"] = mini_state.get("easm_rating") or state_data.get("easm_rating") or {}
+        state_data["fair_decomposition"] = mini_state.get("fair_decomposition") or state_data.get("fair_decomposition") or {}
+        state_data["executive_summary"] = mini_state.get("executive_summary") or state_data.get("executive_summary") or ""
+        state_data["burp_status"] = "completed"
+        state_data["burp_completed_at"] = datetime.utcnow().isoformat()
+        state_data["burp_findings_count"] = new_count
+
+        # Atualiza report_v2
+        report_v2 = state_data.get("report_v2") or {}
+        report_v2.update({
+            "easm_rating": state_data["easm_rating"],
+            "fair_decomposition": state_data["fair_decomposition"],
+            "executive_summary": state_data["executive_summary"],
+        })
+        state_data["report_v2"] = report_v2
+
+        job.state_data = state_data
+        flag_modified(job, "state_data")
+
+        db.add(ScanLog(
+            scan_job_id=scan_job_id,
+            source="burp.post_process",
+            level="INFO",
+            message=(
+                f"Burp post-process concluído: {new_count} findings persistidos, "
+                f"rating={state_data['easm_rating'].get('score', 'N/A')}/100 "
+                f"(Grau {state_data['easm_rating'].get('grade', 'N/A')})"
+            ),
+        ))
+        log_audit(
+            db,
+            event_type="burp.post_process_completed",
+            message=f"Burp async concluído: {new_count} findings, governance recomputada",
+            scan_job_id=scan_job_id,
+            metadata={"burp_findings": new_count, "successful_scans": successful_scans, "failed_scans": failed_scans},
+        )
+        db.commit()
+        return {"ok": True, "findings_count": new_count, "successful_scans": successful_scans}
+    except Exception as exc:
+        db.rollback()
+        try:
+            db.add(ScanLog(
+                scan_job_id=scan_job_id,
+                source="burp.post_process",
+                level="ERROR",
+                message=f"Burp post-process falhou: {exc}",
+            ))
+            state_data = dict(job.state_data or {}) if job else {}
+            state_data["burp_status"] = "error"
+            state_data["burp_error"] = str(exc)
+            if job:
+                job.state_data = state_data
+                flag_modified(job, "state_data")
+            db.commit()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
+
+
 # Executado a cada minuto pelo Celery Beat (já existente)
 @celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
 
@@ -889,12 +1190,46 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 details.update(enrichment_service.enrich(cve_id))
                 flattened_details.update(enrichment_service.enrich(cve_id))
 
+            # ── Extrai campos estruturados para colunas dedicadas ─────────────
+            _cvss_raw = flattened_details.get("cvss") or details.get("cvss")
+            _cvss = None
+            if _cvss_raw is not None:
+                try:
+                    _cvss = float(_cvss_raw)
+                except (TypeError, ValueError):
+                    _cvss = None
+
+            _tool_col = str(
+                tool_hint
+                or flattened_details.get("tool")
+                or details.get("tool")
+                or ""
+            ).strip()[:100] or None
+
+            _domain_col = str(
+                asset_hint
+                or flattened_details.get("asset")
+                or flattened_details.get("target")
+                or job.target_query
+                or ""
+            ).strip()[:255] or None
+
+            _recommendation = str(
+                flattened_details.get("qwen_recomendacao_pt")
+                or flattened_details.get("cloudcode_recomendacao_pt")
+                or ""
+            ).strip() or None
+
             db.add(
                 Finding(
                     scan_job_id=job.id,
                     title=vuln.get("title", "Potential issue"),
                     severity=vuln.get("severity", "low"),
                     cve=cve_id,
+                    cvss=_cvss,
+                    domain=_domain_col,
+                    tool=_tool_col,
+                    recommendation=_recommendation,
                     confidence_score=int(vuln.get("confidence_score", 50) or 50),
                     risk_score=vuln.get("risk_score", 1),
                     details=flattened_details,
@@ -912,6 +1247,29 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             "executive_summary":  final_state.get("executive_summary") or "",
         })
         final_state["report_v2"] = existing_report_v2
+        # ───────────────────────────────────────────────────────────────────────
+
+        # ── Burp Async: dispara chord se houver alvos agendados ───────────────
+        burp_targets = final_state.get("burp_targets") or []
+        if burp_targets and final_state.get("burp_status") == "scheduled":
+            from celery import chord as celery_chord, group as celery_group
+
+            burp_group = celery_group(
+                run_burp_scan.s(scan_job_id=job.id, target=t, scan_mode=scan_mode)
+                for t in burp_targets
+            )
+            celery_chord(burp_group)(
+                burp_post_process.s(scan_job_id=job.id)
+            )
+            final_state["burp_status"] = "pending"
+            final_state["burp_async_dispatched_at"] = datetime.utcnow().isoformat()
+            final_state["burp_async_target_count"] = len(burp_targets)
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="burp.dispatch",
+                level="INFO",
+                message=f"Chord Burp disparado: {len(burp_targets)} alvos (post-process será executado ao final)",
+            ))
         # ───────────────────────────────────────────────────────────────────────
 
         job.state_data = final_state

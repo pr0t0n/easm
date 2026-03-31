@@ -210,31 +210,59 @@ export default function VulnerabilitiesPage() {
         {loading && <p className="text-sm text-slate-400">Carregando vulnerabilidades...</p>}
         {!loading && rows.length === 0 && <p className="text-sm text-slate-500">Nenhuma vulnerabilidade para os filtros atuais.</p>}
 
-        <div className="space-y-2">
-          {rows.map((item) => (
-            <div key={item.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <p className="font-medium">{sanitizeText(item.title)}</p>
-                  <p className="text-xs text-slate-400">scan #{item.scan_job_id} - {item.target_query}</p>
-                </div>
-                <span className={`rounded-md border px-2 py-0.5 text-xs uppercase ${SEV_STYLE[item.severity] || SEV_STYLE.low}`}>
-                  {item.severity}
-                </span>
-              </div>
-              <div className="mt-2 grid gap-2 text-xs text-slate-300 sm:grid-cols-4">
-                <p>risk: <span className="text-white">{item.risk_score ?? "-"}</span></p>
-                <p>confidence: <span className="text-white">{item.confidence_score ?? "-"}</span></p>
-                <p>cve: <span className="text-white">{item.cve || "-"}</span></p>
-                <p>status: <span className="text-white">{item.lifecycle_status || (item.is_false_positive ? "false_positive" : "open")}</span></p>
-                <p>FAIR: <span className="text-blue-300">{item.fair?.fair_score ?? 0}</span></p>
-                <p>ALE: <span className="text-amber-300">USD {Number(item.fair?.annualized_loss_exposure_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></p>
-                <p>AGE ambiente: <span className="text-white">{item.age?.known_in_environment_days ?? 0}d</span></p>
-                <p>AGE mercado/exploit: <span className="text-white">{item.age?.known_in_market_days ?? 0}/{item.age?.exploit_published_days ?? 0}d</span></p>
-                <p>tool: <span className="text-purple-300">{item.details?.tool || "-"}</span></p>
-              </div>
-            </div>
-          ))}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-700 text-xs uppercase text-slate-400">
+                <th className="px-3 py-2">ID</th>
+                <th className="px-3 py-2">Vulnerabilidade</th>
+                <th className="px-3 py-2">CVE</th>
+                <th className="px-3 py-2">CVSS</th>
+                <th className="px-3 py-2">Severidade</th>
+                <th className="px-3 py-2">Data</th>
+                <th className="px-3 py-2">Alvo</th>
+                <th className="px-3 py-2">Dominio</th>
+                <th className="px-3 py-2">Ferramenta</th>
+                <th className="px-3 py-2">Recomendacao</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((item) => {
+                let recSummary = "";
+                try {
+                  const rec = item.recommendation ? JSON.parse(item.recommendation) : null;
+                  recSummary = rec?.resumo || rec?.summary || "";
+                } catch {
+                  recSummary = item.recommendation || "";
+                }
+                return (
+                  <tr key={item.id} className="border-b border-slate-800 hover:bg-slate-800/50">
+                    <td className="px-3 py-2 text-slate-400">{item.id}</td>
+                    <td className="max-w-xs truncate px-3 py-2 font-medium">{sanitizeText(item.title)}</td>
+                    <td className="px-3 py-2 text-blue-300">{item.cve || "-"}</td>
+                    <td className="px-3 py-2 text-amber-300">{item.cvss != null ? Number(item.cvss).toFixed(1) : "-"}</td>
+                    <td className="px-3 py-2">
+                      <span className={`rounded-md border px-2 py-0.5 text-xs uppercase ${SEV_STYLE[item.severity] || SEV_STYLE.low}`}>
+                        {item.severity}
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-slate-400">
+                      {item.created_at ? new Date(item.created_at).toLocaleDateString("pt-BR") : "-"}
+                      <span className="ml-1 text-xs text-slate-500">
+                        {item.created_at ? new Date(item.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : ""}
+                      </span>
+                    </td>
+                    <td className="max-w-[140px] truncate px-3 py-2 text-slate-300">{item.target_query || "-"}</td>
+                    <td className="max-w-[140px] truncate px-3 py-2 text-slate-300">{item.domain || item.details?.asset || "-"}</td>
+                    <td className="px-3 py-2 text-purple-300">{item.tool || item.details?.tool || "-"}</td>
+                    <td className="max-w-[200px] truncate px-3 py-2 text-slate-400" title={recSummary}>
+                      {recSummary ? recSummary.slice(0, 80) + (recSummary.length > 80 ? "..." : "") : "-"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
     </main>

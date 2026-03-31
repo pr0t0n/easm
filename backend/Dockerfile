@@ -71,7 +71,22 @@ RUN set -eux; \
 # Ferramentas opcionais adicionais (best effort)
 RUN set -eux; \
 	apt-get update; \
-	apt-get install -y --no-install-recommends whatweb massdns zaproxy seclists || true; \
+	apt-get install -y --no-install-recommends whatweb zaproxy seclists || true; \
+	# massdns from source (apt package unreliable on some base images)
+	git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns 2>/dev/null || true; \
+	if [ -d /tmp/massdns ]; then \
+		cd /tmp/massdns && make -j$(nproc) 2>/dev/null && cp bin/massdns /usr/local/bin/massdns && chmod +x /usr/local/bin/massdns; \
+		mkdir -p /usr/share/massdns/lists && cp lists/resolvers.txt /usr/share/massdns/lists/resolvers.txt; \
+		cd / && rm -rf /tmp/massdns; \
+	fi; \
+	# DNS wordlists for massdns/dnsenum
+	mkdir -p /usr/share/seclists/Discovery/DNS; \
+	(curl -fsSL "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt" \
+		-o /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt 2>/dev/null || true); \
+	# subjack fingerprints
+	mkdir -p /opt/subjack; \
+	(curl -fsSL "https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json" \
+		-o /opt/subjack/fingerprints.json 2>/dev/null || true); \
 	mkdir -p /usr/share/seclists/Discovery/Web-Content; \
 	printf 'config.inc.php\nconfig/config.inc.php\nsetup/\njs/config.js\n' > /usr/share/seclists/Discovery/Web-Content/phpmyadmin_paths.txt; \
 	# nikto via git + wrapper perl (perl instalado na camada anterior)
