@@ -1,6 +1,7 @@
 #!/bin/bash
 # Configure Burp Suite Professional for advanced testing
 # Handles Repeater for IDOR/SQLi and Intruder for fuzzing with wordlists
+# Só para deploy
 
 set -eu
 
