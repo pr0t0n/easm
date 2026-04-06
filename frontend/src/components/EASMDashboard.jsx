@@ -1,4 +1,4 @@
-// vASM Dashboard Components - FAIR Pillars, Temporal Curves, Score Highlight
+// Pentest.io Dashboard Components - FAIR Pillars, Temporal Curves, Score Highlight
 
 function aggregationSubtitle(mode, targets) {
   const n = Number(targets || 1);
@@ -25,7 +25,7 @@ export function EASMRatingCard({ rating, grade, aggregationMode = "global", aggr
 
   return (
     <div className={`rounded-2xl border ${color} bg-slate-900/60 p-6`}>
-      <p className="text-xs uppercase tracking-widest text-slate-400">vASM Rating</p>
+      <p className="text-xs uppercase tracking-widest text-slate-400">Pentest.io Rating</p>
       <p className="mt-1 text-xs text-slate-500">{aggregationSubtitle(aggregationMode, aggregationTargets)}</p>
       <div className="mt-3 flex items-baseline gap-3">
         <p className={`text-5xl font-bold ${scoreColor}`}>{rating.toFixed(1)}</p>
@@ -138,7 +138,7 @@ export function ExecutiveSummaryCard({ easm_rating, easm_grade, ratingTimeline =
 
   return (
     <div className="rounded-2xl border border-cyan-500/30 bg-gradient-to-r from-cyan-900/30 to-blue-900/30 p-6">
-      <p className="text-xs uppercase tracking-widest text-slate-300">vASM</p>
+      <p className="text-xs uppercase tracking-widest text-slate-300">Pentest.io</p>
       <p className="mt-2 text-sm text-slate-300">Nota consolidada da analise principal</p>
       <div className="mt-4 flex items-end justify-between gap-4">
         <div className="flex items-baseline gap-3">
@@ -198,7 +198,7 @@ export function AssetListCard({ assets }) {
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-      <p className="text-xs uppercase tracking-widest text-slate-400 mb-4">Top Assets (vASM Rating)</p>
+      <p className="text-xs uppercase tracking-widest text-slate-400 mb-4">Top Assets (Pentest.io Rating)</p>
       <div className="space-y-2">
         {assets.slice(0, 10).map((asset) => (
           <div key={asset.id} className="flex items-center justify-between rounded border border-slate-700 p-3 hover:bg-slate-800/40 transition">

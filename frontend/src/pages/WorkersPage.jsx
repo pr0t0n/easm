@@ -370,7 +370,7 @@ export default function WorkersPage() {
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h3 className="text-base font-semibold text-slate-100">Catálogo Completo de Missões</h3>
-              <p className="mt-0.5 text-xs text-slate-400">{pipeline?.total_mission_items || 0} steps — cobertura técnica completa do pipeline EASM</p>
+              <p className="mt-0.5 text-xs text-slate-400">{pipeline?.total_mission_items || 0} steps — cobertura técnica completa do pipeline Pentest.io</p>
             </div>
             <input
               className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 md:w-72"

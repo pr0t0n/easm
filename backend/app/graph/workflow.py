@@ -19,7 +19,7 @@ from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
 def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
-    """Persiste current_step e mission_index no ScanJob durante execução do grafo.
+    """Persiste current_step, mission_index, e node_history no ScanJob durante execução do grafo.
 
     Chamado no início de cada node para que o frontend veja progresso em tempo
     real, sem depender do pulse thread.
@@ -39,10 +39,11 @@ def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
                 mi = state.get("mission_index", 0)
                 total = max(1, len(mission_items))
                 job.mission_progress = int(round(min(mi, total) / total * 100))
-                # Snapshot mínimo para o frontend consultar via /status
+                # Snapshot para o frontend consultar via /status
                 sd = dict(job.state_data or {})
                 sd["mission_index"] = mi
                 sd["mission_items"] = mission_items
+                sd["node_history"] = state.get("node_history", [])
                 sd["burp_status"] = state.get("burp_status", "none")
                 job.state_data = sd
                 _db.commit()
@@ -2352,156 +2353,14 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     )
     state["mission_index"] += 1
     _metric_end(state, "asset_discovery", started_at)
+    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _sync_step_to_db(state, "1. AssetDiscovery")
     return state
 
 
 # Alias legado para backward compat
 def recon_node(state: AgentState) -> AgentState:
     return asset_discovery_node(state)
-
-
-def scan_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    scan_target = state["pending_asset_scans"].pop(0) if state["pending_asset_scans"] else state["target"]
-    state["logs_terminais"].append(f"ScanNode: {current} [{scan_target}]")
-
-    scan_tools = _ordered_tools_for_step(state["scan_mode"], "crawler", current)
-    if state["scan_mode"] == "scheduled":
-        scan_tools = scan_tools + _ordered_tools_for_step(state["scan_mode"], "fingerprint", current)
-
-    scan_findings, scan_ports, _, scan_port_evidence = _run_tools_and_collect(state, scan_tools, scan_target, current, "ScanNode")
-    if scan_findings:
-        state["vulnerabilidades_encontradas"].extend(scan_findings)
-
-    if scan_ports:
-        state["discovered_ports"] = sorted(set((state.get("discovered_ports") or []) + scan_ports))
-        state["pending_port_tests"] = state["discovered_ports"].copy()
-    if scan_target not in state["scanned_assets"]:
-        state["scanned_assets"].append(scan_target)
-    state["port_followup_done"] = True
-
-    if state["pending_port_tests"]:
-        aggregated_ports: list[int] = []
-        for port in state["pending_port_tests"]:
-            technical = scan_port_evidence.get(port, {})
-            service_name = str(technical.get("service") or "").strip()
-            service_version = str(technical.get("version") or "").strip()
-            title = f"Servico externo identificado na porta {port}"
-            if service_name:
-                title = f"Servico externo identificado na porta {port} ({service_name})"
-            aggregated_ports.append(int(port))
-            state["vulnerabilidades_encontradas"].append(
-                {
-                    "title": title,
-                    "severity": "medium",
-                    "risk_score": 4,
-                    "source_worker": "scan",
-                    "details": {
-                        "node": "scan",
-                        "asset": scan_target,
-                        "port": port,
-                        "service": service_name,
-                        "version": service_version,
-                        "tool": technical.get("tool") or "scan",
-                        "evidence": technical.get("evidence") or "",
-                        "command": technical.get("command") or "",
-                        "payload": technical.get("command") or "",
-                        "open_ports": [int(port)],
-                        "step": current,
-                    },
-                }
-            )
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"PortScan consolidado: {scan_target}",
-                "severity": "low",
-                "risk_score": 3,
-                "source_worker": "scan",
-                "details": {
-                    "node": "scan",
-                    "asset": scan_target,
-                    "tool": "portscan",
-                    "step": current,
-                    "open_ports": sorted(set(aggregated_ports)),
-                    "evidence": f"open_ports={','.join(str(p) for p in sorted(set(aggregated_ports)))}",
-                    "payload": "; ".join(
-                        sorted(
-                            {
-                                str((scan_port_evidence.get(p) or {}).get("command") or "").strip()
-                                for p in aggregated_ports
-                                if str((scan_port_evidence.get(p) or {}).get("command") or "").strip()
-                            }
-                        )
-                    )[:500],
-                },
-            }
-        )
-        state["logs_terminais"].append(f"ScanNode: portas analisadas={len(state['pending_port_tests'])}")
-        state["pending_port_tests"] = []
-
-    state["mission_index"] += 1
-    _metric_end(state, "scan", started_at)
-    return state
-
-
-def fuzzing_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    state["logs_terminais"].append(f"FuzzingNode: {current}")
-
-    fuzz_tools = _ordered_tools_for_step(state["scan_mode"], "fuzzing", current)
-    targets = _targets_for_deep_scan(state, limit=8)
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"FuzzingNode: targets={len(targets)}")
-    for scan_target in targets:
-        fuzz_findings, _, _, _ = _run_tools_and_collect(state, fuzz_tools, scan_target, current, "FuzzingNode")
-        if fuzz_findings:
-            state["vulnerabilidades_encontradas"].extend(fuzz_findings)
-
-    state["proxima_ferramenta"] = "vuln"
-
-    state["mission_index"] += 1
-    _metric_end(state, "fuzzing", started_at)
-    return state
-
-
-def fingerprint_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    state["logs_terminais"].append(f"FingerprintNode: {current}")
-
-    fingerprint_tools = _ordered_tools_for_step(state["scan_mode"], "fingerprint", current)
-    targets = _targets_for_deep_scan(state, limit=8)
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"FingerprintNode: targets={len(targets)}")
-    for scan_target in targets:
-        fingerprint_findings, _, _, _ = _run_tools_and_collect(state, fingerprint_tools, scan_target, current, "FingerprintNode")
-        if fingerprint_findings:
-            state["vulnerabilidades_encontradas"].extend(fingerprint_findings)
-
-    state["proxima_ferramenta"] = "fuzzing"
-    state["mission_index"] += 1
-    _metric_end(state, "fingerprint", started_at)
-    return state
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Burp Scheduling (legado)
-# Mantido apenas por compatibilidade de estado/histórico.
-# O fluxo principal atual executa Burp de forma síncrona no RiskAssessment.
-# ─────────────────────────────────────────────────────────────────────────────
-def schedule_burp(state: AgentState, targets: list[str]) -> None:
-    """Compatibilidade legada.
-
-    Esta função permanece disponível para leitura de estados antigos.
-    O pipeline principal não depende mais de agendamento assíncrono do Burp.
-    """
-    state["burp_targets"] = list(targets)
-    state["burp_status"] = "scheduled"
-    state["logs_terminais"].append(
-        f"RiskAssessment:Burp(legado): {len(targets)} alvos marcados em estado"
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2596,66 +2455,14 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
     _metric_end(state, "risk_assessment", started_at)
+    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _sync_step_to_db(state, "3. RiskAssessment")
     return state
 
 
 # Alias legado
 def vuln_node(state: AgentState) -> AgentState:
     return risk_assessment_node(state)
-
-
-def analista_ia_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    state["logs_terminais"].append(f"AnalistaIANode: triagem de {current}")
-    if state.get("vulnerabilidades_encontradas"):
-        last = state["vulnerabilidades_encontradas"][-1]
-        if not last.get("source_worker"):
-            last["source_worker"] = "analista_ia"
-    state["proxima_ferramenta"] = "code_js"
-    state["mission_index"] += 1
-    _metric_end(state, "analista_ia", started_at)
-    return state
-
-
-def code_js_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    state["logs_terminais"].append(f"CodeJSNode: {current}")
-
-    code_tools = _ordered_tools_for_step(state["scan_mode"], "code_js", current)
-    targets = _targets_for_deep_scan(state, limit=6)
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"CodeJSNode: targets={len(targets)}")
-    for scan_target in targets:
-        code_findings, _, _, _ = _run_tools_and_collect(state, code_tools, scan_target, current, "CodeJSNode")
-        if code_findings:
-            state["vulnerabilidades_encontradas"].extend(code_findings)
-
-    state["proxima_ferramenta"] = "api"
-    state["mission_index"] += 1
-    _metric_end(state, "code_js", started_at)
-    return state
-
-
-def api_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    current = _step_name(state)
-    state["logs_terminais"].append(f"APINode: {current}")
-
-    api_tools = _ordered_tools_for_step(state["scan_mode"], "api", current)
-    targets = _targets_for_deep_scan(state, limit=6)
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"APINode: targets={len(targets)}")
-    for scan_target in targets:
-        api_findings, _, _, _ = _run_tools_and_collect(state, api_tools, scan_target, current, "APINode")
-        if api_findings:
-            state["vulnerabilidades_encontradas"].extend(api_findings)
-
-    state["proxima_ferramenta"] = "osint"
-    state["mission_index"] += 1
-    _metric_end(state, "api", started_at)
-    return state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2710,6 +2517,8 @@ def threat_intel_node(state: AgentState) -> AgentState:
     state["proxima_ferramenta"] = "risk_assessment"
     state["mission_index"] += 1
     _metric_end(state, "threat_intel", started_at)
+    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _sync_step_to_db(state, "2. ThreatIntel")
     return state
 
 
@@ -2770,6 +2579,8 @@ def governance_node(state: AgentState) -> AgentState:
     )
     # mission_index já foi incrementado pelos agentes paralelos (threat_intel + risk_assessment)
     _metric_end(state, "governance", started_at)
+    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _sync_step_to_db(state, "4. Governance")
     return state
 
 
@@ -2833,6 +2644,8 @@ def executive_analyst_node(state: AgentState) -> AgentState:
     state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
     state["mission_index"] += 1
     _metric_end(state, "executive_analyst", started_at)
+    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _sync_step_to_db(state, "5. ExecutiveAnalysis")
     return state
 
 

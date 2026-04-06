@@ -1,22 +1,31 @@
 MISSION_ITEMS = [
-    "1. Amass Subdomain Recon", "2. Sublist3r Expansion", "3. DNSenum Active Enum", "4. MassDNS Validation", "5. IP/Infra Mapping",
-    "6. ASN/Network Block Mapping", "7. Naabu Fast Port Scan", "8. Nmap Detailed Scan", "9. Service Banner Grabbing", "10. Wafw00f Detection",
-    "11. HSTS/CSP Header Audit", "12. X-Frame-Options Clickjacking Check", "13. Server/X-Powered-By Exposure", "14. Tech Fingerprint WhatWeb/Wappalyzer", "15. Gobuster Content Discovery",
-    "16. S3 Bucket Discovery (CloudEnum)", "17. Subdomain Takeover Check", "18. Robots.txt Analysis", "19. Sitemap.xml Mapping", "20. Identify Variables: search, user, password, id",
-    "21. Katana URL Crawl Mapping", "22. HTTPX Status/Tech Mapping", "23. Chaos Dataset Correlation", "24. Waymore Historical URL Expansion", "25. Gowitness Screenshot Baseline",
-    "26. SQLi Error-based (search)", "27. SQLi Boolean-based (search)", "28. SQLi Auth Bypass (user)", "29. SQLi Auth Bypass (username)", "30. Blind SQLi Time-based (password)",
-    "31. SQLMap Assisted Injection Validation", "32. NoSQL Injection (JSON Payloads)", "33. SQLi in Headers (User-Agent/XFF)", "34. IDOR GET (id parameter)", "35. IDOR Profile View (uuid)",
-    "36. IDOR POST (Data Change)", "37. IDOR PUT (Update Profile)", "38. IDOR DELETE (Object Removal)", "39. IDOR Export/Download Endpoints", "40. CSRF Password Change (No Token)",
-    "41. CSRF Email Change", "42. CSRF Token Bypass (Null/Empty)", "43. Static CSRF Token Check", "44. FFUF /.git Directory", "45. FFUF /.env Directory",
-    "46. FFUF /.bak and /.old Files", "47. FFUF DB Dumps (.sql/.gz)", "48. FFUF /.ssh/id_rsa Exposure", "49. FFUF /admin and /config", "50. Feroxbuster Recursive Discovery",
-    "51. Wfuzz Header and Body Probing", "52. LinkFinder (JS Endpoints)", "53. SecretFinder (JS Keys/Tokens)", "54. KiteRunner API Routing", "55. Swagger/OpenAPI Exposure",
-    "56. SSRF Cloud Metadata (169.254.169.254)", "57. SSRF Internal Services (localhost)", "58. Wapiti SSRF Module Validation", "59. CORS Misconfiguration (*)", "60. Open Redirect (?url=/?next=)",
-    "61. LFI (Local File Inclusion)", "62. RFI (Remote File Inclusion)", "63. Directory Traversal via File Parameters", "64. XXE (XML External Entity)", "65. Wapiti XXE and File Module Validation",
-    "66. SSTI (Jinja2/Mako)", "67. Tplmap SSTI Validation", "68. Insecure Deserialization (Java)", "69. Insecure Deserialization (PHP/Python)", "70. CRLF/Header Injection",
-    "71. Host Header Injection", "72. HTTP Request Smuggling", "73. Nuclei Critical Templates", "74. Nuclei High Templates", "75. Nuclei 2024/2025 CVEs",
-    "76. Nikto Web Server Scan", "77. WPScan (Plugins/Themes)", "78. WPScan (User Enum)", "79. Drupal/Joomla Scanners", "80. Nessus Infra Scan",
-    "81. Heartbleed Test", "82. Shellshock Test", "83. Dangerous HTTP Methods (PUT/DELETE)", "84. Docker API Exposure (2375)", "85. Kubernetes Kubelet (10250)",
-    "86. Admin Panels (Jenkins/GitLab/Grafana)", "87. System Logs (access/error.log)", "88. TruffleHog Secret Leak", "89. Auth User Enumeration", "90. Password Reset Poisoning",
-    "91. JWT None-algorithm Bypass", "92. JWT Secret Brute Force", "93. Prototype Pollution (JS)", "94. XPath Injection", "95. LDAP Injection",
-    "96. Command Injection (; | &&)", "97. Commix Validation for Command Injection", "98. Vertical/Horizontal Privilege Escalation", "99. Gowitness Screenshots", "100. Relatorio Final JSON"
+    # ──────────────────────────────────────────────────────────────────
+    # PHASE 1: RECONNAISSANCE (Amass, MassDns, Sublist3r, Nmap)
+    # ──────────────────────────────────────────────────────────────────
+    "1. Amass Subdomain Recon",
+    "2. Sublist3r Subdomain Expansion",
+    "3. MassDns DNS Validation",
+    "4. Nmap Port Scanning",
+    "5. Nmap Service Detection",
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PHASE 2a: OSINT (Shodan.io)
+    # ──────────────────────────────────────────────────────────────────
+    "6. Shodan Intelligence Gathering",
+    "7. Shodan Fingerprint Analysis",
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PHASE 2b: VULNERABILITY ANALYSIS (Burp, Nmap Vulscan, Nikto)
+    # ──────────────────────────────────────────────────────────────────
+    "8. Burp Suite Scanning",
+    "9. Nmap Vulscan Script Analysis",
+    "10. Nikto Web Server Scan",
+    
+    # ──────────────────────────────────────────────────────────────────
+    # PHASE 3: LLM CONSOLIDATION & RISK ASSESSMENT
+    # ──────────────────────────────────────────────────────────────────
+    "11. Consolidar Dados (Recon + OSINT + Vuln)",
+    "12. Validate Risk via LLM",
+    "13. Gerar Recomendações de Correção",
+    "14. Relatorio Final JsonL"
 ]

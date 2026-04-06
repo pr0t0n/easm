@@ -37,13 +37,13 @@ export default function LoginPage() {
       <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-7xl items-center gap-8 lg:grid-cols-[1.2fr_0.8fr]">
         <section className="rounded-2xl border border-[#374151] bg-[#111827]/85 p-8 lg:p-10">
           <div className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-blue-200">
-            VASM
+            Pentest.io
           </div>
           <h1 className="mt-6 max-w-3xl font-display text-4xl font-semibold leading-tight text-[#F9FAFB] lg:text-6xl">
             Superficie de ataque externa com leitura executiva, operacao governada e evidencia acionavel.
           </h1>
           <p className="mt-5 max-w-2xl text-base leading-7 text-[#9CA3AF] lg:text-lg">
-            O VASM identifica exposicoes em dominios, subdominios, portas, tecnologias publicadas, vulnerabilidades e achados priorizados por impacto operacional e financeiro. A plataforma cruza recon, varredura, compliance e trilha de execucao para transformar descoberta em decisao.
+            O Pentest.io identifica exposicoes em dominios, subdominios, portas, tecnologias publicadas, vulnerabilidades e achados priorizados por impacto operacional e financeiro. A plataforma cruza recon, varredura, compliance e trilha de execucao para transformar descoberta em decisao.
           </p>
 
           <div className="mt-8 grid gap-3 md:grid-cols-3">
@@ -63,7 +63,7 @@ export default function LoginPage() {
 
           <div className="mt-8 grid gap-3 rounded-xl border border-[#374151] bg-[#0F172A]/80 p-5 md:grid-cols-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.18em] text-[#9CA3AF]">O que o VASM encontra</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-[#9CA3AF]">O que o Pentest.io encontra</p>
               <p className="mt-2 text-sm text-[#F3F4F6]">Portas expostas, frameworks, superfícies esquecidas, banners, fingerprints e ativos sem governanca.</p>
             </div>
             <div>

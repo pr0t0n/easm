@@ -2540,6 +2540,7 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
         mission_progress=job.mission_progress,
         mission_index=state_data.get("mission_index", 0),
         mission_items=state_data.get("mission_items") or [],
+        node_history=state_data.get("node_history") or [],
         burp_status=state_data.get("burp_status", "none"),
         discovered_ports=state_data.get("discovered_ports", []),
         pending_port_tests=state_data.get("pending_port_tests", []),

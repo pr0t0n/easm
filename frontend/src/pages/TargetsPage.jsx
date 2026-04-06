@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import client from "../api/client";
+import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 
 const RISK_COLOR = {
@@ -94,8 +94,7 @@ export default function TargetsPage() {
     loadLogs(selectedScanId);
     loadScanStatus(selectedScanId);
 
-    const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-    const wsBase = apiUrl.startsWith("https://") ? apiUrl.replace("https://", "wss://") : apiUrl.replace("http://", "ws://");
+    const wsBase = getWsBaseUrl();
     const token = localStorage.getItem("token") || "";
     const ws = new WebSocket(`${wsBase}/ws/scans/${selectedScanId}/logs?token=${encodeURIComponent(token)}`);
 

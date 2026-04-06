@@ -1,6 +1,40 @@
-# EASM — Plataforma Enterprise de Gestão de Superfície de Ataque Externo
+# Pentest.io — Plataforma de Pentest Automatizado
 
-**EASM** é uma plataforma de **External Attack Surface Management** de nível enterprise, voltada para escanear, inventariar, quantificar e monitorar continuamente a superfície externa de organizações. Centraliza descoberta de ativos, triagem de vulnerabilidades, priorização financeira (em USD), rastreamento temporal com alertas baseados em desvios de postura, auditoria completa e dashboards executivos.
+**Pentest.io** é uma plataforma **leve e eficiente** de descoberta de ativos, inteligência de ameaças e análise de vulnerabilidades, alimentada por **3 Workers Especializados** e **LLM para consolidação de risco**.
+
+## Arquitetura Simplificada
+
+**Fluxo de Execução:**
+```
+[Scan Iniciado]
+      ↓
+[Worker RECON] — Descobre domínios, IPs, portas (Amass, MassDns, Sublist3r, Nmap)
+      ↓
+   ├─→ [Worker OSINT] — Inteligência (Shodan.io)  [paralelo]
+   └─→ [Worker VULN]  — Analisa vulnerabilidades (Burp, Nmap Vulscan, Nikto)  [paralelo]
+      ↓
+  [LLM ConsolidAR] — Junta dados, valida risco, recomendações
+      ↓
+  [Relatório Final JSON]
+```
+
+## Ferramentas por Worker
+
+| Worker | Ferramentas |
+|--------|-------------|
+| **RECON** | Amass, MassDns, Sublist3r, Nmap |
+| **OSINT** | Shodan.io |
+| **VULN** | Burp Professional, Nmap Vulscan, Nikto |
+
+## Stack Técnico
+
+- **Backend**: FastAPI 0.115 + SQLAlchemy 2.0
+- **Cache**: Redis 7
+- **Database**: PostgreSQL 16
+- **Task Queue**: Celery 5.4 + Redis
+- **LLM**: Ollama (phi:latest)
+- **Vector DB**: Chromadb 0.5
+- **Containers**: 8 serviços (postgres, redis, ollama, backend, 3 workers, frontend)
 
 ## Aviso de Segurança
 
@@ -9,6 +43,30 @@ Este projeto foi estruturado para **uso defensivo e autorizado exclusivamente**.
 ---
 
 ## Estado Atual da Plataforma
+
+## Deploy em Cloud
+
+Para subir a stack fora do ambiente local, nao dependa do arquivo .env implicito do desenvolvedor. Use a base de [/.env.example](.env.example), gere um .env na maquina alvo e ajuste pelo menos:
+
+- SECRET_KEY
+- FRONTEND_ORIGIN
+- FRONTEND_ORIGINS
+- FRONTEND_ORIGIN_REGEX se usar multiplos subdominios
+- VITE_API_URL com a URL publica do backend
+- BURP_LICENSE_KEY se o burp_rest estiver habilitado
+
+Subida recomendada em producao:
+
+```bash
+cp .env.example .env
+docker compose --profile prod up --build -d
+```
+
+Observacoes operacionais:
+
+- O compose agora aceita ambiente sem .env fisico, mas em cloud voce deve fornecer as variaveis de runtime para evitar fallback para localhost.
+- O frontend de producao gera o build durante a imagem e sobe via vite preview na porta 5173.
+- Se frontend e backend ficarem em hosts diferentes, VITE_API_URL e CORS precisam apontar para os enderecos publicos corretos.
 
 ### ✅ Features Implementadas
 

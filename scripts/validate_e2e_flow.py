@@ -9,11 +9,11 @@ import urllib.error
 import urllib.request
 
 
-BASE_URL_DEFAULT = os.getenv("VASM_BASE_URL", "http://localhost:8000").rstrip("/")
-ADMIN_EMAIL_DEFAULT = os.getenv("VASM_ADMIN_EMAIL", "admin@example.com")
-ADMIN_PASSWORD_DEFAULT = os.getenv("VASM_ADMIN_PASSWORD", "admin123")
-TARGET_DEFAULT = os.getenv("VASM_TARGET", "example.com")
-TIMEOUT_SECONDS_DEFAULT = int(os.getenv("VASM_E2E_TIMEOUT", "180"))
+BASE_URL_DEFAULT = os.getenv("PENTEST_IO_BASE_URL", "http://localhost:8000").rstrip("/")
+ADMIN_EMAIL_DEFAULT = os.getenv("PENTEST_IO_ADMIN_EMAIL", "admin@example.com")
+ADMIN_PASSWORD_DEFAULT = os.getenv("PENTEST_IO_ADMIN_PASSWORD", "admin123")
+TARGET_DEFAULT = os.getenv("PENTEST_IO_TARGET", "example.com")
+TIMEOUT_SECONDS_DEFAULT = int(os.getenv("PENTEST_IO_E2E_TIMEOUT", "180"))
 
 BASE_URL = BASE_URL_DEFAULT
 ADMIN_EMAIL = ADMIN_EMAIL_DEFAULT

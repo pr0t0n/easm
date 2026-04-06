@@ -1,22 +1,42 @@
+# Web Framework
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+
+# Database
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 alembic==1.14.0
+
+# Configuration & Security
 pydantic-settings==2.7.0
+pydantic[email]==2.7.0
 email-validator==2.2.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+cryptography==42.0.5
 bcrypt==4.0.1
+
+# Task Queue
 celery==5.4.0
 redis==5.2.1
+kombu==5.3.7
+
+# LLM & Graph
+langchain==0.1.17
+langchain-core==0.1.42
 langgraph==0.2.62
 langgraph-checkpoint-postgres==2.0.9
+ollama==0.1.32
+
+# Vector DB
 chromadb==0.5.23
+
+# HTTP & Utilities
 httpx==0.28.1
 requests==2.32.3
 urllib3==2.2.3
-charset-normalizer==3.4.2
-chardet==5.2.0
-pynessus
+python-dotenv==1.0.0
+
+# Testing (optional)
 pytest==8.3.5
+pytest-asyncio==0.23.3

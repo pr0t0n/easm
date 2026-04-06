@@ -14,13 +14,9 @@ from app.workers.worker_groups import find_group_by_tool, get_worker_groups
 
 
 SAFE_TOOL_REGISTRY = {
-    "recon": ["subfinder", "amass", "assetfinder", "dnsx", "naabu", "nessus"],
-    "crawler": ["httpx", "katana", "waymore", "uro", "gowitness"],
-    "fuzzing": ["ffuf", "feroxbuster", "arjun", "dirb", "gobuster", "wfuzz"],
-    "vuln": ["nessus", "nuclei", "dalfox", "nikto", "wpscan", "zap", "openvas", "semgrep", "nmap-vulscan", "burp-cli", "sqlmap", "commix", "tplmap", "wafw00f", "sslscan", "shcheck", "curl-headers"],
-    "code_js": ["linkfinder", "secretfinder", "trufflehog"],
-    "api": ["kiterunner", "postman-to-k6"],
-    "osint": ["theharvester", "h8mail", "metagoofil", "urlscan-cli", "subjack", "shodan-cli", "whatweb"],
+    "recon": ["amass", "massdns", "sublist3r", "nmap"],
+    "osint": ["shodan-cli"],
+    "vuln": ["burp-cli", "nmap-vulscan", "nikto"],
 }
 
 TOOL_TIMEOUT_SECONDS = 90
@@ -41,59 +37,19 @@ VULSCAN_PRIORITY_TCP_PORTS = [
 
 # Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
 TOOL_SPECIFIC_TIMEOUTS = {
-    # Nuclei e Nmap podem levar ~10min por alvo em varreduras completas.
     "nmap": 600,
     "nmap-vulscan": 600,
-    "burp-cli": 1860,
-    "shodan-cli": 60,
-    "vulscan": 600,
-    "nuclei": 600,
-    "sqlmap": 300,
-    "zap": 300,
-    "wapiti": 240,
-    "nikto": 240,
-    "katana": 180,
-    "dalfox": 180,
-    "commix": 180,
-    "sslscan": 180,
-    "wafw00f": 120,
-    "shcheck": 120,
-    "ffuf": 120,
-    "subfinder": 120,
     "amass": 120,
-    "curl-headers": 25,
+    "massdns": 120,
+    "sublist3r": 120,
+    "shodan-cli": 60,
+    "burp-cli": 1860,
+    "nikto": 240,
 }
 
-OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {
-    "openvas": "OpenVAS requer stack dedicada/GVM e nao e suportado por execucao local direta no worker.",
-    "wapiti": "Wapiti desativado temporariamente por decisao de arquitetura; analise de vulnerabilidade usa Burp + Nmap Vulscan + Nikto.",
-}
+OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {}
 
 
-def _get_nuclei_templates_path() -> str | None:
-    """
-    Returns path to Nuclei templates directory if available.
-    Checks multiple locations:
-    1. /root/.nuclei/templates
-    2. /home/user/.nuclei/templates
-    3. /nuclei/templates
-    """
-    possible_paths = [
-        "/app/nuclei-templates",
-        "/root/.nuclei/templates",
-        os.path.expanduser("~/.nuclei/templates"),
-        "/nuclei/templates",
-    ]
-    
-    for path in possible_paths:
-        if os.path.isdir(path):
-            # Check if there are YAML template files
-            yaml_count = len(list(__import__('pathlib').Path(path).rglob("*.yaml")))
-            yml_count = len(list(__import__('pathlib').Path(path).rglob("*.yml")))
-            if yaml_count + yml_count > 0:
-                return path
-    
-    return None
 
 
 def _rewrite_localhost_for_docker(raw_target: str) -> str:

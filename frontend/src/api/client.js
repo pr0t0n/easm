@@ -1,8 +1,33 @@
 import axios from "axios";
 import { toastError } from "../utils/toast";
 
+function resolveApiBaseUrl() {
+  const configured = import.meta.env.VITE_API_URL;
+  if (configured) {
+    return configured;
+  }
+
+  if (typeof window === "undefined") {
+    return "http://localhost:8000";
+  }
+
+  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+  return `${protocol}//${window.location.hostname}:8000`;
+}
+
+export function getApiBaseUrl() {
+  return resolveApiBaseUrl();
+}
+
+export function getWsBaseUrl() {
+  const apiUrl = resolveApiBaseUrl();
+  return apiUrl.startsWith("https://")
+    ? apiUrl.replace("https://", "wss://")
+    : apiUrl.replace("http://", "ws://");
+}
+
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+  baseURL: resolveApiBaseUrl(),
   timeout: 20000,
 });
 
@@ -70,7 +95,7 @@ client.interceptors.response.use(
 
       try {
         const { data } = await axios.post(
-          `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/auth/refresh`,
+          `${resolveApiBaseUrl()}/api/auth/refresh`,
           { refresh_token: refreshToken }
         );
         localStorage.setItem("token", data.access_token);

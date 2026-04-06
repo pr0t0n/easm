@@ -595,7 +595,7 @@ export default function DashboardPage() {
 
       <section className="rounded-2xl border-2 border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950/60 p-6 shadow-[0_22px_60px_rgba(2,6,23,0.5)]">
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-extrabold tracking-tight text-cyan-200">vASM Enterprise Dashboard</h2>
+          <h2 className="font-display text-2xl font-extrabold tracking-tight text-cyan-200">Pentest.io Enterprise Dashboard</h2>
           <p className="text-xs uppercase tracking-[0.2em] text-cyan-100/70">Visão consolidada de risco e maturidade</p>
         </div>
 

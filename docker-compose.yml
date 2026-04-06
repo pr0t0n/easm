@@ -1,38 +1,46 @@
+x-optional-env-file: &optional_env_file
+  - path: ./.env
+    required: false
+
 services:
+  # ─────────────────────────────────────────────────────────────────
+  # Infrastructure: Database, Cache, LLM
+  # ─────────────────────────────────────────────────────────────────
+
   postgres:
-    image: postgres:16
-    container_name: easm_postgres
+    image: postgres:16-alpine
+    container_name: pentest_postgres
     environment:
       POSTGRES_DB: easm
       POSTGRES_USER: easm
       POSTGRES_PASSWORD: easm
       TZ: America/Sao_Paulo
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     profiles: ["dev", "prod"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U easm -d easm"]
+      test: ["CMD-SHELL", "pg_isready -U easm"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: easm_redis
+    container_name: pentest_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     profiles: ["dev", "prod"]
     environment:
       TZ: America/Sao_Paulo
 
   ollama:
     image: ollama/ollama:latest
-    container_name: easm_ollama
+    container_name: pentest_ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
     profiles: ["dev", "prod"]
     volumes:
       - ollama_data:/root/.ollama
@@ -47,43 +55,21 @@ services:
       OLLAMA_NUM_GPU: "0"
       TZ: America/Sao_Paulo
 
-  # ──────────────────────────────────────────────────────────────────────────────
-  # Burp Suite Professional — container dedicado com Xvfb + REST API (porta 1337)
-  #   O JAR deve estar em burp/burpsuite_pro.jar antes do build.
-  #   A EULA é aceite automaticamente na primeira inicialização via FIFO stdin.
-  #   O estado (EULA, configuração) é persistido no volume burp_home.
-  # ──────────────────────────────────────────────────────────────────────────────
-  burp_rest:
-    build:
-      context: ./burp
-      dockerfile: Dockerfile
-    container_name: easm_burp
-    environment:
-      BURP_API_HOST: "0.0.0.0"
-      BURP_API_PORT: "1337"
-      BURP_LICENSE_KEY: "${BURP_LICENSE_KEY:-}"
-      TZ: America/Sao_Paulo
-    ports:
-      - "1337:1337"
-      - "8888:8888"
-    profiles: ["dev", "prod"]
-    volumes:
-      - burp_home:/root/.BurpSuite
-    restart: unless-stopped
+  # ─────────────────────────────────────────────────────────────────
+  # Backend API
+  # ─────────────────────────────────────────────────────────────────
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: easm_backend
+    container_name: pentest_backend
     command: >
       sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
-    env_file:
-      - .env
+    env_file: *optional_env_file
     environment:
+      APP_ENV: development
       TZ: America/Sao_Paulo
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,54 +78,25 @@ services:
       ollama:
         condition: service_started
     ports:
-      - "8000:8000"
+      - "${BACKEND_HOST_PORT:-8000}:8000"
     profiles: ["dev"]
     volumes:
       - ./backend:/app
 
-  backend_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_backend_prod
-    command: >
-      sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
-    env_file:
-      - .env
-    environment:
-      TZ: America/Sao_Paulo
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      ollama:
-        condition: service_started
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
+  # ─────────────────────────────────────────────────────────────────
+  # Workers: RECON, OSINT, VULN
+  # ─────────────────────────────────────────────────────────────────
 
-  # ──────────────────────────────────────────────────────────────────────────────
-  # Worker RECON (unificado) — processa scans unit + scheduled
-  #   Filas: scan.unit, scan.scheduled, worker.unit.reconhecimento,
-  #          worker.scheduled.reconhecimento
-  # ──────────────────────────────────────────────────────────────────────────────
-  worker_unit_recon:
+  worker_recon:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: easm_worker_unit_recon
-    command: sh /app/scripts/start_celery_worker.sh recon worker-recon
-    env_file:
-      - .env
+    container_name: pentest_worker_recon
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.reconhecimento,worker.scheduled.reconhecimento -n recon@%h
+    env_file: *optional_env_file
     environment:
+      APP_ENV: development
       WORKER_MODE: unit
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
     depends_on:
@@ -152,226 +109,72 @@ services:
     volumes:
       - ./backend:/app
 
-  worker_unit_recon_prod:
+  worker_osint:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: easm_worker_unit_recon_prod
-    command: sh /app/scripts/start_celery_worker.sh recon worker-recon-prod
-    env_file:
-      - .env
+    container_name: pentest_worker_osint
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.osint,worker.scheduled.osint -n osint@%h
+    env_file: *optional_env_file
     environment:
+      APP_ENV: development
       WORKER_MODE: unit
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
       TZ: America/Sao_Paulo
-    profiles: ["prod"]
+    profiles: ["dev"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-      backend_prod:
+      backend:
         condition: service_started
-    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+
+  worker_vuln:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pentest_worker_vuln
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade -n vuln@%h
+    env_file: *optional_env_file
+    environment:
+      APP_ENV: development
+      WORKER_MODE: unit
+      TZ: America/Sao_Paulo
+    profiles: ["dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+
+  # ─────────────────────────────────────────────────────────────────
+  # Frontend
+  # ─────────────────────────────────────────────────────────────────
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: easm_frontend
+    container_name: pentest_frontend
     environment:
-      VITE_API_URL: http://localhost:8000
+      VITE_API_URL: "${VITE_API_URL:-}"
       TZ: America/Sao_Paulo
     depends_on:
       backend:
         condition: service_started
     profiles: ["dev"]
     ports:
-      - "5173:5173"
+      - "${FRONTEND_HOST_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
 
-  worker_unit_vuln:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_unit_vuln
-    command: sh /app/scripts/start_celery_worker.sh vuln worker-vuln
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
-      BURP_SCAN_TIMEOUT: "2400"
-      BURP_PAUSE_MAX_RETRIES: "15"
-      BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  worker_unit_osint:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_unit_osint
-    command: sh /app/scripts/start_celery_worker.sh osint worker-osint
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
-      BURP_SCAN_TIMEOUT: "2400"
-      BURP_PAUSE_MAX_RETRIES: "15"
-      BURP_PREFLIGHT_CONNECT_TIMEOUT: "6"
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  worker_unit_vuln_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_unit_vuln_prod
-    command: sh /app/scripts/start_celery_worker.sh vuln worker-vuln-prod
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
-  worker_unit_osint_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_worker_unit_osint_prod
-    command: sh /app/scripts/start_celery_worker.sh osint worker-osint-prod
-    env_file:
-      - .env
-    environment:
-      WORKER_MODE: unit
-      EASM_TOOL_EXECUTION_MODE: distributed
-      BURP_API_HOST: burp_rest
-      BURP_API_PORT: "1337"
-      BURP_EXT_PORT: "8888"
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
-  frontend_prod:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: easm_frontend_prod
-    command: ["npm", "run", "preview"]
-    environment:
-      VITE_API_URL: http://localhost:8000
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      backend_prod:
-        condition: service_started
-    ports:
-      - "5173:5173"
-    restart: unless-stopped
-
-  # ──────────────────────────────────────────────────────────────────────────────
-  # Celery Beat — dispara scheduler_tick a cada minuto para processar ScheduledScans
-  # ──────────────────────────────────────────────────────────────────────────────
-  celery_beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_celery_beat
-    command: >
-      celery -A app.workers.celery_app.celery beat
-      --loglevel=INFO
-      --scheduler celery.beat.PersistentScheduler
-      --schedule /tmp/celerybeat-schedule
-    env_file:
-      - .env
-    environment:
-      TZ: America/Sao_Paulo
-    profiles: ["dev"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-
-  celery_beat_prod:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: easm_celery_beat_prod
-    command: >
-      celery -A app.workers.celery_app.celery beat
-      --loglevel=INFO
-      --scheduler celery.beat.PersistentScheduler
-      --schedule /tmp/celerybeat-schedule
-    env_file:
-      - .env
-    environment:
-      TZ: America/Sao_Paulo
-    profiles: ["prod"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      backend_prod:
-        condition: service_started
-    restart: unless-stopped
-
 volumes:
   postgres_data:
   ollama_data:
-  burp_home:
