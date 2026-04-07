@@ -8,6 +8,17 @@ from urllib.parse import urlparse
 
 from langgraph.graph import END, StateGraph
 
+# ─────────────────────────────────────────────────────────────
+# Utilidades
+# ─────────────────────────────────────────────────────────────
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m|\[[0-9]{1,3}m')
+
+def _strip_ansi_codes(text: str) -> str:
+    """Remove ANSI color codes from text (e.g., [92m, [0m, etc)."""
+    if not text:
+        return text
+    return ANSI_ESCAPE_PATTERN.sub('', text)
+
 from app.graph.checkpointer import create_checkpointer
 from app.services.risk_service import (
     build_fair_decomposition,
@@ -1958,7 +1969,8 @@ def _extract_sublist3r_findings(stdout: str, step_name: str, default_target: str
     findings: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip().lower()
+        # Remove ANSI color codes (e.g., [92m, [0m, etc)
+        line = _strip_ansi_codes(raw_line).strip().lower()
         if not line or "sublist3r" in line or line.startswith("[") or line.startswith("-"):
             continue
         if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", line):
@@ -2659,6 +2671,22 @@ def risk_assessment_node(state: AgentState) -> AgentState:
                 },
             }
         )
+
+    # nmap-vulscan em TODOS os subdomínios descobertos (mesmo fora do primary_targets)
+    nmap_vulscan_tools = [t for t in vuln_tools if t in {"nmap-vulscan", "nmap", "vulscan"}]
+    extra_vulscan_targets = [t for t in resolvable_targets if t not in primary_targets]
+    if nmap_vulscan_tools and extra_vulscan_targets:
+        state["logs_terminais"].append(f"RiskAssessment: nmap-vulscan extra_targets={len(extra_vulscan_targets)}")
+        for scan_target in extra_vulscan_targets:
+            vulscan_findings, _, _, _ = _run_tools_and_collect(
+                state,
+                nmap_vulscan_tools,
+                scan_target,
+                current,
+                "RiskAssessment:Vulscan",
+            )
+            if vulscan_findings:
+                all_findings.extend(vulscan_findings)
 
     # Headers em todos os subdomínios descobertos (mesmo fora do primary_targets)
     extra_header_targets = [t for t in resolvable_targets if t not in primary_targets]
