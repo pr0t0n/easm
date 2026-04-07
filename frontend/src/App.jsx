@@ -17,6 +17,7 @@ import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import WorkersPage from "./pages/WorkersPage";
 import JobsRegistryPage from "./pages/JobsRegistryPage";
+import WorkerLogsPage from "./pages/WorkerLogsPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -82,6 +83,7 @@ export default function App() {
                     <Route path="/ferramentas" element={<AdminOnly><ToolsPage /></AdminOnly>} />
                     <Route path="/workers" element={<AdminOnly><WorkersPage /></AdminOnly>} />
                     <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
+                    <Route path="/worker-logs" element={<AdminOnly><WorkerLogsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
                 </div>

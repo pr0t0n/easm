@@ -48,7 +48,7 @@ EXPECTED_MISSION_STEPS=(
   "2. Sublist3r Subdomain Expansion"
   "3. MassDns DNS Validation"
   "4. Nmap Port Scanning"
-  "5. Nmap Service Detection"
+  "5. Lista de Subdomínios Encontrados"
   "6. Shodan Intelligence Gathering"
   "7. Shodan Fingerprint Analysis"
   "8. Burp Suite Scanning"
@@ -178,7 +178,7 @@ except:
 " )
     while IFS= read -r node; do
       [[ -z "$node" ]] && continue
-      if [[ ! " ${NODES_VISITED[@]} " =~ " ${node} " ]]; then
+      if [[ ! " ${NODES_VISITED[*]-} " =~ " ${node} " ]]; then
         NODES_VISITED+=("$node")
         pass "Nó visitado: $node"
       fi
@@ -212,7 +212,7 @@ done
 title "6. Validar nós do LangGraph visitados"
 # ═══════════════════════════════════════════════════════════════════════════
 for node in "${EXPECTED_NODES[@]}"; do
-  if [[ " ${NODES_VISITED[@]} " =~ " ${node} " ]]; then
+  if [[ " ${NODES_VISITED[*]-} " =~ " ${node} " ]]; then
     pass "Nó executado: $node"
   else
     warn "Nó não visitado (pode estar em paralelo ou pendente): $node"

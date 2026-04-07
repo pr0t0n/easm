@@ -69,15 +69,17 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
     if execution_mode == "local":
         return run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
 
-    # Evita bloqueio "Never call result.get() within a task" quando o grafo
+    # Evita bloqueio "Never call result.get() dentro da task" quando o grafo
     # ja esta rodando dentro de um worker Celery.
+    # IMPRESCINDÍVEL: grafo usa LangGraph.invoke() que roda sincrono no mesmo processo.
     in_celery_task = False
     try:
         from celery import current_task as _current_task  # type: ignore
         in_celery_task = _current_task is not None
-    except Exception:
+    except Exception as ce:
         in_celery_task = False
 
+    # SEMPRE Usar fallback local quando dentro do Celery (grafo pode estar em qualquer nó)
     if in_celery_task:
         fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
         fallback.setdefault("dispatch_task_name", _tool_task_name(scan_mode=scan_mode, tool_name=tool_name))

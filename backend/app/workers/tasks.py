@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.graph.workflow import build_graph, initial_state
-from app.models.models import AppSetting, Asset, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat
+from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cve_enrichment_service import enrichment_service
@@ -601,9 +601,81 @@ def run_burp_scan(
         # ── Executa Burp ──────────────────────────────────────────────────────
         result = run_tool_execution("burp-cli", target, scan_mode=scan_mode)
 
-        stdout = result.get("stdout", "")
+        stdout = str(result.get("stdout") or result.get("output") or "")
+        stderr = str(result.get("stderr") or "")
+        command = str(result.get("command") or "")
+        status_text = str(result.get("status") or "unknown").strip().lower()
         return_code = result.get("return_code")
         findings = _extract_burp_cli_findings(stdout, "risk_assessment", target)
+
+        execution_blob_parts: list[str] = []
+        if command:
+            execution_blob_parts.append(f"command={command}")
+        if return_code is not None:
+            execution_blob_parts.append(f"return_code={return_code}")
+        if stdout:
+            execution_blob_parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            execution_blob_parts.append(f"stderr:\n{stderr}")
+        execution_blob = "\n\n".join(execution_blob_parts)
+
+        db.add(
+            ExecutedToolRun(
+                scan_job_id=parent_job_id,
+                tool_name="burp-cli",
+                target=str(target or "").strip().lower(),
+                status="success" if status_text == "executed" else status_text or "failed",
+                error_message=(execution_blob[:12000] if execution_blob else None),
+                execution_time_seconds=float(result.get("execution_time_seconds") or 0.0) or None,
+            )
+        )
+
+        db.add(
+            ScanLog(
+                scan_job_id=parent_job_id,
+                source="burp.async",
+                level="INFO",
+                message=f"tool=burp-cli status={status_text or 'unknown'} target={target} return_code={return_code}",
+            )
+        )
+        if command:
+            db.add(
+                ScanLog(
+                    scan_job_id=parent_job_id,
+                    source="burp.async",
+                    level="INFO",
+                    message=f"tool=burp-cli cmd={command[:1200]}",
+                )
+            )
+        if stdout:
+            db.add(
+                ScanLog(
+                    scan_job_id=parent_job_id,
+                    source="burp.async",
+                    level="INFO",
+                    message=f"tool=burp-cli stdout={stdout[:4000]}",
+                )
+            )
+        if stderr:
+            db.add(
+                ScanLog(
+                    scan_job_id=parent_job_id,
+                    source="burp.async",
+                    level="WARNING",
+                    message=f"tool=burp-cli stderr={stderr[:2000]}",
+                )
+            )
+
+        if not findings:
+            db.add(ScanLog(
+                scan_job_id=burp_job.id,
+                source="burp.async",
+                level="WARNING",
+                message=(
+                    "Burp executado sem findings parseados "
+                    f"(rc={return_code}, stdout_len={len(stdout)}, stderr_len={len(stderr)})."
+                ),
+            ))
 
         # ── Persiste findings no banco (Requisito 4) ──────────────────────────
         known_patterns = [
@@ -1331,6 +1403,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         ]
         state = initial_state(
             scan_id=job.id,
+            owner_id=job.owner_id,
             target=job.target_query,
             scan_mode=scan_mode,
             known_vulnerability_patterns=known_patterns,

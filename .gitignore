@@ -17,3 +17,5 @@ backend/nuclei-templates/
 
 # Temp files
 .DS_Store
+
+backend/burp/burpsuite_pro.jar

@@ -9,7 +9,7 @@ alembic==1.14.0
 
 # Configuration & Security
 pydantic-settings==2.7.0
-pydantic[email]==2.7.0
+pydantic[email]==2.10.6
 email-validator==2.2.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
@@ -22,11 +22,9 @@ redis==5.2.1
 kombu==5.3.7
 
 # LLM & Graph
-langchain==0.1.17
-langchain-core==0.1.42
 langgraph==0.2.62
 langgraph-checkpoint-postgres==2.0.9
-ollama==0.1.32
+ollama==0.6.1
 
 # Vector DB
 chromadb==0.5.23
@@ -40,3 +38,7 @@ python-dotenv==1.0.0
 # Testing (optional)
 pytest==8.3.5
 pytest-asyncio==0.23.3
+
+# Burp REST API (Java service)
+# Source repository: https://github.com/vmware-archive/burp-rest-api
+# Runtime is provisioned via docker-compose service `burp_rest`.

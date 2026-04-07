@@ -18,7 +18,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AppSetting, AuditEvent, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, WorkerHeartbeat
+from app.models.models import AccessGroup, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, WorkerHeartbeat
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -355,6 +355,116 @@ def list_audit_events(
         }
         for row in rows
     ]
+
+
+@router.get("/admin/worker-logs")
+def admin_worker_logs(
+    scan_id: int | None = None,
+    tool: str | None = None,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Retorna logs completos de execução dos workers: ExecutedToolRun + ScanLog associados.
+    - scan_id: filtra por scan específico (obrigatório para máxima verbosidade)
+    - tool: filtra por ferramenta específica dentro do scan
+    - limit: máximo de linhas de ScanLog retornadas (padrão 500)
+    """
+    max_limit = max(1, min(int(limit), 2000))
+
+    # ── Scans disponíveis para o seletor ────────────────────────────────────
+    all_scans = (
+        db.query(ScanJob.id, ScanJob.target_query, ScanJob.status, ScanJob.created_at)
+        .order_by(ScanJob.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    scans_list = [
+        {"id": row.id, "target_query": row.target_query, "status": row.status, "created_at": row.created_at}
+        for row in all_scans
+    ]
+
+    if scan_id is None:
+        return {"scans": scans_list, "executions": [], "logs": [], "scan": None}
+
+    # ── Scan selecionado ─────────────────────────────────────────────────────
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    # ── ExecutedToolRun ──────────────────────────────────────────────────────
+    runs_query = db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id)
+    if tool:
+        runs_query = runs_query.filter(ExecutedToolRun.tool_name == tool.strip().lower())
+    runs = runs_query.order_by(ExecutedToolRun.created_at.asc()).all()
+
+    executions = [
+        {
+            "id": r.id,
+            "tool": r.tool_name,
+            "target": r.target,
+            "status": r.status,
+            "error_message": r.error_message or "",
+            "execution_time_seconds": r.execution_time_seconds,
+            "created_at": r.created_at,
+        }
+        for r in runs
+    ]
+
+    # ── ScanLog ──────────────────────────────────────────────────────────────
+    logs_query = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id)
+    if tool:
+        normalized = tool.strip().lower()
+        logs_query = logs_query.filter(ScanLog.message.ilike(f"%tool={normalized}%"))
+    logs = (
+        logs_query
+        .order_by(ScanLog.created_at.asc())
+        .limit(max_limit)
+        .all()
+    )
+
+    logs_list = [
+        {
+            "id": row.id,
+            "source": row.source,
+            "level": row.level,
+            "message": row.message,
+            "created_at": row.created_at,
+        }
+        for row in logs
+    ]
+
+    # ── Resumo por ferramenta ────────────────────────────────────────────────
+    tool_summary: dict[str, dict] = {}
+    for r in runs:
+        t = r.tool_name
+        if t not in tool_summary:
+            tool_summary[t] = {"tool": t, "executed": 0, "failed": 0, "skipped": 0, "total": 0}
+        tool_summary[t]["total"] += 1
+        s_ = str(r.status or "").lower()
+        if s_ in ("success", "executed"):
+            tool_summary[t]["executed"] += 1
+        elif s_ == "failed":
+            tool_summary[t]["failed"] += 1
+        elif s_ == "skipped":
+            tool_summary[t]["skipped"] += 1
+
+    return {
+        "scans": scans_list,
+        "scan": {
+            "id": job.id,
+            "target_query": job.target_query,
+            "status": job.status,
+            "current_step": job.current_step,
+            "mission_progress": job.mission_progress,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        },
+        "tool_summary": list(tool_summary.values()),
+        "executions": executions,
+        "logs": logs_list,
+    }
 
 
 @router.get("/policy/allowlist")

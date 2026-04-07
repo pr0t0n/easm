@@ -18,11 +18,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   nmap \
   perl \
   libjson-perl \
+  libxml-writer-perl \
   dnsutils \
   build-essential \
   libssl-dev \
   libpcap-dev \
   && rm -rf /var/lib/apt/lists/*
+
+# AMASS nao esta disponivel no apt da imagem base (Debian trixie); instala binario oficial.
+RUN set -eux; \
+  ARCH="$(uname -m)"; \
+  case "$ARCH" in \
+    aarch64|arm64) AMASS_ARCH="arm64" ;; \
+    x86_64|amd64) AMASS_ARCH="amd64" ;; \
+    *) echo "Arquitetura nao suportada para AMASS: $ARCH" >&2; exit 1 ;; \
+  esac; \
+  AMASS_VERSION="v5.1.1"; \
+  AMASS_URL="https://github.com/owasp-amass/amass/releases/download/${AMASS_VERSION}/amass_linux_${AMASS_ARCH}.tar.gz"; \
+  tmpdir="$(mktemp -d)"; \
+  curl -fsSL "$AMASS_URL" -o "$tmpdir/amass.tar.gz"; \
+  tar -xzf "$tmpdir/amass.tar.gz" -C "$tmpdir"; \
+  install -m 0755 "$tmpdir"/amass_linux_${AMASS_ARCH}/amass /usr/local/bin/amass; \
+  rm -rf "$tmpdir"
 
 # ─────────────────────────────────────────────────────────────
 # RECON Tools (Amass, MassDNS, Sublist3r, Nmap)
@@ -71,7 +88,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Instala cliente burp-cli + wrapper. Se rede externa falhar no build,
+# mantemos o build funcional e a ferramenta sera marcada como skipped em runtime.
+RUN chmod +x /app/setup_burp.sh /app/scripts/burp_cli_wrapper.sh /app/scripts/start_burp_rest.sh && \
+  /app/setup_burp.sh || true
+
 # ─────────────────────────────────────────────────────────────
 # Initialize database and start server
 # ─────────────────────────────────────────────────────────────
+
+# Criar usuário não-root para segurança
+RUN groupadd -r appgroup && useradd -r -g appgroup -u 1000 appuser && \
+    mkdir -p /app && chown -R appuser:appgroup /app
+
+ENV HOME=/tmp
+
+USER appuser
+
 CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]

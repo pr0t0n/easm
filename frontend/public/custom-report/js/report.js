@@ -799,32 +799,57 @@ function applyTopVariables(report) {
 
 function renderLLMRisk(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
-  const llm = v2.llm_risk || {};
+  const item05 = v2.item_05_subdominios_encontrados || {};
+  const assets = v2.assets_summary || {};
+  const summary = Array.isArray(item05.execution_summary) ? item05.execution_summary : [];
 
-  setText('llmRiskStatus', llm.status || (llm.enabled === false ? 'disabled' : '-'));
-  setText('llmRiskLevel', llm.risk_level || '-');
-  setText('llmRiskTotal', llm.total_tests ?? '-');
-  setText('llmRiskFailed', llm.failed_tests ?? '-');
-  setText('llmRiskPassRate', llm.pass_rate != null ? `${llm.pass_rate}%` : '-');
-  setText('llmRiskStrategies', Array.isArray(llm.strategies) ? llm.strategies.join(', ') : '-');
+  const totalFound = Number(item05.total_subdomains ?? assets.subdomain_count ?? 0);
+  const analyzed = summary.filter((x) => !!x.analyzed).length;
+  const notAnalyzed = Math.max(0, totalFound - Math.max(0, analyzed - 1)); // desconsidera domínio principal
+
+  setText('subMainDomain', item05.target || assets.domain || '-');
+  setText('subTotalFound', totalFound);
+  setText('subAnalyzed', analyzed);
+  setText('subNotAnalyzed', notAnalyzed);
 
   const container = document.getElementById('llmRiskFindings');
   if (!container) return;
-  const findings = Array.isArray(llm.findings) ? llm.findings : [];
-  if (!findings.length) {
-    container.innerHTML = '<div class="section-intro">Sem achados de LLM Risk para este scan.</div>';
+  if (!summary.length) {
+    const subs = Array.isArray(item05.subdomains) ? item05.subdomains : [];
+    if (!subs.length) {
+      container.innerHTML = '<div class="section-intro">Nenhum subdomínio encontrado neste scan.</div>';
+      return;
+    }
+    container.innerHTML = subs.map((sub) => `
+      <div class="llm-risk-row">
+        <div class="llm-risk-row-top">
+          <strong>${esc(sub)}</strong>
+          <span class="llm-risk-sev">descoberto</span>
+        </div>
+        <div class="llm-risk-reason">Sem telemetria de execução por ferramenta disponível para este ativo.</div>
+      </div>
+    `).join('');
     return;
   }
 
-  container.innerHTML = findings.slice(0, 20).map((row) => `
+  container.innerHTML = summary.slice(0, 120).map((row) => {
+    const tools = row.tools || {};
+    const parts = Object.entries(tools).map(([tool, st]) => {
+      const ok = Number(st?.success || 0);
+      const fail = Number(st?.failed || 0);
+      return `${tool}: ok=${ok} fail=${fail}`;
+    });
+    const statusLabel = row.analyzed ? 'analisado' : 'não analisado';
+    return `
     <div class="llm-risk-row">
       <div class="llm-risk-row-top">
-        <strong>${esc(row.strategy || '-')}</strong>
-        <span class="llm-risk-sev">${esc(row.severity || 'low')}</span>
+        <strong>${esc(row.asset || '-')}</strong>
+        <span class="llm-risk-sev">${esc(statusLabel)}</span>
       </div>
-      <div class="llm-risk-reason">${esc(row.reason || '-')}</div>
+      <div class="llm-risk-reason">findings=${Number(row.findings_count || 0)} | execuções=${Number(row.tool_runs_count || 0)} | ${esc(parts.join(' | ') || 'sem execução')}</div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function assignPageNumbers() {

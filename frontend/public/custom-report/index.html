@@ -315,40 +315,32 @@
 <div class="page">
   <div class="page-header">
     <span class="section-label">05</span>
-    <span class="section-title">LLM Risk Assessment</span>
-    <span class="page-tag">IA</span>
+    <span class="section-title">Lista de Subdomínios Encontrados</span>
+    <span class="page-tag">ATIVOS</span>
   </div>
 
-  <p class="section-intro">Resumo dos testes adversariais do endpoint de LLM configurado no scan.</p>
+  <p class="section-intro">Subdomínios descobertos no reconhecimento e status de execução da análise de vulnerabilidade por ativo.</p>
 
   <div class="llm-risk-grid">
     <div class="llm-risk-card">
-      <div class="llm-risk-label">Status</div>
-      <div class="llm-risk-value" id="llmRiskStatus">-</div>
+      <div class="llm-risk-label">Domínio principal</div>
+      <div class="llm-risk-value" id="subMainDomain">-</div>
     </div>
     <div class="llm-risk-card">
-      <div class="llm-risk-label">Risco</div>
-      <div class="llm-risk-value" id="llmRiskLevel">-</div>
+      <div class="llm-risk-label">Subdomínios descobertos</div>
+      <div class="llm-risk-value" id="subTotalFound">-</div>
     </div>
     <div class="llm-risk-card">
-      <div class="llm-risk-label">Testes</div>
-      <div class="llm-risk-value" id="llmRiskTotal">-</div>
+      <div class="llm-risk-label">Ativos analisados</div>
+      <div class="llm-risk-value" id="subAnalyzed">-</div>
     </div>
     <div class="llm-risk-card">
-      <div class="llm-risk-label">Falhas</div>
-      <div class="llm-risk-value" id="llmRiskFailed">-</div>
-    </div>
-    <div class="llm-risk-card">
-      <div class="llm-risk-label">Pass Rate</div>
-      <div class="llm-risk-value" id="llmRiskPassRate">-</div>
-    </div>
-    <div class="llm-risk-card">
-      <div class="llm-risk-label">Estratégias</div>
-      <div class="llm-risk-value" id="llmRiskStrategies">-</div>
+      <div class="llm-risk-label">Ativos sem análise</div>
+      <div class="llm-risk-value" id="subNotAnalyzed">-</div>
     </div>
   </div>
 
-  <div class="section-subtitle">Achados do LLM Risk</div>
+  <div class="section-subtitle">Resumo por subdomínio</div>
   <div id="llmRiskFindings" class="llm-risk-findings">Sem dados.</div>
 </div>
 

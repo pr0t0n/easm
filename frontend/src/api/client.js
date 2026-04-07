@@ -8,11 +8,11 @@ function resolveApiBaseUrl() {
   }
 
   if (typeof window === "undefined") {
-    return "http://localhost:8000";
+    return "http://localhost:8001";
   }
 
   const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-  return `${protocol}//${window.location.hostname}:8000`;
+  return `${protocol}//${window.location.hostname}:8001`;
 }
 
 export function getApiBaseUrl() {

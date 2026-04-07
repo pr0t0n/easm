@@ -34,6 +34,7 @@ export default function Sidebar() {
         { to: "/ferramentas", label: "Tools", adminOnly: true },
         { to: "/workers", label: "Workers", adminOnly: true },
         { to: "/jobs", label: "Jobs Registry", adminOnly: true },
+        { to: "/worker-logs", label: "Worker Logs", adminOnly: true },
         { to: "/configuracao", label: "Settings", adminOnly: true },
       ],
     },

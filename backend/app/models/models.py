@@ -109,6 +109,22 @@ class Finding(Base):
     fp_reviewed_by = relationship("User", foreign_keys=[fp_reviewed_by_id])
 
 
+class ExecutedToolRun(Base):
+    """Rastreia execução de ferramentas para idempotência dentro de uma missão."""
+    __tablename__ = "executed_tool_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    tool_name: Mapped[str] = mapped_column(String(100), index=True)
+    target: Mapped[str] = mapped_column(String(500), index=True)  # IP, domain, or URL scanned
+    status: Mapped[str] = mapped_column(String(50), default="success")  # success, failed, skipped
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    scan_job = relationship("ScanJob")
+
+
 class FalsePositiveMemory(Base):
     __tablename__ = "false_positive_memory"
 

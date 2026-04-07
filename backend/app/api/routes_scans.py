@@ -16,7 +16,7 @@ from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
-    WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert,
+    WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -2048,6 +2048,25 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         synchronize_session=False,
     )
 
+    # Evita violacoes de FK em cadeias derivadas do scan.
+    # 1) Vulnerabilities pode referenciar findings do scan.
+    finding_ids = [f.id for f in (job.findings or [])]
+    if finding_ids:
+        db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids)).update(
+            {Vulnerability.finding_id: None},
+            synchronize_session=False,
+        )
+
+    # 2) Assets e historico temporal podem apontar para este scan.
+    db.query(Asset).filter(Asset.last_scan_id == scan_id).update(
+        {Asset.last_scan_id: None},
+        synchronize_session=False,
+    )
+    db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id == scan_id).update(
+        {AssetRatingHistory.scan_id: None},
+        synchronize_session=False,
+    )
+
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
     
@@ -3019,6 +3038,42 @@ def scan_report(
             _asset = main_domain
         findings_by_subdomain.setdefault(_asset, []).append(_row)
 
+    # Garante presença de todos os ativos descobertos, mesmo sem findings.
+    for _asset in unique_assets_list:
+        if _asset not in findings_by_subdomain:
+            findings_by_subdomain[_asset] = []
+
+    # Consolida status de execução por subdomínio para transparência no relatório.
+    tool_runs = db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id).all()
+    runs_by_asset: dict[str, list[ExecutedToolRun]] = {}
+    for run in tool_runs:
+        key = str(run.target or "").strip().lower()
+        if key:
+            runs_by_asset.setdefault(key, []).append(run)
+
+    subdomain_execution_summary: list[dict[str, Any]] = []
+    for asset_name in unique_assets_list:
+        key = str(asset_name or "").strip().lower()
+        asset_runs = runs_by_asset.get(key, [])
+        tool_status: dict[str, dict[str, int]] = {}
+        for run in asset_runs:
+            tool = str(run.tool_name or "unknown")
+            status_key = str(run.status or "unknown")
+            if tool not in tool_status:
+                tool_status[tool] = {"success": 0, "failed": 0, "skipped": 0, "unknown": 0}
+            tool_status[tool][status_key if status_key in tool_status[tool] else "unknown"] += 1
+
+        subdomain_execution_summary.append(
+            {
+                "asset": asset_name,
+                "is_main_domain": str(asset_name).strip().lower() == main_domain.lower(),
+                "findings_count": len(findings_by_subdomain.get(asset_name, [])),
+                "tool_runs_count": len(asset_runs),
+                "tools": tool_status,
+                "analyzed": len(asset_runs) > 0,
+            }
+        )
+
     return ReportResponse(
         scan_id=scan_id,
         status=job.status,
@@ -3035,6 +3090,14 @@ def scan_report(
                 "frameworks": frameworks,
                 "category_scores": category_scores,
                 "assets_summary": assets_summary,
+                "mission_items": (job.state_data or {}).get("mission_items") or [],
+                "item_05_subdominios_encontrados": {
+                    "title": "5. Lista de Subdomínios Encontrados",
+                    "target": main_domain,
+                    "total_subdomains": len(subdomains_list),
+                    "subdomains": subdomains_list,
+                    "execution_summary": subdomain_execution_summary,
+                },
                 "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
                 "vulnerability_table": consolidated_vulnerability_table,

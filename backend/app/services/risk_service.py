@@ -732,7 +732,7 @@ def build_fair_decomposition(
 def compute_remediation_velocity(
     historical_ratings: list[dict],
     period_days: int = 7,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """
     Calcula velocidade de remediação:
     - Quão rápido o time de TI fecha as falhas?
@@ -760,7 +760,7 @@ def compute_remediation_velocity(
             "velocity_pct": 0.0,
             "trend": "unknown",
             "remediation_rate_per_day": 0.0,
-            "days_to_critical_zero": float("inf"),
+            "days_to_critical_zero": None,
         }
 
     # Sort by timestamp descending (mais recente primeiro)
@@ -792,6 +792,13 @@ def compute_remediation_velocity(
         else float("inf")
     )
 
+    # JSON não aceita Infinity; normaliza para None quando não houver estimativa finita.
+    finite_days_to_zero = (
+        round(days_to_critical_zero, 2)
+        if math.isfinite(days_to_critical_zero)
+        else None
+    )
+
     # Trend analysis (if we have 3+ data points)
     trend = "stable"
     if len(sorted_hist) >= 3:
@@ -806,7 +813,7 @@ def compute_remediation_velocity(
         "velocity_pct": round(min(100.0, max(0.0, velocity_pct)), 2),
         "trend": trend,
         "remediation_rate_per_day": round(remediation_rate_per_day, 3),
-        "days_to_critical_zero": round(days_to_critical_zero, 2),
+        "days_to_critical_zero": finite_days_to_zero,
     }
 
 
@@ -904,8 +911,8 @@ def build_temporal_narrative(
         vel_text = remediation_velocity["trend"]
         rate = remediation_velocity["remediation_rate_per_day"]
         narrative += f"✅ **Taxa de Remediação**: {rate} falhas/dia ({vel_text}).\n"
-        if remediation_velocity["days_to_critical_zero"] < float("inf"):
-            days = remediation_velocity["days_to_critical_zero"]
+        days = remediation_velocity.get("days_to_critical_zero")
+        if isinstance(days, (int, float)):
             narrative += f"   Se mantiver: **zero críticas em {days:.1f} dias**.\n\n"
     else:
         narrative += "❌ **Nenhuma remediação detectada nos últimos 7 dias.**\n\n"

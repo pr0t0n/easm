@@ -6,7 +6,7 @@ MISSION_ITEMS = [
     "2. Sublist3r Subdomain Expansion",
     "3. MassDns DNS Validation",
     "4. Nmap Port Scanning",
-    "5. Nmap Service Detection",
+    "5. Lista de Subdomínios Encontrados",
     
     # ──────────────────────────────────────────────────────────────────
     # PHASE 2a: OSINT (Shodan.io)

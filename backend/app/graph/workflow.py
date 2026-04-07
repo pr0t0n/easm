@@ -1,5 +1,6 @@
 import json
 import re
+import socket
 from datetime import datetime
 from time import perf_counter
 from typing import Any, TypedDict
@@ -58,7 +59,7 @@ GROUP_MISSION_ITEMS: list[str] = [
     "2. ThreatIntel",
     "3. RiskAssessment",
     "4. Governance",
-    "5. ExecutiveAnalysis",
+    "5. Lista de Subdomínios Encontrados",
 ]
 
 KNOWN_WAF_MODELS: list[str] = [
@@ -115,6 +116,7 @@ class AgentState(TypedDict):
     scan_id: int
     target: str
     scan_mode: str                          # "unit" | "scheduled"
+    target_type: str                        # "site" | "dominio" — controla expansão de subdomínios
     easm_segment: str                       # Segmento de mercado inferido
     input_targets: list[str]
     lista_ativos: list[str]
@@ -125,6 +127,7 @@ class AgentState(TypedDict):
     pending_port_tests: list[int]
     pending_asset_scans: list[str]
     scanned_assets: list[str]
+    discovered_subdomains_persisted: list[str]  # Subdomínios já salvos no banco (idempotência)
     port_followup_done: bool
     activity_metrics: list[dict[str, Any]]
     mission_metrics: dict[str, int]
@@ -278,6 +281,52 @@ def _ordered_tools_for_step(scan_mode: str, group_name: str, step_name: str) -> 
     return tools
 
 
+def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
+    """Verifica se ferramenta já foi executada para este target neste scan."""
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ExecutedToolRun
+        
+        db = SessionLocal()
+        try:
+            existing = db.query(ExecutedToolRun).filter(
+                ExecutedToolRun.scan_job_id == scan_id,
+                ExecutedToolRun.tool_name == tool_name.lower(),
+                ExecutedToolRun.target == target.lower(),
+            ).first()
+            return existing is not None
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
+def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, execution_status: str = "success", error_msg: str | None = None, exec_time: float | None = None) -> None:
+    """Registra execução da ferramenta no banco para idempotência."""
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ExecutedToolRun
+        from datetime import datetime
+        
+        db = SessionLocal()
+        try:
+            record = ExecutedToolRun(
+                scan_job_id=scan_id,
+                tool_name=tool_name.lower(),
+                target=target.lower(),
+                status=execution_status,
+                error_message=error_msg,
+                execution_time_seconds=exec_time,
+                created_at=datetime.utcnow(),
+            )
+            db.add(record)
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass  # Não bloqueia o pipeline se persistência falhar
+
+
 def _run_tools_and_collect(
     state: AgentState,
     tools: list[str],
@@ -297,9 +346,52 @@ def _run_tools_and_collect(
         if run_id in state.get("executed_tool_runs", []):
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
             continue
-
+        
+        # Check database (prevents duplication across restarts)
+        scan_id = state.get("scan_id")
+        if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
+            state["executed_tool_runs"].append(run_id)
+            continue
+        
+        # Execute tool
+        from time import perf_counter
+        exec_start = perf_counter()
         result = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
+        exec_time = perf_counter() - exec_start
         state["executed_tool_runs"].append(run_id)
+
+        raw_command = str(result.get("command") or "").strip()
+        raw_return_code = result.get("return_code")
+        raw_stdout = str(result.get("stdout") or "").strip()
+        raw_stderr = str(result.get("stderr") or "").strip()
+        raw_dispatch_error = str(result.get("dispatch_error") or "").strip()
+
+        execution_blob_parts: list[str] = []
+        if raw_command:
+            execution_blob_parts.append(f"command={raw_command}")
+        if raw_return_code is not None:
+            execution_blob_parts.append(f"return_code={raw_return_code}")
+        if raw_dispatch_error:
+            execution_blob_parts.append(f"dispatch_error={raw_dispatch_error}")
+        if raw_stdout:
+            execution_blob_parts.append(f"stdout:\n{raw_stdout}")
+        if raw_stderr:
+            execution_blob_parts.append(f"stderr:\n{raw_stderr}")
+        execution_blob = "\n\n".join(execution_blob_parts)
+        
+        # Record execution in database for idempotency across restarts
+        if scan_id:
+            exec_status = result.get("status", "unknown")
+            _record_tool_execution_in_db(
+                scan_id=scan_id,
+                tool_name=tool,
+                target=scan_target,
+                execution_status="success" if exec_status == "executed" else "failed",
+                error_msg=_truncate_log(execution_blob, 12000) if execution_blob else None,
+                exec_time=exec_time,
+            )
+        
         state["logs_terminais"].append(f"{log_prefix}: tool={tool} status={result.get('status', 'unknown')}")
         if result.get("dispatch_task_name"):
             state["logs_terminais"].append(
@@ -325,11 +417,13 @@ def _run_tools_and_collect(
         if rc is not None:
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} return_code={rc}")
 
-        stdout_preview = _truncate_log(result.get("stdout"), 300)
+        preview_limit = 4000 if str(tool or "").strip().lower() in {"burp", "burp-cli"} else 300
+
+        stdout_preview = _truncate_log(result.get("stdout"), preview_limit)
         if stdout_preview:
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} stdout={stdout_preview}")
 
-        stderr_preview = _truncate_log(result.get("stderr"), 300)
+        stderr_preview = _truncate_log(result.get("stderr"), preview_limit)
         if stderr_preview:
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
 
@@ -343,6 +437,10 @@ def _run_tools_and_collect(
             all_findings.extend(tool_specific_findings)
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
+            )
+        elif str(tool or "").strip().lower() in {"burp", "burp-cli"} and result.get("status") == "executed":
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} warning=executed_without_parsed_findings stdout_len={len(raw_stdout)} stderr_len={len(raw_stderr)}"
             )
 
         extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
@@ -479,6 +577,32 @@ def _target_host(target: str) -> str:
     return host.lstrip("*.").strip(".")
 
 
+def _infer_target_type(target: str) -> str:
+    """
+    Infere tipo de alvo: 'site' vs 'dominio'.
+    
+    Site: https://app.example.com/path?key=value → NÃO expandir subdomínios
+    Dominio: example.com ou www.example.com (sem path) → Expandir subdomínios
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return "dominio"
+    
+    has_scheme = "://" in raw
+    parsed = urlparse(raw if has_scheme else f"http://{raw}")
+    
+    # Se tem path, query ou fragment → site específico
+    if parsed.path.rstrip("/") or parsed.query or parsed.fragment:
+        return "site"
+    
+    # Se começar com scheme → site
+    if has_scheme:
+        return "site"
+    
+    # Padrão: dominio
+    return "dominio"
+
+
 def _is_local_target(target: str) -> bool:
     host = _target_host(target)
     return host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
@@ -571,6 +695,67 @@ def _register_discovered_assets(state: AgentState, root_domain: str, assets: lis
     state["logs_terminais"].append(
         f"ReconNode: subdomains_discovered={len(eligible)} ativos_adicionados={added_assets} fila_scan={added_pending}"
     )
+
+
+def _persist_discovered_assets_to_db(scan_job_id: int, owner_id: int, assets: list[str], source_tool: str = "recon") -> int:
+    """
+    Persiste subdomínios descobertos na tabela Asset do banco de dados.
+    Retorna número de novos assets inseridos.
+    Crítico para: rastreabilidade, auditoria, prevenção de perda de dados em falhas.
+    
+    Usa UNIQUE constraint via query dupla-check (não há constraint no modelo) para evitar duplicatas.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import Asset
+        from datetime import datetime
+        
+        _db = SessionLocal()
+        try:
+            inserted_count = 0
+            now = datetime.utcnow()
+            
+            for asset_str in (assets or []):
+                domain_normalized = str(asset_str or "").strip().lower()
+                if not domain_normalized:
+                    continue
+                
+                try:
+                    # Verificar se asset já existe para este owner
+                    existing = _db.query(Asset).filter(
+                        Asset.owner_id == owner_id,
+                        Asset.domain_or_ip == domain_normalized,
+                    ).first()
+                    
+                    if existing:
+                        # Atualizar last_seen e last_scan_id
+                        existing.last_seen = now
+                        existing.last_scan_id = scan_job_id
+                        existing.scan_count = (existing.scan_count or 0) + 1
+                    else:
+                        # Inserir novo asset
+                        new_asset = Asset(
+                            owner_id=owner_id,
+                            domain_or_ip=domain_normalized,
+                            asset_type="domain",
+                            first_seen=now,
+                            last_seen=now,
+                            last_scan_id=scan_job_id,
+                            scan_count=1,
+                        )
+                        _db.add(new_asset)
+                        inserted_count += 1
+                except Exception as asset_err:
+                    # Log mas não bloqueia (um asset ruim não quebra todo o pipeline)
+                    continue
+            
+            _db.commit()
+            return inserted_count
+        finally:
+            _db.close()
+    except Exception as e:
+        # Não bloqueia o pipeline se persistência falhar
+        return 0
 
 
 def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
@@ -2249,6 +2434,21 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     # Usa asset_discovery group (que aponta para mesma fila reconhecimento)
     recon_tools = _tools_for_group(state["scan_mode"], "asset_discovery") or _tools_for_group(state["scan_mode"], "reconhecimento")
     recon_tools = _adapt_recon_tools_for_target(state["target"], recon_tools)
+    
+    # Lógica condicional: Se target_type é "site" (URL com path), pula expansão de subdomínios
+    # Ferramentas de expansão: amass, sublist3r, massdns (evita descoberta incontrolada)
+    target_type = state.get("target_type", "dominio")
+    if target_type == "site":
+        subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
+        recon_tools = [t for t in recon_tools if t not in subdomain_expansion_tools]
+        state["logs_terminais"].append(
+            f"AssetDiscovery: target_type=site, subdomain_expansion desabilitada (skip={subdomain_expansion_tools})"
+        )
+    else:
+        state["logs_terminais"].append(
+            f"AssetDiscovery: target_type={target_type}, full_recon_pipeline ativado"
+        )
+    
     if _is_local_target(state["target"]):
         state["logs_terminais"].append(
             f"AssetDiscovery: local_target detected, reduced_tools={','.join(recon_tools)}"
@@ -2273,6 +2473,23 @@ def asset_discovery_node(state: AgentState) -> AgentState:
         state["pending_port_tests"] = state["discovered_ports"].copy()
     if recon_assets:
         _register_discovered_assets(state, root_domain=root_domain, assets=recon_assets)
+        
+        # Persiste os subdomínios descobertos no banco de dados para auditoria/rastreabilidade
+        owner_id = state.get("owner_id")
+        scan_id = state.get("scan_id")
+        if owner_id and scan_id:
+            inserted = _persist_discovered_assets_to_db(
+                scan_job_id=scan_id,
+                owner_id=owner_id,
+                assets=recon_assets,
+                source_tool="recon"
+            )
+            state["discovered_subdomains_persisted"].extend(
+                [a.lower() for a in recon_assets[:MAX_DISCOVERED_ASSETS]]
+            )
+            state["logs_terminais"].append(
+                f"ReconNode: {len(recon_assets)} subdomínios persistidos no banco (novos: {inserted})"
+            )
 
         # Executa port scan nos subdomínios recém-descobertos (naabu + nmap)
         if port_scan_tools:
@@ -2380,6 +2597,18 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         )
     primary_targets = _targets_for_deep_scan(state, limit=8)
     all_targets = _targets_for_deep_scan(state, limit=MAX_DISCOVERED_ASSETS + 1)
+    resolvable_targets, unresolved_targets = _filter_resolvable_targets(all_targets)
+    if not resolvable_targets:
+        # Fallback defensivo: mantém alvo principal para evitar no-op total.
+        resolvable_targets = [state.get("target", "")]
+    primary_targets = [t for t in primary_targets if t in set(resolvable_targets)] or [resolvable_targets[0]]
+
+    if unresolved_targets:
+        state["logs_terminais"].append(
+            f"RiskAssessment: unresolved_targets_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
+        )
+    state["risk_targets_resolvable"] = list(resolvable_targets)
+    state["risk_targets_unresolved"] = list(unresolved_targets)
     all_findings: list[dict[str, Any]] = []
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
@@ -2392,9 +2621,9 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     # 1. Executar Burp CLI de forma síncrona em TODOS os alvos do escopo de análise.
     if burp_tools:
         state["logs_terminais"].append(
-            f"RiskAssessment:Burp: executando de forma síncrona em {len(all_targets)} alvos"
+            f"RiskAssessment:Burp: executando de forma síncrona em {len(resolvable_targets)} alvos"
         )
-        for scan_target in all_targets:
+        for scan_target in resolvable_targets:
             burp_findings, _, _, _ = _run_tools_and_collect(
                 state,
                 burp_tools,
@@ -2405,7 +2634,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
             if burp_findings:
                 all_findings.extend(burp_findings)
 
-        state["burp_targets"] = list(all_targets)
+        state["burp_targets"] = list(resolvable_targets)
         state["burp_status"] = "completed"
         state["burp_async_task_ids"] = []
 
@@ -2432,7 +2661,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         )
 
     # Headers em todos os subdomínios descobertos (mesmo fora do primary_targets)
-    extra_header_targets = [t for t in all_targets if t not in primary_targets]
+    extra_header_targets = [t for t in resolvable_targets if t not in primary_targets]
     if "curl-headers" in vuln_tools and extra_header_targets:
         state["logs_terminais"].append(f"RiskAssessment: curl-headers extra_targets={len(extra_header_targets)}")
         for scan_target in extra_header_targets:
@@ -2470,6 +2699,88 @@ def vuln_node(state: AgentState) -> AgentState:
 # Coleta inteligência externa: credenciais vazadas, reputação de IPs, OSINT.
 # Ferramentas: theharvester → shodan-cli → h8mail → subjack
 # ─────────────────────────────────────────────────────────────────────────────
+def _validate_osint_targets(targets: list[str]) -> list[str]:
+    """
+    Valida targets para OSINT (Shodan, Threat Intel).
+    Remove targets claramente inválidos para evitar erros em APIs externas.
+    
+    Aceita:
+    - IPs válidos (v4/v6)
+    - Domínios com TLD válido
+    - Hostnames com dots
+    
+    Rejeita:
+    - Valores vazios/None
+    - IPs malformados
+    - Localhost/127.0.0.1/::1
+    - Ranges CIDR
+    """
+    import ipaddress
+    
+    valid = []
+    for target in (targets or []):
+        if not target or not isinstance(target, str):
+            continue
+        
+        target_str = str(target).strip().lower()
+        if not target_str or target_str in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+            continue
+        
+        # Tenta parsear como IP
+        try:
+            ipaddress.ip_address(target_str.split("/")[0])  # Rejeita ranges CIDR
+            valid.append(target_str)
+            continue
+        except ValueError:
+            pass
+        
+        # Tenta como domínio: deve ter pelo menos um dot ou ser hostname
+        if "." in target_str and len(target_str) > 4:
+            # Validação básica: não começa/termina com dot, sem caracteres inválidos
+            if (not target_str.startswith(".") and not target_str.endswith(".") and
+                all(c.isalnum() or c in ".-" for c in target_str)):
+                valid.append(target_str)
+    
+    return valid
+
+
+def _normalize_host_for_resolution(target: str) -> str:
+    raw = str(target or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        if "://" in raw:
+            parsed = urlparse(raw)
+            return str(parsed.hostname or "").strip().lower()
+    except Exception:
+        pass
+    return raw.split("/")[0].split(":")[0].strip().lower()
+
+
+def _is_target_resolvable(target: str) -> bool:
+    host = _normalize_host_for_resolution(target)
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return False
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except Exception:
+        return False
+
+
+def _filter_resolvable_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+    valid: list[str] = []
+    invalid: list[str] = []
+    for target in targets or []:
+        if _is_target_resolvable(target):
+            valid.append(target)
+        else:
+            invalid.append(target)
+    return valid, invalid
+
+
 def threat_intel_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "2. ThreatIntel")
@@ -2478,9 +2789,16 @@ def threat_intel_node(state: AgentState) -> AgentState:
 
     osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
     targets = _targets_for_deep_scan(state, limit=6)
-    if len(targets) > 1:
-        state["logs_terminais"].append(f"ThreatIntel: targets={len(targets)}")
-    for scan_target in targets:
+    
+    # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR
+    valid_targets = _validate_osint_targets(targets)
+    skipped = len(targets) - len(valid_targets)
+    if skipped > 0:
+        state["logs_terminais"].append(f"ThreatIntel: {skipped} targets inválidos ignorados")
+    
+    if len(valid_targets) > 1:
+        state["logs_terminais"].append(f"ThreatIntel: valid_targets={len(valid_targets)}")
+    for scan_target in valid_targets:
         osint_findings, _, _, _ = _run_tools_and_collect(state, osint_tools, scan_target, current, "ThreatIntel")
         if osint_findings:
             state["vulnerabilidades_encontradas"].extend(osint_findings)
@@ -2688,9 +3006,9 @@ def build_graph(mode: ScanMode = "unit"):
 
     # Pipeline paralelo — Asset Discovery dispara Threat Intel e Risk Assessment simultaneamente
     graph.set_entry_point("asset_discovery")
+    # Fluxo sequencial para evitar conflito de merge de estado em execucao paralela.
     graph.add_edge("asset_discovery",   "threat_intel")
-    graph.add_edge("asset_discovery",   "risk_assessment")
-    graph.add_edge("threat_intel",      "governance")
+    graph.add_edge("threat_intel",      "risk_assessment")
     graph.add_edge("risk_assessment",   "governance")
     graph.add_edge("governance",        "executive_analyst")
     graph.add_edge("executive_analyst", END)
@@ -2700,6 +3018,7 @@ def build_graph(mode: ScanMode = "unit"):
 
 def initial_state(
     scan_id: int,
+    owner_id: int,
     target: str,
     scan_mode: ScanMode = "unit",
     known_vulnerability_patterns: list[str] | None = None,
@@ -2707,12 +3026,15 @@ def initial_state(
 ) -> AgentState:
     parsed_targets = _split_input_targets(target)
     primary_target = parsed_targets[0] if parsed_targets else str(target or "").strip()
+    target_type = _infer_target_type(primary_target)
 
     mission_items = GROUP_MISSION_ITEMS.copy()
     return {
         "scan_id": scan_id,
+        "owner_id": owner_id,
         "target": primary_target,
         "scan_mode": scan_mode,
+        "target_type": target_type,
         "easm_segment": segment or "Digital Services",
         "input_targets": parsed_targets or ([primary_target] if primary_target else []),
         "lista_ativos": [],
@@ -2723,6 +3045,7 @@ def initial_state(
         "pending_port_tests": [],
         "pending_asset_scans": [],
         "scanned_assets": [],
+        "discovered_subdomains_persisted": [],
         "port_followup_done": False,
         "activity_metrics": [],
         "mission_metrics": {

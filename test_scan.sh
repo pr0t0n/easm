@@ -9,18 +9,23 @@ echo ""
 
 # Configuração
 TARGET="validcertificadora.com.br"
-API="http://localhost:8000/api"
+API="http://localhost:8001/api"
+ADMIN_EMAIL="admin@example.com"
+ADMIN_PASSWORD="admin123"
 
 echo "📝 Etapa 1: Login na API"
 echo "========================"
 
-# Fazer login
-TOKEN=$(curl -s -X POST "$API/auth/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin@easm.local&password=admin123" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+# Fazer login (API atual usa /auth/login com payload JSON)
+LOGIN_RESPONSE=$(curl -s -X POST "$API/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+
+TOKEN=$(echo "$LOGIN_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
 
 if [ -z "$TOKEN" ]; then
     echo "❌ Erro: Não foi possível fazer login"
+    echo "Resposta: $LOGIN_RESPONSE"
     exit 1
 fi
 
@@ -95,8 +100,10 @@ while true; do
         fi
     done
     
-    # Verifica status do scan
-    STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+        # Verifica status do scan no endpoint correto
+        STATUS_RESPONSE=$(curl -s "$API/scans/$SCAN_ID/status" \
+            -H "Authorization: Bearer $TOKEN")
+        STATUS=$(echo "$STATUS_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
     
     if [ "$STATUS" = "completed" ]; then
         echo ""

@@ -147,13 +147,19 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         # Flag -a fornece verbosidade completa dos resultados.
         # O wrapper burp-cli lê BURP_API_HOST/BURP_API_PORT das env vars
         # (set via docker-compose), então NÃO passamos -t/-p no comando.
-        return ["burp-cli", "scan", "-a", "--url", url, "--format", "json"]
+        # Para alvos sem esquema explícito, Burp tende a ser mais estável com HTTPS.
+        burp_url = url
+        if "://" not in str(parts.get("raw") or "") and host:
+            burp_url = f"https://{host}"
+        return ["burp-cli", "scan", "-a", "--url", burp_url, "--format", "json"]
     if normalized == "nmap":
         return [
             "nmap",
-            "-sS",
+            "-Pn",
+            "-n",
+            "-sT",
             "-sV",
-            "-A",
+            "-T3",
             "-p-",
             "--script=vulscan/",
             "--script-args",
@@ -442,6 +448,16 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
 
     binary = _tool_binary(tool_name)
     if shutil.which(binary) is None:
+        if normalized_tool in {"burp", "burp-cli"}:
+            return {
+                "status": "skipped",
+                "output": f"Ferramenta {tool_name} indisponivel no worker ({binary}); Burp marcado como skipped.",
+                "open_ports": [],
+                "return_code": 0,
+                "command": f"{binary} <missing>",
+                "stdout": "",
+                "stderr": "missing burp-cli binary",
+            }
         return {
             "status": "error",
             "output": f"Ferramenta {tool_name} nao encontrada no worker ({binary}).",
@@ -493,6 +509,10 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
     if normalized_tool == "nuclei":
         output_limit = 30000
         stream_limit = 20000
+    elif normalized_tool in {"burp", "burp-cli"}:
+        # Burp retorna JSON potencialmente grande; truncar cedo quebra parser de findings.
+        output_limit = 60000
+        stream_limit = 50000
     else:
         output_limit = 2500
         stream_limit = 1500
@@ -500,9 +520,33 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
     open_ports = _parse_open_ports(tool_name, stdout)
     status = "executed" if proc.returncode == 0 else "error"
 
+    # Nmap pode retornar 0 mesmo quando nenhum alvo foi resolvido.
+    if normalized_tool in {"nmap-vulscan", "vulscan", "nmap"}:
+        stderr_l = (stderr or "").lower()
+        stdout_l = (stdout or "").lower()
+        unresolved = "failed to resolve" in stderr_l
+        zero_hosts = "0 hosts up" in stdout_l or "0 hosts scanned" in stderr_l
+        if unresolved and zero_hosts:
+            status = "error"
+
     # Nikto em algumas imagens exige modulo Perl JSON; trata como dependencia ausente.
-    if normalized_tool == "nikto" and "Required module not found: JSON" in stderr:
+    if normalized_tool == "nikto" and (
+        "Required module not found: JSON" in stderr
+        or "Required module not found: XML::Writer" in stderr
+    ):
         status = "skipped"
+
+    # Burp pode ficar indisponivel quando REST API/JAR proprietario nao estao prontos.
+    if normalized_tool in {"burp", "burp-cli"}:
+        lowered = combined.lower()
+        burp_unavailable_markers = [
+            "burp rest api indisponivel",
+            "burp pro jar nao encontrado",
+            "missing /burp/burpsuite_pro.jar",
+            "burp_not_found",
+        ]
+        if any(marker in lowered for marker in burp_unavailable_markers):
+            status = "skipped"
 
     # WPScan em alvos que nao sao WordPress nao deve ser tratado como erro de execucao.
     if normalized_tool == "wpscan" and "does not seem to be running WordPress" in combined:
