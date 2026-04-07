@@ -13,7 +13,7 @@ def _group_config(mode: ScanMode, queue_suffix: str, description: str, tools: li
 
 
 # Pentest.io pipeline (refatorado — 3 workers):
-# 1) RECON (Amass, MassDns, Sublist3r, Nmap) 
+# 1) RECON (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f) 
 #    → 2a) OSINT (Shodan.io) + 2b) VULN (Burp, Nmap Vulscan, Nikto) [paralelo]
 #    → 3) LLM (junta dados + valida risco + recomm)
 
@@ -21,8 +21,8 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
     "recon": _group_config(
         "unit",
         "reconhecimento",
-        "[UNITARIO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap)",
-        ["amass", "massdns", "sublist3r", "nmap"],
+        "[UNITARIO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f)",
+        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
         9,
     ),
     "osint": _group_config(
@@ -44,7 +44,7 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "unit",
         "reconhecimento",
         "[UNITARIO] Alias -> recon",
-        ["amass", "massdns", "sublist3r", "nmap"],
+        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
         9,
     ),
     "analise_vulnerabilidade": _group_config(
@@ -60,8 +60,8 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
     "recon": _group_config(
         "scheduled",
         "reconhecimento",
-        "[AGENDADO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap)",
-        ["amass", "massdns", "sublist3r", "nmap"],
+        "[AGENDADO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f)",
+        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
         6,
     ),
     "osint": _group_config(
@@ -83,7 +83,7 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
         "scheduled",
         "reconhecimento",
         "[AGENDADO] Alias -> recon",
-        ["amass", "massdns", "sublist3r", "nmap"],
+        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
         6,
     ),
     "analise_vulnerabilidade": _group_config(
