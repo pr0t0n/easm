@@ -30,8 +30,10 @@ def _timeout_for_tool(tool_name: str) -> int:
         return 900
     if name in {"nessus", "nmap-vulscan", "vulscan"}:
         return 240
-    if name in {"amass", "katana", "waymore", "wpscan", "nikto"}:
-        return 120
+    if name in {"nikto", "wpscan"}:
+        return 210
+    if name in {"amass", "katana", "waymore"}:
+        return 150
     return 75
 
 

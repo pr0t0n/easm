@@ -1138,7 +1138,7 @@ def _extract_technical_details(details: dict, default_target: str) -> dict[str, 
         evidence or "",
         command or "",
     ]).lower()
-    is_sql_injection = any(token in sql_blob for token in ["sql injection", "sqli", "sqlmap", "injectable", "sql syntax"])
+    is_sql_injection = any(token in sql_blob for token in ["sql injection", "sqli", "injectable", "sql syntax"])
 
     if is_sql_injection and _looks_like_generic_evidence(evidence):
         evidence_lines = [

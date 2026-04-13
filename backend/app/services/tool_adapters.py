@@ -13,6 +13,16 @@ from app.workers.worker_groups import find_group_by_tool, get_worker_groups
 
 TOOL_TIMEOUT_SECONDS = 90
 
+# Ferramentas lentas recebem timeout maior que o padrao de 90s.
+# Deve ficar abaixo do dispatcher timeout correspondente em worker_dispatcher.py.
+_PER_TOOL_TIMEOUT_SECONDS: dict[str, int] = {
+    "nikto": 180,
+    "wpscan": 150,
+    "amass": 120,
+    "nmap-vulscan": 220,
+    "vulscan": 220,
+}
+
 VULSCAN_PRIORITY_TCP_PORTS = [
     20, 21, 22, 23,
     25, 53,
@@ -412,7 +422,7 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
         return _run_curl_headers_tool(target)
 
     cmd = _build_tool_command(tool_name, target)
-    timeout_seconds = TOOL_TIMEOUT_SECONDS
+    timeout_seconds = _PER_TOOL_TIMEOUT_SECONDS.get(normalized_tool, TOOL_TIMEOUT_SECONDS)
     try:
         proc = subprocess.run(
             cmd,
