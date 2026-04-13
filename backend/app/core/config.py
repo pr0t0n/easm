@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     ai_recommendations_use_ollama: bool = True
     ai_recommendations_timeout_seconds: int = 20
     frontend_origin: str = "http://localhost:5173"
-    frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
     frontend_origin_regex: str | None = None
 
     smtp_host: str = ""

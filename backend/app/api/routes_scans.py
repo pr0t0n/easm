@@ -2133,6 +2133,11 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         synchronize_session=False,
     )
 
+    # 3) ExecutedToolRun referencia scan_jobs sem cascade ORM; remover explicitamente.
+    db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
     
@@ -2183,6 +2188,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_audit_events = 0
         deleted_scan_logs = 0
         deleted_findings = 0
+        deleted_executed_tool_runs = 0
         deleted_scan_jobs = 0
 
         if resettable_scan_ids:
@@ -2199,6 +2205,11 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             deleted_findings = (
                 db.query(Finding)
                 .filter(Finding.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_executed_tool_runs = (
+                db.query(ExecutedToolRun)
+                .filter(ExecutedToolRun.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
             deleted_scan_jobs = (
@@ -2234,6 +2245,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "deleted": {
                     "scan_jobs": deleted_scan_jobs,
                     "findings": deleted_findings,
+                    "executed_tool_runs": deleted_executed_tool_runs,
                     "scan_logs": deleted_scan_logs,
                     "audit_events": deleted_audit_events,
                 },
@@ -2246,6 +2258,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             "deleted": {
                 "scan_jobs": deleted_scan_jobs,
                 "findings": deleted_findings,
+                "executed_tool_runs": deleted_executed_tool_runs,
                 "scan_logs": deleted_scan_logs,
                 "audit_events": deleted_audit_events,
             },
