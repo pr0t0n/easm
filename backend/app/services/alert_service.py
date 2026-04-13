@@ -11,9 +11,11 @@ Monitora gatilhos:
 import asyncio
 import json
 import logging
+import smtplib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
+from email.message import EmailMessage
 
 import httpx
 from sqlalchemy import and_
@@ -61,22 +63,27 @@ class AlertDetector:
         current_rating: float,
         previous_rating: float,
         asset_id: Optional[int] = None,
+        threshold_points: float = 10.0,
+        period_hours: int = 24,
     ) -> Optional[Dict[str, Any]]:
         """
         Detecta queda de rating >10 pts em período
 
         Retorna alert config ou None
         """
-        deviation = AlertDetector._compute_posture_deviation(current_rating, previous_rating)
+        deviation = AlertDetector._compute_posture_deviation(current_rating, previous_rating, period_hours=period_hours)
 
-        if deviation["is_critical_deviation"] and deviation["deviation"] < 0:
+        threshold = max(0.1, float(threshold_points))
+        drop_points = abs(float(deviation["deviation"]))
+
+        if deviation["deviation"] < 0 and drop_points >= threshold:
             return {
                 "type": AlertType.RATING_DROP,
                 "severity": AlertSeverity.CRITICAL,
-                "title": f"Rating caiu {abs(deviation['deviation'])} pontos",
+                "title": f"Rating caiu {drop_points} pontos",
                 "description": f"Postura de segurança degradou de {previous_rating:.1f} para {current_rating:.1f}. Causa: {deviation['cause']}",
-                "trigger_value": abs(deviation["deviation"]),
-                "threshold_value": 10.0,
+                "trigger_value": drop_points,
+                "threshold_value": threshold,
             }
         return None
 
@@ -188,9 +195,9 @@ class AlertDetector:
         return None
 
     @staticmethod
-    def _compute_posture_deviation(current: float, previous: float) -> Dict[str, Any]:
+    def _compute_posture_deviation(current: float, previous: float, period_hours: int = 24) -> Dict[str, Any]:
         """Utilitário: compute_posture_deviation"""
-        return compute_posture_deviation(current, previous, period_hours=24)
+        return compute_posture_deviation(current, previous, period_hours=period_hours)
 
 
 class AlertAction:
@@ -229,11 +236,42 @@ class AlertAction:
         subject: str,
         body: str,
     ) -> bool:
-        """Envia alerta por email (implementação stub)"""
-        logger.info(f"[Alert Email] Para: {recipient}")
-        logger.info(f"[Alert Email] Assunto: {subject}")
-        # TODO: Implementar envio via SendGrid/AWS SES
-        return True
+        """Envia alerta por email via SMTP quando configurado."""
+        if not settings.smtp_host or not settings.smtp_sender_email:
+            logger.warning("[Alert Email] SMTP não configurado; envio ignorado")
+            return False
+
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = (
+            f"{settings.smtp_sender_name} <{settings.smtp_sender_email}>"
+            if settings.smtp_sender_name else settings.smtp_sender_email
+        )
+        message["To"] = recipient
+        message.set_content(body)
+
+        def _send() -> bool:
+            smtp_client: smtplib.SMTP | smtplib.SMTP_SSL
+            if settings.smtp_use_ssl:
+                smtp_client = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10)
+            else:
+                smtp_client = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10)
+
+            with smtp_client as server:
+                if settings.smtp_use_tls and not settings.smtp_use_ssl:
+                    server.starttls()
+                if settings.smtp_username:
+                    server.login(settings.smtp_username, settings.smtp_password)
+                server.send_message(message)
+            return True
+
+        try:
+            logger.info(f"[Alert Email] Para: {recipient}")
+            logger.info(f"[Alert Email] Assunto: {subject}")
+            return await asyncio.to_thread(_send)
+        except Exception as exc:
+            logger.error(f"[Alert Email] Erro ao enviar para {recipient}: {exc}")
+            return False
 
     @staticmethod
     async def send_slack(
@@ -286,6 +324,22 @@ class AlertManager:
         webhook_payload: Optional[Dict[str, Any]] = None,
     ) -> EASMAlert:
         """Cria novo alert no banco de dados"""
+        existing = db.query(EASMAlert).filter(
+            EASMAlert.owner_id == owner_id,
+            EASMAlert.asset_id == asset_id,
+            EASMAlert.alert_type == (alert_type.value if isinstance(alert_type, AlertType) else alert_type),
+            EASMAlert.title == title,
+            EASMAlert.is_resolved == False,
+        ).first()
+        if existing:
+            existing.description = description
+            existing.trigger_value = trigger_value
+            existing.threshold_value = threshold_value
+            existing.webhook_payload = webhook_payload or existing.webhook_payload or {}
+            logger.info(f"[Alert] Reutilizado existente: {existing.id} - {title}")
+            db.flush()
+            return existing
+
         alert = EASMAlert(
             owner_id=owner_id,
             asset_id=asset_id,
@@ -332,12 +386,28 @@ class AlertManager:
                 logger.warning(f"[Alert] Webhook falhou: {alert.id}")
 
         # Execute notifications
-        notify_channels = rule.notify_channels or ["email"]
-        if isinstance(notify_channels, dict):
-            notify_channels = notify_channels.get("channels", ["email"])
+        notify_config = rule.notify_channels or ["email"]
+        if isinstance(notify_config, dict):
+            notify_channels = notify_config.get("channels", ["email"])
+        else:
+            notify_channels = notify_config
+            notify_config = {}
 
-        # Stub: implement actual notifications
         logger.info(f"[Alert] Notificações: {notify_channels}")
+
+        if "email" in notify_channels:
+            email_targets = AlertManager._resolve_email_targets(db, alert, notify_config)
+            for recipient in email_targets:
+                ok = await AlertAction.send_email(recipient, alert.title, alert.description)
+                if not ok:
+                    logger.warning(f"[Alert] Email falhou: {alert.id} -> {recipient}")
+
+        if "slack" in notify_channels:
+            slack_webhook = AlertManager._resolve_slack_webhook(rule, notify_config)
+            if slack_webhook:
+                ok = await AlertAction.send_slack(slack_webhook, alert.title, alert.description, alert.severity)
+                if not ok:
+                    logger.warning(f"[Alert] Slack falhou: {alert.id}")
 
     @staticmethod
     def check_all_rules(
@@ -355,8 +425,56 @@ class AlertManager:
 
         for rule in rules:
             if rule.rule_type == AlertType.RATING_DROP.value:
-                # TODO: Implementar
-                pass
+                condition = rule.condition or {}
+                asset_filter = rule.asset_filter or {}
+                threshold = float(condition.get("threshold", 10.0) or 10.0)
+                period_hours = int(condition.get("period_hours", 24) or 24)
+
+                assets_query = db.query(Asset).filter(Asset.owner_id == owner_id)
+                min_criticality = asset_filter.get("min_criticality")
+                if min_criticality is not None:
+                    assets_query = assets_query.filter(Asset.criticality_score >= float(min_criticality))
+
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, period_hours))
+                assets = assets_query.all()
+
+                for asset in assets:
+                    history = (
+                        db.query(AssetRatingHistory)
+                        .filter(
+                            AssetRatingHistory.asset_id == asset.id,
+                            AssetRatingHistory.recorded_at >= cutoff,
+                        )
+                        .order_by(AssetRatingHistory.recorded_at.desc())
+                        .limit(2)
+                        .all()
+                    )
+                    if len(history) < 2:
+                        continue
+
+                    current_history, previous_history = history[0], history[1]
+                    detected = AlertDetector.detect_rating_drop(
+                        db,
+                        owner_id,
+                        current_history.easm_rating,
+                        previous_history.easm_rating,
+                        asset_id=asset.id,
+                        threshold_points=threshold,
+                        period_hours=period_hours,
+                    )
+                    if detected:
+                        alert = AlertManager.create_alert(
+                            db,
+                            owner_id,
+                            AlertType.RATING_DROP,
+                            AlertSeverity(detected["severity"]),
+                            detected["title"],
+                            detected["description"],
+                            trigger_value=detected.get("trigger_value"),
+                            threshold_value=detected.get("threshold_value"),
+                            asset_id=asset.id,
+                        )
+                        alerts.append(alert)
             elif rule.rule_type == AlertType.CROWN_JEWEL_AGE.value:
                 # Iterate assets aplicáveis
                 asset_filter = rule.asset_filter or {}
@@ -387,3 +505,41 @@ class AlertManager:
 
         db.commit()
         return alerts
+
+    @staticmethod
+    def _resolve_email_targets(db: Session, alert: EASMAlert, notify_config: dict[str, Any]) -> list[str]:
+        recipients: list[str] = []
+
+        email_config = notify_config.get("email") if isinstance(notify_config, dict) else None
+        if isinstance(email_config, str) and email_config.strip():
+            recipients.append(email_config.strip())
+        elif isinstance(email_config, list):
+            recipients.extend(str(item).strip() for item in email_config if str(item).strip())
+        elif isinstance(email_config, dict):
+            configured = email_config.get("recipients", [])
+            if isinstance(configured, str) and configured.strip():
+                recipients.append(configured.strip())
+            elif isinstance(configured, list):
+                recipients.extend(str(item).strip() for item in configured if str(item).strip())
+
+        if not recipients:
+            owner = db.query(User).filter(User.id == alert.owner_id).first()
+            if owner and owner.email:
+                recipients.append(owner.email)
+
+        unique_recipients: list[str] = []
+        for recipient in recipients:
+            if recipient not in unique_recipients:
+                unique_recipients.append(recipient)
+        return unique_recipients
+
+    @staticmethod
+    def _resolve_slack_webhook(rule: EASMAlertRule, notify_config: dict[str, Any]) -> str:
+        slack_config = notify_config.get("slack") if isinstance(notify_config, dict) else None
+        if isinstance(slack_config, str) and slack_config.strip():
+            return slack_config.strip()
+        if isinstance(slack_config, dict):
+            webhook = slack_config.get("webhook_url", "")
+            if isinstance(webhook, str) and webhook.strip():
+                return webhook.strip()
+        return str(rule.webhook_url or "").strip()

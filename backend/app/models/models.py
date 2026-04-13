@@ -112,6 +112,9 @@ class Finding(Base):
 class ExecutedToolRun(Base):
     """Rastreia execução de ferramentas para idempotência dentro de uma missão."""
     __tablename__ = "executed_tool_runs"
+    __table_args__ = (
+        sa.UniqueConstraint("scan_job_id", "tool_name", "target", name="uq_executed_tool_runs_scan_tool_target"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)

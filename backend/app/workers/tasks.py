@@ -1,4 +1,5 @@
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -241,6 +242,26 @@ def _touch_worker_heartbeat(
         db.add(hb)
         db.flush()
     return hb
+
+
+@celery.task(name="worker.heartbeat")
+def worker_heartbeat() -> dict[str, Any]:
+    """Heartbeat periódico de worker para health-check operacional."""
+    db: Session = SessionLocal()
+    try:
+        hb = _touch_worker_heartbeat(db, scan_mode="unit", status="alive")
+        db.commit()
+        return {
+            "ok": True,
+            "worker_name": hb.worker_name,
+            "status": hb.status,
+            "last_seen_at": hb.last_seen_at.isoformat() if hb.last_seen_at else None,
+        }
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
 
 
 def _burp_api_host() -> str:
@@ -1408,6 +1429,14 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             scan_mode=scan_mode,
             known_vulnerability_patterns=known_patterns,
         )
+        trace_id = str(state.get("trace_id") or f"scan-{job.id}")
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="worker.trace",
+            level="INFO",
+            message=f"trace_id={trace_id}",
+        ))
+        db.commit()
         recursion_limit = max(100, len(state.get("mission_items", [])) * 4)
         final_state = app.invoke(
             state,
@@ -1416,6 +1445,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 "recursion_limit": recursion_limit,
             },
         )
+        final_state["trace_id"] = trace_id
 
         llm_risk_cfg = parse_scan_llm_risk_config(job.state_data or {})
         if llm_risk_cfg.enabled:
@@ -1801,7 +1831,11 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
         attempt = int(getattr(task_ctx.request, "retries", 0)) + 1
 
         if attempt < max_attempts:
-            next_retry_at = datetime.utcnow() + timedelta(seconds=delay_seconds)
+            max_delay = int(delay_seconds * 8)
+            exponential_delay = int(min(max_delay, delay_seconds * (2 ** max(0, attempt - 1))))
+            jitter = random.randint(0, max(1, min(15, delay_seconds // 2)))
+            countdown = exponential_delay + jitter
+            next_retry_at = datetime.utcnow() + timedelta(seconds=countdown)
             job.status = "retrying"
             job.next_retry_at = next_retry_at
             job.current_step = f"Retry agendado ({attempt + 1}/{max_attempts})"
@@ -1813,12 +1847,12 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
                     level="WARNING",
                     message=(
                         f"Falha na tentativa {attempt}/{max_attempts}: {result.get('error', 'erro')} | "
-                        f"novo retry em {delay_seconds}s"
+                        f"novo retry em {countdown}s"
                     ),
                 )
             )
             db.commit()
-            raise task_ctx.retry(exc=Exception(result.get("error", "scan failed")), countdown=delay_seconds)
+            raise task_ctx.retry(exc=Exception(result.get("error", "scan failed")), countdown=countdown)
 
         job.status = "failed"
         job.next_retry_at = None

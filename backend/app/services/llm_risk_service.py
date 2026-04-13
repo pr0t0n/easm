@@ -8,6 +8,10 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.resilience import SimpleCircuitBreaker, guarded_call
+
+
+_OLLAMA_BREAKER = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout_seconds=30)
 
 
 @dataclass
@@ -136,9 +140,13 @@ def _grade_with_ollama(probe: str, response_text: str, timeout_seconds: int) -> 
 
     try:
         with httpx.Client(timeout=timeout_seconds) as client:
-            raw = client.post(
-                f"{settings.ollama_base_url.rstrip('/')}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False},
+            raw = guarded_call(
+                _OLLAMA_BREAKER,
+                lambda: client.post(
+                    f"{settings.ollama_base_url.rstrip('/')}/api/generate",
+                    json={"model": model, "prompt": prompt, "stream": False},
+                ),
+                on_open_error=RuntimeError("circuit_open: ollama indisponivel temporariamente"),
             )
             raw.raise_for_status()
             data = raw.json()

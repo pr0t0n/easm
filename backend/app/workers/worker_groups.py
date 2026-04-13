@@ -12,88 +12,91 @@ def _group_config(mode: ScanMode, queue_suffix: str, description: str, tools: li
     }
 
 
+CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
+    "recon": ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
+    "osint": ["shodan-cli"],
+    "vuln": ["burp-cli", "nmap-vulscan", "nikto"],
+}
+
+
+def get_canonical_group_tools() -> dict[str, list[str]]:
+    """Return a defensive copy of canonical tools by worker group."""
+    return {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
+
+
+def _build_worker_groups(mode: ScanMode, priorities: dict[str, int]) -> dict[str, dict[str, Any]]:
+    mode_label = "UNITARIO" if mode == "unit" else "AGENDADO"
+    recon_tools = list(CANONICAL_GROUP_TOOLS["recon"])
+    osint_tools = list(CANONICAL_GROUP_TOOLS["osint"])
+    vuln_tools = list(CANONICAL_GROUP_TOOLS["vuln"])
+
+    return {
+        "recon": _group_config(
+            mode,
+            "reconhecimento",
+            f"[{mode_label}] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f)",
+            recon_tools,
+            priorities["recon"],
+        ),
+        "osint": _group_config(
+            mode,
+            "osint",
+            f"[{mode_label}] Worker OSINT — Inteligência de ameaças (Shodan.io)",
+            osint_tools,
+            priorities["osint"],
+        ),
+        "vuln": _group_config(
+            mode,
+            "analise_vulnerabilidade",
+            f"[{mode_label}] Worker VULN — Análise de vulnerabilidades (Burp, Nmap Vulscan, Nikto)",
+            vuln_tools,
+            priorities["vuln"],
+        ),
+        # Aliases para compatibilidade com rotas/CLI
+        "reconhecimento": _group_config(
+            mode,
+            "reconhecimento",
+            f"[{mode_label}] Alias -> recon",
+            recon_tools,
+            priorities["recon"],
+        ),
+        "analise_vulnerabilidade": _group_config(
+            mode,
+            "analise_vulnerabilidade",
+            f"[{mode_label}] Alias -> vuln",
+            vuln_tools,
+            priorities["vuln"],
+        ),
+    }
+
+
 # Pentest.io pipeline (refatorado — 3 workers):
 # 1) RECON (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f) 
 #    → 2a) OSINT (Shodan.io) + 2b) VULN (Burp, Nmap Vulscan, Nikto) [paralelo]
 #    → 3) LLM (junta dados + valida risco + recomm)
 
-UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = {
-    "recon": _group_config(
-        "unit",
-        "reconhecimento",
-        "[UNITARIO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f)",
-        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
-        9,
-    ),
-    "osint": _group_config(
-        "unit",
-        "osint",
-        "[UNITARIO] Worker OSINT — Inteligência de ameaças (Shodan.io)",
-        ["shodan-cli"],
-        8,
-    ),
-    "vuln": _group_config(
-        "unit",
-        "analise_vulnerabilidade",
-        "[UNITARIO] Worker VULN — Análise de vulnerabilidades (Burp, Nmap Vulscan, Nikto)",
-        ["burp-cli", "nmap-vulscan", "nikto"],
-        9,
-    ),
-    # Aliases para compatibilidade com rotas/CLI
-    "reconhecimento": _group_config(
-        "unit",
-        "reconhecimento",
-        "[UNITARIO] Alias -> recon",
-        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
-        9,
-    ),
-    "analise_vulnerabilidade": _group_config(
-        "unit",
-        "analise_vulnerabilidade",
-        "[UNITARIO] Alias -> vuln",
-        ["burp-cli", "nmap-vulscan", "nikto"],
-        9,
-    ),
-}
+UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(
+    mode="unit",
+    priorities={"recon": 9, "osint": 8, "vuln": 9},
+)
 
-SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = {
-    "recon": _group_config(
-        "scheduled",
-        "reconhecimento",
-        "[AGENDADO] Worker RECON — Descoberta de ativos (Amass, MassDns, Sublist3r, Nmap, Curl-Headers, WAFw00f)",
-        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
-        6,
-    ),
-    "osint": _group_config(
-        "scheduled",
-        "osint",
-        "[AGENDADO] Worker OSINT — Inteligência de ameaças (Shodan.io)",
-        ["shodan-cli"],
-        5,
-    ),
-    "vuln": _group_config(
-        "scheduled",
-        "analise_vulnerabilidade",
-        "[AGENDADO] Worker VULN — Análise de vulnerabilidades (Burp, Nmap Vulscan, Nikto)",
-        ["burp-cli", "nmap-vulscan", "nikto"],
-        6,
-    ),
-    # Aliases para compatibilidade
-    "reconhecimento": _group_config(
-        "scheduled",
-        "reconhecimento",
-        "[AGENDADO] Alias -> recon",
-        ["amass", "massdns", "sublist3r", "nmap", "curl-headers", "wafw00f"],
-        6,
-    ),
-    "analise_vulnerabilidade": _group_config(
-        "scheduled",
-        "analise_vulnerabilidade",
-        "[AGENDADO] Alias -> vuln",
-        ["burp-cli", "nmap-vulscan", "nikto"],
-        6,
-    ),
-}
+SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(
+    mode="scheduled",
+    priorities={"recon": 6, "osint": 5, "vuln": 6},
+)
+
+
+def _validate_tool_parity() -> None:
+    for group_name in ["recon", "osint", "vuln"]:
+        unit_tools = UNIT_WORKER_GROUPS[group_name]["tools"]
+        scheduled_tools = SCHEDULED_WORKER_GROUPS[group_name]["tools"]
+        if unit_tools != scheduled_tools:
+            raise RuntimeError(
+                f"Tool drift detectado no grupo '{group_name}': unit={unit_tools} scheduled={scheduled_tools}"
+            )
+
+
+_validate_tool_parity()
 
 WORKER_GROUPS = UNIT_WORKER_GROUPS
 

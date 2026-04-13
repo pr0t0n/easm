@@ -10,14 +10,10 @@ from urllib.parse import urlparse, urlunparse
 from app.core.config import settings
 from app.services.asm_rules_service import get_asm_rules_service
 
-from app.workers.worker_groups import find_group_by_tool, get_worker_groups
+from app.workers.worker_groups import find_group_by_tool, get_canonical_group_tools, get_worker_groups
 
 
-SAFE_TOOL_REGISTRY = {
-    "recon": ["amass", "massdns", "sublist3r", "nmap"],
-    "osint": ["shodan-cli"],
-    "vuln": ["burp-cli", "nmap-vulscan", "nikto"],
-}
+SAFE_TOOL_REGISTRY = get_canonical_group_tools()
 
 TOOL_TIMEOUT_SECONDS = 90
 
@@ -34,18 +30,6 @@ VULSCAN_PRIORITY_TCP_PORTS = [
     8080, 8443, 8888,
     27017,
 ]
-
-# Tool-specific timeouts (override default TOOL_TIMEOUT_SECONDS)
-TOOL_SPECIFIC_TIMEOUTS = {
-    "nmap": 600,
-    "nmap-vulscan": 600,
-    "amass": 120,
-    "massdns": 120,
-    "sublist3r": 120,
-    "shodan-cli": 60,
-    "burp-cli": 1860,
-    "nikto": 240,
-}
 
 OFFICIALLY_DISABLED_TOOLS: dict[str, str] = {}
 
@@ -83,6 +67,14 @@ def _first_existing_path(paths: list[str]) -> str | None:
         if os.path.exists(path):
             return path
     return None
+
+
+def _get_nuclei_templates_path() -> str | None:
+    return _first_existing_path([
+        "/root/.nuclei/templates",
+        "/nuclei-templates",
+        "/app/nuclei-templates",
+    ])
 
 
 def _target_parts(target: str) -> dict[str, str]:
@@ -159,11 +151,9 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "-n",
             "-sT",
             "-sV",
-            "-T3",
-            "-p-",
-            "--script=vulscan/",
-            "--script-args",
-            "vulscandb=cve.csv",
+            "-T4",
+            "--top-ports",
+            "100",
             host,
         ]
     if normalized == "naabu":
@@ -478,7 +468,7 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "stdout": "",
             "stderr": "missing mandatory nuclei templates",
         }
-    timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get(normalized_tool, TOOL_TIMEOUT_SECONDS)
+    timeout_seconds = TOOL_TIMEOUT_SECONDS
     try:
         proc = subprocess.run(
             cmd,
@@ -623,7 +613,7 @@ def _run_curl_headers_tool(target: str) -> dict[str, Any]:
         }
 
     first_cmd = ["curl", "-I", "-sS", "--max-time", "20", first_url]
-    timeout_seconds = TOOL_SPECIFIC_TIMEOUTS.get("curl-headers", 25)
+    timeout_seconds = TOOL_TIMEOUT_SECONDS
 
     try:
         first = subprocess.run(first_cmd, check=False, capture_output=True, text=True, timeout=timeout_seconds)
@@ -720,7 +710,7 @@ def _run_shodan_python_query(target: str) -> dict[str, Any]:
         "    print(json.dumps({'error': str(e), 'matches': [], 'total': 0}))",
     ])
 
-    timeout_secs = TOOL_SPECIFIC_TIMEOUTS.get("shodan-cli", 60)
+    timeout_secs = TOOL_TIMEOUT_SECONDS
     try:
         proc = subprocess.run(
             [sys.executable, "-c", script],

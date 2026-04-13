@@ -1,8 +1,12 @@
 from contextlib import suppress
+import logging
 
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def _sqlalchemy_to_psycopg_dsn(url: str) -> str:
@@ -18,4 +22,9 @@ def create_checkpointer():
         from langgraph.checkpoint.postgres import PostgresSaver
 
         return PostgresSaver.from_conn_string(dsn)
+
+    if str(settings.app_env or "development").strip().lower() in {"prod", "production"}:
+        raise RuntimeError("Postgres checkpointer indisponivel em ambiente de producao")
+
+    logger.warning("LangGraph PostgresSaver indisponivel; usando MemorySaver (nao duravel)")
     return MemorySaver()

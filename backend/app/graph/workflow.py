@@ -1,10 +1,12 @@
 import json
 import re
 import socket
+import logging
 from datetime import datetime
 from time import perf_counter
 from typing import Any, TypedDict
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
@@ -30,6 +32,9 @@ from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
+logger = logging.getLogger(__name__)
+
+
 def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
     """Persiste current_step, mission_index, e node_history no ScanJob durante execução do grafo.
 
@@ -51,18 +56,23 @@ def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
                 mi = state.get("mission_index", 0)
                 total = max(1, len(mission_items))
                 job.mission_progress = int(round(min(mi, total) / total * 100))
+                current_node = _node_for_step(step_label, state.get("scan_mode", "unit"))
+                snapshot_node_history = list(state.get("node_history", []))
+                if current_node and (not snapshot_node_history or snapshot_node_history[-1] != current_node):
+                    snapshot_node_history.append(current_node)
                 # Snapshot para o frontend consultar via /status
                 sd = dict(job.state_data or {})
                 sd["mission_index"] = mi
                 sd["mission_items"] = mission_items
-                sd["node_history"] = state.get("node_history", [])
+                sd["node_history"] = snapshot_node_history
+                sd["current_node"] = current_node
                 sd["burp_status"] = state.get("burp_status", "none")
                 job.state_data = sd
                 _db.commit()
         finally:
             _db.close()
     except Exception:
-        pass  # Não pode bloquear o pipeline por falha de IO
+        logger.exception("Falha ao sincronizar step no banco")
 
 # EASM pipeline
 GROUP_MISSION_ITEMS: list[str] = [
@@ -70,7 +80,7 @@ GROUP_MISSION_ITEMS: list[str] = [
     "2. ThreatIntel",
     "3. RiskAssessment",
     "4. Governance",
-    "5. Lista de Subdomínios Encontrados",
+    "5. ExecutiveAnalysis",
 ]
 
 KNOWN_WAF_MODELS: list[str] = [
@@ -124,6 +134,7 @@ def _normalize_waf_vendor(value: str | None) -> str:
 
 
 class AgentState(TypedDict):
+    trace_id: str
     scan_id: int
     target: str
     scan_mode: str                          # "unit" | "scheduled"
@@ -211,59 +222,28 @@ MAX_DISCOVERED_ASSETS = 40
 
 
 STEP_TOOL_MAP: list[tuple[str, str]] = [
-    ("amass", "amass"),
-    ("subfinder", "subfinder"),
-    ("assetfinder", "assetfinder"),
-    ("dnsx", "dnsx"),
-    ("naabu", "naabu"),
+    # Recon (escopo atual)
+    ("massdns", "massdns"),
+    ("sublist3r", "sublist3r"),
     ("nmap", "nmap"),
-    ("httpx", "httpx"),
-    ("katana", "katana"),
-    ("waymore", "waymore"),
-    ("ffuf", "ffuf"),
-    ("gobuster", "gobuster"),
-    ("wfuzz", "wfuzz"),
-    ("feroxbuster", "feroxbuster"),
-    ("arjun", "arjun"),
-    ("dirb", "dirb"),
-    ("nuclei", "nuclei"),
-    ("dalfox", "dalfox"),
-    ("wapiti", "wapiti"),
-    ("sqlmap", "sqlmap"),
-    ("commix", "commix"),
-    ("tplmap", "tplmap"),
     ("wafw00f", "wafw00f"),
     ("curl", "curl-headers"),
     ("header", "curl-headers"),
-    ("nikto", "nikto"),
-    ("wpscan", "wpscan"),
-    ("zap", "zap"),
-    ("semgrep", "semgrep"),
-    ("secretfinder", "secretfinder"),
-    ("linkfinder", "linkfinder"),
-    ("trufflehog", "trufflehog"),
-    ("kiterunner", "kiterunner"),
-    ("postman-to-k6", "postman-to-k6"),
-    ("whatweb", "whatweb"),
+    # OSINT (escopo atual)
     ("shodan", "shodan-cli"),
-    ("theharvester", "theharvester"),
-    ("h8mail", "h8mail"),
-    ("metagoofil", "metagoofil"),
-    ("subjack", "subjack"),
-    ("urlscan", "urlscan-cli"),
+    # Vulnerabilidade (escopo atual)
+    ("burp", "burp-cli"),
+    ("vulscan", "nmap-vulscan"),
+    ("nikto", "nikto"),
 ]
 
 
 def _tool_for_step(step_name: str) -> str | None:
     step = str(step_name or "").strip().lower()
     semantic_overrides = [
-        (("score board", "administration surface"), "nuclei"),
-        (("sqli",), "sqlmap"),
-        (("ssti", "tplmap"), "tplmap"),
-        (("command injection", "commix"), "commix"),
+        (("riskassessment", "risk assessment", "analise de vulnerabilidade"), "burp-cli"),
         (("waf",), "wafw00f"),
-        (("gobuster",), "gobuster"),
-        (("wfuzz",), "wfuzz"),
+        (("headers",), "curl-headers"),
     ]
     for keywords, tool in semantic_overrides:
         if any(keyword in step for keyword in keywords):
@@ -309,6 +289,7 @@ def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
         finally:
             db.close()
     except Exception:
+        logger.exception("Falha ao verificar execução idempotente da ferramenta")
         return False
 
 
@@ -335,7 +316,7 @@ def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, exec
         finally:
             db.close()
     except Exception:
-        pass  # Não bloqueia o pipeline se persistência falhar
+        logger.exception("Falha ao registrar execução da ferramenta")
 
 
 def _run_tools_and_collect(
@@ -368,6 +349,8 @@ def _run_tools_and_collect(
         # Execute tool
         from time import perf_counter
         exec_start = perf_counter()
+        _sync_step_to_db(state, f"{step_name} · {tool}")
+        state["logs_terminais"].append(f"{log_prefix}: tool={tool} status=starting")
         result = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
         exec_time = perf_counter() - exec_start
         state["executed_tool_runs"].append(run_id)
@@ -3057,7 +3040,9 @@ def initial_state(
     target_type = _infer_target_type(primary_target)
 
     mission_items = GROUP_MISSION_ITEMS.copy()
+    trace_id = str(uuid4())
     return {
+        "trace_id": trace_id,
         "scan_id": scan_id,
         "owner_id": owner_id,
         "target": primary_target,

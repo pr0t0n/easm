@@ -18,6 +18,7 @@ bcrypt==4.0.1
 
 # Task Queue
 celery==5.4.0
+flower==2.0.1
 redis==5.2.1
 kombu==5.3.7
 

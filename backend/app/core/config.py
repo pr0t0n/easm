@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     frontend_origin_regex: str | None = None
 
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_sender_email: str = ""
+    smtp_sender_name: str = "Pentest.io"
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
     nessus_enabled: bool = False
     nessus_url: str = ""
     nessus_access_key: str = ""

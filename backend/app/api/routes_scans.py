@@ -2029,6 +2029,72 @@ def _build_tool_execution_summary(job: ScanJob, scan_logs: list[ScanLog], tools:
     }
 
 
+def _build_vulnerability_execution_evidence(
+    db: Session,
+    scan_id: int,
+    vuln_tools: list[str],
+) -> dict[str, Any]:
+    normalized = [str(tool or "").strip().lower() for tool in vuln_tools if str(tool or "").strip()]
+    rows = (
+        db.query(ExecutedToolRun)
+        .filter(ExecutedToolRun.scan_job_id == scan_id)
+        .all()
+    )
+    rows = [row for row in rows if str(row.tool_name or "").strip().lower() in set(normalized)]
+
+    by_tool: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        tool = str(row.tool_name or "unknown").strip().lower()
+        bucket = by_tool.setdefault(
+            tool,
+            {
+                "tool": tool,
+                "success": 0,
+                "failed": 0,
+                "skipped": 0,
+                "unknown": 0,
+                "targets": set(),
+                "last_execution_seconds": None,
+            },
+        )
+        status = str(row.status or "unknown").strip().lower()
+        if status == "success" or status == "executed":
+            bucket["success"] += 1
+        elif status == "failed":
+            bucket["failed"] += 1
+        elif status == "skipped":
+            bucket["skipped"] += 1
+        else:
+            bucket["unknown"] += 1
+        target = str(row.target or "").strip()
+        if target:
+            bucket["targets"].add(target)
+        if row.execution_time_seconds is not None:
+            bucket["last_execution_seconds"] = float(row.execution_time_seconds)
+
+    tools = []
+    total_success = 0
+    total_failed = 0
+    for tool in sorted(by_tool.keys()):
+        item = by_tool[tool]
+        total_success += int(item.get("success", 0))
+        total_failed += int(item.get("failed", 0))
+        item["targets"] = sorted(list(item.get("targets") or set()))
+        item["targets_count"] = len(item["targets"])
+        tools.append(item)
+
+    return {
+        "requested_tools": sorted(set(normalized)),
+        "executions_found": len(rows),
+        "tools": tools,
+        "summary": {
+            "executed_success": total_success,
+            "executed_failed": total_failed,
+            "has_evidence": len(rows) > 0,
+        },
+    }
+
+
 @router.delete("/scans/{scan_id}")
 def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
@@ -3011,6 +3077,7 @@ def scan_report(
             if str(row.get("tool") or "") in report_focus_tools
         ],
     }
+    vulnerability_evidence = _build_vulnerability_execution_evidence(db, scan_id, report_focus_tools)
 
     # Assets summary and findings grouped by subdomain
     raw_assets_list: list[str] = list(
@@ -3081,6 +3148,7 @@ def scan_report(
         state_data={
             **(job.state_data or {}),
             "report_v2": {
+                "trace_id": (job.state_data or {}).get("trace_id") or f"scan-{scan_id}",
                 "domain": job.target_query,
                 "scan_type": "ASM_EXTERNAL",
                 "risk_score": score,
@@ -3091,15 +3159,15 @@ def scan_report(
                 "category_scores": category_scores,
                 "assets_summary": assets_summary,
                 "mission_items": (job.state_data or {}).get("mission_items") or [],
-                "item_05_subdominios_encontrados": {
-                    "title": "5. Lista de Subdomínios Encontrados",
+                "item_05_executive_analysis": {
+                    "title": "5. ExecutiveAnalysis",
                     "target": main_domain,
-                    "total_subdomains": len(subdomains_list),
-                    "subdomains": subdomains_list,
+                    "executive_summary": report_v2.get("executive_summary", ""),
                     "execution_summary": subdomain_execution_summary,
                 },
                 "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
+                "vulnerability_analysis_evidence": vulnerability_evidence,
                 "vulnerability_table": consolidated_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,

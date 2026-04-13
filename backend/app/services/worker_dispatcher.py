@@ -1,9 +1,15 @@
 import os
 from typing import Any
 
+from celery.result import allow_join_result
+
 from app.services.tool_adapters import run_tool_execution
+from app.services.resilience import SimpleCircuitBreaker, guarded_call
 from app.workers.celery_app import celery
 from app.workers.worker_groups import find_group_by_tool, group_queue
+
+
+_DISPATCH_BREAKER = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout_seconds=30)
 
 
 def _tool_task_name(scan_mode: str, tool_name: str) -> str:
@@ -69,23 +75,12 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
     if execution_mode == "local":
         return run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
 
-    # Evita bloqueio "Never call result.get() dentro da task" quando o grafo
-    # ja esta rodando dentro de um worker Celery.
-    # IMPRESCINDÍVEL: grafo usa LangGraph.invoke() que roda sincrono no mesmo processo.
     in_celery_task = False
     try:
         from celery import current_task as _current_task  # type: ignore
         in_celery_task = _current_task is not None
-    except Exception as ce:
+    except Exception:
         in_celery_task = False
-
-    # SEMPRE Usar fallback local quando dentro do Celery (grafo pode estar em qualquer nó)
-    if in_celery_task:
-        fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
-        fallback.setdefault("dispatch_task_name", _tool_task_name(scan_mode=scan_mode, tool_name=tool_name))
-        fallback.setdefault("dispatch_bypassed", True)
-        fallback.setdefault("dispatch_bypass_reason", "running_inside_celery_task")
-        return fallback
 
     task_name = _tool_task_name(scan_mode=scan_mode, tool_name=tool_name)
     queue_name = _tool_queue_name(scan_mode=scan_mode, tool_name=tool_name)
@@ -93,20 +88,33 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
     dispatch_params = _dispatch_params_from_env()
 
     try:
-        async_result = celery.send_task(
-            task_name,
-            kwargs={"tool": tool_name, "target": target, "params": dispatch_params},
-            queue=queue_name,
+        async_result = guarded_call(
+            _DISPATCH_BREAKER,
+            lambda: celery.send_task(
+                task_name,
+                kwargs={"tool": tool_name, "target": target, "params": dispatch_params},
+                queue=queue_name,
+            ),
+            on_open_error=RuntimeError("circuit_open: dispatch indisponivel temporariamente"),
         )
-        result = async_result.get(timeout=timeout, propagate=False)
+
+        if in_celery_task:
+            with allow_join_result():
+                result = async_result.get(timeout=timeout, propagate=False)
+        else:
+            result = async_result.get(timeout=timeout, propagate=False)
+
         normalized = _normalize_result(tool_name=tool_name, target=target, scan_mode=scan_mode, result=result)
         normalized.setdefault("dispatch_task_id", async_result.id)
         normalized.setdefault("dispatch_task_name", task_name)
+        normalized.setdefault("dispatch_bypassed", False)
         return normalized
     except Exception as exc:
         fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
         fallback.setdefault("dispatch_error", str(exc))
         fallback.setdefault("dispatch_task_name", task_name)
+        fallback.setdefault("dispatch_bypassed", True)
+        fallback.setdefault("dispatch_bypass_reason", "dispatch_error_or_circuit_open")
         if type(exc).__name__.lower() == "timeouterror":
             fallback.setdefault("dispatch_timeout", timeout)
         return fallback
