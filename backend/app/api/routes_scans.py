@@ -352,7 +352,7 @@ def _sanitize_multiline_text(value: str | None) -> str:
 def _normalize_finding_title(value: str | None) -> str:
     title = _sanitize_text(value)
     lowered = title.lower()
-    for prefix in ["nuclei:", "nuclei -", "nikto:", "ffuf:", "nmap-vulscan:", "vulscan:", "asm rule:", "asm rule match:"]:
+    for prefix in ["nikto:", "ffuf:", "nmap-vulscan:", "vulscan:", "asm rule:", "asm rule match:"]:
         if lowered.startswith(prefix):
             title = title[len(prefix):].strip(" -:")
             break
@@ -3161,6 +3161,8 @@ def scan_report(
         state_data={
             **(job.state_data or {}),
             "report_v2": {
+                # report_v2 pode não existir em scans antigos/incompletos.
+                # Evita NameError e mantém resposta consistente.
                 "trace_id": (job.state_data or {}).get("trace_id") or f"scan-{scan_id}",
                 "domain": job.target_query,
                 "scan_type": "ASM_EXTERNAL",
@@ -3172,10 +3174,17 @@ def scan_report(
                 "category_scores": category_scores,
                 "assets_summary": assets_summary,
                 "mission_items": (job.state_data or {}).get("mission_items") or [],
+                "item_05_subdominios_encontrados": {
+                    "title": "5. ExecutiveAnalysis",
+                    "target": main_domain,
+                    "subdomains": subdomains_list,
+                    "total_subdomains": len(subdomains_list),
+                    "execution_summary": subdomain_execution_summary,
+                },
                 "item_05_executive_analysis": {
                     "title": "5. ExecutiveAnalysis",
                     "target": main_domain,
-                    "executive_summary": report_v2.get("executive_summary", ""),
+                    "executive_summary": ((job.state_data or {}).get("report_v2") or {}).get("executive_summary", ""),
                     "execution_summary": subdomain_execution_summary,
                 },
                 "findings_by_subdomain": findings_by_subdomain,
@@ -4486,7 +4495,7 @@ def get_easm_report(
             "high_count": high_ct,
             "medium_count": medium_ct,
             "avg_age_days": int(sum(
-                (datetime.now(timezone.utc) - v.first_detected).days 
+                (datetime.utcnow() - v.first_detected).days 
                 for v in asset_vulns if v.first_detected
             ) / max(1, len(asset_vulns))) if asset_vulns else 0,
         })
@@ -4531,7 +4540,13 @@ def get_easm_report(
     tool_stats = {}
     for tool_run in executed_tools:
         if isinstance(tool_run, str):
-            tool_name = tool_run.split("@")[0] if "@" in tool_run else tool_run
+            if "|" in tool_run:
+                parts = [p.strip() for p in tool_run.split("|") if p.strip()]
+                tool_name = parts[-1] if parts else tool_run
+            elif "@" in tool_run:
+                tool_name = tool_run.split("@")[0]
+            else:
+                tool_name = tool_run
             tool_stats[tool_name] = tool_stats.get(tool_name, 0) + 1
     
     # ── 5. ACTIVITY METRICS POR NODE ────────────────────────────────────────

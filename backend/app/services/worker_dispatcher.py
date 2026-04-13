@@ -28,9 +28,9 @@ def _timeout_for_tool(tool_name: str) -> int:
     name = str(tool_name or "").strip().lower()
     if name in {"burp", "burp-cli"}:
         return 900
-    if name in {"nuclei", "nessus", "nmap-vulscan", "vulscan", "zap"}:
+    if name in {"nessus", "nmap-vulscan", "vulscan"}:
         return 240
-    if name in {"amass", "katana", "waymore", "wpscan", "nikto", "sqlmap"}:
+    if name in {"amass", "katana", "waymore", "wpscan", "nikto"}:
         return 120
     return 75
 
@@ -71,7 +71,7 @@ def _dispatch_params_from_env() -> dict[str, str]:
 
 
 def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "unit") -> dict[str, Any]:
-    execution_mode = str(os.getenv("EASM_TOOL_EXECUTION_MODE", "distributed")).strip().lower()
+    execution_mode = str(os.getenv("EASM_TOOL_EXECUTION_MODE", "local")).strip().lower()
     if execution_mode == "local":
         return run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
 

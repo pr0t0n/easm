@@ -273,7 +273,7 @@ def _ordered_tools_for_step(scan_mode: str, group_name: str, step_name: str) -> 
 
 
 def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
-    """Verifica se ferramenta já foi executada para este target neste scan."""
+    """Verifica se ferramenta já teve execução bem-sucedida para este target neste scan."""
     try:
         from app.db.session import SessionLocal
         from app.models.models import ExecutedToolRun
@@ -284,6 +284,7 @@ def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
                 ExecutedToolRun.scan_job_id == scan_id,
                 ExecutedToolRun.tool_name == tool_name.lower(),
                 ExecutedToolRun.target == target.lower(),
+                ExecutedToolRun.status == "success",
             ).first()
             return existing is not None
         finally:
@@ -302,16 +303,30 @@ def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, exec
         
         db = SessionLocal()
         try:
-            record = ExecutedToolRun(
-                scan_job_id=scan_id,
-                tool_name=tool_name.lower(),
-                target=target.lower(),
-                status=execution_status,
-                error_message=error_msg,
-                execution_time_seconds=exec_time,
-                created_at=datetime.utcnow(),
-            )
-            db.add(record)
+            normalized_tool = tool_name.lower()
+            normalized_target = target.lower()
+            existing = db.query(ExecutedToolRun).filter(
+                ExecutedToolRun.scan_job_id == scan_id,
+                ExecutedToolRun.tool_name == normalized_tool,
+                ExecutedToolRun.target == normalized_target,
+            ).first()
+
+            if existing:
+                existing.status = execution_status
+                existing.error_message = error_msg
+                existing.execution_time_seconds = exec_time
+                existing.created_at = datetime.utcnow()
+            else:
+                record = ExecutedToolRun(
+                    scan_job_id=scan_id,
+                    tool_name=normalized_tool,
+                    target=normalized_target,
+                    status=execution_status,
+                    error_message=error_msg,
+                    execution_time_seconds=exec_time,
+                    created_at=datetime.utcnow(),
+                )
+                db.add(record)
             db.commit()
         finally:
             db.close()
@@ -420,11 +435,6 @@ def _run_tools_and_collect(
         stderr_preview = _truncate_log(result.get("stderr"), preview_limit)
         if stderr_preview:
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
-
-        nuclei_findings = _extract_nuclei_findings(result, step_name, scan_target)
-        if nuclei_findings:
-            all_findings.extend(nuclei_findings)
-            state["logs_terminais"].append(f"{log_prefix}: tool=nuclei findings_extraidas={len(nuclei_findings)}")
 
         tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
         if tool_specific_findings:
@@ -612,10 +622,9 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
-    # Escopo de analise tecnica: core (Burp/Nmap/Nikto) + suporte
-    # (Nuclei, WPScan, Wfuzz, WAF/Headers) quando disponivel.
+    # Escopo atual do worker VULN: Burp + Nmap Vulscan + Nikto.
     preferred_global = [
-        "burp-cli", "nmap-vulscan", "nikto", "nuclei", "wpscan", "wfuzz", "wafw00f", "curl-headers",
+        "burp-cli", "nmap-vulscan", "nikto",
     ]
     selected_global = [tool for tool in preferred_global if tool in tools]
     if selected_global:
@@ -625,14 +634,14 @@ def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
         return tools
 
     preferred = [
-        "burp-cli", "nmap-vulscan", "nikto", "nuclei", "wpscan", "wfuzz", "wafw00f", "curl-headers",
+        "burp-cli", "nmap-vulscan", "nikto",
     ]
     filtered = [tool for tool in preferred if tool in tools]
     if filtered:
         return filtered
     if "burp-cli" in tools:
         return ["burp-cli"]
-    return tools[:8]
+    return tools[:3]
 
 
 def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> list[str]:
@@ -937,7 +946,7 @@ def _truncate_log(value: Any, limit: int = 400) -> str:
     return f"{text[:limit]}..."
 
 
-def _nuclei_risk_for_severity(severity: str) -> int:
+def _severity_to_risk_score(severity: str) -> int:
     sev = str(severity or "").strip().lower()
     if sev == "critical":
         return 9
@@ -948,92 +957,6 @@ def _nuclei_risk_for_severity(severity: str) -> int:
     if sev == "low":
         return 3
     return 2
-
-
-def _extract_nuclei_findings(result: dict[str, Any], step_name: str, default_target: str) -> list[dict[str, Any]]:
-    if str(result.get("tool", "")).strip().lower() != "nuclei":
-        return []
-
-    text = str(result.get("stdout") or result.get("output") or "")
-    if not text.strip():
-        return []
-
-    pattern = re.compile(
-        r"^\[(?P<template>[^\]]+)\]\s+\[(?P<proto>[^\]]+)\]\s+\[(?P<severity>[^\]]+)\]\s+(?P<target>\S+)(?:\s+\[(?P<extra>.*)\])?$"
-    )
-    findings: list[dict[str, Any]] = []
-    known_waf_tokens = {
-        "cloudflare",
-        "akamai",
-        "imperva",
-        "modsecurity",
-        "f5",
-        "aws waf",
-        "barracuda",
-        "fortiweb",
-    }
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        match = pattern.match(line)
-        if not match:
-            continue
-
-        template = str(match.group("template") or "").strip()
-        severity = str(match.group("severity") or "info").strip().lower()
-        target = str(match.group("target") or default_target).strip()
-        proto = str(match.group("proto") or "").strip().lower()
-        extra = str(match.group("extra") or "").strip()
-        template_l = template.lower()
-
-        details: dict[str, Any] = {
-            "node": "scan",
-            "asset": target or default_target,
-            "step": step_name,
-            "tool": "nuclei",
-            "template": template,
-            "protocol": proto,
-            "raw_line": line,
-        }
-        if extra:
-            details["evidence"] = extra
-
-        # Ex.: [http-missing-security-headers:strict-transport-security] ...
-        if template_l.startswith("http-missing-security-headers:"):
-            header_name = template.split(":", 1)[1].strip().lower() if ":" in template else ""
-            if header_name:
-                details["header_name"] = header_name
-                details["header_issue"] = "missing"
-                if "evidence" not in details:
-                    details["evidence"] = f"{header_name}: missing"
-
-        # Ex.: [waf-detect:cloudflare] ...
-        if template_l.startswith("waf-detect:"):
-            vendor = template.split(":", 1)[1].strip().lower() if ":" in template else ""
-            if vendor:
-                details["waf_vendor"] = vendor
-                details["waf_detected"] = True
-
-        # Ex.: [tech-detect:cloudflare] ... (usa apenas quando token casa com WAF conhecido)
-        if template_l.startswith("tech-detect:"):
-            tech = template.split(":", 1)[1].strip().lower() if ":" in template else ""
-            if tech and any(token in tech for token in known_waf_tokens):
-                details["waf_vendor"] = tech
-                details["waf_detected"] = True
-
-        findings.append(
-            {
-                "title": f"Nuclei: {template}",
-                "severity": severity,
-                "risk_score": _nuclei_risk_for_severity(severity),
-                "source_worker": "scan",
-                "details": details,
-            }
-        )
-
-    return findings
 
 
 def _extract_asm_findings(result: dict[str, Any], step_name: str, default_target: str) -> list[dict[str, Any]]:
@@ -1066,7 +989,7 @@ def _extract_asm_findings(result: dict[str, Any], step_name: str, default_target
             {
                 "title": f"ASM Rule: {title}",
                 "severity": severity,
-                "risk_score": _nuclei_risk_for_severity(severity),
+                "risk_score": _severity_to_risk_score(severity),
                 "source_worker": "scan",
                 "details": details,
             }
@@ -1116,8 +1039,6 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
     if tool == "cloudenum":
         return _extract_cloudenum_findings(stdout, step_name, default_target)
     if tool == "whatweb":
-        return _extract_whatweb_findings(stdout, step_name, default_target)
-    if tool == "wappalyzer":
         return _extract_whatweb_findings(stdout, step_name, default_target)
     if tool == "katana":
         return _extract_katana_findings(stdout, step_name, default_target)
@@ -2226,7 +2147,7 @@ def _extract_cloudenum_findings(stdout: str, step_name: str, default_target: str
 
 
 def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai tecnologias fingerprinted pelo whatweb/wappalyzer."""
+    """Extrai tecnologias fingerprinted pelo whatweb."""
     findings: list[dict[str, Any]] = []
     technologies: list[str] = []
     server_header = ""
@@ -2244,7 +2165,6 @@ def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) 
                 server_header = f"{tech_name}/{tech_version}"
             if tech_name.lower() in {"php", "asp.net", "x-powered-by"}:
                 powered_by = f"{tech_name}/{tech_version}"
-        # JSON de wappalyzer
         try:
             data = json.loads(line)
             if isinstance(data, dict):
@@ -2590,13 +2510,16 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(
             f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
         )
-    primary_targets = _targets_for_deep_scan(state, limit=8)
-    all_targets = _targets_for_deep_scan(state, limit=MAX_DISCOVERED_ASSETS + 1)
-    resolvable_targets, unresolved_targets = _filter_resolvable_targets(all_targets)
+    primary_targets = _targets_for_deep_scan(state, limit=3)
+    resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
+    explicit_target = str(state.get("target") or "").strip()
+    if explicit_target and _is_local_target(explicit_target) and explicit_target not in resolvable_targets:
+        # Mantém o alvo local original (incluindo porta) para evitar downgrade para :80.
+        resolvable_targets = [explicit_target] + [t for t in resolvable_targets if t != explicit_target]
     if not resolvable_targets:
         # Fallback defensivo: mantém alvo principal para evitar no-op total.
         resolvable_targets = [state.get("target", "")]
-    primary_targets = [t for t in primary_targets if t in set(resolvable_targets)] or [resolvable_targets[0]]
+    primary_targets = list(resolvable_targets)
 
     if unresolved_targets:
         state["logs_terminais"].append(
@@ -2613,12 +2536,12 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     burp_tools = ["burp-cli"] if "burp-cli" in vuln_tools else []
     other_vuln_tools = [t for t in vuln_tools if t != "burp-cli"]
 
-    # 1. Executar Burp CLI de forma síncrona em TODOS os alvos do escopo de análise.
+    # 1. Executar Burp CLI de forma síncrona nos alvos primários do escopo de análise.
     if burp_tools:
         state["logs_terminais"].append(
-            f"RiskAssessment:Burp: executando de forma síncrona em {len(resolvable_targets)} alvos"
+            f"RiskAssessment:Burp: executando de forma síncrona em {len(primary_targets)} alvos"
         )
-        for scan_target in resolvable_targets:
+        for scan_target in primary_targets:
             burp_findings, _, _, _ = _run_tools_and_collect(
                 state,
                 burp_tools,
@@ -2629,7 +2552,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
             if burp_findings:
                 all_findings.extend(burp_findings)
 
-        state["burp_targets"] = list(resolvable_targets)
+        state["burp_targets"] = list(primary_targets)
         state["burp_status"] = "completed"
         state["burp_async_task_ids"] = []
 
@@ -2654,37 +2577,6 @@ def risk_assessment_node(state: AgentState) -> AgentState:
                 },
             }
         )
-
-    # nmap-vulscan em TODOS os subdomínios descobertos (mesmo fora do primary_targets)
-    nmap_vulscan_tools = [t for t in vuln_tools if t in {"nmap-vulscan", "nmap", "vulscan"}]
-    extra_vulscan_targets = [t for t in resolvable_targets if t not in primary_targets]
-    if nmap_vulscan_tools and extra_vulscan_targets:
-        state["logs_terminais"].append(f"RiskAssessment: nmap-vulscan extra_targets={len(extra_vulscan_targets)}")
-        for scan_target in extra_vulscan_targets:
-            vulscan_findings, _, _, _ = _run_tools_and_collect(
-                state,
-                nmap_vulscan_tools,
-                scan_target,
-                current,
-                "RiskAssessment:Vulscan",
-            )
-            if vulscan_findings:
-                all_findings.extend(vulscan_findings)
-
-    # Headers em todos os subdomínios descobertos (mesmo fora do primary_targets)
-    extra_header_targets = [t for t in resolvable_targets if t not in primary_targets]
-    if "curl-headers" in vuln_tools and extra_header_targets:
-        state["logs_terminais"].append(f"RiskAssessment: curl-headers extra_targets={len(extra_header_targets)}")
-        for scan_target in extra_header_targets:
-            header_findings, _, _, _ = _run_tools_and_collect(
-                state,
-                ["curl-headers"],
-                scan_target,
-                current,
-                "RiskAssessment:Headers",
-            )
-            if header_findings:
-                all_findings.extend(header_findings)
 
     state["logs_terminais"].append(f"RiskAssessment: {current}")
 

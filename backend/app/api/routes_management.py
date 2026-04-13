@@ -44,7 +44,6 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
     "feroxbuster": {"url": "https://github.com/epi052/feroxbuster", "requirements": "Rust ou binário dedicado; instalação manual recomendada."},
     "arjun": {"url": "https://github.com/s0md3v/Arjun", "requirements": "Python 3.10+ e pip."},
     "nessus": {"url": "https://www.tenable.com/products/nessus", "requirements": "Credenciais Nessus, URL do scanner e pynessus instalado."},
-    "nuclei": {"url": "https://github.com/projectdiscovery/nuclei", "requirements": "Go, templates e conectividade HTTP/HTTPS."},
     "nmap-vulscan": {"url": "https://github.com/scipag/vulscan", "requirements": "Nmap instalado e script NSE vulscan em /root/vulscan ou /opt/vulscan."},
     "dalfox": {"url": "https://github.com/hahwul/dalfox", "requirements": "Go e saída HTTP/HTTPS liberada."},
     "nikto": {"url": "https://github.com/sullo/nikto", "requirements": "Perl/apt compatível; pode exigir instalação manual."},
@@ -69,7 +68,6 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
     "alterx": {"url": "https://github.com/projectdiscovery/alterx", "requirements": "Go moderno."},
     "dnsgen": {"url": "https://github.com/ProjectAnte/dnsgen", "requirements": "Python e instalação manual do projeto."},
     "gowitness": {"url": "https://github.com/sensepost/gowitness", "requirements": "Go e engine headless/chromium."},
-    "wappalyzer": {"url": "https://www.wappalyzer.com/", "requirements": "Node.js/CLI dedicado ou serviço externo."},
     "webanalyze": {"url": "https://github.com/rverton/webanalyze", "requirements": "Go moderno."},
     "cmsmap": {"url": "https://github.com/Dionach/CMSmap", "requirements": "Python e dependências específicas do projeto."},
     "dirb": {"url": "http://dirb.sourceforge.net/", "requirements": "Pacote apt ou binário Linux."},
@@ -82,9 +80,6 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
     "gobuster": {"url": "https://github.com/OJ/gobuster", "requirements": "Go moderno e wordlists locais para dir, vhost e fuzz."},
     "wapiti": {"url": "https://github.com/wapiti-scanner/wapiti", "requirements": "Python 3.12+ e pacote wapiti3; cobre SQLi, XSS, SSRF, XXE, file/include e CRLF."},
     "wfuzz": {"url": "https://github.com/xmendez/wfuzz", "requirements": "Python 3, pip e wordlists locais para fuzzing HTTP."},
-    "sqlmap": {"url": "https://github.com/sqlmapproject/sqlmap", "requirements": "Python 3 e clone local do projeto ou pacote equivalente."},
-    "commix": {"url": "https://github.com/commixproject/commix", "requirements": "Python 3 e clone local do projeto para command injection."},
-    "tplmap": {"url": "https://github.com/epinna/tplmap", "requirements": "Python 3 e dependências do projeto para SSTI."},
     "wafw00f": {"url": "https://github.com/EnableSecurity/wafw00f", "requirements": "Python 3 e pip para fingerprinting de WAF."},
     "sslscan": {"url": "https://github.com/rbsec/sslscan", "requirements": "Binário sslscan instalado via apt no worker."},
     "shcheck": {"url": "https://github.com/santoru/shcheck", "requirements": "Python 3 e pip install shcheck."},
@@ -92,10 +87,10 @@ TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
 
 INSTALL_SUPPORTED_TOOLS = {
     "nessus", "arjun", "semgrep", "h8mail", "metagoofil", "theharvester", "shodan-cli", "urlscan-cli",
-    "uro", "subfinder", "amass", "assetfinder", "dnsx", "naabu", "httpx", "katana", "ffuf", "nuclei",
+    "uro", "subfinder", "amass", "assetfinder", "dnsx", "naabu", "httpx", "katana", "ffuf",
     "dalfox", "kiterunner", "subjack", "wpscan", "nikto", "nmap-vulscan", "whatweb", "sublist3r", "waymore", "linkfinder",
-    "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz", "sqlmap", "commix",
-    "tplmap", "wafw00f",
+    "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz",
+    "wafw00f",
     "sslscan", "shcheck", "burp-cli",
 }
 
@@ -108,10 +103,7 @@ TOOL_BINARY_ALIASES = {
     "urlscan-cli": "urlscan",
     "sublist3r": "python3",
     "nmap-vulscan": "nmap",
-    "zap": "zaproxy",
     "burp-cli": "burp-cli",
-    "sqlmap": "sqlmap.py",
-    "tplmap": "tplmap.py",
 }
 
 
@@ -914,7 +906,6 @@ def _install_tool(tool_name: str) -> bool:
         "httpx": [["go", "install", "github.com/projectdiscovery/httpx/cmd/httpx@latest"]],
         "katana": [["go", "install", "github.com/projectdiscovery/katana/cmd/katana@latest"]],
         "ffuf": [["go", "install", "github.com/ffuf/ffuf/v2@latest"]],
-        "nuclei": [["go", "install", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"]],
         "nmap-vulscan": [
             ["apt-get", "update"],
             ["apt-get", "install", "-y", "nmap", "git"],
@@ -947,9 +938,6 @@ def _install_tool(tool_name: str) -> bool:
         "wapiti": [[sys.executable, "-m", "pip", "install", "wapiti3"]],
         "wfuzz": [[sys.executable, "-m", "pip", "install", "git+https://github.com/xmendez/wfuzz.git"]],
         "wafw00f": [[sys.executable, "-m", "pip", "install", "wafw00f"]],
-        "sqlmap": [["git", "clone", "--depth", "1", "https://github.com/sqlmapproject/sqlmap.git", "/opt/sqlmap"], ["ln", "-sf", "/opt/sqlmap/sqlmap.py", "/usr/local/bin/sqlmap.py"]],
-        "commix": [["git", "clone", "--depth", "1", "https://github.com/commixproject/commix.git", "/opt/commix"], ["ln", "-sf", "/opt/commix/commix.py", "/usr/local/bin/commix"]],
-        "tplmap": [["git", "clone", "--depth", "1", "https://github.com/epinna/tplmap.git", "/opt/tplmap"], ["ln", "-sf", "/opt/tplmap/tplmap.py", "/usr/local/bin/tplmap.py"], [sys.executable, "-m", "pip", "install", "-r", "/opt/tplmap/requirements.txt"]],
         "burp-cli": [["sh", "-lc", "npm install -g @portswigger/burp-cli || npm install -g burp-cli"]],
     }
 
@@ -1512,7 +1500,7 @@ def worker_manager_pipeline(current_user: User = Depends(require_admin)):
             "color": "amber",
             "node": "risk_assessment",
             "queue_suffix": "analise_vulnerabilidade",
-            "purpose": "Executa análise completa de vulnerabilidades: SQLi, IDOR, CSRF, SSRF, SSTI, XSS, LFI, RFI, XXE, Nuclei templates, Nikto, WPScan, Nessus.",
+            "purpose": "Executa análise completa de vulnerabilidades: Burp Suite, Nmap Vulscan, Nikto.",
             "internal_only": False,
             "tools": UNIT_WORKER_GROUPS.get("analise_vulnerabilidade", {}).get("tools", []),
             "mission_items": [
@@ -1816,7 +1804,7 @@ def _phase_from_scan(scan: ScanJob | None) -> str:
 
     if any(token in current_step for token in ["recon", "subdomain", "dns", "asset", "scan de superficie", "amass", "subfinder", "naabu", "nmap"]):
         return "reconhecimento"
-    if any(token in current_step for token in ["vulnerab", "vuln", "nikto", "nuclei", "sqlmap", "wapiti", "waf", "sslscan", "dalfox", "commix", "tplmap"]):
+    if any(token in current_step for token in ["vulnerab", "vuln", "nikto", "wapiti", "waf", "sslscan", "dalfox"]):
         return "analise_vulnerabilidade"
     if any(token in current_step for token in ["osint", "theharvester", "h8mail", "metagoofil", "urlscan", "shodan"]):
         return "osint"

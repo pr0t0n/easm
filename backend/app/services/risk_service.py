@@ -507,8 +507,8 @@ ASSET_IMPACT_WEIGHTS: dict[str, float] = {
 
 # Pesos dos 3 pilares FAIR para decomposição executiva (calibrado por mercado)
 FAIR_PILLAR_WEIGHTS: dict[str, float] = {
-    "perimeter_resilience": 0.40,   # Resiliência de Perímetro (naabu + sqlmap)
-    "patching_hygiene":     0.30,   # Higiene e Patching (nuclei CVEs + AGE)
+    "perimeter_resilience": 0.40,   # Resiliência de Perímetro (nmap, nmap-vulscan, wafw00f)
+    "patching_hygiene":     0.30,   # Higiene e Patching (nikto, sslscan, shcheck, curl-headers)
     "osint_exposure":       0.30,   # Exposição OSINT (h8mail + shodan)
 }
 
@@ -517,13 +517,8 @@ _TOOL_TO_PILAR: dict[str, str] = {
     "naabu":        "perimeter_resilience",
     "nmap":         "perimeter_resilience",
     "nmap-vulscan": "patching_hygiene",
-    "nuclei":       "patching_hygiene",
     "nikto":        "patching_hygiene",
     "wapiti":       "patching_hygiene",
-    "sqlmap":       "perimeter_resilience",
-    "commix":       "perimeter_resilience",
-    "dalfox":       "perimeter_resilience",
-    "tplmap":       "perimeter_resilience",
     "wafw00f":      "perimeter_resilience",
     "sslscan":      "patching_hygiene",
     "shcheck":      "patching_hygiene",
@@ -647,8 +642,8 @@ def build_fair_decomposition(
     """Decompõe os findings nos 3 pilares FAIR com peso, evidência e impacto na nota.
 
     Pilares:
-      1. Resiliência de Perímetro (40%) — naabu, sqlmap, commix, dalfox
-      2. Higiene e Patching       (30%) — nuclei, nikto, sslscan, shcheck
+      1. Resiliência de Perímetro (40%) — nmap, nmap-vulscan, wafw00f
+      2. Higiene e Patching       (30%) — nikto, sslscan, shcheck, curl-headers
       3. Exposição OSINT          (30%) — h8mail, shodan-cli, theharvester
 
     Retorna decomposição pronta para dashboard executivo e relatório.

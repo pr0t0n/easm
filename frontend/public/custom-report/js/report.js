@@ -799,7 +799,7 @@ function applyTopVariables(report) {
 
 function renderLLMRisk(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
-  const item05 = v2.item_05_subdominios_encontrados || {};
+  const item05 = v2.item_05_executive_analysis || v2.item_05_subdominios_encontrados || {};
   const assets = v2.assets_summary || {};
   const summary = Array.isArray(item05.execution_summary) ? item05.execution_summary : [];
 
@@ -850,6 +850,92 @@ function renderLLMRisk(report) {
     </div>
   `;
   }).join('');
+}
+
+function renderOperationalImprovements(report) {
+  const v2 = (report?.state_data || {}).report_v2 || {};
+
+  const toolExec = v2.tool_execution_summary || {};
+  const toolExecSummary = toolExec.summary || {};
+  const evidence = v2.vulnerability_analysis_evidence || {};
+  const evidenceSummary = evidence.summary || {};
+
+  setText('opsRequestedTools', Number(toolExecSummary.requested_count || (toolExec.requested_tools || []).length || 0));
+  setText('opsAttemptedTools', Number(toolExecSummary.attempted_count || 0));
+  setText('opsExecutedTools', Number(toolExecSummary.executed_count || 0));
+  setText('opsEvidenceExecutions', Number(evidence.executions_found || 0));
+
+  const vulnToolsContainer = document.getElementById('opsVulnTools');
+  if (vulnToolsContainer) {
+    const tools = Array.isArray(evidence.tools) ? evidence.tools : [];
+    if (!tools.length) {
+      vulnToolsContainer.innerHTML = '<div class="section-intro">Sem evidências de execução para ferramentas de vulnerabilidade.</div>';
+    } else {
+      vulnToolsContainer.innerHTML = tools.map((row) => {
+        const targets = Array.isArray(row.targets) ? row.targets : [];
+        return `
+          <div class="llm-risk-row">
+            <div class="llm-risk-row-top">
+              <strong>${esc(row.tool || '-')}</strong>
+              <span class="llm-risk-sev">ok=${Number(row.success || 0)} fail=${Number(row.failed || 0)} skip=${Number(row.skipped || 0)}</span>
+            </div>
+            <div class="llm-risk-reason">targets=${Number(row.targets_count || targets.length)} | last_exec_s=${Number(row.last_execution_seconds || 0).toFixed(2)} | ${esc(targets.join(', ') || 'sem target')}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  const waf = v2.waf_summary || {};
+  const headers = v2.security_headers_summary || {};
+  setText('opsWafFindings', Number(waf.findings_count || 0));
+  setText('opsWafAssets', Number(waf.assets_count || 0));
+  setText('opsHeaderFindings', Number(headers.findings_count || 0));
+  setText('opsHeaderAssets', Number(headers.assets_count || 0));
+
+  const wafHeadersContainer = document.getElementById('opsWafAndHeaders');
+  if (wafHeadersContainer) {
+    const vendors = Array.isArray(waf.vendors) ? waf.vendors : [];
+    const missingHeaders = Array.isArray(headers.missing_headers) ? headers.missing_headers : [];
+    if (!vendors.length && !missingHeaders.length) {
+      wafHeadersContainer.innerHTML = '<div class="section-intro">Sem dados de WAF/headers neste scan.</div>';
+    } else {
+      const vendorText = vendors.slice(0, 8).map((v) => `${v.name} (${v.count})`).join(' | ') || 'sem vendors';
+      const missingText = missingHeaders.slice(0, 8).map((h) => `${h.header} (${h.count})`).join(' | ') || 'sem headers ausentes';
+      wafHeadersContainer.innerHTML = `
+        <div class="llm-risk-row">
+          <div class="llm-risk-row-top"><strong>WAF vendors detectados</strong></div>
+          <div class="llm-risk-reason">${esc(vendorText)}</div>
+        </div>
+        <div class="llm-risk-row">
+          <div class="llm-risk-row-top"><strong>Security headers ausentes (top)</strong></div>
+          <div class="llm-risk-reason">${esc(missingText)}</div>
+        </div>
+      `;
+    }
+  }
+
+  const strategicTechnicalContainer = document.getElementById('opsStrategicTechnical');
+  if (strategicTechnicalContainer) {
+    const strategic = Array.isArray(v2.strategic_points) ? v2.strategic_points : [];
+    const technical = Array.isArray(v2.technical_points) ? v2.technical_points : [];
+    if (!strategic.length && !technical.length) {
+      strategicTechnicalContainer.innerHTML = '<div class="section-intro">Sem pontos estratégicos/técnicos disponíveis.</div>';
+    } else {
+      const strategicHtml = strategic.slice(0, 5).map((p) => `<div class="llm-risk-reason">- ${esc(p)}</div>`).join('');
+      const technicalHtml = technical.slice(0, 5).map((p) => `<div class="llm-risk-reason">- ${esc(p)}</div>`).join('');
+      strategicTechnicalContainer.innerHTML = `
+        <div class="llm-risk-row">
+          <div class="llm-risk-row-top"><strong>Pontos estratégicos</strong></div>
+          ${strategicHtml || '<div class="llm-risk-reason">- sem pontos</div>'}
+        </div>
+        <div class="llm-risk-row">
+          <div class="llm-risk-row-top"><strong>Pontos técnicos</strong></div>
+          ${technicalHtml || '<div class="llm-risk-reason">- sem pontos</div>'}
+        </div>
+      `;
+    }
+  }
 }
 
 function assignPageNumbers() {
@@ -914,6 +1000,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     validateReportData(report);
     applyTopVariables(report);
     renderLLMRisk(report);
+    renderOperationalImprovements(report);
     const v2 = (report?.state_data || {}).report_v2 || {};
     allVulns = Array.isArray(v2.vulnerability_table)
       ? v2.vulnerability_table

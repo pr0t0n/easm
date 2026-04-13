@@ -92,7 +92,7 @@ class Finding(Base):
     tool: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer, default=1)
-    # Confianca (0-100): derivada do CVSS/nuclei severity para reduzir FP noise
+    # Confianca (0-100): derivada do CVSS/severidade da ferramenta para reduzir FP noise
     confidence_score: Mapped[int] = mapped_column(Integer, default=50)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
     # ── Falso Positivo ────────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ class Vulnerability(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
     finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
-    tool_source: Mapped[str] = mapped_column(String(100))  # nuclei, sqlmap, nessus, shodan, etc
+    tool_source: Mapped[str] = mapped_column(String(100))  # burp, nmap-vulscan, nikto, shodan, etc
     cve_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     severity: Mapped[str] = mapped_column(String(20))  # critical, high, medium, low, info
     cvss_score: Mapped[float | None] = mapped_column(sa.Float, nullable=True)

@@ -39,10 +39,8 @@ BURP_GUARD_MAX_ATTEMPTS = max(1, min(10, int(os.getenv("BURP_GUARD_MAX_ATTEMPTS"
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
     "naabu": "perimeter_resilience", "nmap": "perimeter_resilience",
-    "nmap-vulscan": "patching_hygiene", "nuclei": "patching_hygiene",
+    "nmap-vulscan": "patching_hygiene",
     "nikto": "patching_hygiene", "wapiti": "patching_hygiene",
-    "sqlmap": "perimeter_resilience", "commix": "perimeter_resilience",
-    "dalfox": "perimeter_resilience", "tplmap": "perimeter_resilience",
     "wafw00f": "perimeter_resilience", "sslscan": "patching_hygiene",
     "shcheck": "patching_hygiene", "curl-headers": "patching_hygiene",
     "burp-cli": "patching_hygiene", "theharvester": "osint_exposure",
@@ -1372,7 +1370,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             scan_job_id=job.id,
             source="worker",
             level="INFO",
-            message="Execucao em andamento: ferramentas como nuclei/nmap podem levar varios minutos por alvo.",
+            message="Execucao em andamento: ferramentas de varredura podem levar varios minutos por alvo.",
         ))
         db.add(ScanLog(
             scan_job_id=job.id,
