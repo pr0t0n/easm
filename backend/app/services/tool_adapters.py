@@ -11,17 +11,11 @@ from app.core.config import settings
 
 from app.workers.worker_groups import find_group_by_tool, get_worker_groups
 
-TOOL_TIMEOUT_SECONDS = 90
+TOOL_TIMEOUT_SECONDS = 600
 
-# Ferramentas lentas recebem timeout maior que o padrao de 90s.
-# Deve ficar abaixo do dispatcher timeout correspondente em worker_dispatcher.py.
-_PER_TOOL_TIMEOUT_SECONDS: dict[str, int] = {
-    "nikto": 180,
-    "wpscan": 150,
-    "amass": 120,
-    "nmap-vulscan": 220,
-    "vulscan": 220,
-}
+# Overrides por ferramenta (deve ficar abaixo do dispatcher em worker_dispatcher.py).
+# Valor padrao de 600s (10 min) aplica-se a todas as demais ferramentas.
+_PER_TOOL_TIMEOUT_SECONDS: dict[str, int] = {}
 
 VULSCAN_PRIORITY_TCP_PORTS = [
     20, 21, 22, 23,

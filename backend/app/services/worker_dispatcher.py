@@ -28,13 +28,8 @@ def _timeout_for_tool(tool_name: str) -> int:
     name = str(tool_name or "").strip().lower()
     if name in {"burp", "burp-cli"}:
         return 900
-    if name in {"nessus", "nmap-vulscan", "vulscan"}:
-        return 240
-    if name in {"nikto", "wpscan"}:
-        return 210
-    if name in {"amass", "katana", "waymore"}:
-        return 150
-    return 75
+    # 660s = 10 min de subprocess + 60s de margem para o dispatcher.
+    return 660
 
 
 def _normalize_result(tool_name: str, target: str, scan_mode: str, result: Any) -> dict[str, Any]:
