@@ -201,7 +201,7 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "wafw00f":
         return ["wafw00f", url, "-a"]
     if normalized == "nikto":
-        return ["nikto", "-h", url, "-C", "all", "-Tuning", "1234567890"]
+        return ["nikto", "-host", url, "-C", "all"]
     if normalized == "sslscan":
         return ["sslscan", "--no-colour", host]
     if normalized == "shcheck":
