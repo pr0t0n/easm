@@ -25,7 +25,7 @@ from app.services.policy_service import is_target_allowed
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit
-from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS
+from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS, get_worker_agent_profiles
 from app.graph.mission import MISSION_ITEMS
 
 
@@ -1459,102 +1459,64 @@ def list_worker_groups_config(current_user: User = Depends(require_admin)):
     return {
         "unit": UNIT_WORKER_GROUPS,
         "scheduled": SCHEDULED_WORKER_GROUPS,
+        "agents": {
+            "unit": get_worker_agent_profiles("unit"),
+            "scheduled": get_worker_agent_profiles("scheduled"),
+        },
     }
 
 
 @router.get("/worker-manager/pipeline")
 def worker_manager_pipeline(current_user: User = Depends(require_admin)):
-    """Retorna a definição completa do pipeline EASM 5-agent com missões mapeadas."""
-
-    # Mapeamento de quais itens da lista de 100 pertencem a cada agente
-    AGENT_MISSION_RANGES: dict[str, list[int]] = {
-        "asset_discovery":   list(range(1, 26)),    # 1–25: recon, enumeration, fingerprinting
-        "risk_assessment":   list(range(26, 100)),   # 26–99: all vuln analysis
-        "threat_intel":      [10, 19, 20, 88],       # WAF, S3, takeover, TruffleHog — cross-cutting OSINT
-        "governance":        [],                     # Pure computation — no external steps
-        "executive_analyst": [100],                  # Step 100: final report
-    }
-
-    # Mapeia índice 1-based → texto do item
-    items_by_index: dict[int, str] = {i + 1: item for i, item in enumerate(MISSION_ITEMS)}
+    """Retorna pipeline supervisor-centric e agentes operacionais mapeados."""
+    unit_agents = get_worker_agent_profiles("unit")
 
     pipeline_agents = [
         {
-            "id": "asset_discovery",
-            "label": "EASM Agent 1",
-            "name": "Asset Discovery",
-            "color": "cyan",
-            "node": "asset_discovery",
-            "queue_suffix": "reconhecimento",
-            "purpose": "Enumera subdomínios, mapeia IPs, realiza port scan e faz fingerprinting da superfície exposta.",
-            "internal_only": False,
-            "tools": UNIT_WORKER_GROUPS.get("reconhecimento", {}).get("tools", []),
-            "mission_items": [
-                items_by_index[i] for i in AGENT_MISSION_RANGES["asset_discovery"] if i in items_by_index
-            ],
-        },
-        {
-            "id": "risk_assessment",
-            "label": "EASM Agent 2",
-            "name": "Risk Assessment",
-            "color": "amber",
-            "node": "risk_assessment",
-            "queue_suffix": "analise_vulnerabilidade",
-            "purpose": "Executa análise completa de vulnerabilidades: Burp Suite, Nmap Vulscan, Nikto.",
-            "internal_only": False,
-            "tools": UNIT_WORKER_GROUPS.get("analise_vulnerabilidade", {}).get("tools", []),
-            "mission_items": [
-                items_by_index[i] for i in AGENT_MISSION_RANGES["risk_assessment"] if i in items_by_index
-            ],
-        },
-        {
-            "id": "threat_intel",
-            "label": "EASM Agent 3",
-            "name": "Threat Intel / OSINT",
-            "color": "violet",
-            "node": "threat_intel",
-            "queue_suffix": "osint",
-            "purpose": "Coleta inteligência externa: emails vazados, exposições em Shodan, subdomain takeover, metadados públicos, S3 buckets, secrets em repositórios.",
-            "internal_only": False,
-            "tools": UNIT_WORKER_GROUPS.get("osint", {}).get("tools", []),
-            "mission_items": [
-                items_by_index[i] for i in AGENT_MISSION_RANGES["threat_intel"] if i in items_by_index
-            ],
-        },
-        {
-            "id": "governance",
-            "label": "EASM Agent 4",
-            "name": "Governance / Rating",
-            "color": "emerald",
-            "node": "governance",
-            "queue_suffix": "governance",
-            "purpose": "Calcula o rating contínuo FAIR+AGE por ativo e compõe a decomposição formal de risco (pirâmide 3-pilares). Processamento interno Python puro — sem ferramentas externas.",
+            "id": "supervisor",
+            "name": "Supervisor",
             "internal_only": True,
-            "tools": [],
-            "mission_items": [],
+            "purpose": "Planeja, roteia capacidades e aplica contratos de validação/evidência.",
+            "tools": ["supervisor", "strategic_planning", "evidence_adjudication"],
+            "queue": None,
         },
         {
-            "id": "executive_analyst",
-            "label": "EASM Agent 5",
-            "name": "Executive Analyst",
-            "color": "rose",
-            "node": "executive_analyst",
-            "queue_suffix": "executive_analyst",
-            "purpose": "Gera narrativa executiva via LLM Ollama. Consolida todos os achados em um relatório de alto nível com priorização de ações. Fallback para template estruturado quando Ollama está offline.",
-            "internal_only": True,
-            "tools": [],
-            "mission_items": [items_by_index[100]] if 100 in items_by_index else [],
+            "id": unit_agents["reconhecimento"]["agent_id"],
+            "name": unit_agents["reconhecimento"]["agent_name"],
+            "internal_only": False,
+            "purpose": unit_agents["reconhecimento"]["purpose"],
+            "tools": unit_agents["reconhecimento"]["tools"],
+            "queue": unit_agents["reconhecimento"]["queue"],
+        },
+        {
+            "id": unit_agents["analise_vulnerabilidade"]["agent_id"],
+            "name": unit_agents["analise_vulnerabilidade"]["agent_name"],
+            "internal_only": False,
+            "purpose": unit_agents["analise_vulnerabilidade"]["purpose"],
+            "tools": unit_agents["analise_vulnerabilidade"]["tools"],
+            "queue": unit_agents["analise_vulnerabilidade"]["queue"],
+        },
+        {
+            "id": unit_agents["osint"]["agent_id"],
+            "name": unit_agents["osint"]["agent_name"],
+            "internal_only": False,
+            "purpose": unit_agents["osint"]["purpose"],
+            "tools": unit_agents["osint"]["tools"],
+            "queue": unit_agents["osint"]["queue"],
         },
     ]
 
     return {
-        "linear_flow": [a["id"] for a in pipeline_agents],
+        "architecture": "supervisor_centric",
+        "linear_flow": ["supervisor", "agent.recon", "agent.vuln", "agent.osint", "END"],
         "edges": [
-            {"from": "asset_discovery",   "to": "risk_assessment"},
-            {"from": "risk_assessment",   "to": "threat_intel"},
-            {"from": "threat_intel",      "to": "governance"},
-            {"from": "governance",        "to": "executive_analyst"},
-            {"from": "executive_analyst", "to": "END"},
+            {"from": "supervisor", "to": "agent.recon"},
+            {"from": "supervisor", "to": "agent.vuln"},
+            {"from": "supervisor", "to": "agent.osint"},
+            {"from": "agent.recon", "to": "supervisor"},
+            {"from": "agent.vuln", "to": "supervisor"},
+            {"from": "agent.osint", "to": "supervisor"},
+            {"from": "supervisor", "to": "END"},
         ],
         "agents": pipeline_agents,
         "mission_items_full": MISSION_ITEMS,
@@ -1580,9 +1542,9 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
     for scan in scans:
         state = scan.state_data or {}
         metrics = state.get("activity_metrics", [])
-        for m in metrics:
-            node = str(m.get("node", "unknown"))
-            duration = float(m.get("duration_ms", 0))
+        for metric in metrics:
+            node = str(metric.get("node", "unknown"))
+            duration = float(metric.get("duration_ms", 0))
             durations_by_node.setdefault(node, []).append(duration)
 
         history = state.get("node_history", [])
@@ -1607,6 +1569,10 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
         "worker_groups": {
             "unit": UNIT_WORKER_GROUPS,
             "scheduled": SCHEDULED_WORKER_GROUPS,
+            "agents": {
+                "unit": get_worker_agent_profiles("unit"),
+                "scheduled": get_worker_agent_profiles("scheduled"),
+            },
         },
         "priorities": [
             {
@@ -1628,7 +1594,18 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
     }
 
 
-SUPERVISOR_WORKER_NODES = {"recon", "scan", "fuzzing", "vuln", "analista_ia", "osint"}
+LEGACY_SUPERVISOR_WORKER_NODES = {"recon", "scan", "fuzzing", "vuln", "analista_ia", "osint"}
+SENIOR_ANALYST_PIPELINE = [
+    "supervisor",
+    "strategic_planning",
+    "asset_discovery",
+    "threat_intel",
+    "adversarial_hypothesis",
+    "risk_assessment",
+    "evidence_adjudication",
+    "governance",
+    "executive_analyst",
+]
 
 
 def _validate_supervisor_path(node_history: list[str]) -> dict:
@@ -1645,6 +1622,22 @@ def _validate_supervisor_path(node_history: list[str]) -> dict:
     invalid_edges: list[str] = []
     starts_with_supervisor = node_history[0] == "supervisor"
     has_osint_node = "osint" in node_history
+    starts_with_framework = node_history[0] == "supervisor"
+
+    senior_capabilities = {
+        "asset_discovery",
+        "threat_intel",
+        "adversarial_hypothesis",
+        "risk_assessment",
+        "evidence_adjudication",
+        "governance",
+        "executive_analyst",
+    }
+
+    framework_detected = "legacy-supervisor"
+    senior_capabilities_only = set(SENIOR_ANALYST_PIPELINE[1:])
+    if any(node in senior_capabilities_only for node in node_history):
+        framework_detected = "senior-analyst"
 
     for idx in range(len(node_history) - 1):
         src = str(node_history[idx])
@@ -1652,12 +1645,24 @@ def _validate_supervisor_path(node_history: list[str]) -> dict:
         edge = f"{src}->{dst}"
         transitions.append(edge)
 
+        if framework_detected == "senior-analyst":
+            if src == "supervisor":
+                if dst not in senior_capabilities:
+                    invalid_edges.append(edge)
+                continue
+            if src in senior_capabilities:
+                if dst not in {"supervisor"}:
+                    invalid_edges.append(edge)
+                continue
+            invalid_edges.append(edge)
+            continue
+
         if src == "supervisor":
-            if dst not in SUPERVISOR_WORKER_NODES:
+            if dst not in LEGACY_SUPERVISOR_WORKER_NODES:
                 invalid_edges.append(edge)
             continue
 
-        if src in SUPERVISOR_WORKER_NODES:
+        if src in LEGACY_SUPERVISOR_WORKER_NODES:
             if dst != "supervisor":
                 invalid_edges.append(edge)
             continue
@@ -1665,9 +1670,14 @@ def _validate_supervisor_path(node_history: list[str]) -> dict:
         invalid_edges.append(edge)
 
     return {
-        "valid": starts_with_supervisor and len(invalid_edges) == 0,
+        "valid": (
+            (framework_detected == "senior-analyst" and starts_with_framework and len(invalid_edges) == 0)
+            or (framework_detected != "senior-analyst" and starts_with_supervisor and len(invalid_edges) == 0)
+        ),
         "starts_with_supervisor": starts_with_supervisor,
         "has_osint_node": has_osint_node,
+        "starts_with_framework": starts_with_framework,
+        "framework_detected": framework_detected,
         "invalid_edges": invalid_edges,
         "transitions": transitions,
     }
@@ -1722,7 +1732,8 @@ def worker_manager_supervisor_trail(
             "invalid_supervisor_flow": max(0, len(scans) - valid_count),
             "scans_with_osint_node": osint_count,
             "scans_without_osint_node": max(0, len(scans) - osint_count),
-            "required_worker_nodes": sorted(SUPERVISOR_WORKER_NODES),
+            "required_worker_nodes": sorted(LEGACY_SUPERVISOR_WORKER_NODES),
+            "senior_analyst_pipeline": SENIOR_ANALYST_PIPELINE,
         },
         "scans": items,
     }

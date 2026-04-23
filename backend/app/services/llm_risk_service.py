@@ -249,8 +249,9 @@ def run_llm_risk_assessment(cfg: LLMRiskConfig) -> dict[str, Any]:
 
     return {
         "enabled": True,
-        "provider": settings.llm_risk_provider,
-        "model": settings.llm_risk_ollama_model,
+        "provider": settings.llm_primary_provider or settings.llm_risk_provider,
+        "model": settings.llm_primary_model or settings.llm_risk_ollama_model,
+        "evaluation_model": settings.llm_evaluation_model,
         "strategy_profile": cfg.strategy_profile,
         "strategies": cfg.strategies,
         "status": "completed",

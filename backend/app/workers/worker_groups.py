@@ -19,9 +19,82 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
 }
 
 
+CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
+    "core_orchestration": ["supervisor", "strategic_planning", "evidence_adjudication"],
+    "native_execution": ["shell", "http_request"],
+    "memory_and_reflection": ["store_plan", "get_plan", "store_finding", "checkpoint_review"],
+    "meta_tooling": ["editor", "load_tool"],
+    "supported_scan_tools": [
+        "amass",
+        "massdns",
+        "sublist3r",
+        "nmap",
+        "nmap-vulscan",
+        "nikto",
+        "wafw00f",
+        "curl-headers",
+        "shodan-cli",
+        "ffuf",
+        "whatweb",
+        "wapiti",
+        "wfuzz",
+        "wpscan",
+        "sqlmap",
+    ],
+}
+
+
 def get_canonical_group_tools() -> dict[str, list[str]]:
     """Return a defensive copy of canonical tools by worker group."""
     return {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
+
+
+def get_cyber_autoagent_tool_catalog() -> dict[str, list[str]]:
+    """Return a defensive copy of the conceptual tool catalog aligned with Cyber-AutoAgent."""
+    return {group: list(tools) for group, tools in CYBER_AUTOAGENT_TOOL_CATALOG.items()}
+
+
+def _base_agent_contract() -> dict[str, Any]:
+    return {
+        "reasoning_loop": ["know", "think", "test", "validate"],
+        "evidence_policy": "critical/high exigem prova reproduzivel; sem prova permanece hypothesis",
+        "confidence_thresholds": {"high": 80, "medium": 50, "low": 0},
+        "pivot_rule": "confianca<50 ou repeticao sem progresso => mudar estrategia",
+    }
+
+
+def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
+    groups = get_worker_groups(mode)
+    contract = _base_agent_contract()
+    return {
+        "reconhecimento": {
+            "agent_id": "agent.recon",
+            "agent_name": "Recon Agent",
+            "worker_group": "reconhecimento",
+            "queue": groups["reconhecimento"]["queue"],
+            "purpose": "Mapear superficie de ataque e exposicao inicial de ativos.",
+            "tools": list(groups["reconhecimento"]["tools"]),
+            "contract": contract,
+        },
+        "analise_vulnerabilidade": {
+            "agent_id": "agent.vuln",
+            "agent_name": "Vulnerability Agent",
+            "worker_group": "analise_vulnerabilidade",
+            "queue": groups["analise_vulnerabilidade"]["queue"],
+            "purpose": "Validar hipoteses tecnicas e produzir evidencias de explorabilidade.",
+            "tools": list(groups["analise_vulnerabilidade"]["tools"]),
+            "contract": contract,
+        },
+        "osint": {
+            "agent_id": "agent.osint",
+            "agent_name": "Threat Intel Agent",
+            "worker_group": "osint",
+            "queue": groups["osint"]["queue"],
+            "purpose": "Correlacionar inteligencia externa e sinais de exposicao publica.",
+            "tools": list(groups["osint"]["tools"]),
+            "contract": contract,
+        },
+    }
 
 
 def _build_worker_groups(mode: ScanMode, priorities: dict[str, int]) -> dict[str, dict[str, Any]]:
@@ -106,6 +179,25 @@ def get_worker_groups(mode: ScanMode = "unit") -> dict[str, dict[str, Any]]:
     return UNIT_WORKER_GROUPS if mode == "unit" else SCHEDULED_WORKER_GROUPS
 
 
+def get_worker_agent_profiles(mode: ScanMode = "unit") -> dict[str, dict[str, Any]]:
+    """Return operational worker-agent profiles for the given mode."""
+    return _build_worker_agent_profiles(mode)
+
+
+def get_worker_agent_profile(group_name: str, mode: ScanMode = "unit") -> dict[str, Any]:
+    profiles = get_worker_agent_profiles(mode)
+    normalized = str(group_name or "").strip().lower()
+    alias_map = {
+        "recon": "reconhecimento",
+        "reconhecimento": "reconhecimento",
+        "vuln": "analise_vulnerabilidade",
+        "analise_vulnerabilidade": "analise_vulnerabilidade",
+        "osint": "osint",
+    }
+    key = alias_map.get(normalized, "reconhecimento")
+    return dict(profiles.get(key, profiles["reconhecimento"]))
+
+
 def find_group_by_tool(tool_name: str, mode: ScanMode = "unit") -> str:
     """Find which worker group contains the given tool."""
     normalized = tool_name.strip().lower()
@@ -115,6 +207,11 @@ def find_group_by_tool(tool_name: str, mode: ScanMode = "unit") -> str:
         if normalized in group.get("tools", []):
             return group_name
     return "recon"
+
+
+def find_agent_by_tool(tool_name: str, mode: ScanMode = "unit") -> dict[str, Any]:
+    group = find_group_by_tool(tool_name, mode)
+    return get_worker_agent_profile(group, mode)
 
 
 def group_queue(group_name: str, mode: ScanMode = "unit") -> str:

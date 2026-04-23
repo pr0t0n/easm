@@ -6,7 +6,7 @@ from celery.result import allow_join_result
 from app.services.tool_adapters import run_tool_execution
 from app.services.resilience import SimpleCircuitBreaker, guarded_call
 from app.workers.celery_app import celery
-from app.workers.worker_groups import find_group_by_tool, group_queue
+from app.workers.worker_groups import find_agent_by_tool, find_group_by_tool, group_queue
 
 
 _DISPATCH_BREAKER = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout_seconds=30)
@@ -33,11 +33,15 @@ def _timeout_for_tool(tool_name: str) -> int:
 
 
 def _normalize_result(tool_name: str, target: str, scan_mode: str, result: Any) -> dict[str, Any]:
+    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
+    agent = find_agent_by_tool(tool_name, mode=mode)
     if isinstance(result, dict):
         normalized = dict(result)
         normalized.setdefault("tool", tool_name)
         normalized.setdefault("target", target)
         normalized.setdefault("scan_mode", scan_mode)
+        normalized.setdefault("source_agent_id", agent.get("agent_id"))
+        normalized.setdefault("source_agent_name", agent.get("agent_name"))
         return normalized
 
     return {
@@ -51,6 +55,8 @@ def _normalize_result(tool_name: str, target: str, scan_mode: str, result: Any) 
         "command": "",
         "stdout": "",
         "stderr": "",
+        "source_agent_id": agent.get("agent_id"),
+        "source_agent_name": agent.get("agent_name"),
     }
 
 
@@ -69,8 +75,13 @@ def _dispatch_params_from_env() -> dict[str, str]:
 
 def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "unit") -> dict[str, Any]:
     execution_mode = str(os.getenv("EASM_TOOL_EXECUTION_MODE", "local")).strip().lower()
+    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
+    agent = find_agent_by_tool(tool_name, mode=mode)
     if execution_mode == "local":
-        return run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
+        local = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
+        local.setdefault("source_agent_id", agent.get("agent_id"))
+        local.setdefault("source_agent_name", agent.get("agent_name"))
+        return local
 
     in_celery_task = False
     try:
@@ -105,6 +116,8 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
         normalized.setdefault("dispatch_task_id", async_result.id)
         normalized.setdefault("dispatch_task_name", task_name)
         normalized.setdefault("dispatch_bypassed", False)
+        normalized.setdefault("dispatch_agent_id", agent.get("agent_id"))
+        normalized.setdefault("dispatch_agent_name", agent.get("agent_name"))
         return normalized
     except Exception as exc:
         fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
@@ -112,6 +125,10 @@ def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "uni
         fallback.setdefault("dispatch_task_name", task_name)
         fallback.setdefault("dispatch_bypassed", True)
         fallback.setdefault("dispatch_bypass_reason", "dispatch_error_or_circuit_open")
+        fallback.setdefault("dispatch_agent_id", agent.get("agent_id"))
+        fallback.setdefault("dispatch_agent_name", agent.get("agent_name"))
+        fallback.setdefault("source_agent_id", agent.get("agent_id"))
+        fallback.setdefault("source_agent_name", agent.get("agent_name"))
         if type(exc).__name__.lower() == "timeouterror":
             fallback.setdefault("dispatch_timeout", timeout)
         return fallback

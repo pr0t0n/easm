@@ -28,6 +28,7 @@ from app.services.risk_service import (
     compute_asset_risk,
     METHODOLOGY_VERSION,
 )
+from app.services.cyber_autoagent_alignment import build_supervisor_prompt_contract
 from app.services.worker_dispatcher import execute_tool_with_workers
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
@@ -74,14 +75,29 @@ def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
     except Exception:
         logger.exception("Falha ao sincronizar step no banco")
 
-# EASM pipeline
+# Senior Cyber Analyst pipeline (framework-driven)
 GROUP_MISSION_ITEMS: list[str] = [
-    "1. AssetDiscovery",
-    "2. ThreatIntel",
-    "3. RiskAssessment",
-    "4. Governance",
-    "5. ExecutiveAnalysis",
+    "1. StrategicPlanning",
+    "2. AssetDiscovery",
+    "3. ThreatIntel",
+    "4. AdversarialHypothesis",
+    "5. RiskAssessment",
+    "6. EvidenceAdjudication",
+    "7. Governance",
+    "8. ExecutiveAnalysis",
 ]
+
+ANALYST_CONFIDENCE_THRESHOLDS: dict[str, int] = {
+    "high": 80,
+    "medium": 50,
+    "low": 0,
+}
+
+EVIDENCE_RULES: dict[str, Any] = {
+    "critical_requires": ["reproducible_steps", "impact", "technical_evidence"],
+    "high_requires": ["impact", "technical_evidence"],
+    "minimum_confidence_for_promote": 70,
+}
 
 KNOWN_WAF_MODELS: list[str] = [
     "cloudflare",
@@ -168,6 +184,19 @@ class AgentState(TypedDict):
     burp_targets: list[str]                 # Alvos agendados para Burp assíncrono
     burp_status: str                        # "none" | "scheduled" | "pending" | "completed"
     burp_async_task_ids: list[str]          # Celery task IDs do chord Burp
+    # Senior framework contracts
+    analyst_framework: dict[str, Any]       # Framework ativo e política de decisão
+    operation_plan: dict[str, Any]          # Plano estruturado por fases
+    confidence_state: dict[str, Any]        # Confiança por hipótese/fase
+    evidence_contract: dict[str, Any]       # Regras de promoção de achados
+    completed_capabilities: list[str]       # Capacidades já executadas no ciclo atual
+    loop_iteration: int                      # Iteração atual do supervisor
+    max_iterations: int                      # Orçamento máximo de iterações
+    objective_met: bool                      # Flag de término de operação
+    termination_reason: str                  # Motivo de término da operação
+    routing_next_node: str                   # Próximo nó escolhido pelo supervisor
+    last_completed_node: str                 # Último nó de capacidade concluído
+    agent_validation: dict[str, Any]         # Score de qualidade da execução
 
 
 def _metric_start() -> float:
@@ -185,17 +214,269 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
         }
     )
     state["node_history"].append(node_name)
+    state["last_completed_node"] = node_name
 
 
 def _node_for_step(step_name: str, scan_mode: str) -> str:
     step = str(step_name or "").strip().lower()
     if step in {"", "done"}:
         return "threat_intel"
+    if "supervisor" in step:
+        return "supervisor"
+    if "planning" in step or "strategic" in step:
+        return "strategic_planning"
     if "asset" in step or "recon" in step or "discovery" in step:
         return "asset_discovery"
+    if "hypothesis" in step:
+        return "adversarial_hypothesis"
     if "risk" in step or "vuln" in step or "assessment" in step:
         return "risk_assessment"
+    if "adjudication" in step or "evidence" in step:
+        return "evidence_adjudication"
+    if "governance" in step:
+        return "governance"
+    if "executive" in step:
+        return "executive_analyst"
     return "threat_intel"
+
+
+def _count_high_signal_findings(state: AgentState) -> int:
+    findings = state.get("vulnerabilidades_encontradas") or []
+    return sum(
+        1
+        for finding in findings
+        if str(finding.get("severity", "")).lower() in {"critical", "high"}
+    )
+
+
+def _has_verified_or_strong_evidence(state: AgentState) -> bool:
+    findings = state.get("vulnerabilidades_encontradas") or []
+    for finding in findings:
+        details = dict(finding.get("details") or {})
+        status = str(details.get("validation_status") or "").lower()
+        risk_score = float(finding.get("risk_score") or 0)
+        if status == "verified":
+            return True
+        if str(finding.get("severity", "")).lower() in {"critical", "high"} and risk_score >= 7:
+            return True
+    return False
+
+
+def _route_from_supervisor(state: AgentState) -> str:
+    return str(state.get("routing_next_node") or "END")
+
+
+def supervisor_node(state: AgentState) -> AgentState:
+    """Single decision-maker: roteia capacidades dinamicamente por confiança e evidência."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "0. Supervisor")
+
+    state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
+    max_iterations = int(state.get("max_iterations", 12))
+    completed = list(state.get("completed_capabilities") or [])
+    last_node = str(state.get("last_completed_node") or "").strip()
+
+    capability_nodes = {
+        "strategic_planning",
+        "asset_discovery",
+        "threat_intel",
+        "adversarial_hypothesis",
+        "risk_assessment",
+        "evidence_adjudication",
+        "governance",
+        "executive_analyst",
+    }
+    if last_node in capability_nodes and last_node not in completed:
+        completed.append(last_node)
+
+    confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
+    high_signals = _count_high_signal_findings(state)
+    has_strong_evidence = _has_verified_or_strong_evidence(state)
+
+    next_node = "END"
+    termination_reason = str(state.get("termination_reason") or "")
+
+    if state.get("objective_met"):
+        if "executive_analyst" not in completed:
+            next_node = "executive_analyst"
+        else:
+            next_node = "END"
+            termination_reason = termination_reason or "objective_already_met"
+    elif state["loop_iteration"] > max_iterations:
+        if "governance" not in completed:
+            next_node = "governance"
+        elif "executive_analyst" not in completed:
+            next_node = "executive_analyst"
+        else:
+            next_node = "END"
+            state["objective_met"] = True
+            termination_reason = "max_iterations_reached"
+    elif "strategic_planning" not in completed:
+        next_node = "strategic_planning"
+    elif "asset_discovery" not in completed:
+        next_node = "asset_discovery"
+    elif "threat_intel" not in completed:
+        next_node = "threat_intel"
+    elif "adversarial_hypothesis" not in completed:
+        next_node = "adversarial_hypothesis"
+    elif "risk_assessment" not in completed:
+        next_node = "risk_assessment"
+    elif "evidence_adjudication" not in completed:
+        next_node = "evidence_adjudication"
+    elif "governance" not in completed:
+        next_node = "governance"
+    else:
+        # Loop adaptativo após primeiro ciclo completo
+        if has_strong_evidence and high_signals > 0 and "executive_analyst" not in completed:
+            state["objective_met"] = True
+            termination_reason = "validated_high_signal_findings"
+            next_node = "executive_analyst"
+        else:
+            if confidence >= ANALYST_CONFIDENCE_THRESHOLDS["high"]:
+                next_node = "risk_assessment"
+            elif confidence >= ANALYST_CONFIDENCE_THRESHOLDS["medium"]:
+                next_node = "adversarial_hypothesis"
+            else:
+                next_node = "threat_intel"
+
+    state["completed_capabilities"] = completed
+    state["routing_next_node"] = next_node
+    state["termination_reason"] = termination_reason
+    state["proxima_ferramenta"] = next_node
+    state["logs_terminais"].append(
+        "Supervisor: "
+        f"iter={state['loop_iteration']}/{max_iterations} "
+        f"confidence={confidence} "
+        f"high_signals={high_signals} "
+        f"next={next_node}"
+    )
+
+    _metric_end(state, "supervisor", started_at)
+    _sync_step_to_db(state, "0. Supervisor")
+    return state
+
+
+def strategic_planning_node(state: AgentState) -> AgentState:
+    """Define plano tático inicial e contratos de execução do agente sênior."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "1. StrategicPlanning")
+
+    target = str(state.get("target") or "").strip()
+    max_iterations = int(state.get("max_iterations", 12))
+    prompt_contract = build_supervisor_prompt_contract(
+        target=target,
+        objective=f"Assess external attack surface and exploitable risk for {target}",
+        max_iterations=max_iterations,
+    )
+    plan = {
+        "objective": f"Assess external attack surface and exploitable risk for {target}",
+        "current_phase": 1,
+        "total_phases": len(GROUP_MISSION_ITEMS),
+        "checkpoints": [20, 40, 60, 80],
+        "phases": [
+            {"id": idx + 1, "title": item, "status": "active" if idx == 0 else "pending"}
+            for idx, item in enumerate(GROUP_MISSION_ITEMS)
+        ],
+    }
+
+    state["analyst_framework"] = {
+        "name": "senior-cyber-analyst-framework",
+        "version": "2026.04",
+        "loop": ["know", "think", "test", "validate"],
+        "confidence_thresholds": ANALYST_CONFIDENCE_THRESHOLDS,
+        "prompt_contract": prompt_contract,
+    }
+    state["operation_plan"] = plan
+    state["evidence_contract"] = {
+        "rules": EVIDENCE_RULES,
+        "status_values": ["hypothesis", "unverified", "verified"],
+    }
+    state["confidence_state"] = {
+        "global_confidence": 60,
+        "reason": "initial_plan_created",
+        "last_updated": datetime.utcnow().isoformat(),
+    }
+    state["logs_terminais"].append(
+        "StrategicPlanning: framework=senior-cyber-analyst, confidence=60, plan_initialized"
+    )
+    state["proxima_ferramenta"] = "asset_discovery"
+    state["mission_index"] += 1
+    _metric_end(state, "strategic_planning", started_at)
+    _sync_step_to_db(state, "1. StrategicPlanning")
+    return state
+
+
+def adversarial_hypothesis_node(state: AgentState) -> AgentState:
+    """Consolida hipóteses ofensivas antes da fase de validação técnica."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "4. AdversarialHypothesis")
+
+    vulns = state.get("vulnerabilidades_encontradas") or []
+    high_signal = [
+        v for v in vulns
+        if str(v.get("severity", "")).lower() in {"critical", "high", "medium"}
+    ]
+
+    hypothesis = {
+        "candidate_paths": max(1, min(6, len(high_signal) + 1)),
+        "priority_focus": [
+            "authentication",
+            "exposed_services",
+            "web_attack_surface",
+        ],
+        "observed_signals": len(high_signal),
+    }
+    state["confidence_state"] = {
+        "global_confidence": 70 if high_signal else 55,
+        "reason": "adversarial_hypothesis_built",
+        "last_updated": datetime.utcnow().isoformat(),
+        "hypothesis": hypothesis,
+    }
+    state["logs_terminais"].append(
+        f"AdversarialHypothesis: signals={len(high_signal)} confidence={state['confidence_state']['global_confidence']}"
+    )
+    state["proxima_ferramenta"] = "risk_assessment"
+    state["mission_index"] += 1
+    _metric_end(state, "adversarial_hypothesis", started_at)
+    _sync_step_to_db(state, "4. AdversarialHypothesis")
+    return state
+
+
+def evidence_adjudication_node(state: AgentState) -> AgentState:
+    """Aplica contrato de evidência para separar hipótese de finding verificável."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "6. EvidenceAdjudication")
+
+    rules = (state.get("evidence_contract") or {}).get("rules") or EVIDENCE_RULES
+    min_conf = int(rules.get("minimum_confidence_for_promote", 70))
+
+    adjudicated: list[dict[str, Any]] = []
+    promoted = 0
+    for finding in state.get("vulnerabilidades_encontradas") or []:
+        item = dict(finding)
+        details = dict(item.get("details") or {})
+        sev = str(item.get("severity", "low")).lower()
+        confidence = float(details.get("confidence") or item.get("risk_score") or 0)
+
+        if sev in {"critical", "high"} and confidence < min_conf:
+            details["validation_status"] = "hypothesis"
+            details["adjudication_reason"] = "insufficient_confidence_or_proof"
+        else:
+            details.setdefault("validation_status", "unverified")
+            if confidence >= min_conf:
+                promoted += 1
+        item["details"] = details
+        adjudicated.append(item)
+
+    state["vulnerabilidades_encontradas"] = adjudicated
+    state["logs_terminais"].append(
+        f"EvidenceAdjudication: total={len(adjudicated)} promoted_confident={promoted}"
+    )
+    state["proxima_ferramenta"] = "governance"
+    state["mission_index"] += 1
+    _metric_end(state, "evidence_adjudication", started_at)
+    _sync_step_to_db(state, "6. EvidenceAdjudication")
+    return state
 
 
 def _mark_step_metric(state: AgentState, success: bool) -> None:
@@ -402,6 +683,14 @@ def _run_tools_and_collect(
             )
         
         state["logs_terminais"].append(f"{log_prefix}: tool={tool} status={result.get('status', 'unknown')}")
+        if result.get("source_agent_name"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} agent={result.get('source_agent_name')}"
+            )
+        if result.get("source_agent_id"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} agent_id={result.get('source_agent_id')}"
+            )
         if result.get("dispatch_task_name"):
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} dispatch_task={result.get('dispatch_task_name')}"
@@ -2889,32 +3178,49 @@ def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: st
 
 
 def build_graph(mode: ScanMode = "unit"):
-    """EASM 5-Agent Sequential Pipeline.
+    """Single-Agent Meta-Everything (Supervisor-Centric) LangGraph.
 
-    AssetDiscovery → ThreatIntel → RiskAssessment → Governance → ExecutiveAnalyst
-
-    - AssetDiscovery : subfinder / amass / dnsx / naabu / httpx / gowitness
-    - ThreatIntel    : theharvester / shodan-cli / h8mail / subjack
-    - RiskAssessment : burp-cli → nmap-vulscan → nikto
-    - Governance     : FAIR+AGE rating engine (Python puro, sem ferramentas)
-    - ExecutiveAnalyst: narrativa LLM via Ollama (fallback para template)
+    O supervisor é o único decisor estratégico e roteia capacidades dinamicamente:
+    strategic_planning, asset_discovery, threat_intel, adversarial_hypothesis,
+    risk_assessment, evidence_adjudication, governance e executive_analyst.
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("supervisor", supervisor_node)
+    graph.add_node("strategic_planning", strategic_planning_node)
     graph.add_node("asset_discovery",   asset_discovery_node)
     graph.add_node("risk_assessment",   risk_assessment_node)
     graph.add_node("threat_intel",      threat_intel_node)
+    graph.add_node("adversarial_hypothesis", adversarial_hypothesis_node)
+    graph.add_node("evidence_adjudication", evidence_adjudication_node)
     graph.add_node("governance",        governance_node)
     graph.add_node("executive_analyst", executive_analyst_node)
 
-    # Pipeline paralelo — Asset Discovery dispara Threat Intel e Risk Assessment simultaneamente
-    graph.set_entry_point("asset_discovery")
-    # Fluxo sequencial para evitar conflito de merge de estado em execucao paralela.
-    graph.add_edge("asset_discovery",   "threat_intel")
-    graph.add_edge("threat_intel",      "risk_assessment")
-    graph.add_edge("risk_assessment",   "governance")
-    graph.add_edge("governance",        "executive_analyst")
-    graph.add_edge("executive_analyst", END)
+    graph.set_entry_point("supervisor")
+    graph.add_conditional_edges(
+        "supervisor",
+        _route_from_supervisor,
+        {
+            "strategic_planning": "strategic_planning",
+            "asset_discovery": "asset_discovery",
+            "threat_intel": "threat_intel",
+            "adversarial_hypothesis": "adversarial_hypothesis",
+            "risk_assessment": "risk_assessment",
+            "evidence_adjudication": "evidence_adjudication",
+            "governance": "governance",
+            "executive_analyst": "executive_analyst",
+            "END": END,
+        },
+    )
+
+    graph.add_edge("strategic_planning", "supervisor")
+    graph.add_edge("asset_discovery", "supervisor")
+    graph.add_edge("threat_intel", "supervisor")
+    graph.add_edge("adversarial_hypothesis", "supervisor")
+    graph.add_edge("risk_assessment", "supervisor")
+    graph.add_edge("evidence_adjudication", "supervisor")
+    graph.add_edge("governance", "supervisor")
+    graph.add_edge("executive_analyst", "supervisor")
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -2964,6 +3270,34 @@ def initial_state(
         "mission_items": mission_items,
         "known_vulnerability_patterns": known_vulnerability_patterns or [],
         "executed_tool_runs": [],
+        "analyst_framework": {
+            "name": "senior-cyber-analyst-framework",
+            "version": "2026.04",
+            "confidence_thresholds": ANALYST_CONFIDENCE_THRESHOLDS,
+            "prompt_contract": build_supervisor_prompt_contract(
+                target=primary_target,
+                objective=f"Assess external attack surface and exploitable risk for {primary_target}",
+                max_iterations=12,
+            ),
+        },
+        "operation_plan": {},
+        "confidence_state": {
+            "global_confidence": 60,
+            "reason": "initial_state",
+            "last_updated": datetime.utcnow().isoformat(),
+        },
+        "evidence_contract": {
+            "rules": EVIDENCE_RULES,
+            "status_values": ["hypothesis", "unverified", "verified"],
+        },
+        "completed_capabilities": [],
+        "loop_iteration": 0,
+        "max_iterations": 12,
+        "objective_met": False,
+        "termination_reason": "",
+        "routing_next_node": "strategic_planning",
+        "last_completed_node": "",
+        "agent_validation": {},
         # EASM fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},

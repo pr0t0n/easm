@@ -70,7 +70,7 @@ Observacoes operacionais:
 
 ### ✅ Features Implementadas
 
-**Núcleo EASM (7-Node LangGraph Pipeline):**
+**Núcleo EASM (Supervisor-Centric Senior Analyst LangGraph):**
 - ✅ **Descoberta de Ativos**: varrição de domínios, enumeração de IPs, portas abertas
 - ✅ **Avaliação de Risco**: fórmula **FAIR+AGE** com quantificação em USD
 - ✅ **Inteligência de Ameaças**: correlação CVE, CVSS, EPSS, KEV (Known Exploited Vulnerabilities)
@@ -84,7 +84,8 @@ Observacoes operacionais:
 - ✅ PostgreSQL com **5 novas tabelas EASM**: assets, vulnerabilities, asset_rating_history, easm_alerts, easm_alert_rules
 - ✅ Alembic migration 0002_easm_infrastructure (88 colunas, 12 índices)
 - ✅ Celery + Redis para execução assíncrona (filas por grupo)
-- ✅ LangGraph 0.2.62 com 7 nodos + PostgreSQL checkpointer
+- ✅ LangGraph 0.2.62 com 8 nodos + PostgreSQL checkpointer
+- ✅ Framework de decisão de analista senior (hipótese, confiança e adjudicação de evidência)
 
 **Normalização de Ferramentas (8 Parsers):**
 - ✅ **Subfinder** (JSON): domínios → IPs
@@ -133,7 +134,7 @@ Observacoes operacionais:
 Backend:          FastAPI 0.110.0 + SQLAlchemy + Alembic
 Database:         PostgreSQL 17 (23 tabelas, 5 EASM-specific)
 Async:            Celery + Redis
-State Machine:    LangGraph 0.2.62 + PostgreSQL checkpointer
+State Machine:    LangGraph 0.2.62 + Senior Analyst Framework + PostgreSQL checkpointer
 AI:               Ollama llama3 via httpx
 Search:           ChromaDB (deduplicação vetorial)
 Frontend:         React 18 + Tailwind CSS + Vite
@@ -161,16 +162,14 @@ Logging:          stdlib + WebSocket real-time
         │ orchestration
         │
    ┌────▼────────────────────────────────────────┐
-   │     LangGraph v0.2.62 (StateGraph)          │
-   │         com Paralelismo                     │
-   │                                              │
-   │  1. asset_discovery (nmap, subfinder, etc)  │
-   │         ├─→ risk_assessment (FAIR+AGE)      │
-   │         └─→ threat_intel (CVE)  [PARALELO]  │
-   │  2. governance (agrega dados, rating)       │
-   │  3. executive_analyst (narrativas LLM)      │
-   │  4. temporal_tracking (histórico)           │
-   │  5. alert_check (webhooks)                  │
+  │     LangGraph v0.2.62 (StateGraph)          │
+  │        Senior Analyst Framework              │
+  │                                              │
+  │  strategic_planning                          │
+  │  -> asset_discovery -> threat_intel          │
+  │  -> adversarial_hypothesis                   │
+  │  -> risk_assessment -> evidence_adjudication │
+  │  -> governance -> executive_analyst          │
    │                                              │
    │  Checkpointer: PostgreSQL                   │
    └────┬────────────────────────────────────────┘
@@ -184,7 +183,7 @@ Logging:          stdlib + WebSocket real-time
 └───────┘ └───────┘ └──────────┘ └───────────┘
 ```
 
-### Pipeline de Execução (Fluxo Ponta-a-Ponta com Paralelismo)
+### Pipeline de Execução (Fluxo Supervisor-Centric)
 
 ```
 1. User/Admin: Criar scan via POST /api/scans {target, tools}
@@ -195,40 +194,46 @@ Logging:          stdlib + WebSocket real-time
                 ↓
 4. Worker: Inicializar LangGraph StateGraph
                 ↓
-5. Asset Discovery Node: Executar Subfinder, Nmap, Shodan
-   Resultado: {domain, ip, port, service, fingerprint}
-                ├─────────────────┬─────────────────┐
-                │ (PARALELO)      │ (PARALELO)      │
-                ▼                 ▼
-    6a. Threat Intel Node    6b. Risk Assessment Node
-    Correlacionar CVE,       Computar FAIR+AGE por asset
-    CVSS, EPSS, KEV         Resultado: {easm_rating,
-    Resultado: {vuln[],       grade, pillar_scores}
-    cve_id, threat_freq}
-                │                 │
-                └─────────────────┴─────────────────┐
-                                                    ▼
-7. Governance Node: Agregar dados paralelos, rastrear SLA
-   Entrada: Dados de Threat Intel + Risk Assessment
-   Resultado: {remediation_velocity %, trend, days_to_zero}
-                ↓
-8. Executive Analyst Node: Gerar narrativas com LLM
-   Resultado: {narrative_text, financial_summary, recommendations}
-                ↓
-9. Temporal Tracking Node: Persistir asset_rating_history
-   Resultado: Snapshots históricos para dashboard + forecast
-                ↓
-10. Alert Check Node: Avaliar regras, disparar webhooks
-    Resultado: EASMAlert[] criados, webhooks POST sincronizados
-                ↓
-11. Persistir: Encontrado em findings + audit_trail
+5. Supervisor Node: avalia confiança, progresso e escolhe a próxima capacidade
+    ↓
+6. Capacidades dinâmicas (sob demanda):
+   - strategic_planning
+   - asset_discovery
+   - threat_intel
+   - adversarial_hypothesis
+   - risk_assessment
+   - evidence_adjudication
+   - governance
+   - executive_analyst
+    ↓
+7. Retorno ao Supervisor após cada capacidade (loop metacognitivo)
+    ↓
+8. Encerramento: objetivo atingido com evidência suficiente OU orçamento de iterações
+    ↓
+9. Persistir: findings + rating + fair decomposition + executive summary + audit_trail
     Dashboard, Reports e APIs consomem dados persistidos
 ```
 
-**Benefícios do Paralelismo:**
-- ✅ Execução 2x mais rápida para Threat Intel + Risk Assessment (rodam juntos)
-- ✅ Utilização otimizada de workers paralelos das filas
-- ✅ Governança recebe análise completa (risco + inteligência) de forma integrada
+Para detalhes do framework e contratos, veja `docs/SENIOR_ANALYST_FRAMEWORK.md`.
+
+### Alinhamento Cyber-AutoAgent
+
+O projeto foi alinhado com os pilares operacionais de prompt, arquitetura, ferramentas, modelo, validacao e Docker.
+
+Resumo da implementacao:
+
+- Prompt metacognitivo + evidence-first no contrato do supervisor
+- Supervisor-centric loop com adjudicacao de evidencia
+- Catalogo de capacidades inspirado em Cyber-AutoAgent
+- Configuracao de modelo principal e modelo de avaliacao
+- Rubrica de validacao automatica por execucao (methodology/tooling/evidence/outcome)
+
+Referencias:
+
+- `docs/CYBER_AUTOAGENT_ALIGNMENT.md`
+- `scripts/validate_cyber_autoagent_alignment.py`
+- `scripts/validate_docker_and_image.sh`
+- `scripts/build_and_publish_image.sh`
 
 ---
 

@@ -201,7 +201,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
     if normalized == "wafw00f":
         return ["wafw00f", url, "-a"]
     if normalized == "nikto":
-        return ["nikto", "-host", host, "-C", "all"]
+        maxtime = max(60, TOOL_TIMEOUT_SECONDS - 60)
+        return ["nikto", "-host", host, "-C", "all", "-maxtime", f"{maxtime}s"]
     if normalized == "sslscan":
         return ["sslscan", "--no-colour", host]
     if normalized == "shcheck":
@@ -423,6 +424,8 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
@@ -430,12 +433,20 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
             "status": "error",
             "output": f"Timeout ao executar {tool_name} em {timeout_seconds}s.",
             "open_ports": [],
+            "command": " ".join(cmd),
+            "return_code": -1,
+            "stdout": "",
+            "stderr": f"TimeoutExpired: {tool_name} nao respondeu em {timeout_seconds}s",
         }
     except Exception as exc:
         return {
             "status": "error",
             "output": f"Falha ao executar {tool_name}: {exc}",
             "open_ports": [],
+            "command": " ".join(cmd),
+            "return_code": -1,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
         }
 
     stdout = (proc.stdout or "").strip()
@@ -561,7 +572,7 @@ def _run_curl_headers_tool(target: str) -> dict[str, Any]:
     timeout_seconds = TOOL_TIMEOUT_SECONDS
 
     try:
-        first = subprocess.run(first_cmd, check=False, capture_output=True, text=True, timeout=timeout_seconds)
+        first = subprocess.run(first_cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         return {
             "status": "error",
@@ -600,7 +611,7 @@ def _run_curl_headers_tool(target: str) -> dict[str, Any]:
         if https_url:
             second_cmd = ["curl", "-I", "-sS", "--max-time", "20", https_url]
             try:
-                second = subprocess.run(second_cmd, check=False, capture_output=True, text=True, timeout=timeout_seconds)
+                second = subprocess.run(second_cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seconds)
                 second_stdout = str(second.stdout or "").strip()
                 second_stderr = str(second.stderr or "").strip()
                 combined_stdout = (
@@ -661,6 +672,8 @@ def _run_shodan_python_query(target: str) -> dict[str, Any]:
             [sys.executable, "-c", script],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_secs,
             env={**os.environ},
         )

@@ -18,6 +18,7 @@ from app.graph.workflow import build_graph, initial_state
 from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
+from app.services.cyber_autoagent_alignment import evaluate_execution_quality
 from app.services.cve_enrichment_service import enrichment_service
 from app.services.llm_risk_service import parse_scan_llm_risk_config, run_llm_risk_assessment
 from app.services.tool_adapters import run_tool_execution
@@ -29,6 +30,7 @@ from app.workers.worker_groups import (
     SCAN_SCHEDULED_QUEUE,
     ScanMode,
     find_group_by_tool,
+    get_worker_agent_profile,
     group_queue,
 )
 
@@ -1270,6 +1272,38 @@ def _start_scan_progress_pulse(scan_id: int, scan_mode: ScanMode, interval_secon
 # Tasks de ferramentas — UNITARIOS (scan.unit / worker.unit.*)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _worker_result(
+    worker_group: str,
+    tool: str,
+    target: str,
+    scan_mode: ScanMode,
+    params: dict | None = None,
+) -> dict[str, Any]:
+    """Executa ferramenta preservando contrato legado de worker com identidade de agente."""
+    mode: ScanMode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
+    agent = get_worker_agent_profile(worker_group, mode=mode)
+
+    result = run_tool_execution(tool_name=tool, target=target, scan_mode=mode)
+    normalized = dict(result) if isinstance(result, dict) else {}
+
+    normalized.setdefault("tool", tool)
+    normalized.setdefault("target", target)
+    normalized.setdefault("scan_mode", mode)
+    normalized.setdefault("worker_group", worker_group)
+    normalized.setdefault("worker_role", "operational_agent")
+    normalized.setdefault("source_worker", worker_group)
+    normalized.setdefault("source_agent_id", agent.get("agent_id"))
+    normalized.setdefault("source_agent_name", agent.get("agent_name"))
+    normalized.setdefault("agent_profile", {
+        "agent_id": agent.get("agent_id"),
+        "agent_name": agent.get("agent_name"),
+        "purpose": agent.get("purpose"),
+    })
+    if params:
+        normalized.setdefault("runtime_params", dict(params))
+
+    return normalized
+
 @celery.task(name="worker.unit.reconhecimento.execute", queue="worker.unit.reconhecimento")
 def unit_reconhecimento_execute(tool: str, target: str, params: dict | None = None):
     return _worker_result("reconhecimento", tool, target, "unit", params)
@@ -1378,9 +1412,11 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             level="INFO",
             message=(
                 "PLANO DE EXECUCAO:\n"
-                "  1️⃣  Reconhecimento - Descoberta de hosts, portas, tecnologias e WAF\n"
-                "  2️⃣  OSINT - Consultas OSINT, Shodan, certificados SSL\n"
-                "  3️⃣  Analise de Vulnerabilidade - Burp, Nmap Vulscan, Nikto\n"
+                "  1️⃣  Strategic Planning - Definicao de hipoteses e contrato de evidencia\n"
+                "  2️⃣  Attack Surface Mapping - Descoberta de ativos, exposicoes e contexto\n"
+                "  3️⃣  Adversarial Validation - Testes orientados por hipotese e prioridade\n"
+                "  4️⃣  Evidence Adjudication - Separacao de hipotese vs achado comprovado\n"
+                "  5️⃣  Governance + Executive - FAIR/AGE e narrativa executiva\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "Acompanhe o progresso nos logs abaixo com source=worker.progress_detail"
             ),
@@ -1435,7 +1471,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             message=f"trace_id={trace_id}",
         ))
         db.commit()
-        recursion_limit = max(100, len(state.get("mission_items", [])) * 4)
+        recursion_limit = max(160, len(state.get("mission_items", [])) * 20)
         final_state = app.invoke(
             state,
             config={
@@ -1458,6 +1494,25 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                     ),
                 )
             )
+
+        agent_validation = evaluate_execution_quality(final_state)
+        final_state["agent_validation"] = agent_validation
+        db.add(
+            ScanLog(
+                scan_job_id=job.id,
+                source="validation",
+                level="INFO",
+                message=(
+                    "VALIDACAO CYBER AUTOAGENT: "
+                    f"overall={agent_validation.get('scores', {}).get('overall', 0)} "
+                    f"methodology={agent_validation.get('scores', {}).get('methodology', 0)} "
+                    f"tooling={agent_validation.get('scores', {}).get('tooling', 0)} "
+                    f"evidence={agent_validation.get('scores', {}).get('evidence', 0)} "
+                    f"outcome={agent_validation.get('scores', {}).get('outcome', 0)}"
+                ),
+            )
+        )
+        if llm_risk_cfg.enabled:
             db.commit()
             llm_risk_report = run_llm_risk_assessment(llm_risk_cfg)
             final_state["llm_risk_report"] = llm_risk_report
@@ -1717,7 +1772,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             message=(
                 f"EXECUCAO EASM CONCLUIDA COM SUCESSO!\n"
                 f"\n"
-                f"PIPELINE 5 AGENTES:\n"
+                f"FRAMEWORK SUPERVISOR-CENTRIC:\n"
                 f"{mission_summary}\n"
                 f"\n"
                 f"RESUMO:\n"
@@ -1725,6 +1780,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 f"  • Portas descobertas: {len(final_state.get('discovered_ports', []))}\n"
                 f"  • Ativos mapeados: {len(final_state.get('lista_ativos', []))}\n"
                 f"  • Rating EASM: {easm_rating.get('score', 'N/A')}/100 (Grau {easm_rating.get('grade', 'N/A')})\n"
+                f"  • Validation Score: {final_state.get('agent_validation', {}).get('scores', {}).get('overall', 'N/A')}\n"
                 f"  • Taxa de sucesso: {progress_ctx.get('tools_success', 0)}/{progress_ctx.get('tools_attempted', 0)} ferramentas"
             )
         ))

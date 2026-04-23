@@ -123,6 +123,11 @@ services:
       APP_ENV: development
       BURP_API_HOST: burp_rest
       BURP_API_PORT: "8090"
+      ENABLE_OBSERVABILITY: "${ENABLE_OBSERVABILITY:-false}"
+      ENABLE_AUTO_EVALUATION: "${ENABLE_AUTO_EVALUATION:-false}"
+      LANGFUSE_HOST: "${LANGFUSE_HOST:-}"
+      LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
+      LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
       TZ: America/Sao_Paulo
     depends_on:
       postgres:

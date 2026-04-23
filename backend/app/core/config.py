@@ -24,9 +24,17 @@ class Settings(BaseSettings):
     langgraph_checkpointer_dsn: str | None = None
 
     ollama_base_url: str = "http://ollama:11434"
+    llm_primary_provider: str = "ollama"
+    llm_primary_model: str = "qwen2.5:7b"
     ollama_model: str = "llama3"
     ollama_qwen_model: str = "qwen2.5:7b"
     ollama_cloudcode_model: str = "llama3.1:8b"
+    llm_evaluation_model: str = "qwen2.5:7b"
+    enable_observability: bool = False
+    enable_auto_evaluation: bool = False
+    langfuse_host: str = ""
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
     llm_risk_enabled: bool = False
     llm_risk_provider: str = "ollama"
     llm_risk_ollama_model: str = "qwen2.5:7b"
