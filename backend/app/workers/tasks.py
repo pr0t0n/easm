@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.graph.workflow import build_graph, initial_state
-from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat
+from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat, ScanAuditLog
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cyber_autoagent_alignment import evaluate_execution_quality
@@ -1526,6 +1526,9 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 
         final_state["trace_id"] = trace_id
 
+        # Persiste dados de autonomy em ScanAuditLog
+        _persist_autonomy_audit_log(db, job.id, final_state)
+
         llm_risk_cfg = parse_scan_llm_risk_config(job.state_data or {})
         if llm_risk_cfg.enabled:
             db.add(
@@ -1976,6 +1979,72 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 # Tasks orquestradoras publicas — uma por modo de execucao
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _persist_autonomy_audit_log(db: Session, scan_id: int, final_state: dict[str, Any]) -> None:
+    """Persiste dados de autonomy (notes, todos, actions, observations, errors) em ScanAuditLog"""
+    try:
+        autonomy_notes = final_state.get("autonomy_notes", [])
+        autonomy_todos = final_state.get("autonomy_todos", [])
+        autonomy_actions = final_state.get("autonomy_actions", [])
+        autonomy_observations = final_state.get("autonomy_observations", [])
+        autonomy_errors = final_state.get("autonomy_errors", [])
+        
+        iteration = int(final_state.get("loop_iteration", 0))
+        
+        # Persiste notes
+        for note in autonomy_notes:
+            db.add(ScanAuditLog(
+                scan_job_id=scan_id,
+                iteration=note.get("iteration", iteration),
+                node_name=note.get("phase", "supervisor"),
+                entry_type="note",
+                content=f"{note.get('text', '')} | ts: {note.get('ts', '')}",
+            ))
+        
+        # Persiste todos
+        for todo in autonomy_todos:
+            db.add(ScanAuditLog(
+                scan_job_id=scan_id,
+                iteration=todo.get("iteration", iteration),
+                node_name="supervisor",
+                entry_type="todo",
+                content=f"[{todo.get('priority', 'medium')}] {todo.get('title', '')} | status: {todo.get('status', 'open')}",
+            ))
+        
+        # Persiste actions
+        for action in autonomy_actions:
+            db.add(ScanAuditLog(
+                scan_job_id=scan_id,
+                iteration=action.get("iteration", iteration),
+                node_name="supervisor",
+                entry_type="action",
+                content=f"{action.get('action', '')} | data: {json.dumps(action.get('data', {}))}",
+            ))
+        
+        # Persiste observations
+        for obs in autonomy_observations:
+            db.add(ScanAuditLog(
+                scan_job_id=scan_id,
+                iteration=obs.get("iteration", iteration),
+                node_name=obs.get("source", "unknown"),
+                entry_type="observation",
+                content=obs.get("text", ""),
+            ))
+        
+        # Persiste errors
+        for error in autonomy_errors:
+            db.add(ScanAuditLog(
+                scan_job_id=scan_id,
+                iteration=error.get("iteration", iteration),
+                node_name=error.get("source", "unknown"),
+                entry_type="error",
+                content=error.get("text", ""),
+            ))
+        
+        db.commit()
+    except Exception as e:
+        print(f"Erro ao persistir autonomy audit log: {e}")
+
 
 @celery.task(bind=True, name="run_scan_job_unit", queue=SCAN_UNIT_QUEUE)
 def run_scan_job_unit(self, scan_id: int):

@@ -17,8 +17,9 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
+    ScanAuditLog,
 )
-from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse
+from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
@@ -2846,6 +2847,56 @@ def scan_logs(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         )
         for l in logs
     ]
+
+
+@router.get("/scans/{scan_id}/autonomy", response_model=AutonomyResponse)
+def scan_autonomy(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Retorna dados operacionais de autonomy (memória do agente)"""
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    # Extrair dados de autonomy do state_data
+    state_data = job.state_data or {}
+    autonomy_notes = state_data.get("autonomy_notes", [])
+    autonomy_todos = state_data.get("autonomy_todos", [])
+    autonomy_actions = state_data.get("autonomy_actions", [])
+    autonomy_observations = state_data.get("autonomy_observations", [])
+    autonomy_errors = state_data.get("autonomy_errors", [])
+    delegated_tasks = state_data.get("delegated_tasks", [])
+    active_skills = state_data.get("active_skills", [])
+    execution_control = state_data.get("execution_control", {})
+
+    # Buscar audit trail histórico
+    audit_logs = db.query(ScanAuditLog).filter(ScanAuditLog.scan_job_id == scan_id).order_by(ScanAuditLog.created_at.asc()).all()
+    audit_trail = [
+        {
+            "id": al.id,
+            "iteration": al.iteration,
+            "node_name": al.node_name,
+            "entry_type": al.entry_type,
+            "content": al.content,
+            "created_at": al.created_at,
+        }
+        for al in audit_logs
+    ]
+
+    return AutonomyResponse(
+        scan_id=scan_id,
+        autonomy_notes=autonomy_notes,
+        autonomy_todos=autonomy_todos,
+        autonomy_actions=autonomy_actions,
+        autonomy_observations=autonomy_observations,
+        autonomy_errors=autonomy_errors,
+        delegated_tasks=delegated_tasks,
+        active_skills=active_skills,
+        execution_control=execution_control,
+        audit_trail=audit_trail,
+    )
 
 
 @router.get("/scans/{scan_id}/report", response_model=ReportResponse)

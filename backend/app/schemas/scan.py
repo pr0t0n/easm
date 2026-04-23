@@ -45,6 +45,28 @@ class LogResponse(BaseModel):
     created_at: datetime
 
 
+class AuditLogEntry(BaseModel):
+    id: int
+    iteration: int
+    node_name: str
+    entry_type: str  # note, todo, action, observation, error
+    content: str
+    created_at: datetime
+
+
+class AutonomyResponse(BaseModel):
+    scan_id: int
+    autonomy_notes: list[str]
+    autonomy_todos: list[str]
+    autonomy_actions: list[str]
+    autonomy_observations: list[str]
+    autonomy_errors: list[str]
+    delegated_tasks: list[dict[str, Any]]
+    active_skills: list[dict[str, Any]]
+    execution_control: dict[str, Any]
+    audit_trail: list[AuditLogEntry]
+
+
 class ReportResponse(BaseModel):
     scan_id: int
     status: str

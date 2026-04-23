@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.graph.mission import build_autonomous_mission_contract
+
 
 CYBER_AUTOAGENT_PROMPT_PRINCIPLES = {
     "mission_stance": [
@@ -47,7 +49,13 @@ CYBER_AUTOAGENT_RUBRIC = {
 }
 
 
-def build_supervisor_prompt_contract(target: str, objective: str, max_iterations: int) -> dict[str, Any]:
+def build_supervisor_prompt_contract(
+    target: str,
+    objective: str,
+    max_iterations: int,
+    active_skills: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    skills = list(active_skills or [])
     return {
         "persona": "Senior Cyber Analyst - evidence-first, mission-focused",
         "target": str(target or ""),
@@ -55,6 +63,17 @@ def build_supervisor_prompt_contract(target: str, objective: str, max_iterations
         "max_iterations": int(max_iterations),
         "principles": CYBER_AUTOAGENT_PROMPT_PRINCIPLES,
         "expected_loop": ["know", "think", "test", "validate"],
+        "autonomy_contract": build_autonomous_mission_contract(max_iterations=max_iterations),
+        "active_skills": skills,
+        "skills_summary": [
+            {
+                "id": str(skill.get("id") or ""),
+                "category": str(skill.get("category") or ""),
+                "description": str(skill.get("description") or ""),
+                "playbook": list(skill.get("playbook") or []),
+            }
+            for skill in skills
+        ],
     }
 
 

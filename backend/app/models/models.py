@@ -128,6 +128,21 @@ class ExecutedToolRun(Base):
     scan_job = relationship("ScanJob")
 
 
+class ScanAuditLog(Base):
+    """Auditoria de memória operacional: notas, ações e observações do agente autônomo."""
+    __tablename__ = "scan_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    node_name: Mapped[str] = mapped_column(String(100), index=True)  # supervisor, strategic_planning, etc
+    entry_type: Mapped[str] = mapped_column(String(50), index=True)  # note, todo, action, observation, error
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    scan_job = relationship("ScanJob")
+
+
 class FalsePositiveMemory(Base):
     __tablename__ = "false_positive_memory"
 

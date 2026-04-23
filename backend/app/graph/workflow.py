@@ -22,6 +22,8 @@ def _strip_ansi_codes(text: str) -> str:
     return ANSI_ESCAPE_PATTERN.sub('', text)
 
 from app.graph.checkpointer import create_checkpointer
+from app.graph.mission import MISSION_ITEMS as AUTONOMOUS_MISSION_ITEMS
+from app.graph.mission import build_autonomous_mission_contract, select_mission_skills
 from app.services.risk_service import (
     build_fair_decomposition,
     compute_easm_rating,
@@ -77,14 +79,7 @@ def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
 
 # Senior Cyber Analyst pipeline (framework-driven)
 GROUP_MISSION_ITEMS: list[str] = [
-    "1. StrategicPlanning",
-    "2. AssetDiscovery",
-    "3. ThreatIntel",
-    "4. AdversarialHypothesis",
-    "5. RiskAssessment",
-    "6. EvidenceAdjudication",
-    "7. Governance",
-    "8. ExecutiveAnalysis",
+    *AUTONOMOUS_MISSION_ITEMS,
 ]
 
 ANALYST_CONFIDENCE_THRESHOLDS: dict[str, int] = {
@@ -197,6 +192,18 @@ class AgentState(TypedDict):
     routing_next_node: str                   # Próximo nó escolhido pelo supervisor
     last_completed_node: str                 # Último nó de capacidade concluído
     agent_validation: dict[str, Any]         # Score de qualidade da execução
+    # Autonomous agent runtime
+    active_skills: list[dict[str, Any]]
+    delegated_tasks: list[dict[str, Any]]
+    delegation_log: list[dict[str, Any]]
+    autonomy_notes: list[dict[str, Any]]
+    autonomy_todos: list[dict[str, Any]]
+    autonomy_actions: list[dict[str, Any]]
+    autonomy_observations: list[dict[str, Any]]
+    autonomy_errors: list[dict[str, Any]]
+    execution_control: dict[str, Any]
+    tool_runtime: dict[str, dict[str, int]]
+    validation_backlog: list[dict[str, Any]]
 
 
 def _metric_start() -> float:
@@ -266,6 +273,170 @@ def _route_from_supervisor(state: AgentState) -> str:
     return str(state.get("routing_next_node") or "END")
 
 
+def _append_autonomy_entry(state: AgentState, key: str, payload: dict[str, Any]) -> None:
+    bucket = list(state.get(key) or [])
+    bucket.append(
+        {
+            **payload,
+            "ts": datetime.utcnow().isoformat(),
+            "iteration": int(state.get("loop_iteration", 0)),
+        }
+    )
+    state[key] = bucket
+
+
+def _append_note(state: AgentState, text: str, phase: str) -> None:
+    _append_autonomy_entry(state, "autonomy_notes", {"phase": phase, "text": str(text)})
+
+
+def _append_todo(state: AgentState, title: str, priority: str = "medium") -> None:
+    _append_autonomy_entry(
+        state,
+        "autonomy_todos",
+        {"title": str(title), "priority": str(priority), "status": "open"},
+    )
+
+
+def _append_action(state: AgentState, action: str, data: dict[str, Any] | None = None) -> None:
+    _append_autonomy_entry(state, "autonomy_actions", {"action": str(action), "data": dict(data or {})})
+
+
+def _append_observation(state: AgentState, text: str, source: str) -> None:
+    _append_autonomy_entry(state, "autonomy_observations", {"source": source, "text": str(text)})
+
+
+def _append_error(state: AgentState, text: str, source: str) -> None:
+    _append_autonomy_entry(state, "autonomy_errors", {"source": source, "text": str(text)})
+
+
+def _refresh_active_skills(state: AgentState) -> None:
+    selected = select_mission_skills(
+        target=str(state.get("target") or ""),
+        findings=list(state.get("vulnerabilidades_encontradas") or []),
+        target_type=str(state.get("target_type") or "dominio"),
+        discovered_ports=list(state.get("discovered_ports") or []),
+        max_skills=5,
+    )
+    prev_ids = {str(item.get("id") or "") for item in list(state.get("active_skills") or [])}
+    state["active_skills"] = selected
+    selected_ids = [str(item.get("id") or "") for item in selected]
+    if set(selected_ids) != prev_ids:
+        _append_note(state, f"Skills ativas atualizadas: {', '.join(selected_ids)}", phase="skill-selection")
+
+
+def _register_delegation_task(state: AgentState, node: str, reason: str, priority: int) -> None:
+    tasks = list(state.get("delegated_tasks") or [])
+    duplicate = any(
+        str(item.get("node") or "") == node and str(item.get("status") or "") == "pending"
+        for item in tasks
+    )
+    if duplicate:
+        return
+    task = {
+        "id": f"deleg-{uuid4().hex[:10]}",
+        "node": node,
+        "reason": reason,
+        "priority": int(priority),
+        "status": "pending",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    tasks.append(task)
+    tasks.sort(key=lambda item: int(item.get("priority", 999)))
+    state["delegated_tasks"] = tasks
+    _append_action(state, "delegate_task_created", task)
+
+
+def _complete_delegation_task(state: AgentState, node: str, summary: str) -> None:
+    tasks = list(state.get("delegated_tasks") or [])
+    changed = False
+    for item in tasks:
+        if str(item.get("node") or "") == node and str(item.get("status") or "") == "pending":
+            item["status"] = "done"
+            item["completed_at"] = datetime.utcnow().isoformat()
+            item["summary"] = summary
+            changed = True
+            break
+    state["delegated_tasks"] = tasks
+    if changed:
+        delegation_log = list(state.get("delegation_log") or [])
+        delegation_log.append({"node": node, "summary": summary, "ts": datetime.utcnow().isoformat()})
+        state["delegation_log"] = delegation_log
+
+
+def _update_execution_guardrails(state: AgentState) -> None:
+    ctrl = dict(state.get("execution_control") or {})
+    max_iterations = int(state.get("max_iterations", 12))
+    iteration = int(state.get("loop_iteration", 0))
+    findings_total = len(state.get("vulnerabilidades_encontradas") or [])
+    last_total = int(ctrl.get("last_findings_total", 0))
+    no_progress = int(ctrl.get("no_progress_iterations", 0))
+
+    if findings_total <= last_total:
+        no_progress += 1
+    else:
+        no_progress = 0
+
+    ctrl["last_findings_total"] = findings_total
+    ctrl["no_progress_iterations"] = no_progress
+    ctrl["approaching_limit"] = iteration >= max(1, int(max_iterations * 0.85))
+    ctrl["remaining_iterations"] = max(0, max_iterations - iteration)
+    ctrl["paused"] = bool(ctrl.get("paused", False))
+
+    if ctrl["approaching_limit"]:
+        _append_note(
+            state,
+            f"Orçamento de iterações próximo do limite ({iteration}/{max_iterations}).",
+            phase="execution-control",
+        )
+    if no_progress >= 3:
+        _append_todo(state, "Pivotar estratégia por estagnação de evidências", priority="high")
+        ctrl["paused"] = True
+    else:
+        ctrl["paused"] = False
+
+    state["execution_control"] = ctrl
+
+
+def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
+    runtime = dict(state.get("tool_runtime") or {})
+    ranked: list[tuple[tuple[int, int, int], str]] = []
+    for tool in tools:
+        stats = dict(runtime.get(str(tool), {}))
+        failures = int(stats.get("failures", 0))
+        attempts = int(stats.get("attempts", 0))
+        success = int(stats.get("success", 0))
+        ranked.append(((failures, attempts, -success), tool))
+    ranked.sort(key=lambda item: item[0])
+    return [item[1] for item in ranked]
+
+
+def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
+    if not tools:
+        return []
+    ranked = _rank_tools_for_iteration(state, tools)
+    iteration = int(state.get("loop_iteration", 0))
+    rotate_idx = iteration % max(1, len(ranked))
+    rotated = ranked[rotate_idx:] + ranked[:rotate_idx]
+    batch_size = 2
+    if group == "asset_discovery":
+        batch_size = min(4, max(2, len(rotated)))
+    elif group == "risk_assessment":
+        batch_size = min(3, max(1, len(rotated)))
+    return rotated[:batch_size]
+
+
+def _update_tool_runtime_metrics(state: AgentState, tool: str, status: str) -> None:
+    runtime = dict(state.get("tool_runtime") or {})
+    current = dict(runtime.get(tool, {}))
+    current["attempts"] = int(current.get("attempts", 0)) + 1
+    if status == "executed":
+        current["success"] = int(current.get("success", 0)) + 1
+    else:
+        current["failures"] = int(current.get("failures", 0)) + 1
+    runtime[tool] = current
+    state["tool_runtime"] = runtime
+
+
 def supervisor_node(state: AgentState) -> AgentState:
     """Single decision-maker: roteia capacidades dinamicamente por confiança e evidência."""
     started_at = _metric_start()
@@ -273,8 +444,11 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
     max_iterations = int(state.get("max_iterations", 12))
+    _update_execution_guardrails(state)
+    _refresh_active_skills(state)
     completed = list(state.get("completed_capabilities") or [])
     last_node = str(state.get("last_completed_node") or "").strip()
+    pending_validation = list(state.get("validation_backlog") or [])
 
     capability_nodes = {
         "strategic_planning",
@@ -288,13 +462,30 @@ def supervisor_node(state: AgentState) -> AgentState:
     }
     if last_node in capability_nodes and last_node not in completed:
         completed.append(last_node)
+        _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
 
     confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
     high_signals = _count_high_signal_findings(state)
     has_strong_evidence = _has_verified_or_strong_evidence(state)
 
+    if confidence < ANALYST_CONFIDENCE_THRESHOLDS["medium"]:
+        _register_delegation_task(state, node="asset_discovery", reason="low_confidence_expand_surface", priority=1)
+        _register_delegation_task(state, node="threat_intel", reason="low_confidence_collect_intel", priority=2)
+    elif confidence < ANALYST_CONFIDENCE_THRESHOLDS["high"]:
+        _register_delegation_task(state, node="adversarial_hypothesis", reason="medium_confidence_refine_hypothesis", priority=2)
+    else:
+        _register_delegation_task(state, node="risk_assessment", reason="high_confidence_validate_exploitability", priority=1)
+
     next_node = "END"
     termination_reason = str(state.get("termination_reason") or "")
+
+    if pending_validation:
+        _register_delegation_task(
+            state,
+            node="risk_assessment",
+            reason=f"validation_backlog={len(pending_validation)}",
+            priority=0,
+        )
 
     if state.get("objective_met"):
         if "executive_analyst" not in completed:
@@ -327,7 +518,9 @@ def supervisor_node(state: AgentState) -> AgentState:
         next_node = "governance"
     else:
         # Loop adaptativo após primeiro ciclo completo
-        if has_strong_evidence and high_signals > 0 and "executive_analyst" not in completed:
+        if pending_validation:
+            next_node = "risk_assessment"
+        elif has_strong_evidence and high_signals > 0 and "executive_analyst" not in completed:
             state["objective_met"] = True
             termination_reason = "validated_high_signal_findings"
             next_node = "executive_analyst"
@@ -339,6 +532,33 @@ def supervisor_node(state: AgentState) -> AgentState:
             else:
                 next_node = "threat_intel"
 
+    ctrl = dict(state.get("execution_control") or {})
+    remaining = int(ctrl.get("remaining_iterations", max_iterations))
+    if bool(ctrl.get("paused", False)) and next_node in {"risk_assessment", "evidence_adjudication"}:
+        _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
+        next_node = "threat_intel" if confidence < ANALYST_CONFIDENCE_THRESHOLDS["high"] else "adversarial_hypothesis"
+    if remaining <= 2 and next_node not in {"governance", "executive_analyst", "END"}:
+        _append_note(state, "Forçando finalização contextual por orçamento baixo.", phase="execution-control")
+        next_node = "governance" if "governance" not in completed else "executive_analyst"
+        termination_reason = termination_reason or "forced_finalize_guardrail"
+
+    for delegated in list(state.get("delegated_tasks") or []):
+        if str(delegated.get("status") or "") != "pending":
+            continue
+        delegated_node = str(delegated.get("node") or "")
+        if delegated_node in {
+            "strategic_planning",
+            "asset_discovery",
+            "threat_intel",
+            "adversarial_hypothesis",
+            "risk_assessment",
+            "evidence_adjudication",
+            "governance",
+            "executive_analyst",
+        }:
+            next_node = delegated_node
+            break
+
     state["completed_capabilities"] = completed
     state["routing_next_node"] = next_node
     state["termination_reason"] = termination_reason
@@ -348,7 +568,19 @@ def supervisor_node(state: AgentState) -> AgentState:
         f"iter={state['loop_iteration']}/{max_iterations} "
         f"confidence={confidence} "
         f"high_signals={high_signals} "
+        f"skills={len(state.get('active_skills') or [])} "
+        f"pending_validation={len(pending_validation)} "
         f"next={next_node}"
+    )
+    _append_action(
+        state,
+        "supervisor_route",
+        {
+            "next_node": next_node,
+            "confidence": confidence,
+            "high_signals": high_signals,
+            "pending_validation": len(pending_validation),
+        },
     )
 
     _metric_end(state, "supervisor", started_at)
@@ -363,10 +595,13 @@ def strategic_planning_node(state: AgentState) -> AgentState:
 
     target = str(state.get("target") or "").strip()
     max_iterations = int(state.get("max_iterations", 12))
+    _refresh_active_skills(state)
+    mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
     prompt_contract = build_supervisor_prompt_contract(
         target=target,
         objective=f"Assess external attack surface and exploitable risk for {target}",
         max_iterations=max_iterations,
+        active_skills=list(state.get("active_skills") or []),
     )
     plan = {
         "objective": f"Assess external attack surface and exploitable risk for {target}",
@@ -385,6 +620,7 @@ def strategic_planning_node(state: AgentState) -> AgentState:
         "loop": ["know", "think", "test", "validate"],
         "confidence_thresholds": ANALYST_CONFIDENCE_THRESHOLDS,
         "prompt_contract": prompt_contract,
+        "mission_contract": mission_contract,
     }
     state["operation_plan"] = plan
     state["evidence_contract"] = {
@@ -396,8 +632,13 @@ def strategic_planning_node(state: AgentState) -> AgentState:
         "reason": "initial_plan_created",
         "last_updated": datetime.utcnow().isoformat(),
     }
+    _append_note(state, "Plano estratégico inicial criado com contrato de autonomia.", phase="strategic-planning")
+    _append_todo(state, "Executar ciclo inicial de descoberta de ativos", priority="high")
+    _append_todo(state, "Correlacionar OSINT com superficie descoberta", priority="high")
+    _append_todo(state, "Validar findings high/critical com prova reproduzível", priority="high")
+    _complete_delegation_task(state, "strategic_planning", "planning_contract_ready")
     state["logs_terminais"].append(
-        "StrategicPlanning: framework=senior-cyber-analyst, confidence=60, plan_initialized"
+        f"StrategicPlanning: framework=senior-cyber-analyst, confidence=60, skills={len(state.get('active_skills') or [])}, plan_initialized"
     )
     state["proxima_ferramenta"] = "asset_discovery"
     state["mission_index"] += 1
@@ -432,6 +673,18 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
         "last_updated": datetime.utcnow().isoformat(),
         "hypothesis": hypothesis,
     }
+    _append_observation(
+        state,
+        (
+            "THINK checkpoint: "
+            f"candidate_paths={hypothesis['candidate_paths']} "
+            f"signals={hypothesis['observed_signals']} "
+            f"confidence={state['confidence_state']['global_confidence']}"
+        ),
+        source="adversarial_hypothesis",
+    )
+    _append_todo(state, "Executar teste mínimo para confirmar hipótese prioritária", priority="high")
+    _complete_delegation_task(state, "adversarial_hypothesis", "hypothesis_checkpoint_done")
     state["logs_terminais"].append(
         f"AdversarialHypothesis: signals={len(high_signal)} confidence={state['confidence_state']['global_confidence']}"
     )
@@ -452,25 +705,56 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
 
     adjudicated: list[dict[str, Any]] = []
     promoted = 0
+    backlog: list[dict[str, Any]] = []
     for finding in state.get("vulnerabilidades_encontradas") or []:
         item = dict(finding)
         details = dict(item.get("details") or {})
         sev = str(item.get("severity", "low")).lower()
         confidence = float(details.get("confidence") or item.get("risk_score") or 0)
+        evidence = str(details.get("evidence") or "").strip()
+        repro_steps = str(details.get("repro_steps") or "").strip()
+        has_minimum_proof = bool(evidence) and (bool(repro_steps) or bool(details.get("url")) or bool(details.get("port")))
 
-        if sev in {"critical", "high"} and confidence < min_conf:
+        if sev in {"critical", "high"} and (confidence < min_conf or not has_minimum_proof):
             details["validation_status"] = "hypothesis"
-            details["adjudication_reason"] = "insufficient_confidence_or_proof"
+            details["adjudication_reason"] = "insufficient_confidence_or_missing_reproducible_proof"
+            backlog.append(
+                {
+                    "title": str(item.get("title") or ""),
+                    "severity": sev,
+                    "asset": str(details.get("asset") or state.get("target") or ""),
+                    "reason": details["adjudication_reason"],
+                    "required_action": "rerun_validation_with_repro_steps",
+                }
+            )
         else:
-            details.setdefault("validation_status", "unverified")
+            if sev in {"critical", "high"}:
+                details["validation_status"] = "verified"
+            else:
+                details.setdefault("validation_status", "unverified")
             if confidence >= min_conf:
                 promoted += 1
         item["details"] = details
         adjudicated.append(item)
 
     state["vulnerabilidades_encontradas"] = adjudicated
+    state["validation_backlog"] = backlog
+    if backlog:
+        _register_delegation_task(
+            state,
+            node="risk_assessment",
+            reason=f"evidence_backlog={len(backlog)}",
+            priority=0,
+        )
+        _append_todo(state, f"Revalidar {len(backlog)} findings high/critical sem proof-pack", priority="high")
+        _append_note(
+            state,
+            f"Evidence gate bloqueou promoção de {len(backlog)} finding(s) por falta de reprodução.",
+            phase="evidence-adjudication",
+        )
+    _complete_delegation_task(state, "evidence_adjudication", f"promoted={promoted}; backlog={len(backlog)}")
     state["logs_terminais"].append(
-        f"EvidenceAdjudication: total={len(adjudicated)} promoted_confident={promoted}"
+        f"EvidenceAdjudication: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
     )
     state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
@@ -647,6 +931,11 @@ def _run_tools_and_collect(
         exec_start = perf_counter()
         _sync_step_to_db(state, f"{step_name} · {tool}")
         state["logs_terminais"].append(f"{log_prefix}: tool={tool} status=starting")
+        _append_action(
+            state,
+            "tool_start",
+            {"tool": tool, "target": scan_target, "step": step_name, "group": log_prefix},
+        )
         result = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
         exec_time = perf_counter() - exec_start
         state["executed_tool_runs"].append(run_id)
@@ -703,9 +992,26 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}"
             )
+            _append_error(
+                state,
+                f"tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}",
+                source=log_prefix,
+            )
         _register_tool_result_metric(state, str(result.get("status") or ""))
+        _update_tool_runtime_metrics(state, tool=tool, status=str(result.get("status") or ""))
         if result.get("status") == "executed":
             step_success = True
+            _append_observation(
+                state,
+                f"tool={tool} target={scan_target} executed em {round(exec_time, 2)}s",
+                source=log_prefix,
+            )
+        else:
+            _append_error(
+                state,
+                f"tool={tool} target={scan_target} status={result.get('status', 'unknown')}",
+                source=log_prefix,
+            )
 
         cmd = _truncate_log(result.get("command"))
         if cmd:
@@ -728,6 +1034,11 @@ def _run_tools_and_collect(
         tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
         if tool_specific_findings:
             all_findings.extend(tool_specific_findings)
+            _append_observation(
+                state,
+                f"tool={tool} generated_findings={len(tool_specific_findings)}",
+                source=log_prefix,
+            )
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
             )
@@ -2652,6 +2963,8 @@ def asset_discovery_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(
             f"AssetDiscovery: target_type={target_type}, full_recon_pipeline ativado"
         )
+    recon_tools = _select_tool_batch_for_iteration(state, group="asset_discovery", tools=recon_tools)
+    _append_note(state, f"AssetDiscovery selecionou ferramentas: {', '.join(recon_tools)}", phase="asset-discovery")
     
     if _is_local_target(state["target"]):
         state["logs_terminais"].append(
@@ -2772,6 +3085,7 @@ def asset_discovery_node(state: AgentState) -> AgentState:
             "details": {"node": "asset_discovery", "step": current},
         }
     )
+    _complete_delegation_task(state, "asset_discovery", f"assets={len(state.get('lista_ativos') or [])}")
     state["mission_index"] += 1
     _metric_end(state, "asset_discovery", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado
@@ -2795,6 +3109,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     current = _step_name(state)
     vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
     vuln_tools = _adapt_vuln_tools_for_target(state.get("target", ""), vuln_tools)
+    vuln_tools = _select_tool_batch_for_iteration(state, group="risk_assessment", tools=vuln_tools)
     if _is_local_target(state.get("target", "")):
         state["logs_terminais"].append(
             f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
@@ -2817,6 +3132,11 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     state["risk_targets_resolvable"] = list(resolvable_targets)
     state["risk_targets_unresolved"] = list(unresolved_targets)
     all_findings: list[dict[str, Any]] = []
+    pending_validation = list(state.get("validation_backlog") or [])
+    if pending_validation:
+        state["logs_terminais"].append(
+            f"RiskAssessment: validation_backlog_detected={len(pending_validation)}"
+        )
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     
@@ -2873,6 +3193,15 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         state["vulnerabilidades_encontradas"].extend(all_findings)
     else:
         state["logs_terminais"].append(f"RiskAssessment: sem achados tecnicos no passo {current}")
+    if pending_validation:
+        state["validation_backlog"] = []
+        _append_observation(
+            state,
+            f"Validation backlog processado durante risk_assessment: {len(pending_validation)} itens.",
+            source="risk_assessment",
+        )
+    _append_note(state, f"RiskAssessment selecionou ferramentas: {', '.join(vuln_tools)}", phase="risk-assessment")
+    _complete_delegation_task(state, "risk_assessment", f"findings={len(all_findings)}")
     state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
     _metric_end(state, "risk_assessment", started_at)
@@ -2980,6 +3309,7 @@ def threat_intel_node(state: AgentState) -> AgentState:
     state["logs_terminais"].append(f"ThreatIntel: {current}")
 
     osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
+    osint_tools = _select_tool_batch_for_iteration(state, group="threat_intel", tools=osint_tools)
     targets = _targets_for_deep_scan(state, limit=6)
     
     # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR
@@ -3023,6 +3353,8 @@ def threat_intel_node(state: AgentState) -> AgentState:
                 },
             }
         )
+    _append_note(state, f"ThreatIntel selecionou ferramentas: {', '.join(osint_tools)}", phase="threat-intel")
+    _complete_delegation_task(state, "threat_intel", f"targets={len(valid_targets)}")
 
     state["proxima_ferramenta"] = "risk_assessment"
     state["mission_index"] += 1
@@ -3087,6 +3419,7 @@ def governance_node(state: AgentState) -> AgentState:
         f"Governance: score={easm_rating['score']} grade={easm_rating['grade']} "
         f"n_assets={n_assets} total_ra={easm_rating['total_ra']}"
     )
+    _complete_delegation_task(state, "governance", f"score={easm_rating.get('score', 0)}")
     # mission_index já foi incrementado pelos agentes paralelos (threat_intel + risk_assessment)
     _metric_end(state, "governance", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado
@@ -3152,6 +3485,7 @@ def executive_analyst_node(state: AgentState) -> AgentState:
         state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
 
     state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
+    _complete_delegation_task(state, "executive_analyst", "executive_summary_generated")
     state["mission_index"] += 1
     _metric_end(state, "executive_analyst", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado
@@ -3239,6 +3573,14 @@ def initial_state(
 
     mission_items = GROUP_MISSION_ITEMS.copy()
     trace_id = str(uuid4())
+    initial_skills = select_mission_skills(
+        target=primary_target,
+        findings=[],
+        target_type=target_type,
+        discovered_ports=[],
+        max_skills=5,
+    )
+    mission_contract = build_autonomous_mission_contract(max_iterations=12)
     return {
         "trace_id": trace_id,
         "scan_id": scan_id,
@@ -3278,7 +3620,9 @@ def initial_state(
                 target=primary_target,
                 objective=f"Assess external attack surface and exploitable risk for {primary_target}",
                 max_iterations=12,
+                active_skills=initial_skills,
             ),
+            "mission_contract": mission_contract,
         },
         "operation_plan": {},
         "confidence_state": {
@@ -3298,6 +3642,22 @@ def initial_state(
         "routing_next_node": "strategic_planning",
         "last_completed_node": "",
         "agent_validation": {},
+        "active_skills": initial_skills,
+        "delegated_tasks": [],
+        "delegation_log": [],
+        "autonomy_notes": [],
+        "autonomy_todos": [],
+        "autonomy_actions": [],
+        "autonomy_observations": [],
+        "autonomy_errors": [],
+        "execution_control": {
+            "last_findings_total": 0,
+            "no_progress_iterations": 0,
+            "approaching_limit": False,
+            "remaining_iterations": 12,
+        },
+        "tool_runtime": {},
+        "validation_backlog": [],
         # EASM fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},
