@@ -1939,6 +1939,66 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
     ]
 
 
+@router.get("/reports/by-target")
+def list_report_targets(
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scans = (
+        _authorized_scan_query(db, current_user)
+        .filter(ScanJob.status == "completed")
+        .order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    latest_by_target: dict[str, dict[str, Any]] = {}
+    for scan in scans:
+        for token in _target_tokens(scan.target_query):
+            if token in latest_by_target:
+                continue
+            latest_by_target[token] = {
+                "target": token,
+                "scan_id": scan.id,
+                "scan_created_at": scan.created_at,
+                "target_query": scan.target_query,
+            }
+
+    return sorted(latest_by_target.values(), key=lambda item: str(item.get("target") or ""))
+
+
+@router.get("/reports/by-target/latest")
+def get_latest_scan_by_target(
+    target: str = Query(..., min_length=1, max_length=255),
+    search_limit: int = Query(default=5000, ge=1, le=20000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    normalized_target = _primary_target_token(target)
+    if not normalized_target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alvo invalido")
+
+    scans = (
+        _authorized_scan_query(db, current_user)
+        .filter(ScanJob.status == "completed")
+        .order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
+        .limit(search_limit)
+        .all()
+    )
+
+    for scan in scans:
+        if normalized_target in _target_tokens(scan.target_query):
+            return {
+                "target": normalized_target,
+                "scan_id": scan.id,
+                "scan_created_at": scan.created_at,
+                "target_query": scan.target_query,
+            }
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nenhum scan concluido encontrado para este alvo")
+
+
 def _build_tool_execution_summary(job: ScanJob, scan_logs: list[ScanLog], tools: list[str]) -> dict:
     state = job.state_data or {}
     raw_runs = list(state.get("executed_tool_runs") or [])
