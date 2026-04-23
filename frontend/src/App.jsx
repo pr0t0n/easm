@@ -8,6 +8,7 @@ import AccountPage from "./pages/AccountPage";
 import ConfigurationPage from "./pages/ConfigurationPage";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
+import AttackEvolutionPage from "./pages/AttackEvolutionPage";
 import ReportsPage from "./pages/ReportsPage";
 import SchedulingPage from "./pages/SchedulingPage";
 import ScansPage from "./pages/ScansPage";
@@ -74,6 +75,7 @@ export default function App() {
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<ReportsPage />} />
+                    <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<TargetsPage />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />

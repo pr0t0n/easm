@@ -2512,6 +2512,122 @@ def list_assets(db: Session = Depends(get_db), current_user: User = Depends(get_
     return rows[:500]
 
 
+@router.get("/findings/timeline")
+def findings_timeline(
+    days: int = Query(default=90, ge=7, le=730),
+    severity: str | None = Query(default=None),
+    target: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retorna a evolução acumulada de findings ao longo do tempo, agrupada por dia.
+
+    Cada ponto representa a contagem acumulada de findings (por severidade) descobertos
+    até aquela data, considerando todos os scans dentro da janela de 'days' dias.
+
+    Também retorna:
+    - daily_new: novos findings por dia (para gráfico de barras)
+    - by_target: top alvos por volume de findings
+    - by_type: top tipos/títulos de findings
+    - summary: contagens totais por severidade
+    """
+    from datetime import timezone as _tz
+
+    cutoff = datetime.now(tz=_tz.utc) - timedelta(days=days)
+
+    query = _authorized_finding_query(db, current_user).filter(
+        Finding.created_at >= cutoff,
+        Finding.is_false_positive.is_(False),
+    )
+    if severity:
+        sev_clean = str(severity).strip().lower()
+        query = query.filter(Finding.severity == sev_clean)
+    if target:
+        query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+
+    findings = query.order_by(Finding.created_at.asc()).all()
+
+    SEV_ORDER = ["critical", "high", "medium", "low", "info"]
+
+    # ─── daily_new: {date_str: {sev: count}} ──────────────────────────
+    daily_raw: dict[str, dict[str, int]] = {}
+    for f in findings:
+        ts = f.created_at
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        day = ts.strftime("%Y-%m-%d")
+        sev = str(f.severity or "info").strip().lower()
+        daily_raw.setdefault(day, {})
+        daily_raw[day][sev] = daily_raw[day].get(sev, 0) + 1
+
+    # fill gaps between first and last day
+    if daily_raw:
+        from datetime import date as _date
+        all_days = sorted(daily_raw.keys())
+        start_d = _date.fromisoformat(all_days[0])
+        end_d = _date.fromisoformat(all_days[-1])
+        delta = (end_d - start_d).days
+        for i in range(delta + 1):
+            d = (start_d + timedelta(days=i)).isoformat()
+            daily_raw.setdefault(d, {})
+
+    daily_new = [
+        {"date": day, **{sev: daily_raw[day].get(sev, 0) for sev in SEV_ORDER}}
+        for day in sorted(daily_raw.keys())
+    ]
+
+    # ─── cumulative: running total per severity ──────────────────────
+    running: dict[str, int] = {sev: 0 for sev in SEV_ORDER}
+    cumulative = []
+    for point in daily_new:
+        for sev in SEV_ORDER:
+            running[sev] += int(point.get(sev, 0))
+        cumulative.append({"date": point["date"], **dict(running)})
+
+    # ─── by_target: top 15 alvos ─────────────────────────────────────
+    target_counts: dict[str, int] = {}
+    for f in findings:
+        tq = str((f.scan_job.target_query if f.scan_job else None) or "").strip()
+        for tok in _target_tokens(tq):
+            target_counts[tok] = target_counts.get(tok, 0) + 1
+    by_target = sorted(
+        [{"target": k, "count": v} for k, v in target_counts.items()],
+        key=lambda x: -x["count"],
+    )[:15]
+
+    # ─── by_type: top 15 tipos ──────────────────────────────────────
+    type_counts: dict[str, int] = {}
+    for f in findings:
+        title = str(f.title or "unknown").strip()
+        type_counts[title] = type_counts.get(title, 0) + 1
+    by_type = sorted(
+        [{"title": k, "count": v} for k, v in type_counts.items()],
+        key=lambda x: -x["count"],
+    )[:15]
+
+    # ─── summary ─────────────────────────────────────────────────────
+    summary = {sev: 0 for sev in SEV_ORDER}
+    for f in findings:
+        sev = str(f.severity or "info").strip().lower()
+        if sev in summary:
+            summary[sev] += 1
+    summary["total"] = len(findings)
+
+    return {
+        "days": days,
+        "severity_filter": severity,
+        "target_filter": target,
+        "summary": summary,
+        "daily_new": daily_new,
+        "cumulative": cumulative,
+        "by_target": by_target,
+        "by_type": by_type,
+    }
+
+
 @router.get("/findings")
 def list_findings(
     severity: str | None = None,
