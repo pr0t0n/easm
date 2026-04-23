@@ -1052,14 +1052,10 @@ def scheduler_tick():
             if not raw_targets:
                 continue
 
-            job_ids = []
-            chunks = _chunk_targets(raw_targets, SCHEDULE_TARGETS_PER_SCAN)
-
-            for index, chunk in enumerate(chunks, start=1):
-                job = ScanJob(
+            job = ScanJob(
                     owner_id=sched.owner_id,
                     access_group_id=sched.access_group_id,
-                    target_query="; ".join(chunk),
+                    target_query="; ".join(raw_targets),
                     status="pending",
                     mode="scheduled",
                     compliance_status="approved",
@@ -1067,38 +1063,34 @@ def scheduler_tick():
                     state_data={},
                 )
 
-                db.add(job)
-                db.flush()
+            db.add(job)
+            db.flush()
 
-                db.add(
-                    ScanLog(
-                        scan_job_id=job.id,
-                        source="scheduler",
-                        level="INFO",
-                        message=(
-                            f"Scan agendado disparado automaticamente | "
-                            f"schedule_id={sched.id} | freq={freq} | "
-                            f"batch={index}/{len(chunks)} | targets={len(chunk)}"
-                        ),
-                    )
+            db.add(
+                ScanLog(
+                    scan_job_id=job.id,
+                    source="scheduler",
+                    level="INFO",
+                    message=(
+                        f"Scan agendado disparado automaticamente | "
+                        f"schedule_id={sched.id} | freq={freq} | "
+                        f"targets={len(raw_targets)} | celery_batch_size={SCHEDULE_TARGETS_PER_SCAN}"
+                    ),
                 )
-
-                job_ids.append(job.id)
+            )
 
             # marca execução
             sched.last_run_at = datetime.utcnow()
             db.add(sched)
             db.commit()
 
-            # envia para fila
-            for job_id in job_ids:
-                celery.send_task(
-                    "run_scan_job_scheduled",
-                    kwargs={"scan_id": job_id},
-                    queue=SCAN_SCHEDULED_QUEUE,
-                )
+            celery.send_task(
+                "run_scan_job_scheduled",
+                kwargs={"scan_id": job.id},
+                queue=SCAN_SCHEDULED_QUEUE,
+            )
 
-            fired += len(job_ids)
+            fired += 1
 
         return {
             "ok": True,
@@ -1456,29 +1448,82 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             for row in db.query(Finding.title).filter(Finding.title.isnot(None)).distinct().limit(500).all()
             if row and row[0]
         ]
-        state = initial_state(
-            scan_id=job.id,
-            owner_id=job.owner_id,
-            target=job.target_query,
-            scan_mode=scan_mode,
-            known_vulnerability_patterns=known_patterns,
-        )
-        trace_id = str(state.get("trace_id") or f"scan-{job.id}")
-        db.add(ScanLog(
-            scan_job_id=job.id,
-            source="worker.trace",
-            level="INFO",
-            message=f"trace_id={trace_id}",
-        ))
-        db.commit()
-        recursion_limit = max(160, len(state.get("mission_items", [])) * 20)
-        final_state = app.invoke(
-            state,
-            config={
-                "configurable": {"thread_id": f"scan-{job.id}"},
-                "recursion_limit": recursion_limit,
-            },
-        )
+        # ── Divide alvos em lotes de SCHEDULE_TARGETS_PER_SCAN para o Celery ─────
+        all_targets = [t.strip() for t in job.target_query.replace(",", ";").split(";") if t.strip()]
+        target_batches = _chunk_targets(all_targets, SCHEDULE_TARGETS_PER_SCAN) if len(all_targets) > 1 else [[job.target_query]]
+
+        # Estado acumulado entre lotes (será o final_state ao fim do último lote)
+        final_state: dict = {}
+        trace_id = f"scan-{job.id}"
+
+        for batch_index, batch in enumerate(target_batches, start=1):
+            batch_target = "; ".join(batch)
+            if len(target_batches) > 1:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="worker.batch",
+                    level="INFO",
+                    message=f"Processando lote {batch_index}/{len(target_batches)} | {len(batch)} alvos",
+                ))
+                db.commit()
+
+            state = initial_state(
+                scan_id=job.id,
+                owner_id=job.owner_id,
+                target=batch_target,
+                scan_mode=scan_mode,
+                known_vulnerability_patterns=known_patterns,
+            )
+            if batch_index == 1:
+                trace_id = str(state.get("trace_id") or trace_id)
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="worker.trace",
+                    level="INFO",
+                    message=f"trace_id={trace_id}",
+                ))
+                db.commit()
+
+            # Propaga descobertas acumuladas de lotes anteriores
+            if final_state:
+                state["vulnerabilidades_encontradas"] = list(final_state.get("vulnerabilidades_encontradas", []))
+                state["lista_ativos"] = list(final_state.get("lista_ativos", []))
+                state["discovered_ports"] = list(final_state.get("discovered_ports", []))
+
+            recursion_limit = max(160, len(state.get("mission_items", [])) * 20)
+            batch_result = app.invoke(
+                state,
+                config={
+                    "configurable": {"thread_id": f"scan-{job.id}-b{batch_index}"},
+                    "recursion_limit": recursion_limit,
+                },
+            )
+
+            # Mescla resultados acumulativos
+            if final_state:
+                merged_vulns = list(final_state.get("vulnerabilidades_encontradas", []))
+                for v in batch_result.get("vulnerabilidades_encontradas", []):
+                    if v not in merged_vulns:
+                        merged_vulns.append(v)
+                batch_result["vulnerabilidades_encontradas"] = merged_vulns
+
+                merged_assets = list(final_state.get("lista_ativos", []))
+                for a in batch_result.get("lista_ativos", []):
+                    if a not in merged_assets:
+                        merged_assets.append(a)
+                batch_result["lista_ativos"] = merged_assets
+
+                merged_ports = list(final_state.get("discovered_ports", []))
+                for p in batch_result.get("discovered_ports", []):
+                    if p not in merged_ports:
+                        merged_ports.append(p)
+                batch_result["discovered_ports"] = merged_ports
+
+                merged_logs = list(final_state.get("logs_terminais", [])) + batch_result.get("logs_terminais", [])
+                batch_result["logs_terminais"] = merged_logs
+
+            final_state = batch_result
+
         final_state["trace_id"] = trace_id
 
         llm_risk_cfg = parse_scan_llm_risk_config(job.state_data or {})
@@ -1691,6 +1736,9 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             "easm_rating":        final_state.get("easm_rating") or {},
             "fair_decomposition": final_state.get("fair_decomposition") or {},
             "executive_summary":  final_state.get("executive_summary") or "",
+            "agent_validation":   final_state.get("agent_validation") or {},
+            "confidence_state":   final_state.get("confidence_state") or {},
+            "evidence_contract":  final_state.get("evidence_contract") or {},
         })
         final_state["report_v2"] = existing_report_v2
         # ───────────────────────────────────────────────────────────────────────

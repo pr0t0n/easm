@@ -1,6 +1,6 @@
 from datetime import datetime
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Table, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Table, Text, Text as SAText
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,7 +44,7 @@ class ScanJob(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
-    target_query: Mapped[str] = mapped_column(String(500), index=True)
+    target_query: Mapped[str] = mapped_column(Text, index=True)
     authorization_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     mode: Mapped[str] = mapped_column(String(50), default="single")
     status: Mapped[str] = mapped_column(String(50), default="queued")

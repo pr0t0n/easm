@@ -3,6 +3,39 @@ import { useNavigate } from "react-router-dom";
 import client from "../api/client";
 import { authStore } from "../store/auth";
 
+function normalizeApiError(err) {
+  const detail = err?.response?.data?.detail;
+
+  if (!detail) return "Falha ao autenticar.";
+
+  if (typeof detail === "string") return detail;
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const loc = Array.isArray(item.loc)
+            ? item.loc.filter((v) => typeof v === "string" || typeof v === "number").join(".")
+            : "";
+          const msg = typeof item.msg === "string" ? item.msg : "entrada invalida";
+          return loc ? `${loc}: ${msg}` : msg;
+        }
+        return "entrada invalida";
+      })
+      .filter(Boolean);
+
+    return messages.length ? messages.join(" | ") : "Falha ao autenticar.";
+  }
+
+  if (typeof detail === "object") {
+    if (typeof detail.msg === "string") return detail.msg;
+    return JSON.stringify(detail);
+  }
+
+  return "Falha ao autenticar.";
+}
+
 export default function LoginPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
@@ -24,7 +57,7 @@ export default function LoginPage() {
       authStore.setMe(me.data);
       navigate("/");
     } catch (err) {
-      setError(err?.response?.data?.detail || "Falha ao autenticar.");
+      setError(normalizeApiError(err));
     } finally {
       setSubmitting(false);
     }
@@ -87,12 +120,15 @@ export default function LoginPage() {
 
           <form onSubmit={submit} className="mt-6 space-y-3">
             <input
+              type="email"
+              required
               className="w-full rounded-xl border border-slate-700 px-4 py-3 text-slate-100 placeholder-slate-500 outline-none"
               placeholder="email corporativo"
               onChange={(e) => setEmail(e.target.value)}
             />
             <input
               type="password"
+              required
               className="w-full rounded-xl border border-slate-700 px-4 py-3 text-slate-100 placeholder-slate-500 outline-none"
               placeholder="senha"
               onChange={(e) => setPassword(e.target.value)}

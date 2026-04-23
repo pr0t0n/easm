@@ -165,6 +165,7 @@ SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_
 
 
 def _chunk_targets(targets: list[str], chunk_size: int) -> list[list[str]]:
+    """Divide alvos em lotes de no máximo chunk_size para enfileiramento no Celery."""
     return [targets[i:i + chunk_size] for i in range(0, len(targets), chunk_size)]
 
 
@@ -730,36 +731,28 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
     if not targets:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agendamento sem dominios validos")
 
-    chunks = _chunk_targets(targets, SCHEDULE_TARGETS_PER_SCAN)
-    created_scan_ids: list[int] = []
-    for chunk in chunks:
-        target_batch = "; ".join(chunk)
-        job = _create_scan_from_schedule(
-            db=db,
-            actor_user=current_user,
-            owner_id=row.owner_id,
-            target=target_batch,
-            authorization_code=None,
-            access_group_id=row.access_group_id,
-            mode="scheduled",
-        )
-        created_scan_ids.append(job.id)
-
+    job = _create_scan_from_schedule(
+        db=db,
+        actor_user=current_user,
+        owner_id=row.owner_id,
+        target="; ".join(targets),
+        authorization_code=None,
+        access_group_id=row.access_group_id,
+        mode="scheduled",
+    )
     db.commit()
 
-    for scan_id in created_scan_ids:
-        try:
-            run_scan_job_scheduled.delay(scan_id)
-        except Exception:
-            run_scan_job(scan_id)
+    try:
+        run_scan_job_scheduled.delay(job.id)
+    except Exception:
+        run_scan_job(job.id)
 
     return {
         "ok": True,
-        "created_scans": created_scan_ids,
+        "scan_id": job.id,
         "total_targets": len(targets),
         "validated_domains": targets,
-        "batch_size": SCHEDULE_TARGETS_PER_SCAN,
-        "batches_created": len(created_scan_ids),
+        "celery_batch_size": SCHEDULE_TARGETS_PER_SCAN,
     }
 
 
