@@ -2198,6 +2198,9 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id).delete(
         synchronize_session=False,
     )
+    db.query(ScanAuditLog).filter(ScanAuditLog.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
 
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
@@ -2250,9 +2253,27 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_scan_logs = 0
         deleted_findings = 0
         deleted_executed_tool_runs = 0
+        deleted_scan_audit_logs = 0
         deleted_scan_jobs = 0
 
         if resettable_scan_ids:
+            finding_ids_subquery = (
+                db.query(Finding.id)
+                .filter(Finding.scan_job_id.in_(resettable_scan_ids))
+                .subquery()
+            )
+            db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids_subquery)).update(
+                {Vulnerability.finding_id: None},
+                synchronize_session=False,
+            )
+            db.query(Asset).filter(Asset.last_scan_id.in_(resettable_scan_ids)).update(
+                {Asset.last_scan_id: None},
+                synchronize_session=False,
+            )
+            db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id.in_(resettable_scan_ids)).update(
+                {AssetRatingHistory.scan_id: None},
+                synchronize_session=False,
+            )
             deleted_audit_events = (
                 db.query(AuditEvent)
                 .filter(AuditEvent.scan_job_id.in_(resettable_scan_ids))
@@ -2273,6 +2294,11 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .filter(ExecutedToolRun.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
+            deleted_scan_audit_logs = (
+                db.query(ScanAuditLog)
+                .filter(ScanAuditLog.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
             deleted_scan_jobs = (
                 db.query(ScanJob)
                 .filter(ScanJob.id.in_(resettable_scan_ids))
@@ -2283,12 +2309,15 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         remaining_scan_jobs = db.query(ScanJob.id).count()
         remaining_findings = db.query(Finding.id).count()
         remaining_scan_logs = db.query(ScanLog.id).count()
+        remaining_scan_audit_logs = db.query(ScanAuditLog.id).count()
         if remaining_scan_jobs == 0:
             db.execute(text("ALTER SEQUENCE scan_jobs_id_seq RESTART WITH 1"))
         if remaining_findings == 0:
             db.execute(text("ALTER SEQUENCE findings_id_seq RESTART WITH 1"))
         if remaining_scan_logs == 0:
             db.execute(text("ALTER SEQUENCE scan_logs_id_seq RESTART WITH 1"))
+        if remaining_scan_audit_logs == 0:
+            db.execute(text("ALTER SEQUENCE scan_audit_logs_id_seq RESTART WITH 1"))
 
         preserved_schedules = db.query(ScheduledScan.id).filter(ScheduledScan.enabled.is_(True)).count()
 
@@ -2307,6 +2336,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                     "scan_jobs": deleted_scan_jobs,
                     "findings": deleted_findings,
                     "executed_tool_runs": deleted_executed_tool_runs,
+                    "scan_audit_logs": deleted_scan_audit_logs,
                     "scan_logs": deleted_scan_logs,
                     "audit_events": deleted_audit_events,
                 },
@@ -2320,6 +2350,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "scan_jobs": deleted_scan_jobs,
                 "findings": deleted_findings,
                 "executed_tool_runs": deleted_executed_tool_runs,
+                "scan_audit_logs": deleted_scan_audit_logs,
                 "scan_logs": deleted_scan_logs,
                 "audit_events": deleted_audit_events,
             },
