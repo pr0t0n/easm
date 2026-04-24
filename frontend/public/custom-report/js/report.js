@@ -4,6 +4,12 @@
 
 const query = new URLSearchParams(window.location.search);
 const SCAN_ID = Number(query.get('scan_id') || query.get('id') || 1);
+const INCLUDE_TARGETS = String(query.get('include_targets') || '').trim();
+const PERSONA_MODE = String(query.get('persona') || 'executive').trim().toLowerCase();
+const OUTPUT_MODE = String(query.get('output_mode') || 'visual').trim().toLowerCase();
+const SEVERITY_MIN = String(query.get('severity_min') || 'all').trim().toLowerCase();
+const PERIOD_DAYS = String(query.get('period_days') || 'all').trim().toLowerCase();
+const COMPARE_SCAN_ID = Number(query.get('compare_scan_id') || 0);
 
 function getApiBaseUrl() {
   const byQuery = query.get('api_url') || query.get('api_base') || '';
@@ -25,6 +31,33 @@ const SEV_CONFIG = {
 
 function getSevConfig(sev) {
   return SEV_CONFIG[String(sev || 'info').toLowerCase()] || SEV_CONFIG.info;
+}
+
+function severityRank(sev) {
+  const normalized = String(sev || 'info').toLowerCase();
+  if (normalized === 'critical') return 5;
+  if (normalized === 'high') return 4;
+  if (normalized === 'medium') return 3;
+  if (normalized === 'low') return 2;
+  return 1;
+}
+
+function severityThreshold() {
+  if (SEVERITY_MIN === 'critical') return 5;
+  if (SEVERITY_MIN === 'high') return 4;
+  if (SEVERITY_MIN === 'medium') return 3;
+  if (SEVERITY_MIN === 'low') return 2;
+  return 1;
+}
+
+function parseIsoDate(value) {
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date;
+  } catch {
+    return null;
+  }
 }
 
 function esc(str) {
@@ -76,6 +109,152 @@ function computeDisplayedSummary(v2Summary, vulnerabilityTable) {
     else acc.info += 1;
   }
   return acc;
+}
+
+function filteredSummaryFromRows(rows) {
+  const acc = { total: rows.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const row of rows) {
+    const sev = String(row?.severity || 'info').toLowerCase();
+    if (sev === 'critical') acc.critical += 1;
+    else if (sev === 'high') acc.high += 1;
+    else if (sev === 'medium') acc.medium += 1;
+    else if (sev === 'low') acc.low += 1;
+    else acc.info += 1;
+  }
+  return acc;
+}
+
+function applyUiFilters(rows) {
+  const minRank = severityThreshold();
+  const now = new Date();
+  const usePeriod = PERIOD_DAYS !== 'all' && Number(PERIOD_DAYS) > 0;
+  const cutoff = usePeriod ? new Date(now.getTime() - (Number(PERIOD_DAYS) * 86400000)) : null;
+
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const sevOk = severityRank(row?.severity) >= minRank;
+    if (!sevOk) return false;
+    if (!usePeriod) return true;
+
+    const latest = parseIsoDate(row?.latest_seen_at || row?.created_at);
+    if (!latest) return true;
+    return latest >= cutoff;
+  });
+}
+
+function renderScopeSummary(report) {
+  const box = document.getElementById('scopeSummaryBar');
+  if (!box) return;
+
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const includeTargets = Array.isArray(v2?.filters?.include_targets)
+    ? v2.filters.include_targets
+    : (INCLUDE_TARGETS ? INCLUDE_TARGETS.split(',').map((v) => v.trim()).filter(Boolean) : []);
+
+  const personaLabel = PERSONA_MODE === 'technical' ? 'Técnico' : PERSONA_MODE === 'compliance' ? 'Compliance' : 'Executivo';
+  const outputLabel = OUTPUT_MODE === 'pdf_exec' ? 'PDF Executivo' : OUTPUT_MODE === 'pdf_tech' ? 'PDF Técnico' : 'Interativo';
+
+  box.innerHTML = `
+    <div><strong>Escopo ativo</strong></div>
+    <div>Persona: ${esc(personaLabel)} | Saída: ${esc(outputLabel)} | Severidade mínima: ${esc(SEVERITY_MIN)}</div>
+    <div>Janela temporal: ${PERIOD_DAYS === 'all' ? 'histórico completo' : `últimos ${esc(PERIOD_DAYS)} dias`} | Scan base: #${esc(report?.scan_id || SCAN_ID)}</div>
+    <div>Alvos incluídos: ${includeTargets.length ? esc(includeTargets.join(', ')) : 'todos os alvos do scan'}</div>
+  `;
+}
+
+function renderDecisionPanel(report) {
+  const panel = document.getElementById('decisionPanel');
+  if (!panel) return;
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const summary = v2.summary || {};
+  const topActions = Array.isArray(v2.recommendations) ? v2.recommendations.slice(0, 5) : [];
+  const riskScore = Number(v2.risk_score || 0);
+  const grade = String(v2.grade || '-');
+
+  const actionsHtml = topActions.length
+    ? topActions.map((item, idx) => `<li>${idx + 1}. ${esc(item?.title || item?.problem || 'Ação prioritária')} (${esc(String(item?.severity || 'info'))})</li>`).join('')
+    : '<li>Sem ações priorizadas disponíveis para o escopo atual.</li>';
+
+  panel.innerHTML = `
+    <div class="decision-card">
+      <div class="decision-title">Painel de decisões</div>
+      <div class="decision-kpis">
+        <span>Score: <strong>${esc(String(riskScore))}</strong></span>
+        <span>Grade: <strong>${esc(grade)}</strong></span>
+        <span>Abertas: <strong>${esc(String(summary.open || summary.total || 0))}</strong></span>
+        <span>Triaged: <strong>${esc(String(summary.triaged || 0))}</strong></span>
+      </div>
+      <ul class="decision-list">${actionsHtml}</ul>
+    </div>
+  `;
+}
+
+function renderDataQualityPanel(report) {
+  const panel = document.getElementById('dataQualityPanel');
+  if (!panel) return;
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const toolsSummary = v2.tool_execution_summary?.summary || {};
+  const attempted = Number(toolsSummary.attempted_count || 0);
+  const executed = Number(toolsSummary.executed_count || 0);
+  const confidence = attempted > 0 ? Math.round((executed / attempted) * 100) : 0;
+  const assets = v2.assets_summary || {};
+  const findings = Number(v2.summary?.total || 0);
+  panel.innerHTML = `
+    <div class="quality-card">
+      <div class="quality-title">Cobertura e confiança dos dados</div>
+      <div class="quality-grid">
+        <div><span>Execução de ferramentas</span><strong>${executed}/${attempted}</strong></div>
+        <div><span>Confiança operacional</span><strong>${confidence}%</strong></div>
+        <div><span>Ativos observados</span><strong>${Number(assets.total_assets || 0)}</strong></div>
+        <div><span>Vulnerabilidades no escopo</span><strong>${findings}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderComparisonPanel(baseReport, previousReport) {
+  const panel = document.getElementById('comparisonPanel');
+  if (!panel) return;
+  if (!previousReport) {
+    panel.innerHTML = '<div class="quality-card"><div class="quality-title">Comparação entre scans</div><div class="section-intro">Sem scan de comparação selecionado.</div></div>';
+    return;
+  }
+
+  const baseSummary = (baseReport?.state_data || {}).report_v2?.summary || {};
+  const prevSummary = (previousReport?.state_data || {}).report_v2?.summary || {};
+  const baseTotal = Number(baseSummary.total || 0);
+  const prevTotal = Number(prevSummary.total || 0);
+  const delta = baseTotal - prevTotal;
+  const trendText = delta > 0 ? 'aumento de risco' : delta < 0 ? 'redução de risco' : 'estabilidade';
+
+  panel.innerHTML = `
+    <div class="quality-card">
+      <div class="quality-title">Comparação entre scans</div>
+      <div class="quality-grid">
+        <div><span>Scan atual</span><strong>#${esc(String(baseReport?.scan_id || SCAN_ID))}</strong></div>
+        <div><span>Scan referência</span><strong>#${esc(String(previousReport?.scan_id || '-'))}</strong></div>
+        <div><span>Vulnerabilidades atuais</span><strong>${baseTotal}</strong></div>
+        <div><span>Vulnerabilidades anteriores</span><strong>${prevTotal}</strong></div>
+      </div>
+      <div class="section-intro" style="margin-top:10px">Diferença: ${delta > 0 ? '+' : ''}${delta} (${trendText}).</div>
+    </div>
+  `;
+}
+
+function applyPersonaView() {
+  const hide = (id, shouldHide) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = shouldHide ? 'none' : '';
+  };
+
+  document.body.setAttribute('data-persona', PERSONA_MODE);
+
+  if (PERSONA_MODE === 'executive') {
+    hide('page-assets', true);
+    hide('page-operations', true);
+  } else if (PERSONA_MODE === 'compliance') {
+    hide('page-assets', true);
+  }
 }
 
 function fmtCurrencyUSD(value) {
@@ -612,6 +791,7 @@ function renderGroupHeader(problem, count, sev) {
 let allVulns = [];
 let currentFilter = 'all';
 let currentSearch = '';
+let currentSort = 'risk';
 
 window.toggleVuln = function(id) {
   const card = document.getElementById(id);
@@ -631,7 +811,7 @@ function renderFiltered() {
   const container = document.getElementById('vulnContainer');
   if (!container) return;
 
-  const filtered = allVulns
+  const filtered = applyUiFilters(allVulns)
     .filter((v) => {
       const sevMatch = currentFilter === 'all' || String(v.severity || 'info').toLowerCase() === currentFilter;
       const search = currentSearch.toLowerCase();
@@ -643,9 +823,24 @@ function renderFiltered() {
       return sevMatch && searchMatch;
     })
     .sort((a, b) => {
+      if (currentSort === 'occurrences') {
+        return Number(b.affected_count || b.occurrence_count || 0) - Number(a.affected_count || a.occurrence_count || 0);
+      }
+      if (currentSort === 'recency') {
+        const da = parseIsoDate(a.latest_seen_at || a.created_at)?.getTime() || 0;
+        const db = parseIsoDate(b.latest_seen_at || b.created_at)?.getTime() || 0;
+        return db - da;
+      }
+      if (currentSort === 'name') {
+        return String(a.name || a.problem || '').localeCompare(String(b.name || b.problem || ''));
+      }
+
       const ao = getSevConfig(a.severity).order;
       const bo = getSevConfig(b.severity).order;
       if (ao !== bo) return ao - bo;
+      const riskA = Number(a.risk_score || a.cvss || 0);
+      const riskB = Number(b.risk_score || b.cvss || 0);
+      if (riskA !== riskB) return riskB - riskA;
       return String(a.name || a.problem || '').localeCompare(String(b.name || b.problem || ''));
     });
 
@@ -697,7 +892,14 @@ async function loadReportFromApi() {
   let lastError = null;
 
   for (const limit of limits) {
-    const res = await fetch(`${API_BASE_URL}/api/scans/${SCAN_ID}/report?prioritized_limit=${limit}&prioritized_offset=0`, {
+    const params = new URLSearchParams({
+      prioritized_limit: String(limit),
+      prioritized_offset: '0',
+    });
+    if (INCLUDE_TARGETS) params.set('include_targets', INCLUDE_TARGETS);
+    const endpoint = `${API_BASE_URL}/api/scans/${SCAN_ID}/report?${params.toString()}`;
+
+    const res = await fetch(endpoint, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) {
@@ -710,10 +912,22 @@ async function loadReportFromApi() {
     } catch {
       detail = '';
     }
-    lastError = new Error(`Falha ao buscar ${API_BASE_URL}/api/scans/${SCAN_ID}/report?prioritized_limit=${limit} (HTTP ${res.status}${detail})`);
+    lastError = new Error(`Falha ao buscar ${endpoint} (HTTP ${res.status}${detail})`);
   }
 
   throw lastError || new Error(`Falha ao buscar ${API_BASE_URL}/api/scans/${SCAN_ID}/report`);
+}
+
+async function loadReportByScanId(scanId) {
+  const token = await ensureAccessToken();
+  const params = new URLSearchParams({ prioritized_limit: '25', prioritized_offset: '0' });
+  if (INCLUDE_TARGETS) params.set('include_targets', INCLUDE_TARGETS);
+  const endpoint = `${API_BASE_URL}/api/scans/${scanId}/report?${params.toString()}`;
+  const res = await fetch(endpoint, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
 }
 
 async function tryRefreshToken(refreshToken) {
@@ -987,6 +1201,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   injectPrintButton();
   injectGroupStyles();
 
+  const vulnContainer = document.getElementById('vulnContainer');
+  if (vulnContainer) {
+    vulnContainer.innerHTML = '<div class="loading-indicator"><i class="fas fa-circle-notch fa-spin"></i><span>Montando relatório com narrativa guiada...</span></div>';
+  }
+
   const searchInput = document.getElementById('filterSearch');
   if (searchInput) {
     searchInput.addEventListener('input', (e) => {
@@ -995,16 +1214,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  const sortMode = document.getElementById('sortMode');
+  if (sortMode) {
+    sortMode.value = currentSort;
+    sortMode.addEventListener('change', (e) => {
+      currentSort = String(e.target.value || 'risk');
+      renderFiltered();
+    });
+  }
+
   try {
+    applyPersonaView();
     const report = await loadReportFromApi();
+    const comparison = COMPARE_SCAN_ID > 0 ? await loadReportByScanId(COMPARE_SCAN_ID) : null;
     validateReportData(report);
     applyTopVariables(report);
+    renderScopeSummary(report);
+    renderDecisionPanel(report);
+    renderDataQualityPanel(report);
+    renderComparisonPanel(report, comparison);
     renderLLMRisk(report);
     renderOperationalImprovements(report);
     const v2 = (report?.state_data || {}).report_v2 || {};
     allVulns = Array.isArray(v2.vulnerability_table)
       ? v2.vulnerability_table
       : (Array.isArray(report?.findings) ? report.findings : []);
+    const summaryOverride = filteredSummaryFromRows(applyUiFilters(allVulns));
+    setText('kpiCritical', summaryOverride.critical);
+    setText('kpiHigh', summaryOverride.high);
+    setText('kpiMedium', summaryOverride.medium);
+    setText('kpiLow', summaryOverride.low);
+    setText('kpiInfo', summaryOverride.info);
     renderFiltered();
   } catch (err) {
     console.error(err);

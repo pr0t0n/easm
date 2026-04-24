@@ -63,7 +63,7 @@
   </div>
 </div>
 
-<div class="page">
+<div class="page" id="page-risk">
   <div class="page-header">
     <span class="section-label">01</span>
     <span class="section-title">Sumário Executivo</span>
@@ -73,6 +73,11 @@
   <div class="exec-intro">
     <p id="execIntroText">Carregando resumo...</p>
   </div>
+
+  <div id="scopeSummaryBar" class="scope-summary-bar">Carregando escopo...</div>
+  <div id="decisionPanel" class="decision-panel">Carregando painel de decisões...</div>
+  <div id="dataQualityPanel" class="data-quality-panel">Carregando indicadores de confiança...</div>
+  <div id="comparisonPanel" class="comparison-panel">Carregando comparação entre scans...</div>
 
   <div class="kpi-grid">
     <div class="kpi-card kpi-critical"><div class="kpi-icon"><i class="fas fa-skull-crossbones"></i></div><div class="kpi-number" id="kpiCritical">0</div><div class="kpi-label">Críticos</div><div class="kpi-sub">CVSS ≥ 9.0</div></div>
@@ -87,7 +92,7 @@
   <div id="categoryContainer"></div>
 </div>
 
-<div class="page">
+<div class="page" id="page-grade-benchmark">
   <div class="page-header">
     <span class="section-label">02</span>
     <span class="section-title">Metodologia FAIR e Benchmark Cyber WEF</span>
@@ -180,7 +185,7 @@
 
 </div>
 
-<div class="page">
+<div class="page" id="page-benchmark-comparison">
   <div class="page-header">
     <span class="section-label">03</span>
     <span class="section-title">Faixas de Grade e Classificação</span>
@@ -210,7 +215,7 @@
   </table>
 </div>
 
-<div class="page">
+<div class="page" id="page-vulnerabilities">
   <div class="page-header">
     <span class="section-label">03A</span>
     <span class="section-title">Comparativo: Target vs Benchmark Setorial (WEF)</span>
@@ -282,7 +287,7 @@
   </div>
 </div>
 
-<div class="page">
+<div class="page" id="page-assets">
   <div class="page-header">
     <span class="section-label">04</span>
     <span class="section-title">Vulnerabilidades Identificadas</span>
@@ -293,6 +298,12 @@
 
   <div class="vuln-filters no-print">
     <input type="text" id="filterSearch" placeholder="🔍  Filtrar por alvo, problema ou CVE..." class="filter-input">
+    <select id="sortMode" class="filter-input" style="max-width:220px;flex:0 0 220px">
+      <option value="risk">Ordenar por risco</option>
+      <option value="occurrences">Ordenar por ocorrências</option>
+      <option value="recency">Ordenar por recência</option>
+      <option value="name">Ordenar por nome</option>
+    </select>
     <div class="filter-chips">
       <button class="chip chip-all active" onclick="filterVulns('all')">Todos</button>
       <button class="chip chip-critical" onclick="filterVulns('critical')">Críticos</button>
@@ -312,7 +323,7 @@
   </div>
 </div>
 
-<div class="page">
+<div class="page" id="page-operations">
   <div class="page-header">
     <span class="section-label">05</span>
     <span class="section-title">Lista de Subdomínios Encontrados</span>

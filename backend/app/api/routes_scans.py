@@ -2732,6 +2732,7 @@ def vulnerability_management_dashboard(
     target: str | None = Query(default=None),
     severity: str | None = Query(default=None),
     limit: int = Query(default=3000, ge=100, le=10000),
+    period_days: int | None = Query(default=None, ge=1, le=365),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -2751,6 +2752,13 @@ def vulnerability_management_dashboard(
     if severity_filter:
         query = query.filter(Finding.severity == severity_filter)
         lifecycle_query = lifecycle_query.filter(Finding.severity == severity_filter)
+
+    if period_days:
+        window_start = datetime.utcnow() - timedelta(days=int(period_days))
+        query = query.filter(Finding.created_at >= window_start)
+        lifecycle_query = lifecycle_query.filter(Finding.created_at >= window_start)
+
+    total_candidates = query.count()
 
     findings = query.order_by(Finding.created_at.desc()).limit(limit).all()
     lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).limit(max(limit * 2, 6000)).all()
@@ -2923,6 +2931,14 @@ def vulnerability_management_dashboard(
             "findings_total": len(findings),
             "severity_counts": severity_counts,
             "affected_targets": len({t for v in vulnerabilities for t in v.get("affected_targets", [])}),
+        },
+        "data_quality": {
+            "window_days": int(period_days or 0),
+            "limit": int(limit),
+            "total_candidates": int(total_candidates),
+            "returned_findings": len(findings),
+            "truncated": bool(total_candidates > len(findings)),
+            "coverage_percent": round((len(findings) / max(1, total_candidates)) * 100.0, 2),
         },
         "age": {
             "known_in_environment_avg_days": env_avg,
@@ -3216,6 +3232,7 @@ def scan_report(
     scan_id: int,
     prioritized_limit: int = Query(default=10, ge=1, le=100),
     prioritized_offset: int = Query(default=0, ge=0, le=10000),
+    include_targets: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -3227,7 +3244,44 @@ def scan_report(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
+    selected_target_tokens: list[str] = []
+    for raw_token in re.split(r"[,;\n]+", str(include_targets or "")):
+        token = _primary_target_token(raw_token)
+        if token and token not in selected_target_tokens:
+            selected_target_tokens.append(token)
+
+    def _resolve_finding_target_tokens(finding: Finding) -> set[str]:
+        tokens: set[str] = set()
+        if finding.domain:
+            tokens.update(_target_tokens(str(finding.domain)))
+
+        details = finding.details if isinstance(finding.details, dict) else {}
+        for key in ["url", "target", "domain", "subdomain", "asset", "host", "full_url", "endpoint"]:
+            value = details.get(key)
+            if isinstance(value, str) and value.strip():
+                tokens.update(_target_tokens(value))
+
+        loc = _extract_finding_location(finding)
+        for key in ["target", "subdomain", "url", "path"]:
+            value = loc.get(key)
+            if isinstance(value, str) and value.strip():
+                tokens.update(_target_tokens(value))
+
+        return {token for token in tokens if token}
+
+    def _matches_selected_targets(target_tokens: set[str]) -> bool:
+        if not selected_target_tokens:
+            return True
+        for selected in selected_target_tokens:
+            for candidate in target_tokens:
+                if candidate == selected or candidate.endswith(f".{selected}"):
+                    return True
+        return False
+
     findings = db.query(Finding).filter(Finding.scan_job_id == scan_id).all()
+    if selected_target_tokens:
+        findings = [f for f in findings if _matches_selected_targets(_resolve_finding_target_tokens(f))]
+
     scan_logs = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).order_by(ScanLog.created_at.asc()).all()
     previous_scan = (
         db.query(ScanJob)
@@ -3242,6 +3296,8 @@ def scan_report(
     previous_findings = []
     if previous_scan:
         previous_findings = db.query(Finding).filter(Finding.scan_job_id == previous_scan.id, Finding.is_false_positive.is_(False)).all()
+        if selected_target_tokens:
+            previous_findings = [f for f in previous_findings if _matches_selected_targets(_resolve_finding_target_tokens(f))]
 
     enriched_findings = []
     prioritized_actions = []
@@ -3586,8 +3642,9 @@ def scan_report(
         / max(1, len(enriched_findings)),
         2,
     )
+    report_scope_target = ", ".join(selected_target_tokens) if selected_target_tokens else str(job.target_query or "")
     strategic_points = _build_strategic_points(
-        target=job.target_query,
+        target=report_scope_target,
         summary=summary_data,
         fair_total=fair_total,
         lifecycle=lifecycle,
@@ -3597,7 +3654,8 @@ def scan_report(
 
     segment = _infer_target_segment(job.target_query)
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
-    target_evolution = _build_target_evolution(db, job.target_query, scan_id)
+    evolution_target = selected_target_tokens[0] if len(selected_target_tokens) == 1 else job.target_query
+    target_evolution = _build_target_evolution(db, evolution_target, scan_id)
     rating_timeline = build_rating_timeline(target_evolution.get("timeline") or [])
     continuous_rating = compute_continuous_rating(
         severity_count=severity_count_vuln,
@@ -3638,7 +3696,14 @@ def scan_report(
     unique_assets_list: list[str] = sorted(
         {str(a).strip() for a in raw_assets_list if str(a).strip()}
     )
-    main_domain: str = str(job.target_query or "").strip()
+    if selected_target_tokens:
+        filtered_assets = [
+            asset for asset in unique_assets_list
+            if _matches_selected_targets(set(_target_tokens(asset)))
+        ]
+        unique_assets_list = filtered_assets or list(selected_target_tokens)
+
+    main_domain: str = selected_target_tokens[0] if len(selected_target_tokens) == 1 else str(job.target_query or "").strip()
     subdomains_list: list[str] = [a for a in unique_assets_list if a != main_domain]
     assets_summary = {
         "domain": main_domain,
@@ -3703,10 +3768,13 @@ def scan_report(
                 # report_v2 pode não existir em scans antigos/incompletos.
                 # Evita NameError e mantém resposta consistente.
                 "trace_id": (job.state_data or {}).get("trace_id") or f"scan-{scan_id}",
-                "domain": job.target_query,
+                "domain": report_scope_target,
                 "scan_type": "ASM_EXTERNAL",
                 "risk_score": score,
                 "grade": grade,
+                "filters": {
+                    "include_targets": selected_target_tokens,
+                },
                 "summary": summary_data,
                 "fair": fair_total,
                 "frameworks": frameworks,

@@ -9,6 +9,18 @@ const SEV = {
   info: { color: "#cbd5e1", bg: "rgba(71,85,105,0.24)", label: "Info" },
 };
 const SEV_KEYS = ["critical", "high", "medium", "low", "info"];
+const PERSONAS = {
+  executive: "Executivo",
+  technical: "Técnico",
+  compliance: "Compliance",
+};
+
+const PRESETS = [
+  { id: "all", label: "Escopo Completo", severity: "", periodDays: "all" },
+  { id: "critical", label: "Apenas Críticos", severity: "critical", periodDays: "30" },
+  { id: "high", label: "Alta+ 30 dias", severity: "high", periodDays: "30" },
+  { id: "last7", label: "Últimos 7 dias", severity: "", periodDays: "7" },
+];
 
 function fmtNum(value) {
   const n = Number(value);
@@ -130,42 +142,68 @@ function MiniMetric({ label, value, color }) {
 }
 
 export default function AttackEvolutionPage() {
+  const [wizardStep, setWizardStep] = useState(1);
+  const [persona, setPersona] = useState("executive");
+  const [sortMode, setSortMode] = useState("risk");
   const [dashboard, setDashboard] = useState(null);
+  const [comparisonDashboard, setComparisonDashboard] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
 
   const [targetInput, setTargetInput] = useState("");
   const [targetFilter, setTargetFilter] = useState("");
+  const [comparisonTarget, setComparisonTarget] = useState("");
   const [severity, setSeverity] = useState("");
+  const [periodDays, setPeriodDays] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
 
-  const fetchDashboard = useCallback(async (tgt, sev) => {
+  const fetchDashboard = useCallback(async (tgt, sev, days) => {
     setLoading(true);
     setError("");
     try {
       const params = {};
       if (tgt) params.target = tgt;
       if (sev) params.severity = sev;
+      if (days && days !== "all") params.period_days = Number(days);
       const { data } = await client.get("/api/vulnerability-management/dashboard", { params });
       setDashboard(data);
       const rows = Array.isArray(data?.vulnerabilities) ? data.vulnerabilities : [];
       if (rows.length > 0 && !rows.find((row) => row.vulnerability_key === selectedKey)) {
         setSelectedKey(rows[0].vulnerability_key);
       }
+
+      if (comparisonTarget.trim()) {
+        const compareParams = { ...params, target: comparisonTarget.trim() };
+        const { data: compareData } = await client.get("/api/vulnerability-management/dashboard", { params: compareParams });
+        setComparisonDashboard(compareData);
+      } else {
+        setComparisonDashboard(null);
+      }
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao carregar dashboard de vulnerabilidades.");
     } finally {
       setLoading(false);
     }
-  }, [selectedKey]);
+  }, [selectedKey, comparisonTarget]);
 
   useEffect(() => {
-    fetchDashboard(targetFilter, severity);
-  }, [targetFilter, severity, fetchDashboard]);
+    fetchDashboard(targetFilter, severity, periodDays);
+  }, [targetFilter, severity, periodDays, fetchDashboard]);
 
   const vulnerabilities = useMemo(
-    () => (Array.isArray(dashboard?.vulnerabilities) ? dashboard.vulnerabilities : []),
-    [dashboard],
+    () => {
+      const rows = Array.isArray(dashboard?.vulnerabilities) ? [...dashboard.vulnerabilities] : [];
+      if (sortMode === "occurrences") {
+        rows.sort((a, b) => Number(b?.occurrence_count || 0) - Number(a?.occurrence_count || 0));
+      } else if (sortMode === "recency") {
+        rows.sort((a, b) => new Date(b?.latest_seen_at || 0).getTime() - new Date(a?.latest_seen_at || 0).getTime());
+      } else if (sortMode === "name") {
+        rows.sort((a, b) => String(a?.title || "").localeCompare(String(b?.title || "")));
+      }
+      return rows;
+    },
+    [dashboard, sortMode],
   );
 
   const selectedVulnerability = useMemo(
@@ -173,11 +211,121 @@ export default function AttackEvolutionPage() {
     [vulnerabilities, selectedKey],
   );
 
+  const comparisonSummary = useMemo(() => {
+    if (!comparisonDashboard?.overview || !dashboard?.overview) return null;
+    const current = Number(dashboard?.overview?.total_vulnerabilities || 0);
+    const baseline = Number(comparisonDashboard?.overview?.total_vulnerabilities || 0);
+    const delta = current - baseline;
+    return {
+      baselineTarget: comparisonTarget,
+      baseline,
+      current,
+      delta,
+    };
+  }, [dashboard, comparisonDashboard, comparisonTarget]);
+
+  const runQuickAction = useCallback((actionType) => {
+    const label =
+      actionType === "ticket"
+        ? "Ticket criado para time responsável"
+        : actionType === "retest"
+          ? "Revalidação agendada para esta vulnerabilidade"
+          : "Risco marcado para aceite com justificativa";
+    setActionMessage(`${label}: ${selectedVulnerability?.title || "-"}`);
+    setTimeout(() => setActionMessage(""), 2800);
+  }, [selectedVulnerability]);
+
+  const exportCsv = useCallback(() => {
+    const rows = vulnerabilities;
+    if (!rows.length) return;
+    const header = ["title", "severity", "cve", "occurrence_count", "open_count", "closed_count", "affected_targets", "latest_seen_at"];
+    const lines = [header.join(",")];
+    for (const row of rows) {
+      const line = [
+        row.title,
+        row.severity,
+        row.cve || "",
+        row.occurrence_count,
+        row.open_count,
+        row.closed_count,
+        (row.affected_targets || []).join("|"),
+        row.latest_seen_at || "",
+      ].map((value) => `"${String(value ?? "").replaceAll('"', '""')}"`).join(",");
+      lines.push(line);
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `attack-evolution-${targetFilter || "all"}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [vulnerabilities, targetFilter]);
+
   const availableTargets = dashboard?.filters?.available_targets || [];
   const selectedTargetUrl = dashboard?.filters?.selected_target_url || "";
+  const dataQuality = dashboard?.data_quality || {};
+
+  const scopeSummary = useMemo(() => {
+    const sevLabel = severity ? SEV[severity]?.label || severity : "Todas";
+    const periodLabel = periodDays === "all" ? "Histórico completo" : `${periodDays} dias`;
+    return `${PERSONAS[persona]} | alvo: ${targetFilter || "todos"} | severidade: ${sevLabel} | janela: ${periodLabel}`;
+  }, [persona, targetFilter, severity, periodDays]);
 
   return (
     <div style={{ padding: 16, display: "grid", gap: 16 }}>
+      <div style={{ background: "#0b1220", border: "1px solid #334155", borderRadius: 12, padding: 12, display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[1, 2, 3].map((step) => (
+            <button
+              key={step}
+              type="button"
+              onClick={() => setWizardStep(step)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 999,
+                border: `1px solid ${wizardStep === step ? "#a16207" : "#475569"}`,
+                background: wizardStep === step ? "rgba(245,158,11,0.18)" : "#111827",
+                color: wizardStep === step ? "#fcd34d" : "#cbd5e1",
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              {step}. {step === 1 ? "Contexto" : step === 2 ? "Análise" : "Ação"}
+            </button>
+          ))}
+          <div style={{ flex: 1 }} />
+          <label style={{ fontSize: 12, color: "#94a3b8", display: "flex", alignItems: "center", gap: 6 }}>
+            Persona
+            <select value={persona} onChange={(e) => setPersona(e.target.value)} style={{ padding: "5px 8px", border: "1px solid #475569", borderRadius: 8, background: "#111827", color: "#e2e8f0", fontSize: 12 }}>
+              {Object.entries(PERSONAS).map(([key, label]) => (
+                <option key={key} value={key}>{label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div style={{ position: "sticky", top: 8, zIndex: 4, background: "rgba(2,6,23,0.86)", border: "1px solid #334155", borderRadius: 10, padding: "8px 10px", color: "#cbd5e1", fontSize: 12 }}>
+          <strong style={{ color: "#e2e8f0" }}>Escopo ativo:</strong> {scopeSummary}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={() => {
+                setSeverity(preset.severity);
+                setPeriodDays(preset.periodDays);
+              }}
+              style={{ padding: "6px 10px", border: "1px solid #334155", borderRadius: 999, background: "#111827", color: "#cbd5e1", fontSize: 12, cursor: "pointer" }}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ background: "#0b1220", border: "1px solid #334155", borderRadius: 12, padding: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "#cbd5e1", fontWeight: 700 }}>Filtro por alvo/subdominio</span>
         <select
@@ -208,6 +356,36 @@ export default function AttackEvolutionPage() {
             <option key={sev} value={sev}>{SEV[sev].label}</option>
           ))}
         </select>
+        <select
+          value={periodDays}
+          onChange={(e) => setPeriodDays(e.target.value)}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, background: "#111827", color: "#e2e8f0" }}
+        >
+          <option value="all">Janela completa</option>
+          <option value="7">Últimos 7 dias</option>
+          <option value="30">Últimos 30 dias</option>
+          <option value="90">Últimos 90 dias</option>
+        </select>
+        <select
+          value={sortMode}
+          onChange={(e) => setSortMode(e.target.value)}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, background: "#111827", color: "#e2e8f0" }}
+        >
+          <option value="risk">Ordenar por risco</option>
+          <option value="occurrences">Ordenar por ocorrências</option>
+          <option value="recency">Ordenar por recência</option>
+          <option value="name">Ordenar por nome</option>
+        </select>
+        <select
+          value={comparisonTarget}
+          onChange={(e) => setComparisonTarget(e.target.value)}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, minWidth: 220, background: "#111827", color: "#e2e8f0" }}
+        >
+          <option value="">Sem comparação de alvo</option>
+          {availableTargets.map((item) => (
+            <option key={`cmp-${item}`} value={item}>{item}</option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => setTargetFilter(targetInput.trim())}
@@ -221,13 +399,54 @@ export default function AttackEvolutionPage() {
             setTargetInput("");
             setTargetFilter("");
             setSeverity("");
+            setPeriodDays("all");
+            setComparisonTarget("");
           }}
           style={{ padding: "6px 12px", border: "1px solid #7f1d1d", borderRadius: 8, background: "rgba(185,28,28,0.16)", color: "#fca5a5", fontSize: 12, cursor: "pointer" }}
         >
           Limpar
         </button>
+        <button
+          type="button"
+          onClick={exportCsv}
+          style={{ padding: "6px 12px", border: "1px solid #0369a1", borderRadius: 8, background: "rgba(14,116,144,0.16)", color: "#7dd3fc", fontSize: 12, cursor: "pointer" }}
+        >
+          Exportar CSV
+        </button>
         <div style={{ flex: 1 }} />
         {loading && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
+      </div>
+
+      {actionMessage && (
+        <div style={{ background: "rgba(21,128,61,0.18)", border: "1px solid #166534", color: "#86efac", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}>
+          {actionMessage}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+        <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 12 }}>
+          <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>Cobertura e confiança</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 8 }}>
+            <MiniMetric label="Findings retornados" value={fmtNum(dataQuality?.returned_findings)} color="#7dd3fc" />
+            <MiniMetric label="Candidatos no filtro" value={fmtNum(dataQuality?.total_candidates)} color="#a5b4fc" />
+            <MiniMetric label="Cobertura" value={`${fmtNum(dataQuality?.coverage_percent)}%`} color="#fde68a" />
+            <MiniMetric label="Truncado pelo limite" value={dataQuality?.truncated ? "Sim" : "Não"} color={dataQuality?.truncated ? "#fca5a5" : "#86efac"} />
+          </div>
+        </div>
+
+        {comparisonSummary && (
+          <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 12 }}>
+            <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>Comparação entre alvos</div>
+            <div style={{ marginTop: 8, color: "#e2e8f0", fontSize: 12 }}>
+              Base: <strong>{comparisonSummary.baselineTarget}</strong>
+            </div>
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 8 }}>
+              <MiniMetric label="Atual" value={fmtNum(comparisonSummary.current)} color="#7dd3fc" />
+              <MiniMetric label="Base" value={fmtNum(comparisonSummary.baseline)} color="#a5b4fc" />
+              <MiniMetric label="Delta" value={`${comparisonSummary.delta > 0 ? "+" : ""}${fmtNum(comparisonSummary.delta)}`} color={comparisonSummary.delta > 0 ? "#fca5a5" : "#86efac"} />
+            </div>
+          </div>
+        )}
       </div>
 
       {selectedTargetUrl && (
@@ -244,9 +463,9 @@ export default function AttackEvolutionPage() {
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
         <ScoreCard overview={dashboard?.overview || {}} />
-        <SeverityCard summary={dashboard?.overview?.severity_counts || {}} />
+        {persona !== "executive" && <SeverityCard summary={dashboard?.overview?.severity_counts || {}} />}
         <AgeCard age={dashboard?.age || {}} />
-        <RemediationCard remediation={dashboard?.remediation_history || {}} />
+        {persona !== "compliance" && <RemediationCard remediation={dashboard?.remediation_history || {}} />}
       </div>
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr" }}>
@@ -314,6 +533,11 @@ export default function AttackEvolutionPage() {
                 <div style={{ fontSize: 11, color: "#94a3b8" }}>Correcao recomendada</div>
                 <div style={{ marginTop: 4, fontSize: 12, color: "#e2e8f0", background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: 10 }}>
                   {selectedVulnerability.recommendation || "Sem recomendacao registrada para essa vulnerabilidade."}
+                </div>
+                <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => runQuickAction("ticket")} style={actionBtn("#0369a1", "#7dd3fc")}>Abrir ticket</button>
+                  <button type="button" onClick={() => runQuickAction("retest")} style={actionBtn("#a16207", "#fde68a")}>Agendar re-scan</button>
+                  <button type="button" onClick={() => runQuickAction("accept")} style={actionBtn("#166534", "#86efac")}>Aceitar risco</button>
                 </div>
               </div>
 
@@ -392,3 +616,15 @@ const chipStyle = {
   fontSize: 11,
   color: "#e2e8f0",
 };
+
+function actionBtn(borderColor, textColor) {
+  return {
+    padding: "6px 10px",
+    border: `1px solid ${borderColor}`,
+    borderRadius: 8,
+    background: "#0b1220",
+    color: textColor,
+    fontSize: 11,
+    cursor: "pointer",
+  };
+}
