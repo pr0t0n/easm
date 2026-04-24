@@ -1014,6 +1014,8 @@ def scheduler_tick():
     current_hhmm = now.strftime("%H:%M")
     current_dow = now.strftime("%A").lower()
     current_dom = now.day
+    current_hour = now.hour
+    current_minute = now.minute
 
     db: Session = SessionLocal()
     try:
@@ -1021,12 +1023,37 @@ def scheduler_tick():
         fired = 0
 
         for sched in schedules:
-            # horário
-            if sched.run_time != current_hhmm:
+            run_time = str(sched.run_time or "00:00").strip()
+            try:
+                run_hour_str, run_minute_str = run_time.split(":", 1)
+                run_hour = int(run_hour_str)
+                run_minute = int(run_minute_str)
+                if not (0 <= run_hour <= 23 and 0 <= run_minute <= 59):
+                    continue
+            except Exception:
                 continue
 
             # frequência
             freq = (sched.frequency or "daily").lower()
+
+            # horário para frequências diárias/semanais/mensais
+            if freq in {"daily", "weekly", "monthly"} and run_time != current_hhmm:
+                continue
+
+            # horário para frequências de intervalo (3h/6h/12h)
+            if freq in {"every_3_hours", "every_6_hours", "every_12_hours"}:
+                interval = {
+                    "every_3_hours": 3,
+                    "every_6_hours": 6,
+                    "every_12_hours": 12,
+                }.get(freq, 0)
+                if interval <= 0:
+                    continue
+                # Usa run_time como âncora do minuto e da fase de hora
+                if current_minute != run_minute:
+                    continue
+                if ((current_hour - run_hour) % interval) != 0:
+                    continue
 
             if freq == "weekly" and (sched.day_of_week or "").lower() != current_dow:
                 continue

@@ -626,7 +626,8 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum dominio valido informado")
 
     frequency = (payload.get("frequency") or "daily").strip().lower()
-    if frequency not in {"daily", "weekly", "monthly"}:
+    allowed_frequencies = {"daily", "weekly", "monthly", "every_3_hours", "every_6_hours", "every_12_hours"}
+    if frequency not in allowed_frequencies:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frequency invalido")
 
     access_group_id = payload.get("access_group_id")
@@ -679,6 +680,8 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
         row.access_group_id = access_group_id
 
+    allowed_frequencies = {"daily", "weekly", "monthly", "every_3_hours", "every_6_hours", "every_12_hours"}
+
     for field in ["targets_text", "scan_type", "frequency", "run_time", "day_of_week", "day_of_month", "enabled"]:
         if field in payload:
             if field == "targets_text":
@@ -692,6 +695,11 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
                 if not valid_targets:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum dominio valido informado")
                 setattr(row, field, "; ".join(valid_targets))
+            elif field == "frequency":
+                candidate_frequency = str(payload[field] or "").strip().lower()
+                if candidate_frequency not in allowed_frequencies:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="frequency invalido")
+                setattr(row, field, candidate_frequency)
             else:
                 setattr(row, field, payload[field])
 

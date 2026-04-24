@@ -175,6 +175,9 @@ export default function SchedulingPage() {
             <option value="daily">Diario</option>
             <option value="weekly">Semanal</option>
             <option value="monthly">Mensal</option>
+            <option value="every_3_hours">A cada 3 horas</option>
+            <option value="every_6_hours">A cada 6 horas</option>
+            <option value="every_12_hours">A cada 12 horas</option>
           </select>
 
           <input
@@ -239,6 +242,15 @@ export default function SchedulingPage() {
                 Horario: {row.run_time} {row.day_of_week ? `| Dia semana: ${row.day_of_week}` : ""}
                 {row.day_of_month ? ` | Dia mes: ${row.day_of_month}` : ""}
               </p>
+              {row.frequency === "every_3_hours" && (
+                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 3 horas (âncora: {row.run_time})</p>
+              )}
+              {row.frequency === "every_6_hours" && (
+                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 6 horas (âncora: {row.run_time})</p>
+              )}
+              {row.frequency === "every_12_hours" && (
+                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 12 horas (âncora: {row.run_time})</p>
+              )}
               <div className="mt-2 flex gap-2">
                 <button onClick={() => editRow(row)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Editar</button>
                 <button onClick={() => runNow(row.id)} className="rounded-lg bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">Executar Agora</button>
