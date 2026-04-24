@@ -86,24 +86,24 @@ export default function ReportsPage() {
 
   return (
     <div style={{ padding: 16, display: "grid", gap: 12 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", background: "#ffffff", border: "1px solid #d1d5db", borderRadius: 10, padding: 12 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", background: "#0b1220", border: "1px solid #334155", borderRadius: 10, padding: 12 }}>
         {["scan", "target"].map((m) => (
           <button
             key={m}
             type="button"
             onClick={() => setMode(m)}
-            style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${mode === m ? "#2563eb" : "#d1d5db"}`, background: mode === m ? "#eff6ff" : "#f9fafb", color: mode === m ? "#1d4ed8" : "#374151", fontWeight: mode === m ? 600 : 400, fontSize: 13, cursor: "pointer" }}
+            style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${mode === m ? "#a16207" : "#475569"}`, background: mode === m ? "rgba(245,158,11,0.18)" : "#111827", color: mode === m ? "#fcd34d" : "#cbd5e1", fontWeight: mode === m ? 600 : 400, fontSize: 13, cursor: "pointer" }}
           >
             {m === "scan" ? "Por Scan" : "Por Alvo"}
           </button>
         ))}
-        <div style={{ width: 1, height: 24, background: "#e5e7eb" }} />
+        <div style={{ width: 1, height: 24, background: "#334155" }} />
         {mode === "scan" && (
           <select
             value={selectedId}
             onChange={(e) => setSelectedId(e.target.value)}
             disabled={loadingScans || scans.length === 0}
-            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13 }}
+            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, background: "#111827", color: "#e2e8f0" }}
           >
             {scans.length === 0 && <option value="">Sem scans disponíveis</option>}
             {scans.map((s) => (
@@ -116,17 +116,17 @@ export default function ReportsPage() {
         {mode === "target" && (
           <>
             {targets.length > 0 && (
-              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)} disabled={loadingTargets} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, maxWidth: 220 }}>
+              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)} disabled={loadingTargets} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, maxWidth: 220, background: "#111827", color: "#e2e8f0" }}>
                 <option value="">-- selecionar alvo --</option>
                 {targets.map((t) => <option key={t.target} value={t.target}>{t.target}</option>)}
               </select>
             )}
-            <input ref={inputRef} type="text" placeholder="digitar subdomínio / alvo…" value={targetInput} onChange={(e) => setTargetInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleResolve()} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, minWidth: 210 }} />
-            <button type="button" onClick={handleResolve} disabled={resolving || !targetInput.trim()} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #d1d5db", background: "#f9fafb", fontSize: 13, cursor: "pointer", opacity: resolving || !targetInput.trim() ? 0.5 : 1 }}>
+            <input ref={inputRef} type="text" placeholder="digitar subdomínio / alvo…" value={targetInput} onChange={(e) => setTargetInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleResolve()} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, minWidth: 210, background: "#111827", color: "#e2e8f0" }} />
+            <button type="button" onClick={handleResolve} disabled={resolving || !targetInput.trim()} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #a16207", background: "rgba(245,158,11,0.18)", color: "#fcd34d", fontSize: 13, cursor: "pointer", opacity: resolving || !targetInput.trim() ? 0.5 : 1 }}>
               {resolving ? "Buscando…" : "Gerar"}
             </button>
-            {resolvedScanId && <span style={{ fontSize: 12, color: "#6b7280" }}>Scan #{resolvedScanId}</span>}
-            {resolveError && <span style={{ fontSize: 12, color: "#dc2626" }}>{resolveError}</span>}
+            {resolvedScanId && <span style={{ fontSize: 12, color: "#94a3b8" }}>Scan #{resolvedScanId}</span>}
+            {resolveError && <span style={{ fontSize: 12, color: "#fca5a5" }}>{resolveError}</span>}
           </>
         )}
         <div style={{ flex: 1 }} />
@@ -135,17 +135,17 @@ export default function ReportsPage() {
       </div>
 
       {mode === "scan" && selectedScan && (
-        <div style={{ display: "flex", gap: 20, padding: "8px 14px", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12, color: "#6b7280", flexWrap: "wrap" }}>
-          <span><strong style={{ color: "#374151" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
-          <span><strong style={{ color: "#374151" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "#16a34a" : selectedScan.status === "failed" ? "#dc2626" : "#d97706", fontWeight: 600 }}>{selectedScan.status}</span></span>
-          <span><strong style={{ color: "#374151" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR") : "—"}</span>
+        <div style={{ display: "flex", gap: 20, padding: "8px 14px", background: "#0f172a", border: "1px solid #334155", borderRadius: 8, fontSize: 12, color: "#94a3b8", flexWrap: "wrap" }}>
+          <span><strong style={{ color: "#e2e8f0" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
+          <span><strong style={{ color: "#e2e8f0" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "#86efac" : selectedScan.status === "failed" ? "#fca5a5" : "#fde68a", fontWeight: 600 }}>{selectedScan.status}</span></span>
+          <span><strong style={{ color: "#e2e8f0" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR") : "—"}</span>
         </div>
       )}
 
       {reportUrl ? (
-        <iframe id="report-iframe" key={reportUrl} src={reportUrl} title="Relatório" style={{ width: "100%", minHeight: "calc(100vh - 200px)", border: "1px solid #d1d5db", borderRadius: 10, background: "#fff" }} />
+        <iframe id="report-iframe" key={reportUrl} src={reportUrl} title="Relatório" style={{ width: "100%", minHeight: "calc(100vh - 200px)", border: "1px solid #334155", borderRadius: 10, background: "#020617" }} />
       ) : (
-        <div style={{ padding: 40, textAlign: "center", color: "#9ca3af", border: "1px dashed #d1d5db", borderRadius: 10, fontSize: 14 }}>
+        <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", border: "1px dashed #334155", borderRadius: 10, fontSize: 14, background: "#0f172a" }}>
           {mode === "scan" ? (loadingScans ? "Carregando scans…" : "Selecione um scan para gerar o relatório.") : "Selecione ou digite um alvo e clique em Gerar."}
         </div>
       )}

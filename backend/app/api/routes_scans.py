@@ -1692,6 +1692,73 @@ def _build_finding_lifecycle_status_map(findings: list[Finding]) -> dict[int, st
     return status_by_id
 
 
+def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
+    details = finding.details if isinstance(finding.details, dict) else {}
+    nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+
+    target = str(finding.domain or "").strip()
+    if not target and finding.scan_job:
+        tokens = _target_tokens(str(finding.scan_job.target_query or ""))
+        if tokens:
+            target = str(tokens[0]).strip()
+    if not target and finding.scan_job:
+        target = str(finding.scan_job.target_query or "").strip()
+
+    def _pick_str(*values: Any) -> str:
+        for value in values:
+            candidate = str(value or "").strip()
+            if candidate:
+                return candidate
+        return ""
+
+    raw_url = _pick_str(
+        details.get("url"),
+        details.get("request_url"),
+        details.get("target_url"),
+        details.get("endpoint"),
+        nested.get("url"),
+        nested.get("request_url"),
+        nested.get("target_url"),
+        nested.get("endpoint"),
+    )
+    raw_path = _pick_str(
+        details.get("path"),
+        details.get("route"),
+        details.get("uri"),
+        nested.get("path"),
+        nested.get("route"),
+        nested.get("uri"),
+    )
+
+    parsed_path = ""
+    if raw_url:
+        try:
+            parsed = urlparse(raw_url)
+            parsed_path = str(parsed.path or "").strip()
+        except Exception:
+            parsed_path = ""
+
+    path = raw_path or parsed_path
+    if path and not path.startswith("/"):
+        path = f"/{path}"
+
+    url_value = ""
+    if raw_url.startswith("http://") or raw_url.startswith("https://"):
+        url_value = raw_url
+    elif target:
+        if path:
+            url_value = f"https://{target}{path}"
+        else:
+            url_value = f"https://{target}"
+
+    return {
+        "target": target or None,
+        "subdomain": target or None,
+        "path": path or None,
+        "url": url_value or None,
+    }
+
+
 def _infer_asset_type(name: str) -> str:
     value = str(name or "").strip().lower()
     if not value:
@@ -2657,6 +2724,220 @@ def findings_timeline(
         "cumulative": cumulative,
         "by_target": by_target,
         "by_type": by_type,
+    }
+
+
+@router.get("/vulnerability-management/dashboard")
+def vulnerability_management_dashboard(
+    target: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    limit: int = Query(default=3000, ge=100, le=10000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sev_order = ["critical", "high", "medium", "low", "info"]
+    sev_weight = {"critical": 20, "high": 12, "medium": 7, "low": 3, "info": 1}
+
+    query = _authorized_finding_query(db, current_user).filter(Finding.is_false_positive.is_(False))
+    lifecycle_query = _authorized_finding_query(db, current_user)
+
+    target_filter = str(target or "").strip()
+    if target_filter:
+        ilike_target = f"%{target_filter}%"
+        query = query.filter((ScanJob.target_query.ilike(ilike_target)) | (Finding.domain.ilike(ilike_target)))
+        lifecycle_query = lifecycle_query.filter((ScanJob.target_query.ilike(ilike_target)) | (Finding.domain.ilike(ilike_target)))
+
+    severity_filter = str(severity or "").strip().lower()
+    if severity_filter:
+        query = query.filter(Finding.severity == severity_filter)
+        lifecycle_query = lifecycle_query.filter(Finding.severity == severity_filter)
+
+    findings = query.order_by(Finding.created_at.desc()).limit(limit).all()
+    lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).limit(max(limit * 2, 6000)).all()
+    lifecycle_status = _build_finding_lifecycle_status_map(lifecycle_rows)
+
+    available_targets: set[str] = set()
+    for row in lifecycle_rows:
+        if row.domain:
+            available_targets.add(str(row.domain).strip())
+        if row.scan_job:
+            for token in _target_tokens(str(row.scan_job.target_query or "")):
+                available_targets.add(token)
+
+    severity_counts = {sev: 0 for sev in sev_order}
+    age_env_days: list[int] = []
+    age_market_days: list[int] = []
+    remediation = {"open": 0, "closed": 0, "false_positive": 0}
+
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for finding in findings:
+        sev = str(finding.severity or "info").strip().lower()
+        if sev not in severity_counts:
+            sev = "info"
+        severity_counts[sev] += 1
+
+        status_value = str(lifecycle_status.get(finding.id, "open"))
+        if status_value not in remediation:
+            status_value = "open"
+        remediation[status_value] += 1
+
+        age = compute_age_metrics(finding.created_at, finding.details if isinstance(finding.details, dict) else {})
+        env_days = age.get("known_in_environment_days")
+        market_days = age.get("known_in_market_days")
+        if isinstance(env_days, int):
+            age_env_days.append(env_days)
+        if isinstance(market_days, int):
+            age_market_days.append(market_days)
+
+        loc = _extract_finding_location(finding)
+        target_name = str(loc.get("target") or "").strip()
+        path_name = str(loc.get("path") or "").strip()
+
+        details = finding.details if isinstance(finding.details, dict) else {}
+        nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+        recommendation = str(
+            finding.recommendation
+            or details.get("recommendation")
+            or nested.get("recommendation")
+            or ""
+        ).strip()
+
+        key = "|".join(
+            [
+                _sanitize_text(finding.title or "").lower(),
+                _sanitize_text(sev).lower(),
+                _sanitize_text(finding.cve or "").lower(),
+                _sanitize_text(finding.tool or "").lower(),
+            ]
+        )
+        bucket = grouped.get(key)
+        if not bucket:
+            bucket = {
+                "vulnerability_key": key,
+                "title": finding.title,
+                "severity": sev,
+                "cve": finding.cve,
+                "cvss": finding.cvss,
+                "tool": finding.tool,
+                "recommendation": recommendation,
+                "occurrence_count": 0,
+                "open_count": 0,
+                "closed_count": 0,
+                "affected_targets": set(),
+                "affected_paths": set(),
+                "latest_seen_at": finding.created_at,
+                "occurrences": [],
+            }
+            grouped[key] = bucket
+
+        bucket["occurrence_count"] += 1
+        if status_value == "closed":
+            bucket["closed_count"] += 1
+        else:
+            bucket["open_count"] += 1
+
+        if target_name:
+            bucket["affected_targets"].add(target_name)
+        if path_name:
+            bucket["affected_paths"].add(path_name)
+        if (finding.created_at or datetime.min) > (bucket.get("latest_seen_at") or datetime.min):
+            bucket["latest_seen_at"] = finding.created_at
+
+        bucket["occurrences"].append(
+            {
+                "finding_id": finding.id,
+                "scan_job_id": finding.scan_job_id,
+                "target": loc.get("target"),
+                "subdomain": loc.get("subdomain"),
+                "path": loc.get("path"),
+                "url": loc.get("url"),
+                "created_at": finding.created_at,
+                "lifecycle_status": status_value,
+                "recommendation": recommendation,
+            }
+        )
+
+    vulnerabilities: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        vulnerabilities.append(
+            {
+                "vulnerability_key": bucket["vulnerability_key"],
+                "title": bucket["title"],
+                "severity": bucket["severity"],
+                "cve": bucket["cve"],
+                "cvss": bucket["cvss"],
+                "tool": bucket["tool"],
+                "recommendation": bucket["recommendation"],
+                "occurrence_count": bucket["occurrence_count"],
+                "open_count": bucket["open_count"],
+                "closed_count": bucket["closed_count"],
+                "affected_targets": sorted(list(bucket["affected_targets"])),
+                "affected_paths": sorted(list(bucket["affected_paths"])),
+                "latest_seen_at": bucket["latest_seen_at"],
+                "occurrences": sorted(
+                    bucket["occurrences"],
+                    key=lambda item: str(item.get("created_at") or ""),
+                    reverse=True,
+                ),
+            }
+        )
+
+    vulnerabilities.sort(
+        key=lambda item: (
+            -sev_weight.get(str(item.get("severity") or "info"), 1),
+            -int(item.get("open_count") or 0),
+            -int(item.get("occurrence_count") or 0),
+        )
+    )
+
+    risk_points = sum(sev_weight.get(str(item.get("severity") or "info"), 1) * int(item.get("open_count") or 0) for item in vulnerabilities)
+    score = max(0, 100 - min(95, int(risk_points * 1.6)))
+
+    env_avg = round(sum(age_env_days) / len(age_env_days), 1) if age_env_days else None
+    market_avg = round(sum(age_market_days) / len(age_market_days), 1) if age_market_days else None
+    env_max = max(age_env_days) if age_env_days else None
+    market_max = max(age_market_days) if age_market_days else None
+
+    closed_total = int(remediation.get("closed") or 0)
+    open_total = int(remediation.get("open") or 0)
+    closure_rate = round((closed_total / max(1, closed_total + open_total)) * 100.0, 2)
+
+    selected_target_url = None
+    if target_filter:
+        if target_filter.startswith("http://") or target_filter.startswith("https://"):
+            selected_target_url = target_filter
+        else:
+            selected_target_url = f"https://{target_filter}"
+
+    return {
+        "filters": {
+            "target": target_filter or None,
+            "severity": severity_filter or None,
+            "available_targets": sorted(list(available_targets))[:500],
+            "selected_target_url": selected_target_url,
+        },
+        "overview": {
+            "score": score,
+            "total_vulnerabilities": len(vulnerabilities),
+            "findings_total": len(findings),
+            "severity_counts": severity_counts,
+            "affected_targets": len({t for v in vulnerabilities for t in v.get("affected_targets", [])}),
+        },
+        "age": {
+            "known_in_environment_avg_days": env_avg,
+            "known_in_environment_max_days": env_max,
+            "known_in_market_avg_days": market_avg,
+            "known_in_market_max_days": market_max,
+        },
+        "remediation_history": {
+            "open": open_total,
+            "closed": closed_total,
+            "false_positive": int(remediation.get("false_positive") or 0),
+            "closure_rate_percent": closure_rate,
+        },
+        "vulnerabilities": vulnerabilities,
+        "generated_at": datetime.utcnow().isoformat(),
     }
 
 

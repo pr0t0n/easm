@@ -1,517 +1,394 @@
-/**
- * AttackEvolutionPage — Evolução Temporal de Ataques
- *
- * Mostra a acumulação de findings ao longo do tempo com:
- * - Gráfico de área acumulativa por severidade
- * - Gráfico de barras de novos findings por dia
- * - Filtros: janela de tempo, severidade, alvo
- * - Tabela de top alvos e top tipos de ataque
- * - Resumo por severidade com badges
- */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
-/* ─── paleta de severidade ──────────────────────────────────────────── */
 const SEV = {
-  critical: { color: "#dc2626", label: "Critical", bg: "#fee2e2" },
-  high:     { color: "#f97316", label: "High",     bg: "#ffedd5" },
-  medium:   { color: "#eab308", label: "Medium",   bg: "#fef9c3" },
-  low:      { color: "#22c55e", label: "Low",      bg: "#dcfce7" },
-  info:     { color: "#6b7280", label: "Info",     bg: "#f3f4f6" },
+  critical: { color: "#fca5a5", bg: "rgba(185,28,28,0.18)", label: "Critical" },
+  high: { color: "#fdba74", bg: "rgba(194,65,12,0.18)", label: "High" },
+  medium: { color: "#fde68a", bg: "rgba(161,98,7,0.18)", label: "Medium" },
+  low: { color: "#86efac", bg: "rgba(21,128,61,0.18)", label: "Low" },
+  info: { color: "#cbd5e1", bg: "rgba(71,85,105,0.24)", label: "Info" },
 };
 const SEV_KEYS = ["critical", "high", "medium", "low", "info"];
 
-/* ─── utilitários de chart SVG ──────────────────────────────────────── */
-const W = 780, H = 200, PAD = { top: 12, right: 16, bottom: 28, left: 44 };
-const CW = W - PAD.left - PAD.right;
-const CH = H - PAD.top - PAD.bottom;
-
-function scaleX(i, total) {
-  if (total <= 1) return PAD.left;
-  return PAD.left + (i / (total - 1)) * CW;
-}
-function scaleY(v, maxV) {
-  if (!maxV) return PAD.top + CH;
-  return PAD.top + CH - (v / maxV) * CH;
+function fmtNum(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  return new Intl.NumberFormat("pt-BR").format(n);
 }
 
-/** Área acumulada (stacked) por severidade */
-function AreaChart({ data, severities, title }) {
-  if (!data || data.length === 0)
-    return <EmptyChart title={title} />;
+function fmtDate(value) {
+  if (!value) return "-";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return dt.toLocaleString("pt-BR");
+}
 
-  const maxV = Math.max(...data.map((d) => SEV_KEYS.reduce((s, k) => s + (d[k] || 0), 0)), 1);
-  const ticks = computeTicks(maxV);
-  const n = data.length;
+function sevBadge(sev) {
+  const key = String(sev || "info").toLowerCase();
+  const cfg = SEV[key] || SEV.info;
+  return {
+    color: cfg.color,
+    background: cfg.bg,
+    border: `1px solid ${cfg.color}40`,
+    padding: "3px 8px",
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: "0.03em",
+    textTransform: "uppercase",
+  };
+}
 
-  // stacked areas — rendered bottom-up so critical is on top
-  const stackedPaths = [];
-  const baseline = data.map(() => PAD.top + CH);
-
-  for (let si = SEV_KEYS.length - 1; si >= 0; si--) {
-    const sev = SEV_KEYS[si];
-    if (!severities.includes(sev)) continue;
-
-    const tops = data.map((d, i) => {
-      const accumulated = SEV_KEYS.slice(0, si + 1).reduce((s, k) => s + (d[k] || 0), 0);
-      return scaleY(accumulated, maxV);
-    });
-
-    const pts = tops.map((y, i) => `${scaleX(i, n)},${y}`).join(" ");
-    const bpts = [...baseline].reverse().map((y, i) => `${scaleX(n - 1 - i, n)},${y}`).join(" ");
-
-    stackedPaths.push(
-      <polygon
-        key={sev}
-        points={`${pts} ${bpts}`}
-        fill={SEV[sev].color}
-        fillOpacity={0.7}
-      />,
-    );
-
-    for (let i = 0; i < n; i++) baseline[i] = tops[i];
-  }
-
-  const xLabels = pickEvenly(data.map((d) => d.date), 6);
-
+function ScoreCard({ overview }) {
+  const score = Number(overview?.score || 0);
+  const color = score >= 80 ? "#86efac" : score >= 60 ? "#fde68a" : "#fca5a5";
   return (
-    <div>
-      <p style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>{title}</p>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H }}>
-        {/* grid */}
-        {ticks.map((t) => {
-          const y = scaleY(t, maxV);
-          return (
-            <g key={t}>
-              <line x1={PAD.left} x2={W - PAD.right} y1={y} y2={y} stroke="#e5e7eb" strokeWidth={1} />
-              <text x={PAD.left - 4} y={y + 4} textAnchor="end" fontSize={9} fill="#9ca3af">{t}</text>
-            </g>
-          );
-        })}
-        {/* areas */}
-        {stackedPaths}
-        {/* x labels */}
-        {xLabels.map(({ label, idx }) => (
-          <text key={label} x={scaleX(idx, n)} y={H - 4} textAnchor="middle" fontSize={9} fill="#9ca3af">
-            {label.slice(5)} {/* MM-DD */}
-          </text>
-        ))}
-      </svg>
-    </div>
-  );
-}
-
-/** Barras diárias de novos findings */
-function BarChart({ data, severities, title }) {
-  if (!data || data.length === 0)
-    return <EmptyChart title={title} />;
-
-  const maxV = Math.max(...data.map((d) => SEV_KEYS.reduce((s, k) => s + (d[k] || 0), 0)), 1);
-  const n = data.length;
-  const barW = Math.max(1, CW / n - 1);
-  const ticks = computeTicks(maxV);
-  const xLabels = pickEvenly(data.map((d) => d.date), 6);
-
-  return (
-    <div>
-      <p style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>{title}</p>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H }}>
-        {ticks.map((t) => {
-          const y = scaleY(t, maxV);
-          return (
-            <g key={t}>
-              <line x1={PAD.left} x2={W - PAD.right} y1={y} y2={y} stroke="#e5e7eb" strokeWidth={1} />
-              <text x={PAD.left - 4} y={y + 4} textAnchor="end" fontSize={9} fill="#9ca3af">{t}</text>
-            </g>
-          );
-        })}
-        {data.map((d, i) => {
-          const x = PAD.left + (i / n) * CW;
-          let stackY = PAD.top + CH;
-          return (
-            <g key={d.date}>
-              {SEV_KEYS.slice().reverse().map((sev) => {
-                if (!severities.includes(sev)) return null;
-                const v = d[sev] || 0;
-                if (!v) return null;
-                const bh = (v / maxV) * CH;
-                stackY -= bh;
-                return (
-                  <rect
-                    key={sev}
-                    x={x}
-                    y={stackY}
-                    width={barW}
-                    height={bh}
-                    fill={SEV[sev].color}
-                    fillOpacity={0.85}
-                  />
-                );
-              })}
-            </g>
-          );
-        })}
-        {xLabels.map(({ label, idx }) => (
-          <text key={label} x={PAD.left + (idx / n) * CW + barW / 2} y={H - 4} textAnchor="middle" fontSize={9} fill="#9ca3af">
-            {label.slice(5)}
-          </text>
-        ))}
-      </svg>
-    </div>
-  );
-}
-
-function EmptyChart({ title }) {
-  return (
-    <div>
-      <p style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>{title}</p>
-      <div style={{ height: H, display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 13, border: "1px dashed #e5e7eb", borderRadius: 8 }}>
-        Sem dados para exibir
+    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 16 }}>
+      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Score geral de risco</p>
+      <div style={{ display: "flex", alignItems: "end", gap: 8, marginTop: 4 }}>
+        <span style={{ fontSize: 42, lineHeight: 1, fontWeight: 800, color }}>{fmtNum(score)}</span>
+        <span style={{ fontSize: 13, color: "#94a3b8", marginBottom: 6 }}>/ 100</span>
+      </div>
+      <div style={{ marginTop: 12, background: "#1e293b", height: 10, borderRadius: 99, overflow: "hidden" }}>
+        <div style={{ width: `${Math.max(0, Math.min(100, score))}%`, height: "100%", background: color }} />
+      </div>
+      <div style={{ display: "grid", gap: 4, marginTop: 10, fontSize: 12, color: "#cbd5e1" }}>
+        <div>Total de vulnerabilidades: <strong>{fmtNum(overview?.total_vulnerabilities)}</strong></div>
+        <div>Ocorrencias encontradas: <strong>{fmtNum(overview?.findings_total)}</strong></div>
+        <div>Alvos afetados: <strong>{fmtNum(overview?.affected_targets)}</strong></div>
       </div>
     </div>
   );
 }
 
-function computeTicks(maxV) {
-  if (!maxV) return [0];
-  const step = Math.ceil(maxV / 4);
-  return [0, step, step * 2, step * 3, maxV];
+function SeverityCard({ summary }) {
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 16 }}>
+      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Vulnerabilidades por criticidade</p>
+      <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+        {SEV_KEYS.map((sev) => {
+          const total = Number(summary?.[sev] || 0);
+          const max = Math.max(...SEV_KEYS.map((k) => Number(summary?.[k] || 0)), 1);
+          return (
+            <div key={sev} style={{ display: "grid", gridTemplateColumns: "80px 1fr 44px", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: SEV[sev].color, fontWeight: 700 }}>{SEV[sev].label}</span>
+              <div style={{ background: "#1e293b", height: 8, borderRadius: 99 }}>
+                <div style={{ width: `${(total / max) * 100}%`, height: "100%", borderRadius: 99, background: SEV[sev].color }} />
+              </div>
+              <span style={{ fontSize: 12, color: "#cbd5e1", textAlign: "right" }}>{fmtNum(total)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
-function pickEvenly(labels, count) {
-  if (!labels.length) return [];
-  if (labels.length <= count) return labels.map((l, idx) => ({ label: l, idx }));
-  const result = [];
-  const step = (labels.length - 1) / (count - 1);
-  for (let i = 0; i < count; i++) {
-    const idx = Math.round(i * step);
-    result.push({ label: labels[idx], idx });
-  }
-  return result;
+function AgeCard({ age }) {
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 16 }}>
+      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Age das vulnerabilidades</p>
+      <div style={{ marginTop: 10, display: "grid", gap: 8, fontSize: 12, color: "#cbd5e1" }}>
+        <div>
+          <strong>Conhecida no ambiente</strong>
+          <div>Media: {fmtNum(age?.known_in_environment_avg_days)} dias</div>
+          <div>Maximo: {fmtNum(age?.known_in_environment_max_days)} dias</div>
+        </div>
+        <div>
+          <strong>Existencia no mercado (publicacao CVE)</strong>
+          <div>Media: {fmtNum(age?.known_in_market_avg_days)} dias</div>
+          <div>Maximo: {fmtNum(age?.known_in_market_max_days)} dias</div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-/* ─── componente principal ───────────────────────────────────────────── */
+function RemediationCard({ remediation }) {
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 16 }}>
+      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Historico de correcao</p>
+      <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 8 }}>
+        <MiniMetric label="Abertas" value={remediation?.open} color="#b91c1c" />
+        <MiniMetric label="Corrigidas" value={remediation?.closed} color="#166534" />
+        <MiniMetric label="Taxa de fechamento" value={`${fmtNum(remediation?.closure_rate_percent)}%`} color="#a16207" />
+      </div>
+      <p style={{ marginTop: 10, marginBottom: 0, fontSize: 11, color: "#94a3b8" }}>
+        Regra aplicada: se uma vulnerabilidade nao reaparece no scan posterior, ela e considerada finalizada.
+      </p>
+    </div>
+  );
+}
+
+function MiniMetric({ label, value, color }) {
+  return (
+    <div style={{ background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: 10 }}>
+      <div style={{ fontSize: 11, color: "#94a3b8" }}>{label}</div>
+      <div style={{ marginTop: 3, fontSize: 20, fontWeight: 800, color }}>{value ?? "-"}</div>
+    </div>
+  );
+}
+
 export default function AttackEvolutionPage() {
-  const [data, setData] = useState(null);
+  const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  /* filtros */
-  const [days, setDays] = useState(90);
-  const [severity, setSeverity] = useState(""); // "" = todos
   const [targetInput, setTargetInput] = useState("");
-  const [targetFilter, setTargetFilter] = useState(""); // aplicado
-  const [activeSeverities, setActiveSeverities] = useState(new Set(SEV_KEYS));
+  const [targetFilter, setTargetFilter] = useState("");
+  const [severity, setSeverity] = useState("");
+  const [selectedKey, setSelectedKey] = useState("");
 
-  const fetchTimeline = useCallback(async (d, sev, tgt) => {
+  const fetchDashboard = useCallback(async (tgt, sev) => {
     setLoading(true);
     setError("");
     try {
-      const params = { days: d };
-      if (sev) params.severity = sev;
+      const params = {};
       if (tgt) params.target = tgt;
-      const { data: res } = await client.get("/api/findings/timeline", { params });
-      setData(res);
+      if (sev) params.severity = sev;
+      const { data } = await client.get("/api/vulnerability-management/dashboard", { params });
+      setDashboard(data);
+      const rows = Array.isArray(data?.vulnerabilities) ? data.vulnerabilities : [];
+      if (rows.length > 0 && !rows.find((row) => row.vulnerability_key === selectedKey)) {
+        setSelectedKey(rows[0].vulnerability_key);
+      }
     } catch (err) {
-      setError(err?.response?.data?.detail || "Erro ao carregar dados.");
+      setError(err?.response?.data?.detail || "Falha ao carregar dashboard de vulnerabilidades.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedKey]);
 
   useEffect(() => {
-    fetchTimeline(days, severity, targetFilter);
-  }, [days, severity, targetFilter, fetchTimeline]);
+    fetchDashboard(targetFilter, severity);
+  }, [targetFilter, severity, fetchDashboard]);
 
-  const toggleSev = (sev) => {
-    setActiveSeverities((prev) => {
-      const next = new Set(prev);
-      if (next.has(sev)) { if (next.size > 1) next.delete(sev); }
-      else next.add(sev);
-      return next;
-    });
-  };
+  const vulnerabilities = useMemo(
+    () => (Array.isArray(dashboard?.vulnerabilities) ? dashboard.vulnerabilities : []),
+    [dashboard],
+  );
 
-  const activeSevList = SEV_KEYS.filter((s) => activeSeverities.has(s));
+  const selectedVulnerability = useMemo(
+    () => vulnerabilities.find((item) => item.vulnerability_key === selectedKey) || vulnerabilities[0] || null,
+    [vulnerabilities, selectedKey],
+  );
 
-  const summary = data?.summary || {};
-  const cumulative = data?.cumulative || [];
-  const dailyNew = data?.daily_new || [];
-  const byTarget = data?.by_target || [];
-  const byType = data?.by_type || [];
-
-  const maxCount = Math.max(...byTarget.map((t) => t.count), 1);
-  const maxTypeCount = Math.max(...byType.map((t) => t.count), 1);
+  const availableTargets = dashboard?.filters?.available_targets || [];
+  const selectedTargetUrl = dashboard?.filters?.selected_target_url || "";
 
   return (
     <div style={{ padding: 16, display: "grid", gap: 16 }}>
-
-      {/* ── filtros ─────────────────────────────────────────────── */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          alignItems: "center",
-          background: "#fff",
-          border: "1px solid #d1d5db",
-          borderRadius: 10,
-          padding: "10px 14px",
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Janela:</span>
-        {[30, 60, 90, 180, 365].map((d) => (
-          <button
-            key={d}
-            type="button"
-            onClick={() => setDays(d)}
-            style={{
-              padding: "4px 12px",
-              borderRadius: 6,
-              border: `1px solid ${days === d ? "#2563eb" : "#d1d5db"}`,
-              background: days === d ? "#eff6ff" : "#f9fafb",
-              color: days === d ? "#1d4ed8" : "#374151",
-              fontSize: 12,
-              fontWeight: days === d ? 600 : 400,
-              cursor: "pointer",
-            }}
-          >
-            {d}d
-          </button>
-        ))}
-
-        <div style={{ width: 1, height: 20, background: "#e5e7eb" }} />
-
-        <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Severidade:</span>
-        {SEV_KEYS.map((sev) => (
-          <button
-            key={sev}
-            type="button"
-            onClick={() => toggleSev(sev)}
-            style={{
-              padding: "3px 10px",
-              borderRadius: 6,
-              border: `1px solid ${activeSeverities.has(sev) ? SEV[sev].color : "#d1d5db"}`,
-              background: activeSeverities.has(sev) ? SEV[sev].bg : "#f9fafb",
-              color: activeSeverities.has(sev) ? SEV[sev].color : "#9ca3af",
-              fontSize: 11,
-              fontWeight: activeSeverities.has(sev) ? 700 : 400,
-              cursor: "pointer",
-              textTransform: "uppercase",
-              letterSpacing: "0.04em",
-            }}
-          >
-            {SEV[sev].label}
-          </button>
-        ))}
-
-        <div style={{ width: 1, height: 20, background: "#e5e7eb" }} />
-
-        <input
-          type="text"
-          placeholder="Filtrar por alvo…"
+      <div style={{ background: "#0b1220", border: "1px solid #334155", borderRadius: 12, padding: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "#cbd5e1", fontWeight: 700 }}>Filtro por alvo/subdominio</span>
+        <select
           value={targetInput}
           onChange={(e) => setTargetInput(e.target.value)}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, minWidth: 220, background: "#111827", color: "#e2e8f0" }}
+        >
+          <option value="">Selecionar alvo conhecido</option>
+          {availableTargets.map((item) => (
+            <option key={item} value={item}>{item}</option>
+          ))}
+        </select>
+        <input
+          type="text"
+          value={targetInput}
+          onChange={(e) => setTargetInput(e.target.value)}
+          placeholder="ou digite alvo/subdominio"
           onKeyDown={(e) => e.key === "Enter" && setTargetFilter(targetInput.trim())}
-          style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, minWidth: 180 }}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, minWidth: 220, background: "#111827", color: "#e2e8f0" }}
         />
+        <select
+          value={severity}
+          onChange={(e) => setSeverity(e.target.value)}
+          style={{ padding: "6px 10px", border: "1px solid #475569", borderRadius: 8, fontSize: 12, background: "#111827", color: "#e2e8f0" }}
+        >
+          <option value="">Todas severidades</option>
+          {SEV_KEYS.map((sev) => (
+            <option key={sev} value={sev}>{SEV[sev].label}</option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => setTargetFilter(targetInput.trim())}
-          style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", fontSize: 12, cursor: "pointer" }}
+          style={{ padding: "6px 12px", border: "1px solid #f59e0b", borderRadius: 8, background: "rgba(245,158,11,0.16)", color: "#fcd34d", fontSize: 12, cursor: "pointer" }}
         >
           Aplicar
         </button>
-        {targetFilter && (
-          <button
-            type="button"
-            onClick={() => { setTargetInput(""); setTargetFilter(""); }}
-            style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #fca5a5", background: "#fff5f5", color: "#dc2626", fontSize: 12, cursor: "pointer" }}
-          >
-            ✕ {targetFilter}
-          </button>
-        )}
-
-        <div style={{ flex: 1 }} />
-        {loading && <span style={{ fontSize: 12, color: "#6b7280" }}>Carregando…</span>}
         <button
           type="button"
-          onClick={() => fetchTimeline(days, severity, targetFilter)}
-          disabled={loading}
-          style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", fontSize: 12, cursor: "pointer" }}
+          onClick={() => {
+            setTargetInput("");
+            setTargetFilter("");
+            setSeverity("");
+          }}
+          style={{ padding: "6px 12px", border: "1px solid #7f1d1d", borderRadius: 8, background: "rgba(185,28,28,0.16)", color: "#fca5a5", fontSize: 12, cursor: "pointer" }}
         >
-          ↺ Atualizar
+          Limpar
         </button>
+        <div style={{ flex: 1 }} />
+        {loading && <span style={{ fontSize: 12, color: "#94a3b8" }}>Carregando...</span>}
       </div>
 
+      {selectedTargetUrl && (
+        <div style={{ background: "rgba(245,158,11,0.14)", border: "1px solid #a16207", color: "#fcd34d", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}>
+          URL do alvo selecionado: <strong>{selectedTargetUrl}</strong>
+        </div>
+      )}
+
       {error && (
-        <div style={{ padding: 12, background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, color: "#b91c1c", fontSize: 13 }}>
+        <div style={{ background: "rgba(185,28,28,0.16)", border: "1px solid #7f1d1d", color: "#fca5a5", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}>
           {error}
         </div>
       )}
 
-      {/* ── badges de resumo ─────────────────────────────────────── */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {SEV_KEYS.map((sev) => (
-          <div
-            key={sev}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "8px 16px",
-              background: SEV[sev].bg,
-              border: `1px solid ${SEV[sev].color}30`,
-              borderRadius: 10,
-              minWidth: 110,
-            }}
-          >
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: SEV[sev].color }} />
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: SEV[sev].color, lineHeight: 1 }}>
-                {summary[sev] ?? 0}
-              </div>
-              <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                {SEV[sev].label}
-              </div>
-            </div>
-          </div>
-        ))}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 16px",
-            background: "#f0f9ff",
-            border: "1px solid #bae6fd",
-            borderRadius: 10,
-            minWidth: 110,
-          }}
-        >
-          <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#0ea5e9" }} />
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: "#0369a1", lineHeight: 1 }}>
-              {summary.total ?? 0}
-            </div>
-            <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              Total
-            </div>
-          </div>
-        </div>
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+        <ScoreCard overview={dashboard?.overview || {}} />
+        <SeverityCard summary={dashboard?.overview?.severity_counts || {}} />
+        <AgeCard age={dashboard?.age || {}} />
+        <RemediationCard remediation={dashboard?.remediation_history || {}} />
       </div>
 
-      {/* ── gráficos ─────────────────────────────────────────────── */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 16,
-        }}
-      >
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16 }}>
-          <AreaChart
-            data={cumulative}
-            severities={activeSevList}
-            title="Findings acumulados por severidade"
-          />
-          <Legend severities={activeSevList} />
+      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1.2fr 1fr" }}>
+        <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, overflow: "hidden" }}>
+          <div style={{ padding: "10px 12px", borderBottom: "1px solid #334155", fontSize: 12, color: "#e2e8f0", fontWeight: 700 }}>
+            Vulnerabilidades (clique para detalhar locais e correcao)
+          </div>
+          <div style={{ maxHeight: 520, overflow: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#111827", position: "sticky", top: 0 }}>
+                  <th style={thStyle}>Vulnerabilidade</th>
+                  <th style={thStyle}>Sev</th>
+                  <th style={thStyle}>Ocorrencias</th>
+                  <th style={thStyle}>Alvos</th>
+                  <th style={thStyle}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vulnerabilities.length === 0 && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: 16, textAlign: "center", color: "#94a3b8" }}>Sem vulnerabilidades para os filtros selecionados.</td>
+                  </tr>
+                )}
+                {vulnerabilities.map((row) => {
+                  const active = selectedVulnerability?.vulnerability_key === row.vulnerability_key;
+                  return (
+                    <tr
+                      key={row.vulnerability_key}
+                      onClick={() => setSelectedKey(row.vulnerability_key)}
+                      style={{ background: active ? "rgba(245,158,11,0.15)" : "#0f172a", cursor: "pointer", borderBottom: "1px solid #1e293b" }}
+                    >
+                      <td style={tdStyle}>
+                        <div style={{ fontWeight: 600, color: "#e2e8f0" }}>{row.title}</div>
+                        <div style={{ color: "#94a3b8", fontSize: 11 }}>{row.cve || "sem CVE"}</div>
+                      </td>
+                      <td style={tdStyle}><span style={sevBadge(row.severity)}>{row.severity}</span></td>
+                      <td style={tdStyle}>{fmtNum(row.occurrence_count)}</td>
+                      <td style={tdStyle}>{fmtNum((row.affected_targets || []).length)}</td>
+                      <td style={tdStyle}>{fmtNum(row.open_count)} abertas / {fmtNum(row.closed_count)} fechadas</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16 }}>
-          <BarChart
-            data={dailyNew}
-            severities={activeSevList}
-            title="Novos findings por dia"
-          />
-          <Legend severities={activeSevList} />
-        </div>
-      </div>
 
-      {/* ── top alvos + top tipos ────────────────────────────────── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-
-        {/* top alvos */}
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16 }}>
-          <p style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 10 }}>
-            Top Alvos por Volume
-          </p>
-          {byTarget.length === 0 ? (
-            <p style={{ fontSize: 12, color: "#9ca3af" }}>Sem dados.</p>
+        <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, padding: 12, display: "grid", gap: 10, alignContent: "start" }}>
+          {!selectedVulnerability ? (
+            <div style={{ color: "#94a3b8", fontSize: 12 }}>Selecione uma vulnerabilidade para ver todos os subdominios, paths, URLs e recomendacoes.</div>
           ) : (
-            <div style={{ display: "grid", gap: 6 }}>
-              {byTarget.map(({ target, count }) => (
-                <div key={target} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span
-                    style={{ flex: 1, fontSize: 12, color: "#374151", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    title={target}
-                  >
-                    {target}
-                  </span>
-                  <div style={{ width: 100, background: "#f3f4f6", borderRadius: 4, height: 8, flexShrink: 0 }}>
-                    <div
-                      style={{
-                        width: `${(count / maxCount) * 100}%`,
-                        height: "100%",
-                        background: "#2563eb",
-                        borderRadius: 4,
-                      }}
-                    />
-                  </div>
-                  <span style={{ fontSize: 11, color: "#6b7280", width: 24, textAlign: "right", flexShrink: 0 }}>{count}</span>
+            <>
+              <div>
+                <div style={{ fontSize: 11, color: "#94a3b8" }}>Vulnerabilidade selecionada</div>
+                <div style={{ marginTop: 3, fontWeight: 700, color: "#e2e8f0" }}>{selectedVulnerability.title}</div>
+                <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <span style={sevBadge(selectedVulnerability.severity)}>{selectedVulnerability.severity}</span>
+                  {selectedVulnerability.cve && <span style={chipStyle}>{selectedVulnerability.cve}</span>}
+                  {selectedVulnerability.tool && <span style={chipStyle}>{selectedVulnerability.tool}</span>}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+              </div>
 
-        {/* top tipos */}
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16 }}>
-          <p style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 10 }}>
-            Top Tipos de Ataque
-          </p>
-          {byType.length === 0 ? (
-            <p style={{ fontSize: 12, color: "#9ca3af" }}>Sem dados.</p>
-          ) : (
-            <div style={{ display: "grid", gap: 6 }}>
-              {byType.map(({ title, count }) => (
-                <div key={title} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span
-                    style={{ flex: 1, fontSize: 12, color: "#374151", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    title={title}
-                  >
-                    {title}
-                  </span>
-                  <div style={{ width: 100, background: "#f3f4f6", borderRadius: 4, height: 8, flexShrink: 0 }}>
-                    <div
-                      style={{
-                        width: `${(count / maxTypeCount) * 100}%`,
-                        height: "100%",
-                        background: "#7c3aed",
-                        borderRadius: 4,
-                      }}
-                    />
-                  </div>
-                  <span style={{ fontSize: 11, color: "#6b7280", width: 24, textAlign: "right", flexShrink: 0 }}>{count}</span>
+              <div>
+                <div style={{ fontSize: 11, color: "#94a3b8" }}>Correcao recomendada</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: "#e2e8f0", background: "#111827", border: "1px solid #334155", borderRadius: 8, padding: 10 }}>
+                  {selectedVulnerability.recommendation || "Sem recomendacao registrada para essa vulnerabilidade."}
                 </div>
-              ))}
-            </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Todos os subdominios afetados</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(selectedVulnerability.affected_targets || []).length === 0 && <span style={{ color: "#94a3b8", fontSize: 12 }}>Sem subdominio mapeado.</span>}
+                  {(selectedVulnerability.affected_targets || []).map((item) => <span key={item} style={chipStyle}>{item}</span>)}
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Todos os paths afetados</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(selectedVulnerability.affected_paths || []).length === 0 && <span style={{ color: "#94a3b8", fontSize: 12 }}>Sem path mapeado.</span>}
+                  {(selectedVulnerability.affected_paths || []).map((item) => <span key={item} style={chipStyle}>{item}</span>)}
+                </div>
+              </div>
+
+              <div style={{ borderTop: "1px solid #334155", paddingTop: 8 }}>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Ocorrencias (alvo + path + URL)</div>
+                <div style={{ maxHeight: 220, overflow: "auto", border: "1px solid #334155", borderRadius: 8 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ background: "#111827", position: "sticky", top: 0 }}>
+                        <th style={thStyle}>Subdominio</th>
+                        <th style={thStyle}>Path</th>
+                        <th style={thStyle}>URL</th>
+                        <th style={thStyle}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(selectedVulnerability.occurrences || []).map((occ) => (
+                        <tr key={`${selectedVulnerability.vulnerability_key}-${occ.finding_id}`} style={{ borderBottom: "1px solid #1e293b" }}>
+                          <td style={tdStyle}>{occ.subdomain || "-"}</td>
+                          <td style={tdStyle}>{occ.path || "-"}</td>
+                          <td style={tdStyle} title={occ.url || ""}>{occ.url || "-"}</td>
+                          <td style={tdStyle}>{occ.lifecycle_status || "open"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ marginTop: 6, fontSize: 11, color: "#94a3b8" }}>
+                  Ultima deteccao: {fmtDate(selectedVulnerability.latest_seen_at)}
+                </div>
+              </div>
+            </>
           )}
         </div>
       </div>
-
     </div>
   );
 }
 
-function Legend({ severities }) {
-  return (
-    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-      {severities.map((sev) => (
-        <span key={sev} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#6b7280" }}>
-          <span style={{ width: 8, height: 8, borderRadius: 2, background: SEV[sev].color, display: "inline-block" }} />
-          {SEV[sev].label}
-        </span>
-      ))}
-    </div>
-  );
-}
+const thStyle = {
+  textAlign: "left",
+  padding: "8px 10px",
+  fontSize: 11,
+  color: "#94a3b8",
+  borderBottom: "1px solid #334155",
+};
+
+const tdStyle = {
+  textAlign: "left",
+  padding: "8px 10px",
+  color: "#e2e8f0",
+  verticalAlign: "top",
+};
+
+const chipStyle = {
+  padding: "2px 8px",
+  borderRadius: 999,
+  border: "1px solid #475569",
+  background: "#111827",
+  fontSize: 11,
+  color: "#e2e8f0",
+};
