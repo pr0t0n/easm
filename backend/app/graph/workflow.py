@@ -23,6 +23,37 @@ def _strip_ansi_codes(text: str) -> str:
 
 from app.graph.checkpointer import create_checkpointer
 from app.graph.mission import MISSION_ITEMS as AUTONOMOUS_MISSION_ITEMS
+
+# Mapeamento de fases/atividades para grupos de worker
+MISSION_PHASE_TO_GROUP = {
+    "Recon": "recon",
+    "Vuln Scan": "vuln",
+    "Content": "recon",
+    "SSL/TLS": "recon",
+    "Auth": "vuln",
+    "Injection": "vuln",
+    "SSRF": "vuln",
+    "IDOR": "vuln",
+    "API": "vuln",
+    "Upload": "vuln",
+    "RCE": "vuln",
+    "Race": "vuln",
+    "Takeover": "recon",
+    "Email": "osint",
+    "Cloud": "osint",
+    "WebSocket": "vuln",
+    "CMS": "vuln",
+    "Links": "recon",
+    "Supply Chain": "osint",
+    "Report": "recon",
+}
+
+# Função utilitária para obter o grupo de worker para uma fase
+def get_worker_group_for_phase(phase_title: str) -> str:
+    for key, group in MISSION_PHASE_TO_GROUP.items():
+        if key.lower() in phase_title.lower():
+            return group
+    return "recon"  # fallback padrão
 from app.graph.mission import build_autonomous_mission_contract, select_mission_skills
 from app.services.risk_service import (
     build_fair_decomposition,

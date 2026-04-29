@@ -1517,7 +1517,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 state["lista_ativos"] = list(final_state.get("lista_ativos", []))
                 state["discovered_ports"] = list(final_state.get("discovered_ports", []))
 
-            recursion_limit = max(160, len(state.get("mission_items", [])) * 20)
+            recursion_limit = max(800, len(state.get("mission_items", [])) * 40)
             batch_result = app.invoke(
                 state,
                 config={

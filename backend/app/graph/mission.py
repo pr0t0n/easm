@@ -4,15 +4,26 @@ from typing import Any
 
 
 MISSION_ITEMS = [
-    "1. Autonomous Supervisor Loop & Guardrails",
-    "2. Strategic Planning & Delegation Contract",
-    "3. Asset Discovery & Exposure Mapping",
-    "4. Threat Intelligence Correlation",
-    "5. Adversarial Hypothesis & Thinking Checkpoint",
-    "6. Risk Assessment & Exploit Validation",
-    "7. Evidence Adjudication & Reproduction Gate",
-    "8. Governance & Rating (FAIR + AGE)",
-    "9. Executive Narrative & Priorities",
+    "01. Recon - Subdomains, ports, directories",
+    "02. Vuln Scan - Nuclei, nmap scripts",
+    "03. Content - Fuzzing, backups, admin panels",
+    "04. SSL/TLS - Cipher suites, certificates, headers",
+    "05. Auth - SQLi login, brute-force, OAuth",
+    "06. Injection - XSS, SQLi, Command, XXE, SSTI",
+    "07. SSRF - Param fuzzing, cloud metadata",
+    "08. IDOR - Access control, privilege escalation",
+    "09. API - GraphQL, REST, rate limiting",
+    "10. Upload - Extension bypass, webshells",
+    "11. RCE - Deserialization, Log4j",
+    "12. Race - TOCTOU, business logic",
+    "13. Takeover - Subdomain, CNAME",
+    "14. Email - SPF, DKIM, DMARC",
+    "15. Cloud - S3, Azure, GCP, K8s",
+    "16. WebSocket - Origin, injection",
+    "17. CMS - WordPress, Joomla, Drupal",
+    "18. Links - Broken link hijacking",
+    "19. Supply Chain - JS libs, dependencies",
+    "20. Report - JSON + PDF generation",
 ]
 
 
