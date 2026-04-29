@@ -728,8 +728,8 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
 
 
 def evidence_adjudication_node(state: AgentState) -> AgentState:
-    state["routing_next_node"] = "governance"
     """Aplica contrato de evidência para separar hipótese de finding verificável."""
+    state["routing_next_node"] = "governance"
     started_at = _metric_start()
     _sync_step_to_db(state, "6. EvidenceAdjudication")
 
