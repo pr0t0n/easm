@@ -300,8 +300,11 @@ def _has_verified_or_strong_evidence(state: AgentState) -> bool:
     return False
 
 
-def _route_from_supervisor(state: AgentState) -> str:
-    return str(state.get("routing_next_node") or "END")
+def _route_from_supervisor(state: AgentState):
+    next_node = state.get("routing_next_node")
+    if next_node == "END":
+        return END
+    return next_node
 
 
 def _append_autonomy_entry(state: AgentState, key: str, payload: dict[str, Any]) -> None:
