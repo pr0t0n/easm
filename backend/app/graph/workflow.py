@@ -728,6 +728,7 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
 
 
 def evidence_adjudication_node(state: AgentState) -> AgentState:
+
     """Aplica contrato de evidência para separar hipótese de finding verificável."""
     state["routing_next_node"] = "governance"
     started_at = _metric_start()
@@ -746,7 +747,11 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
         confidence = float(details.get("confidence") or item.get("risk_score") or 0)
         evidence = str(details.get("evidence") or "").strip()
         repro_steps = str(details.get("repro_steps") or "").strip()
-        has_minimum_proof = bool(evidence) and (bool(repro_steps) or bool(details.get("url")) or bool(details.get("port")))
+        has_minimum_proof = bool(evidence) and (
+            bool(repro_steps)
+            or bool(details.get("url"))
+            or bool(details.get("port"))
+        )
 
         if sev in {"critical", "high"} and (confidence < min_conf or not has_minimum_proof):
             details["validation_status"] = "hypothesis"
