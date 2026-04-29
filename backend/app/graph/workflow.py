@@ -787,19 +787,64 @@ MAX_DISCOVERED_ASSETS = 40
 
 
 STEP_TOOL_MAP: list[tuple[str, str]] = [
-    # Recon (escopo atual)
+    # Recon
+    ("subfinder", "subfinder"),
+    ("findomain", "findomain"),
+    ("assetfinder", "assetfinder"),
+    ("amass", "amass"),
     ("massdns", "massdns"),
-    ("sublist3r", "sublist3r"),
+    ("shuffledns", "shuffledns"),
+    ("chaos", "chaos"),
+    ("dnsx", "dnsx"),
+    ("hakrawler", "hakrawler"),
+    ("gau", "gau"),
+    ("waybackurls", "waybackurls"),
+    ("paramspider", "paramspider"),
+    # OSINT
+    ("shodan", "shodan-cli"),
+    ("theharvester", "theHarvester"),
+    ("h8mail", "h8mail"),
+    ("metagoofil", "metagoofil"),
+    # Serviços
     ("nmap", "nmap"),
-    ("wafw00f", "wafw00f"),
+    ("naabu", "naabu"),
+    ("masscan", "masscan"),
+    ("httpx", "httpx"),
+    ("whatweb", "whatweb"),
+    ("sslscan", "sslscan"),
+    # Web/HTTP
+    ("ffuf", "ffuf"),
+    ("gobuster", "gobuster"),
+    ("feroxbuster", "feroxbuster"),
+    ("dirsearch", "dirsearch"),
+    ("katana", "katana"),
+    ("waymore", "waymore"),
+    # Fingerprint
     ("curl", "curl-headers"),
     ("header", "curl-headers"),
-    # OSINT (escopo atual)
-    ("shodan", "shodan-cli"),
-    # Vulnerabilidade (escopo atual)
+    ("nikto", "nikto"),
+    # SAST/Secrets/Deps
+    ("semgrep", "semgrep"),
+    ("bandit", "bandit"),
+    ("gitleaks", "gitleaks"),
+    ("trufflehog", "trufflehog"),
+    ("retire", "retire"),
+    ("eslint", "eslint"),
+    ("jshint", "jshint"),
+    # WAF
+    ("wafw00f", "wafw00f"),
+    # Vuln Web
     ("burp", "burp-cli"),
     ("vulscan", "nmap-vulscan"),
-    ("nikto", "nikto"),
+    ("dalfox", "dalfox"),
+    ("wapiti", "wapiti"),
+    ("nuclei", "nuclei"),
+    # Exploitation
+    ("hydra", "hydra"),
+    ("john", "john"),
+    ("hashcat", "hashcat"),
+    ("cme", "CrackMapExec"),
+    ("responder", "Responder"),
 ]
 
 

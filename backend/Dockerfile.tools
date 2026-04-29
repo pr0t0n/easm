@@ -1,0 +1,98 @@
+# Ferramentas Go/CLI inspiradas no xalgorix (recon, scan, exploit, utility)
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+RUN go install github.com/owasp-amass/amass/v4/...@master
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install github.com/ffuf/ffuf/v2@latest
+RUN go install github.com/OJ/gobuster/v3@latest
+RUN go install github.com/epi052/feroxbuster@latest
+RUN go install github.com/blechschmidt/massdns@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+RUN go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+RUN go install github.com/hahwul/dalfox/v2@latest
+RUN go install github.com/hakluke/hakrawler@latest
+RUN go install github.com/lc/gau/v2/cmd/gau@latest
+RUN go install github.com/tomnomnom/waybackurls@latest
+RUN go install github.com/devanshbatham/paramspider@latest
+RUN go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+RUN go install github.com/hakluke/waymore@latest
+RUN go install github.com/haccer/subjack@latest
+RUN go install github.com/zricethezav/gitleaks/v8@latest
+RUN go install github.com/robertdavidgraham/masscan@latest
+RUN go install github.com/lgandx/Responder@latest
+RUN go install github.com/byt3bl33d3r/CrackMapExec@latest
+RUN go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+
+# Ferramentas Go/CLI para automação pentest (xalgorix-like, cobertura total)
+
+# Recon & Enumeração
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+RUN go install github.com/findomain/findomain@latest
+RUN go install github.com/tomnomnom/assetfinder@latest
+RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+RUN go install github.com/owasp-amass/amass/v4/...@master
+RUN go install github.com/jaeles-project/gospider@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+RUN go install github.com/hakluke/hakrawler@latest
+RUN go install github.com/lc/gau/v2/cmd/gau@latest
+RUN go install github.com/tomnomnom/waybackurls@latest
+RUN go install github.com/devanshbatham/paramspider@latest
+RUN go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+RUN go install github.com/blechschmidt/massdns@latest
+RUN go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+RUN go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+RUN go install github.com/hakluke/hakrevdns@latest
+RUN go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+RUN go install github.com/projectdiscovery/puredns/cmd/puredns@latest
+RUN go install github.com/ProjectAnte/dnsgen@latest
+RUN go install github.com/projectdiscovery/notify/cmd/notify@latest
+
+# Web/HTTP/JS
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+RUN go install github.com/OJ/gobuster/v3@latest
+RUN go install github.com/ffuf/ffuf/v2@latest
+RUN go install github.com/epi052/feroxbuster@latest
+RUN go install github.com/hahwul/dalfox/v2@latest
+RUN go install github.com/ticarpi/jwt_tool@latest || true
+RUN go install github.com/hakluke/waymore@latest
+RUN go install github.com/0xsha/uro@latest
+RUN go install github.com/hakluke/ksubdomain@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+
+# SAST/Secrets/Deps
+RUN pip install semgrep bandit trufflehog
+RUN npm install -g retire eslint jshint @ast-grep/cli tree-sitter-cli js-beautify
+RUN go install github.com/zricethezav/gitleaks/v8@latest
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+# Vuln/Exploitation
+RUN apt-get update && apt-get install -y nmap masscan hydra john hashcat zaproxy sqlmap whatweb nikto wpscan sslscan dirb dnsenum
+RUN go install github.com/robertdavidgraham/masscan@latest
+RUN go install github.com/lgandx/Responder@latest
+RUN go install github.com/byt3bl33d3r/CrackMapExec@latest
+RUN go install github.com/haccer/subjack@latest
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+
+# OSINT
+RUN pip install theHarvester shodan h8mail metagoofil
+
+# Utilitários
+RUN apt-get update && apt-get install -y chromium-browser curl git jq python3-pip ruby npm cargo build-essential libssl-dev libpcap-dev dnsutils unzip wget openjdk-21-jre-headless
+RUN pip install playwright
+RUN npm install -g playwright
+RUN pip install gemini brave-browser
+
+# Outras dependências
+RUN apt-get update && apt-get install -y perl libjson-perl libxml-writer-perl
+
+# Ajustes finais
+RUN go clean -modcache
+RUN npm cache clean --force
+RUN pip cache purge

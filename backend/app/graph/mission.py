@@ -17,47 +17,125 @@ MISSION_ITEMS = [
 
 
 SKILL_CATALOG: list[dict[str, Any]] = [
+    # 1. Supervisor Loop & Guardrails
     {
-        "id": "recon-subdomain-enum",
+        "id": "supervisor-guardrails",
+        "category": "orchestration",
+        "description": "Supervisão autônoma, controle de iteração, adaptação e guardrails.",
+        "triggers": ["supervisor", "loop", "autonomous", "guardrail", "iteration"],
+        "playbook": [],
+    },
+    # 2. Planejamento Estratégico
+    {
+        "id": "strategic-planning",
+        "category": "planning",
+        "description": "Planejamento tático, definição de fases e contratos de execução.",
+        "triggers": ["plan", "strategy", "contract", "delegation"],
+        "playbook": [],
+    },
+    # 3. Descoberta de Ativos
+    {
+        "id": "asset-discovery",
         "category": "reconnaissance",
-        "description": "Enumeração de subdomínios e expansão de superfície com validação DNS.",
-        "triggers": ["domain", "subdomain", "dns", "massdns", "sublist3r", "amass"],
-        "playbook": ["massdns", "sublist3r", "amass"],
+        "description": "Enumeração de ativos, subdomínios e mapeamento de superfície.",
+        "triggers": ["domain", "subdomain", "dns", "asset", "surface", "recon"],
+        "playbook": ["subfinder", "findomain", "assetfinder", "amass", "massdns", "shuffledns", "chaos", "dnsx", "hakrawler", "gau", "waybackurls", "paramspider"],
     },
+    # 4. OSINT & Exposição
     {
-        "id": "service-fingerprint-http",
-        "category": "technologies",
-        "description": "Fingerprint de serviços HTTP/TLS e headers para contexto de exploração.",
-        "triggers": ["http", "https", "header", "whatweb", "nikto", "tls", "ssl"],
-        "playbook": ["curl-headers", "nikto"],
+        "id": "osint-exposure",
+        "category": "osint",
+        "description": "Coleta OSINT, leaks, exposição e inteligência externa.",
+        "triggers": ["osint", "shodan", "leak", "exposure", "internet", "theharvester"],
+        "playbook": ["shodan-cli", "theHarvester", "h8mail", "metagoofil"],
     },
+    # 5. Enumeração de Serviços
+    {
+        "id": "service-enum",
+        "category": "services",
+        "description": "Enumeração de serviços, fingerprint, banners e portas.",
+        "triggers": ["service", "port", "banner", "fingerprint", "nmap", "naabu", "masscan"],
+        "playbook": ["nmap", "naabu", "masscan", "httpx", "whatweb", "sslscan"],
+    },
+    # 6. Enumeração Web/HTTP
+    {
+        "id": "web-enum",
+        "category": "web",
+        "description": "Enumeração de diretórios, arquivos, endpoints e crawling.",
+        "triggers": ["web", "http", "dir", "endpoint", "crawl", "ffuf", "gobuster", "feroxbuster", "dirsearch"],
+        "playbook": ["ffuf", "gobuster", "feroxbuster", "dirsearch", "katana", "gau", "hakrawler", "waymore"],
+    },
+    # 7. Fingerprint HTTP/TLS
+    {
+        "id": "http-fingerprint",
+        "category": "technologies",
+        "description": "Fingerprint de serviços HTTP/TLS, headers e tecnologias.",
+        "triggers": ["http", "https", "header", "tls", "ssl", "tech", "whatweb", "nikto"],
+        "playbook": ["curl-headers", "httpx", "whatweb", "nikto"],
+    },
+    # 8. SAST/Secrets/Deps
+    {
+        "id": "sast-secrets-deps",
+        "category": "code",
+        "description": "SAST, secrets, dependências e análise de código.",
+        "triggers": ["sast", "secret", "dep", "semgrep", "bandit", "gitleaks", "trufflehog"],
+        "playbook": ["semgrep", "bandit", "gitleaks", "trufflehog", "retire", "eslint", "jshint"],
+    },
+    # 9. Validação de WAF/Proxy
+    {
+        "id": "waf-aware-validation",
+        "category": "protocols",
+        "description": "Validação aware de WAF/proxy para reduzir falsos positivos.",
+        "triggers": ["waf", "cloudflare", "proxy", "modsecurity", "akamai"],
+        "playbook": ["wafw00f", "curl-headers", "nmap-vulscan"],
+    },
+    # 10. Testes de Vulnerabilidade Web
     {
         "id": "vuln-web-injection",
         "category": "vulnerabilities",
         "description": "Validação progressiva de injeção e falhas web com evidência reproduzível.",
-        "triggers": ["sqli", "xss", "ssrf", "injection", "burp", "wapiti"],
-        "playbook": ["burp-cli", "nikto", "nmap-vulscan"],
+        "triggers": ["sqli", "xss", "ssrf", "injection", "burp", "wapiti", "dalfox"],
+        "playbook": ["burp-cli", "nikto", "nmap-vulscan", "dalfox", "wapiti", "nuclei"],
     },
+    # 11. Exploração de Serviços
     {
-        "id": "waf-aware-validation",
-        "category": "protocols",
-        "description": "Estratégia de validação aware de WAF/proxy para reduzir falsos positivos.",
-        "triggers": ["waf", "cloudflare", "proxy", "modsecurity", "akamai"],
-        "playbook": ["wafw00f", "curl-headers", "nmap-vulscan"],
+        "id": "exploit-services",
+        "category": "exploitation",
+        "description": "Exploração de serviços, brute force, pós-exploração.",
+        "triggers": ["exploit", "brute", "hydra", "john", "hashcat", "cme", "responder"],
+        "playbook": ["hydra", "john", "hashcat", "CrackMapExec", "Responder"],
     },
+    # 12. Pós-Exploitation/OSINT Avançado
     {
-        "id": "osint-exposure-correlation",
-        "category": "reconnaissance",
-        "description": "Correlação de exposição externa e inteligência de ameaças.",
-        "triggers": ["shodan", "leak", "osint", "exposure", "internet"],
-        "playbook": ["shodan-cli"],
+        "id": "post-exploitation",
+        "category": "post-exploitation",
+        "description": "Pós-exploração, enumeração interna, OSINT avançado.",
+        "triggers": ["post", "internal", "osint", "loot", "pivot"],
+        "playbook": ["impacket", "theHarvester", "shodan-cli", "h8mail"],
     },
+    # 13. Evidência e Prova
     {
         "id": "evidence-proof-pack",
         "category": "coordination",
         "description": "Gate de evidência: só promove severidade alta com prova mínima reproduzível.",
         "triggers": ["critical", "high", "proof", "repro", "validation"],
         "playbook": ["burp-cli", "nikto", "nmap-vulscan"],
+    },
+    # 14. Governança & Rating
+    {
+        "id": "governance-rating",
+        "category": "governance",
+        "description": "Governança, rating FAIR, classificação de risco.",
+        "triggers": ["governance", "rating", "fair", "risk", "score"],
+        "playbook": [],
+    },
+    # 15. Narrativa Executiva
+    {
+        "id": "executive-narrative",
+        "category": "executive",
+        "description": "Sumarização executiva, narrativa e priorização.",
+        "triggers": ["executive", "narrative", "summary", "priorities"],
+        "playbook": [],
     },
 ]
 
