@@ -3456,7 +3456,7 @@ def osint_node(state: AgentState) -> AgentState:
 # Calcula FAIR+AGE por ativo e emite o rating contínuo com decomposição formal.
 # ─────────────────────────────────────────────────────────────────────────────
 def governance_node(state: AgentState) -> AgentState:
-        state["routing_next_node"] = "executive_analyst"
+    state["routing_next_node"] = "executive_analyst"
     started_at = _metric_start()
     _sync_step_to_db(state, "4. Governance")
     state["logs_terminais"].append("Governance: calculando FAIR+AGE rating")
@@ -3515,7 +3515,7 @@ def governance_node(state: AgentState) -> AgentState:
 # Se Ollama não estiver disponível, gera template estruturado sem LLM.
 # ─────────────────────────────────────────────────────────────────────────────
 def executive_analyst_node(state: AgentState) -> AgentState:
-        state["routing_next_node"] = "END"
+    state["routing_next_node"] = "END"
     started_at = _metric_start()
     _sync_step_to_db(state, "5. ExecutiveAnalysis")
     state["logs_terminais"].append("ExecutiveAnalyst: gerando narrativa executiva")
