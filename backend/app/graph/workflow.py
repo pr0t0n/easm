@@ -3623,14 +3623,7 @@ def build_graph(mode: ScanMode = "unit"):
         },
     )
 
-    graph.add_edge("strategic_planning", "supervisor")
-    graph.add_edge("asset_discovery", "supervisor")
-    graph.add_edge("threat_intel", "supervisor")
-    graph.add_edge("adversarial_hypothesis", "supervisor")
-    graph.add_edge("risk_assessment", "supervisor")
-    graph.add_edge("evidence_adjudication", "supervisor")
-    graph.add_edge("governance", "supervisor")
-    graph.add_edge("executive_analyst", "supervisor")
+    # Edges de volta para o supervisor removidos para evitar ciclos infinitos.
 
     return graph.compile(checkpointer=checkpointer)
 
