@@ -672,6 +672,7 @@ def strategic_planning_node(state: AgentState) -> AgentState:
         f"StrategicPlanning: framework=senior-cyber-analyst, confidence=60, skills={len(state.get('active_skills') or [])}, plan_initialized"
     )
     state["proxima_ferramenta"] = "asset_discovery"
+    state["routing_next_node"] = "asset_discovery"
     state["mission_index"] += 1
     _metric_end(state, "strategic_planning", started_at)
     _sync_step_to_db(state, "1. StrategicPlanning")
@@ -727,6 +728,7 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
 
 
 def evidence_adjudication_node(state: AgentState) -> AgentState:
+        state["routing_next_node"] = "governance"
     """Aplica contrato de evidência para separar hipótese de finding verificável."""
     started_at = _metric_start()
     _sync_step_to_db(state, "6. EvidenceAdjudication")
@@ -3011,6 +3013,7 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     _sync_step_to_db(state, "1. AssetDiscovery")
     current = _step_name(state)
     state["proxima_ferramenta"] = "threat_intel"
+    state["routing_next_node"] = "threat_intel"
     state["logs_terminais"].append(f"AssetDiscovery: {current}")
     seed_targets = list(state.get("input_targets") or [])
     if not seed_targets:
@@ -3278,7 +3281,8 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         )
     _append_note(state, f"RiskAssessment selecionou ferramentas: {', '.join(vuln_tools)}", phase="risk-assessment")
     _complete_delegation_task(state, "risk_assessment", f"findings={len(all_findings)}")
-    state["proxima_ferramenta"] = "governance"
+    state["proxima_ferramenta"] = "evidence_adjudication"
+    state["routing_next_node"] = "evidence_adjudication"
     state["mission_index"] += 1
     _metric_end(state, "risk_assessment", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado
@@ -3383,6 +3387,7 @@ def threat_intel_node(state: AgentState) -> AgentState:
     _sync_step_to_db(state, "2. ThreatIntel")
     current = _step_name(state)
     state["logs_terminais"].append(f"ThreatIntel: {current}")
+    state["routing_next_node"] = "risk_assessment"
 
     osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
     osint_tools = _select_tool_batch_for_iteration(state, group="threat_intel", tools=osint_tools)
@@ -3451,6 +3456,7 @@ def osint_node(state: AgentState) -> AgentState:
 # Calcula FAIR+AGE por ativo e emite o rating contínuo com decomposição formal.
 # ─────────────────────────────────────────────────────────────────────────────
 def governance_node(state: AgentState) -> AgentState:
+        state["routing_next_node"] = "executive_analyst"
     started_at = _metric_start()
     _sync_step_to_db(state, "4. Governance")
     state["logs_terminais"].append("Governance: calculando FAIR+AGE rating")
@@ -3509,6 +3515,7 @@ def governance_node(state: AgentState) -> AgentState:
 # Se Ollama não estiver disponível, gera template estruturado sem LLM.
 # ─────────────────────────────────────────────────────────────────────────────
 def executive_analyst_node(state: AgentState) -> AgentState:
+        state["routing_next_node"] = "END"
     started_at = _metric_start()
     _sync_step_to_db(state, "5. ExecutiveAnalysis")
     state["logs_terminais"].append("ExecutiveAnalyst: gerando narrativa executiva")
