@@ -3,150 +3,250 @@ from __future__ import annotations
 from typing import Any
 
 
+# Pipeline phases exposed to the frontend for progress tracking
 MISSION_ITEMS = [
-    "01. Recon - Subdomains, ports, directories",
-    "02. Vuln Scan - Nuclei, nmap scripts",
-    "03. Content - Fuzzing, backups, admin panels",
-    "04. SSL/TLS - Cipher suites, certificates, headers",
-    "05. Auth - SQLi login, brute-force, OAuth",
-    "06. Injection - XSS, SQLi, Command, XXE, SSTI",
-    "07. SSRF - Param fuzzing, cloud metadata",
-    "08. IDOR - Access control, privilege escalation",
-    "09. API - GraphQL, REST, rate limiting",
-    "10. Upload - Extension bypass, webshells",
-    "11. RCE - Deserialization, Log4j",
-    "12. Race - TOCTOU, business logic",
-    "13. Takeover - Subdomain, CNAME",
-    "14. Email - SPF, DKIM, DMARC",
-    "15. Cloud - S3, Azure, GCP, K8s",
-    "16. WebSocket - Origin, injection",
-    "17. CMS - WordPress, Joomla, Drupal",
-    "18. Links - Broken link hijacking",
-    "19. Supply Chain - JS libs, dependencies",
-    "20. Report - JSON + PDF generation",
+    "1. Autonomous Supervisor Loop & Guardrails",
+    "2. Strategic Planning & Delegation Contract",
+    "3. Asset Discovery & Exposure Mapping",
+    "4. Threat Intelligence Correlation",
+    "5. Adversarial Hypothesis & Thinking Checkpoint",
+    "6. Risk Assessment & Exploit Validation",
+    "7. Evidence Adjudication & Reproduction Gate",
+    "8. Governance & Rating (FAIR + AGE)",
+    "9. Executive Narrative & Priorities",
+]
+
+# Detailed pentesting phases executed within nodes (xalgorix-inspired 22-phase pipeline)
+PENTEST_PHASES = [
+    # Phase 1 – Recon
+    {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",
+     "tools": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"]},
+    {"id": "P02", "title": "Port & Service Scan", "node": "asset_discovery",
+     "tools": ["naabu", "nmap", "masscan", "httpx"]},
+    {"id": "P03", "title": "Web Crawling & JS Extraction", "node": "asset_discovery",
+     "tools": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper"]},
+    {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
+     "tools": ["arjun", "paramspider", "ffuf"]},
+    # Phase 2 – Tech Fingerprint
+    {"id": "P05", "title": "HTTP/TLS Fingerprint", "node": "asset_discovery",
+     "tools": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]},
+    {"id": "P06", "title": "WAF Detection & Evasion Profile", "node": "asset_discovery",
+     "tools": ["wafw00f", "curl-headers"]},
+    # Phase 3 – OSINT
+    {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
+    {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
+     "tools": ["theHarvester"]},
+    {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
+     "tools": ["subjack", "nuclei"]},
+    {"id": "P10", "title": "Cloud Asset Exposure (S3/GCP/Azure)", "node": "threat_intel",
+     "tools": ["nuclei", "shodan-cli", "trufflehog"]},
+    # Phase 4 – Vulnerability Assessment
+    {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
+     "tools": ["nuclei", "nmap-vulscan"]},
+    {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
+     "tools": ["sqlmap", "dalfox", "wapiti", "burp-cli", "nikto"]},
+    {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
+     "tools": ["nuclei", "burp-cli", "interactsh-client"]},
+    {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
+     "tools": ["hydra", "jwt_tool", "nuclei", "burp-cli"]},
+    {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
+     "tools": ["ffuf", "gobuster", "feroxbuster", "dirsearch"]},
+    {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
+     "tools": ["nuclei", "burp-cli", "arjun", "wapiti"]},
+    {"id": "P17", "title": "Upload & WebShell Bypass", "node": "risk_assessment",
+     "tools": ["nuclei", "burp-cli"]},
+    {"id": "P18", "title": "SSL/TLS Weakness & Cipher Audit", "node": "risk_assessment",
+     "tools": ["sslscan", "nmap", "testssl"]},
+    {"id": "P19", "title": "IDOR & Access Control Flaws", "node": "risk_assessment",
+     "tools": ["burp-cli", "nuclei"]},
+    {"id": "P20", "title": "CMS-Specific Scan (WP/Joomla/Drupal)", "node": "risk_assessment",
+     "tools": ["wpscan", "nuclei", "nikto"]},
+    # Phase 5 – Code/Supply Chain
+    {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
+     "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
+    {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
+     "tools": ["retire", "trivy", "eslint", "semgrep"]},
 ]
 
 
+# Strix-inspired modular skill catalog (8 categories, community-extendable)
 SKILL_CATALOG: list[dict[str, Any]] = [
-    # 1. Supervisor Loop & Guardrails
+    # ── CATEGORY 1: RECONNAISSANCE ───────────────────────────────────────────
     {
-        "id": "supervisor-guardrails",
-        "category": "orchestration",
-        "description": "Supervisão autônoma, controle de iteração, adaptação e guardrails.",
-        "triggers": ["supervisor", "loop", "autonomous", "guardrail", "iteration"],
-        "playbook": [],
-    },
-    # 2. Planejamento Estratégico
-    {
-        "id": "strategic-planning",
-        "category": "planning",
-        "description": "Planejamento tático, definição de fases e contratos de execução.",
-        "triggers": ["plan", "strategy", "contract", "delegation"],
-        "playbook": [],
-    },
-    # 3. Descoberta de Ativos
-    {
-        "id": "asset-discovery",
+        "id": "recon-subdomain-enum",
         "category": "reconnaissance",
-        "description": "Enumeração de ativos, subdomínios e mapeamento de superfície.",
-        "triggers": ["domain", "subdomain", "dns", "asset", "surface", "recon"],
-        "playbook": ["subfinder", "findomain", "assetfinder", "amass", "massdns", "shuffledns", "chaos", "dnsx", "hakrawler", "gau", "waybackurls", "paramspider"],
+        "description": "Enumeração de subdomínios, validação DNS e expansão de superfície.",
+        "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder", "dnsx"],
+        "playbook": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"],
+        "phases": ["P01"],
     },
-    # 4. OSINT & Exposição
     {
-        "id": "osint-exposure",
-        "category": "osint",
-        "description": "Coleta OSINT, leaks, exposição e inteligência externa.",
-        "triggers": ["osint", "shodan", "leak", "exposure", "internet", "theharvester"],
-        "playbook": ["shodan-cli", "theHarvester", "h8mail", "metagoofil"],
+        "id": "recon-port-service",
+        "category": "reconnaissance",
+        "description": "Enumeração de portas e fingerprint de serviços expostos.",
+        "triggers": ["port", "service", "banner", "naabu", "nmap", "masscan"],
+        "playbook": ["naabu", "nmap", "masscan", "httpx"],
+        "phases": ["P02"],
     },
-    # 5. Enumeração de Serviços
     {
-        "id": "service-enum",
-        "category": "services",
-        "description": "Enumeração de serviços, fingerprint, banners e portas.",
-        "triggers": ["service", "port", "banner", "fingerprint", "nmap", "naabu", "masscan"],
-        "playbook": ["nmap", "naabu", "masscan", "httpx", "whatweb", "sslscan"],
+        "id": "recon-web-crawl",
+        "category": "reconnaissance",
+        "description": "Crawling web, extração de JavaScript, endpoints e parâmetros.",
+        "triggers": ["crawl", "js", "endpoint", "param", "katana", "gau", "wayback"],
+        "playbook": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider"],
+        "phases": ["P03", "P04"],
     },
-    # 6. Enumeração Web/HTTP
+    # ── CATEGORY 2: TECHNOLOGIES ─────────────────────────────────────────────
     {
-        "id": "web-enum",
-        "category": "web",
-        "description": "Enumeração de diretórios, arquivos, endpoints e crawling.",
-        "triggers": ["web", "http", "dir", "endpoint", "crawl", "ffuf", "gobuster", "feroxbuster", "dirsearch"],
-        "playbook": ["ffuf", "gobuster", "feroxbuster", "dirsearch", "katana", "gau", "hakrawler", "waymore"],
-    },
-    # 7. Fingerprint HTTP/TLS
-    {
-        "id": "http-fingerprint",
+        "id": "tech-http-fingerprint",
         "category": "technologies",
-        "description": "Fingerprint de serviços HTTP/TLS, headers e tecnologias.",
-        "triggers": ["http", "https", "header", "tls", "ssl", "tech", "whatweb", "nikto"],
-        "playbook": ["curl-headers", "httpx", "whatweb", "nikto"],
+        "description": "Fingerprint HTTP/TLS, headers de segurança e detecção de WAF.",
+        "triggers": ["http", "https", "header", "tls", "ssl", "whatweb", "nikto", "waf", "cloudflare"],
+        "playbook": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
+        "phases": ["P05", "P06"],
     },
-    # 8. SAST/Secrets/Deps
     {
-        "id": "sast-secrets-deps",
-        "category": "code",
-        "description": "SAST, secrets, dependências e análise de código.",
-        "triggers": ["sast", "secret", "dep", "semgrep", "bandit", "gitleaks", "trufflehog"],
-        "playbook": ["semgrep", "bandit", "gitleaks", "trufflehog", "retire", "eslint", "jshint"],
+        "id": "tech-cms-fingerprint",
+        "category": "technologies",
+        "description": "Detecção e scan de CMS (WordPress, Joomla, Drupal).",
+        "triggers": ["cms", "wordpress", "wp", "joomla", "drupal", "wpscan"],
+        "playbook": ["whatweb", "wpscan", "nuclei"],
+        "phases": ["P20"],
     },
-    # 9. Validação de WAF/Proxy
+    # ── CATEGORY 3: VULNERABILITIES ──────────────────────────────────────────
+    {
+        "id": "vuln-injection",
+        "category": "vulnerabilities",
+        "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível.",
+        "triggers": ["sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox", "burp"],
+        "playbook": ["sqlmap", "dalfox", "wapiti", "burp-cli", "nikto"],
+        "phases": ["P12"],
+    },
+    {
+        "id": "vuln-ssrf-redirect",
+        "category": "vulnerabilities",
+        "description": "Detecção de SSRF, open redirect e server-side interaction.",
+        "triggers": ["ssrf", "redirect", "interaction", "interactsh", "oob"],
+        "playbook": ["nuclei", "burp-cli", "interactsh-client"],
+        "phases": ["P13"],
+    },
+    {
+        "id": "vuln-auth-bypass",
+        "category": "vulnerabilities",
+        "description": "Bypass de autenticação, brute-force, JWT/OAuth e MFA abuse.",
+        "triggers": ["auth", "bypass", "brute", "jwt", "oauth", "token", "hydra"],
+        "playbook": ["hydra", "jwt_tool", "nuclei", "burp-cli"],
+        "phases": ["P14"],
+    },
+    {
+        "id": "vuln-directory-enum",
+        "category": "vulnerabilities",
+        "description": "Enumeração de diretórios, arquivos ocultos e painéis admin.",
+        "triggers": ["dir", "path", "admin", "backup", "ffuf", "gobuster", "dirsearch", "feroxbuster"],
+        "playbook": ["ffuf", "gobuster", "feroxbuster", "dirsearch"],
+        "phases": ["P15"],
+    },
+    {
+        "id": "vuln-api-graphql",
+        "category": "vulnerabilities",
+        "description": "Testes de API REST/GraphQL, rate limiting e endpoints expostos.",
+        "triggers": ["api", "rest", "graphql", "rate", "endpoint", "json"],
+        "playbook": ["nuclei", "burp-cli", "arjun", "wapiti"],
+        "phases": ["P16"],
+    },
+    {
+        "id": "vuln-nuclei-cve",
+        "category": "vulnerabilities",
+        "description": "Scan de CVEs e misconfigurations com Nuclei.",
+        "triggers": ["cve", "nuclei", "misconfiguration", "exploit", "known"],
+        "playbook": ["nuclei", "nmap-vulscan"],
+        "phases": ["P11"],
+    },
+    {
+        "id": "vuln-ssl-tls",
+        "category": "protocols",
+        "description": "Auditoria de SSL/TLS, cipher suites fracos e certificados.",
+        "triggers": ["ssl", "tls", "cipher", "cert", "sslscan", "testssl"],
+        "playbook": ["sslscan", "nmap", "testssl"],
+        "phases": ["P18"],
+    },
+    # ── CATEGORY 4: OSINT ────────────────────────────────────────────────────
+    {
+        "id": "osint-exposure-intel",
+        "category": "osint",
+        "description": "Inteligência de exposição: Shodan, theHarvester, leaks.",
+        "triggers": ["shodan", "leak", "osint", "exposure", "internet", "theharvester"],
+        "playbook": ["shodan-cli", "theHarvester", "h8mail"],
+        "phases": ["P07"],
+    },
+    {
+        "id": "osint-email-infra",
+        "category": "osint",
+        "description": "Postura de segurança de e-mail: SPF, DKIM, DMARC.",
+        "triggers": ["email", "spf", "dkim", "dmarc", "mx", "mail"],
+        "playbook": ["theHarvester"],
+        "phases": ["P08"],
+    },
+    {
+        "id": "osint-subdomain-takeover",
+        "category": "osint",
+        "description": "Detecção de takeover de subdomínios via CNAME dangling.",
+        "triggers": ["takeover", "cname", "subjack", "dangling"],
+        "playbook": ["subjack", "nuclei"],
+        "phases": ["P09"],
+    },
+    {
+        "id": "osint-cloud-exposure",
+        "category": "osint",
+        "description": "Exposição de assets em cloud: S3, GCP buckets, Azure blobs.",
+        "triggers": ["cloud", "s3", "bucket", "azure", "gcp", "aws", "k8s", "kubernetes"],
+        "playbook": ["nuclei", "shodan-cli", "trufflehog"],
+        "phases": ["P10"],
+    },
+    # ── CATEGORY 5: CODE ANALYSIS ────────────────────────────────────────────
+    {
+        "id": "code-secrets-sast",
+        "category": "code",
+        "description": "Análise estática, SAST e detecção de secrets/credenciais expostas.",
+        "triggers": ["sast", "secret", "credential", "key", "token", "semgrep", "bandit", "trufflehog", "gitleaks"],
+        "playbook": ["semgrep", "bandit", "trufflehog", "gitleaks"],
+        "phases": ["P21"],
+    },
+    {
+        "id": "code-supply-chain-deps",
+        "category": "code",
+        "description": "Análise de dependências e risco de supply chain.",
+        "triggers": ["dep", "supply", "chain", "npm", "retire", "trivy", "eslint"],
+        "playbook": ["retire", "trivy", "eslint", "semgrep"],
+        "phases": ["P22"],
+    },
+    # ── CATEGORY 6: PROTOCOLS ────────────────────────────────────────────────
     {
         "id": "waf-aware-validation",
         "category": "protocols",
         "description": "Validação aware de WAF/proxy para reduzir falsos positivos.",
-        "triggers": ["waf", "cloudflare", "proxy", "modsecurity", "akamai"],
-        "playbook": ["wafw00f", "curl-headers", "nmap-vulscan"],
+        "triggers": ["waf", "cloudflare", "proxy", "modsecurity", "akamai", "imperva"],
+        "playbook": ["wafw00f", "curl-headers", "nuclei"],
+        "phases": ["P06"],
     },
-    # 10. Testes de Vulnerabilidade Web
-    {
-        "id": "vuln-web-injection",
-        "category": "vulnerabilities",
-        "description": "Validação progressiva de injeção e falhas web com evidência reproduzível.",
-        "triggers": ["sqli", "xss", "ssrf", "injection", "burp", "wapiti", "dalfox"],
-        "playbook": ["burp-cli", "nikto", "nmap-vulscan", "dalfox", "wapiti", "nuclei"],
-    },
-    # 11. Exploração de Serviços
-    {
-        "id": "exploit-services",
-        "category": "exploitation",
-        "description": "Exploração de serviços, brute force, pós-exploração.",
-        "triggers": ["exploit", "brute", "hydra", "john", "hashcat", "cme", "responder"],
-        "playbook": ["hydra", "john", "hashcat", "CrackMapExec", "Responder"],
-    },
-    # 12. Pós-Exploitation/OSINT Avançado
-    {
-        "id": "post-exploitation",
-        "category": "post-exploitation",
-        "description": "Pós-exploração, enumeração interna, OSINT avançado.",
-        "triggers": ["post", "internal", "osint", "loot", "pivot"],
-        "playbook": ["impacket", "theHarvester", "shodan-cli", "h8mail"],
-    },
-    # 13. Evidência e Prova
+    # ── CATEGORY 7: TOOLING ──────────────────────────────────────────────────
     {
         "id": "evidence-proof-pack",
-        "category": "coordination",
-        "description": "Gate de evidência: só promove severidade alta com prova mínima reproduzível.",
-        "triggers": ["critical", "high", "proof", "repro", "validation"],
-        "playbook": ["burp-cli", "nikto", "nmap-vulscan"],
+        "category": "tooling",
+        "description": "Gate de evidência: só promove severidade alta com prova reproduzível.",
+        "triggers": ["critical", "high", "proof", "repro", "validation", "evidence"],
+        "playbook": ["burp-cli", "nuclei", "interactsh-client"],
+        "phases": [],
     },
-    # 14. Governança & Rating
+    # ── CATEGORY 8: ORCHESTRATION ────────────────────────────────────────────
     {
-        "id": "governance-rating",
-        "category": "governance",
-        "description": "Governança, rating FAIR, classificação de risco.",
-        "triggers": ["governance", "rating", "fair", "risk", "score"],
+        "id": "supervisor-guardrails",
+        "category": "orchestration",
+        "description": "Supervisão autônoma, circuit breaker, WAF-aware e guardrails.",
+        "triggers": ["supervisor", "loop", "autonomous", "guardrail", "iteration", "circuit"],
         "playbook": [],
-    },
-    # 15. Narrativa Executiva
-    {
-        "id": "executive-narrative",
-        "category": "executive",
-        "description": "Sumarização executiva, narrativa e priorização.",
-        "triggers": ["executive", "narrative", "summary", "priorities"],
-        "playbook": [],
+        "phases": [],
     },
 ]
 
@@ -155,12 +255,30 @@ def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
     return {
         "mode": "autonomous-supervisor",
         "max_iterations": int(max_iterations),
-        "loop": ["think", "delegate", "test", "observe", "adapt", "validate"],
+        "loop": ["know", "think", "test", "validate", "adapt"],
+        "phases": PENTEST_PHASES,
         "execution_control": {
             "approaching_limit_ratio": 0.85,
             "force_finalize_remaining": 2,
             "pause_on_stagnation": True,
             "stagnation_threshold": 3,
+        },
+        # xalgorix-inspired circuit breaker
+        "circuit_breaker": {
+            "tool_failure_threshold": 5,
+            "cooldown_seconds": 60,
+            "consecutive_llm_failure_limit": 25,
+            "llm_rate_limit_backoff_minutes": 30,
+        },
+        # strix-inspired scope boundary
+        "scope_policy": {
+            "enforce_authorized_targets": True,
+            "out_of_scope_action": "skip_and_log",
+        },
+        # xalgorix-inspired finish gate
+        "finish_gate": {
+            "minimum_phases_before_finish": ["asset_discovery", "threat_intel", "risk_assessment"],
+            "require_executive_summary": True,
         },
         "evidence_gate": {
             "critical_high_require_verified": True,
@@ -170,20 +288,23 @@ def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
     }
 
 
-def _text_blob(target: str, findings: list[dict[str, Any]], target_type: str, discovered_ports: list[int]) -> str:
+def _text_blob(
+    target: str,
+    findings: list[dict[str, Any]],
+    target_type: str,
+    discovered_ports: list[int],
+) -> str:
     chunks = [str(target or ""), str(target_type or "")]
     if discovered_ports:
         chunks.append("ports:" + ",".join(str(p) for p in discovered_ports[:12]))
     for finding in findings[:40]:
         details = finding.get("details") or {}
-        chunks.extend(
-            [
-                str(finding.get("title") or ""),
-                str(finding.get("severity") or ""),
-                str(details.get("tool") or ""),
-                str(details.get("evidence") or ""),
-            ]
-        )
+        chunks.extend([
+            str(finding.get("title") or ""),
+            str(finding.get("severity") or ""),
+            str(details.get("tool") or ""),
+            str(details.get("evidence") or ""),
+        ])
     return " ".join(chunks).lower()
 
 
@@ -200,24 +321,21 @@ def select_mission_skills(
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for skill in SKILL_CATALOG:
-        score = 0
-        for trigger in skill.get("triggers") or []:
-            if str(trigger).lower() in blob:
-                score += 1
+        score = sum(1 for trigger in (skill.get("triggers") or []) if str(trigger).lower() in blob)
         if score > 0:
             scored.append((score, skill))
 
-    # Garante diversidade mínima de base para cenários sem sinais fortes.
+    # Guaranteed baseline when no signals yet
     if not scored:
         defaults = [
             "recon-subdomain-enum",
-            "service-fingerprint-http",
-            "osint-exposure-correlation",
-            "vuln-web-injection",
-            "evidence-proof-pack",
+            "recon-port-service",
+            "tech-http-fingerprint",
+            "vuln-nuclei-cve",
+            "osint-exposure-intel",
         ]
         by_id = {item["id"]: item for item in SKILL_CATALOG}
-        return [by_id[item_id] for item_id in defaults[:max_skills] if item_id in by_id]
+        return [by_id[sid] for sid in defaults[:max_skills] if sid in by_id]
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     unique: list[dict[str, Any]] = []

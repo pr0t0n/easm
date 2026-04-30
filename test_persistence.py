@@ -6,7 +6,7 @@ import requests
 import time
 from datetime import datetime
 
-BASE_URL = "http://backend:8000"
+BASE_URL = "http://localhost:8001"
 TARGET = "validcertificadora.com.br"
 TEST_EMAIL = "admin@easm.local"
 TEST_PASSWORD = "password"

@@ -1,10 +1,12 @@
-version: '3.9'
-
 x-optional-env-file: &optional_env_file
   - path: ./.env
     required: false
 
 services:
+  # ─────────────────────────────────────────────────────────────────
+  # Infrastructure: Database, Cache, LLM
+  # ─────────────────────────────────────────────────────────────────
+
   postgres:
     image: postgres:16-alpine
     container_name: pentest_postgres
@@ -105,6 +107,10 @@ services:
       timeout: 8s
       retries: 8
 
+  # ─────────────────────────────────────────────────────────────────
+  # Backend API
+  # ─────────────────────────────────────────────────────────────────
+
   backend:
     build:
       context: ./backend
@@ -137,6 +143,10 @@ services:
     profiles: ["dev"]
     volumes:
       - ./backend:/app
+
+  # ─────────────────────────────────────────────────────────────────
+  # Workers: RECON, OSINT, VULN
+  # ─────────────────────────────────────────────────────────────────
 
   worker_recon:
     build:
@@ -240,6 +250,68 @@ services:
           memory: 1g
           cpus: "1"
 
+  worker_exploit:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pentest_worker_exploit
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.exploit,worker.scheduled.exploit -n exploit@%h
+    env_file: *optional_env_file
+    environment:
+      APP_ENV: development
+      WORKER_MODE: unit
+      BURP_API_HOST: burp_rest
+      BURP_API_PORT: "8090"
+      TZ: America/Sao_Paulo
+    profiles: ["dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2"
+        reservations:
+          memory: 512m
+          cpus: "1"
+
+  worker_code:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pentest_worker_code
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.code,worker.scheduled.code -n code@%h
+    env_file: *optional_env_file
+    environment:
+      APP_ENV: development
+      WORKER_MODE: unit
+      TZ: America/Sao_Paulo
+    profiles: ["dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    deploy:
+      resources:
+        limits:
+          memory: 1.5g
+          cpus: "1.5"
+        reservations:
+          memory: 512m
+          cpus: "0.5"
+
   celery_beat:
     build:
       context: ./backend
@@ -279,10 +351,18 @@ services:
         condition: service_started
       worker_vuln:
         condition: service_started
+      worker_exploit:
+        condition: service_started
+      worker_code:
+        condition: service_started
     ports:
       - "${FLOWER_HOST_PORT:-5555}:5555"
     volumes:
       - ./backend:/app
+
+  # ─────────────────────────────────────────────────────────────────
+  # Frontend
+  # ─────────────────────────────────────────────────────────────────
 
   frontend:
     build:
