@@ -21,7 +21,14 @@ export default function Navbar() {
         <div className="flex items-center gap-3">
           <Link
             to="/scan"
-            className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold shadow-[0_0_18px_rgba(26,54,93,0.2)]"
+            className="rounded-lg px-3 py-2 text-sm font-semibold"
+            style={{
+              background: "var(--primary)",
+              color: "#ffffff",
+              boxShadow: "0 1px 2px rgba(254,123,2,0.2)",
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--primary-hover)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "var(--primary)")}
           >
             Novo Scan
           </Link>

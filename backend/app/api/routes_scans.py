@@ -3227,6 +3227,27 @@ def scan_autonomy(scan_id: int, db: Session = Depends(get_db), current_user: Use
     )
 
 
+@router.get("/scans/{scan_id}/phase-monitor")
+def scan_phase_monitor(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cross-references state_data, executed_tool_runs and findings into a per-phase status view.
+    Returns 22 detailed phases + 8 capability nodes + tool inventory + detected issues."""
+    from app.services.phase_monitor import build_phase_monitor
+
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    return build_phase_monitor(db, job)
+
+
 @router.get("/scans/{scan_id}/report", response_model=ReportResponse)
 def scan_report(
     scan_id: int,

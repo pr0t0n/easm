@@ -554,21 +554,18 @@ def supervisor_node(state: AgentState) -> AgentState:
         next_node = "evidence_adjudication"
     elif "governance" not in completed:
         next_node = "governance"
+    elif "executive_analyst" not in completed:
+        # Após governance, sempre rodar executive_analyst para fechar com narrativa.
+        state["objective_met"] = state.get("objective_met") or has_strong_evidence
+        termination_reason = termination_reason or "post_governance_executive_close"
+        next_node = "executive_analyst"
     else:
-        # Loop adaptativo após primeiro ciclo completo
+        # Loop adaptativo após primeiro ciclo completo (incluindo executive_analyst)
         if pending_validation:
             next_node = "risk_assessment"
-        elif has_strong_evidence and high_signals > 0 and "executive_analyst" not in completed:
-            state["objective_met"] = True
-            termination_reason = "validated_high_signal_findings"
-            next_node = "executive_analyst"
         else:
-            if confidence >= ANALYST_CONFIDENCE_THRESHOLDS["high"]:
-                next_node = "risk_assessment"
-            elif confidence >= ANALYST_CONFIDENCE_THRESHOLDS["medium"]:
-                next_node = "adversarial_hypothesis"
-            else:
-                next_node = "threat_intel"
+            next_node = "END"
+            termination_reason = termination_reason or "full_cycle_completed"
 
     ctrl = dict(state.get("execution_control") or {})
     remaining = int(ctrl.get("remaining_iterations", max_iterations))
@@ -580,14 +577,16 @@ def supervisor_node(state: AgentState) -> AgentState:
         next_node = "governance" if "governance" not in completed else "executive_analyst"
         termination_reason = termination_reason or "forced_finalize_guardrail"
 
-    # Delegation override only after full first cycle (all essential phases completed)
+    # Delegation override only after FULL cycle (essential + executive_analyst).
+    # Sem isso, delegação atropelava o caminho sequencial e voltava para fases já feitas.
     essential_phases = {"strategic_planning", "asset_discovery", "threat_intel", "adversarial_hypothesis", "risk_assessment", "evidence_adjudication", "governance"}
-    if essential_phases.issubset(set(completed)):
+    full_cycle_done = essential_phases.issubset(set(completed)) and "executive_analyst" in completed
+    if full_cycle_done:
         for delegated in list(state.get("delegated_tasks") or []):
             if str(delegated.get("status") or "") != "pending":
                 continue
             delegated_node = str(delegated.get("node") or "")
-            if delegated_node in essential_phases | {"executive_analyst"}:
+            if delegated_node in essential_phases:
                 next_node = delegated_node
                 break
 

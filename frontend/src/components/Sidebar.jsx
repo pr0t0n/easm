@@ -9,15 +9,14 @@ export default function Sidebar() {
   const navGroups = [
     {
       title: "Overview",
-      items: [
-        { to: "/", label: "Dashboard", adminOnly: false },
-      ],
+      items: [{ to: "/", label: "Dashboard", adminOnly: false }],
     },
     {
       title: "Pentest",
       items: [
         { to: "/targets", label: "Targets", adminOnly: false },
         { to: "/scan", label: "Scans", adminOnly: true },
+        { to: "/phase-monitor", label: "Phase Monitor", adminOnly: true },
         { to: "/agendamento", label: "Schedules", adminOnly: true },
       ],
     },
@@ -54,10 +53,42 @@ export default function Sidebar() {
   };
 
   return (
-    <aside className="app-sidebar w-full border-b p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r">
-      <div className="app-sidebar-surface rounded-xl border p-4">
-        <h1 className="font-display text-xl font-bold tracking-tight text-white">Pentest.io</h1>
-        <p className="app-sidebar-muted mt-1 text-xs">Enterprise Security Platform</p>
+    <aside
+      className="w-full p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r"
+      style={{
+        background: "var(--sidebar-bg)",
+        borderColor: "var(--sidebar-border)",
+        borderBottomWidth: 1,
+        borderRightWidth: 1,
+      }}
+    >
+      <div
+        className="rounded-xl p-4"
+        style={{
+          background: "var(--bg-muted)",
+          border: "1px solid var(--border)",
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 999,
+              background: "var(--primary)",
+              display: "inline-block",
+            }}
+          />
+          <h1
+            className="font-display text-xl font-bold tracking-tight"
+            style={{ color: "var(--text-primary)" }}
+          >
+            Pentest.io
+          </h1>
+        </div>
+        <p className="mt-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
+          Enterprise Security Platform
+        </p>
       </div>
 
       <nav className="mt-4 space-y-4">
@@ -65,20 +96,54 @@ export default function Sidebar() {
           const visibleItems = group.items.filter((item) => !item.adminOnly || isAdmin);
           if (visibleItems.length === 0) return null;
           return (
-            <div key={group.title} className="app-sidebar-surface rounded-xl border p-2">
-              <p className="app-sidebar-muted px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]">{group.title}</p>
+            <div key={group.title}>
+              <p
+                className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]"
+                style={{ color: "var(--text-tertiary)" }}
+              >
+                {group.title}
+              </p>
               <div className="mt-1 space-y-1">
                 {visibleItems.map((item) => (
                   <NavLink
                     key={item.to}
                     to={item.to}
-                    className={({ isActive }) =>
-                      `block rounded-lg border px-3 py-2 text-sm font-medium transition-all duration-200 ${
-                        isActive
-                          ? "border-[#63b3ed] bg-[#2c5282] text-white shadow-[0_0_0_1px_rgba(99,179,237,0.5)]"
-                          : "app-sidebar-text border-transparent hover:border-[#2c5282] hover:bg-[#2a4f7a]"
-                      }`
+                    style={({ isActive }) =>
+                      isActive
+                        ? {
+                            display: "block",
+                            borderRadius: 8,
+                            border: "1px solid transparent",
+                            padding: "8px 12px",
+                            fontSize: 14,
+                            fontWeight: 500,
+                            background: "rgba(254,123,2,0.10)",
+                            color: "var(--primary)",
+                            borderColor: "rgba(254,123,2,0.25)",
+                          }
+                        : {
+                            display: "block",
+                            borderRadius: 8,
+                            border: "1px solid transparent",
+                            padding: "8px 12px",
+                            fontSize: 14,
+                            fontWeight: 500,
+                            color: "var(--text-secondary)",
+                            background: "transparent",
+                          }
                     }
+                    onMouseEnter={(e) => {
+                      if (!e.currentTarget.style.color.includes("254")) {
+                        e.currentTarget.style.background = "var(--bg-muted)";
+                        e.currentTarget.style.color = "var(--text-primary)";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!e.currentTarget.style.color.includes("254")) {
+                        e.currentTarget.style.background = "transparent";
+                        e.currentTarget.style.color = "var(--text-secondary)";
+                      }
+                    }}
                   >
                     {item.label}
                   </NavLink>
@@ -91,7 +156,22 @@ export default function Sidebar() {
 
       <button
         onClick={logout}
-        className="app-sidebar-text mt-4 w-full rounded-lg border border-[#2c5282] bg-transparent px-3 py-2 text-sm font-medium hover:border-[#63b3ed] hover:text-[#bfdbfe]"
+        className="mt-6 w-full rounded-lg px-3 py-2 text-sm font-medium"
+        style={{
+          background: "transparent",
+          border: "1px solid var(--border)",
+          color: "var(--text-secondary)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = "var(--primary)";
+          e.currentTarget.style.color = "var(--text-primary)";
+          e.currentTarget.style.background = "var(--bg-muted)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = "var(--border)";
+          e.currentTarget.style.color = "var(--text-secondary)";
+          e.currentTarget.style.background = "transparent";
+        }}
       >
         Sair
       </button>

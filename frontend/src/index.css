@@ -4,46 +4,69 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Lovable-inspired SaaS palette.
+ * Light, warm off-white base with orange CTAs and soft blue interactions.
+ */
 :root {
-  --bg-main: #0a0f1e;
-  --surface: #0d1527;
-  --surface-elevated: #111827;
-  --primary: #3b82f6;
-  --primary-light: #60a5fa;
-  --secondary: #22d3ee;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-tertiary: #64748b;
-  --border: #1e293b;
-  --border-light: #243044;
+  --bg-main: #fcfbf8;
+  --bg-muted: #f0ebe7;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-strong: #ffffff;
+  --surface-soft: #faf8f4;
+
+  --primary: #fe7b02;
+  --primary-hover: #e96a00;
+  --primary-light: #ffb070;
+  --secondary: #4b73ff;
+  --accent: #ff66f4;
+
+  --text-primary: #1c1c1c;
+  --text-secondary: #3d3d3d;
+  --text-tertiary: #6b6b6b;
+
+  --border: #e5dcd5;
+  --border-light: #efe7e0;
+  --border-strong: #d8cdc4;
+
   --bg-app-gradient:
-    radial-gradient(circle at 10% 10%, rgba(59, 130, 246, 0.15), transparent 35%),
-    radial-gradient(circle at 90% 0%, rgba(34, 211, 238, 0.12), transparent 26%),
-    linear-gradient(180deg, #060b17 0%, #0a0f1e 100%);
-  --surface-strong: #0d1527;
-  --surface-soft: #111827;
-  --header-bg: rgba(10, 15, 30, 0.92);
-  --header-border: #1e293b;
-  --header-title: #f1f5f9;
-  --header-subtitle: #94a3b8;
-  --btn-primary-bg: #1d4ed8;
-  --btn-primary-hover: #2563eb;
-  --btn-primary-border: #3b82f6;
-  --btn-secondary-bg: #111827;
-  --btn-secondary-border: #243044;
-  --btn-secondary-text: #cbd5e1;
-  --sidebar-bg: #060b17;
-  --sidebar-surface: #0d1527;
-  --sidebar-border: #1e293b;
-  --sidebar-text: #e2e8f0;
-  --sidebar-muted: #94a3b8;
-  --table-row-hover: rgba(30, 41, 59, 0.5);
-  --override-slate-bg: #111827;
-  --override-slate-muted: #94a3b8;
-  --override-slate-dim: #64748b;
-  --input-bg: #111827;
-  --input-border: #243044;
-  --input-focus: #3b82f6;
+    radial-gradient(circle at 12% 10%, rgba(254, 123, 2, 0.06), transparent 35%),
+    radial-gradient(circle at 88% 0%, rgba(75, 115, 255, 0.05), transparent 28%),
+    linear-gradient(180deg, #fcfbf8 0%, #f7f4ee 100%);
+
+  --header-bg: rgba(255, 255, 255, 0.92);
+  --header-border: var(--border);
+  --header-title: var(--text-primary);
+  --header-subtitle: var(--text-secondary);
+
+  --btn-primary-bg: #fe7b02;
+  --btn-primary-hover: #e96a00;
+  --btn-primary-border: #fe7b02;
+  --btn-secondary-bg: #ffffff;
+  --btn-secondary-border: var(--border);
+  --btn-secondary-text: var(--text-secondary);
+
+  --sidebar-bg: #ffffff;
+  --sidebar-surface: #fcfbf8;
+  --sidebar-border: var(--border);
+  --sidebar-text: var(--text-primary);
+  --sidebar-muted: var(--text-tertiary);
+
+  --table-row-hover: rgba(254, 123, 2, 0.05);
+
+  --override-slate-bg: #ffffff;
+  --override-slate-muted: var(--text-secondary);
+  --override-slate-dim: var(--text-tertiary);
+
+  --input-bg: #ffffff;
+  --input-border: var(--border);
+  --input-focus: var(--primary);
+}
+
+/* Force light theme regardless of `data-theme="dark"` legacy attribute. */
+html[data-theme="dark"] {
+  color-scheme: light;
 }
 
 body {
@@ -53,6 +76,8 @@ body {
   background: var(--bg-app-gradient);
   background-attachment: fixed;
   letter-spacing: 0.003em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
@@ -64,8 +89,8 @@ body {
 .panel {
   @apply border rounded-lg;
   border-color: var(--border);
-  background: linear-gradient(135deg, var(--surface-strong) 0%, var(--surface-soft) 100%);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(28, 28, 28, 0.04), 0 4px 12px rgba(28, 28, 28, 0.04);
 }
 
 .panel-header {
@@ -108,14 +133,14 @@ textarea {
 input:not([type="checkbox"]):not([type="radio"]):hover,
 select:hover,
 textarea:hover {
-  border-color: var(--border) !important;
+  border-color: var(--border-strong) !important;
 }
 
 input:not([type="checkbox"]):not([type="radio"]):focus,
 select:focus,
 textarea:focus {
   border-color: var(--input-focus) !important;
-  box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.18);
+  box-shadow: 0 0 0 3px rgba(254, 123, 2, 0.18);
   outline: none;
   background-color: var(--input-bg) !important;
 }
@@ -123,20 +148,20 @@ textarea:focus {
 button:focus-visible,
 a:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.22);
+  box-shadow: 0 0 0 3px rgba(254, 123, 2, 0.22);
 }
 
-/* Primary buttons */
+/* Primary buttons (orange CTA) */
 button.btn-primary {
   @apply px-4 py-2 rounded-lg font-medium text-white;
-  background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
-  box-shadow: 0 2px 8px rgba(26, 54, 93, 0.3);
-  transition: all 200ms ease;
+  background: var(--primary);
+  box-shadow: 0 1px 2px rgba(254, 123, 2, 0.15);
+  transition: all 180ms ease;
 }
 
 button.btn-primary:hover {
-  box-shadow: 0 4px 12px rgba(26, 54, 93, 0.35);
-  transform: translateY(-1px);
+  background: var(--primary-hover);
+  box-shadow: 0 2px 8px rgba(254, 123, 2, 0.25);
 }
 
 button.btn-primary:disabled {
@@ -150,31 +175,33 @@ button.btn-secondary {
   color: var(--btn-secondary-text);
   background: var(--btn-secondary-bg);
   border-color: var(--btn-secondary-border);
-  transition: all 200ms ease;
+  transition: all 180ms ease;
 }
 
 button.btn-secondary:hover {
-  border-color: var(--primary-light);
-  background-color: color-mix(in srgb, var(--btn-secondary-bg) 85%, #ffffff 15%) !important;
+  border-color: var(--primary);
+  color: var(--text-primary);
+  background-color: var(--bg-muted) !important;
 }
 
 /* Danger buttons */
 button.btn-danger {
-  @apply px-4 py-2 rounded-lg font-medium text-rose-200 bg-rose-900/30 border border-rose-800/50 hover:bg-rose-900/50;
-  transition: all 200ms ease;
+  @apply px-4 py-2 rounded-lg font-medium text-white;
+  background: #d64545;
+  border: 1px solid #c53030;
+  transition: all 180ms ease;
 }
 
 button.btn-danger:hover {
-  border-color: rgba(217, 70, 71, 0.8) !important;
-  background-color: rgba(145, 29, 35, 0.5) !important;
+  background: #c53030 !important;
 }
 
 button {
-  transition: all 200ms ease;
+  transition: all 180ms ease;
 }
 
 button:hover:not(:disabled) {
-  transform: translateY(-1px);
+  /* keep subtle but no translate to feel SaaS-clean */
 }
 
 table {
@@ -186,8 +213,22 @@ td {
   border-color: var(--border);
 }
 
+th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+td {
+  color: var(--text-primary);
+}
+
+/* Tailwind slate overrides — repaint legacy dark-theme classes to light SaaS. */
 [class*="border-slate-800"],
-[class*="border-slate-700"] {
+[class*="border-slate-700"],
+[class*="border-slate-600"] {
   border-color: var(--border) !important;
 }
 
@@ -195,8 +236,141 @@ td {
 [class*="bg-slate-900/60"],
 [class*="bg-slate-900/50"],
 [class*="bg-slate-950/60"],
-[class*="bg-slate-950/50"] {
-  background-color: var(--override-slate-bg) !important;
+[class*="bg-slate-950/50"],
+[class*="bg-slate-900"],
+[class*="bg-slate-950"],
+[class*="bg-slate-800"],
+[class*="bg-gray-900"],
+[class*="bg-gray-950"],
+[class*="bg-zinc-900"] {
+  background-color: var(--surface) !important;
+  color: var(--text-primary) !important;
+}
+
+[class*="text-slate-100"],
+[class*="text-slate-200"],
+[class*="text-white"][class*="bg-slate"],
+[class*="text-gray-100"],
+[class*="text-gray-200"] {
+  color: var(--text-primary) !important;
+}
+
+/* Inverted-on-dark accent text → repaint to dark on light. */
+[class*="text-blue-200"],
+[class*="text-blue-300"],
+[class*="text-rose-300"],
+[class*="text-amber-300"],
+[class*="text-emerald-300"] {
+  color: var(--text-primary) !important;
+}
+
+/* Translucent slate panels → solid white card. */
+[class*="bg-slate-800/"],
+[class*="bg-slate-900/"],
+[class*="bg-slate-950/"],
+[class*="bg-gray-800/"],
+[class*="bg-gray-900/"] {
+  background-color: var(--surface) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Borders that were dark slate → soft warm border. */
+[class*="border-slate"],
+[class*="border-gray-700"],
+[class*="border-gray-800"],
+[class*="border-zinc-700"],
+[class*="border-zinc-800"] {
+  border-color: var(--border) !important;
+}
+
+/* Common Tailwind blue CTA → orange primary. */
+button[class*="bg-blue-600"],
+button[class*="bg-blue-700"],
+a[class*="bg-blue-600"],
+a[class*="bg-blue-700"] {
+  background-color: var(--primary) !important;
+  color: #ffffff !important;
+  border-color: var(--primary) !important;
+}
+
+button[class*="bg-blue-600"]:hover,
+button[class*="bg-blue-700"]:hover,
+a[class*="bg-blue-600"]:hover,
+a[class*="bg-blue-700"]:hover {
+  background-color: var(--primary-hover) !important;
+}
+
+/* Rose/red status — keep semantic meaning but repaint to soft light variant. */
+[class*="bg-rose-900/"] {
+  background-color: rgba(214, 69, 69, 0.08) !important;
+  color: #b03333 !important;
+}
+
+[class*="bg-emerald-900/"],
+[class*="bg-green-900/"] {
+  background-color: rgba(34, 145, 96, 0.08) !important;
+  color: #1f8a59 !important;
+}
+
+[class*="bg-amber-900/"],
+[class*="bg-yellow-900/"] {
+  background-color: rgba(254, 123, 2, 0.08) !important;
+  color: #c25500 !important;
+}
+
+[class*="bg-blue-900/"] {
+  background-color: rgba(75, 115, 255, 0.08) !important;
+  color: #2d52e6 !important;
+}
+
+/* Tailwind arbitrary-value overrides for legacy hardcoded dark hexes. */
+[class*="bg-[#1A365D]"],
+[class*="bg-[#2C5282]"],
+[class*="bg-[#1a365d]"],
+[class*="bg-[#2c5282]"] {
+  background-color: var(--primary) !important;
+  color: #ffffff !important;
+}
+
+[class*="bg-[#1A365D]"]:hover,
+[class*="bg-[#2C5282]"]:hover,
+[class*="bg-[#1a365d]"]:hover,
+[class*="bg-[#2c5282]"]:hover {
+  background-color: var(--primary-hover) !important;
+}
+
+[class*="bg-[#0B0F14]"],
+[class*="bg-[#0b0f14]"],
+[class*="bg-[#111827]"],
+[class*="bg-[#0F172A]"],
+[class*="bg-[#0f172a]"],
+[class*="bg-[#1F2937]"],
+[class*="bg-[#1f2937]"] {
+  background-color: var(--surface) !important;
+  color: var(--text-primary) !important;
+}
+
+[class*="text-[#F9FAFB]"],
+[class*="text-[#f9fafb]"],
+[class*="text-[#F3F4F6]"],
+[class*="text-[#f3f4f6]"] {
+  color: var(--text-primary) !important;
+}
+
+[class*="text-[#9CA3AF]"],
+[class*="text-[#9ca3af]"] {
+  color: var(--text-tertiary) !important;
+}
+
+[class*="border-[#374151]"] {
+  border-color: var(--border) !important;
+}
+
+/* Generic blue accent stripes used as decorative gradients. */
+[class*="bg-[linear-gradient(90deg,#2563EB"],
+[class*="bg-[linear-gradient(90deg,#2563eb"],
+[class*="bg-[linear-gradient(90deg,#1D4ED8"] {
+  background: linear-gradient(90deg, #fe7b02, #ff66f4, #4b73ff) !important;
 }
 
 [class*="text-slate-300"],
@@ -210,16 +384,25 @@ td {
 }
 
 tbody tr {
-  transition: background-color 200ms ease;
+  transition: background-color 180ms ease;
 }
 
 tbody tr:hover {
   background-color: var(--table-row-hover);
 }
 
+a {
+  color: var(--secondary);
+}
+
+a:hover {
+  color: #2d52e6;
+}
+
 .app-header {
   border-color: var(--header-border);
   background: var(--header-bg);
+  backdrop-filter: blur(8px);
 }
 
 .app-header-title {
@@ -247,7 +430,7 @@ tbody tr:hover {
 }
 
 .app-btn-secondary:hover {
-  border-color: var(--primary-light);
+  border-color: var(--primary);
   color: var(--text-primary);
 }
 
@@ -272,22 +455,37 @@ tbody tr:hover {
 /* Status badges */
 .badge {
   @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium text-xs;
+  border: 1px solid;
 }
 
 .badge-primary {
-  @apply bg-blue-900/40 text-blue-300 border border-blue-800/50;
+  background: rgba(75, 115, 255, 0.1);
+  color: #2d52e6;
+  border-color: rgba(75, 115, 255, 0.25);
 }
 
 .badge-success {
-  @apply bg-green-900/40 text-green-300 border border-green-800/50;
+  background: rgba(34, 145, 96, 0.1);
+  color: #1f8a59;
+  border-color: rgba(34, 145, 96, 0.25);
 }
 
 .badge-warning {
-  @apply bg-amber-900/40 text-amber-300 border border-amber-800/50;
+  background: rgba(254, 123, 2, 0.1);
+  color: #c25500;
+  border-color: rgba(254, 123, 2, 0.3);
 }
 
 .badge-danger {
-  @apply bg-rose-900/40 text-rose-300 border border-rose-800/50;
+  background: rgba(214, 69, 69, 0.1);
+  color: #b03333;
+  border-color: rgba(214, 69, 69, 0.3);
+}
+
+.badge-accent {
+  background: rgba(255, 102, 244, 0.1);
+  color: #c12db5;
+  border-color: rgba(255, 102, 244, 0.3);
 }
 
 /* Section title */
@@ -297,8 +495,8 @@ tbody tr:hover {
 }
 
 ::selection {
-  background: rgba(37, 99, 235, 0.35);
-  color: #f8fafc;
+  background: rgba(254, 123, 2, 0.25);
+  color: var(--text-primary);
 }
 
 .no-print {

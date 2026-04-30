@@ -29,6 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
   libssl-dev \
   libpcap-dev \
+  hydra \
+  medusa \
+  whatweb \
+  sslscan \
+  wfuzz \
+  gobuster \
+  ruby \
   && rm -rf /var/lib/apt/lists/*
 
 # AMASS nao esta disponivel no apt da imagem base (Debian trixie); instala binario oficial.
@@ -60,8 +67,16 @@ RUN set -eux; \
   go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest; \
   go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest; \
   go install github.com/jaeles-project/gospider@latest; \
+  go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest; \
+  go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest; \
+  go install github.com/projectdiscovery/alterx/cmd/alterx@latest; \
+  go install github.com/tomnomnom/assetfinder@latest; \
+  go install github.com/lc/gau/v2/cmd/gau@latest; \
+  go install github.com/tomnomnom/waybackurls@latest; \
+  go install github.com/hakluke/hakrawler@latest; \
+  go install github.com/hahwul/dalfox/v2@latest; \
   # Publica os binarios Go para todos os usuarios do container.
-  for b in httpx katana ffuf subfinder naabu nuclei interactsh-client gospider; do \
+  for b in httpx katana ffuf subfinder naabu nuclei interactsh-client gospider dnsx shuffledns alterx assetfinder gau waybackurls hakrawler dalfox; do \
     if [ -x "/root/go/bin/${b}" ]; then install -m 0755 "/root/go/bin/${b}" "/usr/local/bin/${b}"; fi; \
   done; \
   # Atualiza templates do nuclei sem quebrar o build em ambientes restritos.
@@ -117,9 +132,43 @@ RUN set -eux; \
   rm -rf /var/lib/apt/lists/*
 
 # ─────────────────────────────────────────────────────────────
-# OSINT Tool (Shodan.io)
+# OSINT + Exploit + extra Recon
 # ─────────────────────────────────────────────────────────────
-RUN pip install --no-cache-dir shodan
+RUN set -eux; \
+  pip install --no-cache-dir shodan theHarvester h8mail; \
+  # ParamSpider (Python git)
+  git clone --depth 1 https://github.com/devanshbatham/ParamSpider.git /opt/ParamSpider || true; \
+  if [ -f /opt/ParamSpider/requirements.txt ]; then pip install --no-cache-dir -r /opt/ParamSpider/requirements.txt || true; fi; \
+  printf '#!/bin/sh\nexec python3 /opt/ParamSpider/paramspider.py "$@"\n' > /usr/local/bin/paramspider; \
+  chmod +x /usr/local/bin/paramspider; \
+  # Subjack (Go) - takeover
+  go install github.com/haccer/subjack@latest || true; \
+  if [ -x /root/go/bin/subjack ]; then install -m 0755 /root/go/bin/subjack /usr/local/bin/subjack; fi; \
+  # Metagoofil (Python)
+  git clone --depth 1 https://github.com/opsdisk/metagoofil.git /opt/metagoofil || true; \
+  if [ -f /opt/metagoofil/requirements.txt ]; then pip install --no-cache-dir -r /opt/metagoofil/requirements.txt || true; fi; \
+  printf '#!/bin/sh\nexec python3 /opt/metagoofil/metagoofil.py "$@"\n' > /usr/local/bin/metagoofil; \
+  chmod +x /usr/local/bin/metagoofil; \
+  # WPScan (Ruby gem)
+  gem install --no-document wpscan || true; \
+  # Impacket (Python)
+  pip install --no-cache-dir impacket || true; \
+  # CrackMapExec (NetExec successor)
+  pip install --no-cache-dir netexec || true; \
+  ln -sf /usr/local/bin/netexec /usr/local/bin/crackmapexec || true; \
+  # evil-winrm (Ruby gem)
+  gem install --no-document evil-winrm || true; \
+  # Feroxbuster (Rust binary release)
+  ARCH="$(uname -m)"; \
+  case "$ARCH" in \
+    x86_64|amd64) FB_ARCH="x86_64" ;; \
+    aarch64|arm64) FB_ARCH="aarch64" ;; \
+    *) FB_ARCH="" ;; \
+  esac; \
+  if [ -n "$FB_ARCH" ]; then \
+    curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${FB_ARCH}-linux-feroxbuster.tar.gz" -o /tmp/ferox.tgz && \
+    tar -xzf /tmp/ferox.tgz -C /tmp && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster && rm -f /tmp/feroxbuster /tmp/ferox.tgz || true; \
+  fi
 
 # ─────────────────────────────────────────────────────────────
 # VULN Analysis Tools (Burp, Nmap Vulscan, Nikto)

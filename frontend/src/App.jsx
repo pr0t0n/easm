@@ -19,6 +19,7 @@ import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import WorkersPage from "./pages/WorkersPage";
 import JobsRegistryPage from "./pages/JobsRegistryPage";
 import WorkerLogsPage from "./pages/WorkerLogsPage";
+import PhaseMonitorPage from "./pages/PhaseMonitorPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -36,7 +37,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", "dark");
+    document.documentElement.setAttribute("data-theme", "light");
   }, []);
 
   useEffect(() => {
@@ -82,6 +83,7 @@ export default function App() {
                     <Route path="/configuracao" element={<AdminOnly><ConfigurationPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScansPage /></AdminOnly>} />
+                    <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />
                     <Route path="/ferramentas" element={<AdminOnly><ToolsPage /></AdminOnly>} />
                     <Route path="/workers" element={<AdminOnly><WorkersPage /></AdminOnly>} />
                     <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
