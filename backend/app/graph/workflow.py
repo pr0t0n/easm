@@ -221,8 +221,10 @@ class AgentState(TypedDict):
     objective_met: bool                      # Flag de término de operação
     termination_reason: str                  # Motivo de término da operação
     routing_next_node: str                   # Próximo nó escolhido pelo supervisor
+    current_phase: str                       # Fase atual (usado para proteção contra loop)
     last_completed_node: str                 # Último nó de capacidade concluído
     agent_validation: dict[str, Any]         # Score de qualidade da execução
+    owner_id: int                            # ID do usuário dono do scan
     # Autonomous agent runtime
     active_skills: list[dict[str, Any]]
     delegated_tasks: list[dict[str, Any]]
@@ -302,7 +304,7 @@ def _has_verified_or_strong_evidence(state: AgentState) -> bool:
 
 def _route_from_supervisor(state: AgentState):
     next_node = state.get("routing_next_node")
-    if next_node == "END":
+    if next_node in (END, "END"):
         return END
     return next_node
 
@@ -476,10 +478,20 @@ def supervisor_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "0. Supervisor")
 
+    # Kill switch: proteção contra loops infinitos
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
     max_iterations = int(state.get("max_iterations", 12))
+    if state["loop_iteration"] > max_iterations:
+        state["routing_next_node"] = END
+        state["termination_reason"] = "max_iterations_reached"
+        state["objective_met"] = True
+        return state
+
     _update_execution_guardrails(state)
     _refresh_active_skills(state)
+    # completed_capabilities deve ser sempre list
+    if "completed_capabilities" not in state or not isinstance(state["completed_capabilities"], list):
+        state["completed_capabilities"] = []
     completed = list(state.get("completed_capabilities") or [])
     last_node = str(state.get("last_completed_node") or "").strip()
     pending_validation = list(state.get("validation_backlog") or [])
@@ -496,6 +508,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     }
     if last_node in capability_nodes and last_node not in completed:
         completed.append(last_node)
+        state["completed_capabilities"] = completed
         _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
 
     confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
@@ -527,15 +540,6 @@ def supervisor_node(state: AgentState) -> AgentState:
         else:
             next_node = "END"
             termination_reason = termination_reason or "objective_already_met"
-    elif state["loop_iteration"] > max_iterations:
-        if "governance" not in completed:
-            next_node = "governance"
-        elif "executive_analyst" not in completed:
-            next_node = "executive_analyst"
-        else:
-            next_node = "END"
-            state["objective_met"] = True
-            termination_reason = "max_iterations_reached"
     elif "strategic_planning" not in completed:
         next_node = "strategic_planning"
     elif "asset_discovery" not in completed:
@@ -576,25 +580,29 @@ def supervisor_node(state: AgentState) -> AgentState:
         next_node = "governance" if "governance" not in completed else "executive_analyst"
         termination_reason = termination_reason or "forced_finalize_guardrail"
 
-    for delegated in list(state.get("delegated_tasks") or []):
-        if str(delegated.get("status") or "") != "pending":
-            continue
-        delegated_node = str(delegated.get("node") or "")
-        if delegated_node in {
-            "strategic_planning",
-            "asset_discovery",
-            "threat_intel",
-            "adversarial_hypothesis",
-            "risk_assessment",
-            "evidence_adjudication",
-            "governance",
-            "executive_analyst",
-        }:
-            next_node = delegated_node
-            break
+    # Delegation override only after full first cycle (all essential phases completed)
+    essential_phases = {"strategic_planning", "asset_discovery", "threat_intel", "adversarial_hypothesis", "risk_assessment", "evidence_adjudication", "governance"}
+    if essential_phases.issubset(set(completed)):
+        for delegated in list(state.get("delegated_tasks") or []):
+            if str(delegated.get("status") or "") != "pending":
+                continue
+            delegated_node = str(delegated.get("node") or "")
+            if delegated_node in essential_phases | {"executive_analyst"}:
+                next_node = delegated_node
+                break
+
+    # Proteção contra loop do mesmo node
+    current_phase = str(state.get("current_phase") or "").strip()
+    if next_node == current_phase and next_node not in {"END", ""}:
+        state["routing_next_node"] = END
+        state["termination_reason"] = "loop_on_same_phase"
+        state["completed_capabilities"] = completed
+        state["current_phase"] = next_node
+        return state
 
     state["completed_capabilities"] = completed
-    state["routing_next_node"] = next_node
+    state["current_phase"] = next_node
+    state["routing_next_node"] = END if next_node == "END" else next_node
     state["termination_reason"] = termination_reason
     state["proxima_ferramenta"] = next_node
     state["logs_terminais"].append(
@@ -759,15 +767,13 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
         if sev in {"critical", "high"} and (confidence < min_conf or not has_minimum_proof):
             details["validation_status"] = "hypothesis"
             details["adjudication_reason"] = "insufficient_confidence_or_missing_reproducible_proof"
-            backlog.append(
-                {
-                    "title": str(item.get("title") or ""),
-                    "severity": sev,
-                    "asset": str(details.get("asset") or state.get("target") or ""),
-                    "reason": details["adjudication_reason"],
-                    "required_action": "rerun_validation_with_repro_steps",
-                }
-            )
+            backlog.append({
+                "title": str(item.get("title") or ""),
+                "severity": sev,
+                "asset": str(details.get("asset") or state.get("target") or ""),
+                "reason": details["adjudication_reason"],
+                "required_action": "rerun_validation_with_repro_steps",
+            })
         else:
             if sev in {"critical", "high"}:
                 details["validation_status"] = "verified"
@@ -3634,11 +3640,22 @@ def build_graph(mode: ScanMode = "unit"):
             "evidence_adjudication": "evidence_adjudication",
             "governance": "governance",
             "executive_analyst": "executive_analyst",
-            "END": END,
+            END: END,
         },
     )
 
-    # Edges de volta para o supervisor removidos para evitar ciclos infinitos.
+    # Back-edges: cada capability node retorna ao supervisor para roteamento contínuo
+    for node_name in [
+        "strategic_planning",
+        "asset_discovery",
+        "threat_intel",
+        "adversarial_hypothesis",
+        "risk_assessment",
+        "evidence_adjudication",
+        "governance",
+        "executive_analyst",
+    ]:
+        graph.add_edge(node_name, "supervisor")
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -3724,6 +3741,7 @@ def initial_state(
         "objective_met": False,
         "termination_reason": "",
         "routing_next_node": "strategic_planning",
+        "current_phase": "",
         "last_completed_node": "",
         "agent_validation": {},
         "active_skills": initial_skills,
