@@ -167,6 +167,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL", "outputs": "tech list",
         "prerequisites": "live URL",
     },
+    "curl-headers": {
+        "category": "recon", "phase": "P05|P06",
+        "description": "HTTP header analysis via curl — inspect security headers, WAF signatures.",
+        "when_to_use": "Lightweight header inspection for security posture and WAF fingerprinting.",
+        "inputs": "URL", "outputs": "HTTP headers + analysis",
+        "prerequisites": "curl installed",
+    },
     "wafw00f": {
         "category": "recon", "phase": "P06",
         "description": "Detects 100+ WAFs by signature/headers.",
