@@ -11,7 +11,11 @@ celery = Celery(
     "easm_worker",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.workers.tasks"],
+    include=[
+        "app.workers.tasks",
+        "app.workers.agent_dispatcher",
+        "app.workers.agent_supervisor",
+    ],
 )
 
 celery.conf.update(
