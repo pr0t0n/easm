@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   nodejs \
   npm \
   nmap \
+  masscan \
   sqlmap \
   perl \
   libjson-perl \
@@ -36,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   wfuzz \
   gobuster \
   ruby \
+  ruby-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # AMASS nao esta disponivel no apt da imagem base (Debian trixie); instala binario oficial.
@@ -135,7 +137,16 @@ RUN set -eux; \
 # OSINT + Exploit + extra Recon
 # ─────────────────────────────────────────────────────────────
 RUN set -eux; \
-  pip install --no-cache-dir shodan theHarvester h8mail; \
+  pip install --no-cache-dir shodan h8mail; \
+  # theHarvester em venv isolado para evitar pinning de FastAPI/Uvicorn do backend.
+  git clone --depth 1 https://github.com/laramies/theHarvester.git /opt/theHarvester || true; \
+  if [ -f /opt/theHarvester/pyproject.toml ]; then \
+    python3 -m venv /opt/theHarvester/.venv; \
+    /opt/theHarvester/.venv/bin/pip install --no-cache-dir --upgrade pip; \
+    /opt/theHarvester/.venv/bin/pip install --no-cache-dir /opt/theHarvester; \
+    printf '#!/bin/sh\nexec /opt/theHarvester/.venv/bin/theHarvester "$@"\n' > /usr/local/bin/theHarvester; \
+    chmod +x /usr/local/bin/theHarvester; \
+  fi; \
   # ParamSpider (Python git)
   git clone --depth 1 https://github.com/devanshbatham/ParamSpider.git /opt/ParamSpider || true; \
   if [ -f /opt/ParamSpider/requirements.txt ]; then pip install --no-cache-dir -r /opt/ParamSpider/requirements.txt || true; fi; \
@@ -161,13 +172,23 @@ RUN set -eux; \
   # Feroxbuster (Rust binary release)
   ARCH="$(uname -m)"; \
   case "$ARCH" in \
-    x86_64|amd64) FB_ARCH="x86_64" ;; \
-    aarch64|arm64) FB_ARCH="aarch64" ;; \
+    x86_64|amd64) FB_ASSET="x86_64-linux-feroxbuster.tar.gz" ;; \
+    aarch64|arm64) FB_ASSET="aarch64-linux-feroxbuster.zip" ;; \
     *) FB_ARCH="" ;; \
   esac; \
-  if [ -n "$FB_ARCH" ]; then \
-    curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${FB_ARCH}-linux-feroxbuster.tar.gz" -o /tmp/ferox.tgz && \
-    tar -xzf /tmp/ferox.tgz -C /tmp && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster && rm -f /tmp/feroxbuster /tmp/ferox.tgz || true; \
+  if [ -n "${FB_ASSET:-}" ]; then \
+    curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${FB_ASSET}" -o /tmp/ferox_asset && \
+    case "$FB_ASSET" in \
+      *.zip) unzip -q /tmp/ferox_asset -d /tmp ;; \
+      *.tar.gz) tar -xzf /tmp/ferox_asset -C /tmp ;; \
+    esac && \
+    install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster && rm -f /tmp/feroxbuster /tmp/ferox_asset || true; \
+  fi; \
+  # testssl.sh (Debian package availability varies by base release/arch).
+  git clone --depth 1 https://github.com/testssl/testssl.sh.git /opt/testssl.sh || true; \
+  if [ -f /opt/testssl.sh/testssl.sh ]; then \
+    printf '#!/bin/sh\nexec /opt/testssl.sh/testssl.sh "$@"\n' > /usr/local/bin/testssl; \
+    chmod +x /usr/local/bin/testssl; \
   fi
 
 # ─────────────────────────────────────────────────────────────

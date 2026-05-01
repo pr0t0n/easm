@@ -277,8 +277,22 @@ def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
         },
         # xalgorix-inspired finish gate
         "finish_gate": {
-            "minimum_phases_before_finish": ["asset_discovery", "threat_intel", "risk_assessment"],
+            "minimum_phases_before_finish": [
+                "strategic_planning",
+                "asset_discovery",
+                "threat_intel",
+                "adversarial_hypothesis",
+                "risk_assessment",
+                "evidence_adjudication",
+                "governance",
+                "executive_analyst",
+            ],
             "require_executive_summary": True,
+        },
+        "coverage_policy": {
+            "target_installed_tool_coverage": 0.70,
+            "attempt_all_installed_tools_before_finish": True,
+            "retry_failed_tools_max_attempts": 2,
         },
         "evidence_gate": {
             "critical_high_require_verified": True,

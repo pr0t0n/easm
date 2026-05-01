@@ -447,18 +447,47 @@ def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
 
 
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
+    """Returns ALL installed tools applicable to the group.
+
+    Previous logic capped to 2-4 tools per iteration which caused superficial
+    scans (~16 of 50+ tools used in a full run). The new behaviour runs every
+    installed tool exactly once per scan; tool_runtime_metrics tracks attempts
+    so we don't re-run tools that already succeeded in this scan.
+    """
     if not tools:
         return []
+    from app.services.tool_catalog import is_tool_installed
+
     ranked = _rank_tools_for_iteration(state, tools)
-    iteration = int(state.get("loop_iteration", 0))
-    rotate_idx = iteration % max(1, len(ranked))
-    rotated = ranked[rotate_idx:] + ranked[:rotate_idx]
-    batch_size = 2
-    if group == "asset_discovery":
-        batch_size = min(4, max(2, len(rotated)))
-    elif group == "risk_assessment":
-        batch_size = min(3, max(1, len(rotated)))
-    return rotated[:batch_size]
+    runtime = dict(state.get("tool_runtime") or {})
+
+    selected: list[str] = []
+    skipped_uninstalled: list[str] = []
+    skipped_already_done: list[str] = []
+    for t in ranked:
+        if not is_tool_installed(t):
+            skipped_uninstalled.append(t)
+            continue
+        # Skip tools that already succeeded — but keep retrying ones that failed,
+        # up to 2 attempts (so a transient failure doesn't permanently exclude).
+        meta = runtime.get(t, {})
+        if int(meta.get("success", 0) or 0) >= 1:
+            skipped_already_done.append(t)
+            continue
+        if int(meta.get("attempts", 0) or 0) >= 2 and int(meta.get("success", 0) or 0) == 0:
+            skipped_already_done.append(t)
+            continue
+        selected.append(t)
+
+    if skipped_uninstalled:
+        state["logs_terminais"].append(
+            f"[{group}] tools NÃO instaladas (puladas): {', '.join(sorted(skipped_uninstalled))}"
+        )
+    if skipped_already_done:
+        state["logs_terminais"].append(
+            f"[{group}] tools já executadas no scan: {', '.join(sorted(skipped_already_done))}"
+        )
+    return selected
 
 
 def _update_tool_runtime_metrics(state: AgentState, tool: str, status: str) -> None:
@@ -471,6 +500,42 @@ def _update_tool_runtime_metrics(state: AgentState, tool: str, status: str) -> N
         current["failures"] = int(current.get("failures", 0)) + 1
     runtime[tool] = current
     state["tool_runtime"] = runtime
+
+
+def _find_node_with_uncovered_tools(state: AgentState) -> str | None:
+    """Returns the first capability node that still has installed tools that
+    haven't been executed in this scan. Drives the second-pass sweep.
+
+    Order is intentional: asset_discovery feeds threat_intel feeds
+    risk_assessment, so we re-enter from upstream → downstream.
+    """
+    try:
+        from app.services.tool_catalog import is_tool_installed
+    except Exception:
+        return None
+
+    runtime = dict(state.get("tool_runtime") or {})
+
+    def _has_uncovered(group_alias: str) -> bool:
+        try:
+            tools = _tools_for_group(state.get("scan_mode", "unit"), group_alias)
+        except Exception:
+            tools = []
+        for t in tools:
+            if not is_tool_installed(t):
+                continue
+            meta = runtime.get(t, {})
+            if int(meta.get("success", 0) or 0) == 0 and int(meta.get("attempts", 0) or 0) < 2:
+                return True
+        return False
+
+    if _has_uncovered("asset_discovery"):
+        return "asset_discovery"
+    if _has_uncovered("threat_intel"):
+        return "threat_intel"
+    if _has_uncovered("risk_assessment"):
+        return "risk_assessment"
+    return None
 
 
 def supervisor_node(state: AgentState) -> AgentState:
@@ -506,9 +571,11 @@ def supervisor_node(state: AgentState) -> AgentState:
         "governance",
         "executive_analyst",
     }
-    if last_node in capability_nodes and last_node not in completed:
-        completed.append(last_node)
-        state["completed_capabilities"] = completed
+    if last_node in capability_nodes:
+        if last_node not in completed:
+            completed.append(last_node)
+            state["completed_capabilities"] = completed
+        # always close any pending delegation task for the node we just left
         _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
 
     confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
@@ -555,10 +622,21 @@ def supervisor_node(state: AgentState) -> AgentState:
     elif "governance" not in completed:
         next_node = "governance"
     elif "executive_analyst" not in completed:
-        # Após governance, sempre rodar executive_analyst para fechar com narrativa.
-        state["objective_met"] = state.get("objective_met") or has_strong_evidence
-        termination_reason = termination_reason or "post_governance_executive_close"
-        next_node = "executive_analyst"
+        # Antes de fechar com analista executivo, exigir SEGUNDA PASSADA
+        # nas fases de coleta cuja cobertura de tools instaladas ainda é baixa.
+        # Caso contrário o relatório executivo é assinado em cima de scan superficial.
+        coverage_gap_node = _find_node_with_uncovered_tools(state)
+        if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
+            _append_note(
+                state,
+                f"Segunda passada — {coverage_gap_node} ainda tem tools instaladas sem rodar.",
+                phase="coverage-sweep",
+            )
+            next_node = coverage_gap_node
+        else:
+            state["objective_met"] = state.get("objective_met") or has_strong_evidence
+            termination_reason = termination_reason or "post_governance_executive_close"
+            next_node = "executive_analyst"
     else:
         # Loop adaptativo após primeiro ciclo completo (incluindo executive_analyst)
         if pending_validation:
@@ -911,9 +989,33 @@ def _tool_for_step(step_name: str) -> str | None:
 
 
 def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
+    """Returns the union of tools from all groups relevant to a graph node.
+
+    Graph nodes (asset_discovery / threat_intel / risk_assessment) map to
+    multiple worker_groups so the agent can fan-out across all phases. Without
+    this, P15 (dir enum) and P22 (deps) would never run because their tools
+    live in different worker groups than the node that owns the phase.
+    """
     groups = get_worker_groups(mode=scan_mode)
-    group = groups.get(group_name, {})
-    return list(group.get("tools", []))
+
+    # Multi-group composition per node (covers all 22 phases).
+    node_to_groups: dict[str, list[str]] = {
+        "asset_discovery": ["recon"],
+        "reconhecimento": ["recon"],
+        "threat_intel": ["osint", "code"],     # P21 secrets are in `code` group
+        "risk_assessment": ["vuln", "exploit", "api", "code", "recon"],  # P15 dir enum (recon), P22 deps (code), P14 auth (exploit)
+        "analise_vulnerabilidade": ["vuln", "exploit", "api", "code"],
+    }
+
+    target_groups = node_to_groups.get(group_name, [group_name])
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in target_groups:
+        for t in (groups.get(g, {}).get("tools") or []):
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
 
 
 def _ordered_tools_for_step(scan_mode: str, group_name: str, step_name: str) -> list[str]:
@@ -998,37 +1100,71 @@ def _run_tools_and_collect(
     log_prefix: str,
     root_domain: str = "",
 ) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
+    """Runs the given tools against `scan_target` with parallel dispatch.
+
+    Tools are submitted in parallel through a ThreadPoolExecutor (max 6 in
+    flight) so a 25-tool node finishes in ~max(tool_runtime) instead of
+    sum(tool_runtime). State mutation stays serial after each future resolves
+    to keep the AgentState dict thread-safe.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from time import perf_counter
+
     all_findings: list[dict[str, Any]] = []
     discovered_ports: set[int] = set()
     discovered_assets: set[str] = set()
     port_evidence: dict[int, dict[str, str]] = {}
     step_success = False
 
+    # 1) Skip tools already executed (in-state or in-DB)
+    pending_tools: list[str] = []
+    scan_id = state.get("scan_id")
     for tool in tools:
         run_id = f"{step_name}|{scan_target}|{tool}".lower()
         if run_id in state.get("executed_tool_runs", []):
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
             continue
-        
-        # Check database (prevents duplication across restarts)
-        scan_id = state.get("scan_id")
         if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
             state["executed_tool_runs"].append(run_id)
             continue
-        
-        # Execute tool
-        from time import perf_counter
+        pending_tools.append(tool)
+
+    if not pending_tools:
+        return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
+
+    # 2) Dispatch in parallel
+    state["logs_terminais"].append(
+        f"{log_prefix}: dispatching {len(pending_tools)} tools in parallel: {', '.join(pending_tools)}"
+    )
+
+    def _dispatch_one(tool: str) -> tuple[str, dict, float]:
         exec_start = perf_counter()
+        try:
+            r = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
+        except Exception as exc:
+            r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
+        return tool, r, perf_counter() - exec_start
+
+    completions: list[tuple[str, dict, float]] = []
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"tool-{log_prefix}") as ex:
+        future_map = {ex.submit(_dispatch_one, t): t for t in pending_tools}
+        for fut in as_completed(future_map):
+            try:
+                completions.append(fut.result())
+            except Exception as exc:
+                t = future_map[fut]
+                completions.append((t, {"status": "error", "dispatch_error": str(exc)}, 0.0))
+
+    # 3) Serial post-processing — mutates state safely
+    for tool, result, exec_time in completions:
+        run_id = f"{step_name}|{scan_target}|{tool}".lower()
         _sync_step_to_db(state, f"{step_name} · {tool}")
-        state["logs_terminais"].append(f"{log_prefix}: tool={tool} status=starting")
         _append_action(
             state,
             "tool_start",
             {"tool": tool, "target": scan_target, "step": step_name, "group": log_prefix},
         )
-        result = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
-        exec_time = perf_counter() - exec_start
         state["executed_tool_runs"].append(run_id)
 
         raw_command = str(result.get("command") or "").strip()
@@ -1313,13 +1449,9 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
-    # Escopo atual do worker VULN: Burp + Nmap Vulscan + Nikto.
-    preferred_global = [
-        "burp-cli", "nmap-vulscan", "nikto",
-    ]
-    selected_global = [tool for tool in preferred_global if tool in tools]
-    if selected_global:
-        tools = selected_global
+    # Mantem a lista completa do no de risk_assessment. O contrato de cobertura
+    # exige sweep de todas as tools instaladas; limitar globalmente a
+    # Burp/Nmap/Nikto deixa dalfox/sqlmap/wapiti/code/deps fora da execucao.
 
     if not _is_local_target(target):
         return tools
@@ -3680,7 +3812,8 @@ def initial_state(
         discovered_ports=[],
         max_skills=5,
     )
-    mission_contract = build_autonomous_mission_contract(max_iterations=12)
+    max_iterations = 18
+    mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
     return {
         "trace_id": trace_id,
         "scan_id": scan_id,
@@ -3719,7 +3852,7 @@ def initial_state(
             "prompt_contract": build_supervisor_prompt_contract(
                 target=primary_target,
                 objective=f"Assess external attack surface and exploitable risk for {primary_target}",
-                max_iterations=12,
+                max_iterations=max_iterations,
                 active_skills=initial_skills,
             ),
             "mission_contract": mission_contract,
@@ -3736,7 +3869,7 @@ def initial_state(
         },
         "completed_capabilities": [],
         "loop_iteration": 0,
-        "max_iterations": 12,
+        "max_iterations": max_iterations,
         "objective_met": False,
         "termination_reason": "",
         "routing_next_node": "strategic_planning",
@@ -3755,7 +3888,7 @@ def initial_state(
             "last_findings_total": 0,
             "no_progress_iterations": 0,
             "approaching_limit": False,
-            "remaining_iterations": 12,
+            "remaining_iterations": max_iterations,
         },
         "tool_runtime": {},
         "validation_backlog": [],
