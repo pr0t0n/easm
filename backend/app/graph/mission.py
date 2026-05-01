@@ -34,7 +34,7 @@ PENTEST_PHASES = [
      "tools": ["wafw00f", "curl-headers"]},
     # Phase 3 – OSINT
     {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "metagoofil", "trufflehog", "gitleaks"]},
     {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
      "tools": ["theHarvester"]},
     {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
@@ -45,11 +45,11 @@ PENTEST_PHASES = [
     {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
      "tools": ["nuclei", "nmap-vulscan"]},
     {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
-     "tools": ["sqlmap", "dalfox", "wapiti", "burp-cli", "nikto"]},
+     "tools": ["sqlmap", "dalfox", "wapiti", "wfuzz", "burp-cli", "nikto"]},
     {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
      "tools": ["nuclei", "burp-cli", "interactsh-client"]},
     {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
-     "tools": ["hydra", "jwt_tool", "nuclei", "burp-cli"]},
+     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "burp-cli", "impacket", "evilwinrm"]},
     {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
      "tools": ["ffuf", "gobuster", "feroxbuster", "dirsearch"]},
     {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
@@ -66,7 +66,7 @@ PENTEST_PHASES = [
     {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
      "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
     {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
-     "tools": ["retire", "trivy", "eslint", "semgrep"]},
+     "tools": ["retire", "trivy", "eslint", "jshint", "ast-grep", "semgrep"]},
 ]
 
 

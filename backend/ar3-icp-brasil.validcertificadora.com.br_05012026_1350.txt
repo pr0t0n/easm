@@ -1,0 +1,204 @@
+********************************************************************************
+                   Wapiti 3.2.10 - wapiti-scanner.github.io
+          Report for http://ar3-icp-brasil.validcertificadora.com.br/
+              Date of the scan : Fri, 01 May 2026 13:50:55 +0000
+                               Crawled pages : 2
+                          Scope of the scan : domain
+********************************************************************************
+
+Summary of vulnerabilities :
+----------------------------
+                                                              Backup file :   0
+                                         Cleartext Submission of Password :   0
+                                                         Weak credentials :   0
+                                                           CRLF Injection :   0
+                                    Content Security Policy Configuration :   1
+                                               Cross Site Request Forgery :   0
+                                               Potentially dangerous file :   0
+                                                        Command execution :   0
+                                                           Path Traversal :   0
+                                    Fingerprint web application framework :   0
+                                                   Fingerprint web server :   0
+                                                          Htaccess Bypass :   0
+                                                           HTML Injection :   0
+                                                  Clickjacking Protection :   1
+                                    HTTP Strict Transport Security (HSTS) :   0
+                                                      MIME Type Confusion :   1
+                                                     HttpOnly Flag cookie :   0
+                                                     Unencrypted Channels :   0
+                                                 Inconsistent Redirection :   0
+                                       Information Disclosure - Full Path :   0
+                                                           LDAP Injection :   0
+                                                                Log4Shell :   0
+                                                              NS takeover :   0
+                                                            Open Redirect :   0
+                                           Reflected Cross Site Scripting :   0
+                                                       Secure Flag cookie :   0
+                                                             Spring4Shell :   0
+                                                            SQL Injection :   0
+                                                TLS/SSL misconfigurations :   3
+                                              Server Side Request Forgery :   0
+                                                    Stored HTML Injection :   0
+                                              Stored Cross Site Scripting :   0
+                                                       Subdomain takeover :   0
+                                                      Blind SQL Injection :   0
+                                                 Unrestricted File Upload :   0
+                                                      Vulnerable software :   0
+********************************************************************************
+
+Content Security Policy Configuration
+-------------------------------------
+CSP is not set for URL: https://ar3-icp-brasil.validcertificadora.com.br/
+WSTG code: ['WSTG-CONF-12', 'OSHP-Content-Security-Policy']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "https://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+********************************************************************************
+
+Clickjacking Protection
+-----------------------
+X-Frame-Options is not set
+WSTG code: ['OSHP-X-Frame-Options']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "http://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+********************************************************************************
+
+MIME Type Confusion
+-------------------
+X-Content-Type-Options is not set
+WSTG code: ['OSHP-X-Content-Type-Options']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "http://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+********************************************************************************
+
+TLS/SSL misconfigurations
+-------------------------
+OCSP Must-Staple extension is missing
+WSTG code: ['WSTG-CRYP-01']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "https://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+Server is vulnerable to OpenSSL CCS (CVE-2014-0224)
+WSTG code: ['WSTG-CRYP-01']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "https://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+Server doesn't support secure renegotiations
+WSTG code: ['WSTG-CRYP-01']
+Evil request:
+    GET / HTTP/1.1
+    host: ar3-icp-brasil.validcertificadora.com.br
+    connection: keep-alive
+    user-agent: Mozilla/5.0 (Windows NT 6.1; rv:45.0) Gecko/20100101 Firefox/45.0
+    accept-language: en-US
+    accept-encoding: gzip, deflate, br
+    accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+cURL command PoC : "curl "https://ar3-icp-brasil.validcertificadora.com.br/""
+
+                                  *   *   *
+
+********************************************************************************
+
+Summary of anomalies :
+----------------------
+                                                    Internal Server Error :   0
+                                                     Resource consumption :   0
+********************************************************************************
+Summary of additionals :
+------------------------
+                       Review Webserver Metafiles for Information Leakage :   0
+                                               Fingerprint web technology :   0
+                                                             HTTP Methods :   0
+                                                TLS/SSL misconfigurations :   8
+********************************************************************************
+
+TLS/SSL misconfigurations
+-------------------------
+Certificate subject: validcertificadora.com.br
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+Alt. names: validcertificadora.com.br, 1step2sign-dev.integraicp.com.br, 1step2sign-hml.integraicp.com.br, 1step2sign.integraicp.com.br, act-icp-brasil.validcertificadora.com.br, agenda-beta.validcertificadora.com.br, agenda-ciesp.validcertificadora.com.br, agenda-global.validcertificadora.com.br, agenda-icp-brasil.validcertificadora.com.br, agenda-icp-brasil2.validcertificadora.com.br, agenda-valid.validcertificadora.com.br, agr.validcertificadora.com.br, api-ecommerce.vcert.com.br, api-integracao.vcert.com.br, ar-admin-global.vpki.com.br, ar-admin.vpki.com.br, ar-api.vcert.com.br, ar-beta.validcertificadora.com.br, ar-ciesp.validcertificadora.com.br, ar-global.validcertificadora.com.br, ar-icp-brasil.validcertificadora.com.br, ar-icp-brasil2.validcertificadora.com.br, ar-valid.validcertificadora.com.br, ar.tecnisign.net, ar.validcertificadora.com.br, ar.vcert.com.br, ar2-icp-brasil.validcertificadora.com.br, ar3-icp-brasil.validcertificadora.com.br, arremuneracao.validcertificadora.com.br, autenticacao.validcertificadora.com.br, blog.validcertificadora.com.br, cert-checker.vpki.com.br, ciesp.validcertificadora.com.br, cp.vpki.com.br, cs.vpki.com.br, dc-certificate.vcert.com.br, dev-autenticacao2.validcertificadora.com.br, dev-commercial-services.validcertificadora.com.br, dev-dc-services.validcertificadora.com.br, dev-portal.validsigner.com.br, dev-sar-services.validcertificadora.com.br, dev-sat-services.validcertificadora.com.br, developers-dev.integraicp.com.br, developers-hml.integraicp.com.br, developers.integraicp.com.br, dna.vpki.com.br, gcp-autenticacao.validcertificadora.com.br, gcu-icp-brasil.validcertificadora.com.br, gcu2-icp-brasil.validcertificadora.com.br, gestores.validcertificadora.com.br, hml-agenda-icp-brasil.validcertificadora.com.br, hml-ar.validcertificadora.com.br, hml-arremuneracao.validcertificadora.com.br, hml-gcu-icp-brasil.validcertificadora.com.br, hml-portal.validsigner.com.br, icp-brasil.validcertificadora.com.br, icp-brasil2.validcertificadora.com.br, ln-icp-brasil.validcertificadora.com.br, loja.parceirovalidcertificadora.com.br, moncldprd.vpki.com.br, pad-hml.validcertificadora.com.br, pad-tst.validcertificadora.com.br, pad.validcertificadora.com.br, parceiro.validcertificadora.com.br, parceiro.vcert.com.br, pki-core-portal.vcert.com.br, portal-pdf.validsigner.com.br, portal.validsigner.com.br, renewadmin-icp-brasil.validcertificadora.com.br, renovar.vpki.com.br, request.vpki.com.br, sar-services.validcertificadora.com.br, sat-services.validcertificadora.com.br, serasa-agent-application.vcert.com.br, serasa-customer-application.vcert.com.br, serasa.certificadodigital.com.br, services-dev.integraicp.com.br, services-hml.integraicp.com.br, services.integraicp.com.br, sgeea-icp-brasil.validcertificadora.com.br, sig-icp-brasil.validcertificadora.com.br, sig-services.validcertificadora.com.br, skinmanager-icp-brasil.validcertificadora.com.br, validacao-interna.validcertificadora.com.br, validacao-interna.vpki.com.br, vcivs-icp-brasil.validcertificadora.com.br, vqueue-icp-brasil.validcertificadora.com.br, www.validcertificadora.com.br
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+Issuer: DigiCert Global G3 TLS ECC SHA384 2020 CA1
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+Key: EC 128 bits
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+Signature Algorithm: ecdsa-with-SHA384
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+Certificate expires in about 163 days, 10 hours and 8 minutes
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+The following ciphers are strong for TLSv1.3: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+The following ciphers are strong for TLSv1.2: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+WSTG: ['WSTG-CRYP-01']
+
+                                  *   *   *
+
+********************************************************************************

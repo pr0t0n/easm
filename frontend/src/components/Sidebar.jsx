@@ -25,7 +25,7 @@ export default function Sidebar() {
       items: [
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
         { to: "/evolucao", label: "Attack Evolution", adminOnly: false },
-        { to: "/relatorios", label: "Reports", adminOnly: false },
+        { to: "/relatorios", label: "Relatórios", adminOnly: false },
       ],
     },
     {
@@ -53,128 +53,66 @@ export default function Sidebar() {
   };
 
   return (
-    <aside
-      className="w-full p-4 md:min-h-screen md:w-72 md:border-b-0 md:border-r"
-      style={{
-        background: "var(--sidebar-bg)",
-        borderColor: "var(--sidebar-border)",
-        borderBottomWidth: 1,
-        borderRightWidth: 1,
-      }}
-    >
-      <div
-        className="rounded-xl p-4"
-        style={{
-          background: "var(--bg-muted)",
-          border: "1px solid var(--border)",
-        }}
-      >
-        <div className="flex items-center gap-2">
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: "var(--primary)",
-              display: "inline-block",
-            }}
-          />
-          <h1
-            className="font-display text-xl font-bold tracking-tight"
-            style={{ color: "var(--text-primary)" }}
-          >
-            Pentest.io
-          </h1>
+    <aside className="sb">
+      <div className="sb-logo">
+        <span className="sb-logo-mark" aria-hidden />
+        <div>
+          <span className="sb-logo-name">Pentest.io</span>
+          <span className="sb-logo-tag">Enterprise Security</span>
         </div>
-        <p className="mt-1 text-xs" style={{ color: "var(--text-tertiary)" }}>
-          Enterprise Security Platform
-        </p>
       </div>
 
-      <nav className="mt-4 space-y-4">
-        {navGroups.map((group) => {
-          const visibleItems = group.items.filter((item) => !item.adminOnly || isAdmin);
-          if (visibleItems.length === 0) return null;
-          return (
-            <div key={group.title}>
-              <p
-                className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]"
-                style={{ color: "var(--text-tertiary)" }}
+      {navGroups.map((group) => {
+        const visibleItems = group.items.filter((item) => !item.adminOnly || isAdmin);
+        if (visibleItems.length === 0) return null;
+        return (
+          <div key={group.title}>
+            <div className="sb-group">{group.title}</div>
+            {visibleItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === "/"}
+                className={({ isActive }) => `sb-item${isActive ? " active" : ""}`}
               >
-                {group.title}
-              </p>
-              <div className="mt-1 space-y-1">
-                {visibleItems.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    style={({ isActive }) =>
-                      isActive
-                        ? {
-                            display: "block",
-                            borderRadius: 8,
-                            border: "1px solid transparent",
-                            padding: "8px 12px",
-                            fontSize: 14,
-                            fontWeight: 500,
-                            background: "rgba(254,123,2,0.10)",
-                            color: "var(--primary)",
-                            borderColor: "rgba(254,123,2,0.25)",
-                          }
-                        : {
-                            display: "block",
-                            borderRadius: 8,
-                            border: "1px solid transparent",
-                            padding: "8px 12px",
-                            fontSize: 14,
-                            fontWeight: 500,
-                            color: "var(--text-secondary)",
-                            background: "transparent",
-                          }
-                    }
-                    onMouseEnter={(e) => {
-                      if (!e.currentTarget.style.color.includes("254")) {
-                        e.currentTarget.style.background = "var(--bg-muted)";
-                        e.currentTarget.style.color = "var(--text-primary)";
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (!e.currentTarget.style.color.includes("254")) {
-                        e.currentTarget.style.background = "transparent";
-                        e.currentTarget.style.color = "var(--text-secondary)";
-                      }
-                    }}
-                  >
-                    {item.label}
-                  </NavLink>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-      </nav>
+                <span className="sb-item-dot" aria-hidden />
+                {item.label}
+              </NavLink>
+            ))}
+          </div>
+        );
+      })}
 
-      <button
-        onClick={logout}
-        className="mt-6 w-full rounded-lg px-3 py-2 text-sm font-medium"
-        style={{
-          background: "transparent",
-          border: "1px solid var(--border)",
-          color: "var(--text-secondary)",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = "var(--primary)";
-          e.currentTarget.style.color = "var(--text-primary)";
-          e.currentTarget.style.background = "var(--bg-muted)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = "var(--border)";
-          e.currentTarget.style.color = "var(--text-secondary)";
-          e.currentTarget.style.background = "transparent";
-        }}
-      >
-        Sair
-      </button>
+      <div className="sb-foot">
+        <strong>{me?.email || "—"}</strong>
+        {isAdmin ? "Admin · acesso total" : "Operador"}
+        <button
+          onClick={logout}
+          style={{
+            marginTop: 10,
+            display: "block",
+            width: "100%",
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--sidebar-border)",
+            background: "transparent",
+            color: "var(--sidebar-muted)",
+            fontSize: 12,
+            fontWeight: 500,
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--sidebar-hover-bg)";
+            e.currentTarget.style.color = "#ffffff";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--sidebar-muted)";
+          }}
+        >
+          Sair
+        </button>
+      </div>
     </aside>
   );
 }

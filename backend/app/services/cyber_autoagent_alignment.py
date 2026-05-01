@@ -98,6 +98,40 @@ Out-of-scope actions MUST be skipped and logged.
 ## ACTIVE SKILLS (prioritized for this target)
 {skills_summary}
 
+## TOOL CATALOG (only INSTALLED tools you may invoke)
+{tool_catalog}
+
+When choosing a tool:
+- Match by purpose (description, when_to_use), never invent tool names.
+- Verify prerequisites are satisfied before invoking; otherwise skip and log.
+- Wire INPUTS from prior phase outputs (recon → vuln → exploit pipeline).
+- A tool not listed here is NOT installed — do not call it.
+
+## COVERAGE POLICY (MANDATORY — non-negotiable)
+The 22-phase pipeline MUST be exercised end-to-end. Each capability node owns
+specific phases and MUST attempt every applicable installed tool exactly once
+per scan, not just one tool per iteration. Skipping a phase requires a logged
+reason (e.g. "out of scope", "prerequisite missing"). Specifically:
+
+- asset_discovery owns P01-P06: subdomain enum (subfinder/amass/dnsx/massdns/
+  shuffledns/assetfinder/alterx), port/service (naabu/nmap/httpx),
+  crawl+JS (katana/hakrawler/gau/waybackurls/gospider),
+  param discovery (arjun/paramspider/ffuf), HTTP/TLS fingerprint
+  (whatweb/sslscan/wafw00f/curl-headers).
+- threat_intel owns P07-P10 + P21: OSINT (shodan-cli/theHarvester/h8mail/
+  metagoofil), email posture (theHarvester), takeover (subjack/nuclei),
+  cloud exposure (nuclei/shodan-cli/trufflehog), secrets (trufflehog/gitleaks).
+- risk_assessment owns P11-P20 + P22: CVE scan (nuclei/nmap-vulscan),
+  injection (sqlmap/dalfox/wapiti/burp-cli/nikto), SSRF (nuclei/interactsh-client),
+  auth bypass (hydra/jwt_tool), dir enum (ffuf/gobuster/feroxbuster/dirsearch),
+  API (nuclei/burp-cli/arjun/wapiti), TLS (sslscan/testssl), CMS (wpscan),
+  deps (retire/trivy/eslint/semgrep).
+- governance + executive_analyst do NOT run tools — they aggregate evidence.
+
+After your first full sweep, the `phase_monitor` summary is checked: any phase
+flagged "node_completed_no_phase_tools" or "attempted_failed" with installed
+tools available MUST be retried.
+
 ## CIRCUIT BREAKER
 - 5 consecutive tool failures → log and pause 60s.
 - 3 iterations with no new findings → pivot strategy (change tools/approach).
@@ -122,12 +156,22 @@ def build_supervisor_prompt_contract(
         f"{skill.get('description', '')} | tools: {', '.join(skill.get('playbook', [])[:5])}"
         for skill in skills
     )
+
+    # Inject the live tool catalog so the agent sees only INSTALLED tools.
+    try:
+        from app.services.tool_catalog import render_tool_catalog_for_prompt
+
+        tool_catalog = render_tool_catalog_for_prompt(only_installed=True)
+    except Exception:
+        tool_catalog = "(tool catalog unavailable)"
+
     prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
         target=str(target or ""),
         objective=str(objective or f"Assess external attack surface for {target}"),
         authorized_targets=", ".join(scope) if scope else str(target),
         max_iterations=int(max_iterations),
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
+        tool_catalog=tool_catalog,
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
     )
     return {

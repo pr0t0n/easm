@@ -61,8 +61,7 @@ _TOOL_BINARIES: dict[str, list[str]] = {
     "hydra": ["hydra"],
     "medusa": ["medusa"],
     "jwt_tool": ["jwt_tool"],
-    "crackmapexec": ["crackmapexec", "netexec", "nxc"],
-    "impacket": ["impacket-smbexec", "impacket-secretsdump"],
+    "impacket": ["impacket-smbexec", "impacket-secretsdump", "smbexec.py", "secretsdump.py"],
     "evilwinrm": ["evil-winrm"],
     "semgrep": ["semgrep"],
     "bandit": ["bandit"],
@@ -406,13 +405,6 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "JWT string", "outputs": "vulnerabilities + forged tokens",
         "prerequisites": "captured JWT",
     },
-    "crackmapexec": {
-        "category": "exploit", "phase": "P14",
-        "description": "Swiss-army for SMB/AD: enumerate, spray, dump SAM, lateral move.",
-        "when_to_use": "Internal/exposed SMB/AD only; needs authorization.",
-        "inputs": "host list, creds", "outputs": "hosts + privileges",
-        "prerequisites": "SMB exposed, credentials or null session",
-    },
     "impacket": {
         "category": "exploit", "phase": "P14",
         "description": "Suite for Windows protocols (psexec, smbexec, secretsdump, GetNPUsers).",
@@ -484,6 +476,27 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "when_to_use": "JS-only code.",
         "inputs": "JS file/dir", "outputs": "issues",
         "prerequisites": "JS code",
+    },
+    "ast-grep": {
+        "category": "code", "phase": "P22",
+        "description": "AST-aware structural code search for insecure patterns.",
+        "when_to_use": "Fast custom SAST rules across source trees and extracted JS.",
+        "inputs": "code dir, AST pattern", "outputs": "matched files + lines",
+        "prerequisites": "source code or extracted JS",
+    },
+    "js-snooper": {
+        "category": "recon|code", "phase": "P03",
+        "description": "JavaScript endpoint and secret discovery from bundles.",
+        "when_to_use": "After crawling live apps to inspect JS assets.",
+        "inputs": "JS URLs/files", "outputs": "endpoints, keys, interesting strings",
+        "prerequisites": "JS files from crawler",
+    },
+    "jsniper": {
+        "category": "recon|code", "phase": "P03",
+        "description": "JavaScript recon helper for endpoints and sensitive patterns.",
+        "when_to_use": "Complement js-snooper on large SPAs and static bundles.",
+        "inputs": "JS URLs/files", "outputs": "endpoints + candidate secrets",
+        "prerequisites": "JS files from crawler",
     },
 }
 

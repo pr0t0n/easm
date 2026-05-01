@@ -124,6 +124,7 @@ def _parse_targets(targets_text: str) -> list[str]:
 
 
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+IPV4_RE = re.compile(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")
 
 
 def _normalize_domain_candidate(raw_target: str) -> str | None:
@@ -140,9 +141,12 @@ def _normalize_domain_candidate(raw_target: str) -> str | None:
     wildcard = raw.startswith("*.")
     host = raw[2:] if wildcard else raw
 
-    if not host or not DOMAIN_RE.match(host):
+    is_valid_domain = DOMAIN_RE.match(host)
+    is_valid_ipv4 = IPV4_RE.match(host)
+    
+    if not host or (not is_valid_domain and not is_valid_ipv4):
         return None
-    return f"*.{host}" if wildcard else host
+    return f"*.{host}" if wildcard and is_valid_domain else host
 
 
 def _validate_schedule_targets(targets_text: str) -> tuple[list[str], list[str]]:

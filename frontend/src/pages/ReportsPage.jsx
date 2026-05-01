@@ -41,6 +41,30 @@ const OUTPUT_LABEL = {
   pdf_tech: "PDF Técnico",
 };
 
+const controlLabel = {
+  display: "grid",
+  gap: 4,
+  fontSize: 12,
+  color: "var(--ink-muted)",
+};
+
+const controlInput = {
+  padding: "6px 10px",
+  borderRadius: 8,
+  border: "1px solid var(--line)",
+  fontSize: 13,
+  background: "#ffffff",
+  color: "var(--ink)",
+};
+
+const reportCard = {
+  background: "#ffffff",
+  border: "1px solid var(--line)",
+  borderRadius: 10,
+  padding: 12,
+  boxShadow: "var(--shadow-card)",
+};
+
 export default function ReportsPage() {
   const apiUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [wizardStep, setWizardStep] = useState(1);
@@ -175,8 +199,8 @@ export default function ReportsPage() {
   const selectedScan = scans.find((s) => String(s.id) === String(selectedId));
 
   return (
-    <div style={{ padding: 16, display: "grid", gap: 12 }}>
-      <div style={{ background: "#0b1220", border: "1px solid #334155", borderRadius: 10, padding: 12, display: "grid", gap: 10 }}>
+    <div style={{ padding: 16, display: "grid", gap: 12, background: "var(--bg-main)", color: "var(--ink)" }}>
+      <div style={{ ...reportCard, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             {[1, 2, 3].map((step) => (
@@ -187,9 +211,9 @@ export default function ReportsPage() {
                 style={{
                   padding: "6px 10px",
                   borderRadius: 999,
-                  border: `1px solid ${wizardStep === step ? "#a16207" : "#475569"}`,
-                  background: wizardStep === step ? "rgba(245,158,11,0.18)" : "#111827",
-                  color: wizardStep === step ? "#fcd34d" : "#cbd5e1",
+                  border: `1px solid ${wizardStep === step ? "var(--brand-500)" : "var(--line)"}`,
+                  background: wizardStep === step ? "var(--brand-500)" : "#ffffff",
+                  color: wizardStep === step ? "#ffffff" : "var(--ink-soft)",
                   fontSize: 12,
                   cursor: "pointer",
                 }}
@@ -198,29 +222,29 @@ export default function ReportsPage() {
               </button>
             ))}
           </div>
-          <div style={{ color: "#94a3b8", fontSize: 12 }}>{stepTitle}</div>
+          <div style={{ color: "var(--ink-muted)", fontSize: 12 }}>{stepTitle}</div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
-          <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#94a3b8" }}>
+          <label style={controlLabel}>
             Persona
-            <select value={persona} onChange={(e) => setPersona(e.target.value)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}>
+            <select value={persona} onChange={(e) => setPersona(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
               <option value="executive">Executivo</option>
               <option value="technical">Técnico</option>
               <option value="compliance">Compliance</option>
             </select>
           </label>
-          <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#94a3b8" }}>
+          <label style={controlLabel}>
             Formato de saída
-            <select value={outputMode} onChange={(e) => setOutputMode(e.target.value)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}>
+            <select value={outputMode} onChange={(e) => setOutputMode(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
               <option value="visual">Interativo</option>
               <option value="pdf_exec">PDF Executivo</option>
               <option value="pdf_tech">PDF Técnico</option>
             </select>
           </label>
-          <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#94a3b8" }}>
+          <label style={controlLabel}>
             Severidade mínima
-            <select value={severityMin} onChange={(e) => setSeverityMin(e.target.value)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}>
+            <select value={severityMin} onChange={(e) => setSeverityMin(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
               <option value="all">Todas</option>
               <option value="critical">Crítica+</option>
               <option value="high">Alta+</option>
@@ -228,9 +252,9 @@ export default function ReportsPage() {
               <option value="low">Baixa+</option>
             </select>
           </label>
-          <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#94a3b8" }}>
+          <label style={controlLabel}>
             Janela temporal
-            <select value={periodDays} onChange={(e) => setPeriodDays(e.target.value)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}>
+            <select value={periodDays} onChange={(e) => setPeriodDays(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
               <option value="all">Histórico completo</option>
               <option value="7">Últimos 7 dias</option>
               <option value="30">Últimos 30 dias</option>
@@ -240,24 +264,24 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", background: "#0b1220", border: "1px solid #334155", borderRadius: 10, padding: 12 }}>
+      <div style={{ ...reportCard, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
         {["scan", "target"].map((m) => (
           <button
             key={m}
             type="button"
             onClick={() => setMode(m)}
-            style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${mode === m ? "#a16207" : "#475569"}`, background: mode === m ? "rgba(245,158,11,0.18)" : "#111827", color: mode === m ? "#fcd34d" : "#cbd5e1", fontWeight: mode === m ? 600 : 400, fontSize: 13, cursor: "pointer" }}
+            style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${mode === m ? "var(--brand-500)" : "var(--line)"}`, background: mode === m ? "var(--brand-500)" : "#ffffff", color: mode === m ? "#ffffff" : "var(--ink-soft)", fontWeight: mode === m ? 600 : 400, fontSize: 13, cursor: "pointer" }}
           >
             {m === "scan" ? "Por Scan" : "Por Alvo"}
           </button>
         ))}
-        <div style={{ width: 1, height: 24, background: "#334155" }} />
+        <div style={{ width: 1, height: 24, background: "var(--line)" }} />
         {mode === "scan" && (
           <select
             value={selectedId}
             onChange={(e) => setSelectedId(e.target.value)}
             disabled={loadingScans || scans.length === 0}
-            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, background: "#111827", color: "#e2e8f0" }}
+            style={controlInput}
           >
             {scans.length === 0 && <option value="">Sem scans disponíveis</option>}
             {scans.map((s) => (
@@ -270,22 +294,22 @@ export default function ReportsPage() {
         {mode === "target" && (
           <>
             {targets.length > 0 && (
-              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)} disabled={loadingTargets} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, maxWidth: 220, background: "#111827", color: "#e2e8f0" }}>
+              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)} disabled={loadingTargets} style={{ ...controlInput, maxWidth: 220 }}>
                 <option value="">-- selecionar alvo --</option>
                 {targets.map((t) => <option key={t.target} value={t.target}>{t.target}</option>)}
               </select>
             )}
-            <input ref={inputRef} type="text" placeholder="digitar subdomínio / alvo…" value={targetInput} onChange={(e) => setTargetInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleResolve()} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 13, minWidth: 210, background: "#111827", color: "#e2e8f0" }} />
-            <button type="button" onClick={handleResolve} disabled={resolving || !targetInput.trim()} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #a16207", background: "rgba(245,158,11,0.18)", color: "#fcd34d", fontSize: 13, cursor: "pointer", opacity: resolving || !targetInput.trim() ? 0.5 : 1 }}>
+            <input ref={inputRef} type="text" placeholder="digitar subdomínio / alvo…" value={targetInput} onChange={(e) => setTargetInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleResolve()} style={{ ...controlInput, minWidth: 210 }} />
+            <button type="button" onClick={handleResolve} disabled={resolving || !targetInput.trim()} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid var(--brand-500)", background: "var(--brand-500)", color: "#ffffff", fontSize: 13, cursor: "pointer", opacity: resolving || !targetInput.trim() ? 0.5 : 1 }}>
               {resolving ? "Buscando…" : "Gerar"}
             </button>
-            {resolvedScanId && <span style={{ fontSize: 12, color: "#94a3b8" }}>Scan #{resolvedScanId}</span>}
-            {resolveError && <span style={{ fontSize: 12, color: "#fca5a5" }}>{resolveError}</span>}
+            {resolvedScanId && <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Scan #{resolvedScanId}</span>}
+            {resolveError && <span style={{ fontSize: 12, color: "var(--sev-critical-text)" }}>{resolveError}</span>}
           </>
         )}
 
         <div style={{ display: "grid", gap: 4, minWidth: 260 }}>
-          <label style={{ fontSize: 11, color: "#94a3b8" }}>Alvos incluídos no relatório (customizável)</label>
+          <label style={{ fontSize: 11, color: "var(--ink-muted)" }}>Alvos incluídos no relatório (customizável)</label>
           <select
             multiple
             value={selectedIncludeTargets}
@@ -293,7 +317,7 @@ export default function ReportsPage() {
               const values = Array.from(e.target.selectedOptions || []).map((opt) => normalizeTargetToken(opt.value)).filter(Boolean);
               setSelectedIncludeTargets(values);
             }}
-            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, minHeight: 72, background: "#111827", color: "#e2e8f0" }}
+            style={{ ...controlInput, fontSize: 12, minHeight: 72 }}
           >
             {availableTargetOptions.map((target) => (
               <option key={target} value={target}>{target}</option>
@@ -304,19 +328,19 @@ export default function ReportsPage() {
             placeholder="Extras (csv): ex. app.site.com,api.site.com"
             value={customTargetsInput}
             onChange={(e) => setCustomTargetsInput(e.target.value)}
-            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}
+            style={{ ...controlInput, fontSize: 12 }}
           />
-          <span style={{ fontSize: 11, color: "#94a3b8" }}>
+          <span style={{ fontSize: 11, color: "var(--ink-muted)" }}>
             Escopo ativo: {effectiveIncludeTargets.length > 0 ? effectiveIncludeTargets.join(", ") : "scan completo"}
           </span>
         </div>
 
-        <label style={{ display: "grid", gap: 4, minWidth: 190, fontSize: 11, color: "#94a3b8" }}>
+        <label style={{ ...controlLabel, minWidth: 190, fontSize: 11 }}>
           Comparar com scan (opcional)
           <select
             value={compareScanId}
             onChange={(e) => setCompareScanId(e.target.value)}
-            style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #475569", fontSize: 12, background: "#111827", color: "#e2e8f0" }}
+            style={{ ...controlInput, fontSize: 12 }}
           >
             <option value="">Sem comparação</option>
             {scans
@@ -349,8 +373,8 @@ export default function ReportsPage() {
         <button type="button" onClick={printReport} disabled={!reportUrl || !scopeReady || wizardStep < 3} className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50">Imprimir / PDF</button>
       </div>
 
-      <div style={{ position: "sticky", top: 8, zIndex: 4, background: "rgba(2,6,23,0.92)", border: "1px solid #334155", borderRadius: 10, padding: "10px 12px", display: "grid", gap: 3, fontSize: 12, color: "#94a3b8" }}>
-        <div style={{ color: "#e2e8f0", fontWeight: 600 }}>Resumo do escopo</div>
+      <div style={{ position: "sticky", top: 8, zIndex: 4, background: "rgba(255,255,255,0.94)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px", display: "grid", gap: 3, fontSize: 12, color: "var(--ink-muted)", boxShadow: "var(--shadow-card)", backdropFilter: "blur(8px)" }}>
+        <div style={{ color: "var(--ink)", fontWeight: 600 }}>Resumo do escopo</div>
         <div>Persona: {PERSONA_LABEL[persona] || persona} | Saída: {OUTPUT_LABEL[outputMode] || outputMode}</div>
         <div>Modo: {mode === "scan" ? "Por scan" : "Por alvo"} | Severidade mínima: {severityMin} | Janela: {periodDays === "all" ? "completa" : `${periodDays} dias`}</div>
         <div>Scan base: {scanId ? `#${scanId}` : "não selecionado"} {compareScanId ? `| comparação: #${compareScanId}` : "| sem comparação"}</div>
@@ -358,17 +382,17 @@ export default function ReportsPage() {
       </div>
 
       {mode === "scan" && selectedScan && (
-        <div style={{ display: "flex", gap: 20, padding: "8px 14px", background: "#0f172a", border: "1px solid #334155", borderRadius: 8, fontSize: 12, color: "#94a3b8", flexWrap: "wrap" }}>
-          <span><strong style={{ color: "#e2e8f0" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
-          <span><strong style={{ color: "#e2e8f0" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "#86efac" : selectedScan.status === "failed" ? "#fca5a5" : "#fde68a", fontWeight: 600 }}>{selectedScan.status}</span></span>
-          <span><strong style={{ color: "#e2e8f0" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR") : "—"}</span>
+        <div style={{ display: "flex", gap: 20, padding: "8px 14px", background: "#ffffff", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12, color: "var(--ink-muted)", flexWrap: "wrap" }}>
+          <span><strong style={{ color: "var(--ink)" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
+          <span><strong style={{ color: "var(--ink)" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "var(--sev-low-text)" : selectedScan.status === "failed" ? "var(--sev-critical-text)" : "var(--sev-medium-text)", fontWeight: 600 }}>{selectedScan.status}</span></span>
+          <span><strong style={{ color: "var(--ink)" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR") : "—"}</span>
         </div>
       )}
 
       {reportUrl ? (
-        <iframe id="report-iframe" key={reportUrl} src={reportUrl} title="Relatório" style={{ width: "100%", minHeight: "calc(100vh - 200px)", border: "1px solid #334155", borderRadius: 10, background: "#020617" }} />
+        <iframe id="report-iframe" key={reportUrl} src={reportUrl} title="Relatório" style={{ width: "100%", minHeight: "calc(100vh - 200px)", border: "1px solid var(--line)", borderRadius: 10, background: "#ffffff", boxShadow: "var(--shadow-card)" }} />
       ) : (
-        <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", border: "1px dashed #334155", borderRadius: 10, fontSize: 14, background: "#0f172a" }}>
+        <div style={{ padding: 40, textAlign: "center", color: "var(--ink-muted)", border: "1px dashed var(--line-strong)", borderRadius: 10, fontSize: 14, background: "#ffffff" }}>
           {mode === "scan" ? (loadingScans ? "Carregando scans…" : "Selecione um scan para gerar o relatório.") : "Selecione ou digite um alvo e clique em Gerar."}
         </div>
       )}

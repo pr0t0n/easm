@@ -69,9 +69,9 @@ export default function App() {
           path="/*"
           element={
             <Protected>
-              <div className="min-h-screen md:flex" style={{ backgroundColor: "var(--bg-main)" }}>
+              <div className="app-shell" style={{ backgroundColor: "var(--bg-main)" }}>
                 <Sidebar />
-                <div className="flex min-h-screen flex-1 flex-col">
+                <div className="main-column">
                   <Navbar />
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />

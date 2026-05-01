@@ -24,13 +24,13 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     # Recon: subdomain enum, port scan, web crawl, fingerprint
     "recon": [
         "subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx",
-        "naabu", "nmap", "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan",
-        "katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider",
-        "ffuf", "gobuster", "feroxbuster", "dirsearch",
+        "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan",
+        "katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper",
+        "arjun", "paramspider", "ffuf", "gobuster", "feroxbuster", "dirsearch", "nikto",
     ],
     # OSINT: external intelligence, leaks, email security, takeover
     "osint": [
-        "shodan-cli", "theHarvester", "h8mail", "subjack", "metagoofil",
+        "shodan-cli", "theHarvester", "h8mail", "subjack", "metagoofil", "nuclei",
     ],
     # Vuln: active vulnerability scanning + web injection + auth
     "vuln": [
@@ -40,11 +40,11 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     # Exploit: targeted exploitation, auth bypass, credential testing
     "exploit": [
         "hydra", "medusa", "jwt_tool", "sqlmap", "burp-cli",
-        "crackmapexec", "impacket", "evilwinrm",
+        "impacket", "evilwinrm",
     ],
     # API: REST/GraphQL/rate-limit testing
     "api": [
-        "nuclei", "burp-cli", "arjun", "wapiti", "ffuf",
+        "nuclei", "burp-cli", "arjun", "wapiti", "ffuf", "testssl",
     ],
     # Code/Secrets/Supply chain
     "code": [

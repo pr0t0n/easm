@@ -2,27 +2,27 @@
    VARIABLES & RESET
 ============================================================ */
 :root {
-  --bg-primary: #0a0f1e;
-  --bg-secondary: #0d1527;
-  --bg-card: #111827;
-  --bg-card-hover: #1a2337;
-  --border: #1e293b;
-  --border-light: #243044;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent: #3b82f6;
-  --accent-glow: rgba(59, 130, 246, 0.15);
-  --critical: #ef4444;
-  --high: #f97316;
-  --medium: #eab308;
-  --low: #22c55e;
-  --info: #3b82f6;
-  --neon-blue: #60a5fa;
-  --neon-cyan: #22d3ee;
+  --bg-primary: #fcfbf8;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #faf8f4;
+  --border: #e5dcd5;
+  --border-light: #efe7e0;
+  --text-primary: #1c1c1c;
+  --text-secondary: #3d3d3d;
+  --text-muted: #6b6b6b;
+  --accent: #e96363;
+  --accent-glow: rgba(233, 99, 99, 0.12);
+  --critical: #b03333;
+  --high: #c25500;
+  --medium: #a47700;
+  --low: #1f8a59;
+  --info: #2d52e6;
+  --neon-blue: #4b73ff;
+  --neon-cyan: #f3a6a6;
   --page-w: 960px;
   --page-pad: 48px;
-  --radius: 12px;
+  --radius: 8px;
   --radius-sm: 8px;
 }
 
@@ -32,7 +32,10 @@ html { font-size: 15px; }
 
 body {
   font-family: 'Inter', system-ui, sans-serif;
-  background: #060b17;
+  background:
+    radial-gradient(circle at 12% 10%, rgba(233, 99, 99, 0.06), transparent 35%),
+    radial-gradient(circle at 88% 0%, rgba(75, 115, 255, 0.05), transparent 28%),
+    linear-gradient(180deg, #fcfbf8 0%, #f7f4ee 100%);
   color: var(--text-primary);
   line-height: 1.7;
   -webkit-print-color-adjust: exact;
@@ -51,9 +54,10 @@ body {
   border-radius: 0;
   padding: var(--page-pad);
   position: relative;
-  box-shadow: 0 0 60px rgba(0,0,0,0.6);
-  page-break-after: always;
-  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(28,28,28,0.04), 0 4px 12px rgba(28,28,28,0.04);
+  page-break-after: auto;
+  break-after: auto;
+  overflow: visible;
 }
 
 .page::before {
@@ -61,7 +65,7 @@ body {
   position: absolute;
   top: 0; left: 0; right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--neon-cyan), var(--accent));
+  background: var(--accent);
 }
 
 /* ============================================================
@@ -108,7 +112,10 @@ body {
 ============================================================ */
 .cover-page {
   min-height: 297mm;
-  background: linear-gradient(160deg, #060b17 0%, #0a1628 40%, #060b17 100%);
+  background: #b03333;
+  background-image:
+    radial-gradient(circle at 85% 10%, rgba(255,255,255,0.10), transparent 40%),
+    radial-gradient(circle at 0% 100%, rgba(0,0,0,0.20), transparent 40%);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -126,7 +133,7 @@ body {
   position: absolute;
   top: -200px; right: -200px;
   width: 600px; height: 600px;
-  background: radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(255,255,255,0.10) 0%, transparent 70%);
   pointer-events: none;
 }
 
@@ -134,8 +141,8 @@ body {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(59,130,246,0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(59,130,246,0.04) 1px, transparent 1px);
+    linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
   background-size: 40px 40px;
   pointer-events: none;
 }
@@ -153,14 +160,14 @@ body {
 
 .brand-shield {
   width: 52px; height: 52px;
-  background: linear-gradient(135deg, var(--accent), var(--neon-cyan));
+  background: #ffffff;
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 24px;
-  color: #fff;
-  box-shadow: 0 0 30px rgba(59,130,246,0.4);
+  color: #b03333;
+  box-shadow: none;
 }
 
 .brand-text {
@@ -201,9 +208,9 @@ body {
 
 .cover-badge {
   display: inline-block;
-  background: rgba(239,68,68,0.15);
-  border: 1px solid rgba(239,68,68,0.3);
-  color: #ef4444;
+  background: rgba(255,255,255,0.14);
+  border: 1px solid rgba(255,255,255,0.32);
+  color: #ffffff;
   font-size: 10px;
   font-weight: 700;
   padding: 6px 16px;
@@ -216,10 +223,7 @@ body {
   font-size: 3.2rem;
   font-weight: 800;
   line-height: 1.15;
-  background: linear-gradient(135deg, #f1f5f9 0%, #94a3b8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #ffffff;
 }
 
 .cover-subtitle {
@@ -233,10 +237,10 @@ body {
   flex-direction: column;
   gap: 4px;
   padding: 20px 24px;
-  background: rgba(59,130,246,0.06);
-  border: 1px solid rgba(59,130,246,0.2);
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.25);
   border-radius: var(--radius-sm);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid #ffffff;
   width: fit-content;
 }
 
@@ -250,7 +254,7 @@ body {
 .cover-org-name {
   font-size: 1.1rem;
   font-weight: 700;
-  color: var(--neon-blue);
+  color: #ffffff;
 }
 
 .cover-meta-grid {
@@ -1252,10 +1256,10 @@ body {
   }
 
   body {
-    background: #0f172a !important;
+    background: #ffffff !important;
     margin: 0;
     padding: 0;
-    color: #f1f5f9 !important;
+    color: #1c1c1c !important;
   }
 
   .page {
@@ -1267,11 +1271,12 @@ body {
     box-shadow: none;
     border: none;
     border-radius: 0;
-    page-break-after: always;
+    page-break-after: auto;
+    break-after: auto;
     page-break-inside: auto;
     overflow: visible;
-    background: #1e293b !important;
-    color: #f1f5f9 !important;
+    background: #ffffff !important;
+    color: #1c1c1c !important;
   }
 
   .page::before {
@@ -1279,11 +1284,11 @@ body {
   }
 
   .cover-page {
-    background: #1e293b !important;
+    background: #b03333 !important;
     min-height: calc(297mm - 20mm) !important;
     max-height: none !important;
     padding: 18mm 12mm !important;
-    color: #f1f5f9 !important;
+    color: #ffffff !important;
     border: none !important;
   }
 
@@ -1297,8 +1302,8 @@ body {
 
   .cover-title {
     background: none !important;
-    -webkit-text-fill-color: #f1f5f9 !important;
-    color: #f1f5f9 !important;
+    -webkit-text-fill-color: #ffffff !important;
+    color: #ffffff !important;
   }
 
   .cover-subtitle,

@@ -67,7 +67,8 @@ export default function LoginPage() {
     <main className="relative min-h-screen overflow-hidden px-4 py-8" style={{ background: "var(--bg-app-gradient)" }}>
       <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-7xl items-center gap-8 lg:grid-cols-[1.2fr_0.8fr]">
         <section className="rounded-2xl border p-8 lg:p-10" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "0 1px 2px rgba(28,28,28,0.04), 0 4px 12px rgba(28,28,28,0.04)" }}>
-          <div className="inline-flex items-center gap-2 rounded-full border px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em]" style={{ background: "rgba(254,123,2,0.08)", borderColor: "rgba(254,123,2,0.3)", color: "#c25500" }}>
+          <div className="inline-flex items-center gap-2 rounded-full border px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em]" style={{ background: "rgba(233,99,99,0.08)", borderColor: "rgba(233,99,99,0.3)", color: "var(--brand-700)" }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand-500)", display: "inline-block" }} />
             Pentest.io
           </div>
           <h1 className="mt-6 max-w-3xl font-display text-4xl font-semibold leading-tight lg:text-6xl" style={{ color: "var(--text-primary)" }}>
@@ -104,12 +105,12 @@ export default function LoginPage() {
           </div>
         </section>
 
-        <section className="relative overflow-hidden rounded-2xl border p-6 lg:p-8" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "0 2px 6px rgba(28,28,28,0.06), 0 8px 24px rgba(28,28,28,0.06)" }}>
-          <div className="absolute inset-x-0 top-0 h-1" style={{ background: "linear-gradient(90deg,#fe7b02,#ff66f4,#4b73ff)" }} />
-          <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--text-tertiary)" }}>Acesso corporativo</p>
-          <h2 className="mt-3 font-display text-3xl font-semibold" style={{ color: "var(--text-primary)" }}>Entrar na operacao</h2>
-          <p className="mt-2 text-sm leading-6" style={{ color: "var(--text-secondary)" }}>
-            Acompanhe execucoes, postura de risco e status das integrações em um painel único. O cadastro de usuarios é realizado exclusivamente por administradores.
+        <section className="relative overflow-hidden rounded-2xl border p-6 lg:p-8" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "var(--shadow-elevate)" }}>
+          <div className="absolute inset-x-0 top-0 h-1" style={{ background: "linear-gradient(90deg,#e96363,#ff66f4,#4b73ff)" }} />
+          <p className="ds-eyebrow">Acesso corporativo</p>
+          <h2 className="mt-3 font-display text-3xl font-semibold" style={{ color: "var(--ink)" }}>Entrar na operação</h2>
+          <p className="mt-2 text-sm leading-6" style={{ color: "var(--ink-soft)" }}>
+            Acompanhe execuções, postura de risco e status das integrações em um painel único. O cadastro de usuários é realizado exclusivamente por administradores.
           </p>
 
           <form onSubmit={submit} className="mt-6 space-y-3">
@@ -139,7 +140,9 @@ export default function LoginPage() {
             <button
               disabled={submitting}
               className="w-full rounded-xl px-4 py-3 font-semibold text-white disabled:opacity-50"
-              style={{ background: "var(--primary)", boxShadow: "0 2px 8px rgba(254,123,2,0.25)" }}
+              style={{ background: "var(--primary)", border: "1px solid var(--primary)", boxShadow: "var(--shadow-cta)" }}
+              onMouseEnter={(e) => { if (!submitting) { e.currentTarget.style.background = "var(--primary-hover)"; e.currentTarget.style.boxShadow = "var(--shadow-cta-hover)"; } }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--primary)"; e.currentTarget.style.boxShadow = "var(--shadow-cta)"; }}
             >
               {submitting ? "Processando..." : "Entrar"}
             </button>
