@@ -2,11 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
 const STATUS_STYLES = {
-  executed: { bg: "rgba(34,145,96,0.10)", border: "#1f8a59", text: "#1f8a59", label: "Executou" },
-  attempted_failed: { bg: "rgba(214,69,69,0.10)", border: "#d64545", text: "#b03333", label: "Falhou" },
-  node_completed_no_phase_tools: { bg: "rgba(254,123,2,0.10)", border: "#fe7b02", text: "#c25500", label: "Node OK / sem tools" },
-  node_visited_no_tools: { bg: "rgba(75,115,255,0.10)", border: "#4b73ff", text: "#2d52e6", label: "Visitou / sem tools" },
-  skipped: { bg: "#f0ebe7", border: "#d8cdc4", text: "#6b6b6b", label: "Pulou" },
+  executed:                       { className: "ds-badge ds-badge--low",     label: "Executado" },
+  partial_coverage:               { className: "ds-badge ds-badge--high",    label: "Parcial" },
+  attempted_failed:               { className: "ds-badge ds-badge--critical", label: "Falhou" },
+  node_completed_tools_skipped:   { className: "ds-badge ds-badge--info",     label: "Tools puladas" },
+  no_tools_installed:             { className: "ds-badge",                   label: "Sem tools" },
+  node_completed_no_phase_tools:  { className: "ds-badge ds-badge--high",    label: "Node OK / sem tools" },
+  node_visited_no_tools:          { className: "ds-badge ds-badge--info",    label: "Visitou / sem tools" },
+  skipped:                        { className: "ds-badge",                   label: "Pulou" },
 };
 
 const SEVERITY_COLORS = {
@@ -19,23 +22,7 @@ const SEVERITY_COLORS = {
 
 function StatusBadge({ status }) {
   const meta = STATUS_STYLES[status] || STATUS_STYLES.skipped;
-  return (
-    <span
-      style={{
-        background: meta.bg,
-        border: `1px solid ${meta.border}`,
-        color: meta.text,
-        padding: "2px 8px",
-        borderRadius: 4,
-        fontSize: 11,
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.04em",
-      }}
-    >
-      {meta.label}
-    </span>
-  );
+  return <span className={meta.className}>{meta.label}</span>;
 }
 
 function CapabilityCard({ cap }) {
@@ -171,6 +158,44 @@ export default function PhaseMonitorPage() {
             <Metric label="Objective met" value={data.objective_met ? "yes" : "no"} />
           </div>
 
+          {/* TOOL INSTALLATION REPORT */}
+          {data.installation_report && (
+            <div
+              style={{
+                background: "#ffffff",
+                border: "1px solid #e5dcd5",
+                borderRadius: 8,
+                padding: "10px 14px",
+                marginBottom: 16,
+                boxShadow: "0 1px 2px rgba(28,28,28,0.04)",
+              }}
+            >
+              <div style={{ fontSize: 12, color: "#6b6b6b", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
+                Inventário de tools (ambiente backend ativo)
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
+                <span><strong style={{ color: "#1f8a59" }}>{data.installation_report.installed.length}</strong> instaladas</span>
+                <span><strong style={{ color: "#b03333" }}>{data.installation_report.missing.length}</strong> faltando</span>
+                <span><strong>{Math.round((data.installation_report.coverage_ratio || 0) * 100)}%</strong> de cobertura</span>
+                <span style={{ color: "#6b6b6b" }}>
+                  Used in this scan: <strong>{data.metrics.tools_installed_used_ratio !== undefined ? `${Math.round(data.metrics.tools_installed_used_ratio * 100)}% das instaladas` : "—"}</strong>
+                </span>
+              </div>
+              {data.installation_report.missing.length > 0 && (
+                <details style={{ marginTop: 8 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 12, color: "#b03333" }}>
+                    Tools não instaladas no runtime atual ({data.installation_report.missing.length})
+                  </summary>
+                  <div style={{ marginTop: 6 }}>
+                    {data.installation_report.missing.map((t) => (
+                      <span key={t} style={{ ...chip, ...chipMuted }}>{t}</span>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
           {/* SEVERITY */}
           <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
             {["critical", "high", "medium", "low", "info"].map((sev) => (
@@ -233,7 +258,7 @@ export default function PhaseMonitorPage() {
                       <th style={th}>Phase</th>
                       <th style={th}>Status</th>
                       <th style={th}>Tools used</th>
-                      <th style={th}>Tools missing</th>
+                      <th style={th}>Pendências de tools</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -251,17 +276,27 @@ export default function PhaseMonitorPage() {
                               {p.tools_failed.map((t) => (
                                 <span key={t} style={{ ...chip, ...chipDanger }}>{t}</span>
                               ))}
+                              {(p.tools_skipped || []).map((t) => (
+                                <span key={t} style={{ ...chip, ...chipMuted }} title="Ignorado com justificativa operacional">{t}</span>
+                              ))}
                             </span>
                           ) : (
                             <span style={{ color: "#a0958c" }}>—</span>
                           )}
                         </td>
                         <td style={td}>
-                          {p.tools_missing.slice(0, 6).map((t) => (
-                            <span key={t} style={{ ...chip, ...chipMuted }}>{t}</span>
+                          {/* installed-but-unused = red flag (agent skipped) */}
+                          {(p.tools_missing_unused || []).slice(0, 6).map((t) => (
+                            <span key={t} style={{ ...chip, ...chipDanger }} title="Instalado mas não executado">{t}</span>
                           ))}
-                          {p.tools_missing.length > 6 && (
-                            <span style={{ color: "#6b6b6b", fontSize: 11 }}>+{p.tools_missing.length - 6}</span>
+                          {/* uninstalled = neutral */}
+                          {(p.tools_missing_uninstalled || p.tools_missing || []).slice(0, 6).map((t) => (
+                            <span key={t} style={{ ...chip, ...chipMuted }} title="Não instalado">{t}*</span>
+                          ))}
+                          {(p.tools_missing || []).length > 12 && (
+                            <span style={{ color: "#6b6b6b", fontSize: 11 }}>
+                              +{(p.tools_missing || []).length - 12}
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -282,6 +317,7 @@ export default function PhaseMonitorPage() {
                   <th style={th}>Attempts</th>
                   <th style={th}>Success</th>
                   <th style={th}>Failed</th>
+                  <th style={th}>Skipped</th>
                   <th style={th}>Targets</th>
                   <th style={th}>Time (s)</th>
                   <th style={th}>Findings</th>
@@ -295,6 +331,7 @@ export default function PhaseMonitorPage() {
                     <td style={td}>{t.attempts}</td>
                     <td style={{ ...td, color: t.success > 0 ? "#1f8a59" : "#a0958c", fontWeight: 600 }}>{t.success}</td>
                     <td style={{ ...td, color: t.failed > 0 ? "#b03333" : "#a0958c", fontWeight: 600 }}>{t.failed}</td>
+                    <td style={{ ...td, color: t.skipped > 0 ? "#c25500" : "#a0958c", fontWeight: 600 }}>{t.skipped || 0}</td>
                     <td style={td}>{t.targets_count}</td>
                     <td style={td}>{t.total_seconds}</td>
                     <td style={td}>{t.findings_generated}</td>
@@ -342,7 +379,7 @@ const inputStyle = {
 };
 
 const primaryBtn = {
-  background: "#fe7b02",
+  background: "var(--brand-500)",
   color: "#ffffff",
   border: "none",
   padding: "6px 14px",

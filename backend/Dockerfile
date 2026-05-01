@@ -20,16 +20,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   golang-go \
   nodejs \
   npm \
+  python3-venv \
   nmap \
   masscan \
   sqlmap \
+  openssl \
   perl \
   libjson-perl \
   libxml-writer-perl \
   dnsutils \
   build-essential \
+  pkg-config \
   libssl-dev \
+  libffi-dev \
+  libcurl4-openssl-dev \
+  libxml2-dev \
+  libxslt1-dev \
+  zlib1g-dev \
   libpcap-dev \
+  cargo \
+  rustc \
   hydra \
   medusa \
   whatweb \
@@ -140,13 +150,15 @@ RUN set -eux; \
   pip install --no-cache-dir shodan h8mail; \
   # theHarvester em venv isolado para evitar pinning de FastAPI/Uvicorn do backend.
   git clone --depth 1 https://github.com/laramies/theHarvester.git /opt/theHarvester || true; \
+  python3 -m venv /opt/theHarvester/.venv; \
+  /opt/theHarvester/.venv/bin/pip install --no-cache-dir --upgrade pip; \
   if [ -f /opt/theHarvester/pyproject.toml ]; then \
-    python3 -m venv /opt/theHarvester/.venv; \
-    /opt/theHarvester/.venv/bin/pip install --no-cache-dir --upgrade pip; \
     /opt/theHarvester/.venv/bin/pip install --no-cache-dir /opt/theHarvester; \
-    printf '#!/bin/sh\nexec /opt/theHarvester/.venv/bin/theHarvester "$@"\n' > /usr/local/bin/theHarvester; \
-    chmod +x /usr/local/bin/theHarvester; \
+  else \
+    /opt/theHarvester/.venv/bin/pip install --no-cache-dir git+https://github.com/laramies/theHarvester.git; \
   fi; \
+  printf '#!/bin/sh\nexec /opt/theHarvester/.venv/bin/theHarvester "$@"\n' > /usr/local/bin/theHarvester; \
+  chmod +x /usr/local/bin/theHarvester; \
   # ParamSpider (Python git)
   git clone --depth 1 https://github.com/devanshbatham/ParamSpider.git /opt/ParamSpider || true; \
   if [ -f /opt/ParamSpider/requirements.txt ]; then pip install --no-cache-dir -r /opt/ParamSpider/requirements.txt || true; fi; \
@@ -166,7 +178,8 @@ RUN set -eux; \
   pip install --no-cache-dir impacket || true; \
   # CrackMapExec (NetExec successor)
   pip install --no-cache-dir netexec || true; \
-  ln -sf /usr/local/bin/netexec /usr/local/bin/crackmapexec || true; \
+  if command -v nxc >/dev/null 2>&1 && ! command -v netexec >/dev/null 2>&1; then ln -sf "$(command -v nxc)" /usr/local/bin/netexec; fi; \
+  if command -v netexec >/dev/null 2>&1; then ln -sf "$(command -v netexec)" /usr/local/bin/crackmapexec; fi; \
   # evil-winrm (Ruby gem)
   gem install --no-document evil-winrm || true; \
   # Feroxbuster (Rust binary release)
@@ -218,6 +231,21 @@ COPY . .
 # mantemos o build funcional e a ferramenta sera marcada como skipped em runtime.
 RUN chmod +x /app/setup_burp.sh /app/scripts/burp_cli_wrapper.sh /app/scripts/start_burp_rest.sh && \
   /app/setup_burp.sh || true
+
+# Fail fast when the image no longer satisfies the runtime tool catalog. This
+# keeps phase-monitor "not installed" warnings from drifting silently.
+RUN python - <<'PY'
+import subprocess
+from app.services.tool_catalog import installation_report
+
+report = installation_report()
+missing = report.get("missing") or []
+if missing:
+    raise SystemExit(f"Missing expected pentest tools in image: {', '.join(missing)}")
+for cmd in (["dirsearch", "--help"], ["ast-grep", "--version"]):
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(f"Pentest tool catalog OK: {len(report.get('installed') or [])}/{report.get('total')} installed")
+PY
 
 # ─────────────────────────────────────────────────────────────
 # Initialize database and start server

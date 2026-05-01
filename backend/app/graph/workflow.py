@@ -1002,7 +1002,7 @@ def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
     node_to_groups: dict[str, list[str]] = {
         "asset_discovery": ["recon"],
         "reconhecimento": ["recon"],
-        "threat_intel": ["osint", "code"],     # P21 secrets are in `code` group
+        "threat_intel": ["osint", "code"],     # P09/P10 nuclei are in `osint`; P21 secrets are in `code`
         "risk_assessment": ["vuln", "exploit", "api", "code", "recon"],  # P15 dir enum (recon), P22 deps (code), P14 auth (exploit)
         "analise_vulnerabilidade": ["vuln", "exploit", "api", "code"],
     }
@@ -1186,14 +1186,22 @@ def _run_tools_and_collect(
             execution_blob_parts.append(f"stderr:\n{raw_stderr}")
         execution_blob = "\n\n".join(execution_blob_parts)
         
-        # Record execution in database for idempotency across restarts
+        # Record execution in database for idempotency across restarts.
+        # Preserve "skipped" separately so the phase monitor does not paint
+        # intentional/contextual skips as hard tool failures.
         if scan_id:
             exec_status = result.get("status", "unknown")
+            if exec_status == "executed":
+                db_status = "success"
+            elif exec_status == "skipped":
+                db_status = "skipped"
+            else:
+                db_status = "failed"
             _record_tool_execution_in_db(
                 scan_id=scan_id,
                 tool_name=tool,
                 target=scan_target,
-                execution_status="success" if exec_status == "executed" else "failed",
+                execution_status=db_status,
                 error_msg=_truncate_log(execution_blob, 12000) if execution_blob else None,
                 exec_time=exec_time,
             )

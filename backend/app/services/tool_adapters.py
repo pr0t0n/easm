@@ -97,6 +97,9 @@ def _tool_binary(tool_name: str) -> str:
         "curl-headers": "curl",
         "sublist3r": "python3",
         "burp": "burp-cli",
+        "impacket": "smbexec.py",
+        "evilwinrm": "evil-winrm",
+        "testssl": "testssl",
     }
     normalized = tool_name.strip().lower()
     return aliases.get(normalized, normalized)
@@ -145,6 +148,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
             "100",
             host,
         ]
+    if normalized == "masscan":
+        return ["masscan", host, "--top-ports", "100", "--rate", os.getenv("MASSCAN_RATE", "1000")]
     if normalized == "naabu":
         return ["naabu", "-host", host, "-top-ports", "100", "-silent", "-rate", "1000"]
     if normalized == "subfinder":
@@ -205,6 +210,8 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         return ["nikto", "-host", host, "-C", "all", "-maxtime", f"{maxtime}s"]
     if normalized == "sslscan":
         return ["sslscan", "--no-colour", host]
+    if normalized == "testssl":
+        return ["testssl", "--fast", "--warnings", "batch", host]
     if normalized == "shcheck":
         return ["shcheck.py", url]
     if normalized == "curl-headers":
@@ -296,6 +303,28 @@ def _build_tool_command(tool_name: str, target: str) -> list[str]:
         return ["h8mail", "-h"]
     if normalized == "metagoofil":
         return ["metagoofil", "-h"]
+    if normalized == "impacket":
+        return ["smbexec.py", "-h"]
+    if normalized == "evilwinrm":
+        return ["evil-winrm", "-h"]
+    if normalized == "hydra":
+        return ["hydra", "-h"]
+    if normalized == "medusa":
+        return ["medusa", "-h"]
+    if normalized == "retire":
+        return ["retire", "--version"]
+    if normalized == "trivy":
+        return ["trivy", "--version"]
+    if normalized == "eslint":
+        return ["eslint", "--version"]
+    if normalized == "jshint":
+        return ["jshint", "--version"]
+    if normalized == "ast-grep":
+        return ["ast-grep", "--version"]
+    if normalized == "js-snooper":
+        return ["js-snooper", "--help"]
+    if normalized == "jsniper":
+        return ["jsniper", "--help"]
     if normalized == "subjack":
         fingerprints = _first_existing_path([
             "/opt/subjack/fingerprints.json",
@@ -394,6 +423,30 @@ def _run_cli_tool(tool_name: str, target: str) -> dict[str, Any]:
 
     if normalized_tool in {"shodan", "shodan-cli"}:
         return _run_shodan_python_query(target)
+
+    credentialed_tools = {"impacket", "evilwinrm", "hydra", "medusa"}
+    if normalized_tool in credentialed_tools:
+        has_creds = (
+            os.getenv("PENTEST_AUTH_USERNAME")
+            and os.getenv("PENTEST_AUTH_PASSWORD")
+        ) or (
+            os.getenv("PENTEST_USERNAME")
+            and os.getenv("PENTEST_PASSWORD")
+        )
+        if not has_creds:
+            return {
+                "status": "skipped",
+                "output": (
+                    f"{tool_name} requer credenciais autorizadas. Configure "
+                    "PENTEST_AUTH_USERNAME/PENTEST_AUTH_PASSWORD ou "
+                    "PENTEST_USERNAME/PENTEST_PASSWORD para habilitar esta etapa."
+                ),
+                "open_ports": [],
+                "return_code": 0,
+                "command": f"{normalized_tool} <requires-authorized-credentials>",
+                "stdout": "",
+                "stderr": "missing authorized credentials",
+            }
 
     binary = _tool_binary(tool_name)
     if shutil.which(binary) is None:

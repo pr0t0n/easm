@@ -77,6 +77,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "attempts": 0,
             "success": 0,
             "failed": 0,
+            "skipped": 0,
             "targets": set(),
             "last_status": None,
             "last_error": None,
@@ -91,6 +92,8 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         stats["targets"].add(str(r.target or ""))
         if r.status == "success":
             stats["success"] += 1
+        elif r.status == "skipped":
+            stats["skipped"] += 1
         else:
             stats["failed"] += 1
         stats["last_status"] = r.status
@@ -122,6 +125,13 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
                 break
         obs_by_node[node_key].append(ob)
 
+    # Pre-compute installation map once
+    try:
+        from app.services.tool_catalog import is_tool_installed
+    except Exception:
+        def is_tool_installed(_t: str) -> bool:  # type: ignore
+            return True
+
     # Phases (22) — status derived from node completion + tools attempted
     expected_tools = _expected_tools_by_phase()
     phases: list[dict[str, Any]] = []
@@ -131,22 +141,45 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         node_done = node in completed_caps
         node_visited = node in node_history
         tools_expected = [_normalize_tool(t) for t in phase.get("tools", [])]
+        tools_installed = [t for t in tools_expected if is_tool_installed(t)]
+        tools_uninstalled = [t for t in tools_expected if not is_tool_installed(t)]
         tools_used = [t for t in tools_expected if tool_stats.get(t, {}).get("attempts", 0) > 0]
         tools_success = [t for t in tools_used if tool_stats.get(t, {}).get("success", 0) > 0]
-        tools_failed = [t for t in tools_used if tool_stats.get(t, {}).get("failed", 0) > 0 and tool_stats.get(t, {}).get("success", 0) == 0]
-        tools_missing = [t for t in tools_expected if tool_stats.get(t, {}).get("attempts", 0) == 0]
+        tools_failed = [
+            t for t in tools_used
+            if tool_stats.get(t, {}).get("failed", 0) > 0
+            and tool_stats.get(t, {}).get("success", 0) == 0
+            and tool_stats.get(t, {}).get("skipped", 0) == 0
+        ]
+        tools_skipped = [
+            t for t in tools_used
+            if tool_stats.get(t, {}).get("skipped", 0) > 0
+            and tool_stats.get(t, {}).get("success", 0) == 0
+            and tool_stats.get(t, {}).get("failed", 0) == 0
+        ]
+        # Distinguish "missing because uninstalled" vs "missing despite installed".
+        tools_missing_uninstalled = [t for t in tools_uninstalled if tool_stats.get(t, {}).get("attempts", 0) == 0]
+        tools_missing_unused = [t for t in tools_installed if tool_stats.get(t, {}).get("attempts", 0) == 0]
+        tools_missing = tools_missing_uninstalled + tools_missing_unused
 
         if not node_visited:
             status_label = "skipped"
-        elif tools_success:
+        elif tools_missing_unused and tools_success:
+            # Some tools ran but other INSTALLED tools weren't tried.
+            status_label = "partial_coverage"
+        elif tools_success and not tools_missing_unused:
             status_label = "executed"
+        elif tools_skipped and not tools_failed:
+            status_label = "node_visited_no_tools"
         elif tools_used:
             status_label = "attempted_failed"
         else:
             status_label = "node_visited_no_tools"
 
-        if node_done and not tools_used:
-            status_label = "node_completed_no_phase_tools"
+        if node_done and not tools_used and not tools_installed:
+            status_label = "no_tools_installed"
+        elif node_done and not tools_used and tools_installed:
+            status_label = "node_completed_tools_skipped"
 
         phases.append({
             "id": pid,
@@ -156,10 +189,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "node_visited": node_visited,
             "node_completed": node_done,
             "tools_expected": tools_expected,
+            "tools_installed": tools_installed,
+            "tools_uninstalled": tools_uninstalled,
             "tools_used": tools_used,
             "tools_success": tools_success,
             "tools_failed": tools_failed,
+            "tools_skipped": tools_skipped,
             "tools_missing": tools_missing,
+            "tools_missing_uninstalled": tools_missing_uninstalled,
+            "tools_missing_unused": tools_missing_unused,  # red flag — installed but agent skipped
         })
 
     # Capability summary (9 missions equivalent — actually 8 graph nodes + supervisor)
@@ -191,6 +229,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "attempts": v["attempts"],
             "success": v["success"],
             "failed": v["failed"],
+            "skipped": v["skipped"],
             "targets_count": len(v["targets"]),
             "total_seconds": round(v["total_seconds"], 2),
             "last_status": v["last_status"],
@@ -209,22 +248,42 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     issues: list[str] = []
     validation_summary: dict[str, Any] = {"critical": [], "warning": [], "info": []}
 
-    # 1. Phase coverage: mandatory tools that MUST run
+    # 1. Phase coverage — only count tools that are INSTALLED (otherwise we
+    # punish the agent for things the operator hasn't deployed yet).
     expected_all_tools = sorted({t for tools in expected_tools.values() for t in tools})
+    installed_expected = sorted({t for t in expected_all_tools if is_tool_installed(t)})
+    uninstalled_expected = sorted({t for t in expected_all_tools if not is_tool_installed(t)})
     used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0}
-    missing_mandatory = expected_all_tools[: max(1, len(expected_all_tools) // 3)]  # ~33% are mandatory
-    missing_mandatory_unused = [t for t in missing_mandatory if t not in used_tools_set]
+    installed_unused = [t for t in installed_expected if t not in used_tools_set]
 
-    if missing_mandatory_unused:
-        issue = f"MANDATORY TOOLS NOT EXECUTED: {', '.join(missing_mandatory_unused[:5])}. "
-        issue += "Supervisor MUST retry these phases."
+    if installed_unused:
+        issue = (
+            f"INSTALLED TOOLS NOT EXECUTED ({len(installed_unused)}): "
+            f"{', '.join(installed_unused[:8])}{'…' if len(installed_unused) > 8 else ''}. "
+            "Agent MUST sweep all installed tools before terminating."
+        )
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
-    coverage_ratio = (len(used_tools_set & set(expected_all_tools)) / max(1, len(expected_all_tools)))
-    if coverage_ratio < 0.5:
-        issue = f"Tool coverage critically low: {coverage_ratio:.0%} (<50%). "
-        issue += f"Expected {len(expected_all_tools)}, used {len(used_tools_set)}"
+    if uninstalled_expected:
+        issue = (
+            f"TOOLS NOT INSTALLED ({len(uninstalled_expected)}): "
+            f"{', '.join(uninstalled_expected[:8])}{'…' if len(uninstalled_expected) > 8 else ''}. "
+            "Update Dockerfile or remove from expected catalog."
+        )
+        issues.append(issue)
+        validation_summary["warning"].append(issue)
+
+    coverage_ratio_installed = (
+        len(used_tools_set & set(installed_expected)) / max(1, len(installed_expected))
+    )
+    coverage_ratio = coverage_ratio_installed
+    if coverage_ratio_installed < 0.7:
+        issue = (
+            f"Coverage of INSTALLED tools low: {coverage_ratio_installed:.0%} "
+            f"({len(used_tools_set & set(installed_expected))}/{len(installed_expected)}). "
+            "Target ≥70% of installed tools per scan."
+        )
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
@@ -237,7 +296,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         validation_summary["critical"].append(issue)
 
     # 3. Tool failures: tools that failed all attempts must retry
-    failed_only = [k for k, v in tool_stats.items() if v["attempts"] > 0 and v["success"] == 0]
+    failed_only = [k for k, v in tool_stats.items() if v["attempts"] > 0 and v["success"] == 0 and v["skipped"] == 0]
     if failed_only:
         issue = f"TOOL FAILURES (all attempts): {', '.join(sorted(failed_only)[:5])}. "
         issue += "These must be retried or skipped with explanation."
@@ -267,6 +326,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             validation_summary["warning"].append(issue)
             issues.append(issue)
 
+    try:
+        from app.services.tool_catalog import installation_report as _install_report
+        installation = _install_report()
+    except Exception:
+        installation = {"total": 0, "installed": [], "missing": [], "coverage_ratio": 0}
+
     return {
         "scan_id": scan.id,
         "status": scan.status,
@@ -283,6 +348,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "max_iterations": int(state.get("max_iterations", 0) or 0),
             "findings_total": len(findings),
             "tool_runs_total": len(runs),
+            "tools_installed_used_ratio": round(coverage_ratio_installed, 3),
+            "tools_installed_total": len(installed_expected),
+            "tools_uninstalled_total": len(uninstalled_expected),
         },
         "severity_counts": dict(severity_counts),
         "completed_capabilities": completed_caps,
@@ -293,4 +361,5 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "tool_inventory": tool_inventory,
         "issues": issues,
         "validation_summary": validation_summary,
+        "installation_report": installation,
     }

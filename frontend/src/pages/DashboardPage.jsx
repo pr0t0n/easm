@@ -161,13 +161,16 @@ function RatingBadge({ letter, score, label }) {
   const numeric = Number(score || 0);
   const tone =
     numeric >= 80
-      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+      ? { color: "var(--sev-low-text)", bg: "var(--sev-low-bg)", border: "var(--sev-low-border)", fill: "var(--sev-low-solid)" }
       : numeric >= 60
-        ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-        : "border-rose-500/40 bg-rose-500/10 text-rose-100";
+        ? { color: "var(--sev-medium-text)", bg: "var(--sev-medium-bg)", border: "var(--sev-medium-border)", fill: "var(--sev-medium-solid)" }
+        : { color: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", border: "var(--sev-critical-border)", fill: "var(--sev-critical-solid)" };
 
   return (
-    <div className={`rounded-2xl border p-6 min-h-[260px] shadow-lg ${tone}`}>
+    <div
+      className="rounded-2xl border p-6 min-h-[260px]"
+      style={{ background: tone.bg, borderColor: tone.border, color: tone.color, boxShadow: "var(--shadow-card)" }}
+    >
       <p className="text-xs uppercase tracking-[0.2em] opacity-80">{label}</p>
       <div className="mt-5 flex items-end justify-between gap-4">
         <div>
@@ -176,8 +179,8 @@ function RatingBadge({ letter, score, label }) {
         </div>
         <p className="text-5xl font-black tabular-nums">{numeric.toFixed(1)}</p>
       </div>
-      <div className="mt-5 h-3 overflow-hidden rounded-full bg-black/20">
-        <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500" style={{ width: `${Math.max(0, Math.min(100, numeric))}%` }} />
+      <div className="mt-5 h-3 overflow-hidden rounded-full" style={{ background: "rgba(28, 28, 28, 0.10)" }}>
+        <div className="h-full rounded-full" style={{ width: `${Math.max(0, Math.min(100, numeric))}%`, background: tone.fill }} />
       </div>
     </div>
   );
@@ -559,7 +562,20 @@ export default function DashboardPage() {
                 setSearchInput("");
                 setSelectedGroup("");
               }}
-              className="flex-1 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium text-slate-100 transition-colors"
+              className="flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors"
+              style={{
+                background: "#ffffff",
+                borderColor: "var(--line)",
+                color: "var(--ink-soft)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "var(--brand-500)";
+                e.currentTarget.style.color = "var(--ink)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = "var(--line)";
+                e.currentTarget.style.color = "var(--ink-soft)";
+              }}
             >
               Limpar Filtros
             </button>
@@ -593,10 +609,10 @@ export default function DashboardPage() {
         )}
       </section>
 
-      <section className="rounded-2xl border-2 border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950/60 p-6 shadow-[0_22px_60px_rgba(2,6,23,0.5)]">
+      <section className="ds-panel p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-extrabold tracking-tight text-cyan-200">Pentest.io Enterprise Dashboard</h2>
-          <p className="text-xs uppercase tracking-[0.2em] text-cyan-100/70">Visão consolidada de risco e maturidade</p>
+          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>Pentest.io Enterprise Dashboard</h2>
+          <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--brand-700)" }}>Visão consolidada de risco e maturidade</p>
         </div>
 
         <div className="grid gap-4 xl:grid-cols-12">
@@ -614,19 +630,19 @@ export default function DashboardPage() {
               score={globalEasmRating.score}
             />
           </div>
-          <div className="xl:col-span-4 rounded-2xl border border-cyan-500/30 bg-slate-900/70 p-4">
+          <div className="xl:col-span-4 rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)", boxShadow: "var(--shadow-card)" }}>
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-100/80">Rating Distribuído</p>
-                <p className="text-xs text-slate-400">Top 5 alvos com maior volume de vulnerabilidades</p>
+                <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--brand-700)" }}>Rating Distribuído</p>
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>Top 5 alvos com maior volume de vulnerabilidades</p>
               </div>
               <div className="text-right">
-                <p className="text-3xl font-black text-cyan-200">{distributedGrade} {Number(distributedScore || 0).toFixed(1)}</p>
+                <p className="text-3xl font-black" style={{ color: "var(--ink)" }}>{distributedGrade} {Number(distributedScore || 0).toFixed(1)}</p>
               </div>
             </div>
-            <div className="overflow-x-auto rounded-xl border border-slate-700/80">
+            <div className="overflow-x-auto rounded-xl border" style={{ borderColor: "var(--line)" }}>
               <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-800/90 text-slate-300">
+                <thead style={{ background: "var(--surface-soft)", color: "var(--ink-soft)" }}>
                   <tr>
                     <th className="px-3 py-2">Alvo</th>
                     <th className="px-3 py-2">Vulnerabilidades</th>
@@ -636,12 +652,12 @@ export default function DashboardPage() {
                 <tbody>
                   {distributedRows.length === 0 && (
                     <tr>
-                      <td className="px-3 py-3 text-slate-500" colSpan={3}>Sem dados suficientes para distribuição.</td>
+                      <td className="px-3 py-3" style={{ color: "var(--ink-muted)" }} colSpan={3}>Sem dados suficientes para distribuição.</td>
                     </tr>
                   )}
                   {distributedRows.map((row) => (
-                    <tr key={`dist-${row.target}`} className="border-t border-slate-700/70 bg-slate-900/40">
-                      <td className="px-3 py-2 font-mono text-cyan-100">{row.target}</td>
+                    <tr key={`dist-${row.target}`} className="border-t" style={{ borderColor: "var(--line)" }}>
+                      <td className="px-3 py-2 font-mono" style={{ color: "var(--brand-700)" }}>{row.target}</td>
                       <td className="px-3 py-2">{row.vulnCount}</td>
                       <td className="px-3 py-2 font-semibold">{row.grade} {row.score.toFixed(1)}</td>
                     </tr>
@@ -653,20 +669,20 @@ export default function DashboardPage() {
         </div>
 
         <div className="mt-5 grid gap-4 lg:grid-cols-3">
-          <section className="rounded-2xl border border-indigo-500/30 bg-indigo-950/20 p-4">
-            <h3 className="text-sm font-semibold text-indigo-200">Maturidade por Framework</h3>
-            <p className="mt-1 text-xs text-slate-400">Conformidade por framework de segurança</p>
+          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Maturidade por Framework</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Conformidade por framework de segurança</p>
             <div className="mt-4 space-y-4">
               {frameworks.map((info) => (
                 <div key={`secure-${info.name}`}>
                   <div className="mb-1 flex items-center justify-between text-sm">
-                    <span className="font-medium text-slate-200">{info.name}</span>
-                    <span className="font-bold text-indigo-100">{info.score}%</span>
+                    <span className="font-medium" style={{ color: "var(--ink-soft)" }}>{info.name}</span>
+                    <span className="font-bold" style={{ color: "var(--brand-700)" }}>{info.score}%</span>
                   </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-2 overflow-hidden rounded-full" style={{ background: "var(--bg-muted)" }}>
                     <div
-                      className={`h-2 rounded-full bg-gradient-to-r transition-all duration-700 ${BAR_COLOR[info.name] || "from-cyan-500 to-blue-400"}`}
-                      style={{ width: `${info.score}%` }}
+                      className="h-2 rounded-full transition-all duration-700"
+                      style={{ width: `${info.score}%`, background: "var(--brand-500)" }}
                     />
                   </div>
                 </div>
@@ -674,41 +690,41 @@ export default function DashboardPage() {
             </div>
           </section>
 
-          <section className="rounded-2xl border border-cyan-500/30 bg-cyan-950/20 p-4">
-            <h3 className="text-sm font-semibold text-cyan-200">Faixas de Grade</h3>
-            <p className="mt-1 text-xs text-slate-400">Domínio e Subdomínio</p>
-            <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700/80">
+          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Faixas de Grade</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Domínio e Subdomínio</p>
+            <div className="mt-4 overflow-x-auto rounded-xl border" style={{ borderColor: "var(--line)" }}>
               <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-800/90 text-slate-300">
+                <thead style={{ background: "var(--surface-soft)", color: "var(--ink-soft)" }}>
                   <tr>
                     <th className="px-3 py-2">Grade</th>
                     <th className="px-3 py-2">Mínimo</th>
                     <th className="px-3 py-2">Máximo</th>
                   </tr>
                 </thead>
-                <tbody className="text-slate-200">
-                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">A</td><td className="px-3 py-2">90</td><td className="px-3 py-2">100</td></tr>
-                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">B</td><td className="px-3 py-2">80</td><td className="px-3 py-2">89</td></tr>
-                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">C</td><td className="px-3 py-2">70</td><td className="px-3 py-2">79</td></tr>
-                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">D</td><td className="px-3 py-2">60</td><td className="px-3 py-2">69</td></tr>
-                  <tr className="border-t border-slate-700/70"><td className="px-3 py-2 font-semibold">F</td><td className="px-3 py-2">0</td><td className="px-3 py-2">59</td></tr>
+                <tbody>
+                  <tr className="border-t"><td className="px-3 py-2 font-semibold">A</td><td className="px-3 py-2">90</td><td className="px-3 py-2">100</td></tr>
+                  <tr className="border-t"><td className="px-3 py-2 font-semibold">B</td><td className="px-3 py-2">80</td><td className="px-3 py-2">89</td></tr>
+                  <tr className="border-t"><td className="px-3 py-2 font-semibold">C</td><td className="px-3 py-2">70</td><td className="px-3 py-2">79</td></tr>
+                  <tr className="border-t"><td className="px-3 py-2 font-semibold">D</td><td className="px-3 py-2">60</td><td className="px-3 py-2">69</td></tr>
+                  <tr className="border-t"><td className="px-3 py-2 font-semibold">F</td><td className="px-3 py-2">0</td><td className="px-3 py-2">59</td></tr>
                 </tbody>
               </table>
             </div>
           </section>
 
-          <section className="rounded-2xl border border-fuchsia-500/30 bg-fuchsia-950/20 p-4">
-            <h3 className="text-sm font-semibold text-fuchsia-200">Atividade Operacional</h3>
-            <p className="mt-1 text-xs text-slate-400">Atividade dos últimos 7 dias</p>
+          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Atividade Operacional</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Atividade dos últimos 7 dias</p>
             <div className="mt-4 flex h-40 items-end gap-2">
               {activity.map((d) => (
                 <div key={`bitsight-${d.day}`} className="flex flex-1 flex-col items-center gap-1">
-                  <span className="text-[10px] text-slate-400">{d.findings}</span>
+                  <span className="text-[10px]" style={{ color: "var(--ink-muted)" }}>{d.findings}</span>
                   <div
-                    className="w-full rounded-t-sm bg-gradient-to-t from-fuchsia-500 via-purple-500 to-cyan-400"
-                    style={{ height: `${Math.round((d.findings / maxFindings) * 100)}%`, minHeight: "4px" }}
+                    className="w-full rounded-t-sm"
+                    style={{ height: `${Math.round((d.findings / maxFindings) * 100)}%`, minHeight: "4px", background: "var(--brand-500)" }}
                   />
-                  <span className="text-[10px] text-slate-500">{d.day}</span>
+                  <span className="text-[10px]" style={{ color: "var(--ink-muted)" }}>{d.day}</span>
                 </div>
               ))}
             </div>
@@ -716,9 +732,9 @@ export default function DashboardPage() {
         </div>
 
         <div className="mt-5">
-          <section className="rounded-2xl border border-rose-500/30 bg-slate-900/70 p-4">
-            <h3 className="text-sm font-semibold text-rose-200">Risco Operacional</h3>
-            <p className="mt-1 text-xs text-slate-400">Rossio operacional por severidade</p>
+          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Risco Operacional</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Risco operacional por severidade</p>
             <div className="mt-4 grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
                 <p className="text-xs uppercase text-red-300">Crítico</p>
