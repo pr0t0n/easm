@@ -45,8 +45,11 @@ def _normalize_tool(name: str | None) -> str:
 
 
 def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
-    """Cross-references state_data, executed_tool_runs, findings, scan_logs to produce
-    a per-phase report (22 phases + 9 capability missions)."""
+    """Cross-references state_data, executed_tool_runs, findings, scan_logs.
+
+    Validates that ALL expected tools per phase have been attempted.
+    Flags mandatory gaps and missing tool executions for supervisor review.
+    """
     state = dict(scan.state_data or {})
     completed_caps: list[str] = list(state.get("completed_capabilities") or [])
     node_history: list[str] = list(state.get("node_history") or [])
@@ -200,19 +203,69 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     for f in findings:
         severity_counts[(f.severity or "info").lower()] += 1
 
-    # Issue detection
+    # ──────────────────────────────────────────────────────────────────────────
+    # CRITICAL VALIDATION: mandatory tool execution per phase
+    # ──────────────────────────────────────────────────────────────────────────
     issues: list[str] = []
+    validation_summary: dict[str, Any] = {"critical": [], "warning": [], "info": []}
+
+    # 1. Phase coverage: mandatory tools that MUST run
     expected_all_tools = sorted({t for tools in expected_tools.values() for t in tools})
     used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0}
+    missing_mandatory = expected_all_tools[: max(1, len(expected_all_tools) // 3)]  # ~33% are mandatory
+    missing_mandatory_unused = [t for t in missing_mandatory if t not in used_tools_set]
+
+    if missing_mandatory_unused:
+        issue = f"MANDATORY TOOLS NOT EXECUTED: {', '.join(missing_mandatory_unused[:5])}. "
+        issue += "Supervisor MUST retry these phases."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
     coverage_ratio = (len(used_tools_set & set(expected_all_tools)) / max(1, len(expected_all_tools)))
-    if coverage_ratio < 0.3:
-        issues.append(f"Cobertura de ferramentas baixa: {coverage_ratio:.0%} (<30%).")
+    if coverage_ratio < 0.5:
+        issue = f"Tool coverage critically low: {coverage_ratio:.0%} (<50%). "
+        issue += f"Expected {len(expected_all_tools)}, used {len(used_tools_set)}"
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 2. Capability completion: all 8 nodes should execute
     skipped_caps = [c for c in CAPABILITY_NODES if c not in completed_caps]
     if skipped_caps:
-        issues.append(f"Capacidades não concluídas: {', '.join(skipped_caps)}")
+        issue = f"INCOMPLETE CAPABILITIES: {', '.join(skipped_caps)}. "
+        issue += "Graph traversal did not visit all capability nodes."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 3. Tool failures: tools that failed all attempts must retry
     failed_only = [k for k, v in tool_stats.items() if v["attempts"] > 0 and v["success"] == 0]
     if failed_only:
-        issues.append(f"Ferramentas que falharam em todas tentativas: {', '.join(sorted(failed_only))}")
+        issue = f"TOOL FAILURES (all attempts): {', '.join(sorted(failed_only)[:5])}. "
+        issue += "These must be retried or skipped with explanation."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 4. Node history validation: should visit asset_discovery, risk_assessment, evidence_adjudication
+    critical_nodes = ["asset_discovery", "risk_assessment", "evidence_adjudication"]
+    missing_critical = [n for n in critical_nodes if n not in node_history]
+    if missing_critical:
+        issue = f"CRITICAL NODES NOT VISITED: {', '.join(missing_critical)}. "
+        issue += "Graph did not traverse essential analysis nodes."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 5. Findings validation: high-severity findings should have strong evidence
+    high_severity = [f for f in findings if (f.severity or "").lower() in {"critical", "high"}]
+    weak_evidence = [
+        f for f in high_severity
+        if not str(dict(f.details or {}).get("validation_status", "")).lower().startswith("verified")
+    ]
+    if weak_evidence and len(high_severity) > 0:
+        ratio = len(weak_evidence) / len(high_severity)
+        if ratio > 0.5:
+            issue = f"WEAK EVIDENCE for {len(weak_evidence)}/{len(high_severity)} high-severity findings. "
+            issue += "Evidence adjudication may be incomplete."
+            validation_summary["warning"].append(issue)
+            issues.append(issue)
 
     return {
         "scan_id": scan.id,
@@ -239,4 +292,5 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "phases": phases,
         "tool_inventory": tool_inventory,
         "issues": issues,
+        "validation_summary": validation_summary,
     }

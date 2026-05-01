@@ -4,10 +4,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/*
- * Lovable-inspired SaaS palette.
- * Light, warm off-white base with orange CTAs and soft blue interactions.
- */
+/* Light theme — contrast ratio ≥ 4.5:1 (WCAG AA) */
 :root {
   --bg-main: #fcfbf8;
   --bg-muted: #f0ebe7;
@@ -64,9 +61,63 @@
   --input-focus: var(--primary);
 }
 
-/* Force light theme regardless of `data-theme="dark"` legacy attribute. */
-html[data-theme="dark"] {
-  color-scheme: light;
+/* Dark theme — dark background with bright text */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-main: #0f0f0f;
+    --bg-muted: #1a1a1a;
+    --surface: #1a1a1a;
+    --surface-elevated: #242424;
+    --surface-strong: #2d2d2d;
+    --surface-soft: #161616;
+
+    --primary: #ff9d3f;
+    --primary-hover: #ffab52;
+    --primary-light: #ffb070;
+    --secondary: #6b8eff;
+    --accent: #ff88f8;
+
+    --text-primary: #f5f5f5;
+    --text-secondary: #d1d1d1;
+    --text-tertiary: #9a9a9a;
+
+    --border: #404040;
+    --border-light: #323232;
+    --border-strong: #4a4a4a;
+
+    --bg-app-gradient:
+      radial-gradient(circle at 12% 10%, rgba(255, 157, 63, 0.1), transparent 35%),
+      radial-gradient(circle at 88% 0%, rgba(107, 142, 255, 0.1), transparent 28%),
+      linear-gradient(180deg, #0f0f0f 0%, #161616 100%);
+
+    --header-bg: rgba(26, 26, 26, 0.95);
+    --header-border: var(--border);
+    --header-title: var(--text-primary);
+    --header-subtitle: var(--text-secondary);
+
+    --btn-primary-bg: #ff9d3f;
+    --btn-primary-hover: #ffab52;
+    --btn-primary-border: #ff9d3f;
+    --btn-secondary-bg: #1a1a1a;
+    --btn-secondary-border: var(--border);
+    --btn-secondary-text: var(--text-secondary);
+
+    --sidebar-bg: #1a1a1a;
+    --sidebar-surface: #161616;
+    --sidebar-border: var(--border);
+    --sidebar-text: var(--text-primary);
+    --sidebar-muted: var(--text-tertiary);
+
+    --table-row-hover: rgba(255, 157, 63, 0.1);
+
+    --override-slate-bg: #1a1a1a;
+    --override-slate-muted: var(--text-secondary);
+    --override-slate-dim: var(--text-tertiary);
+
+    --input-bg: #242424;
+    --input-border: var(--border);
+    --input-focus: var(--primary);
+  }
 }
 
 body {
