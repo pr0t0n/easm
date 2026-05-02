@@ -447,12 +447,12 @@ def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
 
 
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
-    """Returns ALL installed tools applicable to the group.
+    """Returns every Kali-mapped tool applicable to the group, minus those
+    that already ran successfully in this scan.
 
-    Previous logic capped to 2-4 tools per iteration which caused superficial
-    scans (~16 of 50+ tools used in a full run). The new behaviour runs every
-    installed tool exactly once per scan; tool_runtime_metrics tracks attempts
-    so we don't re-run tools that already succeeded in this scan.
+    The Kali runner ships every supported tool, so "is_tool_installed" reduces
+    to "does this tool have a profile mapping in TOOL_TO_PROFILE". Tools that
+    failed twice are also skipped to keep transient failures from looping.
     """
     if not tools:
         return []
@@ -462,14 +462,12 @@ def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[
     runtime = dict(state.get("tool_runtime") or {})
 
     selected: list[str] = []
-    skipped_uninstalled: list[str] = []
+    no_profile: list[str] = []
     skipped_already_done: list[str] = []
     for t in ranked:
         if not is_tool_installed(t):
-            skipped_uninstalled.append(t)
+            no_profile.append(t)
             continue
-        # Skip tools that already succeeded — but keep retrying ones that failed,
-        # up to 2 attempts (so a transient failure doesn't permanently exclude).
         meta = runtime.get(t, {})
         if int(meta.get("success", 0) or 0) >= 1:
             skipped_already_done.append(t)
@@ -479,9 +477,9 @@ def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[
             continue
         selected.append(t)
 
-    if skipped_uninstalled:
+    if no_profile:
         state["logs_terminais"].append(
-            f"[{group}] tools NÃO instaladas (puladas): {', '.join(sorted(skipped_uninstalled))}"
+            f"[{group}] tools sem profile no Kali runner: {', '.join(sorted(no_profile))}"
         )
     if skipped_already_done:
         state["logs_terminais"].append(
@@ -998,13 +996,22 @@ def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
     """
     groups = get_worker_groups(mode=scan_mode)
 
-    # Multi-group composition per node (covers all 22 phases).
+    # Multi-group composition per graph node → Kill Chain phase groups.
+    # Phase groups live in worker_groups.CANONICAL_GROUP_TOOLS and align with
+    # the celery queue names (worker.{mode}.{group}).
     node_to_groups: dict[str, list[str]] = {
-        "asset_discovery": ["recon"],
-        "reconhecimento": ["recon"],
-        "threat_intel": ["osint", "code"],     # P09/P10 nuclei are in `osint`; P21 secrets are in `code`
-        "risk_assessment": ["vuln", "exploit", "api", "code", "recon"],  # P15 dir enum (recon), P22 deps (code), P14 auth (exploit)
-        "analise_vulnerabilidade": ["vuln", "exploit", "api", "code"],
+        # Graph node              → list of phase groups feeding it
+        "strategic_planning":     ["scope_validation"],
+        "asset_discovery":        ["reconnaissance"],
+        "threat_intel":           ["weaponization", "actions_on_objectives"],
+        "adversarial_hypothesis": ["delivery"],
+        "risk_assessment":        ["exploitation", "delivery", "weaponization", "actions_on_objectives"],
+        "evidence_adjudication":  ["installation", "actions_on_objectives"],
+        "governance":             ["command_control"],
+        "executive_analyst":      ["reporting"],
+        # Legacy aliases — kept so old persisted state still resolves.
+        "reconhecimento":         ["reconnaissance"],
+        "analise_vulnerabilidade": ["exploitation", "weaponization"],
     }
 
     target_groups = node_to_groups.get(group_name, [group_name])

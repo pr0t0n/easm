@@ -146,6 +146,66 @@ export default function PhaseMonitorPage() {
 
       {data && (
         <>
+          {/* CYBER KILL CHAIN — 9 phases with completion */}
+          {data.kill_chain && data.kill_chain.phases && (
+            <div
+              style={{
+                background: "#ffffff",
+                border: "1px solid #e5dcd5",
+                borderRadius: 12,
+                padding: "16px 18px",
+                marginBottom: 18,
+                boxShadow: "var(--shadow-card)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+                <div>
+                  <span className="ds-eyebrow" style={{ color: "var(--brand-700)" }}>Cyber Kill Chain</span>
+                  <h3 style={{ fontSize: 18, fontWeight: 700, marginTop: 4, color: "#1c1c1c" }}>Pipeline narrativo do scan</h3>
+                </div>
+                <div style={{ fontSize: 12, color: "#6b6b6b" }}>
+                  {data.kill_chain.phases.filter((p) => p.completed).length}/{data.kill_chain.total} fases concluídas
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
+                {data.kill_chain.phases.map((p, idx) => {
+                  const tone = p.completed ? "#1f8a59" : p.visited ? "var(--brand-500)" : "#d8cdc4";
+                  const bg = p.completed ? "rgba(34,145,96,0.08)" : p.visited ? "rgba(233,99,99,0.08)" : "#fafafa";
+                  return (
+                    <div
+                      key={p.phase}
+                      style={{
+                        background: bg,
+                        border: `1px solid ${tone}`,
+                        borderLeft: `3px solid ${tone}`,
+                        borderRadius: 8,
+                        padding: "10px 12px",
+                        position: "relative",
+                      }}
+                      title={p.executive_pitch}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: tone, fontWeight: 600 }}>
+                          {String(idx + 1).padStart(2, "0")}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#1c1c1c", lineHeight: 1.2 }}>{p.label}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#6b6b6b", marginTop: 4, lineHeight: 1.4 }}>
+                        {p.summary}
+                      </div>
+                      <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", fontSize: 10, color: "#9a8e83" }}>
+                        <span>{p.node || "—"}</span>
+                        <span style={{ color: tone, fontWeight: 600 }}>
+                          {p.completed ? "✓ done" : p.visited ? "active" : "pending"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* HEADER METRICS */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 18 }}>
             <Metric label="Status" value={data.status} />

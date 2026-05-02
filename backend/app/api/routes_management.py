@@ -845,41 +845,21 @@ def _setting_int(db: Session, owner_id: int, key: str, default: int, min_value: 
 
 
 def _tool_installed(tool_name: str) -> bool:
+    """Tool is "installed" iff the Kali runner has a profile that maps to it.
+
+    The backend image no longer carries any offensive tooling — every probe
+    runs inside the Kali sidecar via HTTP. The local `shutil.which` checks
+    were retired together with the per-worker tool installation. Nessus is
+    the only out-of-band integration that still has a Python-package gate.
+    """
     normalized = tool_name.strip().lower()
     if normalized == "nessus":
         return find_spec("nessus") is not None or find_spec("pynessus") is not None
-
-    if normalized == "sublist3r":
-        # Sublist3r costuma existir como modulo Python sem binario dedicado no PATH.
-        return (
-            find_spec("sublist3r") is not None
-            or shutil.which("sublist3r") is not None
-            or shutil.which("Sublist3r") is not None
-        )
-
-    if normalized == "nmap-vulscan":
-        if shutil.which("nmap") is None:
-            return False
-        return any(
-            os.path.exists(path)
-            for path in [
-                "/root/vulscan/vulscan.nse",
-                "/opt/vulscan/vulscan.nse",
-            ]
-        )
-
-    if normalized == "nikto":
-        return (
-            shutil.which("nikto") is not None
-            or os.path.exists("/usr/bin/nikto")
-            or os.path.exists("/opt/nikto/program/nikto.pl")
-        )
-
-    if normalized == "burp-cli":
-        return shutil.which("burp-cli") is not None
-
-    cmd = TOOL_BINARY_ALIASES.get(normalized, normalized)
-    return shutil.which(cmd) is not None
+    try:
+        from app.services.kali_executor import TOOL_TO_PROFILE
+    except Exception:
+        return False
+    return normalized in TOOL_TO_PROFILE
 
 
 def _run_install_command(command: list[str]) -> bool:
@@ -891,75 +871,13 @@ def _run_install_command(command: list[str]) -> bool:
 
 
 def _install_tool(tool_name: str) -> bool:
-    normalized = tool_name.strip().lower()
+    """Tool installation from the backend is intentionally disabled.
 
-    install_map: dict[str, list[list[str]]] = {
-        "nessus": [[sys.executable, "-m", "pip", "install", "pynessus"]],
-        "arjun": [[sys.executable, "-m", "pip", "install", "arjun"]],
-        "semgrep": [[sys.executable, "-m", "pip", "install", "semgrep"]],
-        "h8mail": [[sys.executable, "-m", "pip", "install", "h8mail"]],
-        "metagoofil": [[sys.executable, "-m", "pip", "install", "metagoofil"]],
-        "theharvester": [[sys.executable, "-m", "pip", "install", "theHarvester"]],
-        "shodan-cli": [[sys.executable, "-m", "pip", "install", "shodan"]],
-        "urlscan-cli": [[sys.executable, "-m", "pip", "install", "urlscanio"]],
-        "uro": [[sys.executable, "-m", "pip", "install", "uro"]],
-        "subfinder": [["go", "install", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"]],
-        "amass": [["go", "install", "github.com/owasp-amass/amass/v4/...@master"]],
-        "assetfinder": [["go", "install", "github.com/tomnomnom/assetfinder@latest"]],
-        "dnsx": [["go", "install", "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"]],
-        "naabu": [["go", "install", "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"]],
-        "httpx": [["go", "install", "github.com/projectdiscovery/httpx/cmd/httpx@latest"]],
-        "katana": [["go", "install", "github.com/projectdiscovery/katana/cmd/katana@latest"]],
-        "ffuf": [["go", "install", "github.com/ffuf/ffuf/v2@latest"]],
-        "nmap-vulscan": [
-            ["apt-get", "update"],
-            ["apt-get", "install", "-y", "nmap", "git"],
-            ["git", "clone", "--depth", "1", "https://github.com/scipag/vulscan.git", "/root/vulscan"],
-        ],
-        "dalfox": [["go", "install", "github.com/hahwul/dalfox/v2@latest"]],
-        "kiterunner": [["go", "install", "github.com/assetnote/kiterunner@latest"]],
-        "subjack": [["go", "install", "github.com/haccer/subjack@latest"]],
-        "trufflehog": [["go", "install", "github.com/trufflesecurity/trufflehog/v3@latest"]],
-        "wpscan": [["gem", "install", "--no-document", "wpscan"]],
-        "nikto": [
-            ["apt-get", "update"],
-            ["apt-get", "install", "-y", "nikto"],
-            ["apt-get", "install", "-y", "git", "perl"],
-            ["sh", "-lc", "if [ ! -d /opt/nikto ]; then git clone --depth 1 https://github.com/sullo/nikto.git /opt/nikto; fi"],
-            ["sh", "-lc", "if [ -f /opt/nikto/program/nikto.pl ]; then ln -sf /opt/nikto/program/nikto.pl /usr/local/bin/nikto && chmod +x /opt/nikto/program/nikto.pl; fi"],
-        ],
-        "whatweb": [["apt-get", "update"], ["apt-get", "install", "-y", "whatweb"]],
-        "sublist3r": [
-            [sys.executable, "-m", "pip", "install", "git+https://github.com/aboul3la/Sublist3r.git"],
-            ["sh", "-lc", "printf '#!/bin/sh\nexec python3 -m sublist3r \"$@\"\n' >/usr/local/bin/sublist3r && chmod +x /usr/local/bin/sublist3r"],
-        ],
-        "waymore": [[sys.executable, "-m", "pip", "install", "waymore"]],
-        "linkfinder": [[sys.executable, "-m", "pip", "install", "linkfinder"]],
-        "alterx": [["go", "install", "github.com/projectdiscovery/alterx/cmd/alterx@latest"]],
-        "chaos": [["go", "install", "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"]],
-        "puredns": [["go", "install", "github.com/d3mondev/puredns/v2@latest"]],
-        "webanalyze": [["go", "install", "github.com/rverton/webanalyze/cmd/webanalyze@latest"]],
-        "gobuster": [["sh", "-lc", "ARCH=$(uname -m); if [ \"$ARCH\" = \"aarch64\" ] || [ \"$ARCH\" = \"arm64\" ]; then URL=https://github.com/OJ/gobuster/releases/download/v3.8.2/gobuster_Linux_arm64.tar.gz; else URL=https://github.com/OJ/gobuster/releases/download/v3.8.2/gobuster_Linux_x86_64.tar.gz; fi; curl -fsSL \"$URL\" -o /tmp/gobuster.tar.gz && tar -xzf /tmp/gobuster.tar.gz -C /tmp && install -m 0755 /tmp/gobuster /usr/local/bin/gobuster"]],
-        "feroxbuster": [["sh", "-lc", "ARCH=$(uname -m); if [ \"$ARCH\" = \"aarch64\" ] || [ \"$ARCH\" = \"arm64\" ]; then ASSET=aarch64-linux-feroxbuster.zip; else ASSET=x86_64-linux-feroxbuster.tar.gz; fi; curl -fsSL \"https://github.com/epi052/feroxbuster/releases/latest/download/${ASSET}\" -o /tmp/ferox_asset && case \"$ASSET\" in *.zip) unzip -q /tmp/ferox_asset -d /tmp ;; *.tar.gz) tar -xzf /tmp/ferox_asset -C /tmp ;; esac && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster"]],
-        "masscan": [["apt-get", "update"], ["apt-get", "install", "-y", "masscan"]],
-        "testssl": [["sh", "-lc", "if [ ! -d /opt/testssl.sh ]; then git clone --depth 1 https://github.com/testssl/testssl.sh.git /opt/testssl.sh; fi; printf '#!/bin/sh\nexec /opt/testssl.sh/testssl.sh \"$@\"\n' >/usr/local/bin/testssl && chmod +x /usr/local/bin/testssl"]],
-        "evilwinrm": [["gem", "install", "--no-document", "evil-winrm"]],
-        "wapiti": [[sys.executable, "-m", "pip", "install", "wapiti3"]],
-        "wfuzz": [[sys.executable, "-m", "pip", "install", "git+https://github.com/xmendez/wfuzz.git"]],
-        "wafw00f": [[sys.executable, "-m", "pip", "install", "wafw00f"]],
-        "burp-cli": [["sh", "-lc", "npm install -g @portswigger/burp-cli || npm install -g burp-cli"]],
-    }
-
-    commands = install_map.get(normalized)
-    if not commands:
-        return False
-
-    for cmd in commands:
-        _run_install_command(cmd)
-        if _tool_installed(normalized):
-            return True
-    return _tool_installed(normalized)
-
+    Kali runner owns the offensive-tool repository. Adding/removing tools now
+    means changing the Kali image/profiles, not mutating the backend container
+    at runtime.
+    """
+    return False
 
 def _burp_api_host() -> str:
     host = str(os.getenv("BURP_API_HOST", "burp_rest")).strip()
@@ -1255,23 +1173,19 @@ def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depen
 @router.post("/config/tools/install-one")
 def install_tool(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     tool = str(payload.get("tool") or "").strip().lower()
-    if not tool:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tool obrigatorio")
-
-    already_installed = _tool_installed(tool)
-    installed = already_installed or _install_tool(tool)
-
     log_audit(
         db,
-        event_type="tools.install_attempt",
-        message=f"Instalacao de tool solicitada: {tool}",
+        event_type="tools.install_blocked",
+        message=f"Instalacao avulsa bloqueada: {tool or '-'}",
         actor_user_id=current_user.id,
-        level="INFO" if installed else "WARNING",
-        metadata={"tool": tool, "installed": installed, "already_installed": already_installed},
+        level="WARNING",
+        metadata={"tool": tool, "reason": "kali_runner_is_tool_repository"},
     )
     db.commit()
-
-    return {"ok": installed, "tool": tool, "installed": installed, "already_installed": already_installed}
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Instalacao avulsa removida. Ferramentas devem ser adicionadas no Kali runner.",
+    )
 
 
 @router.get("/config/nessus")
@@ -2239,3 +2153,50 @@ def change_own_password(payload: dict, db: Session = Depends(get_db), current_us
     current_user.password_hash = get_password_hash(new_password)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/kali-runner/health")
+def kali_runner_health(current_user: User = Depends(get_current_user)):
+    """Surfaces Kali runner health + the global feature-flag status.
+    Used by the frontend to badge whether tools are dispatched centrally.
+    """
+    from app.core.config import settings
+    from app.services.kali_executor import runner_health, TOOL_TO_PROFILE
+
+    health = runner_health()
+    return {
+        "use_kali_executor": settings.use_kali_executor,
+        "kali_runner_url": settings.kali_runner_url,
+        "canary_tools": [
+            t.strip() for t in (settings.kali_executor_tools or "").split(",") if t.strip()
+        ],
+        "tool_profile_mappings": len(TOOL_TO_PROFILE),
+        "runner": health,
+    }
+
+
+@router.get("/kali-runner/profiles")
+def kali_runner_profiles(current_user: User = Depends(get_current_user)):
+    """Proxies the runner's /profiles endpoint so the frontend doesn't talk
+    directly to the runner (CORS + auth)."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.get(f"{settings.kali_runner_url.rstrip('/')}/profiles", timeout=8)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
+@router.get("/kali-runner/tools")
+def kali_runner_tools(current_user: User = Depends(get_current_user)):
+    """Proxy the Kali runner live PATH catalog."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.get(f"{settings.kali_runner_url.rstrip('/')}/tools", timeout=12)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")

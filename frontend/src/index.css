@@ -684,6 +684,83 @@ a[class*="bg-blue-700"]:hover {
   color: #2d52e6 !important;
 }
 
+/* ============================================================
+   Pages with legacy dark severity tokens — flatten to DS palette.
+   Maps Tailwind text-{red,orange,yellow,emerald}-{300,400,500} to
+   the matching --sev-*-text on a light background.
+   ============================================================ */
+[class*="text-red-300"],
+[class*="text-red-400"],
+[class*="text-rose-300"],
+[class*="text-rose-400"] {
+  color: var(--sev-critical-text) !important;
+}
+[class*="bg-red-500/10"],
+[class*="bg-rose-500/10"] {
+  background-color: var(--sev-critical-bg) !important;
+}
+[class*="border-red-500/30"],
+[class*="border-rose-500/30"] {
+  border-color: var(--sev-critical-border) !important;
+}
+
+[class*="text-orange-300"],
+[class*="text-orange-400"] {
+  color: var(--sev-high-text) !important;
+}
+[class*="bg-orange-500/10"] {
+  background-color: var(--sev-high-bg) !important;
+}
+[class*="border-orange-500/30"] {
+  border-color: var(--sev-high-border) !important;
+}
+
+[class*="text-yellow-300"],
+[class*="text-yellow-400"],
+[class*="text-amber-300"],
+[class*="text-amber-400"] {
+  color: var(--sev-medium-text) !important;
+}
+[class*="bg-yellow-500/10"],
+[class*="bg-amber-500/10"] {
+  background-color: var(--sev-medium-bg) !important;
+}
+[class*="border-yellow-500/30"],
+[class*="border-amber-500/30"] {
+  border-color: var(--sev-medium-border) !important;
+}
+
+[class*="text-emerald-300"],
+[class*="text-emerald-400"],
+[class*="text-green-300"],
+[class*="text-green-400"] {
+  color: var(--sev-low-text) !important;
+}
+[class*="bg-emerald-500/10"],
+[class*="bg-green-500/10"] {
+  background-color: var(--sev-low-bg) !important;
+}
+[class*="border-emerald-500/30"],
+[class*="border-green-500/30"] {
+  border-color: var(--sev-low-border) !important;
+}
+
+[class*="text-cyan-300"],
+[class*="text-cyan-400"] {
+  color: var(--sev-info-text) !important;
+}
+[class*="bg-cyan-500/10"] {
+  background-color: var(--sev-info-bg) !important;
+}
+[class*="border-cyan-500/30"] {
+  border-color: var(--sev-info-border) !important;
+}
+
+/* Page section panels — fall back to .ds-panel surface even if class is "panel" */
+.panel, [class*="rounded-2xl"][class*="border"] {
+  color: var(--ink);
+}
+
 [class*="bg-cyan-900/"],
 [class*="bg-cyan-950/"],
 [class*="bg-indigo-900/"],

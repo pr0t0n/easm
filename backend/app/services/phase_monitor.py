@@ -332,6 +332,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     except Exception:
         installation = {"total": 0, "installed": [], "missing": [], "coverage_ratio": 0}
 
+    try:
+        from app.graph.kill_chain import render_kill_chain_summary
+        kill_chain = render_kill_chain_summary(state)
+    except Exception:
+        kill_chain = {"phases": [], "total": 0}
+
     return {
         "scan_id": scan.id,
         "status": scan.status,
@@ -362,4 +368,5 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "issues": issues,
         "validation_summary": validation_summary,
         "installation_report": installation,
+        "kill_chain": kill_chain,
     }

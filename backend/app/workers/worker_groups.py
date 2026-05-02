@@ -21,36 +21,23 @@ def _group_config(
 # ── Tool assignments per worker group ────────────────────────────────────────
 
 CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
-    # Recon: subdomain enum, port scan, web crawl, fingerprint
-    "recon": [
-        "subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx",
-        "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan",
-        "katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper",
-        "arjun", "paramspider", "ffuf", "gobuster", "feroxbuster", "dirsearch", "nikto",
+    "scope_validation": [],
+    "reconnaissance": [
+        "subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx",
+        "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers",
+        "sslscan", "testssl", "katana", "hakrawler", "gau", "waybackurls",
+        "gospider", "arjun", "paramspider",
     ],
-    # OSINT: external intelligence, leaks, email security, takeover
-    "osint": [
-        "shodan-cli", "theHarvester", "h8mail", "subjack", "metagoofil", "nuclei",
+    "weaponization": [
+        "nuclei", "nmap-vulscan", "shodan-cli", "theHarvester", "h8mail",
+        "trufflehog", "gitleaks", "subjack",
     ],
-    # Vuln: active vulnerability scanning + web injection + auth
-    "vuln": [
-        "nuclei", "nmap-vulscan", "nikto", "wapiti", "wfuzz", "burp-cli",
-        "sqlmap", "dalfox", "wpscan", "interactsh-client",
-    ],
-    # Exploit: targeted exploitation, auth bypass, credential testing
-    "exploit": [
-        "hydra", "medusa", "jwt_tool", "sqlmap", "burp-cli",
-        "impacket", "evilwinrm",
-    ],
-    # API: REST/GraphQL/rate-limit testing
-    "api": [
-        "nuclei", "burp-cli", "arjun", "wapiti", "ffuf", "testssl",
-    ],
-    # Code/Secrets/Supply chain
-    "code": [
-        "semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy",
-        "eslint", "jshint", "ast-grep", "js-snooper", "jsniper",
-    ],
+    "delivery": ["ffuf", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider"],
+    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client"],
+    "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool"],
+    "command_control": ["nuclei", "interactsh-client", "testssl"],
+    "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy"],
+    "reporting": [],
 }
 
 
@@ -108,40 +95,60 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
 
 
 def _build_worker_groups(mode: ScanMode, priorities: dict[str, int]) -> dict[str, dict[str, Any]]:
+    """Materializes one entry per Kill Chain phase. Each entry gets a celery
+    queue name `worker.{mode}.{group}` and inherits the tool list from
+    CANONICAL_GROUP_TOOLS. Legacy aliases (`recon`, `vuln`, ...) point to the
+    same configs so persisted state and old callers keep working.
+    """
     label = "UNIT" if mode == "unit" else "SCHED"
     groups: dict[str, dict[str, Any]] = {}
 
     specs = [
-        ("recon",  "reconhecimento",          f"[{label}] RECON — Subdomain/Port/Web Crawl/Fingerprint"),
-        ("osint",  "osint",                   f"[{label}] OSINT — Shodan/theHarvester/Leaks/Takeover"),
-        ("vuln",   "analise_vulnerabilidade", f"[{label}] VULN — Nuclei/Nikto/Wapiti/Burp/SQLMap/Dalfox"),
-        ("exploit","exploit",                 f"[{label}] EXPLOIT — Hydra/JWT/CrackMapExec/Impacket"),
-        ("api",    "api",                     f"[{label}] API — REST/GraphQL/Rate-Limit Tester"),
-        ("code",   "code",                    f"[{label}] CODE — SAST/Secrets/Supply-Chain (Semgrep/Gitleaks/Trivy)"),
+        ("scope_validation",      f"[{label}] SCOPE VALIDATION"),
+        ("reconnaissance",        f"[{label}] RECON — Subdomain/Port/Web Crawl/Fingerprint"),
+        ("weaponization",         f"[{label}] WEAPONIZATION — CVE/OSINT/Secrets correlation"),
+        ("delivery",              f"[{label}] DELIVERY — Dir/Param/Vhost discovery"),
+        ("exploitation",          f"[{label}] EXPLOITATION — Nuclei/Nikto/Wapiti/SQLMap/Dalfox"),
+        ("installation",          f"[{label}] INSTALLATION — Auth bruteforce, JWT, AD"),
+        ("command_control",       f"[{label}] C2 — Persistence + outbound risk"),
+        ("actions_on_objectives", f"[{label}] AOO — SAST/secrets/dependency"),
+        ("reporting",             f"[{label}] REPORTING — Executive narrative"),
     ]
 
-    default_priority = priorities.get("recon", 7)
-    for group_key, queue_suffix, description in specs:
+    default_priority = priorities.get("reconnaissance", 7)
+    for group_key, description in specs:
         priority = priorities.get(group_key, default_priority)
         tools = list(CANONICAL_GROUP_TOOLS.get(group_key, []))
-        groups[group_key] = _group_config(mode, queue_suffix, description, tools, priority)
+        groups[group_key] = _group_config(mode, group_key, description, tools, priority)
 
-    # Aliases for backward-compatibility
-    groups["reconhecimento"] = dict(groups["recon"])
-    groups["analise_vulnerabilidade"] = dict(groups["vuln"])
+    # Backward-compat aliases — older code/state references the legacy group
+    # names. Each alias is just a pointer to the new Kill Chain entry.
+    aliases = {
+        "recon":                  "reconnaissance",
+        "reconhecimento":         "reconnaissance",
+        "osint":                  "weaponization",
+        "vuln":                   "exploitation",
+        "analise_vulnerabilidade":"exploitation",
+        "exploit":                "installation",
+        "api":                    "delivery",
+        "code":                   "actions_on_objectives",
+    }
+    for alias, target in aliases.items():
+        if target in groups:
+            groups[alias] = dict(groups[target])
 
     return groups
 
 
-UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(
-    mode="unit",
-    priorities={"recon": 9, "osint": 8, "vuln": 9, "exploit": 7, "api": 7, "code": 6},
-)
+_UNIT_PRIORITIES = {
+    "scope_validation": 10, "reconnaissance": 9, "weaponization": 9,
+    "delivery": 8, "exploitation": 8, "installation": 7,
+    "command_control": 6, "actions_on_objectives": 6, "reporting": 5,
+}
+_SCHED_PRIORITIES = {k: max(1, v - 3) for k, v in _UNIT_PRIORITIES.items()}
 
-SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(
-    mode="scheduled",
-    priorities={"recon": 6, "osint": 5, "vuln": 6, "exploit": 5, "api": 5, "code": 4},
-)
+UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(mode="unit", priorities=_UNIT_PRIORITIES)
+SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(mode="scheduled", priorities=_SCHED_PRIORITIES)
 
 WORKER_GROUPS = UNIT_WORKER_GROUPS
 

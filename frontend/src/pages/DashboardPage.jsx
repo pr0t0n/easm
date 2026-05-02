@@ -2,33 +2,34 @@ import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
 const SEV_COLOR = {
-  critical: "text-red-400 bg-red-500/10 border-red-500/30",
-  high: "text-orange-400 bg-orange-500/10 border-orange-500/30",
-  medium: "text-yellow-400 bg-yellow-500/10 border-yellow-500/30",
-  low: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30",
+  critical: "ds-badge ds-badge--critical",
+  high: "ds-badge ds-badge--high",
+  medium: "ds-badge ds-badge--medium",
+  low: "ds-badge ds-badge--low",
+  info: "ds-badge ds-badge--info",
 };
 
 const STATUS_COLOR = {
-  completed: "text-emerald-400",
-  running: "text-cyan-400 animate-pulse",
-  retrying: "text-amber-300",
-  failed: "text-red-400",
-  queued: "text-yellow-400",
-  blocked: "text-slate-400",
+  completed: "text-[#1f8a59] font-semibold",
+  running: "text-[#fe7b02] font-semibold animate-pulse",
+  retrying: "text-[#a47700] font-semibold",
+  failed: "text-[#b03333] font-semibold",
+  queued: "text-[#2d52e6] font-semibold",
+  blocked: "text-[#6b6b6b] font-semibold",
 };
 
 const BAR_COLOR = {
-  "ISO 27001": "from-cyan-500 to-cyan-400",
-  "NIST CSF": "from-violet-500 to-violet-400",
-  "CIS v8": "from-emerald-500 to-emerald-400",
-  PCI: "from-orange-500 to-yellow-400",
+  "ISO 27001": "from-[#4b73ff] to-[#6b8aff]",
+  "NIST CSF": "from-[#ff66f4] to-[#ff8af4]",
+  "CIS v8":   "from-[#229160] to-[#39b079]",
+  PCI:        "from-[#fe7b02] to-[#ffa047]",
 };
 
 const RISK_DOT = {
-  critical: "bg-red-500",
-  high: "bg-orange-500",
-  medium: "bg-yellow-500",
-  low: "bg-emerald-500",
+  critical: "bg-[#d64545]",
+  high:     "bg-[#fe7b02]",
+  medium:   "bg-[#d4a500]",
+  low:      "bg-[#229160]",
 };
 
 const FACTOR_VISUAL = {
@@ -38,7 +39,7 @@ const FACTOR_VISUAL = {
         <path d="M4 7h16M4 12h10M4 17h7" />
       </svg>
     ),
-    accent: "text-rose-300 border-rose-500/40 bg-rose-500/10",
+    accent: "text-[#b03333] border-[rgba(214,69,69,0.30)] bg-[rgba(214,69,69,0.10)]",
   },
   "Persistência Temporal (AGE)": {
     icon: (
@@ -47,7 +48,7 @@ const FACTOR_VISUAL = {
         <path d="M12 8v5l3 2" />
       </svg>
     ),
-    accent: "text-amber-300 border-amber-500/40 bg-amber-500/10",
+    accent: "text-[#a47700] border-[rgba(254,200,0,0.40)] bg-[rgba(254,200,0,0.12)]",
   },
   "Impacto Econômico (FAIR)": {
     icon: (
@@ -55,7 +56,7 @@ const FACTOR_VISUAL = {
         <path d="M12 3v18M16 7.5c0-1.9-1.8-3.5-4-3.5s-4 1.6-4 3.5 1.8 3.5 4 3.5 4 1.6 4 3.5-1.8 3.5-4 3.5-4-1.6-4-3.5" />
       </svg>
     ),
-    accent: "text-emerald-300 border-emerald-500/40 bg-emerald-500/10",
+    accent: "text-[#1f8a59] border-[rgba(34,145,96,0.30)] bg-[rgba(34,145,96,0.10)]",
   },
   "Resiliência Operacional": {
     icon: (
@@ -63,7 +64,7 @@ const FACTOR_VISUAL = {
         <path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z" />
       </svg>
     ),
-    accent: "text-cyan-300 border-cyan-500/40 bg-cyan-500/10",
+    accent: "text-[#2d52e6] border-[rgba(75,115,255,0.30)] bg-[rgba(75,115,255,0.10)]",
   },
 };
 

@@ -10,7 +10,6 @@ tools by role rather than name-matching.
 """
 from __future__ import annotations
 
-import shutil
 from typing import Any
 
 # (binary_name, …) — list of CLI binaries that signal the tool is installed.
@@ -502,12 +501,29 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 
 
 def is_tool_installed(tool_name: str) -> bool:
-    candidates = _TOOL_BINARIES.get(tool_name, [tool_name])
-    return any(shutil.which(c) for c in candidates)
+    """Returns True if the tool has a profile mapping in the Kali runner.
+
+    After the architecture refactor, "installed" means "Kali has it and we
+    have a profile that maps to it". The local subprocess check
+    (`shutil.which`) was retired together with `_TOOL_INSTALL_RECIPES` —
+    the runner now owns lifecycle, healthchecks and lifetime.
+    """
+    try:
+        from app.services.kali_executor import TOOL_TO_PROFILE
+    except Exception:
+        return False
+    return str(tool_name or "").strip().lower() in TOOL_TO_PROFILE
 
 
 def installed_tools() -> dict[str, bool]:
     return {tool: is_tool_installed(tool) for tool in TOOL_CATALOG.keys()}
+
+
+def ensure_tool_installed(tool_name: str) -> bool:
+    """Back-compat alias. Auto-install was removed — the Kali runner ships
+    every tool already, so this is now equivalent to is_tool_installed.
+    """
+    return is_tool_installed(tool_name)
 
 
 def tool_summary_for_agent(category: str | None = None, only_installed: bool = True) -> list[dict[str, Any]]:

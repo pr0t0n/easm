@@ -20,11 +20,11 @@ MISSION_ITEMS = [
 PENTEST_PHASES = [
     # Phase 1 – Recon
     {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",
-     "tools": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"]},
+     "tools": ["subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx"]},
     {"id": "P02", "title": "Port & Service Scan", "node": "asset_discovery",
      "tools": ["naabu", "nmap", "masscan", "httpx"]},
     {"id": "P03", "title": "Web Crawling & JS Extraction", "node": "asset_discovery",
-     "tools": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper"]},
+     "tools": ["katana", "hakrawler", "gau", "waybackurls", "gospider"]},
     {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
      "tools": ["arjun", "paramspider", "ffuf"]},
     # Phase 2 – Tech Fingerprint
@@ -34,7 +34,7 @@ PENTEST_PHASES = [
      "tools": ["wafw00f", "curl-headers"]},
     # Phase 3 – OSINT
     {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "metagoofil", "trufflehog", "gitleaks"]},
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
     {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
      "tools": ["theHarvester"]},
     {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
@@ -45,28 +45,28 @@ PENTEST_PHASES = [
     {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
      "tools": ["nuclei", "nmap-vulscan"]},
     {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
-     "tools": ["sqlmap", "dalfox", "wapiti", "wfuzz", "burp-cli", "nikto"]},
+     "tools": ["sqlmap", "dalfox", "wapiti", "nikto"]},
     {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
-     "tools": ["nuclei", "burp-cli", "interactsh-client"]},
+     "tools": ["nuclei", "interactsh-client"]},
     {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
-     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "burp-cli", "impacket", "evilwinrm"]},
+     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"]},
     {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
      "tools": ["ffuf", "gobuster", "feroxbuster", "dirsearch"]},
     {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
-     "tools": ["nuclei", "burp-cli", "arjun", "wapiti"]},
+     "tools": ["nuclei", "arjun", "wapiti"]},
     {"id": "P17", "title": "Upload & WebShell Bypass", "node": "risk_assessment",
-     "tools": ["nuclei", "burp-cli"]},
+     "tools": ["nuclei"]},
     {"id": "P18", "title": "SSL/TLS Weakness & Cipher Audit", "node": "risk_assessment",
      "tools": ["sslscan", "nmap", "testssl"]},
     {"id": "P19", "title": "IDOR & Access Control Flaws", "node": "risk_assessment",
-     "tools": ["burp-cli", "nuclei"]},
+     "tools": ["nuclei"]},
     {"id": "P20", "title": "CMS-Specific Scan (WP/Joomla/Drupal)", "node": "risk_assessment",
      "tools": ["wpscan", "nuclei", "nikto"]},
     # Phase 5 – Code/Supply Chain
     {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
      "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
     {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
-     "tools": ["retire", "trivy", "eslint", "jshint", "ast-grep", "semgrep"]},
+     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks"]},
 ]
 
 
@@ -78,7 +78,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "reconnaissance",
         "description": "Enumeração de subdomínios, validação DNS e expansão de superfície.",
         "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder", "dnsx"],
-        "playbook": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"],
+        "playbook": ["subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx"],
         "phases": ["P01"],
     },
     {
@@ -120,7 +120,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível.",
         "triggers": ["sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox", "burp"],
-        "playbook": ["sqlmap", "dalfox", "wapiti", "burp-cli", "nikto"],
+        "playbook": ["sqlmap", "dalfox", "wapiti", "nikto"],
         "phases": ["P12"],
     },
     {
@@ -128,7 +128,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Detecção de SSRF, open redirect e server-side interaction.",
         "triggers": ["ssrf", "redirect", "interaction", "interactsh", "oob"],
-        "playbook": ["nuclei", "burp-cli", "interactsh-client"],
+        "playbook": ["nuclei", "interactsh-client"],
         "phases": ["P13"],
     },
     {
@@ -136,7 +136,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Bypass de autenticação, brute-force, JWT/OAuth e MFA abuse.",
         "triggers": ["auth", "bypass", "brute", "jwt", "oauth", "token", "hydra"],
-        "playbook": ["hydra", "jwt_tool", "nuclei", "burp-cli"],
+        "playbook": ["hydra", "jwt_tool", "nuclei", "crackmapexec"],
         "phases": ["P14"],
     },
     {
@@ -152,7 +152,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Testes de API REST/GraphQL, rate limiting e endpoints expostos.",
         "triggers": ["api", "rest", "graphql", "rate", "endpoint", "json"],
-        "playbook": ["nuclei", "burp-cli", "arjun", "wapiti"],
+        "playbook": ["nuclei", "arjun", "wapiti"],
         "phases": ["P16"],
     },
     {
@@ -217,8 +217,8 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "id": "code-supply-chain-deps",
         "category": "code",
         "description": "Análise de dependências e risco de supply chain.",
-        "triggers": ["dep", "supply", "chain", "npm", "retire", "trivy", "eslint"],
-        "playbook": ["retire", "trivy", "eslint", "semgrep"],
+        "triggers": ["dep", "supply", "chain", "npm", "retire", "trivy", "semgrep"],
+        "playbook": ["retire", "trivy", "semgrep", "bandit", "gitleaks"],
         "phases": ["P22"],
     },
     # ── CATEGORY 6: PROTOCOLS ────────────────────────────────────────────────
@@ -236,7 +236,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "tooling",
         "description": "Gate de evidência: só promove severidade alta com prova reproduzível.",
         "triggers": ["critical", "high", "proof", "repro", "validation", "evidence"],
-        "playbook": ["burp-cli", "nuclei", "interactsh-client"],
+        "playbook": ["nuclei", "interactsh-client"],
         "phases": [],
     },
     # ── CATEGORY 8: ORCHESTRATION ────────────────────────────────────────────

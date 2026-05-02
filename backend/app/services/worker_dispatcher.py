@@ -1,134 +1,62 @@
-import os
+"""Tool dispatcher — Kali runner is the ONLY execution path.
+
+After the architecture refactor, every offensive tool runs inside the
+Kali container. Workers no longer carry tools themselves. This module
+exists only to (a) translate `tool_name → profile`, (b) post the job
+to `kali_runner`, (c) poll for the result, (d) shape it back into the
+dict structure the existing workflow code expects.
+
+If the runner is unreachable, the call returns a structured `error`
+result so the workflow can flag it as `attempted_failed` instead of
+hanging. There is NO local fallback — that codepath has been removed.
+"""
+from __future__ import annotations
+
+import logging
 from typing import Any
 
-from celery.result import allow_join_result
-
-from app.services.tool_adapters import run_tool_execution
-from app.services.resilience import SimpleCircuitBreaker, guarded_call
-from app.workers.celery_app import celery
-from app.workers.worker_groups import find_agent_by_tool, find_group_by_tool, group_queue
+from app.services.kali_executor import execute_via_kali, TOOL_TO_PROFILE
 
 
-_DISPATCH_BREAKER = SimpleCircuitBreaker(failure_threshold=3, recovery_timeout_seconds=30)
+logger = logging.getLogger(__name__)
 
 
-def _tool_task_name(scan_mode: str, tool_name: str) -> str:
-    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
-    group = find_group_by_tool(tool_name, mode=mode)
-    return f"worker.{mode}.{group}.execute"
+def execute_tool_with_workers(
+    tool_name: str,
+    target: str,
+    scan_mode: str = "unit",
+) -> dict[str, Any]:
+    """Single-path tool execution: always via the Kali runner."""
+    if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
+        return {
+            "tool": tool_name,
+            "target": target,
+            "scan_mode": scan_mode,
+            "status": "error",
+            "command": "",
+            "stdout": "",
+            "stderr": "",
+            "dispatch_error": f"no_profile_mapping for tool '{tool_name}'",
+            "source_agent_id": "kali_runner",
+            "source_agent_name": "Kali Runner",
+            "open_ports": [],
+        }
 
-
-def _tool_queue_name(scan_mode: str, tool_name: str) -> str:
-    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
-    group = find_group_by_tool(tool_name, mode=mode)
-    return group_queue(group, mode=mode)
-
-
-def _timeout_for_tool(tool_name: str) -> int:
-    name = str(tool_name or "").strip().lower()
-    if name in {"burp", "burp-cli"}:
-        return 900
-    # 660s = 10 min de subprocess + 60s de margem para o dispatcher.
-    return 660
-
-
-def _normalize_result(tool_name: str, target: str, scan_mode: str, result: Any) -> dict[str, Any]:
-    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
-    agent = find_agent_by_tool(tool_name, mode=mode)
-    if isinstance(result, dict):
-        normalized = dict(result)
-        normalized.setdefault("tool", tool_name)
-        normalized.setdefault("target", target)
-        normalized.setdefault("scan_mode", scan_mode)
-        normalized.setdefault("source_agent_id", agent.get("agent_id"))
-        normalized.setdefault("source_agent_name", agent.get("agent_name"))
-        return normalized
-
-    return {
-        "tool": tool_name,
-        "target": target,
-        "scan_mode": scan_mode,
-        "status": "error",
-        "output": f"Resultado invalido retornado pelo worker: {type(result).__name__}",
-        "open_ports": [],
-        "return_code": None,
-        "command": "",
-        "stdout": "",
-        "stderr": "",
-        "source_agent_id": agent.get("agent_id"),
-        "source_agent_name": agent.get("agent_name"),
-    }
-
-
-def _dispatch_params_from_env() -> dict[str, str]:
-    params: dict[str, str] = {}
-    burp_key = str(os.getenv("BURP_LICENSE_KEY", "")).strip()
-    if burp_key:
-        params["burp_license_key"] = burp_key
-
-    shodan_key = str(os.getenv("SHODAN_API_KEY", "")).strip()
-    if shodan_key:
-        params["shodan_api_key"] = shodan_key
-
-    return params
-
-
-def execute_tool_with_workers(tool_name: str, target: str, scan_mode: str = "unit") -> dict[str, Any]:
-    execution_mode = str(os.getenv("EASM_TOOL_EXECUTION_MODE", "local")).strip().lower()
-    mode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
-    agent = find_agent_by_tool(tool_name, mode=mode)
-    if execution_mode == "local":
-        local = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
-        local.setdefault("source_agent_id", agent.get("agent_id"))
-        local.setdefault("source_agent_name", agent.get("agent_name"))
-        return local
-
-    in_celery_task = False
+    # Try to surface the current scan_id so evidence is filed under
+    # /workspace/{scan_id}/{tool}/{job_id}/ on the runner.
+    scan_id: int | None = None
     try:
-        from celery import current_task as _current_task  # type: ignore
-        in_celery_task = _current_task is not None
+        from celery import current_task as _ct  # type: ignore
+        if _ct is not None and getattr(_ct, "request", None):
+            scan_id = (_ct.request.kwargs or {}).get("scan_id")
+            if not scan_id and _ct.request.args:
+                scan_id = _ct.request.args[0]
     except Exception:
-        in_celery_task = False
+        scan_id = None
 
-    task_name = _tool_task_name(scan_mode=scan_mode, tool_name=tool_name)
-    queue_name = _tool_queue_name(scan_mode=scan_mode, tool_name=tool_name)
-    timeout = _timeout_for_tool(tool_name)
-    dispatch_params = _dispatch_params_from_env()
-
-    try:
-        async_result = guarded_call(
-            _DISPATCH_BREAKER,
-            lambda: celery.send_task(
-                task_name,
-                kwargs={"tool": tool_name, "target": target, "params": dispatch_params},
-                queue=queue_name,
-            ),
-            on_open_error=RuntimeError("circuit_open: dispatch indisponivel temporariamente"),
-        )
-
-        if in_celery_task:
-            with allow_join_result():
-                result = async_result.get(timeout=timeout, propagate=False)
-        else:
-            result = async_result.get(timeout=timeout, propagate=False)
-
-        normalized = _normalize_result(tool_name=tool_name, target=target, scan_mode=scan_mode, result=result)
-        normalized.setdefault("dispatch_task_id", async_result.id)
-        normalized.setdefault("dispatch_task_name", task_name)
-        normalized.setdefault("dispatch_bypassed", False)
-        normalized.setdefault("dispatch_agent_id", agent.get("agent_id"))
-        normalized.setdefault("dispatch_agent_name", agent.get("agent_name"))
-        return normalized
-    except Exception as exc:
-        fallback = run_tool_execution(tool_name=tool_name, target=target, scan_mode=scan_mode)
-        fallback.setdefault("dispatch_error", str(exc))
-        fallback.setdefault("dispatch_task_name", task_name)
-        fallback.setdefault("dispatch_bypassed", True)
-        fallback.setdefault("dispatch_bypass_reason", "dispatch_error_or_circuit_open")
-        fallback.setdefault("dispatch_agent_id", agent.get("agent_id"))
-        fallback.setdefault("dispatch_agent_name", agent.get("agent_name"))
-        fallback.setdefault("source_agent_id", agent.get("agent_id"))
-        fallback.setdefault("source_agent_name", agent.get("agent_name"))
-        if type(exc).__name__.lower() == "timeouterror":
-            fallback.setdefault("dispatch_timeout", timeout)
-        return fallback
+    return execute_via_kali(
+        tool_name=tool_name,
+        target=target,
+        scan_id=scan_id,
+        scan_mode=scan_mode,
+    )

@@ -63,5 +63,12 @@ class Settings(BaseSettings):
     nessus_secret_key: str = ""
     nessus_verify_tls: bool = True
 
+    # ── Kali runner (centralized tool executor) ────────────────────────────
+    # SINGLE source of truth for offensive tools. All workers dispatch HTTP
+    # jobs to this sidecar; backend/worker images carry NO tools themselves.
+    use_kali_executor: bool = True
+    kali_runner_url: str = "http://kali_runner:8088"
+    kali_executor_tools: str = ""  # legacy canary list; ignored when use_kali_executor=true
+
 
 settings = Settings()

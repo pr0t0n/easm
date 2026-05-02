@@ -1,0 +1,201 @@
+# Phase: RECONNAISSANCE — passive/active surface mapping
+# Each profile = one well-tuned tool invocation. cmd uses {target} substitution.
+
+subfinder_passive:
+  tool: subfinder
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Passive subdomain enumeration via 30+ data sources (CT logs, DNS-DB)."
+  cmd: ["subfinder", "-d", "{host}", "-silent", "-t", "100"]
+  timeout: 180
+  parser: lines
+
+amass_enum:
+  tool: amass
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Active+passive subdomain enumeration with brute force."
+  cmd: ["amass", "enum", "-passive", "-d", "{host}", "-timeout", "5"]
+  timeout: 300
+  parser: lines
+
+assetfinder_passive:
+  tool: assetfinder
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Quick passive subdomain finder (CT logs + Wayback)."
+  cmd: ["assetfinder", "--subs-only", "{host}"]
+  timeout: 60
+  parser: lines
+
+dnsx_resolve:
+  tool: dnsx
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Multi-purpose DNS toolkit (A, AAAA, CNAME, NS, MX)."
+  cmd: ["dnsx", "-d", "{host}", "-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-silent"]
+  timeout: 120
+  parser: lines
+
+shuffledns_brute:
+  tool: shuffledns
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Active subdomain bruteforce + wildcard filter."
+  cmd: ["shuffledns", "-d", "{host}", "-silent", "-mode", "bruteforce", "-r", "/usr/share/seclists/Miscellaneous/dns-resolvers.txt", "-w", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"]
+  timeout: 600
+  parser: lines
+
+alterx_permutations:
+  tool: alterx
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Pattern-based subdomain permutation generator."
+  cmd: ["alterx", "-l", "{host}", "-silent"]
+  timeout: 60
+  parser: lines
+
+naabu_top1000:
+  tool: naabu
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Fast TCP port scan top-1000."
+  cmd: ["naabu", "-host", "{host}", "-top-ports", "1000", "-silent", "-rate", "1000"]
+  timeout: 600
+  parser: lines
+
+nmap_service_detect:
+  tool: nmap
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Service/version detection with default scripts."
+  cmd: ["nmap", "-sV", "-sC", "-Pn", "--top-ports", "200", "-T4", "{host}"]
+  timeout: 600
+  parser: raw
+
+masscan_full:
+  tool: masscan
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Internet-scale stateless TCP port scanner."
+  cmd: ["masscan", "{host}", "-p1-65535", "--rate", "5000", "--wait", "3"]
+  timeout: 900
+  parser: raw
+
+httpx_probe:
+  tool: httpx
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Live HTTP/HTTPS prober with status, title, tech."
+  cmd: ["httpx", "-u", "{url}", "-silent", "-status-code", "-title", "-tech-detect", "-tls-probe", "-json"]
+  timeout: 120
+  parser: jsonl
+
+whatweb_fingerprint:
+  tool: whatweb
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Web tech fingerprint (CMS, frameworks, JS libs)."
+  cmd: ["whatweb", "--no-errors", "-a", "3", "--log-json=-", "{url}"]
+  timeout: 120
+  parser: jsonl
+
+wafw00f_detect:
+  tool: wafw00f
+  category: recon
+  phase: RECONNAISSANCE
+  description: "WAF detector — 100+ vendors."
+  cmd: ["wafw00f", "{url}"]
+  timeout: 60
+  parser: raw
+
+sslscan_audit:
+  tool: sslscan
+  category: recon
+  phase: RECONNAISSANCE
+  description: "TLS cipher / cert audit."
+  cmd: ["sslscan", "--no-colour", "{host}"]
+  timeout: 120
+  parser: raw
+
+testssl_audit:
+  tool: testssl
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Comprehensive TLS auditor (vulns, ciphers, HSTS, OCSP)."
+  cmd: ["testssl", "--quiet", "--color", "0", "{host}"]
+  timeout: 600
+  parser: raw
+
+katana_crawl:
+  tool: katana
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Headless+passive crawler with JS parser."
+  cmd: ["katana", "-u", "{url}", "-silent", "-d", "3", "-jc", "-kf", "all"]
+  timeout: 300
+  parser: lines
+
+hakrawler_crawl:
+  tool: hakrawler
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Fast Go web crawler — pulls links from JS, robots, sitemaps."
+  cmd: ["hakrawler", "-d", "3", "-u"]
+  stdin_template: "{url}\n"
+  timeout: 180
+  parser: lines
+
+gospider_crawl:
+  tool: gospider
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Web spider with form/sitemap detection."
+  cmd: ["gospider", "-s", "{url}", "-d", "3", "-c", "5", "--quiet"]
+  timeout: 300
+  parser: lines
+
+gau_archives:
+  tool: gau
+  category: recon
+  phase: RECONNAISSANCE
+  description: "GetAllUrls — archived URLs from Wayback/CommonCrawl/AlienVault."
+  cmd: ["gau", "{host}", "--threads", "5"]
+  timeout: 180
+  parser: lines
+
+waybackurls_archives:
+  tool: waybackurls
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Wayback Machine URL extractor."
+  cmd: ["waybackurls", "{host}"]
+  timeout: 120
+  parser: lines
+
+arjun_param_discover:
+  tool: arjun
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Hidden HTTP parameter discoverer (GET/POST/JSON)."
+  cmd: ["arjun", "-u", "{url}", "--passive"]
+  timeout: 300
+  parser: raw
+
+paramspider_mining:
+  tool: paramspider
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Mines URLs from Wayback to extract param names."
+  cmd: ["paramspider", "-d", "{host}"]
+  timeout: 180
+  parser: lines
+
+curl_headers:
+  tool: curl-headers
+  category: recon
+  phase: RECONNAISSANCE
+  description: "HTTP header inspection (security headers, server, WAF hints)."
+  cmd: ["curl", "-sSI", "-L", "--max-time", "30", "{url}"]
+  timeout: 60
+  parser: raw

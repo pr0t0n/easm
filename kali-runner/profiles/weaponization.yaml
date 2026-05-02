@@ -1,0 +1,66 @@
+# Phase: WEAPONIZATION_SIMULATION — payload prep, exploit selection from CVEs.
+# These are passive: they reason over recon evidence without attacking.
+
+nuclei_cves:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "CVE & misconfiguration template-driven scan (8000+ checks)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-severity", "critical,high,medium", "-rate-limit", "150"]
+  timeout: 900
+  parser: jsonl
+
+nmap_vuln_scripts:
+  tool: nmap-vulscan
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nmap NSE vuln category — maps services to known CVEs."
+  cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4", "{host}"]
+  timeout: 900
+  parser: raw
+
+nikto_basic:
+  tool: nikto
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Legacy web server scanner (6700+ tests for misconfigs)."
+  cmd: ["nikto", "-h", "{url}", "-Format", "json", "-Tuning", "1234567890abc"]
+  timeout: 900
+  parser: raw
+
+shodan_lookup:
+  tool: shodan-cli
+  category: osint
+  phase: WEAPONIZATION_SIMULATION
+  description: "Shodan host lookup — banners, exposed services."
+  cmd: ["shodan", "host", "{host}"]
+  requires_env: ["SHODAN_API_KEY"]
+  timeout: 60
+  parser: raw
+
+theharvester_passive:
+  tool: theHarvester
+  category: osint
+  phase: WEAPONIZATION_SIMULATION
+  description: "Email/host gathering from public sources."
+  cmd: ["theHarvester", "-d", "{host}", "-b", "duckduckgo,crtsh,hackertarget,bing,otx", "-l", "200"]
+  timeout: 300
+  parser: raw
+
+h8mail_breach:
+  tool: h8mail
+  category: osint
+  phase: WEAPONIZATION_SIMULATION
+  description: "Email leak hunter (HIBP integration)."
+  cmd: ["h8mail", "-t", "{host}"]
+  timeout: 120
+  parser: raw
+
+trufflehog_secrets:
+  tool: trufflehog
+  category: code
+  phase: WEAPONIZATION_SIMULATION
+  description: "Verified secret scanner — works on URL/git/S3."
+  cmd: ["trufflehog", "filesystem", "--no-update", "--json", "."]
+  timeout: 600
+  parser: jsonl

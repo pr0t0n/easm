@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
 const SEV_STYLE = {
-  critical: "text-red-300 border-red-500/30 bg-red-500/10",
-  high: "text-orange-300 border-orange-500/30 bg-orange-500/10",
-  medium: "text-yellow-800 border-yellow-500/40 bg-yellow-100",
-  low: "text-emerald-300 border-emerald-500/30 bg-emerald-500/10",
-  info: "text-blue-300 border-blue-500/30 bg-blue-500/10",
+  critical: "ds-badge ds-badge--critical",
+  high: "ds-badge ds-badge--high",
+  medium: "ds-badge ds-badge--medium",
+  low: "ds-badge ds-badge--low",
+  info: "ds-badge ds-badge--info",
 };
 
 const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
