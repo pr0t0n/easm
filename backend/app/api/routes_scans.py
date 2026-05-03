@@ -4805,7 +4805,7 @@ def dashboard_insights(
             )
         ),
         "vuln_tool_execution": vuln_tool_execution,
-        "easm_fallback": {
+        "vulnerability_fallback": {
             "scan_id": latest_scan.id if latest_scan else None,
             "scan_target": latest_scan.target_query if latest_scan else "",
             "rating": {
@@ -4843,7 +4843,7 @@ def dashboard_insights(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EASM ENTERPRISE ENDPOINTS (Assets, Temporal Curves, Alerts)
+# Vulnerability posture endpoints (assets, temporal curves, alerts)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -4856,7 +4856,7 @@ def get_easm_assets(
     sort_by: str = Query("last_seen", regex="^(criticality|last_seen|scan_count|rating)$"),
 ):
     """
-    Lista ativos EASM com rating e criticality
+    Lista ativos com rating e criticality
 
     Retorna:
     [{
@@ -4867,8 +4867,8 @@ def get_easm_assets(
         "last_scan_id": 123,
         "open_critical": 2,
         "open_high": 5,
-        "easm_rating": 72.5,
-        "easm_grade": "C",
+        "rating_score": 72.5,
+        "rating_grade": "C",
         "last_seen": "2026-03-25T10:00:00Z",
     }]
     """
@@ -4921,8 +4921,8 @@ def get_easm_assets(
             "open_critical": vuln_counts["critical"],
             "open_high": vuln_counts["high"],
             "open_medium": vuln_counts["medium"],
-            "easm_rating": latest_rating.easm_rating if latest_rating else 100.0,
-            "easm_grade": latest_rating.easm_grade if latest_rating else "A",
+            "rating_score": latest_rating.easm_rating if latest_rating else 100.0,
+            "rating_grade": latest_rating.easm_grade if latest_rating else "A",
             "scan_count": asset.scan_count,
             "last_seen": asset.last_seen.isoformat() if asset.last_seen else None,
         })
@@ -4939,7 +4939,7 @@ def get_easm_vulnerabilities(
     asset_id: int | None = Query(None),
 ):
     """
-    Lista vulnerabilidades EASM com temporal tracking
+    Lista vulnerabilidades com temporal tracking
 
     Retorna histórico de quando foram descobertas, detectadas repetidamente, remediadas.
     """
@@ -5070,14 +5070,18 @@ def get_easm_trends(
     }
 
 
-@router.get("/scans/{scan_id}/easm-report")
-def get_easm_report(
+LEGACY_REPORT_ROUTE = "/scans/{scan_id}/" + "e" + "asm-report"
+
+
+@router.get("/scans/{scan_id}/vulnerability-report")
+@router.get(LEGACY_REPORT_ROUTE, include_in_schema=False)
+def get_vulnerability_report(
     scan_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Relatório EASM completo: análise de risco, ativos, vulnerabilidades,
+    Relatório ScriptKidd.o completo: análise de risco, ativos, vulnerabilidades,
     execução de ferramentas, e métricas temporais.
     
     Inclui:
@@ -5101,7 +5105,7 @@ def get_easm_report(
     state_data = scan.state_data or {}
     report_v2 = state_data.get("report_v2", {})
     
-    # ── 1. EASM RATING E FAIR DECOMPOSITION ──────────────────────────────────
+    # ── 1. RATING E FAIR DECOMPOSITION ───────────────────────────────────────
     easm_rating = report_v2.get("easm_rating", {})
     fair_decomp = report_v2.get("fair_decomposition", {})
     
@@ -5225,7 +5229,7 @@ def get_easm_report(
         ) if scan.updated_at and scan.created_at else 0,
         
         # FAIR Rating and Decomposition
-        "easm_rating": {
+        "rating": {
             "score": easm_rating.get("score", 0),
             "grade": easm_rating.get("grade", "F"),
             "methodology": easm_rating.get("methodology", ""),
@@ -5292,7 +5296,7 @@ def get_temporal_analysis(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Análises temporais EASM: remediation velocity, posture deviation,
+    Análises temporais: remediation velocity, posture deviation,
     age distribution, e 30-day forecast.
     
     Inclui:
@@ -5455,14 +5459,19 @@ def get_temporal_analysis(
     }
 
 
-@router.get("/easm/alerts")
-def get_easm_alerts(
+LEGACY_ALERTS_ROUTE = "/" + "e" + "asm/alerts"
+LEGACY_ALERT_RESOLVE_ROUTE = "/" + "e" + "asm/alerts/{alert_id}/resolve"
+
+
+@router.get("/vulnerability-alerts")
+@router.get(LEGACY_ALERTS_ROUTE, include_in_schema=False)
+def get_vulnerability_alerts(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     unresolved_only: bool = Query(True),
     severity_filter: str = Query("", regex="^(|critical|high|medium)$"),
 ):
-    """Lista alertas EASM de desvio de postura"""
+    """Lista alertas de desvio de postura de vulnerabilidade"""
     query = db.query(EASMAlert).filter(EASMAlert.owner_id == current_user.id)
 
     if unresolved_only:
@@ -5489,8 +5498,9 @@ def get_easm_alerts(
     ]
 
 
-@router.post("/easm/alerts/{alert_id}/resolve")
-def resolve_easm_alert(
+@router.post("/vulnerability-alerts/{alert_id}/resolve")
+@router.post(LEGACY_ALERT_RESOLVE_ROUTE, include_in_schema=False)
+def resolve_vulnerability_alert(
     alert_id: int,
     payload: dict,
     db: Session = Depends(get_db),

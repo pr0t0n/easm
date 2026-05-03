@@ -1109,7 +1109,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         progress, progress_ctx = _progress_from_state(final_state)
         final_state["mission_progress_context"] = progress_ctx
 
-        # ── EASM: propaga campos dos agentes 4 e 5 para report_v2 ─────────────
+        # Propaga campos de governança dos agentes 4 e 5 para report_v2.
         existing_report_v2 = (job.state_data or {}).get("report_v2") or {}
         existing_report_v2.update({
             "easm_rating":        final_state.get("easm_rating") or {},
@@ -1122,7 +1122,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         final_state["report_v2"] = existing_report_v2
         # ───────────────────────────────────────────────────────────────────────
 
-        # ── EASM: Persistir histórico de ratings (AssetRatingHistory) ────────
+        # Persiste histórico de ratings por ativo.
         from app.models.models import Asset, AssetRatingHistory
         easm_rating = final_state.get("easm_rating") or {}
         fair_decomp = final_state.get("fair_decomposition") or {}
@@ -1187,7 +1187,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             source="worker.summary",
             level="INFO",
             message=(
-                f"EXECUCAO EASM CONCLUIDA COM SUCESSO!\n"
+                f"EXECUCAO SCRIPTKIDD.O CONCLUIDA COM SUCESSO!\n"
                 f"\n"
                 f"FRAMEWORK SUPERVISOR-CENTRIC:\n"
                 f"{mission_summary}\n"
@@ -1196,7 +1196,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 f"  • Vulnerabilidades encontradas: {len(final_state.get('vulnerabilidades_encontradas', []))}\n"
                 f"  • Portas descobertas: {len(final_state.get('discovered_ports', []))}\n"
                 f"  • Ativos mapeados: {len(final_state.get('lista_ativos', []))}\n"
-                f"  • Rating EASM: {easm_rating.get('score', 'N/A')}/100 (Grau {easm_rating.get('grade', 'N/A')})\n"
+                f"  • Rating ScriptKidd.o: {easm_rating.get('score', 'N/A')}/100 (Grau {easm_rating.get('grade', 'N/A')})\n"
                 f"  • Validation Score: {final_state.get('agent_validation', {}).get('scores', {}).get('overall', 'N/A')}\n"
                 f"  • Taxa de sucesso: {progress_ctx.get('tools_success', 0)}/{progress_ctx.get('tools_attempted', 0)} ferramentas"
             )

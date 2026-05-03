@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 REGISTRY="${REGISTRY:-}"
-IMAGE_REPO="${IMAGE_REPO:-easm/backend}"
+IMAGE_REPO="${IMAGE_REPO:-scriptkiddo/backend}"
 IMAGE_TAG="${IMAGE_TAG:-cyber-autoagent-$(date +%Y%m%d-%H%M)}"
-LOCAL_IMAGE="${LOCAL_IMAGE:-easm-backend:cyber-autoagent}"
+LOCAL_IMAGE="${LOCAL_IMAGE:-scriptkiddo-backend:cyber-autoagent}"
 
 if [[ -z "$REGISTRY" ]]; then
   echo "REGISTRY is required. Example: REGISTRY=ghcr.io/pr0t0n"

@@ -7,7 +7,7 @@
 
 ## 📋 Resumo da Validação
 
-Validei completamente a configuração de timeouts para todas as ferramentas de segurança integradas no EASM. **Todas as validações passaram.**
+Validei completamente a configuração de timeouts para todas as ferramentas de segurança integradas no ScriptKidd.o. **Todas as validações passaram.**
 
 ### Resultado: ✅ APROVADO
 

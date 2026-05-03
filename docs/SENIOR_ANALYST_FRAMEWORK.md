@@ -1,6 +1,6 @@
 # Senior Cyber Analyst Framework (LangGraph)
 
-Este documento define o novo contrato operacional do agente de pentest do PENTEST.IO.
+Este documento define o novo contrato operacional do agente de analise de vulnerabilidade do ScriptKidd.o.
 
 ## Objetivo
 
@@ -107,7 +107,7 @@ Regras de promocao de achados:
 
 A refatoracao preserva os artefatos principais consumidos pela plataforma:
 - `vulnerabilidades_encontradas`
-- `easm_rating`
+- rating de vulnerabilidade
 - `fair_decomposition`
 - `executive_summary`
 - `mission_items`, `mission_index`, `node_history`

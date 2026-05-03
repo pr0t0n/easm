@@ -31,6 +31,66 @@ function Counter({ label, value }) {
   );
 }
 
+function readinessLabel(value) {
+  if (value === "operational") return "Operacional";
+  if (value === "partial") return "Parcial";
+  if (value === "initial") return "Inicial";
+  return "Sem aprendizado";
+}
+
+function LearningIndex({ index }) {
+  const items = index?.items || [];
+  if (!items.length) return null;
+  return (
+    <section className="panel p-5">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="ds-eyebrow">Índice por ataque / skill</p>
+          <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--ink)" }}>
+            Cobertura de aprendizado para análise de vulnerabilidade
+          </h2>
+        </div>
+        <div className="rounded-lg border px-4 py-2 text-sm font-semibold" style={{ borderColor: "var(--line)", background: "var(--surface-soft)", color: "var(--ink)" }}>
+          {index.overall_learning_percent || 0}% global
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.id} className="rounded-lg border p-4" style={{ borderColor: "var(--line)", background: "#fff" }}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.label}</h3>
+                <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+                  {item.accepted_learnings} aceitos · {item.techniques_accepted}/{item.target_techniques} técnicas
+                </p>
+              </div>
+              <span className="ds-badge" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+                {readinessLabel(item.readiness)}
+              </span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full" style={{ background: "var(--surface-soft)" }}>
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${Math.min(100, Math.max(0, item.learning_percent || 0))}%`,
+                  background: item.learning_percent >= 85 ? "var(--sev-low-text)" : item.learning_percent >= 45 ? "var(--sev-medium-text)" : "var(--brand-500)",
+                }}
+              />
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs" style={{ color: "var(--ink-muted)" }}>
+              <span>{item.learning_percent || 0}% aprendido</span>
+              <span>{(item.phases || []).join(", ")}</span>
+            </div>
+            <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
+              Skills: {(item.skills || []).join(", ") || "-"}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function TechniqueList({ techniques }) {
   if (!techniques?.length) {
     return <p className="text-sm" style={{ color: "var(--ink-muted)" }}>Nenhuma técnica detalhada.</p>;
@@ -151,6 +211,8 @@ function ReviewPanel({ item, notes, setNotes, onAccept, onReject, busy }) {
 export default function LearningPage() {
   const [urlsText, setUrlsText] = useState("");
   const [summary, setSummary] = useState({});
+  const [skillIndex, setSkillIndex] = useState(null);
+  const [missionPrompt, setMissionPrompt] = useState("");
   const [items, setItems] = useState([]);
   const [reviewItem, setReviewItem] = useState(null);
   const [notes, setNotes] = useState("");
@@ -159,6 +221,7 @@ export default function LearningPage() {
   const [submitting, setSubmitting] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [error, setError] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
 
@@ -178,9 +241,13 @@ export default function LearningPage() {
     setLoading(true);
     setError("");
     try {
-      const { data } = await client.get("/api/learning/vulnerabilities");
+      const [{ data }, indexResponse] = await Promise.all([
+        client.get("/api/learning/vulnerabilities"),
+        client.get("/api/learning/vulnerabilities/attack-index").catch(() => ({ data: null })),
+      ]);
       const nextItems = data.items || [];
       setSummary(data.summary || {});
+      if (indexResponse?.data) setSkillIndex(indexResponse.data);
       setItems(nextItems);
       setSelectedIds((current) => current.filter((id) => nextItems.some((item) => item.id === id && item.status === "pending_review")));
       if (!reviewItem) {
@@ -322,6 +389,22 @@ export default function LearningPage() {
     }
   };
 
+  const generateMissionPrompt = async () => {
+    setGeneratingPrompt(true);
+    setError("");
+    setTaskStatus("");
+    try {
+      const { data } = await client.post("/api/learning/vulnerabilities/mission-prompt");
+      setSkillIndex(data.attack_index || skillIndex);
+      setMissionPrompt(data.prompt || "");
+      setTaskStatus(`Prompt consolidado com ${data.learning_count || 0} aprendizados aceitos e ${data.overall_learning_percent || 0}% de cobertura global.`);
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao consolidar prompt/missão.");
+    } finally {
+      setGeneratingPrompt(false);
+    }
+  };
+
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
       <section className="panel p-5">
@@ -334,6 +417,9 @@ export default function LearningPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button type="button" className="btn-primary" onClick={generateMissionPrompt} disabled={generatingPrompt}>
+              {generatingPrompt ? "Formalizando..." : "Formalizar prompt/missão"}
+            </button>
             <button type="button" className="btn-secondary" onClick={seedCatalog} disabled={seeding}>
               {seeding ? "Antecipando..." : "Antecipar catálogo"}
             </button>
@@ -351,6 +437,8 @@ export default function LearningPage() {
         <Counter label="Técnicas recebidas" value={summary.techniques_received} />
         <Counter label="Técnicas aceitas" value={summary.techniques_accepted} />
       </section>
+
+      <LearningIndex index={skillIndex} />
 
       {error && (
         <section className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)" }}>
@@ -391,6 +479,28 @@ export default function LearningPage() {
         onAccept={() => review("accept")}
         onReject={() => review("reject")}
       />
+
+      {missionPrompt && (
+        <section className="panel p-5">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="ds-eyebrow">Prompt operacional consolidado</p>
+              <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--ink)" }}>
+                Missão de análise de vulnerabilidade por Cyber Kill Chain
+              </h2>
+            </div>
+            <span className="ds-badge" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+              IF / SE por ataque e skill
+            </span>
+          </div>
+          <textarea
+            readOnly
+            value={missionPrompt}
+            className="mt-4 min-h-96 w-full rounded-lg border px-3 py-2 text-xs font-mono leading-5"
+            style={{ borderColor: "var(--line)", color: "var(--ink)", background: "var(--surface-soft)" }}
+          />
+        </section>
+      )}
 
       <section className="panel p-5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

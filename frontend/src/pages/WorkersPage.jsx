@@ -193,7 +193,7 @@ export default function WorkersPage() {
           <div>
             <h2 className="text-xl font-semibold text-slate-100">Worker Manager</h2>
             <p className="mt-1 text-sm text-slate-400">
-              Pipeline EASM 5-Agent · {agents.length} agentes · {pipeline?.total_mission_items || 0} missões catalogadas
+              Pipeline ScriptKidd.o · {agents.length} agentes · {pipeline?.total_mission_items || 0} missões catalogadas
               {kaliCatalog ? ` · Kali ${kaliCatalog.profiled_tools_ready}/${kaliCatalog.profile_mappings_expected} profiles prontos` : ""}
             </p>
           </div>
@@ -444,7 +444,7 @@ export default function WorkersPage() {
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h3 className="text-base font-semibold text-slate-100">Catálogo Completo de Missões</h3>
-              <p className="mt-0.5 text-xs text-slate-400">{pipeline?.total_mission_items || 0} steps — cobertura técnica completa do pipeline Pentest.io</p>
+              <p className="mt-0.5 text-xs text-slate-400">{pipeline?.total_mission_items || 0} steps — cobertura técnica completa do pipeline ScriptKidd.o</p>
             </div>
             <input
               className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 md:w-72"

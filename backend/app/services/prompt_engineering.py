@@ -233,14 +233,14 @@ class ExecutiveNarrativeGenerator:
         Gera narrativa de 3-5 parágrafos para CISO/Executivos
 
         Exemplo:
-        "Sua postura EASM atual é de 72 (Grau C), expondo ~$1.2M em risco potencial.
+        "Sua postura de vulnerabilidade atual é de 72 (Grau C), expondo ~$1.2M em risco potencial.
         O principal driver é a presença de 5 vulnerabilidades críticas não remediadas há
         > 30 dias, cada uma com ~25% de chance de exploração anual (CVSS 9.8, sem patches).
         Se uma destas for explorada, os custos de resposta + perda de dados podem chegar
         a $850K. Recomendação: Priorice os 5 críticos para remediação em <7 dias."
         """
         narrativa = f"""
-**Postura EASM: {easm_grade} (Score {easm_rating}/100)**
+**Postura ScriptKidd.o: {easm_grade} (Score {easm_rating}/100)**
 
 Sua organização enfrenta **${potential_loss:,.0f}** em risco potencial de exposição,
 impulsionado por {open_critical_count} vulnerabilidade(idades) crítica(s) aberta(s) há mais
@@ -324,10 +324,10 @@ se não mitigado.
 
 
 EXECUTIVE_PROMPT_TEMPLATE = """
-You are a cybersecurity risk advisor. Given the following EASM data, generate a concise 
+You are a cybersecurity risk advisor. Given the following vulnerability posture data, generate a concise
 executive summary (2-3 paragraphs) explaining the financial risk in business terms.
 
-**EASM Rating Data:**
+**Vulnerability Rating Data:**
 - Current Score: {easm_rating}/100 (Grade: {easm_grade})
 - Potential Financial Loss: ${potential_loss:,.0f}
 - Open Critical Vulnerabilities: {critical_count}
@@ -348,10 +348,10 @@ Keep language accessible to non-technical stakeholders (CFO, Board level).
 """
 
 CISO_PROMPT_TEMPLATE = """
-You are a CISO advising on security posture. Based on the following EASM assessment,
+You are a CISO advising on security posture. Based on the following vulnerability assessment,
 provide a 3-paragraph technical narrative including remediation priorities.
 
-**EASM Metrics:**
+**Vulnerability Metrics:**
 - FAIR Decomposition:
   - Perimeter Resilience: {perimeter_score}/100
   - Patching Hygiene: {patching_score}/100

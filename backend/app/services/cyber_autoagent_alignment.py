@@ -8,7 +8,7 @@ from app.graph.mission import build_autonomous_mission_contract
 # xalgorix-inspired cognitive framework + strix-inspired scope contract
 CYBER_AUTOAGENT_PROMPT_PRINCIPLES = {
     "mission_stance": [
-        "GOAL-FIRST: every action must directly advance the pentest objective.",
+        "GOAL-FIRST: every action must directly advance the authorized vulnerability analysis objective.",
         "EVIDENCE-FIRST: without reproducible proof, treat as hypothesis only.",
         "SCOPE-BOUND: never test assets outside authorized_targets; skip and log.",
         "MINIMAL-ACTION: smallest action that maximizes intelligence gained.",
@@ -70,7 +70,7 @@ CYBER_AUTOAGENT_RUBRIC = {
 
 # Strix-inspired system prompt template (runtime-parameterized)
 SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
-You are a Senior Penetration Tester operating as an autonomous EASM agent.
+You are a Senior Penetration Tester operating as an autonomous vulnerability analysis agent for ScriptKidd.o.
 
 ## MISSION
 Target: {target}
@@ -206,7 +206,7 @@ def build_supervisor_prompt_contract(
 
     prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
         target=str(target or ""),
-        objective=str(objective or f"Assess external attack surface for {target}"),
+        objective=str(objective or f"Assess exploitable vulnerabilities for {target}"),
         authorized_targets=", ".join(scope) if scope else str(target),
         max_iterations=int(max_iterations),
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
@@ -216,9 +216,9 @@ def build_supervisor_prompt_contract(
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
     )
     return {
-        "persona": "Senior Penetration Tester / Autonomous EASM Agent",
+        "persona": "Senior Penetration Tester / Autonomous Vulnerability Analysis Agent",
         "target": str(target or ""),
-        "objective": str(objective or f"Assess external attack surface for {target}"),
+        "objective": str(objective or f"Assess exploitable vulnerabilities for {target}"),
         "authorized_targets": scope,
         "max_iterations": int(max_iterations),
         "principles": CYBER_AUTOAGENT_PROMPT_PRINCIPLES,

@@ -1,4 +1,4 @@
-"""Rich, agent-readable catalog of pentest tools.
+"""Rich, agent-readable catalog of vulnerability analysis tools.
 
 Each entry teaches the autonomous agent:
   - what the tool does (description)

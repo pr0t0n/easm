@@ -107,7 +107,7 @@ PHASE_META: dict[str, dict[str, Any]] = {
     },
     "REPORTING": {
         "label": "Relatório Executivo",
-        "summary": "Narrativa, FAIR breakdown, EASM rating e recomendações priorizadas.",
+        "summary": "Narrativa, FAIR breakdown, rating ScriptKidd.o e recomendações priorizadas.",
         "executive_pitch": "Material assinável para o board e o PRA do cliente.",
         "node": "executive_analyst",
     },

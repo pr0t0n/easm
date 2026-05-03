@@ -9,11 +9,11 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: pentest_postgres
+    container_name: scriptkiddo_postgres
     environment:
-      POSTGRES_DB: easm
-      POSTGRES_USER: easm
-      POSTGRES_PASSWORD: easm
+      POSTGRES_DB: "${POSTGRES_DB:-scriptkiddo}"
+      POSTGRES_USER: "${POSTGRES_USER:-scriptkiddo}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-scriptkiddo}"
       TZ: America/Sao_Paulo
     ports:
       - "${POSTGRES_HOST_PORT:-5432}:5432"
@@ -22,14 +22,14 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U easm"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scriptkiddo}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: pentest_redis
+    container_name: scriptkiddo_redis
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
     profiles: ["dev", "prod"]
@@ -38,7 +38,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    container_name: pentest_ollama
+    container_name: scriptkiddo_ollama
     ports:
       - "${OLLAMA_HOST_PORT:-11434}:11434"
     profiles: ["dev", "prod"]
@@ -64,7 +64,7 @@ services:
     build:
       context: ./kali-runner
       dockerfile: Dockerfile
-    container_name: pentest_kali_runner
+    container_name: scriptkiddo_kali_runner
     profiles: ["dev", "prod"]
     environment:
       KALI_WORKSPACE: /workspace
@@ -92,7 +92,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: pentest_backend
+    container_name: scriptkiddo_backend
     command: >
       sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     env_file: *optional_env_file
@@ -126,7 +126,7 @@ services:
 
   worker_scope:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_scope
+    container_name: scriptkiddo_worker_scope
     command: celery -A app.workers.celery_app.celery worker -l info -Q scan.unit,scan.scheduled,worker.unit.scope_validation,worker.scheduled.scope_validation -n scope@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -136,7 +136,7 @@ services:
 
   worker_recon:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_recon
+    container_name: scriptkiddo_worker_recon
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.reconnaissance,worker.scheduled.reconnaissance,worker.unit.reconhecimento,worker.scheduled.reconhecimento -n recon@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -146,7 +146,7 @@ services:
 
   worker_weaponization:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_weaponization
+    container_name: scriptkiddo_worker_weaponization
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.weaponization,worker.scheduled.weaponization,worker.unit.osint,worker.scheduled.osint -n weaponization@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -156,7 +156,7 @@ services:
 
   worker_delivery:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_delivery
+    container_name: scriptkiddo_worker_delivery
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.delivery,worker.scheduled.delivery -n delivery@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -166,7 +166,7 @@ services:
 
   worker_exploitation:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_exploitation
+    container_name: scriptkiddo_worker_exploitation
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.exploitation,worker.scheduled.exploitation,worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade -n exploitation@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -176,7 +176,7 @@ services:
 
   worker_installation:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_installation
+    container_name: scriptkiddo_worker_installation
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.installation,worker.scheduled.installation,worker.unit.exploit,worker.scheduled.exploit -n installation@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -186,7 +186,7 @@ services:
 
   worker_c2:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_c2
+    container_name: scriptkiddo_worker_c2
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.command_control,worker.scheduled.command_control,worker.unit.api,worker.scheduled.api -n c2@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -196,7 +196,7 @@ services:
 
   worker_actions:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_actions
+    container_name: scriptkiddo_worker_actions
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.actions_on_objectives,worker.scheduled.actions_on_objectives,worker.unit.code,worker.scheduled.code -n actions@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -206,7 +206,7 @@ services:
 
   worker_reporting:
     build: { context: ./backend, dockerfile: Dockerfile }
-    container_name: pentest_worker_reporting
+    container_name: scriptkiddo_worker_reporting
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.reporting,worker.scheduled.reporting -n reporting@%h
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", TZ: America/Sao_Paulo }
@@ -218,7 +218,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: pentest_celery_beat
+    container_name: scriptkiddo_celery_beat
     command: celery -A app.workers.celery_app.celery beat -l info
     env_file: *optional_env_file
     environment:
@@ -241,7 +241,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: pentest_frontend
+    container_name: scriptkiddo_frontend
     environment:
       VITE_API_URL: "${VITE_API_URL:-http://localhost:8001}"
       TZ: America/Sao_Paulo

@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "Pentest.io"
+    app_name: str = "ScriptKidd.o"
     app_env: str = "development"
     secret_key: str = "change_me"
     # Token de acesso: 24h por padrao.
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_sender_email: str = ""
-    smtp_sender_name: str = "Pentest.io"
+    smtp_sender_name: str = "ScriptKidd.o"
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
 

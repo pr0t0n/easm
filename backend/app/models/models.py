@@ -299,12 +299,12 @@ class PolicyAllowlistEntry(Base):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EASM ENTERPRISE INFRASTRUCTURE (Assets, Vulnerabilities, Temporal Tracking)
+# ScriptKidd.o infrastructure (assets, vulnerabilities, temporal tracking)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 class Asset(Base):
-    """EASM Asset - memória de estado de superfície"""
+    """Asset - memória de estado de superfície"""
 
     __tablename__ = "assets"
 
@@ -329,7 +329,7 @@ class Asset(Base):
 
 
 class Vulnerability(Base):
-    """EASM Vulnerability - histórico com AGE factor"""
+    """Vulnerability - histórico com AGE factor"""
 
     __tablename__ = "vulnerabilities"
 
@@ -348,7 +348,7 @@ class Vulnerability(Base):
     detection_count: Mapped[int] = mapped_column(Integer, default=1)
     fair_pillar: Mapped[str] = mapped_column(String(50), default="perimeter_resilience")
     age_factor: Mapped[float] = mapped_column(sa.Float, default=1.0)  # 1 + log10(days_open + 1)
-    ra_score: Mapped[float] = mapped_column(sa.Float, default=0.0)  # Risk score EASM
+    ra_score: Mapped[float] = mapped_column(sa.Float, default=0.0)  # Risk score
     remediation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     vulnerability_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -359,7 +359,7 @@ class Vulnerability(Base):
 
 
 class AssetRatingHistory(Base):
-    """EASM Temporal curve - rating history per asset per scan"""
+    """Temporal curve - rating history per asset per scan"""
 
     __tablename__ = "asset_rating_history"
 
@@ -380,7 +380,7 @@ class AssetRatingHistory(Base):
 
 
 class EASMAlert(Base):
-    """EASM Alert - desvio de postura, webhooks"""
+    """Posture alert - desvio de postura, webhooks"""
 
     __tablename__ = "easm_alerts"
 
@@ -401,7 +401,7 @@ class EASMAlert(Base):
 
 
 class EASMAlertRule(Base):
-    """EASM Alert Rule - configuração de gatilhos"""
+    """Posture alert rule - configuração de gatilhos"""
 
     __tablename__ = "easm_alert_rules"
 

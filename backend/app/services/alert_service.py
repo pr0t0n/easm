@@ -1,5 +1,5 @@
 """
-EASM Alerts Service - Webhooks, Triggers, Posture Deviation Detection
+ScriptKidd.o Alerts Service - Webhooks, Triggers, Posture Deviation Detection
 
 Monitora gatilhos:
 1. Rating Drop >10 pontos em 24h
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class AlertType(str, Enum):
-    """Tipos de alertas EASM"""
+    """Tipos de alertas de postura de vulnerabilidade"""
     RATING_DROP = "rating_drop"  # Rating caiu >10 pts em 24h
     CROWN_JEWEL_AGE = "crown_jewel_age"  # Asset crítico com vulnidade antiga
     CRITICAL_SPIKE = "critical_spike"  # Novo crítico descoberto
@@ -293,7 +293,7 @@ class AlertAction:
                     "title": title,
                     "text": description,
                     "color": color_map.get(severity, "#CCCCCC"),
-                    "footer": "EASM Alert",
+                    "footer": "ScriptKidd.o Alert",
                     "ts": int(datetime.now(timezone.utc).timestamp()),
                 }
             ]

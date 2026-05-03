@@ -1,6 +1,6 @@
 # Cyber-AutoAgent Alignment (Prompt, Arquitetura, Ferramentas, Modelo, Validacao, Docker)
 
-Este documento registra o alinhamento aplicado na plataforma EASM com os principios do repositório Cyber-AutoAgent.
+Este documento registra o alinhamento aplicado na plataforma ScriptKidd.o com os principios do repositório Cyber-AutoAgent.
 
 ## 1) Prompt (Execution Contract)
 
@@ -95,10 +95,10 @@ python scripts/validate_cyber_autoagent_alignment.py
 Fluxo operacional para validar stack, validar imagem e publicar:
 
 ```bash
-./scripts/validate_docker_and_image.sh easm-backend:cyber-autoagent
+./scripts/validate_docker_and_image.sh scriptkiddo-backend:cyber-autoagent
 
 REGISTRY=ghcr.io/pr0t0n \
-IMAGE_REPO=easm/backend \
+IMAGE_REPO=scriptkiddo/backend \
 IMAGE_TAG=cyber-autoagent-vision \
 ./scripts/build_and_publish_image.sh
 ```

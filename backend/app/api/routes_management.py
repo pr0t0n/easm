@@ -1912,6 +1912,26 @@ def bulk_review_vulnerability_learnings(
     }
 
 
+@router.get("/learning/vulnerabilities/attack-index")
+def learning_vulnerability_attack_index(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import vulnerability_learning_attack_index
+
+    return vulnerability_learning_attack_index(db)
+
+
+@router.post("/learning/vulnerabilities/mission-prompt")
+def build_learning_vulnerability_mission_prompt(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import build_consolidated_vulnerability_mission_prompt
+
+    return build_consolidated_vulnerability_mission_prompt(db)
+
+
 @router.put("/learning/vulnerabilities/{learning_id}/accept")
 def accept_vulnerability_learning(
     learning_id: int,

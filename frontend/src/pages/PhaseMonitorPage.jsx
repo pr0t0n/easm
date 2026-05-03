@@ -113,7 +113,7 @@ export default function PhaseMonitorPage() {
     <div style={{ padding: "20px 24px", color: "#1c1c1c" }}>
       <div style={{ marginBottom: 18 }}>
         <h2 style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.02em", marginBottom: 4 }}>Phase Monitor</h2>
-        <p style={{ fontSize: 13, color: "#6b6b6b" }}>22-step pentest pipeline · cobertura por fase, ferramentas usadas e pontos de falha.</p>
+        <p style={{ fontSize: 13, color: "#6b6b6b" }}>22-step vulnerability analysis pipeline · cobertura por fase, ferramentas usadas e pontos de falha.</p>
       </div>
 
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>

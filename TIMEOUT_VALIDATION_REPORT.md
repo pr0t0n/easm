@@ -1,4 +1,4 @@
-# Relatório de Validação de Timeouts - EASM
+# Relatório de Validação de Timeouts - ScriptKidd.o
 
 **Data:** 24 de março de 2026  
 **Estado:** ⚠️ PARCIALMENTE CONFIGURADO

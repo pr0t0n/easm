@@ -12,7 +12,7 @@ export default function Sidebar() {
       items: [{ to: "/", label: "Dashboard", adminOnly: false }],
     },
     {
-      title: "Pentest",
+      title: "Vulnerability Ops",
       items: [
         { to: "/targets", label: "Targets", adminOnly: false },
         { to: "/scan", label: "Scans", adminOnly: true },
@@ -57,8 +57,8 @@ export default function Sidebar() {
       <div className="sb-logo">
         <span className="sb-logo-mark" aria-hidden />
         <div>
-          <span className="sb-logo-name">Pentest.io</span>
-          <span className="sb-logo-tag">Enterprise Security</span>
+          <span className="sb-logo-name">ScriptKidd.o</span>
+          <span className="sb-logo-tag">Vulnerability Analysis</span>
         </div>
       </div>
 

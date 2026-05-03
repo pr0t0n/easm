@@ -1,7 +1,7 @@
 """
 ASM Rules Service - Integrates ASM vulnerability rules into worker assessment.
 
-Rules are loaded from ~/.easm/rules and applied during scan analysis.
+Rules are loaded from ~/.scriptkiddo/rules and applied during scan analysis.
 Each rule defines:
   - id: unique identifier
   - name: human-readable name
@@ -37,9 +37,9 @@ class ASMRulesService:
         self._load_rules()
 
     def _load_rules(self) -> None:
-        """Load all ASM rules from ~/.easm/rules directory."""
+        """Load all ASM rules from ~/.scriptkiddo/rules directory."""
         home = Path.home()
-        rules_dir = home / ".easm" / "rules"
+        rules_dir = home / ".scriptkiddo" / "rules"
 
         # Fallback to project bundled rules if available
         project_rules = Path(__file__).parent.parent.parent.parent / "asm-rules"

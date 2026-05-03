@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Architecture validation test for EASM platform.
+"""Architecture validation test for ScriptKidd.o platform.
 
 Tests:
 1. Agent registry and orchestration
@@ -153,7 +153,7 @@ def test_phase_validation():
 def main():
     """Run all architecture tests."""
     print("\n" + "█"*70)
-    print("EASM Platform Architecture Validation")
+    print("ScriptKidd.o Platform Architecture Validation")
     print("█"*70)
 
     tests = [

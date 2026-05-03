@@ -16,7 +16,7 @@ MISSION_ITEMS = [
     "9. Executive Narrative & Priorities",
 ]
 
-# Detailed pentesting phases executed within nodes (xalgorix-inspired 22-phase pipeline)
+# Detailed vulnerability analysis phases executed within nodes (xalgorix-inspired 22-phase pipeline)
 PENTEST_PHASES = [
     # Phase 1 – Recon
     {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",

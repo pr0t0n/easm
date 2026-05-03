@@ -127,7 +127,7 @@ def generate_portuguese_recommendations(finding: dict, known_patterns: list[str]
     base_prompt = (
         "Voce e um analista senior de ciberseguranca. "
         "Responda SOMENTE em portugues do Brasil e em JSON valido. "
-        "Objetivo: recomendar mitigacoes praticas para vulnerabilidades encontradas no EASM. "
+        "Objetivo: recomendar mitigacoes praticas para vulnerabilidades encontradas no ScriptKidd.o. "
         "Formato JSON obrigatorio: "
         '{"resumo":"...","impacto":"...","mitigacoes":["..."],"prioridade":"baixa|media|alta|critica","validacoes":["..."]}. '
         "Contexto do achado: "

@@ -69,13 +69,13 @@ export default function LoginPage() {
         <section className="rounded-2xl border p-8 lg:p-10" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "0 1px 2px rgba(28,28,28,0.04), 0 4px 12px rgba(28,28,28,0.04)" }}>
           <div className="inline-flex items-center gap-2 rounded-full border px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em]" style={{ background: "rgba(233,99,99,0.08)", borderColor: "rgba(233,99,99,0.3)", color: "var(--brand-700)" }}>
             <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand-500)", display: "inline-block" }} />
-            Pentest.io
+            ScriptKidd.o
           </div>
           <h1 className="mt-6 max-w-3xl font-display text-4xl font-semibold leading-tight lg:text-6xl" style={{ color: "var(--text-primary)" }}>
-            Superficie de ataque externa com leitura executiva, operacao governada e evidencia acionavel.
+            Análise de vulnerabilidade com leitura executiva, operação governada e evidência acionável.
           </h1>
           <p className="mt-5 max-w-2xl text-base leading-7 lg:text-lg" style={{ color: "var(--text-secondary)" }}>
-            O Pentest.io identifica exposicoes em dominios, subdominios, portas, tecnologias publicadas, vulnerabilidades e achados priorizados por impacto operacional e financeiro. A plataforma cruza recon, varredura, compliance e trilha de execucao para transformar descoberta em decisao.
+            O ScriptKidd.o identifica vulnerabilidades em domínios, subdomínios, portas, tecnologias publicadas, APIs e fluxos autenticados. A plataforma cruza recon, execução Kali, aprendizado aceito e trilha de evidência para transformar hipótese em achado reproduzível.
           </p>
 
           <div className="mt-8 grid gap-3 md:grid-cols-3">
@@ -93,7 +93,7 @@ export default function LoginPage() {
 
           <div className="mt-8 grid gap-3 rounded-xl border p-5 md:grid-cols-3" style={{ borderColor: "var(--border)", background: "var(--bg-muted)" }}>
             {[
-              ["O que o Pentest.io encontra", "Portas expostas, frameworks, superfícies esquecidas, banners, fingerprints e ativos sem governanca."],
+              ["O que o ScriptKidd.o encontra", "Falhas exploráveis, frameworks vulneráveis, parâmetros sensíveis, endpoints esquecidos e evidências reproduzíveis."],
               ["Fontes de evidencia", "Recon DNS, HTTP probing, tecnologia web, scanners especializados e enriquecimento externo."],
               ["Saida executiva", "Dashboard consolidado, scans em andamento, top tecnologias e plano de correcao priorizado."],
             ].map(([t, d]) => (

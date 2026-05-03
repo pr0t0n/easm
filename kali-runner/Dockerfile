@@ -1,5 +1,5 @@
 # Kali Linux runner — single source of truth for offensive tools.
-# All EASM workers dispatch jobs HERE via HTTP; no tool ships in worker images.
+# All ScriptKidd.o workers dispatch jobs HERE via HTTP; no tool ships in worker images.
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive \

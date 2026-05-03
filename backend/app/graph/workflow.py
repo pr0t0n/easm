@@ -199,11 +199,11 @@ class AgentState(TypedDict):
     mission_items: list[str]
     known_vulnerability_patterns: list[str]
     executed_tool_runs: list[str]
-    # EASM Governance fields (preenchidos pelo GovernanceNode)
+    # Governance fields (preenchidos pelo GovernanceNode)
     asset_fingerprints: dict[str, dict]     # asset -> {waf, tech, ports, cvss}
     fair_decomposition: dict[str, Any]      # 3-pillar FAIR breakdown
     easm_rating: dict[str, Any]             # {score, grade, factors, methodology}
-    # EASM Executive fields (preenchidos pelo ExecutiveAnalystNode)
+    # Executive fields (preenchidos pelo ExecutiveAnalystNode)
     executive_summary: str                  # Narrativa LLM gerada
     # Senior framework contracts
     analyst_framework: dict[str, Any]       # Framework ativo e política de decisão
@@ -3029,7 +3029,7 @@ def _step_name(state: AgentState) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 1: Asset Discovery
+# ScriptKidd.o Agent 1: Asset Discovery
 # Descobre subdomínios, IPs, portas e tecnologias expostas.
 # Ferramentas: subfinder → amass → dnsx → naabu → httpx → gowitness
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3203,7 +3203,7 @@ def recon_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 3: Risk Assessment
+# ScriptKidd.o Agent 3: Risk Assessment
 # Avalia vulnerabilidades técnicas nos ativos descobertos.
 # Ferramentas ativas: Kali runner profiles de nuclei, nmap-vulscan, nikto,
 # sqlmap, dalfox, wapiti e demais scanners aplicaveis.
@@ -3321,7 +3321,7 @@ def vuln_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 2: Threat Intel
+# ScriptKidd.o Agent 2: Threat Intel
 # Coleta inteligência externa: credenciais vazadas, reputação de IPs, OSINT.
 # Ferramentas: theharvester → shodan-cli → h8mail → subjack
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3476,7 +3476,7 @@ def osint_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 4: Governance (The Rating Engine)
+# ScriptKidd.o Agent 4: Governance (The Rating Engine)
 # Agente Python puro — sem ferramentas externas.
 # Calcula FAIR+AGE por ativo e emite o rating contínuo com decomposição formal.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3535,7 +3535,7 @@ def governance_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EASM Agent 5: Executive Analyst
+# ScriptKidd.o Agent 5: Executive Analyst
 # Usa LLM (Ollama) para gerar narrativa executiva baseada na decomposição FAIR.
 # Se Ollama não estiver disponível, gera template estruturado sem LLM.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3772,7 +3772,7 @@ def initial_state(
         },
         "tool_runtime": {},
         "validation_backlog": [],
-        # EASM fields (preenchidos pelos agents 4 e 5)
+        # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},
         "easm_rating": {},

@@ -118,7 +118,7 @@ EXPECTED_MISSION_STEPS=(
 )
 
 echo -e "\n${BOLD}═══════════════════════════════════════════════════════${RESET}"
-echo -e "${BOLD}  PENTEST.IO — Teste LangGraph Nodes & Mission Steps${RESET}"
+echo -e "${BOLD}  SCRIPTKIDD.O — Teste LangGraph Nodes & Mission Steps${RESET}"
 echo -e "${BOLD}═══════════════════════════════════════════════════════${RESET}"
 info "Target: $TARGET_DOMAIN"
 info "Mode: $SCAN_MODE"

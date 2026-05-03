@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-IMAGE_NAME="${1:-easm-backend:cyber-autoagent}"
+IMAGE_NAME="${1:-scriptkiddo-backend:cyber-autoagent}"
 
 echo "[1/4] Checking docker daemon"
 docker info >/dev/null
@@ -17,7 +17,7 @@ docker build -f backend/Dockerfile -t "$IMAGE_NAME" backend
 
 echo "[4/4] Running smoke command inside image"
 docker run --rm \
-	-e DATABASE_URL="postgresql://easm:easm@localhost:5432/easm" \
+	-e DATABASE_URL="postgresql://scriptkiddo:scriptkiddo@localhost:5432/scriptkiddo" \
 	-e REDIS_URL="redis://localhost:6379/0" \
 	-e CELERY_BROKER_URL="redis://localhost:6379/0" \
 	-e CELERY_RESULT_BACKEND="redis://localhost:6379/1" \

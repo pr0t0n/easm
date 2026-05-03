@@ -1,6 +1,6 @@
-# Pentest.io - Plataforma EASM e Pentest Automatizado
+# ScriptKidd.o - Plataforma de Análise de Vulnerabilidade Automatizada
 
-Pentest.io e uma plataforma de External Attack Surface Management e pentest automatizado orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas ofensivas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
+ScriptKidd.o e uma plataforma de analise de vulnerabilidade automatizada orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
 
 Este README descreve o fluxo real de operacao da plataforma: o que acontece quando um scan nasce, como as ferramentas sao escolhidas e executadas, onde cada dado e persistido, como a UI enxerga o progresso e como investigar falhas.
 
@@ -86,24 +86,24 @@ Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *
 
 O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servicos principais sao:
 
-| Servico | Container | Funcao |
+| Servico | Identificador operacional | Funcao |
 | --- | --- | --- |
-| `postgres` | `pentest_postgres` | Banco transacional |
-| `redis` | `pentest_redis` | Broker/result backend Celery |
-| `ollama` | `pentest_ollama` | Runtime LLM local |
-| `kali_runner` | `pentest_kali_runner` | Unico local de execucao das ferramentas |
-| `backend` | `pentest_backend` | API FastAPI |
-| `worker_scope` | `pentest_worker_scope` | Validacao de escopo e entrada |
-| `worker_recon` | `pentest_worker_recon` | Reconhecimento |
-| `worker_weaponization` | `pentest_worker_weaponization` | Correlacao CVE/OSINT/leaks |
-| `worker_delivery` | `pentest_worker_delivery` | Descoberta de caminhos, parametros e vetores |
-| `worker_exploitation` | `pentest_worker_exploitation` | Validacao de vulnerabilidades |
-| `worker_installation` | `pentest_worker_installation` | Risco de persistencia, auth e credenciais |
-| `worker_c2` | `pentest_worker_c2` | Risco de C2 e canais externos |
-| `worker_actions` | `pentest_worker_actions` | Secrets, SAST, dependencias e impacto |
-| `worker_reporting` | `pentest_worker_reporting` | Narrativa e consolidacao |
-| `celery_beat` | `pentest_celery_beat` | Agendamentos |
-| `frontend` | `pentest_frontend` | Interface web |
+| `postgres` | compose service `postgres` | Banco transacional |
+| `redis` | compose service `redis` | Broker/result backend Celery |
+| `ollama` | compose service `ollama` | Runtime LLM local |
+| `kali_runner` | compose service `kali_runner` | Unico local de execucao das ferramentas |
+| `backend` | compose service `backend` | API FastAPI |
+| `worker_scope` | compose service `worker_scope` | Validacao de escopo e entrada |
+| `worker_recon` | compose service `worker_recon` | Reconhecimento |
+| `worker_weaponization` | compose service `worker_weaponization` | Correlacao CVE/OSINT/leaks |
+| `worker_delivery` | compose service `worker_delivery` | Descoberta de caminhos, parametros e vetores |
+| `worker_exploitation` | compose service `worker_exploitation` | Validacao de vulnerabilidades |
+| `worker_installation` | compose service `worker_installation` | Risco de persistencia, auth e credenciais |
+| `worker_c2` | compose service `worker_c2` | Risco de C2 e canais externos |
+| `worker_actions` | compose service `worker_actions` | Secrets, SAST, dependencias e impacto |
+| `worker_reporting` | compose service `worker_reporting` | Narrativa e consolidacao |
+| `celery_beat` | compose service `celery_beat` | Agendamentos |
+| `frontend` | compose service `frontend` | Interface web |
 
 Portas sao configuraveis por `.env`. Defaults do compose:
 
@@ -214,7 +214,7 @@ O worker chama `initial_state()` em `backend/app/graph/workflow.py`. O estado in
 - `autonomy_errors`
 - `tool_runtime`
 - `validation_backlog`
-- `easm_rating`
+- `rating de vulnerabilidade`
 - `fair_decomposition`
 - `executive_summary`
 
@@ -262,7 +262,7 @@ Visibilidade:
 - `agent_validation`
 - Pagina `Phase Monitor`
 
-### 6. As fases de pentest sao mapeadas para a Cyber Kill Chain
+### 6. As fases de analise sao mapeadas para a Cyber Kill Chain
 
 A plataforma expoe 9 fases executivas de Cyber Kill Chain:
 
@@ -465,7 +465,7 @@ Visibilidade:
 Os nodes `governance` e `executive_analyst` consolidam:
 
 - `fair_decomposition`
-- `easm_rating`
+- `rating de vulnerabilidade`
 - `executive_summary`
 - `agent_validation`
 - `confidence_state`
@@ -484,7 +484,7 @@ Visibilidade:
 
 - Pagina `Reports`
 - `GET /api/scans/{scan_id}/report`
-- `GET /api/scans/{scan_id}/easm-report`
+- `GET /api/scans/{scan_id}/report`
 - `GET /api/reports/by-target`
 - `GET /api/reports/by-target/latest`
 
@@ -747,7 +747,7 @@ Variaveis importantes:
 | `VITE_API_URL` | URL publica do backend para o frontend |
 | `KALI_RUNNER_URL` | URL interna do runner para backend/workers |
 | `SHODAN_API_KEY` | habilita `shodan-cli` |
-| `PENTEST_AUTH_USERNAME` / `PENTEST_AUTH_PASSWORD` | habilitam perfis que exigem credencial |
+| `SCAN_AUTH_USERNAME` / `SCAN_AUTH_PASSWORD` | habilitam perfis que exigem credencial |
 
 ### 2. Subir stack
 
@@ -929,8 +929,8 @@ Validado em scan **#34** contra `http://juice-shop:3000` (OWASP Juice Shop):
 | --- | --- |
 | Containers ativos | 16/16 healthy |
 | Kali runner | reachable - 4 077 tools detected - 48 profiles |
-| Backend image | 4.06 GB (sem qualquer ferramenta de pentest) |
-| Workers (9) | 0 ferramentas de pentest cada |
+| Backend image | 4.06 GB (sem qualquer ferramenta de analise) |
+| Workers (9) | 0 ferramentas de analise cada |
 | Tools executadas no scan | 43 (25 success - 18 fail por DNS/timeout esperado) |
 | Findings persistidos | 20 (11 medium - 7 low - 2 info) |
 | Capabilities concluidas | 8/8 |
@@ -940,8 +940,8 @@ Validado em scan **#34** contra `http://juice-shop:3000` (OWASP Juice Shop):
 ### Como provar que a refatoracao Kali-only esta ativa
 
 ```bash
-# Backend NAO tem tools de pentest:
-docker exec pentest_backend bash -c \
+# Backend NAO tem tools de analise:
+docker compose --profile dev exec backend bash -c \
   'for t in subfinder nuclei nmap hydra sqlmap; do printf "%-12s " $t; command -v $t >/dev/null && echo INSTALLED || echo MISSING; done'
 # subfinder    MISSING
 # nuclei       MISSING
@@ -949,15 +949,15 @@ docker exec pentest_backend bash -c \
 # hydra        MISSING
 # sqlmap       MISSING
 
-# Workers NAO tem tools de pentest:
-docker exec pentest_worker_recon bash -c 'command -v subfinder || echo MISSING'
+# Workers NAO tem tools de analise:
+docker compose --profile dev exec worker_recon bash -c 'command -v subfinder || echo MISSING'
 # MISSING
 
 # Kali runner tem TUDO:
 curl -fsS http://localhost:8088/healthz | jq
 # { "status": "ok", "profiles_loaded": 48, "kali_tools_detected": 4077, ... }
 
-docker exec pentest_kali_runner bash -c \
+docker compose --profile dev exec kali_runner bash -c \
   'for t in subfinder nuclei nmap hydra sqlmap nikto httpx katana paramspider; do printf "%-12s " $t; command -v $t >/dev/null && echo INSTALLED || echo MISSING; done'
 # subfinder    INSTALLED
 # nuclei       INSTALLED

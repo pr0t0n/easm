@@ -4,11 +4,11 @@ import client from "../api/client";
 import { authStore } from "../store/auth";
 
 const PAGE_META = {
-  "/":               { eyebrow: "Pentest.io · Enterprise Dashboard", title: "Visão Consolidada de Risco e Maturidade", sub: "Monitoramento contínuo de superfície externa" },
-  "/targets":        { eyebrow: "Pentest · Targets",         title: "Alvos Autorizados",         sub: "Inventário de domínios e ativos sob escopo" },
-  "/scan":           { eyebrow: "Pentest · Scans",           title: "Execuções Ativas",          sub: "Pipelines automatizados de pentest e estado em tempo real" },
-  "/phase-monitor":  { eyebrow: "Pentest · Phase Monitor",   title: "Monitor de Fases",          sub: "Cobertura de tools por fase do pipeline 22-step" },
-  "/agendamento":    { eyebrow: "Pentest · Schedules",       title: "Agendamentos",              sub: "Janelas e cadência de scans recorrentes" },
+  "/":               { eyebrow: "ScriptKidd.o · Vulnerability Dashboard", title: "Visão Consolidada de Risco e Maturidade", sub: "Análise contínua de vulnerabilidades" },
+  "/targets":        { eyebrow: "Vulnerability Ops · Targets", title: "Alvos Autorizados",       sub: "Inventário de domínios e ativos sob escopo" },
+  "/scan":           { eyebrow: "Vulnerability Ops · Scans",   title: "Execuções Ativas",        sub: "Pipelines automatizados de análise de vulnerabilidade em tempo real" },
+  "/phase-monitor":  { eyebrow: "Vulnerability Ops · Phases",  title: "Monitor de Fases",        sub: "Cobertura de tools por fase do pipeline 22-step" },
+  "/agendamento":    { eyebrow: "Vulnerability Ops · Schedules", title: "Agendamentos",          sub: "Janelas e cadência de scans recorrentes" },
   "/vulnerabilidades": { eyebrow: "Security · Vulns",        title: "Vulnerabilidades",          sub: "Achados priorizados por severidade, FAIR e AGE" },
   "/evolucao":       { eyebrow: "Security · Evolution",      title: "Attack Evolution",          sub: "Trajetória da postura de segurança ao longo do tempo" },
   "/aprendizado":    { eyebrow: "Security · Learning",        title: "Aprendizado de Vulnerabilidades", sub: "Técnicas revisadas antes de entrar na missão dos agentes" },
@@ -25,7 +25,7 @@ function metaFor(pathname) {
   const exact = PAGE_META[pathname];
   if (exact) return exact;
   const prefix = Object.keys(PAGE_META).find((p) => p !== "/" && pathname.startsWith(p));
-  return prefix ? PAGE_META[prefix] : { eyebrow: "Pentest.io", title: "Painel", sub: "Monitoramento, risco e operações de superfície externa" };
+  return prefix ? PAGE_META[prefix] : { eyebrow: "ScriptKidd.o", title: "Painel", sub: "Monitoramento, risco e operações de análise de vulnerabilidade" };
 }
 
 export default function Navbar() {

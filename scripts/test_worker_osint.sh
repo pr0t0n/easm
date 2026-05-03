@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "PENTEST.IO - Validacao OSINT/Weaponization via Kali Runner"
+echo "SCRIPTKIDD.O - Validacao OSINT/Weaponization via Kali Runner"
 echo "Grupo: weaponization"
 echo
 

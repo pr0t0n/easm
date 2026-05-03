@@ -202,11 +202,11 @@ export default function DashboardPage() {
   const [continuousRating, setContinuousRating] = useState({ score: 0, grade: "F", factors: [] });
   const [ratingTimeline, setRatingTimeline] = useState([]);
   
-  // EASM Enterprise
-  const [globalEasmRating, setGlobalEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
-  const [scopedEasmRating, setScopedEasmRating] = useState({ score: 0, grade: "F", pillars: [] });
-  const [easmTrends, setEasmTrends] = useState(null);
-  const [easmAlerts, setEasmAlerts] = useState([]);
+  // Vulnerability analysis enterprise metrics
+  const [globalVulnerabilityRating, setGlobalVulnerabilityRating] = useState({ score: 0, grade: "F", pillars: [] });
+  const [scopedVulnerabilityRating, setScopedVulnerabilityRating] = useState({ score: 0, grade: "F", pillars: [] });
+  const [vulnerabilityTrends, setVulnerabilityTrends] = useState(null);
+  const [vulnerabilityAlerts, setVulnerabilityAlerts] = useState([]);
   
   // Filters
   const [groups, setGroups] = useState([]);
@@ -260,7 +260,7 @@ export default function DashboardPage() {
             globalDashboard = dashboard;
           }
         }
-        const easmFallback = dashboard.easm_fallback || {};
+        const vulnerabilityFallback = dashboard.vulnerability_fallback || {};
         setDomainOptions(Array.isArray(dashboard.targets) ? dashboard.targets : []);
 
         setStats({
@@ -315,13 +315,13 @@ export default function DashboardPage() {
         const scopedPreferredScore = Number(
           scopedTimelineAvgScore
           ?? resolvedContinuous?.score
-          ?? easmFallback?.rating?.score
+          ?? vulnerabilityFallback?.rating?.score
           ?? 0
         );
         const scopedPreferredGrade = String(
           gradeFromScore(scopedPreferredScore)
           || resolvedContinuous?.grade
-          || easmFallback?.rating?.grade
+          || vulnerabilityFallback?.rating?.grade
           || "F"
         );
 
@@ -333,37 +333,37 @@ export default function DashboardPage() {
         const globalPreferredScore = Number(
           globalTimelineAvgScore
           ?? globalContinuous?.score
-          ?? easmFallback?.rating?.score
+          ?? vulnerabilityFallback?.rating?.score
           ?? 0
         );
         const globalPreferredGrade = String(
           gradeFromScore(globalPreferredScore)
           || globalContinuous?.grade
-          || easmFallback?.rating?.grade
+          || vulnerabilityFallback?.rating?.grade
           || "F"
         );
         setGlobalVasmMeta({
           aggregationTargets: Number(globalDashboard.stats?.aggregation_targets || 1),
           scanCount: Number(globalTimeline.length || 0),
         });
-        setScopedEasmRating({
+        setScopedVulnerabilityRating({
           score: scopedPreferredScore,
           grade: scopedPreferredGrade,
           pillars: [],
         });
-        setGlobalEasmRating({
+        setGlobalVulnerabilityRating({
           score: globalPreferredScore,
           grade: globalPreferredGrade,
           pillars: [],
         });
 
-        if (easmFallback?.executive_summary) {
-          setEasmTrends((prev) => ({
+        if (vulnerabilityFallback?.executive_summary) {
+          setVulnerabilityTrends((prev) => ({
             ...(prev || {}),
-            temporal_narrative: easmFallback.executive_summary,
+            temporal_narrative: vulnerabilityFallback.executive_summary,
             historical_ratings: [
               {
-                pillars: easmFallback.fair_decomposition || {},
+                pillars: vulnerabilityFallback.fair_decomposition || {},
               },
             ],
           }));
@@ -371,33 +371,33 @@ export default function DashboardPage() {
 
         const hasActiveFilter = Boolean(selectedGroup || selectedTarget.trim());
 
-        // Load EASM data
+        // Load vulnerability posture data
         try {
           if (hasActiveFilter) {
-            setEasmAlerts([]);
+            setVulnerabilityAlerts([]);
             return;
           }
 
           const [assetsResp, alertsResp] = await Promise.all([
             client.get("/api/dashboard/assets").catch(() => ({ data: [] })),
-            client.get("/api/easm/alerts").catch(() => ({ data: [] })),
+            client.get("/api/vulnerability-alerts").catch(() => ({ data: [] })),
           ]);
           
-          setEasmAlerts(alertsResp.data || []);
+          setVulnerabilityAlerts(alertsResp.data || []);
           
           // Get latest asset for trends
           if (assetsResp.data && assetsResp.data.length > 0) {
             const topAsset = assetsResp.data[0];
             try {
               const trendsResp = await client.get(`/api/dashboard/trends/${topAsset.id}`);
-              setEasmTrends(trendsResp.data);
+              setVulnerabilityTrends(trendsResp.data);
             } catch (e) {
               // Silent fail
             }
           }
         } catch (e) {
-          // EASM endpoints may not be available yet
-          console.log("EASM endpoints not available");
+          // Vulnerability posture endpoints may not be available yet
+          console.log("Vulnerability posture endpoints not available");
         }
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
@@ -460,7 +460,7 @@ export default function DashboardPage() {
 
   const distributedScore = distributedRows.length
     ? distributedRows.reduce((acc, row) => acc + row.score, 0) / distributedRows.length
-    : Number(scopedEasmRating?.score || 0);
+    : Number(scopedVulnerabilityRating?.score || 0);
   const distributedGrade = gradeFromScore(distributedScore);
 
   if (loading) {
@@ -612,7 +612,7 @@ export default function DashboardPage() {
 
       <section className="ds-panel p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>Pentest.io Enterprise Dashboard</h2>
+          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>ScriptKidd.o Vulnerability Dashboard</h2>
           <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--brand-700)" }}>Visão consolidada de risco e maturidade</p>
         </div>
 
@@ -620,15 +620,15 @@ export default function DashboardPage() {
           <div className="xl:col-span-4">
             <RatingBadge
               label="Rating Atual do Alvo"
-              letter={scopedEasmRating.grade}
-              score={scopedEasmRating.score}
+              letter={scopedVulnerabilityRating.grade}
+              score={scopedVulnerabilityRating.score}
             />
           </div>
           <div className="xl:col-span-4">
             <RatingBadge
               label="Rating Atual do Grupo"
-              letter={globalEasmRating.grade}
-              score={globalEasmRating.score}
+              letter={globalVulnerabilityRating.grade}
+              score={globalVulnerabilityRating.score}
             />
           </div>
           <div className="xl:col-span-4 rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)", boxShadow: "var(--shadow-card)" }}>

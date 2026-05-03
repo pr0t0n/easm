@@ -1,4 +1,4 @@
-"""Kali runner — HTTP API that executes pentest tools inside the Kali container.
+"""Kali runner — HTTP API that executes vulnerability analysis tools inside the Kali container.
 
 Architecture:
   POST /jobs           → enqueue {profile, target, scan_id, tool} → returns job_id
@@ -283,7 +283,7 @@ def _target_context(target: str) -> dict[str, str]:
         "scheme": scheme,
         **{f"env_{key}": value for key, value in os.environ.items()},
     }
-    for env_name in ("SHODAN_API_KEY", "PENTEST_AUTH_USERNAME", "PENTEST_AUTH_PASSWORD"):
+    for env_name in ("SHODAN_API_KEY", "SCAN_AUTH_USERNAME", "SCAN_AUTH_PASSWORD"):
         context.setdefault(f"env_{env_name}", "")
     return context
 
@@ -434,7 +434,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
 
 
 # ── FastAPI surface ──────────────────────────────────────────────────────────
-app = FastAPI(title="Pentest.io Kali Runner", version="1.0.0")
+app = FastAPI(title="ScriptKidd.o Kali Runner", version="1.0.0")
 
 
 @app.get("/healthz")

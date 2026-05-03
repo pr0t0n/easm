@@ -1,4 +1,4 @@
-# RUNBOOK Operacional - Pentest.io v2 (Simplificado)
+# RUNBOOK Operacional - ScriptKidd.o v2 (Simplificado)
 
 ## Objetivo
 
@@ -25,14 +25,13 @@ docker compose --profile dev up --build
 ```
 
 Serviços iniciados:
-- `pentest_postgres` — PostgreSQL 16
-- `pentest_redis` — Redis 7
-- `pentest_ollama` — Ollama LLM
-- `pentest_backend` — API FastAPI (porta 8000)
-- `pentest_worker_recon` — Worker de Reconhecimento
-- `pentest_worker_osint` — Worker de OSINT
-- `pentest_worker_vuln` — Worker de Vulnerabilidades
-- `pentest_frontend` — Frontend Vite (porta 5173)
+- `postgres` — PostgreSQL 16
+- `redis` — Redis 7
+- `ollama` — Ollama LLM
+- `backend` — API FastAPI (porta 8000)
+- `worker_recon` — Worker de Reconhecimento
+- `worker_exploitation` — Worker de Validação de Vulnerabilidades
+- `frontend` — Frontend Vite (porta 5173)
 
 ### Produção (perfil `prod`)
 ```bash
@@ -47,10 +46,10 @@ docker compose --profile prod up --build -d
 curl -s http://localhost:8000/docs | grep fastapi && echo "✅ Backend OK"
 
 # Workers em execução
-docker compose ps | grep "pentest_worker"
+docker compose ps | grep "worker_"
 
 # Logs de um worker
-docker compose logs -f pentest_worker_recon
+docker compose logs -f worker_recon
 ```
 
 ## Configuração de Ambiente (.env)
@@ -62,7 +61,7 @@ REDIS_HOST_PORT=6379
 
 # Backend
 BACKEND_HOST_PORT=8000
-APP_NAME=Pentest.io
+APP_NAME=ScriptKidd.o
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=admin123
 
@@ -111,7 +110,7 @@ docker compose down -v
 | Problema | Solução |
 |----------|---------|
 | `podman: command not found` | Use `docker` em vez de `podman` |
-| Worker não processa tarefas | Verifique `docker compose logs pentest_redis` |
+| Worker não processa tarefas | Verifique `docker compose logs redis` |
 | Backend recusa conexão | Aguarde `postgres_data` inicializar (15s) |
 | Ollama muito lento | Reduza `OLLAMA_NUM_PARALLEL` em docker-compose.yml |
 2. Verificar logs dos containers:

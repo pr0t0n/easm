@@ -319,7 +319,7 @@ def compute_continuous_rating(
     age_mkt = float(age_market_avg_days)
     # env: cap a 90 dias como ponto de saturação (≈3 ciclos de sprint)
     env_component = min(55.0, age_env * 0.62)
-    # market: CVE antigo impacta menos que janela interna (pentesting real)
+    # market: CVE antigo impacta menos que janela interna (validação técnica real)
     mkt_component = min(25.0, age_mkt * 0.07)
     # recurring: cada finding recorrente contribui com peso constante
     recur_component = min(20.0, recurring_findings_count * 1.5)
@@ -486,7 +486,7 @@ def build_priority_reason(title: str, severity: str | None, fair: dict[str, Any]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EASM Continuous Rating Engine — FAIR + AGE Formula
+# ScriptKidd.o Continuous Rating Engine — FAIR + AGE Formula
 # Referência: Arquitetura BitSight-style com FAIR Institute Calibration Guide v2.0
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -720,7 +720,7 @@ def build_fair_decomposition(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# TEMPORAL CURVES & REMEDIATION VELOCITY (Enterprise EASM)
+# TEMPORAL CURVES & REMEDIATION VELOCITY (ScriptKidd.o)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -824,8 +824,8 @@ def compute_posture_deviation(
     - Rating subiu? Remediação aconteceu
 
     Args:
-        current_rating: Score EASM atual (0-100)
-        previous_rating: Score EASM anterior (0-100)
+        current_rating: Score atual (0-100)
+        previous_rating: Score anterior (0-100)
         period_hours: período que caiu (default: 24h)
 
     Returns:

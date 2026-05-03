@@ -1,5 +1,5 @@
 """
-Task Broker / Workflow Orchestrator - gerencia dependências entre agentes EASM.
+Task Broker / Workflow Orchestrator - gerencia dependências entre agentes ScriptKidd.o.
 
 Workflow:
 1. Asset Discovery finaliza
@@ -72,7 +72,7 @@ class WorkflowOrchestrator:
         self._register_default_pipeline()
 
     def _register_default_pipeline(self):
-        """Registra pipeline padrão EASM"""
+        """Registra pipeline padrão de análise de vulnerabilidade"""
         
         # Asset Discovery - entrada do workflow
         self.register_node(
@@ -202,7 +202,7 @@ class WorkflowOrchestrator:
         Returns:
             Estado final com todos os resultados
         """
-        logger.info(f"[Workflow {job_id}] Iniciando pipeline EASM")
+        logger.info(f"[Workflow {job_id}] Iniciando pipeline ScriptKidd.o")
 
         if not self.validate_dependencies():
             logger.error(f"[Workflow {job_id}] Validação de dependências falhou")
@@ -248,7 +248,7 @@ class WorkflowOrchestrator:
 
 
 class TemporalTracker:
-    """Registra histórico temporal de ratings EASM por asset"""
+    """Registra histórico temporal de ratings por asset"""
 
     @staticmethod
     def record_asset_snapshot(
