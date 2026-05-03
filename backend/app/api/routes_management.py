@@ -18,7 +18,7 @@ from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
-from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit
+from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task
 from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS, get_worker_agent_profiles
 from app.graph.mission import MISSION_ITEMS
 
@@ -1760,23 +1760,45 @@ def create_learning_from_urls(
     current_user: User = Depends(require_admin),
 ):
     from app.services.vulnerability_learning_service import (
-        create_vulnerability_learning,
-        serialize_vulnerability_learning,
         vulnerability_learning_summary,
     )
 
     urls_text = str(payload.get("urls_text") or payload.get("urls") or "").strip()
     if not urls_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe URLs separadas por ponto e virgula.")
-    try:
-        row = create_vulnerability_learning(db, current_user, urls_text)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Falha no aprendizado: {exc}") from exc
+    
+    # Dispatch to background task to prevent timeout
+    task = create_vulnerability_learning_task.apply_async(
+        args=(current_user.id, urls_text),
+        task_id=f"learning-{current_user.id}-{int(datetime.now().timestamp()*1000)}",
+        queue="default",
+    )
+    
     return {
+        "task_id": task.id,
+        "status": "processing",
+        "message": "URLs estão sendo processadas pelo LLM. Atualize a página em alguns segundos.",
         "summary": vulnerability_learning_summary(db),
-        "item": serialize_vulnerability_learning(row),
+    }
+
+
+@router.get("/learning/vulnerabilities/task/{task_id}")
+def check_learning_task_status(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Check the status of a background learning task."""
+    from celery.result import AsyncResult
+    from app.services.vulnerability_learning_service import vulnerability_learning_summary
+    
+    result = AsyncResult(task_id, app=celery)
+    
+    return {
+        "task_id": task_id,
+        "status": result.status,
+        "result": result.result if result.ready() else None,
+        "summary": vulnerability_learning_summary(db),
     }
 
 

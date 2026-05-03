@@ -1349,3 +1349,35 @@ def run_scan_job(scan_id: int):
 # Scheduler tick — verifica ScheduledScan devidos e dispara ScanJobs
 # Executado a cada minuto pelo Celery Beat
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+@celery.task(bind=True, name="create_vulnerability_learning_task", queue="default")
+def create_vulnerability_learning_task(self, owner_id: int, urls_text: str):
+    """Background task to process vulnerability learning from URLs.
+    
+    This prevents timeouts by running the expensive operations (HTTP fetches, LLM calls)
+    in a background worker instead of blocking the API endpoint.
+    """
+    from app.models.models import User, VulnerabilityLearning
+    from app.services.vulnerability_learning_service import (
+        create_vulnerability_learning,
+        serialize_vulnerability_learning,
+    )
+    
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter(User.id == owner_id).first()
+        if not owner:
+            return {"error": f"User {owner_id} not found"}
+        
+        row = create_vulnerability_learning(db, owner, urls_text)
+        return {
+            "success": True,
+            "item": serialize_vulnerability_learning(row),
+        }
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Falha no aprendizado: {exc}"}
+    finally:
+        db.close()
