@@ -1760,6 +1760,8 @@ def create_learning_from_urls(
     current_user: User = Depends(require_admin),
 ):
     from app.services.vulnerability_learning_service import (
+        create_vulnerability_learning,
+        serialize_vulnerability_learning,
         vulnerability_learning_summary,
     )
 
@@ -1767,19 +1769,31 @@ def create_learning_from_urls(
     if not urls_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe URLs separadas por ponto e virgula.")
     
-    # Dispatch to background task to prevent timeout
-    task = create_vulnerability_learning_task.apply_async(
-        args=(current_user.id, urls_text),
-        task_id=f"learning-{current_user.id}-{int(datetime.now().timestamp()*1000)}",
-        queue="default",
-    )
-    
-    return {
-        "task_id": task.id,
-        "status": "processing",
-        "message": "URLs estão sendo processadas pelo LLM. Atualize a página em alguns segundos.",
-        "summary": vulnerability_learning_summary(db),
-    }
+    try:
+        # Try async task first
+        task = create_vulnerability_learning_task.apply_async(
+            args=(current_user.id, urls_text),
+            task_id=f"learning-{current_user.id}-{int(datetime.now().timestamp()*1000)}",
+            countdown=1,  # Delay slightly to allow async processing
+        )
+        return {
+            "task_id": task.id,
+            "status": "processing",
+            "message": "URLs estão sendo processadas pelo LLM. Atualize a página em alguns segundos.",
+            "summary": vulnerability_learning_summary(db),
+        }
+    except Exception:  # noqa: BLE001
+        # Fallback to synchronous execution if Celery not available
+        try:
+            row = create_vulnerability_learning(db, current_user, urls_text)
+            return {
+                "summary": vulnerability_learning_summary(db),
+                "item": serialize_vulnerability_learning(row),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Falha no aprendizado: {exc}") from exc
 
 
 @router.get("/learning/vulnerabilities/task/{task_id}")
