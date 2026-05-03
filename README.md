@@ -490,7 +490,7 @@ Visibilidade:
 
 ### 12. Aprendizado de vulnerabilidades com aceite humano
 
-A página `Aprendizado` permite enviar uma ou várias URLs públicas separadas por ponto e vírgula (`;`), por exemplo:
+A página `Aprendizado` permite enviar uma ou várias URLs públicas separadas por ponto e vírgula (`;`), quebra de linha ou espaço, por exemplo:
 
 ```text
 https://hackerone.com/reports/2586641; https://hackerone.com/reports/...
@@ -505,6 +505,18 @@ O registro `vulnerability_learnings` guarda esses três blocos em colunas própr
 - `remediation`: orientação de correção preservada para o relatório.
 
 Depois disso, o conjunto é enviado para a LLM local para gerar missão, prompt e técnicas operacionais, criando o aprendizado com status `pending_review`.
+
+Para acelerar a maturidade inicial, a tela também tem `Antecipar catálogo`. Essa ação cria aprendizados pendentes, sem depender de download externo, para as famílias:
+
+- SQL Injection, Resource Injection, Remote File Inclusion, Path Traversal;
+- NULL Pointer Dereference, Information Exposure/Disclosure;
+- Improper Authorization, IDOR, User Enumeration;
+- XSS, CSRF, Code Injection, CRLF Injection;
+- Brute Force, SSRF, Unprotected Transport of Credentials;
+- Weak Password Recovery, Weak Cryptography for Passwords;
+- XML Entity Expansion, XXE e Clickjacking.
+
+URLs de diretórios conhecidos do repositório `aldaor/HackerOneReports` e listas públicas de disclosed reports são mapeadas para esse catálogo curado quando a rede do container não consegue baixar o conteúdo. Isso evita que a aprendizagem fique travada por egress/proxy, mantendo o aceite humano antes de influenciar agentes.
 
 O operador vê antes do aceite:
 

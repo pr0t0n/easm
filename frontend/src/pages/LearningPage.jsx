@@ -156,8 +156,10 @@ export default function LearningPage() {
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState("");
+  const [taskStatus, setTaskStatus] = useState("");
 
   const parsedUrlCount = useMemo(
     () => urlsText.split(";").map((item) => item.trim()).filter(Boolean).length,
@@ -186,20 +188,73 @@ export default function LearningPage() {
     load();
   }, []);
 
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const pollLearningTask = async (taskId) => {
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      await wait(2000);
+      const { data } = await client.get(`/api/learning/vulnerabilities/task/${taskId}`);
+      const status = data.status || "PENDING";
+      setSummary(data.summary || {});
+      setTaskStatus(status === "PENDING" || status === "STARTED" ? "Processando aprendizado..." : "");
+
+      if (status === "SUCCESS") {
+        if (data.result?.success && data.result?.item) {
+          setReviewItem(data.result.item);
+          setNotes("");
+          setUrlsText("");
+          await load();
+          return;
+        }
+        throw new Error(data.result?.error || "A task terminou sem criar aprendizado.");
+      }
+      if (status === "FAILURE" || status === "REVOKED") {
+        throw new Error(data.result?.error || "A task de aprendizado falhou.");
+      }
+    }
+    throw new Error("Aprendizado ainda em processamento. Atualize a página em alguns segundos.");
+  };
+
   const submit = async () => {
     setSubmitting(true);
     setError("");
+    setTaskStatus("");
     try {
       const { data } = await client.post("/api/learning/vulnerabilities", { urls_text: urlsText });
-      setSummary(data.summary || {});
-      setReviewItem(data.item || null);
-      setNotes("");
-      setUrlsText("");
-      await load();
+      if (data.task_id) {
+        setTaskStatus(data.message || "Processando aprendizado...");
+        await pollLearningTask(data.task_id);
+      } else {
+        setSummary(data.summary || {});
+        setReviewItem(data.item || null);
+        setNotes("");
+        setUrlsText("");
+        await load();
+      }
     } catch (err) {
-      setError(err?.response?.data?.detail || "Falha ao enviar URLs para aprendizagem.");
+      setError(err?.response?.data?.detail || err?.message || "Falha ao enviar URLs para aprendizagem.");
     } finally {
+      setTaskStatus("");
       setSubmitting(false);
+    }
+  };
+
+  const seedCatalog = async () => {
+    setSeeding(true);
+    setError("");
+    setTaskStatus("");
+    try {
+      const { data } = await client.post("/api/learning/vulnerabilities/seed-catalog");
+      setSummary(data.summary || {});
+      if ((data.items || []).length) {
+        setReviewItem(data.items[0]);
+      }
+      await load();
+      setTaskStatus(`${data.created || 0} aprendizados antecipados criados para revisão.`);
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao antecipar catálogo de aprendizado.");
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -230,9 +285,14 @@ export default function LearningPage() {
               Reports públicos entram como proposta; somente o aceite libera o conteúdo para os agentes.
             </p>
           </div>
-          <button type="button" className="btn-secondary" onClick={load} disabled={loading}>
-            {loading ? "Atualizando..." : "Atualizar"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" onClick={seedCatalog} disabled={seeding}>
+              {seeding ? "Antecipando..." : "Antecipar catálogo"}
+            </button>
+            <button type="button" className="btn-secondary" onClick={load} disabled={loading}>
+              {loading ? "Atualizando..." : "Atualizar"}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -247,6 +307,11 @@ export default function LearningPage() {
       {error && (
         <section className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)" }}>
           {error}
+        </section>
+      )}
+      {taskStatus && !error && (
+        <section className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--line)", background: "var(--surface-soft)", color: "var(--ink-soft)" }}>
+          {taskStatus}
         </section>
       )}
 

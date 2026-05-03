@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import logging
 import os
 import re
 import secrets
@@ -7,6 +8,8 @@ import sys
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
@@ -1774,6 +1777,7 @@ def create_learning_from_urls(
         task = create_vulnerability_learning_task.apply_async(
             args=(current_user.id, urls_text),
             task_id=f"learning-{current_user.id}-{int(datetime.now().timestamp()*1000)}",
+            queue="worker.unit.reporting",
             countdown=1,  # Delay slightly to allow async processing
         )
         return {
@@ -1782,7 +1786,8 @@ def create_learning_from_urls(
             "message": "URLs estão sendo processadas pelo LLM. Atualize a página em alguns segundos.",
             "summary": vulnerability_learning_summary(db),
         }
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao enfileirar aprendizado; executando sincronamente: %s", exc)
         # Fallback to synchronous execution if Celery not available
         try:
             row = create_vulnerability_learning(db, current_user, urls_text)
@@ -1812,6 +1817,25 @@ def check_learning_task_status(
         "task_id": task_id,
         "status": result.status,
         "result": result.result if result.ready() else None,
+        "summary": vulnerability_learning_summary(db),
+    }
+
+
+@router.post("/learning/vulnerabilities/seed-catalog")
+def seed_vulnerability_learning_catalog(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import (
+        create_curated_learning_catalog,
+        serialize_vulnerability_learning,
+        vulnerability_learning_summary,
+    )
+
+    rows = create_curated_learning_catalog(db, current_user)
+    return {
+        "created": len(rows),
+        "items": [serialize_vulnerability_learning(row) for row in rows],
         "summary": vulnerability_learning_summary(db),
     }
 

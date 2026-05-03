@@ -1351,7 +1351,7 @@ def run_scan_job(scan_id: int):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@celery.task(bind=True, name="create_vulnerability_learning_task")
+@celery.task(bind=True, name="create_vulnerability_learning_task", queue="worker.unit.reporting")
 def create_vulnerability_learning_task(self, owner_id: int, urls_text: str):
     """Background task to process vulnerability learning from URLs.
     
