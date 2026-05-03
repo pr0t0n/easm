@@ -560,15 +560,69 @@ def _worker_result(
     normalized.setdefault("source_worker", worker_group)
     normalized.setdefault("source_agent_id", agent.get("agent_id"))
     normalized.setdefault("source_agent_name", agent.get("agent_name"))
+    normalized.setdefault("worker_mission", agent.get("mission"))
+    normalized.setdefault("worker_techniques", list(agent.get("techniques") or []))
     normalized.setdefault("agent_profile", {
         "agent_id": agent.get("agent_id"),
         "agent_name": agent.get("agent_name"),
         "purpose": agent.get("purpose"),
+        "mission": agent.get("mission"),
+        "techniques": list(agent.get("techniques") or []),
+        "phases": list(agent.get("phases") or []),
+        "evidence_focus": list(agent.get("evidence_focus") or []),
+        "decision_rules": list(agent.get("decision_rules") or []),
+        "tools": list(agent.get("tools") or []),
     })
     if params:
         normalized.setdefault("runtime_params", dict(params))
 
     return normalized
+
+
+@celery.task(name="worker.unit.scope_validation.execute", queue="worker.unit.scope_validation")
+def unit_scope_validation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("scope_validation", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.reconnaissance.execute", queue="worker.unit.reconnaissance")
+def unit_reconnaissance_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reconnaissance", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.weaponization.execute", queue="worker.unit.weaponization")
+def unit_weaponization_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("weaponization", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.delivery.execute", queue="worker.unit.delivery")
+def unit_delivery_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("delivery", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.exploitation.execute", queue="worker.unit.exploitation")
+def unit_exploitation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("exploitation", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.installation.execute", queue="worker.unit.installation")
+def unit_installation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("installation", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.command_control.execute", queue="worker.unit.command_control")
+def unit_command_control_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("command_control", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.actions_on_objectives.execute", queue="worker.unit.actions_on_objectives")
+def unit_actions_on_objectives_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("actions_on_objectives", tool, target, "unit", params)
+
+
+@celery.task(name="worker.unit.reporting.execute", queue="worker.unit.reporting")
+def unit_reporting_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reporting", tool, target, "unit", params)
+
 
 @celery.task(name="worker.unit.reconhecimento.execute", queue="worker.unit.reconhecimento")
 def unit_reconhecimento_execute(tool: str, target: str, params: dict | None = None):
@@ -595,6 +649,51 @@ def unit_dispatch_tool(tool: str, target: str, params: dict | None = None):
 # ──────────────────────────────────────────────────────────────────────────────
 # Tasks de ferramentas — AGENDADOS (scan.scheduled / worker.scheduled.*)
 # ──────────────────────────────────────────────────────────────────────────────
+
+@celery.task(name="worker.scheduled.scope_validation.execute", queue="worker.scheduled.scope_validation")
+def scheduled_scope_validation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("scope_validation", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.reconnaissance.execute", queue="worker.scheduled.reconnaissance")
+def scheduled_reconnaissance_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reconnaissance", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.weaponization.execute", queue="worker.scheduled.weaponization")
+def scheduled_weaponization_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("weaponization", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.delivery.execute", queue="worker.scheduled.delivery")
+def scheduled_delivery_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("delivery", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.exploitation.execute", queue="worker.scheduled.exploitation")
+def scheduled_exploitation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("exploitation", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.installation.execute", queue="worker.scheduled.installation")
+def scheduled_installation_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("installation", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.command_control.execute", queue="worker.scheduled.command_control")
+def scheduled_command_control_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("command_control", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.actions_on_objectives.execute", queue="worker.scheduled.actions_on_objectives")
+def scheduled_actions_on_objectives_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("actions_on_objectives", tool, target, "scheduled", params)
+
+
+@celery.task(name="worker.scheduled.reporting.execute", queue="worker.scheduled.reporting")
+def scheduled_reporting_execute(tool: str, target: str, params: dict | None = None):
+    return _worker_result("reporting", tool, target, "scheduled", params)
+
 
 @celery.task(name="worker.scheduled.reconhecimento.execute", queue="worker.scheduled.reconhecimento")
 def scheduled_reconhecimento_execute(tool: str, target: str, params: dict | None = None):

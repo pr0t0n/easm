@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import threading
 import time
@@ -262,13 +263,20 @@ def _target_context(target: str) -> dict[str, str]:
     port = str(parsed.port or "")
     netloc = f"{host}:{parsed.port}" if parsed.port else host
     scheme = parsed.scheme if "://" in raw else "http"
-    url = raw if "://" in raw else urlunparse((scheme, netloc, "", "", "", ""))
-    https_url = raw if raw.startswith("https://") else urlunparse(("https", netloc, "", "", "", ""))
+    path = parsed.path or ""
+    query = parsed.query or ""
+    url = urlunparse((scheme, netloc, path, "", query, ""))
+    https_url = urlunparse(("https", netloc, path, "", query, ""))
+    try:
+        host_ip = socket.gethostbyname(host)
+    except OSError:
+        host_ip = host
     context = {
         "target": raw,
         "url": url,
         "https_url": https_url,
         "host": host,
+        "host_ip": host_ip,
         "domain": host,
         "netloc": netloc,
         "port": port,
@@ -338,6 +346,23 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
                 command=f"{profile.get('tool') or req.profile} <requires_env:{','.join(missing_env)}>",
                 stdout="",
                 stderr=f"missing required environment: {', '.join(missing_env)}",
+            )
+            return
+
+        required_schemes = {
+            str(item).strip().lower()
+            for item in (profile.get("requires_scheme") or [])
+            if str(item).strip()
+        }
+        target_scheme = _target_context(req.target).get("scheme", "").lower()
+        if required_schemes and target_scheme not in required_schemes:
+            _set_job_fields(
+                job_id,
+                status="skipped",
+                return_code=0,
+                command=f"{profile.get('tool') or req.profile} <requires_scheme:{','.join(sorted(required_schemes))}>",
+                stdout="",
+                stderr=f"target scheme {target_scheme or '-'} not supported by this profile",
             )
             return
 

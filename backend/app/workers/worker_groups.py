@@ -10,11 +10,17 @@ def _group_config(
     tools: list[str],
     priority: int,
 ) -> dict[str, Any]:
+    mission = CANONICAL_GROUP_MISSIONS.get(queue_suffix, {})
     return {
         "queue": f"worker.{mode}.{queue_suffix}",
         "description": description,
         "tools": tools,
         "priority": priority,
+        "mission": mission.get("mission", description),
+        "techniques": list(mission.get("techniques", [])),
+        "phases": list(mission.get("phases", [])),
+        "evidence_focus": list(mission.get("evidence_focus", [])),
+        "decision_rules": list(mission.get("decision_rules", [])),
     }
 
 
@@ -40,6 +46,72 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "reporting": [],
 }
 
+CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {
+    "scope_validation": {
+        "mission": "Validar escopo autorizado, normalizar alvos e bloquear qualquer execucao fora do contrato.",
+        "phases": ["preflight"],
+        "techniques": ["scope normalization", "authorization gate", "target canonicalization"],
+        "evidence_focus": ["authorized target", "blocked target reason", "scan mode"],
+        "decision_rules": ["sem escopo aprovado, nao executar ferramentas ofensivas"],
+    },
+    "reconnaissance": {
+        "mission": "Mapear superficie externa, portas, tecnologias, endpoints, parametros e sinais HTTP/TLS antes de testes intrusivos.",
+        "phases": ["P01", "P02", "P03", "P04", "P05", "P06", "P18"],
+        "techniques": ["subdomain enumeration", "port/service fingerprinting", "web crawling", "parameter discovery", "WAF/TLS fingerprint"],
+        "evidence_focus": ["asset", "port", "service", "url", "parameter", "header", "technology"],
+        "decision_rules": ["priorizar ferramentas passivas/baixa intrusividade antes de validacoes ativas"],
+    },
+    "weaponization": {
+        "mission": "Correlacionar OSINT, CVEs, takeover, vazamentos e exposicoes externas para orientar hipoteses de risco.",
+        "phases": ["P07", "P08", "P09", "P10", "P11", "P21"],
+        "techniques": ["CVE correlation", "takeover checks", "leak intelligence", "cloud exposure review", "secret discovery"],
+        "evidence_focus": ["CVE id", "template id", "public exposure", "leak source", "takeover signal"],
+        "decision_rules": ["promover apenas com evidencia observavel ou correlacao forte com ativo do escopo"],
+    },
+    "delivery": {
+        "mission": "Descobrir caminhos, arquivos, vhosts e parametros que alimentam validacoes de vulnerabilidade.",
+        "phases": ["P04", "P15", "P16"],
+        "techniques": ["directory brute discovery", "content discovery", "parameter mining", "API surface expansion"],
+        "evidence_focus": ["path", "status code", "content length", "parameter", "wordlist profile"],
+        "decision_rules": ["controlar taxa de requisicoes e registrar skips quando precondicoes faltarem"],
+    },
+    "exploitation": {
+        "mission": "Validar vulnerabilidades web/API com prova reproduzivel, payload minimo e impacto demonstravel sem acoes destrutivas.",
+        "phases": ["P11", "P12", "P13", "P16", "P17", "P19", "P20"],
+        "techniques": ["template validation", "SQLi validation", "XSS validation", "SSRF/OOB validation", "API abuse", "IDOR reproduction"],
+        "evidence_focus": ["request", "response", "payload", "endpoint", "artifact path", "impact"],
+        "decision_rules": ["critical/high exige repro_steps, technical_evidence e artifact"],
+    },
+    "installation": {
+        "mission": "Testar controles de autenticacao, autorizacao, JWT e credenciais apenas em escopo explicitamente autorizado.",
+        "phases": ["P14", "P19"],
+        "techniques": ["JWT analysis", "controlled brute-force safety checks", "auth bypass checks", "role/tenant validation"],
+        "evidence_focus": ["account precondition", "token claim", "rate limit", "authorization delta"],
+        "decision_rules": ["nao executar ataque volumetrico; usar poucas tentativas controladas e registrar precondicoes"],
+    },
+    "command_control": {
+        "mission": "Avaliar risco de callbacks, interacoes outbound, TLS fraco e sinais de persistencia apenas como validacao defensiva.",
+        "phases": ["P13", "P18"],
+        "techniques": ["OOB interaction validation", "TLS weakness validation", "callback evidence review"],
+        "evidence_focus": ["OOB callback", "cipher/certificate", "egress behavior", "timestamp"],
+        "decision_rules": ["usar listeners controlados e nunca manter persistencia real"],
+    },
+    "actions_on_objectives": {
+        "mission": "Correlacionar secrets, SAST, dependencias e supply chain para impacto tecnico e plano de remediacao.",
+        "phases": ["P21", "P22"],
+        "techniques": ["secret scanning", "SAST triage", "dependency risk review", "supply-chain correlation"],
+        "evidence_focus": ["file path", "secret fingerprint", "dependency id", "rule id", "fix version"],
+        "decision_rules": ["mascarar segredos e priorizar evidencia minima sem exfiltracao"],
+    },
+    "reporting": {
+        "mission": "Consolidar evidencias, separar hipotese de achado comprovado e produzir narrativa tecnica/executiva.",
+        "phases": ["governance", "executive_analyst"],
+        "techniques": ["evidence adjudication", "FAIR/AGE summarization", "remediation narrative", "false-positive separation"],
+        "evidence_focus": ["severity", "confidence", "business impact", "reproducibility", "remediation"],
+        "decision_rules": ["sem prova, manter como hipotese/backlog de validacao"],
+    },
+}
+
 
 CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
     "core_orchestration": ["supervisor", "strategic_planning", "evidence_adjudication"],
@@ -52,6 +124,10 @@ CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
 
 def get_canonical_group_tools() -> dict[str, list[str]]:
     return {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
+
+
+def get_canonical_group_missions() -> dict[str, dict[str, Any]]:
+    return {group: dict(mission) for group, mission in CANONICAL_GROUP_MISSIONS.items()}
 
 
 def get_cyber_autoagent_tool_catalog() -> dict[str, list[str]]:
@@ -91,6 +167,11 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "worker_group": group_key,
             "queue": group_data.get("queue", f"worker.{mode}.{group_key}"),
             "purpose": group_data.get("description", ""),
+            "mission": group_data.get("mission", group_data.get("description", "")),
+            "techniques": list(group_data.get("techniques") or []),
+            "phases": list(group_data.get("phases") or []),
+            "evidence_focus": list(group_data.get("evidence_focus") or []),
+            "decision_rules": list(group_data.get("decision_rules") or []),
             "tools": list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(group_key, [])),
             "contract": contract,
         }
@@ -202,6 +283,29 @@ def get_worker_agent_profile(group_name: str, mode: ScanMode = "unit") -> dict[s
     }
     key = alias_map.get(normalized, "reconhecimento")
     return dict(profiles.get(key, profiles["reconhecimento"]))
+
+
+def validate_worker_group_contracts(mode: ScanMode = "unit") -> dict[str, Any]:
+    groups = get_worker_groups(mode)
+    canonical_groups = list(CANONICAL_GROUP_TOOLS.keys())
+    missing: dict[str, list[str]] = {}
+    for group in canonical_groups:
+        data = groups.get(group) or {}
+        absent = [
+            field
+            for field in ["queue", "mission", "techniques", "tools", "evidence_focus", "decision_rules"]
+            if not data.get(field)
+        ]
+        if group in {"scope_validation", "reporting"}:
+            absent = [field for field in absent if field != "tools"]
+        if absent:
+            missing[group] = absent
+    return {
+        "ok": not missing,
+        "mode": mode,
+        "missing": missing,
+        "groups": canonical_groups,
+    }
 
 
 _TOOL_TO_GROUP: dict[str, str] = {}

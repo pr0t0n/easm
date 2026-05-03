@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from app.services.kali_executor import execute_via_kali, TOOL_TO_PROFILE
+from app.workers.worker_groups import find_agent_by_tool
 
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,33 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    return execute_via_kali(
+    result = execute_via_kali(
         tool_name=tool_name,
         target=target,
         scan_id=scan_id,
         scan_mode=scan_mode,
     )
+    try:
+        agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
+        result.setdefault("source_agent_id", agent.get("agent_id"))
+        result.setdefault("source_agent_name", agent.get("agent_name"))
+        result.setdefault("worker_group", agent.get("worker_group"))
+        result.setdefault("worker_mission", agent.get("mission"))
+        result.setdefault("worker_techniques", list(agent.get("techniques") or []))
+        result.setdefault(
+            "agent_profile",
+            {
+                "agent_id": agent.get("agent_id"),
+                "agent_name": agent.get("agent_name"),
+                "worker_group": agent.get("worker_group"),
+                "mission": agent.get("mission"),
+                "techniques": list(agent.get("techniques") or []),
+                "phases": list(agent.get("phases") or []),
+                "tools": list(agent.get("tools") or []),
+                "evidence_focus": list(agent.get("evidence_focus") or []),
+                "decision_rules": list(agent.get("decision_rules") or []),
+            },
+        )
+    except Exception:
+        logger.exception("Falha ao anexar perfil do agente para tool=%s", tool_name)
+    return result

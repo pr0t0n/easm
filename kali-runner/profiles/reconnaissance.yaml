@@ -33,7 +33,8 @@ dnsx_resolve:
   category: recon
   phase: RECONNAISSANCE
   description: "Multi-purpose DNS toolkit (A, AAAA, CNAME, NS, MX)."
-  cmd: ["dnsx", "-d", "{host}", "-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-silent"]
+  cmd: ["dnsx", "-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-silent"]
+  stdin_template: "{host}\n"
   timeout: 120
   parser: lines
 
@@ -60,7 +61,7 @@ naabu_top1000:
   category: recon
   phase: RECONNAISSANCE
   description: "Fast TCP port scan top-1000."
-  cmd: ["naabu", "-host", "{host}", "-top-ports", "1000", "-silent", "-rate", "1000"]
+  cmd: ["naabu", "-host", "{host_ip}", "-top-ports", "1000", "-silent", "-rate", "1000"]
   timeout: 600
   parser: lines
 
@@ -78,7 +79,7 @@ masscan_full:
   category: recon
   phase: RECONNAISSANCE
   description: "Internet-scale stateless TCP port scanner."
-  cmd: ["masscan", "{host}", "-p1-65535", "--rate", "5000", "--wait", "3"]
+  cmd: ["masscan", "{host_ip}", "-p1-65535", "--rate", "5000", "--wait", "3"]
   timeout: 900
   parser: raw
 
@@ -114,7 +115,8 @@ sslscan_audit:
   category: recon
   phase: RECONNAISSANCE
   description: "TLS cipher / cert audit."
-  cmd: ["sslscan", "--no-colour", "{host}"]
+  requires_scheme: ["https"]
+  cmd: ["sslscan", "--no-colour", "{netloc}"]
   timeout: 120
   parser: raw
 
@@ -123,7 +125,8 @@ testssl_audit:
   category: recon
   phase: RECONNAISSANCE
   description: "Comprehensive TLS auditor (vulns, ciphers, HSTS, OCSP)."
-  cmd: ["testssl", "--quiet", "--color", "0", "{host}"]
+  requires_scheme: ["https"]
+  cmd: ["testssl", "--quiet", "--color", "0", "{netloc}"]
   timeout: 600
   parser: raw
 
@@ -152,6 +155,7 @@ gospider_crawl:
   phase: RECONNAISSANCE
   description: "Web spider with form/sitemap detection."
   cmd: ["gospider", "-s", "{url}", "-d", "3", "-c", "5", "--quiet"]
+  allowed_return_codes: [0, 1]
   timeout: 300
   parser: lines
 
@@ -178,8 +182,8 @@ arjun_param_discover:
   category: recon
   phase: RECONNAISSANCE
   description: "Hidden HTTP parameter discoverer (GET/POST/JSON)."
-  cmd: ["arjun", "-u", "{url}", "--passive"]
-  timeout: 300
+  cmd: ["arjun", "-u", "{url}", "-w", "/app/profiles/quick-params.txt", "--stable", "-t", "5", "-T", "5", "-c", "20", "--rate-limit", "20"]
+  timeout: 120
   parser: raw
 
 paramspider_mining:

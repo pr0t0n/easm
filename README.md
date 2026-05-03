@@ -530,7 +530,7 @@ O operador vê antes do aceite:
 - `learned_prompt`, que é o trecho proposto para orientar os agentes;
 - lista de técnicas com sinais de evidência e passos seguros de validação.
 
-Somente registros com status `accepted` entram no prompt do supervisor em `ACCEPTED VULNERABILITY LEARNING`. Registros pendentes ou rejeitados ficam armazenados para auditoria, mas não alteram o comportamento dos agentes.
+Somente registros com status `accepted` entram no prompt do supervisor em `ACCEPTED VULNERABILITY LEARNING`. Registros pendentes ou rejeitados ficam armazenados para auditoria, mas não alteram o comportamento dos agentes. A tela permite aceite individual e aceite/rejeição em lote: selecione os aprendizados pendentes no histórico e use `Aceitar selecionados` ou `Rejeitar selecionados`. O endpoint usado é `POST /api/learning/vulnerabilities/bulk-review`.
 
 Quando um agente identifica uma possível vulnerabilidade, os aprendizados aceitos são comparados com o finding por tipo de vulnerabilidade, título, ferramenta, fase, skill e evidência observada. Se houver correspondência, o finding recebe em `details`:
 
@@ -545,7 +545,16 @@ Esse enriquecimento é usado em `risk_assessment` e `evidence_adjudication`. Se 
 
 ## Workers e Filas
 
-Os workers sao especializados por fase, mas todos chamam o mesmo executor Kali.
+Os workers sao especializados por fase, mas todos chamam o mesmo executor Kali. Cada grupo tem contrato próprio em `backend/app/workers/worker_groups.py`:
+
+- `mission`: objetivo operacional do agente;
+- `techniques`: técnicas que o agente deve aplicar;
+- `phases`: fases Cyber Kill Chain/Pxx sob responsabilidade;
+- `evidence_focus`: quais evidências precisa produzir;
+- `decision_rules`: regras de promoção, skip e prova;
+- `tools`: ferramentas Kali permitidas/esperadas para aquele grupo.
+
+Esses contratos aparecem em `GET /api/worker-manager/groups`, em `GET /api/worker-manager/pipeline`, no prompt do supervisor em `WORKER / AGENT MISSIONS` e no resultado de execução como `agent_profile`.
 
 | Worker | Filas principais | Ferramentas esperadas |
 | --- | --- | --- |

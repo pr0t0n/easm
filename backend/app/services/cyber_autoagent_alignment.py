@@ -98,6 +98,9 @@ Out-of-scope actions MUST be skipped and logged.
 ## ACTIVE SKILLS (prioritized for this target)
 {skills_summary}
 
+## WORKER / AGENT MISSIONS
+{worker_missions}
+
 ## ACCEPTED VULNERABILITY LEARNING (reviewed by operator)
 {accepted_vulnerability_learning}
 
@@ -175,12 +178,39 @@ def build_supervisor_prompt_contract(
     except Exception:
         accepted_vulnerability_learning = "(accepted vulnerability learning unavailable)"
 
+    try:
+        from app.workers.worker_groups import get_worker_agent_profiles
+
+        canonical_groups = {
+            "scope_validation",
+            "reconnaissance",
+            "weaponization",
+            "delivery",
+            "exploitation",
+            "installation",
+            "command_control",
+            "actions_on_objectives",
+            "reporting",
+        }
+        worker_missions = "\n".join(
+            (
+                f"  - {profile.get('agent_name')} [{group}]: mission={profile.get('mission')}; "
+                f"techniques={', '.join(profile.get('techniques') or [])}; "
+                f"tools={', '.join((profile.get('tools') or [])[:12])}"
+            )
+            for group, profile in get_worker_agent_profiles("unit").items()
+            if group in canonical_groups
+        )
+    except Exception:
+        worker_missions = "(worker missions unavailable)"
+
     prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
         target=str(target or ""),
         objective=str(objective or f"Assess external attack surface for {target}"),
         authorized_targets=", ".join(scope) if scope else str(target),
         max_iterations=int(max_iterations),
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
+        worker_missions=worker_missions,
         accepted_vulnerability_learning=accepted_vulnerability_learning,
         tool_catalog=tool_catalog,
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
@@ -196,6 +226,7 @@ def build_supervisor_prompt_contract(
         "expected_loop": ["know", "think", "test", "validate", "adapt"],
         "autonomy_contract": build_autonomous_mission_contract(max_iterations=max_iterations),
         "system_prompt": prompt.strip(),
+        "worker_missions": worker_missions,
         "accepted_vulnerability_learning": accepted_vulnerability_learning,
         "active_skills": skills,
         "skills_summary": [

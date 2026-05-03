@@ -230,7 +230,11 @@ def _normalize_to_legacy_shape(
     tool_name: str, target: str, scan_mode: str, result: dict
 ) -> dict[str, Any]:
     runner_status = result.get("status")
-    is_ok = runner_status == "done" and (result.get("return_code") in (0, None))
+    # The runner already applies each profile's allowed_return_codes and
+    # skip markers before emitting its terminal status. Trust that decision
+    # here so tools like gospider can treat rc=1/no-output as a completed
+    # no-finding run instead of a platform error.
+    is_ok = runner_status == "done"
     status = "executed" if is_ok else "failed"
     if runner_status == "skipped":
         status = "skipped"

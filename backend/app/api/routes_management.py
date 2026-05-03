@@ -22,7 +22,13 @@ from app.services.policy_service import is_target_allowed
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task
-from app.workers.worker_groups import WORKER_GROUPS, UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS, get_worker_agent_profiles
+from app.workers.worker_groups import (
+    SCHEDULED_WORKER_GROUPS,
+    UNIT_WORKER_GROUPS,
+    WORKER_GROUPS,
+    get_worker_agent_profiles,
+    validate_worker_group_contracts,
+)
 from app.graph.mission import MISSION_ITEMS
 
 
@@ -885,6 +891,10 @@ def list_worker_groups_config(current_user: User = Depends(require_admin)):
             "unit": get_worker_agent_profiles("unit"),
             "scheduled": get_worker_agent_profiles("scheduled"),
         },
+        "validation": {
+            "unit": validate_worker_group_contracts("unit"),
+            "scheduled": validate_worker_group_contracts("scheduled"),
+        },
     }
 
 
@@ -893,56 +903,66 @@ def worker_manager_pipeline(current_user: User = Depends(require_admin)):
     """Retorna pipeline supervisor-centric e agentes operacionais mapeados."""
     unit_agents = get_worker_agent_profiles("unit")
 
+    canonical_order = [
+        "scope_validation",
+        "reconnaissance",
+        "weaponization",
+        "delivery",
+        "exploitation",
+        "installation",
+        "command_control",
+        "actions_on_objectives",
+        "reporting",
+    ]
+    operational_agents = [
+        {
+            "id": unit_agents[group]["agent_id"],
+            "name": unit_agents[group]["agent_name"],
+            "internal_only": False,
+            "purpose": unit_agents[group]["purpose"],
+            "mission": unit_agents[group]["mission"],
+            "techniques": unit_agents[group]["techniques"],
+            "phases": unit_agents[group]["phases"],
+            "evidence_focus": unit_agents[group]["evidence_focus"],
+            "decision_rules": unit_agents[group]["decision_rules"],
+            "tools": unit_agents[group]["tools"],
+            "queue": unit_agents[group]["queue"],
+        }
+        for group in canonical_order
+        if group in unit_agents
+    ]
     pipeline_agents = [
         {
             "id": "supervisor",
             "name": "Supervisor",
             "internal_only": True,
             "purpose": "Planeja, roteia capacidades e aplica contratos de validação/evidência.",
+            "mission": "Orquestrar todos os agentes por Cyber Kill Chain, aplicar escopo, decidir pivots e exigir prova antes de promover achados.",
+            "techniques": ["strategic planning", "graph routing", "evidence adjudication", "governance"],
             "tools": ["supervisor", "strategic_planning", "evidence_adjudication"],
             "queue": None,
         },
-        {
-            "id": unit_agents["reconhecimento"]["agent_id"],
-            "name": unit_agents["reconhecimento"]["agent_name"],
-            "internal_only": False,
-            "purpose": unit_agents["reconhecimento"]["purpose"],
-            "tools": unit_agents["reconhecimento"]["tools"],
-            "queue": unit_agents["reconhecimento"]["queue"],
-        },
-        {
-            "id": unit_agents["analise_vulnerabilidade"]["agent_id"],
-            "name": unit_agents["analise_vulnerabilidade"]["agent_name"],
-            "internal_only": False,
-            "purpose": unit_agents["analise_vulnerabilidade"]["purpose"],
-            "tools": unit_agents["analise_vulnerabilidade"]["tools"],
-            "queue": unit_agents["analise_vulnerabilidade"]["queue"],
-        },
-        {
-            "id": unit_agents["osint"]["agent_id"],
-            "name": unit_agents["osint"]["agent_name"],
-            "internal_only": False,
-            "purpose": unit_agents["osint"]["purpose"],
-            "tools": unit_agents["osint"]["tools"],
-            "queue": unit_agents["osint"]["queue"],
-        },
+        *operational_agents,
     ]
 
     return {
         "architecture": "supervisor_centric",
-        "linear_flow": ["supervisor", "agent.recon", "agent.vuln", "agent.osint", "END"],
+        "linear_flow": ["supervisor", *[agent["id"] for agent in operational_agents], "END"],
         "edges": [
-            {"from": "supervisor", "to": "agent.recon"},
-            {"from": "supervisor", "to": "agent.vuln"},
-            {"from": "supervisor", "to": "agent.osint"},
-            {"from": "agent.recon", "to": "supervisor"},
-            {"from": "agent.vuln", "to": "supervisor"},
-            {"from": "agent.osint", "to": "supervisor"},
+            *[
+                {"from": "supervisor", "to": agent["id"]}
+                for agent in operational_agents
+            ],
+            *[
+                {"from": agent["id"], "to": "supervisor"}
+                for agent in operational_agents
+            ],
             {"from": "supervisor", "to": "END"},
         ],
         "agents": pipeline_agents,
         "mission_items_full": MISSION_ITEMS,
         "total_mission_items": len(MISSION_ITEMS),
+        "validation": validate_worker_group_contracts("unit"),
     }
 
 
@@ -994,6 +1014,10 @@ def worker_manager_overview(db: Session = Depends(get_db), current_user: User = 
             "agents": {
                 "unit": get_worker_agent_profiles("unit"),
                 "scheduled": get_worker_agent_profiles("scheduled"),
+            },
+            "validation": {
+                "unit": validate_worker_group_contracts("unit"),
+                "scheduled": validate_worker_group_contracts("scheduled"),
             },
         },
         "priorities": [
@@ -1836,6 +1860,54 @@ def seed_vulnerability_learning_catalog(
     return {
         "created": len(rows),
         "items": [serialize_vulnerability_learning(row) for row in rows],
+        "summary": vulnerability_learning_summary(db),
+    }
+
+
+@router.post("/learning/vulnerabilities/bulk-review")
+def bulk_review_vulnerability_learnings(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import (
+        serialize_vulnerability_learning,
+        update_learning_review,
+        vulnerability_learning_summary,
+    )
+
+    raw_ids = payload.get("ids") or payload.get("learning_ids") or []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ids deve ser uma lista.")
+    learning_ids = sorted({int(item) for item in raw_ids if str(item).strip().isdigit()})
+    if not learning_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selecione pelo menos um aprendizado.")
+
+    action = str(payload.get("action") or "accepted").strip().lower()
+    status_value = "accepted" if action in {"accept", "accepted"} else "rejected" if action in {"reject", "rejected"} else ""
+    if not status_value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action deve ser accept ou reject.")
+
+    rows = (
+        db.query(VulnerabilityLearning)
+        .filter(VulnerabilityLearning.id.in_(learning_ids))
+        .order_by(VulnerabilityLearning.created_at.desc())
+        .all()
+    )
+    found_ids = {row.id for row in rows}
+    missing_ids = [item for item in learning_ids if item not in found_ids]
+
+    reviewed = []
+    notes = str(payload.get("review_notes") or "").strip() or None
+    for row in rows:
+        reviewed.append(update_learning_review(db, row, current_user, status_value, notes=notes))
+
+    return {
+        "ok": True,
+        "status": status_value,
+        "reviewed_count": len(reviewed),
+        "missing_ids": missing_ids,
+        "items": [serialize_vulnerability_learning(row) for row in reviewed],
         "summary": vulnerability_learning_summary(db),
     }
 

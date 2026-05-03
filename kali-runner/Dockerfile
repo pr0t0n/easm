@@ -6,6 +6,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# The default mirror redirector can occasionally resolve to an unreachable
+# endpoint from Docker Desktop. Use the direct Cloudflare-backed Kali mirror so
+# image rebuilds are repeatable.
+RUN printf 'deb http://kali.download/kali kali-rolling main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
+
 # Core: Python runtime, build deps, networking primitives, Go (for ProjectDiscovery tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq dnsutils openssl \

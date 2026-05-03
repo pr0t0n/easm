@@ -154,6 +154,7 @@ export default function LearningPage() {
   const [items, setItems] = useState([]);
   const [reviewItem, setReviewItem] = useState(null);
   const [notes, setNotes] = useState("");
+  const [selectedIds, setSelectedIds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [seeding, setSeeding] = useState(false);
@@ -162,20 +163,29 @@ export default function LearningPage() {
   const [taskStatus, setTaskStatus] = useState("");
 
   const parsedUrlCount = useMemo(
-    () => urlsText.split(";").map((item) => item.trim()).filter(Boolean).length,
+    () => urlsText.split(/[;\s]+/).map((item) => item.trim()).filter(Boolean).length,
     [urlsText],
   );
+
+  const pendingItemIds = useMemo(
+    () => items.filter((item) => item.status === "pending_review").map((item) => item.id),
+    [items],
+  );
+
+  const allPendingSelected = pendingItemIds.length > 0 && pendingItemIds.every((id) => selectedIds.includes(id));
 
   const load = async () => {
     setLoading(true);
     setError("");
     try {
       const { data } = await client.get("/api/learning/vulnerabilities");
+      const nextItems = data.items || [];
       setSummary(data.summary || {});
-      setItems(data.items || []);
+      setItems(nextItems);
+      setSelectedIds((current) => current.filter((id) => nextItems.some((item) => item.id === id && item.status === "pending_review")));
       if (!reviewItem) {
-        const pending = (data.items || []).find((item) => item.status === "pending_review");
-        setReviewItem(pending || (data.items || [])[0] || null);
+        const pending = nextItems.find((item) => item.status === "pending_review");
+        setReviewItem(pending || nextItems[0] || null);
       }
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao carregar aprendizados.");
@@ -258,6 +268,18 @@ export default function LearningPage() {
     }
   };
 
+  const toggleSelected = (id) => {
+    setSelectedIds((current) => (
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id]
+    ));
+  };
+
+  const toggleAllPending = () => {
+    setSelectedIds(allPendingSelected ? [] : pendingItemIds);
+  };
+
   const review = async (action) => {
     if (!reviewItem?.id) return;
     setReviewing(true);
@@ -269,6 +291,32 @@ export default function LearningPage() {
       await load();
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao revisar aprendizado.");
+    } finally {
+      setReviewing(false);
+    }
+  };
+
+  const bulkReview = async (action) => {
+    if (!selectedIds.length) return;
+    setReviewing(true);
+    setError("");
+    setTaskStatus("");
+    try {
+      const { data } = await client.post("/api/learning/vulnerabilities/bulk-review", {
+        ids: selectedIds,
+        action,
+        review_notes: notes,
+      });
+      setSummary(data.summary || {});
+      setSelectedIds([]);
+      setNotes("");
+      if ((data.items || []).length) {
+        setReviewItem(data.items[0]);
+      }
+      setTaskStatus(`${data.reviewed_count || 0} aprendizados ${action === "accept" ? "aceitos" : "rejeitados"}.`);
+      await load();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao revisar aprendizados em lote.");
     } finally {
       setReviewing(false);
     }
@@ -345,14 +393,35 @@ export default function LearningPage() {
       />
 
       <section className="panel p-5">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold" style={{ color: "var(--ink)" }}>Histórico</h2>
-          {loading && <span className="text-xs" style={{ color: "var(--ink-muted)" }}>Carregando...</span>}
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold" style={{ color: "var(--ink)" }}>Histórico</h2>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
+              {selectedIds.length} selecionados para revisão em lote
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {loading && <span className="self-center text-xs" style={{ color: "var(--ink-muted)" }}>Carregando...</span>}
+            <button type="button" className="btn-secondary" onClick={() => bulkReview("reject")} disabled={reviewing || selectedIds.length === 0}>
+              Rejeitar selecionados
+            </button>
+            <button type="button" className="btn-primary" onClick={() => bulkReview("accept")} disabled={reviewing || selectedIds.length === 0}>
+              Aceitar selecionados
+            </button>
+          </div>
         </div>
         <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left text-sm">
+          <table className="w-full min-w-[820px] text-left text-sm">
             <thead>
               <tr className="border-b">
+                <th className="px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allPendingSelected}
+                    onChange={toggleAllPending}
+                    aria-label="Selecionar pendentes"
+                  />
+                </th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Título</th>
                 <th className="px-3 py-2">Tipo</th>
@@ -364,6 +433,15 @@ export default function LearningPage() {
             <tbody>
               {items.map((item) => (
                 <tr key={item.id} className="cursor-pointer border-b hover:bg-[var(--table-row-hover)]" onClick={() => { setReviewItem(item); setNotes(item.review_notes || ""); }}>
+                  <td className="px-3 py-3" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(item.id)}
+                      disabled={item.status !== "pending_review"}
+                      onChange={() => toggleSelected(item.id)}
+                      aria-label={`Selecionar aprendizado ${item.id}`}
+                    />
+                  </td>
                   <td className="px-3 py-3"><span className={statusClass[item.status] || "ds-badge"}>{statusLabel[item.status] || item.status}</span></td>
                   <td className="max-w-xs px-3 py-3 font-medium" style={{ color: "var(--ink)" }}>{item.title || "-"}</td>
                   <td className="px-3 py-3" style={{ color: "var(--ink-soft)" }}>{item.vulnerability_type || "-"}</td>
@@ -374,7 +452,7 @@ export default function LearningPage() {
               ))}
               {!items.length && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center" style={{ color: "var(--ink-muted)" }}>
+                  <td colSpan={7} className="px-3 py-8 text-center" style={{ color: "var(--ink-muted)" }}>
                     Nenhum aprendizado registrado.
                   </td>
                 </tr>
