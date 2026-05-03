@@ -855,8 +855,17 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         for line in final_state.get("logs_terminais", []):
             db.add(ScanLog(scan_job_id=job.id, source="graph", level="INFO", message=line))
 
+        findings_to_persist = list(final_state.get("vulnerabilidades_encontradas", []))
+        try:
+            from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+            findings_to_persist = enrich_findings_with_accepted_learning(findings_to_persist)
+            final_state["vulnerabilidades_encontradas"] = findings_to_persist
+        except Exception:
+            pass
+
         seen_findings: set[tuple[str, str, str, str]] = set()
-        for vuln in final_state.get("vulnerabilidades_encontradas", []):
+        for vuln in findings_to_persist:
             source_worker = vuln.get("source_worker", "vuln")
             details = dict(vuln)
             nested_details = details.get("details") if isinstance(details.get("details"), dict) else {}

@@ -4,6 +4,64 @@ Pentest.io e uma plataforma de External Attack Surface Management e pentest auto
 
 Este README descreve o fluxo real de operacao da plataforma: o que acontece quando um scan nasce, como as ferramentas sao escolhidas e executadas, onde cada dado e persistido, como a UI enxerga o progresso e como investigar falhas.
 
+## Sumario rapido
+
+| Item | Detalhe |
+| --- | --- |
+| Arquitetura | Kali-only para tools - backend/worker tool-free - LangGraph para fluxo |
+| Containers | 16 servicos (1 Kali - 1 backend - 9 workers Kill Chain - 5 infra/UI) |
+| Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
+| Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
+| Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
+| Visibilidade | 5 paineis frontend + 8 endpoints REST de telemetria |
+
+## Diagrama do fluxo (cerebro vs. maos)
+
+```
+       usuario (browser)
+              |
+              v
+       Frontend React 18                       http://localhost:5174
+              |
+              | JWT Bearer
+              v
+       Backend FastAPI                         http://localhost:8001
+              |  POST /api/scans
+              |  GET  /api/scans/{id}/phase-monitor
+              |  GET  /api/kali-runner/health
+              v
+            Redis (broker Celery)
+              |
+   +----------+----------+----------+----------+----------+----------+
+   |          |          |          |          |          |          |
+worker     worker     worker     worker     worker     worker     worker
+scope      recon      weapon     delivery   exploit    install    ...
+   |          |          |          |          |          |          |
+   +----------+----------+--POST----+----------+----------+----------+
+                            /jobs
+                              |
+                              v
+                       Kali Runner FastAPI         http://kali_runner:8088
+                              |  POST /jobs
+                              |  GET  /jobs/{id}
+                              |  GET  /jobs/{id}/result
+                              v
+                       subprocess.run dentro do container Kali
+                              |
+                              v
+                       /workspace/{scan_id}/{tool}/{job_id}/
+                              command.txt
+                              stdout.txt
+                              stderr.txt
+                              exit_code.txt
+                              parsed.json
+                              |
+                              v
+                       PostgreSQL: scan_jobs.state_data, executed_tool_runs, findings
+```
+
+Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *qual* ferramenta usar; as **maos** (container Kali) executam. Backend e workers carregam apenas codigo Python; toda a superficie ofensiva vive em uma unica imagem Kali, mantida pelos kali-maintainers.
+
 ## Principios Operacionais
 
 - Uso defensivo e autorizado: scans devem ser executados somente contra alvos sob escopo aprovado.
@@ -222,6 +280,35 @@ A plataforma expoe 9 fases executivas de Cyber Kill Chain:
 
 Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/mission.py`. O `Phase Monitor` usa essas fases para verificar se as ferramentas esperadas foram tentadas.
 
+### Catálogo de ferramentas por fase técnica
+
+| Fase | Node | Worker principal | Objetivo | Ferramentas Kali/profileadas |
+| --- | --- | --- | --- | --- |
+| `P01` | `asset_discovery` | `worker_recon` | Subdomain Enumeration | `subfinder`, `amass`, `dnsx`, `shuffledns`, `assetfinder`, `alterx` |
+| `P02` | `asset_discovery` | `worker_recon` | Port & Service Scan | `naabu`, `nmap`, `masscan`, `httpx` |
+| `P03` | `asset_discovery` | `worker_recon` | Web Crawling & JS Extraction | `katana`, `hakrawler`, `gau`, `waybackurls`, `gospider` |
+| `P04` | `asset_discovery` | `worker_recon` / `worker_delivery` | Parameter Discovery | `arjun`, `paramspider`, `ffuf` |
+| `P05` | `asset_discovery` | `worker_recon` | HTTP/TLS Fingerprint | `httpx`, `whatweb`, `nikto`, `curl-headers`, `sslscan`, `wafw00f` |
+| `P06` | `asset_discovery` | `worker_recon` | WAF Detection & Evasion Profile | `wafw00f`, `curl-headers` |
+| `P07` | `threat_intel` | `worker_weaponization` | OSINT & Leak Intelligence | `shodan-cli`, `theHarvester`, `h8mail`, `trufflehog`, `gitleaks` |
+| `P08` | `threat_intel` | `worker_weaponization` | Email Security Posture | `theHarvester` |
+| `P09` | `threat_intel` | `worker_weaponization` | Subdomain Takeover | `subjack`, `nuclei` |
+| `P10` | `threat_intel` | `worker_weaponization` | Cloud Asset Exposure | `nuclei`, `shodan-cli`, `trufflehog` |
+| `P11` | `risk_assessment` | `worker_weaponization` / `worker_exploitation` | CVE & Misconfiguration Scan | `nuclei`, `nmap-vulscan` |
+| `P12` | `risk_assessment` | `worker_exploitation` | Web Injection | `sqlmap`, `dalfox`, `wapiti`, `nikto` |
+| `P13` | `risk_assessment` | `worker_exploitation` / `worker_c2` | SSRF & Open Redirect | `nuclei`, `interactsh-client` |
+| `P14` | `risk_assessment` | `worker_installation` | Authentication Bypass & Brute Force | `hydra`, `medusa`, `jwt_tool`, `nuclei`, `crackmapexec` |
+| `P15` | `risk_assessment` | `worker_delivery` | Directory & File Enumeration | `ffuf`, `gobuster`, `feroxbuster`, `dirsearch` |
+| `P16` | `risk_assessment` | `worker_exploitation` | API Security | `nuclei`, `arjun`, `wapiti` |
+| `P17` | `risk_assessment` | `worker_exploitation` | Upload & WebShell Bypass | `nuclei` |
+| `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Weakness & Cipher Audit | `sslscan`, `nmap`, `testssl` |
+| `P19` | `risk_assessment` | `worker_exploitation` | IDOR & Access Control Flaws | `nuclei` |
+| `P20` | `risk_assessment` | `worker_exploitation` | CMS-Specific Scan | `wpscan`, `nuclei`, `nikto` |
+| `P21` | `threat_intel` | `worker_actions` / `worker_weaponization` | Secret & Credential Exposure | `trufflehog`, `gitleaks`, `semgrep`, `bandit` |
+| `P22` | `risk_assessment` | `worker_actions` | Dependency & Supply Chain Risk | `retire`, `trivy`, `semgrep`, `bandit`, `gitleaks` |
+
+Este catálogo é intencionalmente o contrato operacional: se uma ferramenta aparece aqui, ela deve existir como profile no `kali_runner`, ser executada dentro do container Kali e aparecer no `Phase Monitor` como `executed`, `skipped` com motivo, ou `attempted_failed` com erro rastreável.
+
 ### 7. Ferramentas sao selecionadas e disparadas
 
 Cada node escolhe uma lista de ferramentas esperadas para o alvo atual. A execucao ocorre por `_run_tools_and_collect()`:
@@ -400,6 +487,49 @@ Visibilidade:
 - `GET /api/scans/{scan_id}/easm-report`
 - `GET /api/reports/by-target`
 - `GET /api/reports/by-target/latest`
+
+### 12. Aprendizado de vulnerabilidades com aceite humano
+
+A página `Aprendizado` permite enviar uma ou várias URLs públicas separadas por ponto e vírgula (`;`), por exemplo:
+
+```text
+https://hackerone.com/reports/2586641; https://hackerone.com/reports/...
+```
+
+O backend busca as páginas com guardrails contra SSRF. Para reports do HackerOne, a plataforma tenta primeiro o endpoint JSON publico do report (`/reports/{id}.json`) e extrai especificamente `Steps to reproduce`, `Impact` e `Remediation`/`Suggested Mitigation`. O HTML da página fica como fallback.
+
+O registro `vulnerability_learnings` guarda esses três blocos em colunas próprias:
+
+- `steps_to_reproduce`: playbook aprendido de exploração/reprodução defensiva;
+- `impact`: impacto original preservado para o relatório;
+- `remediation`: orientação de correção preservada para o relatório.
+
+Depois disso, o conjunto é enviado para a LLM local para gerar missão, prompt e técnicas operacionais, criando o aprendizado com status `pending_review`.
+
+O operador vê antes do aceite:
+
+- resumo da vulnerabilidade aprendida;
+- quantidade de técnicas recebidas;
+- fases, skills e ferramentas sugeridas;
+- `steps_to_reproduce`, usado como aprendizado de exploração/reprodução;
+- `impact`, que será levado para o relatório;
+- `remediation`, que será levado para o relatório;
+- `learned_mission`, que descreve como a missão deve se adaptar;
+- `learned_prompt`, que é o trecho proposto para orientar os agentes;
+- lista de técnicas com sinais de evidência e passos seguros de validação.
+
+Somente registros com status `accepted` entram no prompt do supervisor em `ACCEPTED VULNERABILITY LEARNING`. Registros pendentes ou rejeitados ficam armazenados para auditoria, mas não alteram o comportamento dos agentes.
+
+Quando um agente identifica uma possível vulnerabilidade, os aprendizados aceitos são comparados com o finding por tipo de vulnerabilidade, título, ferramenta, fase, skill e evidência observada. Se houver correspondência, o finding recebe em `details`:
+
+- `learning_match`: qual aprendizado aceito foi aplicado;
+- `reproduction_playbook`: missão, prompt delta, técnicas, ferramentas Kali recomendadas, passos seguros de validação e critérios de aceite;
+- `learned_steps_to_reproduce`, `learned_impact` e `learned_remediation`: campos preservados para enriquecer o relatório;
+- `repro_steps`: passos que o agente deve tentar reproduzir;
+- `technical_evidence_expected`: sinais que precisam aparecer na evidência;
+- `proof_pack_required=true`.
+
+Esse enriquecimento é usado em `risk_assessment` e `evidence_adjudication`. Se um achado crítico/alto não tiver prova suficiente, ele entra em `validation_backlog` com o playbook aprendido para que o próximo ciclo priorize as ferramentas e passos corretos. O relatório preserva esses campos em `Finding.details`, permitindo mostrar não só o achado, mas também como ele foi reproduzido ou o que faltou para comprovação.
 
 ## Workers e Filas
 
@@ -769,3 +899,47 @@ curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/healthz | jq
 - `docs/SENIOR_ANALYST_FRAMEWORK.md`: contrato do analista senior e evidencia.
 - `docs/CYBER_AUTOAGENT_ALIGNMENT.md`: alinhamento com modelo Cyber AutoAgent.
 - `docs/KALI_EXECUTOR_PROPOSAL.md`: contexto da migracao para executor Kali.
+
+## Status atual da plataforma
+
+Validado em scan **#34** contra `http://juice-shop:3000` (OWASP Juice Shop):
+
+| Metrica | Valor |
+| --- | --- |
+| Containers ativos | 16/16 healthy |
+| Kali runner | reachable - 4 077 tools detected - 48 profiles |
+| Backend image | 4.06 GB (sem qualquer ferramenta de pentest) |
+| Workers (9) | 0 ferramentas de pentest cada |
+| Tools executadas no scan | 43 (25 success - 18 fail por DNS/timeout esperado) |
+| Findings persistidos | 20 (11 medium - 7 low - 2 info) |
+| Capabilities concluidas | 8/8 |
+| Cyber Kill Chain | 9/9 fases visitadas |
+| Evidencia arquivada | `/workspace/34/{tool}/{job_id}/` no volume `kali_workspace` |
+
+### Como provar que a refatoracao Kali-only esta ativa
+
+```bash
+# Backend NAO tem tools de pentest:
+docker exec pentest_backend bash -c \
+  'for t in subfinder nuclei nmap hydra sqlmap; do printf "%-12s " $t; command -v $t >/dev/null && echo INSTALLED || echo MISSING; done'
+# subfinder    MISSING
+# nuclei       MISSING
+# nmap         MISSING
+# hydra        MISSING
+# sqlmap       MISSING
+
+# Workers NAO tem tools de pentest:
+docker exec pentest_worker_recon bash -c 'command -v subfinder || echo MISSING'
+# MISSING
+
+# Kali runner tem TUDO:
+curl -fsS http://localhost:8088/healthz | jq
+# { "status": "ok", "profiles_loaded": 48, "kali_tools_detected": 4077, ... }
+
+docker exec pentest_kali_runner bash -c \
+  'for t in subfinder nuclei nmap hydra sqlmap nikto httpx katana paramspider; do printf "%-12s " $t; command -v $t >/dev/null && echo INSTALLED || echo MISSING; done'
+# subfinder    INSTALLED
+# nuclei       INSTALLED
+# nmap         INSTALLED
+# ... (10/10)
+```

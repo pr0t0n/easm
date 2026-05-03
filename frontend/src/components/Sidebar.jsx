@@ -25,6 +25,7 @@ export default function Sidebar() {
       items: [
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
         { to: "/evolucao", label: "Attack Evolution", adminOnly: false },
+        { to: "/aprendizado", label: "Aprendizado", adminOnly: true },
         { to: "/relatorios", label: "Relatórios", adminOnly: false },
       ],
     },

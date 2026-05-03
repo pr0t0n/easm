@@ -98,6 +98,9 @@ Out-of-scope actions MUST be skipped and logged.
 ## ACTIVE SKILLS (prioritized for this target)
 {skills_summary}
 
+## ACCEPTED VULNERABILITY LEARNING (reviewed by operator)
+{accepted_vulnerability_learning}
+
 ## TOOL CATALOG (only INSTALLED tools you may invoke)
 {tool_catalog}
 
@@ -165,12 +168,20 @@ def build_supervisor_prompt_contract(
     except Exception:
         tool_catalog = "(tool catalog unavailable)"
 
+    try:
+        from app.services.vulnerability_learning_service import render_accepted_learning_for_prompt
+
+        accepted_vulnerability_learning = render_accepted_learning_for_prompt(limit=8)
+    except Exception:
+        accepted_vulnerability_learning = "(accepted vulnerability learning unavailable)"
+
     prompt = SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.format(
         target=str(target or ""),
         objective=str(objective or f"Assess external attack surface for {target}"),
         authorized_targets=", ".join(scope) if scope else str(target),
         max_iterations=int(max_iterations),
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
+        accepted_vulnerability_learning=accepted_vulnerability_learning,
         tool_catalog=tool_catalog,
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
     )
@@ -185,6 +196,7 @@ def build_supervisor_prompt_contract(
         "expected_loop": ["know", "think", "test", "validate", "adapt"],
         "autonomy_contract": build_autonomous_mission_contract(max_iterations=max_iterations),
         "system_prompt": prompt.strip(),
+        "accepted_vulnerability_learning": accepted_vulnerability_learning,
         "active_skills": skills,
         "skills_summary": [
             {

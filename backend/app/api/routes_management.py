@@ -12,7 +12,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, WorkerHeartbeat
+from app.models.models import AccessGroup, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -1724,3 +1724,89 @@ def kali_runner_tools(current_user: User = Depends(get_current_user)):
         return r.json()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
+@router.get("/learning/vulnerabilities")
+def list_vulnerability_learnings(
+    status_filter: str | None = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import (
+        serialize_vulnerability_learning,
+        vulnerability_learning_summary,
+    )
+
+    query = db.query(VulnerabilityLearning)
+    if status_filter:
+        query = query.filter(VulnerabilityLearning.status == status_filter)
+    rows = (
+        query
+        .order_by(VulnerabilityLearning.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "summary": vulnerability_learning_summary(db),
+        "items": [serialize_vulnerability_learning(row) for row in rows],
+    }
+
+
+@router.post("/learning/vulnerabilities")
+def create_learning_from_urls(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import (
+        create_vulnerability_learning,
+        serialize_vulnerability_learning,
+        vulnerability_learning_summary,
+    )
+
+    urls_text = str(payload.get("urls_text") or payload.get("urls") or "").strip()
+    if not urls_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe URLs separadas por ponto e virgula.")
+    try:
+        row = create_vulnerability_learning(db, current_user, urls_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Falha no aprendizado: {exc}") from exc
+    return {
+        "summary": vulnerability_learning_summary(db),
+        "item": serialize_vulnerability_learning(row),
+    }
+
+
+@router.put("/learning/vulnerabilities/{learning_id}/accept")
+def accept_vulnerability_learning(
+    learning_id: int,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import serialize_vulnerability_learning, update_learning_review
+
+    row = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == learning_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
+    row = update_learning_review(db, row, current_user, "accepted", notes=(payload or {}).get("review_notes"))
+    return {"ok": True, "item": serialize_vulnerability_learning(row)}
+
+
+@router.put("/learning/vulnerabilities/{learning_id}/reject")
+def reject_vulnerability_learning(
+    learning_id: int,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import serialize_vulnerability_learning, update_learning_review
+
+    row = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == learning_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
+    row = update_learning_review(db, row, current_user, "rejected", notes=(payload or {}).get("review_notes"))
+    return {"ok": True, "item": serialize_vulnerability_learning(row)}

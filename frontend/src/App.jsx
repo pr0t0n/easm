@@ -17,6 +17,7 @@ import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import WorkersPage from "./pages/WorkersPage";
 import JobsRegistryPage from "./pages/JobsRegistryPage";
+import LearningPage from "./pages/LearningPage";
 import WorkerLogsPage from "./pages/WorkerLogsPage";
 import PhaseMonitorPage from "./pages/PhaseMonitorPage";
 import { authStore } from "./store/auth";
@@ -85,6 +86,7 @@ export default function App() {
                     <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />
                     <Route path="/workers" element={<AdminOnly><WorkersPage /></AdminOnly>} />
                     <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
+                    <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
                     <Route path="/worker-logs" element={<AdminOnly><WorkerLogsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>

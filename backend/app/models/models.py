@@ -154,6 +154,43 @@ class FalsePositiveMemory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class VulnerabilityLearning(Base):
+    """Aprendizados revisáveis extraídos de reports públicos de vulnerabilidade."""
+    __tablename__ = "vulnerability_learnings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending_review", index=True)
+    source_kind: Mapped[str] = mapped_column(String(60), default="hackerone_report", index=True)
+    source_urls: Mapped[list] = mapped_column(JSONB, default=list)
+    url_count: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    vulnerability_type: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps_to_reproduce: Mapped[str | None] = mapped_column(Text, nullable=True)
+    impact: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    learned_mission: Mapped[str | None] = mapped_column(Text, nullable=True)
+    learned_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    learned_techniques: Mapped[list] = mapped_column(JSONB, default=list)
+    technique_count: Mapped[int] = mapped_column(Integer, default=0)
+    affected_phases: Mapped[list] = mapped_column(JSONB, default=list)
+    affected_skills: Mapped[list] = mapped_column(JSONB, default=list)
+    recommended_tools: Mapped[list] = mapped_column(JSONB, default=list)
+    raw_extraction: Mapped[dict] = mapped_column(JSONB, default=dict)
+    raw_llm_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accepted_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner = relationship("User", foreign_keys=[owner_id])
+    accepted_by = relationship("User", foreign_keys=[accepted_by_id])
+
+
 class ScheduledScan(Base):
     __tablename__ = "scheduled_scans"
 

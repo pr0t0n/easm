@@ -770,6 +770,27 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
         v for v in vulns
         if str(v.get("severity", "")).lower() in {"critical", "high", "medium"}
     ]
+    try:
+        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+        high_signal = enrich_findings_with_accepted_learning(high_signal)
+        learning_guided = [
+            item for item in high_signal
+            if (item.get("details") or {}).get("reproduction_playbook")
+        ]
+        if learning_guided:
+            _append_todo(
+                state,
+                f"Validar {len(learning_guided)} hipótese(s) usando técnicas aprendidas aceitas",
+                priority="high",
+            )
+            _append_observation(
+                state,
+                f"Learning-guided hypotheses ready: {len(learning_guided)}",
+                source="adversarial_hypothesis",
+            )
+    except Exception:
+        pass
 
     hypothesis = {
         "candidate_paths": max(1, min(6, len(high_signal) + 1)),
@@ -821,7 +842,15 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
     adjudicated: list[dict[str, Any]] = []
     promoted = 0
     backlog: list[dict[str, Any]] = []
-    for finding in state.get("vulnerabilidades_encontradas") or []:
+    findings_for_adjudication = list(state.get("vulnerabilidades_encontradas") or [])
+    try:
+        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+        findings_for_adjudication = enrich_findings_with_accepted_learning(findings_for_adjudication)
+    except Exception:
+        pass
+
+    for finding in findings_for_adjudication:
         item = dict(finding)
         details = dict(item.get("details") or {})
         sev = str(item.get("severity", "low")).lower()
@@ -842,7 +871,15 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
                 "severity": sev,
                 "asset": str(details.get("asset") or state.get("target") or ""),
                 "reason": details["adjudication_reason"],
-                "required_action": "rerun_validation_with_repro_steps",
+                "required_action": "rerun_learning_guided_validation_with_repro_steps",
+                "details": {
+                    "tool": details.get("tool"),
+                    "evidence": evidence[:1200],
+                    "learning_match": details.get("learning_match"),
+                    "reproduction_playbook": details.get("reproduction_playbook"),
+                    "repro_steps": details.get("repro_steps"),
+                    "technical_evidence_expected": details.get("technical_evidence_expected"),
+                },
             })
         else:
             if sev in {"critical", "high"}:
@@ -1311,6 +1348,12 @@ def _run_tools_and_collect(
         step_name=step_name,
         default_target=scan_target,
     )
+    try:
+        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+        all_findings = enrich_findings_with_accepted_learning(all_findings)
+    except Exception:
+        pass
 
     _mark_step_metric(state, step_success)
     return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
@@ -3169,8 +3212,28 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "3. RiskAssessment")
     current = _step_name(state)
+    pending_validation = list(state.get("validation_backlog") or [])
     vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
     vuln_tools = _adapt_vuln_tools_for_target(state.get("target", ""), vuln_tools)
+    learning_validation_tools: list[str] = []
+    if pending_validation:
+        try:
+            from app.services.vulnerability_learning_service import recommended_learning_tools_for_findings
+
+            learning_validation_tools = recommended_learning_tools_for_findings(pending_validation, limit=8)
+        except Exception:
+            learning_validation_tools = []
+        if learning_validation_tools:
+            state["logs_terminais"].append(
+                "RiskAssessment: learning_guided_tools="
+                f"{','.join(learning_validation_tools)}"
+            )
+            _append_note(
+                state,
+                f"Revalidacao guiada por aprendizado aceito usando tools: {', '.join(learning_validation_tools)}",
+                phase="risk-assessment",
+            )
+            vuln_tools = learning_validation_tools + [tool for tool in vuln_tools if tool not in learning_validation_tools]
     vuln_tools = _select_tool_batch_for_iteration(state, group="risk_assessment", tools=vuln_tools)
     if _is_local_target(state.get("target", "")):
         state["logs_terminais"].append(
@@ -3194,7 +3257,6 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     state["risk_targets_resolvable"] = list(resolvable_targets)
     state["risk_targets_unresolved"] = list(unresolved_targets)
     all_findings: list[dict[str, Any]] = []
-    pending_validation = list(state.get("validation_backlog") or [])
     if pending_validation:
         state["logs_terminais"].append(
             f"RiskAssessment: validation_backlog_detected={len(pending_validation)}"
@@ -3226,6 +3288,12 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     state["logs_terminais"].append(f"RiskAssessment: {current}")
 
     if all_findings:
+        try:
+            from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+            all_findings = enrich_findings_with_accepted_learning(all_findings)
+        except Exception:
+            pass
         state["vulnerabilidades_encontradas"].extend(all_findings)
     else:
         state["logs_terminais"].append(f"RiskAssessment: sem achados tecnicos no passo {current}")
