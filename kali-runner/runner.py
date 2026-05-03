@@ -109,6 +109,7 @@ class JobStatus(BaseModel):
     tool: str
     target: str
     status: str
+    command: Optional[str] = None
     enqueued_at: str
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
@@ -119,7 +120,6 @@ class JobStatus(BaseModel):
 
 
 class JobResult(JobStatus):
-    command: Optional[str] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
     parsed: Optional[Any] = None
@@ -429,17 +429,23 @@ def healthz() -> dict[str, Any]:
 
 @app.get("/profiles")
 def list_profiles() -> dict[str, Any]:
+    def _profile_payload(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+        command = list(spec.get("cmd") or [])
+        return {
+            "tool": spec.get("tool", name),
+            "category": spec.get("category"),
+            "phase": spec.get("phase"),
+            "description": spec.get("description"),
+            "timeout": spec.get("timeout", DEFAULT_TIMEOUT),
+            "source": spec.get("source_file"),
+            "command": command,
+            "command_executable": command[0] if command else spec.get("tool", name),
+        }
+
     return {
         "count": len(PROFILES),
         "profiles": {
-            name: {
-                "tool": spec.get("tool", name),
-                "category": spec.get("category"),
-                "phase": spec.get("phase"),
-                "description": spec.get("description"),
-                "timeout": spec.get("timeout", DEFAULT_TIMEOUT),
-                "source": spec.get("source_file"),
-            }
+            name: _profile_payload(name, spec)
             for name, spec in PROFILES.items()
         },
     }
@@ -451,6 +457,9 @@ def list_kali_tools() -> dict[str, Any]:
     profiles_by_tool: dict[str, list[str]] = {}
     for profile_name, spec in PROFILES.items():
         profiles_by_tool.setdefault(str(spec.get("tool") or profile_name), []).append(profile_name)
+        cmd = list(spec.get("cmd") or [])
+        if cmd:
+            profiles_by_tool.setdefault(str(cmd[0]), []).append(profile_name)
     return {
         "count": len(tools),
         "tools": [

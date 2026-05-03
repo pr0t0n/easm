@@ -25,6 +25,7 @@ def execute_tool_with_workers(
     tool_name: str,
     target: str,
     scan_mode: str = "unit",
+    scan_id: int | None = None,
 ) -> dict[str, Any]:
     """Single-path tool execution: always via the Kali runner."""
     if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
@@ -44,15 +45,15 @@ def execute_tool_with_workers(
 
     # Try to surface the current scan_id so evidence is filed under
     # /workspace/{scan_id}/{tool}/{job_id}/ on the runner.
-    scan_id: int | None = None
-    try:
-        from celery import current_task as _ct  # type: ignore
-        if _ct is not None and getattr(_ct, "request", None):
-            scan_id = (_ct.request.kwargs or {}).get("scan_id")
-            if not scan_id and _ct.request.args:
-                scan_id = _ct.request.args[0]
-    except Exception:
-        scan_id = None
+    if scan_id is None:
+        try:
+            from celery import current_task as _ct  # type: ignore
+            if _ct is not None and getattr(_ct, "request", None):
+                scan_id = (_ct.request.kwargs or {}).get("scan_id")
+                if not scan_id and _ct.request.args:
+                    scan_id = _ct.request.args[0]
+        except Exception:
+            scan_id = None
 
     return execute_via_kali(
         tool_name=tool_name,

@@ -50,7 +50,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("asset_id", sa.Integer(), sa.ForeignKey("assets.id"), nullable=False, index=True),
         sa.Column("finding_id", sa.Integer(), sa.ForeignKey("findings.id"), nullable=True, index=True),
-        sa.Column("tool_source", sa.String(100), nullable=False),  # nuclei, sqlmap, nessus, shodan, etc
+        sa.Column("tool_source", sa.String(100), nullable=False),  # nuclei, sqlmap, shodan, etc
         sa.Column("cve_id", sa.String(50), nullable=True, index=True),
         sa.Column("severity", sa.String(20), nullable=False),  # critical, high, medium, low, info
         sa.Column("cvss_score", sa.Float(), nullable=True),

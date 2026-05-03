@@ -12,69 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# (binary_name, …) — list of CLI binaries that signal the tool is installed.
-# If multiple alternatives exist, any present is enough.
-_TOOL_BINARIES: dict[str, list[str]] = {
-    "subfinder": ["subfinder"],
-    "amass": ["amass"],
-    "massdns": ["massdns"],
-    "dnsx": ["dnsx"],
-    "shuffledns": ["shuffledns"],
-    "assetfinder": ["assetfinder"],
-    "alterx": ["alterx"],
-    "naabu": ["naabu"],
-    "nmap": ["nmap"],
-    "masscan": ["masscan"],
-    "httpx": ["httpx"],
-    "whatweb": ["whatweb"],
-    "wafw00f": ["wafw00f"],
-    "curl-headers": ["curl"],
-    "sslscan": ["sslscan"],
-    "testssl": ["testssl", "testssl.sh"],
-    "katana": ["katana"],
-    "hakrawler": ["hakrawler"],
-    "gau": ["gau"],
-    "waybackurls": ["waybackurls"],
-    "gospider": ["gospider"],
-    "arjun": ["arjun"],
-    "paramspider": ["paramspider"],
-    "ffuf": ["ffuf"],
-    "gobuster": ["gobuster"],
-    "feroxbuster": ["feroxbuster"],
-    "dirsearch": ["dirsearch"],
-    "shodan-cli": ["shodan"],
-    "theHarvester": ["theHarvester", "theharvester"],
-    "h8mail": ["h8mail"],
-    "subjack": ["subjack"],
-    "metagoofil": ["metagoofil"],
-    "nuclei": ["nuclei"],
-    "nmap-vulscan": ["nmap"],
-    "nikto": ["nikto"],
-    "wapiti": ["wapiti"],
-    "wfuzz": ["wfuzz"],
-    "burp-cli": ["burp-cli"],
-    "sqlmap": ["sqlmap"],
-    "dalfox": ["dalfox"],
-    "wpscan": ["wpscan"],
-    "interactsh-client": ["interactsh-client"],
-    "hydra": ["hydra"],
-    "medusa": ["medusa"],
-    "jwt_tool": ["jwt_tool"],
-    "impacket": ["impacket-smbexec", "impacket-secretsdump", "smbexec.py", "secretsdump.py"],
-    "evilwinrm": ["evil-winrm"],
-    "semgrep": ["semgrep"],
-    "bandit": ["bandit"],
-    "trufflehog": ["trufflehog"],
-    "gitleaks": ["gitleaks"],
-    "retire": ["retire"],
-    "trivy": ["trivy"],
-    "eslint": ["eslint"],
-    "jshint": ["jshint"],
-    "ast-grep": ["ast-grep"],
-    "js-snooper": ["js-snooper"],
-    "jsniper": ["jsniper"],
-}
-
 
 # Rich tool catalog. Keep entries narrative — these go straight into the agent prompt.
 TOOL_CATALOG: dict[str, dict[str, Any]] = {
@@ -346,13 +283,6 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL template, wordlist", "outputs": "responses ranked by anomaly",
         "prerequisites": "URL with FUZZ marker",
     },
-    "burp-cli": {
-        "category": "vuln", "phase": "P12|P13|P14|P16|P17|P19",
-        "description": "Burp Pro REST API for crawl + active scan with extended issue rules.",
-        "when_to_use": "Authoritative web vuln coverage when Burp Pro is configured.",
-        "inputs": "URL", "outputs": "Burp issues JSON",
-        "prerequisites": "burp_rest service healthy + license",
-    },
     "sqlmap": {
         "category": "vuln", "phase": "P12",
         "description": "Automatic SQL injection + DB takeover (extracts schema, dumps tables).",
@@ -377,7 +307,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "interactsh-client": {
         "category": "vuln", "phase": "P13",
         "description": "OOB interaction server — proves blind SSRF/RCE/XSS via DNS callbacks.",
-        "when_to_use": "Validate blind vulnerabilities found by nuclei/burp.",
+        "when_to_use": "Validate blind vulnerabilities found by nuclei or active web scanners.",
         "inputs": "registered hostname", "outputs": "callback log",
         "prerequisites": "egress DNS works",
     },
@@ -501,18 +431,16 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 
 
 def is_tool_installed(tool_name: str) -> bool:
-    """Returns True if the tool has a profile mapping in the Kali runner.
+    """Back-compat name for "available in the Kali runner".
 
-    After the architecture refactor, "installed" means "Kali has it and we
-    have a profile that maps to it". The local subprocess check
-    (`shutil.which`) was retired together with `_TOOL_INSTALL_RECIPES` —
-    the runner now owns lifecycle, healthchecks and lifetime.
+    The backend never checks local binaries. Availability requires both a Kali
+    profile mapping and a live executable inside the Kali container.
     """
     try:
-        from app.services.kali_executor import TOOL_TO_PROFILE
+        from app.services.kali_catalog import is_kali_tool_available
     except Exception:
         return False
-    return str(tool_name or "").strip().lower() in TOOL_TO_PROFILE
+    return is_kali_tool_available(tool_name)
 
 
 def installed_tools() -> dict[str, bool]:
@@ -520,8 +448,10 @@ def installed_tools() -> dict[str, bool]:
 
 
 def ensure_tool_installed(tool_name: str) -> bool:
-    """Back-compat alias. Auto-install was removed — the Kali runner ships
-    every tool already, so this is now equivalent to is_tool_installed.
+    """Back-compat alias. Runtime tool installation is not supported.
+
+    Adding tools means adding them to the Kali image and creating a safe
+    profile; the backend image stays tool-free.
     """
     return is_tool_installed(tool_name)
 
@@ -571,14 +501,16 @@ def render_tool_catalog_for_prompt(category: str | None = None, only_installed: 
 
 
 def installation_report() -> dict[str, Any]:
-    """Dict with installed/missing breakdown for the phase-monitor endpoint."""
-    installed: list[str] = []
-    missing: list[str] = []
-    for tool in TOOL_CATALOG.keys():
-        (installed if is_tool_installed(tool) else missing).append(tool)
-    return {
-        "total": len(TOOL_CATALOG),
-        "installed": sorted(installed),
-        "missing": sorted(missing),
-        "coverage_ratio": round(len(installed) / max(1, len(TOOL_CATALOG)), 3),
-    }
+    """Kali-runner availability breakdown for the phase-monitor endpoint."""
+    try:
+        from app.services.kali_catalog import kali_installation_report
+    except Exception:
+        return {
+            "source": "kali_runner",
+            "runner_reachable": False,
+            "total": len(TOOL_CATALOG),
+            "installed": [],
+            "missing": sorted(TOOL_CATALOG.keys()),
+            "coverage_ratio": 0,
+        }
+    return kali_installation_report(expected_tools=list(TOOL_CATALOG.keys()))

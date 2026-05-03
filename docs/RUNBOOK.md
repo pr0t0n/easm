@@ -168,7 +168,7 @@ docker compose restart worker_unit_osint
 
 1. Criar .env a partir de [/.env.example](.env.example) antes da primeira subida.
 2. Ajustar FRONTEND_ORIGIN, FRONTEND_ORIGINS e VITE_API_URL para as URLs publicas.
-3. Definir BURP_LICENSE_KEY se o serviço [burp_rest](docker-compose.yml#L44) estiver habilitado.
+3. Definir `KALI_RUNNER_URL` se o runner nao usar o default interno `http://kali_runner:8088`.
 4. Subir a stack:
 ```bash
 docker compose --profile prod up --build -d

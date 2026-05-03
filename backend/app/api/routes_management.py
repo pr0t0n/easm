@@ -1,14 +1,8 @@
 from datetime import datetime, timedelta
-import json
 import os
 import re
 import secrets
-import shutil
-import subprocess
 import sys
-import urllib.error
-import urllib.request
-from importlib.util import find_spec
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -30,94 +24,6 @@ from app.graph.mission import MISSION_ITEMS
 
 
 router = APIRouter(prefix="/api", tags=["management"])
-
-TOOL_REQUIREMENTS: dict[str, dict[str, str]] = {
-    "subfinder": {"url": "https://github.com/projectdiscovery/subfinder", "requirements": "Go 1.22+, acesso HTTP externo e DNS funcional."},
-    "amass": {"url": "https://github.com/owasp-amass/amass", "requirements": "Go, memória moderada e conectividade DNS/HTTP."},
-    "assetfinder": {"url": "https://github.com/tomnomnom/assetfinder", "requirements": "Go e acesso HTTP externo."},
-    "dnsx": {"url": "https://github.com/projectdiscovery/dnsx", "requirements": "Go e resolução DNS liberada."},
-    "naabu": {"url": "https://github.com/projectdiscovery/naabu", "requirements": "Go, libpcap-dev e acesso de rede para probe."},
-    "httpx": {"url": "https://github.com/projectdiscovery/httpx", "requirements": "Go e saída HTTP/HTTPS liberada."},
-    "katana": {"url": "https://github.com/projectdiscovery/katana", "requirements": "Go e saída HTTP/HTTPS liberada."},
-    "uro": {"url": "https://github.com/s0md3v/uro", "requirements": "Python 3.10+ e pip."},
-    "ffuf": {"url": "https://github.com/ffuf/ffuf", "requirements": "Go e wordlists locais/remotas."},
-    "feroxbuster": {"url": "https://github.com/epi052/feroxbuster", "requirements": "Rust ou binário dedicado; instalação manual recomendada."},
-    "arjun": {"url": "https://github.com/s0md3v/Arjun", "requirements": "Python 3.10+ e pip."},
-    "nessus": {"url": "https://www.tenable.com/products/nessus", "requirements": "Credenciais Nessus, URL do scanner e pynessus instalado."},
-    "nmap-vulscan": {"url": "https://github.com/scipag/vulscan", "requirements": "Nmap instalado e script NSE vulscan em /root/vulscan ou /opt/vulscan."},
-    "dalfox": {"url": "https://github.com/hahwul/dalfox", "requirements": "Go e saída HTTP/HTTPS liberada."},
-    "nikto": {"url": "https://github.com/sullo/nikto", "requirements": "Perl/apt compatível; pode exigir instalação manual."},
-    "wpscan": {"url": "https://github.com/wpscanteam/wpscan", "requirements": "Ruby, gem e acesso HTTP/HTTPS."},
-    "zap": {"url": "https://www.zaproxy.org/", "requirements": "Java 11+ ou container dedicado; recomendado serviço separado."},
-    "burp-cli": {"url": "https://portswigger.net/burp/documentation/desktop/tools/command-line", "requirements": "Burp Professional CLI instalado e chave de licenca valida configurada."},
-    "secretfinder": {"url": "https://github.com/m4ll0k/SecretFinder", "requirements": "Python e instalação manual do projeto."},
-    "trufflehog": {"url": "https://github.com/trufflesecurity/trufflehog", "requirements": "Go moderno e acesso a repositórios/targets."},
-    "kiterunner": {"url": "https://github.com/assetnote/kiterunner", "requirements": "Go moderno; binário pode variar por arquitetura."},
-    "theharvester": {"url": "https://github.com/laramies/theHarvester", "requirements": "Python, APIs opcionais e saída HTTP externa."},
-    "shodan-cli": {"url": "https://github.com/achillean/shodan-python", "requirements": "Python, pacote shodan e chave API configurada."},
-    "whatweb": {"url": "https://github.com/urbanadventurer/WhatWeb", "requirements": "Ruby/apt compatível."},
-    "urlscan-cli": {"url": "https://urlscan.io/docs/api/", "requirements": "Cliente compatível e API key do urlscan quando aplicável."},
-    "subjack": {"url": "https://github.com/haccer/subjack", "requirements": "Go e listas de fingerprints."},
-    "findomain": {"url": "https://github.com/findomain/findomain", "requirements": "Binário próprio; instalação manual recomendada."},
-    "sublist3r": {"url": "https://github.com/aboul3la/Sublist3r", "requirements": "Python 3 e pip."},
-    "chaos": {"url": "https://github.com/projectdiscovery/chaos-client", "requirements": "Go e API key Chaos quando usada."},
-    "cloudenum": {"url": "https://github.com/initstring/cloud_enum", "requirements": "Python e instalação manual do projeto."},
-    "puredns": {"url": "https://github.com/d3mondev/puredns", "requirements": "Go, massdns e resolução DNS liberada."},
-    "massdns": {"url": "https://github.com/blechschmidt/massdns", "requirements": "Compilação nativa/manual; não empacotado por padrão."},
-    "dnsenum": {"url": "https://github.com/fwaeytens/dnsenum", "requirements": "Perl e pacote do sistema."},
-    "alterx": {"url": "https://github.com/projectdiscovery/alterx", "requirements": "Go moderno."},
-    "dnsgen": {"url": "https://github.com/ProjectAnte/dnsgen", "requirements": "Python e instalação manual do projeto."},
-    "gowitness": {"url": "https://github.com/sensepost/gowitness", "requirements": "Go e engine headless/chromium."},
-    "webanalyze": {"url": "https://github.com/rverton/webanalyze", "requirements": "Go moderno."},
-    "cmsmap": {"url": "https://github.com/Dionach/CMSmap", "requirements": "Python e dependências específicas do projeto."},
-    "dirb": {"url": "http://dirb.sourceforge.net/", "requirements": "Pacote apt ou binário Linux."},
-    "linkfinder": {"url": "https://github.com/GerbenJavado/LinkFinder", "requirements": "Python 3 e pip."},
-    "postman-to-k6": {"url": "https://github.com/grafana/postman-to-k6", "requirements": "Node.js e npm."},
-    "h8mail": {"url": "https://github.com/khast3x/h8mail", "requirements": "Python 3 e pip."},
-    "metagoofil": {"url": "https://github.com/opsdisk/metagoofil", "requirements": "Projeto externo; instalação manual recomendada."},
-    "openvas": {"url": "https://greenbone.github.io/docs/latest/", "requirements": "Stack dedicada Greenbone/OpenVAS; serviço separado."},
-    "waymore": {"url": "https://github.com/xnl-h4ck3r/waymore", "requirements": "Python 3 e pip."},
-    "gobuster": {"url": "https://github.com/OJ/gobuster", "requirements": "Go moderno e wordlists locais para dir, vhost e fuzz."},
-    "wapiti": {"url": "https://github.com/wapiti-scanner/wapiti", "requirements": "Python 3.12+ e pacote wapiti3; cobre SQLi, XSS, SSRF, XXE, file/include e CRLF."},
-    "wfuzz": {"url": "https://github.com/xmendez/wfuzz", "requirements": "Python 3, pip e wordlists locais para fuzzing HTTP."},
-    "wafw00f": {"url": "https://github.com/EnableSecurity/wafw00f", "requirements": "Python 3 e pip para fingerprinting de WAF."},
-    "sslscan": {"url": "https://github.com/rbsec/sslscan", "requirements": "Binário sslscan instalado via apt no worker."},
-    "shcheck": {"url": "https://github.com/santoru/shcheck", "requirements": "Python 3 e pip install shcheck."},
-}
-
-INSTALL_SUPPORTED_TOOLS = {
-    "nessus", "arjun", "semgrep", "h8mail", "metagoofil", "theharvester", "shodan-cli", "urlscan-cli",
-    "uro", "subfinder", "amass", "assetfinder", "dnsx", "naabu", "httpx", "katana", "ffuf",
-    "dalfox", "kiterunner", "subjack", "wpscan", "nikto", "nmap-vulscan", "whatweb", "sublist3r", "waymore", "linkfinder",
-    "alterx", "chaos", "puredns", "webanalyze", "gobuster", "wapiti", "wfuzz",
-    "wafw00f",
-    "sslscan", "shcheck", "burp-cli",
-}
-
-TOOL_BINARY_ALIASES = {
-    "kiterunner": "kr",
-    "theharvester": "theHarvester",
-    "linkfinder": "linkfinder.py",
-    "secretfinder": "SecretFinder.py",
-    "shodan-cli": "shodan",
-    "urlscan-cli": "urlscan",
-    "sublist3r": "python3",
-    "nmap-vulscan": "nmap",
-    "burp-cli": "burp-cli",
-}
-
-
-def _tool_metadata(tool_name: str) -> dict[str, str | bool]:
-    normalized = tool_name.strip().lower()
-    base = TOOL_REQUIREMENTS.get(normalized, {})
-    requirements = str(base.get("requirements") or "Instalação manual ou externa pode ser necessária.")
-    return {
-        "url": str(base.get("url") or ""),
-        "requirements": requirements,
-        "install_supported": normalized in INSTALL_SUPPORTED_TOOLS,
-        "requires_credentials": normalized in {"nessus", "shodan-cli", "urlscan-cli", "chaos", "burp-cli"},
-    }
-
 
 def _parse_targets(targets_text: str) -> list[str]:
     return [item.strip() for item in targets_text.split(";") if item.strip()]
@@ -844,160 +750,6 @@ def _setting_int(db: Session, owner_id: int, key: str, default: int, min_value: 
     return max(min_value, min(max_value, value))
 
 
-def _tool_installed(tool_name: str) -> bool:
-    """Tool is "installed" iff the Kali runner has a profile that maps to it.
-
-    The backend image no longer carries any offensive tooling — every probe
-    runs inside the Kali sidecar via HTTP. The local `shutil.which` checks
-    were retired together with the per-worker tool installation. Nessus is
-    the only out-of-band integration that still has a Python-package gate.
-    """
-    normalized = tool_name.strip().lower()
-    if normalized == "nessus":
-        return find_spec("nessus") is not None or find_spec("pynessus") is not None
-    try:
-        from app.services.kali_executor import TOOL_TO_PROFILE
-    except Exception:
-        return False
-    return normalized in TOOL_TO_PROFILE
-
-
-def _run_install_command(command: list[str]) -> bool:
-    try:
-        proc = subprocess.run(command, check=False, capture_output=True, text=True, timeout=600)
-        return proc.returncode == 0
-    except Exception:
-        return False
-
-
-def _install_tool(tool_name: str) -> bool:
-    """Tool installation from the backend is intentionally disabled.
-
-    Kali runner owns the offensive-tool repository. Adding/removing tools now
-    means changing the Kali image/profiles, not mutating the backend container
-    at runtime.
-    """
-    return False
-
-def _burp_api_host() -> str:
-    host = str(os.getenv("BURP_API_HOST", "burp_rest")).strip()
-    return host or "burp_rest"
-
-
-def _burp_api_port() -> str:
-    port = str(os.getenv("BURP_API_PORT", "1337")).strip()
-    return port or "1337"
-
-
-def _burp_api_key() -> str:
-    return str(os.getenv("BURP_API_KEY", "")).strip()
-
-
-def _burp_api_base_url() -> str:
-    host = _burp_api_host()
-    port = _burp_api_port()
-    api_key = _burp_api_key()
-    if api_key:
-        return f"http://{host}:{port}/{api_key}/v0.1"
-    return f"http://{host}:{port}/v0.1"
-
-
-def _burp_cli_list_scans_output() -> str:
-    cli = shutil.which("burp-api-cli") or shutil.which("burp-cli")
-    if not cli:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="burp-cli nao instalado no backend")
-
-    cmd = [cli, "-t", _burp_api_host(), "-p", _burp_api_port(), "-L"]
-    try:
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"falha ao listar scans burp: {exc}")
-
-    text = "\n".join(part for part in [proc.stdout or "", proc.stderr or ""] if part).strip()
-    if proc.returncode != 0 and text:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=text[:500])
-    return text
-
-
-def _parse_burp_cli_list_output(output: str) -> list[dict[str, str]]:
-    scans: list[dict[str, str]] = []
-    seen_ids: set[str] = set()
-
-    # burp-cli -L pode retornar tabela em largura fixa com quebras de linha.
-    # Fazemos busca no texto inteiro para capturar id/url/status mesmo quebrados.
-    pattern = re.compile(
-        r"(?<!\d)(?P<id>\d+)\s+(?P<url>https?://\S+|scan_\d+)\s+(?P<status>paused|auditing|running|succeeded|failed|cancelled)\b",
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(output or ""):
-        scan_id = str(match.group("id") or "").strip()
-        if not scan_id or scan_id in seen_ids:
-            continue
-        seen_ids.add(scan_id)
-        scans.append(
-            {
-                "id": scan_id,
-                "url": str(match.group("url") or "").strip(),
-                "status": str(match.group("status") or "").strip().lower(),
-            }
-        )
-    return scans
-
-
-def _burp_api_call(method: str, path: str, timeout: int = 12) -> tuple[bool, int, str]:
-    req = urllib.request.Request(_burp_api_base_url() + path, method=method.upper())
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = (response.read() or b"").decode("utf-8", "ignore")
-            return True, int(response.status), body
-    except urllib.error.HTTPError as exc:
-        body = (exc.read() or b"").decode("utf-8", "ignore")
-        return False, int(getattr(exc, "code", 0) or 0), body
-    except Exception as exc:
-        return False, 0, str(exc)
-
-
-def _burp_cli_history_path() -> str:
-    custom_path = str(os.getenv("BURP_CLI_HISTORY_FILE", "")).strip()
-    if custom_path:
-        return custom_path
-    return "/root/.burp-cli/scan_history.json"
-
-
-def _prune_burp_cli_history(scan_ids_to_remove: list[str]) -> int:
-    targets = {str(item).strip() for item in (scan_ids_to_remove or []) if str(item).strip()}
-    if not targets:
-        return 0
-
-    path = _burp_cli_history_path()
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except Exception:
-        return 0
-
-    records = payload.get("records") if isinstance(payload, dict) else None
-    if not isinstance(records, list):
-        return 0
-
-    kept_records = [
-        row
-        for row in records
-        if str((row or {}).get("scan_id") or "").strip() not in targets
-    ]
-    removed = len(records) - len(kept_records)
-    if removed <= 0:
-        return 0
-
-    payload["records"] = kept_records
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
-    except Exception:
-        return 0
-    return removed
-
-
 @router.get("/config/runtime")
 def get_runtime_flags(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     debug_mode = _get_setting(db, current_user.id, "debug_mode", "false") == "true"
@@ -1097,262 +849,6 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
             }
             for row in error_logs
         ],
-    }
-
-
-@router.get("/config/tools")
-def list_tools_catalog(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    def _group_payload(mode_name: str, groups: dict) -> list[dict]:
-        result: list[dict] = []
-        for group_name, group in groups.items():
-            tools = []
-            for tool in group.get("tools", []):
-                metadata = _tool_metadata(tool)
-                tools.append(
-                    {
-                        "name": tool,
-                        "installed": _tool_installed(tool),
-                        **metadata,
-                    }
-                )
-            result.append(
-                {
-                    "mode": mode_name,
-                    "group": group_name,
-                    "queue": group.get("queue"),
-                    "description": group.get("description", ""),
-                    "tools": tools,
-                }
-            )
-        return result
-
-    nessus_enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
-    nessus_url = _get_setting(db, current_user.id, "nessus_url", "")
-    burp_enabled = _get_setting(db, current_user.id, "burp_enabled", "false") == "true"
-    burp_license_key = _get_setting(db, current_user.id, "burp_license_key", "")
-    shodan_key = _get_setting(db, current_user.id, "shodan_api_key", "")
-
-    unique_tools: dict[str, dict] = {}
-    for groups in [UNIT_WORKER_GROUPS, SCHEDULED_WORKER_GROUPS]:
-        for group in groups.values():
-            for tool in group.get("tools", []):
-                if tool not in unique_tools:
-                    unique_tools[tool] = {
-                        "name": tool,
-                        "installed": _tool_installed(tool),
-                        **_tool_metadata(tool),
-                    }
-
-    return {
-        "catalog": {
-            "unit": _group_payload("unit", UNIT_WORKER_GROUPS),
-            "scheduled": _group_payload("scheduled", SCHEDULED_WORKER_GROUPS),
-        },
-        "requirements_catalog": sorted(unique_tools.values(), key=lambda item: item["name"]),
-        "nessus": {
-            "enabled": nessus_enabled,
-            "url": nessus_url,
-            "pynessus_installed": _tool_installed("nessus"),
-            "configured": bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")),
-            "status": "ativo" if bool(nessus_url and _get_setting(db, current_user.id, "nessus_access_key", "") and _get_setting(db, current_user.id, "nessus_secret_key", "")) else "desativado",
-        },
-        "burp": {
-            "enabled": burp_enabled,
-            "configured": bool(burp_license_key),
-            "burp_cli_installed": _tool_installed("burp-cli"),
-            "status": "ativo" if bool(burp_enabled and burp_license_key) else "desativado",
-        },
-        "shodan": {
-            "configured": bool(shodan_key),
-            "enabled": bool(shodan_key),
-            "status": "ativo" if shodan_key else "desativado",
-        },
-    }
-
-
-@router.post("/config/tools/install-one")
-def install_tool(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    tool = str(payload.get("tool") or "").strip().lower()
-    log_audit(
-        db,
-        event_type="tools.install_blocked",
-        message=f"Instalacao avulsa bloqueada: {tool or '-'}",
-        actor_user_id=current_user.id,
-        level="WARNING",
-        metadata={"tool": tool, "reason": "kali_runner_is_tool_repository"},
-    )
-    db.commit()
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="Instalacao avulsa removida. Ferramentas devem ser adicionadas no Kali runner.",
-    )
-
-
-@router.get("/config/nessus")
-def get_nessus_config(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    enabled = _get_setting(db, current_user.id, "nessus_enabled", "false") == "true"
-    url = _get_setting(db, current_user.id, "nessus_url", "")
-    access_key = _get_setting(db, current_user.id, "nessus_access_key", "")
-    secret_key = _get_setting(db, current_user.id, "nessus_secret_key", "")
-    verify_tls = _get_setting(db, current_user.id, "nessus_verify_tls", "true") == "true"
-
-    return {
-        "enabled": enabled,
-        "url": url,
-        "access_key": access_key,
-        "secret_key": "***" if secret_key else "",
-        "verify_tls": verify_tls,
-        "configured": bool(url and access_key and secret_key),
-        "pynessus_installed": _tool_installed("nessus"),
-    }
-
-
-@router.put("/config/nessus")
-def save_nessus_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    enabled = _parse_bool(payload, "enabled", False)
-    url = str(payload.get("url") or "").strip()
-    access_key = str(payload.get("access_key") or "").strip()
-    secret_key = str(payload.get("secret_key") or "").strip()
-    verify_tls = _parse_bool(payload, "verify_tls", True)
-
-    _set_setting(db, current_user.id, "nessus_enabled", "true" if enabled else "false")
-    _set_setting(db, current_user.id, "nessus_url", url)
-    if access_key:
-        _set_setting(db, current_user.id, "nessus_access_key", access_key)
-    if secret_key and secret_key != "***":
-        _set_setting(db, current_user.id, "nessus_secret_key", secret_key)
-    _set_setting(db, current_user.id, "nessus_verify_tls", "true" if verify_tls else "false")
-    db.commit()
-
-    return {"ok": True}
-
-
-@router.get("/config/burp")
-def get_burp_config(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    enabled = _get_setting(db, current_user.id, "burp_enabled", "false") == "true"
-    license_key = _get_setting(db, current_user.id, "burp_license_key", "")
-    return {
-        "enabled": enabled,
-        "license_key": f"***{license_key[-4:]}" if license_key else "",
-        "configured": bool(license_key),
-        "burp_cli_installed": _tool_installed("burp-cli"),
-    }
-
-
-@router.put("/config/burp")
-def save_burp_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    enabled = _parse_bool(payload, "enabled", False)
-    license_key = str(payload.get("license_key") or "").strip()
-
-    _set_setting(db, current_user.id, "burp_enabled", "true" if enabled else "false")
-    if license_key and not license_key.startswith("***"):
-        _set_setting(db, current_user.id, "burp_license_key", license_key)
-    db.commit()
-    return {"ok": True}
-
-
-@router.get("/config/burp/scans")
-def get_burp_scans(current_user: User = Depends(require_admin)):
-    raw_output = _burp_cli_list_scans_output()
-    scans = _parse_burp_cli_list_output(raw_output)
-
-    by_status: dict[str, int] = {
-        "running": 0,
-        "auditing": 0,
-        "paused": 0,
-        "succeeded": 0,
-        "failed": 0,
-        "cancelled": 0,
-    }
-    for scan in scans:
-        st = str(scan.get("status") or "").lower()
-        if st in by_status:
-            by_status[st] += 1
-
-    return {
-        "total": len(scans),
-        "status_counts": by_status,
-        "scans": scans,
-        "api_host": _burp_api_host(),
-        "api_port": _burp_api_port(),
-    }
-
-
-@router.post("/config/burp/scans/actions")
-def burp_scans_actions(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    action = str(payload.get("action") or "").strip().lower()
-    scan_ids_payload = payload.get("scan_ids") or []
-    only_active = bool(payload.get("only_active", False))
-
-    if action not in {"cancel", "remove", "cancel_and_remove"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="acao invalida")
-
-    known_scans = _parse_burp_cli_list_output(_burp_cli_list_scans_output())
-    known_ids = {str(item.get("id") or "").strip() for item in known_scans}
-    active_ids = {
-        str(item.get("id") or "").strip()
-        for item in known_scans
-        if str(item.get("status") or "").strip().lower() in {"running", "auditing", "paused"}
-    }
-
-    requested_ids = [str(v).strip() for v in scan_ids_payload if str(v).strip()]
-    if not requested_ids:
-        requested_ids = sorted(active_ids if only_active else known_ids)
-
-    scan_ids = [sid for sid in requested_ids if sid in known_ids]
-
-    results: list[dict[str, object]] = []
-    for scan_id in scan_ids:
-        row: dict[str, object] = {"scan_id": scan_id, "cancel": None, "remove": None}
-
-        if action in {"cancel", "cancel_and_remove"}:
-            ok, code, _ = _burp_api_call("POST", f"/scan/{scan_id}/cancel")
-            row["cancel"] = {"ok": ok, "code": code}
-
-        if action in {"remove", "cancel_and_remove"}:
-            ok, code, _ = _burp_api_call("DELETE", f"/scan/{scan_id}")
-            row["remove"] = {"ok": ok, "code": code}
-
-        results.append(row)
-
-    removed_history_count = 0
-    if action in {"remove", "cancel_and_remove"}:
-        removable_ids = [
-            str(item.get("scan_id") or "").strip()
-            for item in results
-            if isinstance(item.get("remove"), dict)
-            and bool(item.get("remove", {}).get("ok"))
-            and int(item.get("remove", {}).get("code") or 0) in {200, 202, 204, 404}
-        ]
-        removed_history_count = _prune_burp_cli_history(removable_ids)
-
-    # Mantem o tracker local consistente para o -L
-    refresh_output = _burp_cli_list_scans_output()
-    refresh_scans = _parse_burp_cli_list_output(refresh_output)
-
-    log_audit(
-        db,
-        event_type="burp.scans.action",
-        message=f"Acao em scans Burp: {action}",
-        actor_user_id=current_user.id,
-        metadata={
-            "action": action,
-            "requested": requested_ids,
-            "applied": scan_ids,
-            "results": results,
-            "removed_history_count": removed_history_count,
-        },
-    )
-    db.commit()
-
-    return {
-        "ok": True,
-        "action": action,
-        "requested": requested_ids,
-        "applied": scan_ids,
-        "results": results,
-        "removed_history_count": removed_history_count,
-        "remaining_total": len(refresh_scans),
     }
 
 
@@ -2162,8 +1658,10 @@ def kali_runner_health(current_user: User = Depends(get_current_user)):
     """
     from app.core.config import settings
     from app.services.kali_executor import runner_health, TOOL_TO_PROFILE
+    from app.services.kali_catalog import kali_installation_report
 
     health = runner_health()
+    catalog = kali_installation_report(expected_tools=list(TOOL_TO_PROFILE.keys()))
     return {
         "use_kali_executor": settings.use_kali_executor,
         "kali_runner_url": settings.kali_runner_url,
@@ -2171,8 +1669,34 @@ def kali_runner_health(current_user: User = Depends(get_current_user)):
             t.strip() for t in (settings.kali_executor_tools or "").split(",") if t.strip()
         ],
         "tool_profile_mappings": len(TOOL_TO_PROFILE),
+        "kali_catalog": {
+            "source": catalog.get("source"),
+            "runner_reachable": catalog.get("runner_reachable"),
+            "kali_tools_detected": catalog.get("kali_tools_detected"),
+            "profiles_loaded": catalog.get("profiles_loaded"),
+            "profiled_tools_ready": len(catalog.get("installed") or []),
+            "profiled_tools_missing": len(catalog.get("missing") or []),
+            "coverage_ratio": catalog.get("coverage_ratio"),
+        },
         "runner": health,
     }
+
+
+@router.get("/kali-runner/catalog")
+def kali_runner_catalog(
+    include_unprofiled: bool = Query(False),
+    limit: int = Query(500, ge=1, le=5000),
+    force: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+):
+    """Maps Kali tools to runner profiles, workers, mission phases and skills."""
+    from app.services.kali_catalog import build_kali_tool_matrix
+
+    return build_kali_tool_matrix(
+        include_unprofiled=include_unprofiled,
+        limit=limit,
+        force=force,
+    )
 
 
 @router.get("/kali-runner/profiles")

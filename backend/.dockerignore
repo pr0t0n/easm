@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime/state artifacts
+celerybeat-schedule
+burp/
+burp-export/
+
+# Offensive tool assets belong to kali-runner, not backend/workers.
+nuclei-templates/

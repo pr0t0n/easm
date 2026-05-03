@@ -135,6 +135,7 @@ export default function WorkersPage() {
   const [pipeline, setPipeline]   = useState(null);
   const [health, setHealth]       = useState(null);
   const [overview, setOverview]   = useState(null);
+  const [kaliCatalog, setKaliCatalog] = useState(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState("");
   const [expandedAgent, setExpandedAgent] = useState(null);
@@ -144,14 +145,16 @@ export default function WorkersPage() {
     setLoading(true);
     setError("");
     try {
-      const [pipelineRes, healthRes, overviewRes] = await Promise.all([
+      const [pipelineRes, healthRes, overviewRes, kaliCatalogRes] = await Promise.all([
         client.get("/api/worker-manager/pipeline"),
         client.get("/api/worker-manager/health"),
         client.get("/api/worker-manager/overview"),
+        client.get("/api/kali-runner/catalog"),
       ]);
       setPipeline(pipelineRes.data || null);
       setHealth(healthRes.data || null);
       setOverview(overviewRes.data || null);
+      setKaliCatalog(kaliCatalogRes.data || null);
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao carregar worker manager.");
     } finally {
@@ -191,11 +194,13 @@ export default function WorkersPage() {
             <h2 className="text-xl font-semibold text-slate-100">Worker Manager</h2>
             <p className="mt-1 text-sm text-slate-400">
               Pipeline EASM 5-Agent · {agents.length} agentes · {pipeline?.total_mission_items || 0} missões catalogadas
+              {kaliCatalog ? ` · Kali ${kaliCatalog.profiled_tools_ready}/${kaliCatalog.profile_mappings_expected} profiles prontos` : ""}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {tabBtn("pipeline", "Pipeline")}
             {tabBtn("workers", "Workers ao Vivo")}
+            {tabBtn("kali", "Kali Catalog")}
             {tabBtn("missions", "Catálogo de Missões")}
             {tabBtn("metrics", "Métricas")}
             <button onClick={load} disabled={loading}
@@ -298,6 +303,75 @@ export default function WorkersPage() {
             </div>
           </section>
         </>
+      )}
+
+      {/* ── TAB: KALI CATALOG ───────────────────────────────────────────── */}
+      {activeTab === "kali" && (
+        <section className="panel p-5">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-slate-100">Kali Runner Catalog</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Ferramentas executáveis no Kali, mapeadas para profile, worker, skill e fase de missão.
+              </p>
+            </div>
+            <div className="grid min-w-[280px] grid-cols-2 gap-2 text-xs">
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
+                <p className="text-slate-500">profiles prontos</p>
+                <p className="text-lg font-semibold text-emerald-300">{kaliCatalog?.profiled_tools_ready || 0}</p>
+              </div>
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                <p className="text-slate-500">pendentes</p>
+                <p className="text-lg font-semibold text-amber-300">{kaliCatalog?.profiled_tools_missing || 0}</p>
+              </div>
+              <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">
+                <p className="text-slate-500">binários Kali</p>
+                <p className="text-lg font-semibold text-slate-100">{kaliCatalog?.kali_tools_detected || 0}</p>
+              </div>
+              <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">
+                <p className="text-slate-500">profiles</p>
+                <p className="text-lg font-semibold text-slate-100">{kaliCatalog?.profiles_loaded || 0}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 overflow-hidden rounded-xl border border-slate-800">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-900 text-slate-400">
+                <tr className="text-left">
+                  <th className="px-3 py-2">Tool</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Profile</th>
+                  <th className="px-3 py-2">Worker</th>
+                  <th className="px-3 py-2">Skills / fases</th>
+                  <th className="px-3 py-2">Uso</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 bg-slate-950/50">
+                {(kaliCatalog?.tools || []).map((tool) => (
+                  <tr key={tool.name}>
+                    <td className="px-3 py-2 font-mono text-slate-100">{tool.name}</td>
+                    <td className="px-3 py-2">
+                      <span className={`rounded-md px-2 py-0.5 ${tool.available ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}>
+                        {tool.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-slate-300">
+                      <span className="font-mono">{tool.profile}</span>
+                      {tool.executable && <span className="ml-1 text-slate-500">({tool.executable})</span>}
+                    </td>
+                    <td className="px-3 py-2 text-slate-300">{tool.worker_group || "unassigned"}</td>
+                    <td className="px-3 py-2 text-slate-400">
+                      {(tool.skills || []).slice(0, 2).join(", ") || "-"}
+                      {(tool.mission_phases || []).length > 0 && <span className="ml-1 text-slate-500">[{tool.mission_phases.join(", ")}]</span>}
+                    </td>
+                    <td className="max-w-md px-3 py-2 text-slate-400">{tool.need || tool.functionality || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
 
       {/* ── TAB: WORKERS AO VIVO ────────────────────────────────────────── */}

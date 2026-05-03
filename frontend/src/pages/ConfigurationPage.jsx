@@ -3,8 +3,6 @@ import client from "../api/client";
 
 export default function ConfigurationPage() {
   const [activeTab, setActiveTab] = useState("runtime");
-  const [shodanApiKey, setShodanApiKey] = useState("");
-  const [shodanMeta, setShodanMeta] = useState({ configured: false, enabled: false, status: "desativado" });
   const [runtime, setRuntime] = useState({
     debug_mode: false,
     verbose_mode: false,
@@ -20,93 +18,32 @@ export default function ConfigurationPage() {
   const [overview, setOverview] = useState(null);
   const [lines, setLines] = useState([]);
   const [newLine, setNewLine] = useState({ name: "", category: "reconhecimento", position: 0, enabled: true });
-  const [toolsCatalog, setToolsCatalog] = useState({ unit: [], scheduled: [] });
-  const [nessusMeta, setNessusMeta] = useState({ enabled: false, configured: false, pynessus_installed: false, url: "" });
-  const [nessusConfig, setNessusConfig] = useState({ enabled: false, url: "", access_key: "", secret_key: "", verify_tls: true });
-  const [burpMeta, setBurpMeta] = useState({ enabled: false, configured: false, burp_cli_installed: false, status: "desativado" });
-  const [burpConfig, setBurpConfig] = useState({ enabled: false, license_key: "" });
-  const [burpScans, setBurpScans] = useState({ total: 0, status_counts: {}, scans: [], api_host: "", api_port: "" });
-  const [burpBusy, setBurpBusy] = useState(false);
   const [supervisorTrail, setSupervisorTrail] = useState({ summary: null, scans: [] });
 
   const loadAll = async () => {
-    const [shodanRes, runtimeRes, statusRes, workerGroupsRes, linesRes, overviewRes, toolsRes, nessusRes, burpRes, supervisorRes, burpScansRes] = await Promise.all([
-      client.get("/api/config/shodan"),
+    const [runtimeRes, statusRes, workerGroupsRes, linesRes, overviewRes, supervisorRes] = await Promise.all([
       client.get("/api/config/runtime"),
       client.get("/api/config/ai-status"),
       client.get("/api/worker-manager/groups"),
       client.get("/api/worker-manager/lines"),
       client.get("/api/worker-manager/overview"),
-      client.get("/api/config/tools"),
-      client.get("/api/config/nessus"),
-      client.get("/api/config/burp"),
       client.get("/api/worker-manager/supervisor-trail", { params: { limit: 20 } }),
-      client.get("/api/config/burp/scans"),
     ]);
-    setShodanApiKey(shodanRes.data.api_key || "");
     setRuntime(runtimeRes.data);
     setAiStatus(statusRes.data);
     setWorkerGroups(workerGroupsRes.data || {});
     setLines(linesRes.data);
     setOverview(overviewRes.data || null);
-    setToolsCatalog(toolsRes.data?.catalog || { unit: [], scheduled: [] });
-    setNessusMeta(toolsRes.data?.nessus || { enabled: false, configured: false, pynessus_installed: false, url: "" });
-    setNessusConfig({
-      enabled: Boolean(nessusRes.data?.enabled),
-      url: nessusRes.data?.url || "",
-      access_key: nessusRes.data?.access_key || "",
-      secret_key: "",
-      verify_tls: Boolean(nessusRes.data?.verify_tls),
-    });
-    setBurpMeta(toolsRes.data?.burp || { enabled: false, configured: false, burp_cli_installed: false, status: "desativado" });
-    setBurpConfig({
-      enabled: Boolean(burpRes.data?.enabled),
-      license_key: burpRes.data?.license_key || "",
-    });
-    setBurpScans(burpScansRes.data || { total: 0, status_counts: {}, scans: [] });
     setSupervisorTrail(supervisorRes.data || { summary: null, scans: [] });
-    setShodanMeta({
-      configured: Boolean(shodanRes.data?.configured),
-      enabled: Boolean(shodanRes.data?.enabled),
-      status: shodanRes.data?.status || "desativado",
-    });
   };
 
   useEffect(() => {
     loadAll();
   }, []);
 
-  const saveShodan = async () => {
-    await client.put("/api/config/shodan", { api_key: shodanApiKey });
-  };
-
   const saveRuntime = async () => {
     await client.put("/api/config/runtime", runtime);
     await loadAll();
-  };
-
-  const saveNessus = async () => {
-    await client.put("/api/config/nessus", nessusConfig);
-    await loadAll();
-  };
-
-  const saveBurp = async () => {
-    await client.put("/api/config/burp", burpConfig);
-    await loadAll();
-  };
-
-  const runBurpScanAction = async (action, scanIds = [], onlyActive = false) => {
-    setBurpBusy(true);
-    try {
-      await client.post("/api/config/burp/scans/actions", {
-        action,
-        scan_ids: scanIds,
-        only_active: onlyActive,
-      });
-      await loadAll();
-    } finally {
-      setBurpBusy(false);
-    }
   };
 
   const addLine = async () => {
@@ -131,7 +68,6 @@ export default function ConfigurationPage() {
       <section className="panel p-4">
         <div className="flex flex-wrap gap-2">
           <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Runtime</button>
-          <button onClick={() => setActiveTab("tools")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "tools" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Ferramentas</button>
           <button onClick={() => setActiveTab("workers")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "workers" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Workers</button>
         </div>
       </section>
@@ -401,188 +337,6 @@ export default function ConfigurationPage() {
       </section>
       )}
 
-      {activeTab === "tools" && (
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Ferramentas em Uso / Instaladas</h3>
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
-            {["unit", "scheduled"].map((modeName) => (
-              <div key={modeName} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-                <p className="font-semibold uppercase">{modeName}</p>
-                <div className="mt-2 space-y-2">
-                  {(toolsCatalog[modeName] || []).map((group) => (
-                    <div key={`${modeName}-${group.group}`} className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
-                      <p className="text-sm font-medium">{group.group} - {group.queue}</p>
-                      <p className="text-xs text-slate-400">{group.description}</p>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {(group.tools || []).map((tool) => (
-                          <span key={`${group.group}-${tool.name}`} className={`rounded-md px-2 py-0.5 text-xs ${tool.installed ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}`}>
-                            {tool.name} {tool.installed ? "(instalada)" : "(nao instalada)"}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {activeTab === "tools" && (
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Shodan</h3>
-          <p className="mt-1 text-xs text-slate-300">Enriquecimento de ativos e exposicoes externas via API Shodan.</p>
-          <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
-            <p>Status: <span className={shodanMeta.configured ? "text-emerald-300" : "text-amber-300"}>{shodanMeta.status}</span></p>
-            <p className="mt-1 text-xs text-slate-400">{shodanMeta.configured ? "A integracao pode enriquecer ativos e exposicoes externas." : "Desativado ate que uma API key valida seja salva."}</p>
-          </div>
-          <div className="mt-3">
-            <label className="mb-1 block text-sm text-slate-300">Shodan API Key</label>
-            <input
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-              value={shodanApiKey}
-              onChange={(e) => setShodanApiKey(e.target.value)}
-              placeholder="insira a chave"
-            />
-            <button onClick={saveShodan} className="mt-3 rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Salvar chave</button>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "tools" && (
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Nessus (pynessus)</h3>
-          <p className="mt-1 text-xs text-slate-300">Habilita o Nessus como discovery/scanner/analista de vulnerabilidade.</p>
-          <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
-            <p>Status: <span className={nessusMeta.configured ? "text-emerald-300" : "text-amber-300"}>{nessusMeta.status || (nessusMeta.configured ? "ativo" : "desativado")}</span></p>
-            <p>pynessus instalado: <span className={nessusMeta.pynessus_installed ? "text-emerald-300" : "text-rose-300"}>{String(nessusMeta.pynessus_installed)}</span></p>
-            <p>Nessus configurado: <span className={nessusMeta.configured ? "text-emerald-300" : "text-amber-300"}>{String(nessusMeta.configured)}</span></p>
-            <p>URL atual: {nessusMeta.url || "nao definida"}</p>
-            {!nessusMeta.configured && <p className="mt-1 text-xs text-slate-400">Desativado ate que URL, Access Key e Secret Key sejam informados.</p>}
-          </div>
-
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <label className="flex items-center gap-2 text-sm md:col-span-2">
-              <input type="checkbox" checked={nessusConfig.enabled} onChange={(e) => setNessusConfig({ ...nessusConfig, enabled: e.target.checked })} />
-              Habilitar Nessus
-            </label>
-            <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="https://nessus.local:8834" value={nessusConfig.url} onChange={(e) => setNessusConfig({ ...nessusConfig, url: e.target.value })} />
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={nessusConfig.verify_tls} onChange={(e) => setNessusConfig({ ...nessusConfig, verify_tls: e.target.checked })} />
-              Verificar TLS
-            </label>
-            <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Access Key" value={nessusConfig.access_key} onChange={(e) => setNessusConfig({ ...nessusConfig, access_key: e.target.value })} />
-            <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Secret Key (deixe vazio para manter)" value={nessusConfig.secret_key} onChange={(e) => setNessusConfig({ ...nessusConfig, secret_key: e.target.value })} />
-          </div>
-          <button onClick={saveNessus} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar Nessus</button>
-        </section>
-      )}
-
-      {activeTab === "tools" && (
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Burp Professional CLI</h3>
-          <p className="mt-1 text-xs text-slate-300">Integra o Burp CLI no worker de vulnerabilidade e usa a licenca salva no settings.</p>
-          <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
-            <p>Status: <span className={burpMeta.configured ? "text-emerald-300" : "text-amber-300"}>{burpMeta.status || (burpMeta.configured ? "ativo" : "desativado")}</span></p>
-            <p>burp-cli instalado: <span className={burpMeta.burp_cli_installed ? "text-emerald-300" : "text-rose-300"}>{String(burpMeta.burp_cli_installed)}</span></p>
-            <p>Licenca configurada: <span className={burpMeta.configured ? "text-emerald-300" : "text-amber-300"}>{String(burpMeta.configured)}</span></p>
-          </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <label className="flex items-center gap-2 text-sm md:col-span-2">
-              <input type="checkbox" checked={burpConfig.enabled} onChange={(e) => setBurpConfig({ ...burpConfig, enabled: e.target.checked })} />
-              Habilitar Burp CLI
-            </label>
-            <input
-              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
-              placeholder="Burp license key (deixe mascarada para manter)"
-              value={burpConfig.license_key}
-              onChange={(e) => setBurpConfig({ ...burpConfig, license_key: e.target.value })}
-            />
-          </div>
-          <button onClick={saveBurp} className="mt-3 rounded-xl bg-emerald-500 px-4 py-2 font-semibold text-white">Salvar Burp</button>
-
-          <div className="mt-5 rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className="text-sm font-semibold">Analise de Scans Burp</h4>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => loadAll()}
-                  disabled={burpBusy}
-                  className="rounded-lg bg-blue-700 px-3 py-1 text-xs text-white disabled:opacity-60"
-                >
-                  Atualizar
-                </button>
-                <button
-                  onClick={() => runBurpScanAction("cancel_and_remove", [], true)}
-                  disabled={burpBusy}
-                  className="rounded-lg bg-rose-700 px-3 py-1 text-xs text-white disabled:opacity-60"
-                >
-                  Cancelar + remover em execucao
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-2 grid gap-2 text-xs text-slate-300 md:grid-cols-3">
-              <p>Total: <span className="font-semibold text-slate-100">{burpScans.total || 0}</span></p>
-              <p>Executando: <span className="font-semibold text-amber-300">{(burpScans.status_counts?.running || 0) + (burpScans.status_counts?.auditing || 0) + (burpScans.status_counts?.paused || 0)}</span></p>
-              <p>API: <span className="font-semibold text-slate-100">{burpScans.api_host || "-"}:{burpScans.api_port || "-"}</span></p>
-            </div>
-
-            <div className="mt-3 max-h-80 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60">
-              <table className="min-w-full text-xs">
-                <thead className="sticky top-0 bg-slate-900">
-                  <tr className="text-left text-slate-300">
-                    <th className="px-2 py-2">ID</th>
-                    <th className="px-2 py-2">URL</th>
-                    <th className="px-2 py-2">Status</th>
-                    <th className="px-2 py-2">Acoes</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(burpScans.scans || []).map((scan) => {
-                    const running = ["running", "auditing", "paused"].includes(String(scan.status || "").toLowerCase());
-                    return (
-                      <tr key={scan.id} className="border-t border-slate-800">
-                        <td className="px-2 py-2 font-mono text-slate-200">{scan.id}</td>
-                        <td className="px-2 py-2 text-slate-300">{scan.url}</td>
-                        <td className="px-2 py-2">
-                          <span className={`rounded px-2 py-0.5 ${running ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}`}>
-                            {scan.status}
-                          </span>
-                        </td>
-                        <td className="px-2 py-2">
-                          <div className="flex gap-1">
-                            <button
-                              onClick={() => runBurpScanAction("cancel", [scan.id], false)}
-                              disabled={burpBusy || !running}
-                              className="rounded bg-amber-700 px-2 py-1 text-[11px] text-white disabled:opacity-40"
-                            >
-                              Cancelar
-                            </button>
-                            <button
-                              onClick={() => runBurpScanAction("remove", [scan.id], false)}
-                              disabled={burpBusy}
-                              className="rounded bg-rose-700 px-2 py-1 text-[11px] text-white disabled:opacity-40"
-                            >
-                              Remover
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {(!burpScans.scans || burpScans.scans.length === 0) && (
-                    <tr>
-                      <td colSpan={4} className="px-2 py-3 text-center text-slate-400">Sem scans no Burp</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      )}
     </main>
   );
 }

@@ -12,7 +12,6 @@ const PAGE_META = {
   "/vulnerabilidades": { eyebrow: "Security · Vulns",        title: "Vulnerabilidades",          sub: "Achados priorizados por severidade, FAIR e AGE" },
   "/evolucao":       { eyebrow: "Security · Evolution",      title: "Attack Evolution",          sub: "Trajetória da postura de segurança ao longo do tempo" },
   "/relatorios":     { eyebrow: "Security · Reports",        title: "Relatórios",                sub: "Documentação executiva e técnica gerada por scan" },
-  "/ferramentas":    { eyebrow: "Management · Tools",        title: "Ferramentas",               sub: "Catálogo de ferramentas instaladas e cobertura" },
   "/workers":        { eyebrow: "Management · Workers",      title: "Workers",                   sub: "Heartbeats e capacidade dos agentes especializados" },
   "/jobs":           { eyebrow: "Management · Jobs Registry", title: "Jobs Registry",            sub: "Trilha de tarefas Celery por scan" },
   "/worker-logs":    { eyebrow: "Management · Logs",         title: "Worker Logs",               sub: "Streaming de logs operacionais por worker" },

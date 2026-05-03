@@ -1597,7 +1597,7 @@ def _source_group_from_details(details: dict) -> str:
         return "osint"
     if node in {"vuln", "fuzzing", "api", "code_js"} or worker in {"analise_vulnerabilidade", "vuln"}:
         return "vuln"
-    if tool in {"burp-cli", "nikto", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
+    if tool in {"nikto", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
         return "vuln"
     return "other"
 
@@ -3144,7 +3144,6 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
         mission_index=state_data.get("mission_index", 0),
         mission_items=state_data.get("mission_items") or [],
         node_history=state_data.get("node_history") or [],
-        burp_status=state_data.get("burp_status", "none"),
         discovered_ports=state_data.get("discovered_ports", []),
         pending_port_tests=state_data.get("pending_port_tests", []),
         retry_attempt=job.retry_attempt,
@@ -3694,11 +3693,7 @@ def scan_report(
     scan_mode = str((job.state_data or {}).get("scan_mode") or ("scheduled" if str(job.mode or "").lower() == "scheduled" else "unit")).strip().lower()
     groups = get_worker_groups("scheduled" if scan_mode == "scheduled" else "unit")
     vuln_tools = list((groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
-    report_focus_tools = [
-        "burp-cli",
-        "nmap-vulscan",
-        "nikto",
-    ]
+    report_focus_tools = ["nmap-vulscan", "nikto", "nuclei"]
     tool_execution_summary = _build_tool_execution_summary(job, scan_logs, vuln_tools)
     focused_tool_execution = {
         **tool_execution_summary,
@@ -4266,7 +4261,7 @@ def dashboard_insights(
         latest_mode = str((latest_scan.state_data or {}).get("scan_mode") or ("scheduled" if str(latest_scan.mode or "").lower() == "scheduled" else "unit")).strip().lower()
         latest_groups = get_worker_groups("scheduled" if latest_mode == "scheduled" else "unit")
         latest_vuln_tools = list((latest_groups.get("analise_vulnerabilidade") or {}).get("tools") or [])
-        focus_tools = ["burp-cli", "nmap-vulscan", "nikto"]
+        focus_tools = ["nmap-vulscan", "nikto", "nuclei"]
         base_summary = _build_tool_execution_summary(latest_scan, latest_scan_logs, latest_vuln_tools)
         vuln_tool_execution = {
             **base_summary,
@@ -5210,13 +5205,6 @@ def get_easm_report(
     # ── 7. NODE HISTORY ─────────────────────────────────────────────────────
     node_history = state_data.get("node_history", [])
     
-    # ── 8. BURP ASYNC STATUS ────────────────────────────────────────────────
-    burp_info = {
-        "status": state_data.get("burp_status", "none"),
-        "findings_count": state_data.get("burp_findings_count", 0),
-        "targets_count": state_data.get("burp_async_target_count", 0),
-    }
-    
     return {
         # Metadata
         "scan_id": scan.id,
@@ -5286,8 +5274,6 @@ def get_easm_report(
             "total_nodes_executed": len(node_history),
         },
         
-        # Burp Async
-        "burp_async": burp_info,
     }
 
 

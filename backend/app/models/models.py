@@ -299,7 +299,7 @@ class Vulnerability(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
     finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
-    tool_source: Mapped[str] = mapped_column(String(100))  # burp, nmap-vulscan, nikto, shodan, etc
+    tool_source: Mapped[str] = mapped_column(String(100))  # nmap-vulscan, nikto, shodan, etc
     cve_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     severity: Mapped[str] = mapped_column(String(20))  # critical, high, medium, low, info
     cvss_score: Mapped[float | None] = mapped_column(sa.Float, nullable=True)

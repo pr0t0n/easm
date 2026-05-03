@@ -24,7 +24,6 @@ export const TOOL_PALETTE = {
   massdns: "border-teal-500/50   bg-teal-500/10   text-teal-300",
   sublist3r: "border-sky-500/50    bg-sky-500/10    text-sky-300",
   "shodan-cli": "border-orange-500/50 bg-orange-500/10 text-orange-300",
-  "burp-cli": "border-red-500/50    bg-red-500/10    text-red-300",
   nikto: "border-pink-500/50   bg-pink-500/10   text-pink-300",
   nuclei: "border-indigo-500/50 bg-indigo-500/10 text-indigo-300",
 };

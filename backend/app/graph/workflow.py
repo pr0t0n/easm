@@ -100,7 +100,6 @@ def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
                 sd["mission_items"] = mission_items
                 sd["node_history"] = snapshot_node_history
                 sd["current_node"] = current_node
-                sd["burp_status"] = state.get("burp_status", "none")
                 job.state_data = sd
                 _db.commit()
         finally:
@@ -206,10 +205,6 @@ class AgentState(TypedDict):
     easm_rating: dict[str, Any]             # {score, grade, factors, methodology}
     # EASM Executive fields (preenchidos pelo ExecutiveAnalystNode)
     executive_summary: str                  # Narrativa LLM gerada
-    # Burp async fields (preenchidos pelo schedule_burp)
-    burp_targets: list[str]                 # Alvos agendados para Burp assíncrono
-    burp_status: str                        # "none" | "scheduled" | "pending" | "completed"
-    burp_async_task_ids: list[str]          # Celery task IDs do chord Burp
     # Senior framework contracts
     analyst_framework: dict[str, Any]       # Framework ativo e política de decisão
     operation_plan: dict[str, Any]          # Plano estruturado por fases
@@ -621,13 +616,13 @@ def supervisor_node(state: AgentState) -> AgentState:
         next_node = "governance"
     elif "executive_analyst" not in completed:
         # Antes de fechar com analista executivo, exigir SEGUNDA PASSADA
-        # nas fases de coleta cuja cobertura de tools instaladas ainda é baixa.
+        # nas fases de coleta cuja cobertura de profiles Kali prontos ainda e baixa.
         # Caso contrário o relatório executivo é assinado em cima de scan superficial.
         coverage_gap_node = _find_node_with_uncovered_tools(state)
         if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
             _append_note(
                 state,
-                f"Segunda passada — {coverage_gap_node} ainda tem tools instaladas sem rodar.",
+                f"Segunda passada: {coverage_gap_node} ainda tem profiles Kali prontos sem rodar.",
                 phase="coverage-sweep",
             )
             next_node = coverage_gap_node
@@ -956,7 +951,6 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     # WAF
     ("wafw00f", "wafw00f"),
     # Vuln Web
-    ("burp", "burp-cli"),
     ("vulscan", "nmap-vulscan"),
     ("dalfox", "dalfox"),
     ("wapiti", "wapiti"),
@@ -973,7 +967,7 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
 def _tool_for_step(step_name: str) -> str | None:
     step = str(step_name or "").strip().lower()
     semantic_overrides = [
-        (("riskassessment", "risk assessment", "analise de vulnerabilidade"), "burp-cli"),
+        (("riskassessment", "risk assessment", "analise de vulnerabilidade"), "nuclei"),
         (("waf",), "wafw00f"),
         (("headers",), "curl-headers"),
     ]
@@ -1148,7 +1142,12 @@ def _run_tools_and_collect(
     def _dispatch_one(tool: str) -> tuple[str, dict, float]:
         exec_start = perf_counter()
         try:
-            r = execute_tool_with_workers(tool, scan_target, scan_mode=state["scan_mode"])
+            r = execute_tool_with_workers(
+                tool,
+                scan_target,
+                scan_mode=state["scan_mode"],
+                scan_id=scan_id if isinstance(scan_id, int) else None,
+            )
         except Exception as exc:
             r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
         return tool, r, perf_counter() - exec_start
@@ -1263,7 +1262,7 @@ def _run_tools_and_collect(
         if rc is not None:
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} return_code={rc}")
 
-        preview_limit = 4000 if str(tool or "").strip().lower() in {"burp", "burp-cli"} else 300
+        preview_limit = 300
 
         stdout_preview = _truncate_log(result.get("stdout"), preview_limit)
         if stdout_preview:
@@ -1284,11 +1283,6 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
             )
-        elif str(tool or "").strip().lower() in {"burp", "burp-cli"} and result.get("status") == "executed":
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} warning=executed_without_parsed_findings stdout_len={len(raw_stdout)} stderr_len={len(raw_stderr)}"
-            )
-
         extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
         for port in extracted_ports:
             discovered_ports.add(port)
@@ -1465,20 +1459,16 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
     # Mantem a lista completa do no de risk_assessment. O contrato de cobertura
-    # exige sweep de todas as tools instaladas; limitar globalmente a
-    # Burp/Nmap/Nikto deixa dalfox/sqlmap/wapiti/code/deps fora da execucao.
+    # exige sweep de todos os profiles Kali prontos; limitar globalmente a
+    # poucos scanners deixa dalfox/sqlmap/wapiti/code/deps fora da execucao.
 
     if not _is_local_target(target):
         return tools
 
-    preferred = [
-        "burp-cli", "nmap-vulscan", "nikto",
-    ]
+    preferred = ["nuclei", "nmap-vulscan", "nikto", "wapiti"]
     filtered = [tool for tool in preferred if tool in tools]
     if filtered:
         return filtered
-    if "burp-cli" in tools:
-        return ["burp-cli"]
     return tools[:3]
 
 
@@ -1850,8 +1840,6 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_curl_headers_findings(stdout, step_name, default_target)
     if tool == "nikto":
         return _extract_nikto_findings(stdout, step_name, default_target)
-    if tool == "burp-cli":
-        return _extract_burp_cli_findings(stdout, step_name, default_target)
     if tool in {"nmap-vulscan", "vulscan"}:
         return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
     if tool == "sslscan":
@@ -2344,172 +2332,6 @@ def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: 
                 },
             }
         )
-    return findings
-
-
-def _extract_burp_cli_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    severity_map = {
-        "critical": ("critical", 10),
-        "high": ("high", 8),
-        "medium": ("medium", 5),
-        "low": ("low", 3),
-        "info": ("low", 2),
-        "information": ("low", 2),
-    }
-
-    payload: dict[str, Any] = {}
-    issues: list[dict[str, Any]] = []
-    try:
-        parsed = json.loads(stdout or "{}")
-        if isinstance(parsed, dict):
-            payload = parsed
-        elif isinstance(parsed, list):
-            issues = [item for item in parsed if isinstance(item, dict)]
-    except Exception:
-        payload = {}
-
-    if not issues:
-        # Alguns formatos de output imprimem logs antes do bloco JSON.
-        json_block_match = re.search(r"(\[\s*\{.*\}\s*\])", stdout or "", re.DOTALL)
-        if json_block_match:
-            try:
-                parsed_block = json.loads(json_block_match.group(1))
-                if isinstance(parsed_block, list):
-                    issues = [item for item in parsed_block if isinstance(item, dict)]
-            except Exception:
-                pass
-
-    if not issues:
-        issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
-    if isinstance(payload.get("results"), list) and not issues:
-        issues = payload.get("results")
-
-    for raw_issue in issues:
-        if not isinstance(raw_issue, dict):
-            continue
-
-        # Burp_export.json costuma trazer eventos no formato:
-        # [{"id":..., "type":"issue_found", "issue": {...}}]
-        issue = raw_issue.get("issue") if isinstance(raw_issue.get("issue"), dict) else raw_issue
-        if not isinstance(issue, dict):
-            continue
-
-        name = _sanitize_cli_text(
-            str(issue.get("name") or issue.get("title") or issue.get("issue_name") or "Burp finding")
-        )
-        sev_raw = str(issue.get("severity") or "medium").strip().lower()
-        sev, risk_score = severity_map.get(sev_raw, ("medium", 5))
-        evidence = _sanitize_cli_text(
-            str(issue.get("evidence") or issue.get("description") or issue.get("detail") or "")
-        )
-
-        issue_url = _sanitize_cli_text(
-            str(issue.get("url") or issue.get("full_url") or issue.get("endpoint") or "")
-        )
-        if not issue_url:
-            origin = _sanitize_cli_text(str(issue.get("origin") or ""))
-            path = _sanitize_cli_text(str(issue.get("path") or ""))
-            if origin and path:
-                issue_url = f"{origin.rstrip('/')}/{path.lstrip('/')}"
-            elif origin:
-                issue_url = origin
-            elif path:
-                issue_url = path
-        if not issue_url:
-            issue_url = default_target
-        http_method = _sanitize_cli_text(str(issue.get("method") or issue.get("http_method") or "GET")).upper() or "GET"
-        issue_parameter = _sanitize_cli_text(str(issue.get("parameter") or issue.get("param") or issue.get("field") or ""))
-
-        # Extrai payload se disponível
-        payload = _sanitize_cli_text(
-            str(
-                issue.get("payload")
-                or issue.get("injected_payload")
-                or issue.get("attack")
-                or issue.get("input")
-                or issue.get("vector")
-                or ""
-            )
-        )
-
-        if not issue_parameter and "?" in issue_url:
-            try:
-                query_part = issue_url.split("?", 1)[1]
-                first_param = query_part.split("&", 1)[0].split("=", 1)[0].strip()
-                issue_parameter = _sanitize_cli_text(first_param)
-            except Exception:
-                issue_parameter = ""
-
-        cve_match = re.search(r"\bCVE-\d{4}-\d{4,7}\b", f"{name} {evidence}", re.IGNORECASE)
-        cve_id = str(cve_match.group(0) or "").upper() if cve_match else ""
-        title = cve_id or name
-
-        dedupe = f"{title}|{sev}|{issue_url or default_target}|{issue_parameter}"
-        if dedupe in seen:
-            continue
-        seen.add(dedupe)
-
-        finding_details = {
-            "node": "vuln",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "burp-cli",
-            "cve": cve_id or None,
-            "evidence": evidence,
-            "url": issue_url or default_target,
-            "full_url": issue_url or default_target,
-            "http_method": http_method,
-        }
-        if issue_parameter:
-            finding_details["parameter"] = issue_parameter
-        if payload:
-            finding_details["payload"] = payload
-
-        if not finding_details.get("evidence"):
-            finding_details["evidence"] = (
-                f"Burp identificou potencial vulnerabilidade em {http_method} {issue_url or default_target}."
-                + (f" Parametro: {issue_parameter}." if issue_parameter else "")
-            )
-
-        findings.append(
-            {
-                "title": title,
-                "severity": sev,
-                "risk_score": risk_score,
-                "source_worker": "analise_vulnerabilidade",
-                "details": finding_details,
-            }
-        )
-
-    if findings:
-        return findings
-
-    # Fallback simples: extrai CVEs do stdout livre quando burp-cli nao retorna JSON estruturado.
-    for match in re.findall(r"\bCVE-\d{4}-\d{4,7}\b", stdout or "", re.IGNORECASE):
-        cve_id = str(match or "").upper()
-        if cve_id in seen:
-            continue
-        seen.add(cve_id)
-        findings.append(
-            {
-                "title": cve_id,
-                "severity": "high",
-                "risk_score": 7,
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "burp-cli",
-                    "cve": cve_id,
-                    "evidence": "cve_extraida_do_stdout",
-                },
-            }
-        )
-
     return findings
 
 
@@ -3340,7 +3162,8 @@ def recon_node(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────────────────────────────────────
 # EASM Agent 3: Risk Assessment
 # Avalia vulnerabilidades técnicas nos ativos descobertos.
-# Ferramentas ativas: burp-cli (sync) + nmap-vulscan + nikto (sync)
+# Ferramentas ativas: Kali runner profiles de nuclei, nmap-vulscan, nikto,
+# sqlmap, dalfox, wapiti e demais scanners aplicaveis.
 # ─────────────────────────────────────────────────────────────────────────────
 def risk_assessment_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
@@ -3379,35 +3202,9 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     
-    # Burp é a ferramenta principal de vulnerabilidade e executa de forma síncrona.
-    # Outras ferramentas também executam de forma síncrona.
-    burp_tools = ["burp-cli"] if "burp-cli" in vuln_tools else []
-    other_vuln_tools = [t for t in vuln_tools if t != "burp-cli"]
-
-    # 1. Executar Burp CLI de forma síncrona nos alvos primários do escopo de análise.
-    if burp_tools:
-        state["logs_terminais"].append(
-            f"RiskAssessment:Burp: executando de forma síncrona em {len(primary_targets)} alvos"
-        )
-        for scan_target in primary_targets:
-            burp_findings, _, _, _ = _run_tools_and_collect(
-                state,
-                burp_tools,
-                scan_target,
-                current,
-                "RiskAssessment:Burp",
-            )
-            if burp_findings:
-                all_findings.extend(burp_findings)
-
-        state["burp_targets"] = list(primary_targets)
-        state["burp_status"] = "completed"
-        state["burp_async_task_ids"] = []
-
-    # 2. Executar outras ferramentas de vulnerabilidade nos primary_targets.
     for scan_target in primary_targets:
-        if other_vuln_tools:
-            vuln_findings, _, _, _ = _run_tools_and_collect(state, other_vuln_tools, scan_target, current, "RiskAssessment")
+        if vuln_tools:
+            vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "RiskAssessment")
             if vuln_findings:
                 all_findings.extend(vuln_findings)
         
@@ -3912,8 +3709,4 @@ def initial_state(
         "fair_decomposition": {},
         "easm_rating": {},
         "executive_summary": "",
-        # Burp async fields
-        "burp_targets": [],
-        "burp_status": "none",
-        "burp_async_task_ids": [],
     }

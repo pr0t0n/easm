@@ -6,7 +6,7 @@
 # Dispara um scan real e monitora o progresso através dos nós:
 #   1) asset_discovery (RECON: Amass, MassDns, Sublist3r, Nmap)
 #   2) threat_intel (OSINT: Shodan.io) [paralelo]
-#   3) risk_assessment (VULN: Burp, Nmap Vulscan, Nikto) [paralelo]
+#   3) risk_assessment (VULN: Nuclei, Nmap Vulscan, Nikto, Wapiti) [paralelo]
 #   4) governance (FAIR+AGE rating)
 #   5) executive_analyst (Narrativa LLM)
 #

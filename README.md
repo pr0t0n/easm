@@ -1,668 +1,771 @@
-# Pentest.io — Plataforma de Pentest Automatizado
+# Pentest.io - Plataforma EASM e Pentest Automatizado
 
-**Pentest.io** é uma plataforma **leve e eficiente** de descoberta de ativos, inteligência de ameaças e análise de vulnerabilidades, alimentada por **3 Workers Especializados** e **LLM para consolidação de risco**.
+Pentest.io e uma plataforma de External Attack Surface Management e pentest automatizado orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas ofensivas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
 
-## Arquitetura Simplificada
+Este README descreve o fluxo real de operacao da plataforma: o que acontece quando um scan nasce, como as ferramentas sao escolhidas e executadas, onde cada dado e persistido, como a UI enxerga o progresso e como investigar falhas.
 
-**Fluxo de Execução:**
-```
-[Scan Iniciado]
-      ↓
-[Worker RECON] — Descobre domínios, IPs, portas (Amass, MassDns, Sublist3r, Nmap)
-      ↓
-   ├─→ [Worker OSINT] — Inteligência (Shodan.io)  [paralelo]
-   └─→ [Worker VULN]  — Analisa vulnerabilidades (Burp, Nmap Vulscan, Nikto)  [paralelo]
-      ↓
-  [LLM ConsolidAR] — Junta dados, valida risco, recomendações
-      ↓
-  [Relatório Final JSON]
-```
+## Principios Operacionais
 
-## Ferramentas por Worker
+- Uso defensivo e autorizado: scans devem ser executados somente contra alvos sob escopo aprovado.
+- Execucao centralizada: workers nao executam ferramentas ofensivas localmente; todos chamam o `kali_runner`.
+- Evidencia primeiro: achados criticos e altos precisam de evidencia tecnica, impacto e reprodutibilidade para serem promovidos.
+- Visibilidade continua: progresso, logs, jobs, ferramentas usadas, findings, ratings e workers ficam expostos via API e frontend.
+- Auditoria por scan: cada scan possui `trace_id`, logs, audit trail, execucoes de ferramentas, estado do grafo e evidencias no volume do Kali.
 
-| Worker | Ferramentas |
-|--------|-------------|
-| **RECON** | Amass, MassDns, Sublist3r, Nmap |
-| **OSINT** | Shodan.io |
-| **VULN** | Burp Professional, Nmap Vulscan, Nikto |
+## Stack Atual
 
-## Stack Técnico
+| Camada | Tecnologia | Responsabilidade |
+| --- | --- | --- |
+| Frontend | React + Vite + Tailwind/CSS do produto | Dashboard, scans, targets, phase monitor, workers, jobs, vulnerabilidades, evolucao e relatorios |
+| Backend API | FastAPI + SQLAlchemy + Alembic | Autenticacao, autorizacao, criacao de scans, consultas, agregacoes, relatorios e proxy do Kali |
+| Orquestracao | LangGraph | Supervisor autonomo, roteamento de capacidades, loop de decisao e estado da missao |
+| Filas | Celery + Redis | Execucao assincrona de scans, schedules, workers e pos-processamentos |
+| Banco | PostgreSQL | ScanJob, logs, findings, assets, vulnerabilities, historico de rating, auditoria e heartbeats |
+| Execucao de ferramentas | Kali Runner FastAPI | Perfis YAML, execucao de CLI, persistencia de jobs e evidencias em `/workspace` |
+| LLM local | Ollama | Narrativas, recomendacoes e apoio ao relatorio, quando configurado |
 
-- **Backend**: FastAPI 0.115 + SQLAlchemy 2.0
-- **Cache**: Redis 7
-- **Database**: PostgreSQL 16
-- **Task Queue**: Celery 5.4 + Redis
-- **LLM**: Ollama (phi:latest)
-- **Vector DB**: Chromadb 0.5
-- **Containers**: 8 serviços (postgres, redis, ollama, backend, 3 workers, frontend)
+## Servicos Docker
 
-## Aviso de Segurança
+O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servicos principais sao:
 
-Este projeto foi estruturado para **uso defensivo e autorizado exclusivamente**. Toda execução depende de autorização válida por escopo e de policy/allowlist ativa. Não use para varredura não autorizada.
+| Servico | Container | Funcao |
+| --- | --- | --- |
+| `postgres` | `pentest_postgres` | Banco transacional |
+| `redis` | `pentest_redis` | Broker/result backend Celery |
+| `ollama` | `pentest_ollama` | Runtime LLM local |
+| `kali_runner` | `pentest_kali_runner` | Unico local de execucao das ferramentas |
+| `backend` | `pentest_backend` | API FastAPI |
+| `worker_scope` | `pentest_worker_scope` | Validacao de escopo e entrada |
+| `worker_recon` | `pentest_worker_recon` | Reconhecimento |
+| `worker_weaponization` | `pentest_worker_weaponization` | Correlacao CVE/OSINT/leaks |
+| `worker_delivery` | `pentest_worker_delivery` | Descoberta de caminhos, parametros e vetores |
+| `worker_exploitation` | `pentest_worker_exploitation` | Validacao de vulnerabilidades |
+| `worker_installation` | `pentest_worker_installation` | Risco de persistencia, auth e credenciais |
+| `worker_c2` | `pentest_worker_c2` | Risco de C2 e canais externos |
+| `worker_actions` | `pentest_worker_actions` | Secrets, SAST, dependencias e impacto |
+| `worker_reporting` | `pentest_worker_reporting` | Narrativa e consolidacao |
+| `celery_beat` | `pentest_celery_beat` | Agendamentos |
+| `frontend` | `pentest_frontend` | Interface web |
 
----
+Portas sao configuraveis por `.env`. Defaults do compose:
 
-## Estado Atual da Plataforma
+| Variavel | Default | Uso |
+| --- | --- | --- |
+| `BACKEND_HOST_PORT` | `8000` | FastAPI no host |
+| `FRONTEND_HOST_PORT` | `5173` | Frontend no host |
+| `KALI_RUNNER_HOST_PORT` | `8088` | Runner Kali no host |
+| `POSTGRES_HOST_PORT` | `5432` | PostgreSQL |
+| `REDIS_HOST_PORT` | `6379` | Redis |
+| `OLLAMA_HOST_PORT` | `11434` | Ollama |
 
-## Deploy em Cloud
-
-Para subir a stack fora do ambiente local, nao dependa do arquivo .env implicito do desenvolvedor. Use a base de [/.env.example](.env.example), gere um .env na maquina alvo e ajuste pelo menos:
-
-- SECRET_KEY
-- FRONTEND_ORIGIN
-- FRONTEND_ORIGINS
-- FRONTEND_ORIGIN_REGEX se usar multiplos subdominios
-- VITE_API_URL com a URL publica do backend
-- BURP_LICENSE_KEY se o burp_rest estiver habilitado
-
-Subida recomendada em producao:
+Para conferir o ambiente real:
 
 ```bash
-cp .env.example .env
-docker compose --profile prod up --build -d
+docker compose --profile dev ps
 ```
 
-Observacoes operacionais:
+## Fluxo de Operacao Completo
 
-- O compose agora aceita ambiente sem .env fisico, mas em cloud voce deve fornecer as variaveis de runtime para evitar fallback para localhost.
-- O frontend de producao gera o build durante a imagem e sobe via vite preview na porta 5173.
-- Se frontend e backend ficarem em hosts diferentes, VITE_API_URL e CORS precisam apontar para os enderecos publicos corretos.
+### 1. Usuario acessa a plataforma
 
-### ✅ Features Implementadas
+O usuario autentica no frontend via `/api/auth/login`. O token JWT e salvo no cliente e usado nas chamadas subsequentes. As rotas sensiveis verificam usuario, admin e grupos de acesso.
 
-**Núcleo EASM (Supervisor-Centric Senior Analyst LangGraph):**
-- ✅ **Descoberta de Ativos**: varrição de domínios, enumeração de IPs, portas abertas
-- ✅ **Avaliação de Risco**: fórmula **FAIR+AGE** com quantificação em USD
-- ✅ **Inteligência de Ameaças**: correlação CVE, CVSS, EPSS, KEV (Known Exploited Vulnerabilities)
-- ✅ **Governança de Remediação**: rastreamento de SLA, ciclo de vida de vulnerabilidades
-- ✅ **Análise Executiva**: narrativas automáticas em português, recomendações para C-level
-- ✅ **Rastreamento Temporal**: snapshots de risco, velocidade de remediação, desvios de postura
-- ✅ **Alertas Inteligentes**: 6 tipos de eventos (rating_drop, crown_jewel_age, critical_spike, etc) com webhook
+Visibilidade:
 
-**Backend e Orquestração:**
-- ✅ FastAPI com JWT + controle de acesso por owner_id
-- ✅ PostgreSQL com **5 novas tabelas EASM**: assets, vulnerabilities, asset_rating_history, easm_alerts, easm_alert_rules
-- ✅ Alembic migration 0002_easm_infrastructure (88 colunas, 12 índices)
-- ✅ Celery + Redis para execução assíncrona (filas por grupo)
-- ✅ LangGraph 0.2.62 com 8 nodos + PostgreSQL checkpointer
-- ✅ Framework de decisão de analista senior (hipótese, confiança e adjudicação de evidência)
+- Frontend: tela de login e shell autenticado.
+- Backend: `/api/auth/me`.
+- Banco: usuarios, grupos e permissoes.
 
-**Normalização de Ferramentas (8 Parsers):**
-- ✅ **Subfinder** (JSON): domínios → IPs
-- ✅ **Nmap** (JSON): hosts → portas abertas + detecção de serviço
-- ✅ **Shodan** (JSON): fingerprinting + CVE extraction
-- ✅ **h8mail** (JSON): breach data + OSINT exposure
-- ✅ **Nuclei** (JSON-lines): template findings com severity/CVE
-- ✅ **Nikto** (JSON): vulnerabilidades HTTP por URI
-- ✅ **SQLMap** (JSON): SQL injection detection
-- ✅ **Nessus** (XML): agregação de vulnerabilidades com plugin data
-- ✅ Factory pattern + deduplicação de findings
+### 2. Operador define alvo e cria scan
 
-**Dashboard EASM (6 Cards):**
-- ✅ EASM Rating (A-F grade com score 0-100)
-- ✅ FAIR Pillars (3 decomposição: perimeter_resilience, patching_hygiene, osint_exposure)
-- ✅ Temporal Curves (remediation velocity, deviation 24h, 30-day forecast)
-- ✅ Executive Summary (narrativa em prosa para stakeholders)
-- ✅ Alerts (top 5 com severity colors)
-- ✅ Asset List (top 10 ranked by risk)
+Um scan pode nascer por:
 
-**Quantificação Financeira:**
-- ✅ Potencial loss em USD por setor (Healthcare $610/record, Financial $250/record, etc)
-- ✅ Threat Event Frequency (TEF): probabilidade anual de exploração
-- ✅ Expected Annual Loss (EAL) com multiplicadores de age, criticality
-- ✅ Prompt engineering para narrativas financeiras
+- Pagina `Targets`: operador cadastra ou escolhe alvo autorizado e dispara scan.
+- Pagina `Scans`: operador cria scan manual.
+- `Schedules`: `celery_beat` dispara execucoes recorrentes.
+- API: `POST /api/scans`.
 
-**Alertas e Webhooks:**
-- ✅ 6 tipos de alertas: rating_drop, crown_jewel_age, critical_spike, zero_remediation, velocity_degradation, pillar_threshold
-- ✅ Webhook dispatcher com retry async
-- ✅ Integração Slack com payload colorido
+Ao criar o scan, o backend cria um `ScanJob` com:
 
-**Relatórios:**
-- ✅ Custom HTML/PDF com FAIR decomposition, executive summary, findings counts
-- ✅ Print-friendly Tailwind CSS
-- ✅ Endpoint `/api/scans/{scan_id}/easm-report`
+- `owner_id`
+- `target_query`
+- `mode` (`unit` ou `scheduled`)
+- `status=queued`
+- `compliance_status`
+- `current_step`
+- `state_data` inicial com configuracoes complementares, como `llm_risk`
 
-**Auditoria e Compliance:**
-- ✅ Trilha de autorização por escopo
-- ✅ Logs em tempo real via WebSocket
-- ✅ Allowlist com validação de ownership
-- ✅ Policy enforcement pré-execução
+Em seguida, o backend registra auditoria (`scan.created`, `compliance.gate_pass`) e enfileira a task Celery:
 
-### Tecnologia
+- `run_scan_job_unit` na fila `scan.unit`
+- `run_scan_job_scheduled` na fila `scan.scheduled`
 
+Visibilidade:
+
+- `GET /api/scans`
+- `GET /api/jobs/registry`
+- Pagina `Scans`
+- Pagina `Jobs Registry`
+- Audit trail em `/api/audit/events`
+
+### 3. Worker assume o scan
+
+Quando uma task Celery pega o scan:
+
+1. O worker abre sessao no PostgreSQL.
+2. Atualiza `ScanJob.status` para `running`.
+3. Define `current_step="Iniciando grafo"`.
+4. Cria logs em `ScanLog`.
+5. Atualiza `WorkerHeartbeat` com `status=busy`, `current_scan_id` e `last_task_name`.
+6. Inicia um pulse periodico para progresso.
+
+Visibilidade:
+
+- `GET /api/scans/{scan_id}/status`
+- `GET /api/scans/{scan_id}/logs`
+- WebSocket `/ws/scans/{scan_id}/logs?token=...`
+- Pagina `Workers`
+- Pagina `Scans`
+
+### 4. LangGraph inicializa o estado da missao
+
+O worker chama `initial_state()` em `backend/app/graph/workflow.py`. O estado inclui:
+
+- `trace_id`
+- `scan_id`
+- `owner_id`
+- `target`
+- `scan_mode`
+- `target_type`
+- `input_targets`
+- `lista_ativos`
+- `discovered_ports`
+- `vulnerabilidades_encontradas`
+- `mission_items`
+- `mission_metrics`
+- `node_history`
+- `completed_capabilities`
+- `analyst_framework`
+- `operation_plan`
+- `confidence_state`
+- `evidence_contract`
+- `autonomy_notes`
+- `autonomy_todos`
+- `autonomy_actions`
+- `autonomy_observations`
+- `autonomy_errors`
+- `tool_runtime`
+- `validation_backlog`
+- `easm_rating`
+- `fair_decomposition`
+- `executive_summary`
+
+Esse estado e o "caderno de trabalho" dos agentes. Ao final do scan ele e persistido em `ScanJob.state_data`.
+
+Visibilidade:
+
+- `GET /api/scans/{scan_id}/status` mostra fatias do estado.
+- `GET /api/scans/{scan_id}/autonomy` mostra memoria operacional.
+- `GET /api/scans/{scan_id}/phase-monitor` cruza esse estado com ferramentas e findings.
+
+### 5. Supervisor decide o proximo node
+
+O grafo tem entrada em `supervisor`. Ele roteia dinamicamente para as capacidades:
+
+1. `strategic_planning`
+2. `asset_discovery`
+3. `threat_intel`
+4. `adversarial_hypothesis`
+5. `risk_assessment`
+6. `evidence_adjudication`
+7. `governance`
+8. `executive_analyst`
+
+Cada capability node retorna ao `supervisor`. O supervisor avalia:
+
+- cobertura de ferramentas
+- progresso de missao
+- confianca global
+- evidencia coletada
+- erros e skips
+- nodes ainda nao visitados
+- limite de iteracoes
+- objetivo atingido
+
+O loop encerra quando o objetivo e atingido ou quando o orcamento de iteracoes acaba. O default atual e `max_iterations=18`.
+
+Visibilidade:
+
+- `node_history`
+- `completed_capabilities`
+- `loop_iteration`
+- `termination_reason`
+- `objective_met`
+- `agent_validation`
+- Pagina `Phase Monitor`
+
+### 6. As fases de pentest sao mapeadas para a Cyber Kill Chain
+
+A plataforma expoe 9 fases executivas de Cyber Kill Chain:
+
+| Fase | Node associado | O que representa |
+| --- | --- | --- |
+| `SCOPE_VALIDATION` | `strategic_planning` | Validacao de escopo, contrato e plano |
+| `RECONNAISSANCE` | `asset_discovery` | Subdominios, DNS, portas, crawling e fingerprint |
+| `WEAPONIZATION_SIMULATION` | `threat_intel` | CVEs, OSINT, leaks e sinais de explorabilidade |
+| `DELIVERY_MAPPING` | `adversarial_hypothesis` | Vetores de entrega, paths, parametros e hipoteses |
+| `EXPLOITATION_VALIDATION` | `risk_assessment` | Probes read-only para confirmar risco |
+| `INSTALLATION_RISK_ANALYSIS` | `evidence_adjudication` | Persistencia, auth fraca e qualidade de evidencia |
+| `COMMAND_AND_CONTROL_RISK` | `governance` | Risco de C2, governanca, FAIR e priorizacao |
+| `ACTIONS_ON_OBJECTIVES` | derivado de evidencias | Impacto, secrets, SAST e supply chain |
+| `REPORTING` | `executive_analyst` | Narrativa, rating, recomendacoes e relatorio |
+
+Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/mission.py`. O `Phase Monitor` usa essas fases para verificar se as ferramentas esperadas foram tentadas.
+
+### 7. Ferramentas sao selecionadas e disparadas
+
+Cada node escolhe uma lista de ferramentas esperadas para o alvo atual. A execucao ocorre por `_run_tools_and_collect()`:
+
+1. Monta `run_id = step|target|tool`.
+2. Evita repetir ferramenta ja executada no mesmo passo.
+3. Consulta `ExecutedToolRun` para evitar duplicidade ja persistida.
+4. Dispara ferramentas pendentes em paralelo com `ThreadPoolExecutor(max_workers=6)`.
+5. Para cada resultado, registra acao de autonomia.
+6. Normaliza stdout/stderr/return code.
+7. Atualiza metricas de missao.
+8. Persiste execucao em `ExecutedToolRun`.
+
+Importante: o worker nao executa CLI local. Ele chama `execute_tool_with_workers()`, que chama `execute_via_kali()`.
+
+Visibilidade:
+
+- `ExecutedToolRun`
+- `ScanLog` com source `graph`, `worker`, `worker.progress_detail`, `validation`
+- `Phase Monitor` em `tool_inventory`, `phases[]`, `issues[]`
+- `Workers` em heartbeats e grupos
+
+### 8. O Kali Runner executa a ferramenta
+
+O `kali_runner` e uma API FastAPI dentro do container Kali.
+
+Fluxo HTTP:
+
+```text
+worker/backend
+  -> POST http://kali_runner:8088/jobs
+       { profile, target, scan_id, tool }
+  <- { job_id, status, profile, tool, target }
+
+worker/backend
+  -> GET /jobs/{job_id}
+       ate status terminal
+
+worker/backend
+  -> GET /jobs/{job_id}/result
+       stdout, stderr, parsed, command, return_code, workdir
 ```
-Backend:          FastAPI 0.110.0 + SQLAlchemy + Alembic
-Database:         PostgreSQL 17 (23 tabelas, 5 EASM-specific)
-Async:            Celery + Redis
-State Machine:    LangGraph 0.2.62 + Senior Analyst Framework + PostgreSQL checkpointer
-AI:               Ollama llama3 via httpx
-Search:           ChromaDB (deduplicação vetorial)
-Frontend:         React 18 + Tailwind CSS + Vite
-Logging:          stdlib + WebSocket real-time
+
+Estados de job no runner:
+
+- `queued`
+- `running`
+- `done`
+- `failed`
+- `timeout`
+- `skipped`
+
+O runner:
+
+1. Carrega perfis YAML de `kali-runner/profiles/*.yaml`.
+2. Valida alvo contra guardrails basicos.
+3. Materializa comando com placeholders como `{host}`, `{url}`, `{https_url}`.
+4. Aplica `requires_env` quando a ferramenta depende de segredo ou credencial.
+5. Executa o argv dentro do container Kali, sem shell string.
+6. Escreve evidencias no volume.
+7. Persiste o job em `/workspace/.runner_jobs/{job_id}.json`.
+8. Mantem resultado consultavel apos restart do runner.
+
+Estrutura de evidencia:
+
+```text
+/workspace/{scan_id}/{tool}/{job_id}/
+  command.txt
+  stdout.txt
+  stderr.txt
+  exit_code.txt
+  parsed.json        # quando o parser do perfil conseguir extrair JSON/JSONL
+
+/workspace/.runner_jobs/{job_id}.json
+  estado operacional do job
 ```
 
----
+Visibilidade:
 
-## Arquitetura Operacional
+- `GET /api/kali-runner/health`
+- `GET /api/kali-runner/catalog`
+- `GET /api/kali-runner/profiles`
+- `GET /api/kali-runner/tools`
+- `curl http://localhost:8088/healthz`
+- `curl http://localhost:8088/jobs/{job_id}`
+- Volume Docker `kali_workspace`
+- Badge `Kali ativo/offline` no topo do frontend
 
-### Diagrama de Stack
+### 9. Resultados voltam ao grafo
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│              Frontend: React + Tailwind CSS                 │
-│    Dashboard (6 EASM cards) + Custom Report + Admin Panel   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP/REST + WebSocket
-        ┌──────────────────┴──────────────────┐
-        │                                      │
-   ┌────▼──────────┐                  ┌──────▼─────────┐
-   │   FastAPI     │                  │  WebSocket     │
-   │ Auth + Routes │                  │  Real-time Logs│
-   └────┬──────────┘                  └────────────────┘
-        │ orchestration
-        │
-   ┌────▼────────────────────────────────────────┐
-  │     LangGraph v0.2.62 (StateGraph)          │
-  │        Senior Analyst Framework              │
-  │                                              │
-  │  strategic_planning                          │
-  │  -> asset_discovery -> threat_intel          │
-  │  -> adversarial_hypothesis                   │
-  │  -> risk_assessment -> evidence_adjudication │
-  │  -> governance -> executive_analyst          │
-   │                                              │
-   │  Checkpointer: PostgreSQL                   │
-   └────┬────────────────────────────────────────┘
-        │
-     ┌──┴─────┬────────────┬──────────────┐
-     │         │            │              │
-┌────▼──┐ ┌───▼───┐ ┌─────▼──┐ ┌────────▼──┐
-│Celery │ │ Redis │ │ Postgres │ │  ChromaDB │
-│Workers│ │ Queue │ │ Storage  │ │  Vectors  │
-│(7 Q)  │ │ Cache │ │(23 TB)   │ │(dup check)│
-└───────┘ └───────┘ └──────────┘ └───────────┘
-```
+O backend normaliza o resultado do Kali para o formato legado esperado pelo workflow:
 
-### Pipeline de Execução (Fluxo Supervisor-Centric)
-
-```
-1. User/Admin: Criar scan via POST /api/scans {target, tools}
-                ↓
-2. Backend: Validar authorization_code + policy/allowlist
-                ↓
-3. Enqueue: Tarefa para Celery (fila scan.unit)
-                ↓
-4. Worker: Inicializar LangGraph StateGraph
-                ↓
-5. Supervisor Node: avalia confiança, progresso e escolhe a próxima capacidade
-    ↓
-6. Capacidades dinâmicas (sob demanda):
-   - strategic_planning
-   - asset_discovery
-   - threat_intel
-   - adversarial_hypothesis
-   - risk_assessment
-   - evidence_adjudication
-   - governance
-   - executive_analyst
-    ↓
-7. Retorno ao Supervisor após cada capacidade (loop metacognitivo)
-    ↓
-8. Encerramento: objetivo atingido com evidência suficiente OU orçamento de iterações
-    ↓
-9. Persistir: findings + rating + fair decomposition + executive summary + audit_trail
-    Dashboard, Reports e APIs consomem dados persistidos
-```
-
-Para detalhes do framework e contratos, veja `docs/SENIOR_ANALYST_FRAMEWORK.md`.
-
-### Alinhamento Cyber-AutoAgent
-
-O projeto foi alinhado com os pilares operacionais de prompt, arquitetura, ferramentas, modelo, validacao e Docker.
-
-Resumo da implementacao:
-
-- Prompt metacognitivo + evidence-first no contrato do supervisor
-- Supervisor-centric loop com adjudicacao de evidencia
-- Catalogo de capacidades inspirado em Cyber-AutoAgent
-- Configuracao de modelo principal e modelo de avaliacao
-- Rubrica de validacao automatica por execucao (methodology/tooling/evidence/outcome)
-
-Referencias:
-
-- `docs/CYBER_AUTOAGENT_ALIGNMENT.md`
-- `scripts/validate_cyber_autoagent_alignment.py`
-- `scripts/validate_docker_and_image.sh`
-- `scripts/build_and_publish_image.sh`
-
----
-
-## Conceitos-Chave
-
-### 1. FAIR + AGE Rating
-
-Fórmula de risco quantitativo estendida:
-
-```
-EASM_Rating = (Asset_Impact × CVSS_Score) × Age_Factor
-
-Age_Factor = 1 + log₁₀(days_open + 1)
-
-Asset_Impact = (0.40 × perimeter_resilience) 
-             + (0.30 × patching_hygiene) 
-             + (0.30 × osint_exposure)
-
-Perimeter_Resilience:  [Subfinder, Nmap] → descoberta de portas/serviços
-Patching_Hygiene:      [Nuclei, Nikto, SQLMap] → vulnerabilidades conhecidas
-OSINT_Exposure:        [h8mail, Shodan] → dados públicos, breaches
-
-Grade: A (90-100), B (75-89), C (60-74), D (45-59), F (<45)
-```
-
-**Exemplo:**
-- Asset: database.megacorp.com (CVSS 8.5)
-- Age: 15 dias aberto
-- Pillar scores: perimeter 85%, patching 60%, osint 40%
-- Asset Impact = 0.40×85 + 0.30×60 + 0.30×40 = 34 + 18 + 12 = **64%**
-- Age Factor = 1 + log₁₀(16) = 1 + 1.20 = **2.20**
-- EASM Rating = 64 × 8.5 × 2.20 = **1,193** (capped at 100) → capped and normalized → **Grade B** (rating 87)
-
-### 2. Temporal Curves (Séries Temporais)
-
-Acompanhamento contínuo de 3 dimensões com snapshots diários:
-
-**Remediation Velocity** (%/semana):
-- Velocidade de fechamento de vulnerabilidades no período
-- Trend: improving (>10%/sem), stable (5-10%), degrading (<5%)
-- Projeção: dias até critical_count = 0
-
-**Posture Deviation** (pontos em 24h):
-- Mudança de rating EASM em 24 horas
-- **Alert crítico** se deviation > 10 pontos
-- Causa raiz: age_factor (aging), new_findings, remediation, stable
-
-**30-Day Forecast**:
-- Projeção do rating com AGE decay, novas descobertas, remediação esperada
-- Confiança: alta/média/baixa
-- Drivers: lista de fatores impactando mudança
-
-**Asset Rating History** (tabela persistida):
-```sql
-asset_rating_history {
-  asset_id,
-  recorded_at (timestamp),
-  easm_rating (0-100),
-  easm_grade (A-F),
-  open_critical, open_high, open_medium, open_low (counts),
-  remediated_this_period (int),
-  velocity_score (float % per week),
-  pillar_scores (JSONB: {perimeter_resilience, patching_hygiene, osint_exposure}),
-  remediation_notes (text)
+```json
+{
+  "tool": "nuclei",
+  "target": "example.com",
+  "status": "executed",
+  "command": "nuclei ...",
+  "return_code": 0,
+  "stdout": "...",
+  "stderr": "",
+  "parsed": [],
+  "source_agent_id": "kali_runner",
+  "dispatch_task_id": "uuid-do-job",
+  "evidence_path": "/workspace/27/nuclei/uuid-do-job",
+  "duration_seconds": 12.3
 }
 ```
 
-### 3. Quantificação Financeira
+Falhas tambem voltam estruturadas:
 
-**Setor-Specific Breach Costs:**
-```python
-SECTOR_BREACH_COSTS = {
-    'healthcare': {'cost_per_record': 610, 'avg_records': 50000, ...},
-    'financial': {'cost_per_record': 250, 'avg_records': 100000, ...},
-    'retail': {'cost_per_record': 140, 'avg_records': 200000, ...},
-    'technology': {'cost_per_record': 180, ...},
-    'government': {'cost_per_record': 210, ...},
+```json
+{
+  "status": "error",
+  "dispatch_error": "runner_lost_job:uuid-do-job",
+  "source_agent_id": "kali_runner",
+  "dispatch_task_id": "uuid-do-job"
 }
 ```
 
-**Potential Loss** = avg_records × cost_per_record × severity_multiplier × age_multiplier × asset_type_mult × crown_jewel_mult
+Isso permite que o grafo marque ferramenta como `attempted_failed`, registre o erro e continue a missao sem travar indefinidamente.
 
-**Expected Annual Loss (EAL)** = Potential_Loss × Threat_Event_Frequency
+### 10. Achados sao normalizados e persistidos
 
-**Threat Event Frequency (TEF)**:
-- Severity probability: critical 0.70, high 0.40, medium 0.15, low 0.05
-- Age boost: 1 + (age_days / 100)
-- Threat intel multiplier: public_poc 1.8, exploit_kits 2.5, cisa_kev 2.0
+Ao final do grafo, o worker percorre `vulnerabilidades_encontradas` e cria registros em:
 
----
+- `Finding`
+- `Asset`
+- `Vulnerability`
+- `AssetRatingHistory`
 
-## Database Schema (EASM-Specific)
+O worker tambem:
 
-### Novas Tabelas (5 registradas em migration 0002)
+- deduplica findings por titulo, severidade, worker, asset, porta, step e ferramenta;
+- enriquece CVE quando detectado;
+- calcula ou propaga CVSS;
+- gera recomendacoes em portugues;
+- preenche colunas estruturadas (`tool`, `domain`, `cve`, `cvss`, `recommendation`, `confidence_score`);
+- preserva detalhes brutos em `Finding.details`.
 
-**assets** (inventário de host/porta/serviço):
-```sql
-CREATE TABLE assets (
-  id SERIAL PRIMARY KEY,
-  owner_id INT NOT NULL,
-  domain_or_ip VARCHAR(255) NOT NULL INDEXED,
-  port INT,
-  protocol VARCHAR(20) DEFAULT 'http',
-  asset_type VARCHAR(50) DEFAULT 'web',
-  criticality_score FLOAT DEFAULT 50,
-  status VARCHAR(20) DEFAULT 'active' INDEXED,
-  first_seen TIMESTAMP NOT NULL,
-  last_seen TIMESTAMP NOT NULL,
-  scan_count INT DEFAULT 0,
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  FOREIGN KEY (owner_id) REFERENCES owner(id),
-  UNIQUE (owner_id, domain_or_ip, port, protocol)
-);
+Visibilidade:
+
+- Pagina `Vulnerabilities`
+- Pagina `Dashboard`
+- Pagina `Attack Evolution`
+- Relatorios por scan ou por target
+- `GET /api/findings/page`
+- `GET /api/dashboard/assets`
+- `GET /api/dashboard/vulnerabilities`
+- `GET /api/dashboard/trends/{asset_id}`
+
+### 11. Rating, governanca e relatorio sao gerados
+
+Os nodes `governance` e `executive_analyst` consolidam:
+
+- `fair_decomposition`
+- `easm_rating`
+- `executive_summary`
+- `agent_validation`
+- `confidence_state`
+- `evidence_contract`
+- `report_v2`
+
+O rating considera pilares FAIR/AGE:
+
+- `perimeter_resilience`
+- `patching_hygiene`
+- `osint_exposure`
+
+O relatorio pode ser gerado por scan ou por target, com persona tecnica por padrao no frontend atual.
+
+Visibilidade:
+
+- Pagina `Reports`
+- `GET /api/scans/{scan_id}/report`
+- `GET /api/scans/{scan_id}/easm-report`
+- `GET /api/reports/by-target`
+- `GET /api/reports/by-target/latest`
+
+## Workers e Filas
+
+Os workers sao especializados por fase, mas todos chamam o mesmo executor Kali.
+
+| Worker | Filas principais | Ferramentas esperadas |
+| --- | --- | --- |
+| `worker_scope` | `scan.unit`, `scan.scheduled`, `worker.*.scope_validation` | Sem tools ofensivas; escopo e entrada |
+| `worker_recon` | `worker.*.reconnaissance` | subfinder, amass, dnsx, shuffledns, assetfinder, alterx, naabu, nmap, masscan, httpx, whatweb, wafw00f, curl-headers, sslscan, testssl, katana, hakrawler, gau, waybackurls, gospider, arjun, paramspider |
+| `worker_weaponization` | `worker.*.weaponization` | nuclei, nmap-vulscan, shodan-cli, theHarvester, h8mail, trufflehog, gitleaks, subjack |
+| `worker_delivery` | `worker.*.delivery` | ffuf, gobuster, feroxbuster, dirsearch, arjun, paramspider |
+| `worker_exploitation` | `worker.*.exploitation` | nuclei, sqlmap, dalfox, wapiti, wpscan, nikto, interactsh-client |
+| `worker_installation` | `worker.*.installation` | hydra, medusa, crackmapexec, jwt_tool |
+| `worker_c2` | `worker.*.command_control` | nuclei, interactsh-client, testssl |
+| `worker_actions` | `worker.*.actions_on_objectives` | semgrep, bandit, trufflehog, gitleaks, retire, trivy |
+| `worker_reporting` | `worker.*.reporting` | Sem CLI ofensiva; consolidacao |
+
+`backend/app/workers/worker_groups.py` e a fonte canonica dos grupos, prioridades e aliases legados.
+
+## Perfis Kali
+
+Cada ferramenta executavel pelo runner precisa de um profile YAML. Os perfis atuais ficam em:
+
+```text
+kali-runner/profiles/reconnaissance.yaml
+kali-runner/profiles/weaponization.yaml
+kali-runner/profiles/delivery_exploitation.yaml
+kali-runner/profiles/post_exploitation.yaml
 ```
 
-**vulnerabilities** (descobertas persistidas):
-```sql
-CREATE TABLE vulnerabilities (
-  id SERIAL PRIMARY KEY,
-  asset_id INT NOT NULL INDEXED,
-  finding_id INT,
-  tool_source VARCHAR(50) INDEXED,     -- 'nmap', 'nuclei', 'shodan', etc
-  cve_id VARCHAR(20) INDEXED,
-  severity VARCHAR(20),               -- 'critical', 'high', 'medium', 'low'
-  cvss_score FLOAT,
-  title VARCHAR(500),
-  description TEXT,
-  first_detected TIMESTAMP DEFAULT NOW(),
-  last_detected TIMESTAMP,
-  remediated_at TIMESTAMP INDEXED,
-  age_factor FLOAT DEFAULT 1.0,
-  ra_score FLOAT DEFAULT 0.0,
-  fair_pillar VARCHAR(50) INDEXED,    -- 'perimeter_resilience', 'patching_hygiene', 'osint_exposure'
-  detection_count INT DEFAULT 1,
-  remediation_notes TEXT,
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
-);
+Cada profile define:
+
+```yaml
+nuclei_cves:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "CVE & misconfiguration template-driven scan."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl"]
+  timeout: 900
+  parser: jsonl
 ```
 
-**asset_rating_history** (série temporal):
-```sql
-CREATE TABLE asset_rating_history (
-  id SERIAL PRIMARY KEY,
-  asset_id INT NOT NULL INDEXED,
-  scan_id INT,
-  easm_rating FLOAT,
-  easm_grade VARCHAR(1),              -- 'A', 'B', 'C', 'D', 'F'
-  open_critical INT DEFAULT 0,
-  open_high INT DEFAULT 0,
-  open_medium INT DEFAULT 0,
-  open_low INT DEFAULT 0,
-  remediated_this_period INT DEFAULT 0,
-  velocity_score FLOAT DEFAULT 0.0,   -- % per week
-  pillar_scores JSONB,                -- {perimeter_resilience, patching_hygiene, osint_exposure}
-  recorded_at TIMESTAMP DEFAULT NOW() INDEXED,
-  FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
-);
-```
+Campos relevantes:
 
-**easm_alerts** (eventos disparados):
-```sql
-CREATE TABLE easm_alerts (
-  id SERIAL PRIMARY KEY,
-  owner_id INT NOT NULL,
-  asset_id INT,
-  alert_type VARCHAR(50),             -- 'rating_drop', 'crown_jewel_age', etc
-  severity VARCHAR(20),               -- 'CRITICAL', 'HIGH', 'MEDIUM'
-  title VARCHAR(500),
-  description TEXT,
-  trigger_value FLOAT,
-  threshold_value FLOAT,
-  is_resolved BOOLEAN DEFAULT FALSE,
-  resolved_at TIMESTAMP,
-  resolved_notes TEXT,
-  webhook_payload JSONB,
-  created_at TIMESTAMP DEFAULT NOW() INDEXED,
-  FOREIGN KEY (owner_id) REFERENCES owner(id),
-  FOREIGN KEY (asset_id) REFERENCES assets(id)
-);
-```
+| Campo | Funcao |
+| --- | --- |
+| `tool` | Nome humano/canonico da ferramenta |
+| `category` | Recon, vuln, osint, exploit, code etc. |
+| `phase` | Fase Cyber Kill Chain |
+| `description` | Explicacao usada para operacao e catalogo |
+| `cmd` | Array de argv, sem shell string |
+| `timeout` | Timeout por ferramenta |
+| `parser` | `raw`, `lines`, `json` ou `jsonl` |
+| `requires_env` | Variaveis obrigatorias; se ausentes, o job vira `skipped` |
+| `stdin_template` | Entrada padronizada quando a ferramenta exige stdin |
+| `allowed_return_codes` | Codigos que ainda contam como sucesso |
+| `skip_if_output_contains` | Marcadores que transformam falha em skip explicado |
 
-**easm_alert_rules** (regras para trigger):
-```sql
-CREATE TABLE easm_alert_rules (
-  id SERIAL PRIMARY KEY,
-  owner_id INT NOT NULL,
-  name VARCHAR(255),
-  rule_type VARCHAR(50),              -- 'rating_drop', 'crown_jewel_age', etc
-  enabled BOOLEAN DEFAULT TRUE,
-  condition JSONB,                    -- {threshold: 10, period_hours: 24, ...}
-  webhook_url VARCHAR(500),
-  notify_channels JSONB,              -- ["email", "slack"]
-  asset_filter JSONB,                 -- {min_criticality: 80, types: ["web"]}
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  FOREIGN KEY (owner_id) REFERENCES owner(id)
-);
-```
+## Modelo de Dados e Visibilidade
 
----
+| Entidade | Onde nasce | O que guarda | Onde aparece |
+| --- | --- | --- | --- |
+| `ScanJob` | `POST /api/scans` | alvo, status, progresso, estado LangGraph, report_v2 | Scans, Jobs Registry, Phase Monitor, Reports |
+| `ScanLog` | worker/grafo/validacao | logs temporais por scan | Scans, Targets, WebSocket, Worker Logs |
+| `ExecutedToolRun` | `_run_tools_and_collect()` | ferramenta, alvo, status, erro, tempo | Phase Monitor, Workers, auditoria tecnica |
+| `Finding` | pos-processamento do grafo | vulnerabilidade normalizada | Vulnerabilities, Dashboard, Reports |
+| `Asset` | persistencia de findings/ativos | host, porta, protocolo, criticidade, last_seen | Dashboard, Targets, Trends |
+| `Vulnerability` | upsert por finding | CVE, severidade, CVSS, age, FAIR pillar | Dashboard, Evolution, Reports |
+| `AssetRatingHistory` | final do scan | rating temporal por asset | Attack Evolution, Trends |
+| `WorkerHeartbeat` | inicio/pulse de worker | worker online, scan atual, fase | Workers |
+| `ScanAuditLog` | autonomia/execucao | notas, acoes, observacoes, erros | `/api/scans/{id}/autonomy` |
+| Kali job JSON | `kali_runner` | status, comando, stdout/stderr, workdir | `/jobs/{id}`, volume `kali_workspace` |
 
-## Endpoints Principais
+## Telas e o que cada uma mostra
 
-### Novos Endpoints EASM (7 rotas)
+| Tela | Rota | Visibilidade principal |
+| --- | --- | --- |
+| Dashboard | `/` | rating consolidado, tendencia, top riscos, ativos, alertas e resumo executivo |
+| Targets | `/targets` | alvos sob escopo, scans por target, logs e status |
+| Scans | `/scan` | criacao de scan, allowlist, status, progresso, WebSocket e logs |
+| Phase Monitor | `/phase-monitor` | cobertura por 22 fases, tools usadas, falhas, skips, gaps e nodes visitados |
+| Vulnerabilities | `/vulnerabilidades` | findings filtrados por severidade, target e periodo |
+| Attack Evolution | `/evolucao` | evolucao temporal, comparacao, lifecycle e tendencia |
+| Reports | `/relatorios` | relatorio por scan/target, persona, severidade minima e comparacao |
+| Workers | `/workers` | heartbeats, agentes, filas, workers ao vivo e fase atual |
+| Jobs Registry | `/jobs` | scans recentes, status, duracao, findings e audit events |
+| Worker Logs | `/worker-logs` | logs administrativos agregados |
+| Settings | `/configuracao` | runtime, IA, workers e parametros operacionais |
+| Kali Catalog | `/workers` | profiles Kali, binario executavel, worker, skills e fases |
 
-**Dashboard & Analytics:**
-- `GET /api/dashboard/assets` — Query: status, min_criticality, sort_by; Returns: assets com ratings
-- `GET /api/dashboard/vulnerabilities` — Query: open_only, severity, asset_id; Returns: vulns persistidas
-- `GET /api/dashboard/trends/{asset_id}` — Query: days (7-365); Returns: histórico + velocity + deviation + forecast
+## Phase Monitor: como interpretar
 
-**Scans & Reports:**
-- `GET /api/scans/{scan_id}/easm-report` — Returns: FAIR decomp + executive summary + findings
-- `GET /api/easm/alerts` — Query: unresolved_only, severity; Returns: alerts recentes
+O `Phase Monitor` cruza quatro fontes:
 
-**Alert Management:**
-- `POST /api/easm/alerts/{alert_id}/resolve` — Body: notes; Returns: confirmation
+1. `ScanJob.state_data`
+2. `ExecutedToolRun`
+3. `Finding`
+4. catalogo de fases/ferramentas
 
-### Endpoints Legados (Backward Compatible)
+Campos importantes:
 
-Todos os endpoints anteriores mantidos:
-- Autenticação: `/api/auth/*`
-- Scans: `/api/scans`, `/api/scans/{id}/status`, `/api/scans/{id}/logs`
-- Findings: `/api/findings`, `/api/findings/page`
-- Compliance: `/api/compliance/authorizations/*`
-- Workers: `/api/worker-manager/*`
-- Config: `/api/config/*`, `/api/policy/allowlist`
-- Schedules: `/api/schedules/*`
+| Campo | Significado |
+| --- | --- |
+| `tools_expected` | Ferramentas esperadas para a fase |
+| `tools_installed` | Alias legado para ferramentas prontas no Kali Runner |
+| `tools_uninstalled` | Alias legado para ferramentas sem profile/binario no Kali Runner |
+| `tools_available` | Ferramentas esperadas com profile e executavel vivo no Kali |
+| `tools_unavailable` | Ferramentas esperadas sem profile ou sem binario no Kali |
+| `tools_used` | Ferramentas com pelo menos uma tentativa |
+| `tools_success` | Ferramentas com sucesso |
+| `tools_failed` | Ferramentas tentadas que falharam em todas as tentativas |
+| `tools_skipped` | Ferramentas puladas com explicacao, por exemplo falta de env |
+| `tools_missing_unused` | Ferramentas prontas no Kali mas nao tentadas |
+| `tools_missing_uninstalled` | Ferramentas esperadas sem profile/binario no Kali |
 
----
+Quando a coluna de ferramentas aparece em vermelho, normalmente significa uma destas condicoes:
 
-## Setup & Deployment
+- a ferramenta foi tentada e falhou (`tools_failed`);
+- o node foi visitado, mas uma ferramenta pronta no Kali nao foi executada (`tools_missing_unused`);
+- uma capability critica nao foi visitada;
+- a cobertura das ferramentas prontas no Kali ficou abaixo do alvo.
 
-### 1. Ambiente de Desenvolvimento
+Isso nao significa que a ferramenta esta no backend. Pode significar erro de profile Kali, timeout, falta de credencial, target sem contexto adequado ou regra de roteamento do agente que encerrou antes de varrer tudo.
+
+## Logs e Auditoria
+
+Fontes principais de logs:
+
+| Source | Conteudo |
+| --- | --- |
+| `worker` | inicio/fim da execucao, status geral |
+| `worker.plan` | plano de execucao apresentado no inicio |
+| `worker.trace` | `trace_id` do scan |
+| `worker.batch` | lotes de targets |
+| `worker.progress_detail` | pulso periodico de progresso |
+| `graph` | linhas produzidas pelo LangGraph e execucao das ferramentas |
+| `validation` | avaliacao Cyber AutoAgent |
+| `llm-risk` | execucao de teste LLM Risk, quando habilitado |
+| `ia` | recomendacoes em portugues |
+
+Consultas uteis:
 
 ```bash
-# Clone e setup
-git clone https://github.com/pr0t0n/easm.git && cd easm
+# Logs de um scan pela API
+curl -H "Authorization: Bearer <JWT>" \
+  http://localhost:${BACKEND_HOST_PORT:-8000}/api/scans/27/logs
+
+# Logs do container Kali
+docker compose --profile dev logs --tail 200 kali_runner
+
+# Logs dos workers
+docker compose --profile dev logs --tail 200 worker_recon worker_exploitation
+```
+
+## Endpoints Operacionais
+
+| Endpoint | Funcao |
+| --- | --- |
+| `POST /api/scans` | cria scan |
+| `GET /api/scans` | lista scans autorizados |
+| `GET /api/scans/{id}/status` | status resumido e progresso |
+| `GET /api/scans/{id}/logs` | logs do scan |
+| `GET /api/scans/{id}/autonomy` | memoria/autonomia do agente |
+| `GET /api/scans/{id}/phase-monitor` | cobertura por fases e tools |
+| `POST /api/scans/{id}/stop` | interrompe scan |
+| `DELETE /api/scans/{id}` | remove scan |
+| `GET /api/jobs/registry` | registro operacional de scans/jobs |
+| `GET /api/kali-runner/health` | saude do Kali e mappings |
+| `GET /api/kali-runner/catalog` | mapeamento tool -> profile -> worker -> skill/fase |
+| `GET /api/kali-runner/profiles` | profiles YAML expostos pelo runner |
+| `GET /api/kali-runner/tools` | catalogo vivo do PATH dentro do Kali |
+| `GET /api/worker-manager/health` | workers online/offline e scan atual |
+| `GET /api/worker-manager/pipeline` | grupos/agentes e pipeline |
+| `GET /api/findings/page` | findings paginados |
+| `GET /api/dashboard/insights` | dados agregados do dashboard |
+| `GET /api/vulnerability-management/dashboard` | evolucao e gestao de vulnerabilidades |
+| `GET /api/scans/{id}/report` | relatorio tecnico/executivo |
+
+## Operacao Local
+
+### 1. Preparar `.env`
+
+```bash
 cp .env.example .env
-
-# Subir stack com Docker Compose
-docker compose --profile dev up --build
-
-# Endpoints:
-# Frontend: http://localhost:5173
-# Backend:  http://localhost:8000
-# Docs:     http://localhost:8000/docs
 ```
 
-### 2. Migração de Database (CRÍTICO)
+Variaveis importantes:
+
+| Variavel | Funcao |
+| --- | --- |
+| `SECRET_KEY` | assinatura JWT |
+| `FRONTEND_ORIGIN` / `FRONTEND_ORIGINS` | CORS |
+| `VITE_API_URL` | URL publica do backend para o frontend |
+| `KALI_RUNNER_URL` | URL interna do runner para backend/workers |
+| `SHODAN_API_KEY` | habilita `shodan-cli` |
+| `PENTEST_AUTH_USERNAME` / `PENTEST_AUTH_PASSWORD` | habilitam perfis que exigem credencial |
+
+### 2. Subir stack
 
 ```bash
-# Dentro do container backend ou venv local:
-cd backend
-alembic upgrade head
-
-# Isso cria as 5 novas tabelas EASM (0002_easm_infrastructure)
-# Verificar com: \dt em psql → deve listar assets, vulnerabilities, etc
+docker compose --profile dev up --build -d
 ```
 
-### 3. Testar Endpoints EASM
+### 3. Aplicar migracoes
+
+O backend executa `alembic upgrade head` no startup. Para rodar manualmente:
 
 ```bash
-# Login primeiro
-curl -X POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"password"}'
-
-# Copiar token JWT da resposta
-
-# Listar assets
-curl -X GET http://localhost:8000/api/dashboard/assets \
-  -H "Authorization: Bearer <JWT_TOKEN>"
-
-# Listar alertas
-curl -X GET http://localhost:8000/api/easm/alerts \
-  -H "Authorization: Bearer <JWT_TOKEN>"
-
-# Custom report (após executar scan)
-curl -X GET http://localhost:8000/api/scans/1/easm-report \
-  -H "Authorization: Bearer <JWT_TOKEN>"
+docker compose --profile dev exec backend alembic -c alembic.ini upgrade head
 ```
 
-### 4. Configurar Webhooks (Opcional)
+### 4. Validar saude
 
 ```bash
-# Criar rule para alertar via webhook
-curl -X POST http://localhost:8000/api/easm/alert-rules \
-  -H "Authorization: Bearer <JWT_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Rating Drop Alert",
-    "rule_type": "rating_drop",
-    "enabled": true,
-    "condition": {"threshold": 10, "period_hours": 24},
-    "webhook_url": "https://your-slack-webhook-url",
-    "notify_channels": ["slack"]
-  }'
+docker compose --profile dev ps
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/healthz | jq
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/profiles | jq '.count'
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/tools | jq '.count'
 ```
 
----
-
-## Validação e Testes
-
-### E2E Flow Validation
+### 5. Executar um job direto no Kali Runner
 
 ```bash
-python scripts/validate_e2e_flow.py
+JOB_ID=$(
+  curl -fsS -X POST http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/jobs \
+    -H "Content-Type: application/json" \
+    -d '{"profile":"curl_headers","target":"https://example.com","scan_id":0,"tool":"curl-headers"}' \
+  | jq -r .job_id
+)
+
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/jobs/$JOB_ID | jq
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/jobs/$JOB_ID/result | jq
 ```
 
-Testa:
-1. User registration + login
-2. Authorization request + approval
-3. Scan creation + execution
-4. LangGraph pipeline execution
-5. Data persistence em DB
-6. Endpoint responses
-
-### Unit Tests (Backend)
+### 6. Rebuild seletivo
 
 ```bash
-cd backend
-python -m pytest tests/ -v
+# Runner Kali
+docker compose --profile dev build kali_runner
+docker compose --profile dev up -d --no-deps --force-recreate kali_runner
+
+# Backend e workers
+docker compose --profile dev build backend worker_scope worker_recon worker_weaponization worker_delivery worker_exploitation worker_installation worker_c2 worker_actions worker_reporting celery_beat
+docker compose --profile dev restart backend worker_scope worker_recon worker_weaponization worker_delivery worker_exploitation worker_installation worker_c2 worker_actions worker_reporting celery_beat
 ```
 
-Cobertura: risk_service.py (FAIR+AGE), normalizers.py (8 parsers), alert_service.py
+### 7. Validar que o backend nao tem ferramentas de analise
 
-### Dashboard Validation
+A imagem final do backend e dos workers deve conter apenas runtime Python. Nao devem existir `curl`, `wget`, `jq`, `dnsutils`, `nmap`, `nuclei`, `sqlmap` ou scanners equivalentes:
 
-Acessar http://localhost:5173/dashboard e verificar:
-- EASM Rating card renderizando
-- FAIR Pillars bar chart
-- Temporal Curves com gráficos
-- Alerts list populated
-- Asset list com dados
-
----
-
-## Documentação Complementar
-
-- **[RUNBOOK.md](docs/RUNBOOK.md)** — Operações diárias, troubleshooting, SOP
-- **[backend/alembic/versions/](backend/alembic/versions/)** — Histórico de migrations
-- **[backend/app/services/](backend/app/services/)** — Código de risco, parsers, alertas
-- **[frontend/easm-report.html](frontend/easm-report.html)** — Template custom report
-- **[backend/app/graph/workflow.py](backend/app/graph/workflow.py)** — LangGraph definition
-
----
-
-## Estrutura de Arquivos (EASM-Relevant)
-
-```
-easm/
-├── backend/
-│   ├── alembic/
-│   │   └── versions/
-│   │       └── 0002_easm_infrastructure.py     ← NEW: Schema EASM
-│   ├── app/
-│   │   ├── models/models.py                    ← EXTENDED: 5 EASM classes
-│   │   ├── services/
-│   │   │   ├── risk_service.py                 ← EXTENDED: temporal curves
-│   │   │   ├── normalizers.py                  ← NEW: 8 tool parsers
-│   │   │   ├── prompt_engineering.py           ← NEW: financial models
-│   │   │   ├── orchestrator.py                 ← NEW: workflow broker
-│   │   │   └── alert_service.py                ← NEW: webhook dispatcher
-│   │   └── api/
-│   │       └── routes_scans.py                 ← EXTENDED: 7 EASM endpoints
-│   └── requirements.txt                        ← ALL deps included
-│
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   └── EASMDashboard.jsx               ← NEW: 6 EASM cards
-│   │   └── pages/
-│   │       └── DashboardPage.jsx               ← EXTENDED: EASM integration
-│   └── easm-report.html                        ← NEW: Custom report template
-│
-└── docs/
-    └── RUNBOOK.md
+```bash
+docker compose --profile dev run --rm backend sh -lc \
+  'for t in curl wget jq dig nslookup nmap nuclei sqlmap ffuf nikto; do command -v "$t" >/dev/null && echo "FOUND $t"; done'
 ```
 
----
+Saida esperada: nenhuma linha `FOUND`.
 
-## Roadmap e Próximas Etapas
+## Falhas comuns e como ler
 
-### Fase 1 — Production Ready (v1.0) ✅
-- [x] FAIR+AGE motor
-- [x] 5-node EASM pipeline
-- [x] 8 tool normalizers
-- [x] Asset inventory persistence
-- [x] Temporal tracking + forecasting
-- [x] Alert webhooks + Slack integration
-- [x] EASM dashboard + custom report
-- [x] Financial quantification
-- [x] Compliance & auditoria
+### `GET /jobs/{uuid} 404 Not Found` no Kali
 
-### Fase 2 — Intelligence & Automation (v2.0)
-- [ ] Threat intelligence feeds (CISA KEV, Exploit-DB daily)
-- [ ] SOAR playbooks para auto-remediation
-- [ ] Integração com SIEM (Splunk, ELK)
-- [ ] Scheduler automático (Celery Beat)
-- [ ] Multi-tenant com tenant_id global
-- [ ] Prometheus metrics export
-- [ ] Cost optimization recommendations
+Significa que alguem consultou um job que o runner nao conhece. Hoje o runner persiste jobs em `/workspace/.runner_jobs`, entao isso deve acontecer apenas para IDs realmente antigos/inexistentes.
 
-### Fase 3 — Enterprise Scale (v3.0)
-- [ ] Sharded PostgreSQL para 10K+ assets
-- [ ] Grafana dashboards + alerting
-- [ ] API rate limiting + quota management
-- [ ] LDAP/SAML SSO
-- [ ] Audit log archival (S3/WORM)
-- [ ] PCI-DSS, SOC2 compliance mappings
+No backend, dois 404 consecutivos viram:
 
----
+```text
+dispatch_error=runner_lost_job:<uuid>
+```
 
-## Suporte e Contribuições
+O scan nao deve ficar em polling infinito.
 
-**Issues**: Use a GitHub issue tracker com tags: `bug`, `enhancement`, `documentation`
+### Ferramenta em vermelho no Phase Monitor
 
-**Contributing**: Contribuições bem-vindas. Favor seguir:
-1. Feature branch: `git checkout -b feature/xyz`
-2. Commit message: `feat(module): description`
-3. Pull request com tests (pytest coverage >80%)
+Verifique:
 
----
+1. `tools_failed`: ferramenta executou e falhou.
+2. `last_error`: erro persistido em `ExecutedToolRun`.
+3. `evidence_path`: path no Kali com `stdout.txt` e `stderr.txt`.
+4. `tools_missing_unused`: pronta no Kali, mas nao tentada pelo agente.
+5. `tools_missing_uninstalled`: esperada, mas sem profile/binario no Kali.
+6. `requires_env`: profile pode ter virado `skipped` por falta de variavel.
 
-**Last Updated**: Março 2026  
-**Maintainer**: Security Platform Team  
-**License**: Proprietary
+### Runner online, mas ferramenta falha
+
+Investigue:
+
+```bash
+docker compose --profile dev logs --tail 200 kali_runner
+docker compose --profile dev exec kali_runner which nuclei
+docker compose --profile dev exec kali_runner sh -lc 'ls -la /workspace/.runner_jobs | tail'
+```
+
+Depois consulte o `workdir` retornado pelo job.
+
+### Worker aparece stale/offline
+
+Verifique:
+
+```bash
+docker compose --profile dev ps
+docker compose --profile dev logs --tail 200 worker_recon
+curl -H "Authorization: Bearer <JWT>" \
+  http://localhost:${BACKEND_HOST_PORT:-8000}/api/worker-manager/health
+```
+
+Se houver scan `running` sem task ativa, use a reconciliacao/orphan requeue pelo endpoint administrativo ou pela tela de workers/settings.
+
+## Estrutura relevante do repositorio
+
+```text
+backend/
+  app/api/routes_scans.py          # scans, status, logs, reports, phase-monitor
+  app/api/routes_management.py     # users, settings, workers, kali health/profiles/tools/catalog
+  app/graph/workflow.py            # LangGraph supervisor e nodes
+  app/graph/mission.py             # 9 mission items + 22 fases tecnicas
+  app/graph/kill_chain.py          # mapeamento Cyber Kill Chain para UI
+  app/services/kali_executor.py    # cliente HTTP do Kali Runner
+  app/services/kali_catalog.py     # catalogo vivo Kali -> profile -> worker -> skill
+  app/services/worker_dispatcher.py# unica rota de execucao: Kali
+  app/services/phase_monitor.py    # cruzamento state_data + runs + findings
+  app/services/tool_catalog.py     # catalogo narrativo usado pelos agentes
+  app/workers/tasks.py             # execucao Celery do scan
+  app/workers/worker_groups.py     # grupos, filas, ferramentas e prioridades
+
+kali-runner/
+  Dockerfile
+  runner.py                        # API FastAPI que executa CLI no Kali
+  profiles/*.yaml                  # profiles de ferramentas
+
+frontend/src/
+  components/Navbar.jsx            # badge de saude do Kali
+  components/Sidebar.jsx           # navegacao
+  pages/DashboardPage.jsx
+  pages/ScansPage.jsx
+  pages/PhaseMonitorPage.jsx
+  pages/WorkersPage.jsx
+  pages/JobsRegistryPage.jsx
+  pages/VulnerabilitiesPage.jsx
+  pages/AttackEvolutionPage.jsx
+  pages/ReportsPage.jsx
+```
+
+## Comandos de verificacao
+
+```bash
+# Sintaxe Python dos pontos centrais
+python3 -m py_compile \
+  backend/app/services/kali_executor.py \
+  backend/app/services/kali_catalog.py \
+  backend/app/services/worker_dispatcher.py \
+  backend/app/services/phase_monitor.py \
+  backend/app/graph/workflow.py \
+  kali-runner/runner.py
+
+# Config final do compose
+docker compose --profile dev config --services
+
+# Saude runtime
+docker compose --profile dev ps
+curl -fsS http://localhost:${KALI_RUNNER_HOST_PORT:-8088}/healthz | jq
+```
+
+## Documentacao complementar
+
+- `docs/RUNBOOK.md`: rotinas de operacao e troubleshooting.
+- `docs/SENIOR_ANALYST_FRAMEWORK.md`: contrato do analista senior e evidencia.
+- `docs/CYBER_AUTOAGENT_ALIGNMENT.md`: alinhamento com modelo Cyber AutoAgent.
+- `docs/KALI_EXECUTOR_PROPOSAL.md`: contexto da migracao para executor Kali.

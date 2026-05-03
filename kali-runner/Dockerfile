@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq dnsutils openssl \
       python3 python3-pip python3-venv \
+      pipx \
       build-essential pkg-config libssl-dev libpcap-dev \
       golang-go ruby ruby-dev \
       openssh-server \
@@ -61,11 +62,29 @@ RUN set -eux; \
 # WPScan via Ruby (kali metapackage may not include it)
 RUN gem install --no-document wpscan 2>&1 | tail -3 || true
 
+# Python/Node CLIs that are not consistently shipped by Kali metapackages.
+# Keep them in the Kali runner only; backend/worker images remain tool-free.
+ENV PIPX_HOME=/opt/pipx \
+    PIPX_BIN_DIR=/usr/local/bin
+RUN set -eux; \
+    pipx install bandit==1.9.4; \
+    pipx install semgrep==1.161.0; \
+    corepack prepare pnpm@9.15.4 --activate; \
+    corepack enable; \
+    PNPM_HOME=/usr/local/bin pnpm add -g retire@5.4.2; \
+    rm -rf /root/.cache /root/.local/share/pnpm/store
+
+# jwt_tool is distributed as a source repository, not an installable Python
+# package. Clone it and expose a stable wrapper command expected by profiles.
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && \
+    pip install --break-system-packages --no-cache-dir -r /opt/jwt_tool/requirements.txt && \
+    printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool && \
+    chmod +x /usr/local/bin/jwt_tool
+
 # ParamSpider — não tem pacote pip/apt; clone direto.
 RUN git clone --depth 1 https://github.com/devanshbatham/ParamSpider /opt/ParamSpider 2>&1 | tail -2 && \
-    pip install --break-system-packages -r /opt/ParamSpider/requirements.txt 2>&1 | tail -1 || true && \
-    printf '#!/bin/sh\nexec python3 /opt/ParamSpider/paramspider.py "$@"\n' > /usr/local/bin/paramspider && \
-    chmod +x /usr/local/bin/paramspider
+    pip install --break-system-packages --no-cache-dir /opt/ParamSpider && \
+    command -v paramspider
 
 # Runner application — FastAPI HTTP server
 # We use a dedicated venv to avoid conflicts with Kali-shipped python packages

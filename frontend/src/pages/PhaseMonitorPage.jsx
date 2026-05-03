@@ -231,20 +231,23 @@ export default function PhaseMonitorPage() {
               }}
             >
               <div style={{ fontSize: 12, color: "#6b6b6b", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
-                Inventário de tools (ambiente backend ativo)
+                Inventário de tools (Kali Runner)
               </div>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
-                <span><strong style={{ color: "#1f8a59" }}>{data.installation_report.installed.length}</strong> instaladas</span>
-                <span><strong style={{ color: "#b03333" }}>{data.installation_report.missing.length}</strong> faltando</span>
+                <span><strong style={{ color: "#1f8a59" }}>{data.installation_report.installed.length}</strong> prontas</span>
+                <span><strong style={{ color: "#b03333" }}>{data.installation_report.missing.length}</strong> sem profile/binario</span>
                 <span><strong>{Math.round((data.installation_report.coverage_ratio || 0) * 100)}%</strong> de cobertura</span>
                 <span style={{ color: "#6b6b6b" }}>
-                  Used in this scan: <strong>{data.metrics.tools_installed_used_ratio !== undefined ? `${Math.round(data.metrics.tools_installed_used_ratio * 100)}% das instaladas` : "—"}</strong>
+                  Used in this scan: <strong>{data.metrics.tools_installed_used_ratio !== undefined ? `${Math.round(data.metrics.tools_installed_used_ratio * 100)}% das prontas` : "—"}</strong>
+                </span>
+                <span style={{ color: "#6b6b6b" }}>
+                  Source: <strong>{data.installation_report.source || "kali_runner"}</strong>
                 </span>
               </div>
               {data.installation_report.missing.length > 0 && (
                 <details style={{ marginTop: 8 }}>
                   <summary style={{ cursor: "pointer", fontSize: 12, color: "#b03333" }}>
-                    Tools não instaladas no runtime atual ({data.installation_report.missing.length})
+                    Tools sem profile/binário no Kali Runner ({data.installation_report.missing.length})
                   </summary>
                   <div style={{ marginTop: 6 }}>
                     {data.installation_report.missing.map((t) => (
@@ -345,13 +348,13 @@ export default function PhaseMonitorPage() {
                           )}
                         </td>
                         <td style={td}>
-                          {/* installed-but-unused = red flag (agent skipped) */}
+                          {/* Kali-ready but unused = red flag (agent skipped) */}
                           {(p.tools_missing_unused || []).slice(0, 6).map((t) => (
-                            <span key={t} style={{ ...chip, ...chipDanger }} title="Instalado mas não executado">{t}</span>
+                            <span key={t} style={{ ...chip, ...chipDanger }} title="Pronto no Kali mas não executado">{t}</span>
                           ))}
-                          {/* uninstalled = neutral */}
+                          {/* unavailable in Kali = neutral */}
                           {(p.tools_missing_uninstalled || p.tools_missing || []).slice(0, 6).map((t) => (
-                            <span key={t} style={{ ...chip, ...chipMuted }} title="Não instalado">{t}*</span>
+                            <span key={t} style={{ ...chip, ...chipMuted }} title="Sem profile/binário no Kali Runner">{t}*</span>
                           ))}
                           {(p.tools_missing || []).length > 12 && (
                             <span style={{ color: "#6b6b6b", fontSize: 11 }}>

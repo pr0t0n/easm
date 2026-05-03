@@ -1,6 +1,6 @@
 """Legacy module — kept ONLY as a thin compatibility shim.
 
-In the previous architecture this file held ~900 lines of subprocess wrappers
+In the previous architecture this file held ~900 lines of local tool wrappers
 that ran offensive tools inside the backend/worker containers. After the Kali
 runner refactor, all of that logic lives in `kali-runner/runner.py` and is
 invoked over HTTP via `app.services.kali_executor.execute_via_kali`.
@@ -25,11 +25,12 @@ def run_tool_execution(
     tool_name: str,
     target: str,
     scan_mode: str = "unit",
-    **_legacy_kwargs: Any,
+    **legacy_kwargs: Any,
 ) -> dict[str, Any]:
     """Shim: every call routes to the Kali runner via HTTP."""
     return execute_via_kali(
         tool_name=tool_name,
         target=target,
+        scan_id=legacy_kwargs.get("scan_id"),
         scan_mode=scan_mode,
     )

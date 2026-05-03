@@ -13,7 +13,6 @@ import ReportsPage from "./pages/ReportsPage";
 import SchedulingPage from "./pages/SchedulingPage";
 import ScansPage from "./pages/ScansPage";
 import TargetsPage from "./pages/TargetsPage";
-import ToolsPage from "./pages/ToolsPage";
 import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import WorkersPage from "./pages/WorkersPage";
@@ -84,7 +83,6 @@ export default function App() {
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScansPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />
-                    <Route path="/ferramentas" element={<AdminOnly><ToolsPage /></AdminOnly>} />
                     <Route path="/workers" element={<AdminOnly><WorkersPage /></AdminOnly>} />
                     <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
                     <Route path="/worker-logs" element={<AdminOnly><WorkerLogsPage /></AdminOnly>} />

@@ -122,9 +122,9 @@ reason (e.g. "out of scope", "prerequisite missing"). Specifically:
   metagoofil), email posture (theHarvester), takeover (subjack/nuclei),
   cloud exposure (nuclei/shodan-cli/trufflehog), secrets (trufflehog/gitleaks).
 - risk_assessment owns P11-P20 + P22: CVE scan (nuclei/nmap-vulscan),
-  injection (sqlmap/dalfox/wapiti/burp-cli/nikto), SSRF (nuclei/interactsh-client),
+  injection (sqlmap/dalfox/wapiti/nikto), SSRF (nuclei/interactsh-client),
   auth bypass (hydra/jwt_tool), dir enum (ffuf/gobuster/feroxbuster/dirsearch),
-  API (nuclei/burp-cli/arjun/wapiti), TLS (sslscan/testssl), CMS (wpscan),
+  API (nuclei/arjun/wapiti), TLS (sslscan/testssl), CMS (wpscan),
   deps (retire/trivy/eslint/semgrep).
 - governance + executive_analyst do NOT run tools — they aggregate evidence.
 

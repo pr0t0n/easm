@@ -125,7 +125,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
                 break
         obs_by_node[node_key].append(ob)
 
-    # Pre-compute installation map once
+    # Pre-compute Kali-runner availability map once.
     try:
         from app.services.tool_catalog import is_tool_installed
     except Exception:
@@ -157,7 +157,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             and tool_stats.get(t, {}).get("success", 0) == 0
             and tool_stats.get(t, {}).get("failed", 0) == 0
         ]
-        # Distinguish "missing because uninstalled" vs "missing despite installed".
+        # Distinguish "missing because unavailable in Kali" vs "ready but skipped".
         tools_missing_uninstalled = [t for t in tools_uninstalled if tool_stats.get(t, {}).get("attempts", 0) == 0]
         tools_missing_unused = [t for t in tools_installed if tool_stats.get(t, {}).get("attempts", 0) == 0]
         tools_missing = tools_missing_uninstalled + tools_missing_unused
@@ -165,7 +165,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         if not node_visited:
             status_label = "skipped"
         elif tools_missing_unused and tools_success:
-            # Some tools ran but other INSTALLED tools weren't tried.
+            # Some tools ran but other Kali-ready tools weren't tried.
             status_label = "partial_coverage"
         elif tools_success and not tools_missing_unused:
             status_label = "executed"
@@ -191,13 +191,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "tools_expected": tools_expected,
             "tools_installed": tools_installed,
             "tools_uninstalled": tools_uninstalled,
+            "tools_available": tools_installed,
+            "tools_unavailable": tools_uninstalled,
             "tools_used": tools_used,
             "tools_success": tools_success,
             "tools_failed": tools_failed,
             "tools_skipped": tools_skipped,
             "tools_missing": tools_missing,
             "tools_missing_uninstalled": tools_missing_uninstalled,
-            "tools_missing_unused": tools_missing_unused,  # red flag — installed but agent skipped
+            "tools_missing_unused": tools_missing_unused,  # red flag - Kali-ready but agent skipped
         })
 
     # Capability summary (9 missions equivalent — actually 8 graph nodes + supervisor)
@@ -248,8 +250,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     issues: list[str] = []
     validation_summary: dict[str, Any] = {"critical": [], "warning": [], "info": []}
 
-    # 1. Phase coverage — only count tools that are INSTALLED (otherwise we
-    # punish the agent for things the operator hasn't deployed yet).
+    # 1. Phase coverage - only count tools available through the Kali runner.
     expected_all_tools = sorted({t for tools in expected_tools.values() for t in tools})
     installed_expected = sorted({t for t in expected_all_tools if is_tool_installed(t)})
     uninstalled_expected = sorted({t for t in expected_all_tools if not is_tool_installed(t)})
@@ -258,18 +259,18 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
 
     if installed_unused:
         issue = (
-            f"INSTALLED TOOLS NOT EXECUTED ({len(installed_unused)}): "
+            f"KALI TOOLS NOT EXECUTED ({len(installed_unused)}): "
             f"{', '.join(installed_unused[:8])}{'…' if len(installed_unused) > 8 else ''}. "
-            "Agent MUST sweep all installed tools before terminating."
+            "Agent MUST sweep all Kali-ready tools before terminating."
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
     if uninstalled_expected:
         issue = (
-            f"TOOLS NOT INSTALLED ({len(uninstalled_expected)}): "
+            f"KALI TOOLS NOT AVAILABLE ({len(uninstalled_expected)}): "
             f"{', '.join(uninstalled_expected[:8])}{'…' if len(uninstalled_expected) > 8 else ''}. "
-            "Update Dockerfile or remove from expected catalog."
+            "Add/repair Kali runner profiles or remove from expected catalog."
         )
         issues.append(issue)
         validation_summary["warning"].append(issue)
@@ -280,9 +281,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     coverage_ratio = coverage_ratio_installed
     if coverage_ratio_installed < 0.7:
         issue = (
-            f"Coverage of INSTALLED tools low: {coverage_ratio_installed:.0%} "
+            f"Coverage of Kali-ready tools low: {coverage_ratio_installed:.0%} "
             f"({len(used_tools_set & set(installed_expected))}/{len(installed_expected)}). "
-            "Target ≥70% of installed tools per scan."
+            "Target ≥70% of Kali-ready tools per scan."
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)

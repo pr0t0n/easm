@@ -57,12 +57,6 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
 
-    nessus_enabled: bool = False
-    nessus_url: str = ""
-    nessus_access_key: str = ""
-    nessus_secret_key: str = ""
-    nessus_verify_tls: bool = True
-
     # ── Kali runner (centralized tool executor) ────────────────────────────
     # SINGLE source of truth for offensive tools. All workers dispatch HTTP
     # jobs to this sidecar; backend/worker images carry NO tools themselves.

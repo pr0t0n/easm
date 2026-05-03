@@ -19,6 +19,7 @@ backend/nuclei-templates/
 .DS_Store
 
 backend/burp/burpsuite_pro.jar
+burp/
 backend/celerybeat-schedule
 
 # Scan output artifacts (do not commit raw target dumps)

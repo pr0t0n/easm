@@ -73,24 +73,41 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
     contract = _base_agent_contract()
 
     profiles: dict[str, dict[str, Any]] = {}
-    for group_key, cfg in [
-        ("reconhecimento", "recon"),
-        ("analise_vulnerabilidade", "vuln"),
-        ("osint", "osint"),
-        ("exploit", "exploit"),
-        ("api", "api"),
-        ("code", "code"),
+    for group_key, agent_slug in [
+        ("scope_validation", "scope"),
+        ("reconnaissance", "recon"),
+        ("weaponization", "weaponization"),
+        ("delivery", "delivery"),
+        ("exploitation", "vuln"),
+        ("installation", "installation"),
+        ("command_control", "c2"),
+        ("actions_on_objectives", "aoo"),
+        ("reporting", "reporting"),
     ]:
-        group_data = groups.get(cfg) or groups.get(group_key) or {}
+        group_data = groups.get(group_key) or {}
         profiles[group_key] = {
-            "agent_id": f"agent.{cfg}",
-            "agent_name": f"{cfg.title()} Agent",
+            "agent_id": f"agent.{agent_slug}",
+            "agent_name": f"{agent_slug.replace('_', ' ').title()} Agent",
             "worker_group": group_key,
             "queue": group_data.get("queue", f"worker.{mode}.{group_key}"),
             "purpose": group_data.get("description", ""),
-            "tools": list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(cfg, [])),
+            "tools": list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(group_key, [])),
             "contract": contract,
         }
+
+    aliases = {
+        "recon": "reconnaissance",
+        "reconhecimento": "reconnaissance",
+        "osint": "weaponization",
+        "vuln": "exploitation",
+        "analise_vulnerabilidade": "exploitation",
+        "exploit": "installation",
+        "api": "delivery",
+        "code": "actions_on_objectives",
+    }
+    for alias, target in aliases.items():
+        if target in profiles:
+            profiles[alias] = dict(profiles[target], worker_group=alias)
     return profiles
 
 
@@ -167,6 +184,15 @@ def get_worker_agent_profile(group_name: str, mode: ScanMode = "unit") -> dict[s
     alias_map = {
         "recon": "reconhecimento",
         "reconhecimento": "reconhecimento",
+        "reconnaissance": "reconnaissance",
+        "weaponization": "weaponization",
+        "delivery": "delivery",
+        "exploitation": "exploitation",
+        "installation": "installation",
+        "command_control": "command_control",
+        "actions_on_objectives": "actions_on_objectives",
+        "reporting": "reporting",
+        "scope_validation": "scope_validation",
         "vuln": "analise_vulnerabilidade",
         "analise_vulnerabilidade": "analise_vulnerabilidade",
         "osint": "osint",
@@ -181,8 +207,9 @@ def get_worker_agent_profile(group_name: str, mode: ScanMode = "unit") -> dict[s
 _TOOL_TO_GROUP: dict[str, str] = {}
 for _group, _tools in CANONICAL_GROUP_TOOLS.items():
     for _t in _tools:
-        if _t not in _TOOL_TO_GROUP:
-            _TOOL_TO_GROUP[_t] = _group
+        _normalized_tool = str(_t or "").strip().lower()
+        if _normalized_tool and _normalized_tool not in _TOOL_TO_GROUP:
+            _TOOL_TO_GROUP[_normalized_tool] = _group
 
 
 def find_group_by_tool(tool_name: str, mode: ScanMode = "unit") -> str:

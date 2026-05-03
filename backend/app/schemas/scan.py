@@ -83,7 +83,6 @@ class ScanStatusResponse(BaseModel):
     mission_index: int = 0
     mission_items: list[str] = []
     node_history: list[str] = []
-    burp_status: str = "none"
     discovered_ports: list[int]
     pending_port_tests: list[int]
     retry_attempt: int = 0

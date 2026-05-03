@@ -1,28 +1,44 @@
-# Backend image — pure Python FastAPI + Celery.
-# After the Kali runner refactor, ZERO offensive tooling ships here.
-# Workers dispatch every tool to the kali_runner sidecar via HTTP.
-FROM python:3.12-slim
+# Backend image - pure Python FastAPI + Celery.
+# No analysis/offensive tooling is installed here. Workers dispatch tools to
+# the kali_runner sidecar via HTTP.
+FROM python:3.12-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      gcc \
+      libpq-dev \
+      python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:$PATH"
+
 WORKDIR /app
 
-# Minimal runtime: ssl/curl for outbound HTTP, postgres client, dnsutils for
-# scope validation pre-flight only. NO offensive tools.
+# Runtime-only packages. Offensive scanners and analysis CLIs live exclusively
+# in the Kali runner image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget jq \
-      libpq-dev gcc python3-dev \
-      dnsutils \
+      ca-certificates \
+      libpq5 \
       tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Application code
+COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
 # Non-root runtime user

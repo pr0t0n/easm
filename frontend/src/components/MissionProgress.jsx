@@ -19,7 +19,6 @@ export default function MissionProgress({ scan, scanStatus }) {
     const missionIndex = scanStatus?.mission_index ?? 0;
     const scanDone = scan.status === "completed" || scan.status === "failed" || scan.status === "stopped";
     const scanRunning = scan.status === "running" || scan.status === "retrying";
-    const burpStatus = scanStatus?.burp_status || "none";
 
     const steps = missionItems.map((item, idx) => {
       const label = PIPELINE_LABELS[item] || item.replace(/^\d+\.\s*/, "");
@@ -34,26 +33,17 @@ export default function MissionProgress({ scan, scanStatus }) {
       return { id: idx, key: item, label, status };
     });
 
-    // Enriquece step de RiskAssessment com info Engine vs Burp
+    // Enriquece step de RiskAssessment com a execucao centralizada no Kali.
     const riskStep = steps.find((s) => s.key === "3. RiskAssessment");
-    let engineStatus = "pending";
-    let burpDisplay = "pending";
+    let kaliStatus = "pending";
 
     if (riskStep) {
       if (riskStep.status === "completed" || riskStep.status === "running") {
-        // Engine (nmap, nikto) roda síncrono — se risk_assessment está completo, engine terminou
-        engineStatus = riskStep.status === "completed" ? "completed" : "running";
+        kaliStatus = riskStep.status === "completed" ? "completed" : "running";
       }
-      // Burp é assíncrono
-      if (burpStatus === "completed") burpDisplay = "completed";
-      else if (burpStatus === "pending" || burpStatus === "scheduled") burpDisplay = "running";
-      else if (riskStep.status === "completed" && burpStatus === "none") burpDisplay = "skipped";
-      else burpDisplay = "pending";
-
-      if (burpStatus === "error") burpDisplay = "error";
     }
 
-    return { steps, engineStatus, burpDisplay, burpStatus, scanDone, scanRunning };
+    return { steps, kaliStatus, scanDone, scanRunning };
   }, [scan, scanStatus]);
 
   if (!pipeline) {
@@ -132,33 +122,16 @@ export default function MissionProgress({ scan, scanStatus }) {
                 </div>
               </div>
 
-              {/* Sub-itens Engine vs Burp no step de RiskAssessment */}
+              {/* Sub-item Kali Runner no step de RiskAssessment */}
               {isRisk && (step.status === "running" || step.status === "completed") && (
                 <div className="ml-6 mt-2 space-y-2">
-                  {/* Engine (nmap-vulscan, nikto) */}
-                  <div className={`rounded border p-2 text-xs ${colorMap[pipeline.engineStatus]}`}>
+                  <div className={`rounded border p-2 text-xs ${colorMap[pipeline.kaliStatus]}`}>
                     <div className="flex items-center justify-between">
                       <span>
-                        {iconMap[pipeline.engineStatus]} <b>A</b> — Engine (nmap-vulscan, nikto)
+                        {iconMap[pipeline.kaliStatus]} <b>K</b> — Kali Runner profiles
                       </span>
                       <span className="font-mono px-1.5 py-0.5 rounded bg-black/30">
-                        {labelMap[pipeline.engineStatus]}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Burp Suite */}
-                  <div className={`rounded border p-2 text-xs ${colorMap[pipeline.burpDisplay]}`}>
-                    <div className="flex items-center justify-between">
-                      <span>
-                        {iconMap[pipeline.burpDisplay]} <b>B</b> — Burp Suite (async)
-                      </span>
-                      <span className="font-mono px-1.5 py-0.5 rounded bg-black/30">
-                        {pipeline.burpDisplay === "running"
-                          ? "Em execução (async)"
-                          : pipeline.burpDisplay === "skipped"
-                          ? "Não habilitado"
-                          : labelMap[pipeline.burpDisplay]}
+                        {labelMap[pipeline.kaliStatus]}
                       </span>
                     </div>
                   </div>
@@ -172,12 +145,7 @@ export default function MissionProgress({ scan, scanStatus }) {
       {/* Progresso global */}
       <div className="mt-4 pt-4 border-t border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
         <span>Progresso global: {scan.mission_progress || 0}%</span>
-        {pipeline.burpStatus === "pending" && (
-          <span className="text-amber-400">⏳ Burp executando em paralelo</span>
-        )}
-        {pipeline.burpStatus === "completed" && (
-          <span className="text-green-400">✅ Burp concluído — rating recalculado</span>
-        )}
+        <span>Ferramentas via Kali Runner</span>
       </div>
 
       <style>{`
