@@ -99,6 +99,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
 
 # ── Public API: HTTP execution ───────────────────────────────────────────────
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
+LOST_JOB_RETRIES = 2
 
 
 def execute_via_kali(
@@ -140,14 +141,49 @@ def execute_via_kali(
         return _kali_failure(tool_name, target, scan_mode, f"enqueue_error: {exc}")
 
     # Poll until terminal (job runner side does the heavy lifting)
+    lost_job_count = 0
     while True:
         elapsed = time.perf_counter() - started
         if elapsed > max_wait:
-            return _kali_failure(tool_name, target, scan_mode, f"client_timeout after {int(elapsed)}s")
+            return _kali_failure(
+                tool_name,
+                target,
+                scan_mode,
+                f"client_timeout after {int(elapsed)}s",
+                dispatch_task_id=job_id,
+            )
         try:
             r = requests.get(f"{base}/jobs/{job_id}", timeout=10)
             r.raise_for_status()
             status = r.json().get("status", "unknown")
+            lost_job_count = 0
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 404:
+                lost_job_count += 1
+                logger.warning(
+                    "kali_runner job %s not found while polling (%s/%s)",
+                    job_id,
+                    lost_job_count,
+                    LOST_JOB_RETRIES,
+                )
+                if lost_job_count >= LOST_JOB_RETRIES:
+                    return _kali_failure(
+                        tool_name,
+                        target,
+                        scan_mode,
+                        f"runner_lost_job:{job_id}",
+                        dispatch_task_id=job_id,
+                    )
+                time.sleep(min(poll_interval, 1.0))
+                continue
+            logger.warning("kali_runner poll failed: %s", exc)
+            time.sleep(poll_interval)
+            continue
+        except requests.RequestException as exc:
+            logger.warning("kali_runner poll failed: %s", exc)
+            time.sleep(poll_interval)
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("kali_runner poll failed: %s", exc)
             time.sleep(poll_interval)
@@ -161,8 +197,31 @@ def execute_via_kali(
         rr = requests.get(f"{base}/jobs/{job_id}/result", timeout=15)
         rr.raise_for_status()
         result = rr.json()
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            return _kali_failure(
+                tool_name,
+                target,
+                scan_mode,
+                f"runner_lost_result:{job_id}",
+                dispatch_task_id=job_id,
+            )
+        return _kali_failure(
+            tool_name,
+            target,
+            scan_mode,
+            f"result_fetch_error: {exc}",
+            dispatch_task_id=job_id,
+        )
     except Exception as exc:  # noqa: BLE001
-        return _kali_failure(tool_name, target, scan_mode, f"result_fetch_error: {exc}")
+        return _kali_failure(
+            tool_name,
+            target,
+            scan_mode,
+            f"result_fetch_error: {exc}",
+            dispatch_task_id=job_id,
+        )
 
     return _normalize_to_legacy_shape(tool_name, target, scan_mode, result)
 
@@ -195,7 +254,14 @@ def _normalize_to_legacy_shape(
     }
 
 
-def _kali_failure(tool_name: str, target: str, scan_mode: str, reason: str) -> dict[str, Any]:
+def _kali_failure(
+    tool_name: str,
+    target: str,
+    scan_mode: str,
+    reason: str,
+    *,
+    dispatch_task_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "tool": tool_name,
         "target": target,
@@ -208,6 +274,7 @@ def _kali_failure(tool_name: str, target: str, scan_mode: str, reason: str) -> d
         "dispatch_error": reason,
         "source_agent_id": "kali_runner",
         "source_agent_name": "Kali Runner",
+        "dispatch_task_id": dispatch_task_id,
         "open_ports": [],
     }
 

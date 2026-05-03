@@ -33,11 +33,14 @@ from pydantic import BaseModel, Field
 
 # ── Configuration ────────────────────────────────────────────────────────────
 WORKSPACE = Path(os.getenv("KALI_WORKSPACE", "/workspace"))
+JOBS_DIR = WORKSPACE / ".runner_jobs"
 PROFILES_DIR = Path(__file__).parent / "profiles"
 MAX_PARALLEL = int(os.getenv("KALI_MAX_PARALLEL", "8"))
 DEFAULT_TIMEOUT = int(os.getenv("KALI_DEFAULT_TIMEOUT", "300"))
+VOLATILE_JOB_STATES = {"queued", "running"}
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Profile loading ──────────────────────────────────────────────────────────
@@ -122,9 +125,97 @@ class JobResult(JobStatus):
     parsed: Optional[Any] = None
 
 
-_JOBS: dict[str, dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_PARALLEL, thread_name_prefix="kali-job")
+
+
+def _job_path(job_id: str) -> Path:
+    safe_job_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(job_id or ""))
+    return JOBS_DIR / f"{safe_job_id}.json"
+
+
+def _json_safe_job(job: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in job.items():
+        try:
+            json.dumps(value)
+            safe[key] = value
+        except TypeError:
+            safe[key] = str(value)
+    return safe
+
+
+def _persist_job_record(job: dict[str, Any]) -> None:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return
+    try:
+        path = _job_path(job_id)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps(_json_safe_job(job), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[jobs] failed to persist {job_id}: {exc}")
+
+
+def _load_job_from_disk(job_id: str) -> dict[str, Any] | None:
+    path = _job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[jobs] failed to load {job_id}: {exc}")
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["job_id"] = str(data.get("job_id") or job_id)
+    return data
+
+
+def _load_persisted_jobs() -> dict[str, dict[str, Any]]:
+    jobs: dict[str, dict[str, Any]] = {}
+    for path in sorted(JOBS_DIR.glob("*.json")):
+        job = _load_job_from_disk(path.stem)
+        if not job:
+            continue
+        if job.get("status") in VOLATILE_JOB_STATES:
+            job["status"] = "failed"
+            job["error"] = job.get("error") or "runner_restarted_before_job_finished"
+            job["finished_at"] = job.get("finished_at") or datetime.utcnow().isoformat()
+            _persist_job_record(job)
+        jobs[str(job["job_id"])] = job
+    return jobs
+
+
+_JOBS: dict[str, dict[str, Any]] = _load_persisted_jobs()
+print(f"[jobs] loaded {len(_JOBS)} persisted jobs")
+
+
+def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
+    with _JOBS_LOCK:
+        job = _JOBS[job_id]
+        job.update(fields)
+        snapshot = dict(job)
+    _persist_job_record(snapshot)
+    return snapshot
+
+
+def _get_job_record(job_id: str) -> dict[str, Any] | None:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if job:
+        return job
+
+    job = _load_job_from_disk(job_id)
+    if not job:
+        return None
+    with _JOBS_LOCK:
+        _JOBS[str(job["job_id"])] = job
+    return job
 
 
 def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
@@ -173,7 +264,7 @@ def _target_context(target: str) -> dict[str, str]:
     scheme = parsed.scheme if "://" in raw else "http"
     url = raw if "://" in raw else urlunparse((scheme, netloc, "", "", "", ""))
     https_url = raw if raw.startswith("https://") else urlunparse(("https", netloc, "", "", "", ""))
-    return {
+    context = {
         "target": raw,
         "url": url,
         "https_url": https_url,
@@ -184,6 +275,9 @@ def _target_context(target: str) -> dict[str, str]:
         "scheme": scheme,
         **{f"env_{key}": value for key, value in os.environ.items()},
     }
+    for env_name in ("SHODAN_API_KEY", "PENTEST_AUTH_USERNAME", "PENTEST_AUTH_PASSWORD"):
+        context.setdefault(f"env_{env_name}", "")
+    return context
 
 
 def _materialize_template(template: str | None, target: str) -> str | None:
@@ -218,16 +312,17 @@ def _parse_output(profile: dict[str, Any], stdout: str) -> Any:
 
 def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     """Worker thread — executes the tool, streams stdout/stderr to disk."""
-    with _JOBS_LOCK:
-        job = _JOBS[job_id]
-        job["status"] = "running"
-        job["started_at"] = datetime.utcnow().isoformat()
+    job = _set_job_fields(
+        job_id,
+        status="running",
+        started_at=datetime.utcnow().isoformat(),
+    )
     started = time.perf_counter()
 
-    workdir = WORKSPACE / str(req.scan_id or "ad-hoc") / job["tool"] / job_id
+    tool_name = str(job.get("tool") or req.tool or req.profile)
+    workdir = WORKSPACE / str(req.scan_id or "ad-hoc") / tool_name / job_id
     workdir.mkdir(parents=True, exist_ok=True)
-    with _JOBS_LOCK:
-        job["workdir"] = str(workdir)
+    _set_job_fields(job_id, workdir=str(workdir))
 
     try:
         missing_env = [
@@ -236,20 +331,22 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             if not str(os.getenv(str(name), "")).strip()
         ]
         if missing_env:
-            with _JOBS_LOCK:
-                job["status"] = "skipped"
-                job["return_code"] = 0
-                job["command"] = f"{profile.get('tool') or req.profile} <requires_env:{','.join(missing_env)}>"
-                job["stdout"] = ""
-                job["stderr"] = f"missing required environment: {', '.join(missing_env)}"
+            _set_job_fields(
+                job_id,
+                status="skipped",
+                return_code=0,
+                command=f"{profile.get('tool') or req.profile} <requires_env:{','.join(missing_env)}>",
+                stdout="",
+                stderr=f"missing required environment: {', '.join(missing_env)}",
+            )
             return
 
         argv = _build_command(profile, req.target, req.extra_args)
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target)
+        command = " ".join(shlex.quote(a) for a in argv)
 
-        with _JOBS_LOCK:
-            job["command"] = " ".join(shlex.quote(a) for a in argv)
+        _set_job_fields(job_id, command=command)
 
         proc = subprocess.run(
             argv,
@@ -266,7 +363,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         (workdir / "stdout.txt").write_text(stdout, encoding="utf-8", errors="replace")
         (workdir / "stderr.txt").write_text(stderr, encoding="utf-8", errors="replace")
         (workdir / "exit_code.txt").write_text(str(return_code), encoding="utf-8")
-        (workdir / "command.txt").write_text(job["command"] or "", encoding="utf-8")
+        (workdir / "command.txt").write_text(command, encoding="utf-8")
 
         parsed = _parse_output(profile, stdout)
         if parsed is not None:
@@ -285,24 +382,30 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         if skipped_markers and any(marker in combined_lower for marker in skipped_markers):
             status = "skipped"
 
-        with _JOBS_LOCK:
-            job["status"] = status
-            job["return_code"] = return_code
-            job["stdout"] = stdout[-100_000:] if stdout else ""
-            job["stderr"] = stderr[-20_000:] if stderr else ""
-            job["parsed"] = parsed
+        _set_job_fields(
+            job_id,
+            status=status,
+            return_code=return_code,
+            stdout=stdout[-100_000:] if stdout else "",
+            stderr=stderr[-20_000:] if stderr else "",
+            parsed=parsed,
+        )
     except subprocess.TimeoutExpired as exc:
-        with _JOBS_LOCK:
-            job["status"] = "timeout"
-            job["error"] = f"timeout after {exc.timeout}s"
+        _set_job_fields(
+            job_id,
+            status="timeout",
+            error=f"timeout after {exc.timeout}s",
+            stdout=str(exc.stdout or ""),
+            stderr=str(exc.stderr or ""),
+        )
     except Exception as exc:  # noqa: BLE001
-        with _JOBS_LOCK:
-            job["status"] = "failed"
-            job["error"] = f"{type(exc).__name__}: {exc}"
+        _set_job_fields(job_id, status="failed", error=f"{type(exc).__name__}: {exc}")
     finally:
-        with _JOBS_LOCK:
-            job["finished_at"] = datetime.utcnow().isoformat()
-            job["duration_seconds"] = round(time.perf_counter() - started, 3)
+        _set_job_fields(
+            job_id,
+            finished_at=datetime.utcnow().isoformat(),
+            duration_seconds=round(time.perf_counter() - started, 3),
+        )
 
 
 # ── FastAPI surface ──────────────────────────────────────────────────────────
@@ -311,12 +414,15 @@ app = FastAPI(title="Pentest.io Kali Runner", version="1.0.0")
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
+    with _JOBS_LOCK:
+        active_jobs = sum(1 for j in _JOBS.values() if j["status"] in VOLATILE_JOB_STATES)
+        total_jobs = len(_JOBS)
     return {
         "status": "ok",
         "profiles_loaded": len(PROFILES),
         "kali_tools_detected": len(_discover_kali_tools()),
-        "active_jobs": sum(1 for j in _JOBS.values() if j["status"] in {"queued", "running"}),
-        "total_jobs": len(_JOBS),
+        "active_jobs": active_jobs,
+        "total_jobs": total_jobs,
         "workspace": str(WORKSPACE),
     }
 
@@ -403,6 +509,7 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
     job_id = job["job_id"]
     with _JOBS_LOCK:
         _JOBS[job_id] = job
+    _persist_job_record(job)
 
     _EXECUTOR.submit(_run_job, job_id, profile, req)
     return {
@@ -416,8 +523,7 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> JobStatus:
-    with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+    job = _get_job_record(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return JobStatus(**{k: job.get(k) for k in JobStatus.model_fields.keys()})
@@ -425,8 +531,7 @@ def get_job(job_id: str) -> JobStatus:
 
 @app.get("/jobs/{job_id}/result")
 def get_job_result(job_id: str) -> JobResult:
-    with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+    job = _get_job_record(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return JobResult(**{k: job.get(k) for k in JobResult.model_fields.keys()})
