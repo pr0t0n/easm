@@ -61,6 +61,12 @@ RUN set -eux; \
 # WPScan via Ruby (kali metapackage may not include it)
 RUN gem install --no-document wpscan 2>&1 | tail -3 || true
 
+# ParamSpider — não tem pacote pip/apt; clone direto.
+RUN git clone --depth 1 https://github.com/devanshbatham/ParamSpider /opt/ParamSpider 2>&1 | tail -2 && \
+    pip install --break-system-packages -r /opt/ParamSpider/requirements.txt 2>&1 | tail -1 || true && \
+    printf '#!/bin/sh\nexec python3 /opt/ParamSpider/paramspider.py "$@"\n' > /usr/local/bin/paramspider && \
+    chmod +x /usr/local/bin/paramspider
+
 # Runner application — FastAPI HTTP server
 # We use a dedicated venv to avoid conflicts with Kali-shipped python packages
 # (uvicorn/pydantic/etc. installed via apt have no RECORD files and break pip).

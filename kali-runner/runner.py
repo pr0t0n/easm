@@ -63,8 +63,13 @@ print(f"[profiles] loaded {len(PROFILES)} profiles")
 
 
 # ── Target safety guardrails ─────────────────────────────────────────────────
+# Hard block on loopback (127.0.0.1) and link-local. The 10/172.16-31/192.168
+# nets used to be blocked too, but the runner shares the docker bridge with
+# in-scope test targets (juice-shop, internal staging hosts), so we trust the
+# upstream ScanAuthorization gate instead. Operators who need stricter rules
+# can set ALLOWED_TARGETS regex via env.
 PRIVATE_NET_RE = re.compile(
-    r"^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|0\.0\.0\.0|169\.254\.|::1$|fe80:|fc00:|fd00:)"
+    r"^(?:127\.|0\.0\.0\.0|169\.254\.|::1$|fe80:)"
 )
 
 
@@ -72,8 +77,14 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
     t = (target or "").strip()
     if not t:
         return True, "empty target"
-    if PRIVATE_NET_RE.match(t):
-        return True, f"private/loopback range blocked: {t}"
+    # Strip URL prefix to evaluate just the host portion
+    host = t
+    for prefix in ("http://", "https://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    host = host.split("/")[0].split(":")[0]
+    if PRIVATE_NET_RE.match(host):
+        return True, f"loopback/link-local blocked: {host}"
     if any(ch in t for ch in [";", "&&", "||", "`", "$(", "\n", "\r"]):
         return True, f"shell metacharacter in target: {t!r}"
     return False, ""
