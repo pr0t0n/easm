@@ -283,7 +283,14 @@ def _target_context(target: str) -> dict[str, str]:
         "scheme": scheme,
         **{f"env_{key}": value for key, value in os.environ.items()},
     }
-    for env_name in ("SHODAN_API_KEY", "SCAN_AUTH_USERNAME", "SCAN_AUTH_PASSWORD"):
+    for env_name in (
+        "SHODAN_API_KEY",
+        "SCAN_AUTH_USERNAME",
+        "SCAN_AUTH_PASSWORD",
+        "SCAN_AUTH_USERLIST",
+        "SCAN_AUTH_PASSLIST",
+        "SCAN_AUTH_PROTOCOL",
+    ):
         context.setdefault(f"env_{env_name}", "")
     return context
 

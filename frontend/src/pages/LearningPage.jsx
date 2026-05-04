@@ -31,14 +31,7 @@ function Counter({ label, value }) {
   );
 }
 
-function readinessLabel(value) {
-  if (value === "operational") return "Operacional";
-  if (value === "partial") return "Parcial";
-  if (value === "initial") return "Inicial";
-  return "Sem aprendizado";
-}
-
-function LearningIndex({ index }) {
+function LearningIndex({ index, onLearn }) {
   const items = index?.items || [];
   if (!items.length) return null;
   return (
@@ -51,7 +44,7 @@ function LearningIndex({ index }) {
           </h2>
         </div>
         <div className="rounded-lg border px-4 py-2 text-sm font-semibold" style={{ borderColor: "var(--line)", background: "var(--surface-soft)", color: "var(--ink)" }}>
-          {index.overall_learning_percent || 0}% global
+          {index.families_total || items.length} famílias
         </div>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -61,28 +54,77 @@ function LearningIndex({ index }) {
               <div>
                 <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.label}</h3>
                 <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {item.accepted_learnings} aceitos · {item.techniques_accepted}/{item.target_techniques} técnicas
+                  {item.accepted_learnings} aceitos · {item.pending_learnings} pendentes · {item.techniques_accepted} técnicas
                 </p>
               </div>
-              <span className="ds-badge" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
-                {readinessLabel(item.readiness)}
-              </span>
-            </div>
-            <div className="mt-3 h-2 overflow-hidden rounded-full" style={{ background: "var(--surface-soft)" }}>
-              <div
-                className="h-full rounded-full"
-                style={{
-                  width: `${Math.min(100, Math.max(0, item.learning_percent || 0))}%`,
-                  background: item.learning_percent >= 85 ? "var(--sev-low-text)" : item.learning_percent >= 45 ? "var(--sev-medium-text)" : "var(--brand-500)",
-                }}
-              />
-            </div>
-            <div className="mt-2 flex items-center justify-between text-xs" style={{ color: "var(--ink-muted)" }}>
-              <span>{item.learning_percent || 0}% aprendido</span>
-              <span>{(item.phases || []).join(", ")}</span>
+              <button className="btn-secondary" type="button" onClick={() => onLearn?.(item.id)}>
+                Aprender
+              </button>
             </div>
             <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
               Skills: {(item.skills || []).join(", ") || "-"}
+            </p>
+            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+              Fases: {(item.phases || []).join(", ") || "-"}
+            </p>
+            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+              Ferramentas: {(item.tools || []).join(", ") || "-"}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PhaseKnowledgeIndex({ index, onLearn }) {
+  const items = index?.items || [];
+  if (!items.length) return null;
+  return (
+    <section className="panel p-5">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="ds-eyebrow">Conhecimento por fase P01-P22</p>
+          <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--ink)" }}>
+            Missão, ferramentas e técnicas por momento da Cyber Kill Chain
+          </h2>
+        </div>
+        <div className="rounded-lg border px-4 py-2 text-sm font-semibold" style={{ borderColor: "var(--line)", background: "var(--surface-soft)", color: "var(--ink)" }}>
+          {index.phases_with_accepted_learning || 0}/{index.phases_total || items.length} fases com aceite
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.id} className="rounded-lg border p-4" style={{ borderColor: "var(--line)", background: "#fff" }}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold" style={{ color: "var(--brand-600)" }}>{item.id}</p>
+                <h3 className="mt-1 text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.title}</h3>
+                <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>{item.node}</p>
+              </div>
+              <button className="btn-secondary" type="button" onClick={() => onLearn?.(item.id)}>
+                Ensinar fase
+              </button>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="rounded-lg border px-2 py-2" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+                <b style={{ color: "var(--ink)" }}>{item.accepted_learnings || 0}</b>
+                <span className="block" style={{ color: "var(--ink-muted)" }}>aceitos</span>
+              </div>
+              <div className="rounded-lg border px-2 py-2" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+                <b style={{ color: "var(--ink)" }}>{item.pending_learnings || 0}</b>
+                <span className="block" style={{ color: "var(--ink-muted)" }}>pendentes</span>
+              </div>
+              <div className="rounded-lg border px-2 py-2" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+                <b style={{ color: "var(--ink)" }}>{item.techniques_accepted || 0}</b>
+                <span className="block" style={{ color: "var(--ink-muted)" }}>técnicas</span>
+              </div>
+            </div>
+            <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
+              Workers: {(item.worker_groups || []).join(", ") || "-"}
+            </p>
+            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+              Ferramentas: {(item.tools || []).join(", ") || "-"}
             </p>
           </div>
         ))}
@@ -119,7 +161,114 @@ function TechniqueList({ techniques }) {
   );
 }
 
-function ReviewPanel({ item, notes, setNotes, onAccept, onReject, busy }) {
+function WorkerKnowledgeList({ items }) {
+  if (!items?.length) {
+    return <p className="text-sm" style={{ color: "var(--ink-muted)" }}>Nenhum worker vinculado.</p>;
+  }
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {items.map((item) => (
+        <div key={item.worker_group} className="rounded-lg border p-3" style={{ borderColor: "var(--line)", background: "#fff" }}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.worker_group}</h4>
+            <span className="ds-badge" style={{ borderColor: "var(--line)", background: "var(--surface-soft)" }}>
+              {(item.phases || []).join(", ") || "-"}
+            </span>
+          </div>
+          <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>{item.mission || "-"}</p>
+          <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+            Ferramentas: {(item.tools || []).join(", ") || "-"}
+          </p>
+          <p className="mt-1 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+            Técnicas: {(item.techniques || []).join(", ") || "-"}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ManualLearningForm({
+  attackOptions,
+  phaseOptions,
+  attackId,
+  setAttackId,
+  phaseId,
+  setPhaseId,
+  instruction,
+  setInstruction,
+  urlsText,
+  setUrlsText,
+  onSubmit,
+  busy,
+}) {
+  return (
+    <section className="panel p-5">
+      <div className="flex flex-col gap-1">
+        <p className="ds-eyebrow">Ensinar técnica manualmente</p>
+        <h2 className="text-lg font-semibold" style={{ color: "var(--ink)" }}>Aprendizado por skill e fase P01-P22</h2>
+      </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--ink-muted)" }}>Ataque / skill</label>
+          <select
+            value={attackId}
+            onChange={(event) => setAttackId(event.target.value)}
+            className="mt-2 w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "var(--line)", color: "var(--ink)" }}
+          >
+            {attackOptions.map((item) => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--ink-muted)" }}>Fase Cyber Kill Chain</label>
+          <select
+            value={phaseId}
+            onChange={(event) => setPhaseId(event.target.value)}
+            className="mt-2 w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "var(--line)", color: "var(--ink)" }}
+          >
+            {phaseOptions.map((item) => (
+              <option key={item.id} value={item.id}>{item.id} - {item.title}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="mt-4">
+        <label className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--ink-muted)" }}>Como a técnica deve ser reproduzida</label>
+        <textarea
+          value={instruction}
+          onChange={(event) => setInstruction(event.target.value)}
+          className="mt-2 min-h-36 w-full rounded-lg border px-3 py-2 text-sm"
+          style={{ borderColor: "var(--line)" }}
+          placeholder="Descreva precondições, sinais, passos seguros, evidências esperadas, impacto e remediação. A LLM transformará isso em proposta para aceite."
+        />
+      </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--ink-muted)" }}>URLs de apoio</label>
+          <textarea
+            value={urlsText}
+            onChange={(event) => setUrlsText(event.target.value)}
+            className="mt-2 min-h-20 w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "var(--line)" }}
+            placeholder="Opcional: https://hackerone.com/reports/...; https://github.com/..."
+          />
+        </div>
+        <button type="button" className="btn-primary" onClick={onSubmit} disabled={busy || !attackId || !phaseId || instruction.trim().length < 20}>
+          {busy ? "Analisando..." : "Analisar e aprender"}
+        </button>
+      </div>
+      <p className="mt-3 text-xs" style={{ color: "var(--ink-muted)" }}>
+        A proposta aparece em revisão. Só após o aceite ela entra no conhecimento da fase e do worker.
+      </p>
+    </section>
+  );
+}
+
+function ReviewPanel({ item, notes, setNotes, onAccept, onReject, onDelete, busy }) {
   if (!item) return null;
   return (
     <section className="panel p-5">
@@ -138,6 +287,9 @@ function ReviewPanel({ item, notes, setNotes, onAccept, onReject, busy }) {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button className="btn-secondary" type="button" onClick={onDelete} disabled={busy}>
+            Retirar aprendizado
+          </button>
           <button className="btn-secondary" type="button" onClick={onReject} disabled={busy || item.status === "rejected"}>
             Rejeitar
           </button>
@@ -204,6 +356,13 @@ function ReviewPanel({ item, notes, setNotes, onAccept, onReject, busy }) {
           <TechniqueList techniques={item.learned_techniques || []} />
         </div>
       </div>
+
+      <div className="mt-5">
+        <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Conhecimento por worker/agente</h3>
+        <div className="mt-3">
+          <WorkerKnowledgeList items={item.worker_knowledge || []} />
+        </div>
+      </div>
     </section>
   );
 }
@@ -212,13 +371,19 @@ export default function LearningPage() {
   const [urlsText, setUrlsText] = useState("");
   const [summary, setSummary] = useState({});
   const [skillIndex, setSkillIndex] = useState(null);
+  const [phaseIndex, setPhaseIndex] = useState(null);
   const [missionPrompt, setMissionPrompt] = useState("");
   const [items, setItems] = useState([]);
   const [reviewItem, setReviewItem] = useState(null);
   const [notes, setNotes] = useState("");
+  const [manualAttackId, setManualAttackId] = useState("");
+  const [manualPhaseId, setManualPhaseId] = useState("");
+  const [manualInstruction, setManualInstruction] = useState("");
+  const [manualUrlsText, setManualUrlsText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [manualSubmitting, setManualSubmitting] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
@@ -237,18 +402,25 @@ export default function LearningPage() {
 
   const allPendingSelected = pendingItemIds.length > 0 && pendingItemIds.every((id) => selectedIds.includes(id));
 
+  const attackOptions = useMemo(() => skillIndex?.items || [], [skillIndex]);
+  const phaseOptions = useMemo(() => phaseIndex?.items || [], [phaseIndex]);
+
   const load = async () => {
     setLoading(true);
     setError("");
     try {
-      const [{ data }, indexResponse] = await Promise.all([
+      const [{ data }, indexResponse, phaseResponse] = await Promise.all([
         client.get("/api/learning/vulnerabilities"),
         client.get("/api/learning/vulnerabilities/attack-index").catch(() => ({ data: null })),
+        client.get("/api/learning/vulnerabilities/phase-index").catch(() => ({ data: null })),
       ]);
       const nextItems = data.items || [];
       setSummary(data.summary || {});
       if (indexResponse?.data) setSkillIndex(indexResponse.data);
+      if (phaseResponse?.data) setPhaseIndex(phaseResponse.data);
       setItems(nextItems);
+      if (!manualAttackId && indexResponse?.data?.items?.length) setManualAttackId(indexResponse.data.items[0].id);
+      if (!manualPhaseId && phaseResponse?.data?.items?.length) setManualPhaseId(phaseResponse.data.items[0].id);
       setSelectedIds((current) => current.filter((id) => nextItems.some((item) => item.id === id && item.status === "pending_review")));
       if (!reviewItem) {
         const pending = nextItems.find((item) => item.status === "pending_review");
@@ -316,6 +488,41 @@ export default function LearningPage() {
     }
   };
 
+  const submitManualLearning = async () => {
+    setManualSubmitting(true);
+    setError("");
+    setTaskStatus("");
+    try {
+      const { data } = await client.post("/api/learning/vulnerabilities/manual-analyze", {
+        attack_id: manualAttackId,
+        phase_id: manualPhaseId,
+        instruction_text: manualInstruction,
+        urls_text: manualUrlsText,
+      });
+      setSummary(data.summary || {});
+      setReviewItem(data.item || null);
+      setNotes("");
+      setManualInstruction("");
+      setManualUrlsText("");
+      setTaskStatus(data.message || "Proposta criada para revisão.");
+      await load();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao analisar aprendizado manual.");
+    } finally {
+      setManualSubmitting(false);
+    }
+  };
+
+  const selectAttackForLearning = (attackId) => {
+    setManualAttackId(attackId);
+    setTaskStatus("Ataque selecionado para ensino manual. Escolha a fase P01-P22 e descreva a técnica.");
+  };
+
+  const selectPhaseForLearning = (phaseId) => {
+    setManualPhaseId(phaseId);
+    setTaskStatus("Fase selecionada para ensino manual. Escolha a skill e descreva a técnica.");
+  };
+
   const seedCatalog = async () => {
     setSeeding(true);
     setError("");
@@ -363,6 +570,24 @@ export default function LearningPage() {
     }
   };
 
+  const deleteLearning = async () => {
+    if (!reviewItem?.id) return;
+    setReviewing(true);
+    setError("");
+    try {
+      const { data } = await client.delete(`/api/learning/vulnerabilities/${reviewItem.id}`);
+      setSummary(data.summary || {});
+      setReviewItem(null);
+      setNotes("");
+      setTaskStatus(`Aprendizado ${data.deleted_id} retirado. Atualize ou ensine novamente para reaprender.`);
+      await load();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao retirar aprendizado.");
+    } finally {
+      setReviewing(false);
+    }
+  };
+
   const bulkReview = async (action) => {
     if (!selectedIds.length) return;
     setReviewing(true);
@@ -396,8 +621,9 @@ export default function LearningPage() {
     try {
       const { data } = await client.post("/api/learning/vulnerabilities/mission-prompt");
       setSkillIndex(data.attack_index || skillIndex);
+      setPhaseIndex(data.phase_index || phaseIndex);
       setMissionPrompt(data.prompt || "");
-      setTaskStatus(`Prompt consolidado com ${data.learning_count || 0} aprendizados aceitos e ${data.overall_learning_percent || 0}% de cobertura global.`);
+      setTaskStatus(`Prompt consolidado com ${data.learning_count || 0} aprendizados aceitos e conhecimento separado por P01-P22.`);
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao consolidar prompt/missão.");
     } finally {
@@ -438,7 +664,9 @@ export default function LearningPage() {
         <Counter label="Técnicas aceitas" value={summary.techniques_accepted} />
       </section>
 
-      <LearningIndex index={skillIndex} />
+      <LearningIndex index={skillIndex} onLearn={selectAttackForLearning} />
+
+      <PhaseKnowledgeIndex index={phaseIndex} onLearn={selectPhaseForLearning} />
 
       {error && (
         <section className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)" }}>
@@ -471,6 +699,21 @@ export default function LearningPage() {
         </div>
       </section>
 
+      <ManualLearningForm
+        attackOptions={attackOptions}
+        phaseOptions={phaseOptions}
+        attackId={manualAttackId}
+        setAttackId={setManualAttackId}
+        phaseId={manualPhaseId}
+        setPhaseId={setManualPhaseId}
+        instruction={manualInstruction}
+        setInstruction={setManualInstruction}
+        urlsText={manualUrlsText}
+        setUrlsText={setManualUrlsText}
+        onSubmit={submitManualLearning}
+        busy={manualSubmitting}
+      />
+
       <ReviewPanel
         item={reviewItem}
         notes={notes}
@@ -478,6 +721,7 @@ export default function LearningPage() {
         busy={reviewing}
         onAccept={() => review("accept")}
         onReject={() => review("reject")}
+        onDelete={deleteLearning}
       />
 
       {missionPrompt && (

@@ -34,6 +34,7 @@ ENV GOPATH=/root/go \
 #  kali-linux-everything; see `apt-cache search '^kali-linux-'`.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       kali-linux-everything \
+      seclists hydra gobuster feroxbuster dirsearch medusa \
     && rm -rf /var/lib/apt/lists/*
 
 # ProjectDiscovery suite — most active recon/vuln tools we use are NOT in Kali
@@ -102,6 +103,13 @@ RUN python3 -m venv /opt/runner-venv && \
 ENV PATH="/opt/runner-venv/bin:${PATH}"
 COPY runner.py .
 COPY profiles ./profiles
+
+RUN set -eux; \
+    for tool in ffuf hydra gobuster feroxbuster dirsearch medusa crackmapexec jwt_tool; do command -v "$tool"; done; \
+    test -f /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt; \
+    test -f /usr/share/seclists/Discovery/Web-Content/raft-small-files.txt; \
+    test -f /usr/share/seclists/Usernames/top-usernames-shortlist.txt; \
+    test -f /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt
 
 # Workspace for evidence (mounted as volume in docker-compose)
 RUN mkdir -p /workspace

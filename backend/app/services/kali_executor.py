@@ -85,7 +85,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "subjack": "subjack_takeover",
 
     # Installation / C2 / AOO
-    "hydra": "hydra_http_auth",
+    "hydra": "hydra_wordlist_auth",
     "medusa": "medusa_smb",
     "crackmapexec": "crackmapexec_smb",
     "jwt_tool": "jwt_tool_audit",

@@ -184,9 +184,9 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "ffuf": {
         "category": "recon", "phase": "P15",
         "description": "Fast HTTP fuzzer for paths, parameters, virtual hosts, headers.",
-        "when_to_use": "Directory/file enum; vhost brute; parameter brute.",
+        "when_to_use": "Directory/file enum with Kali Seclists; default profiles use raft-small-directories and raft-small-files.",
         "inputs": "URL, wordlist", "outputs": "found paths",
-        "prerequisites": "wordlist",
+        "prerequisites": "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt and raft-small-files.txt inside kali_runner",
     },
     "gobuster": {
         "category": "recon", "phase": "P15",
@@ -316,9 +316,9 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "hydra": {
         "category": "exploit", "phase": "P14",
         "description": "Network login bruteforcer (SSH, FTP, RDP, HTTP-POST, SMB).",
-        "when_to_use": "When exposed login services found; only with explicit authorization.",
+        "when_to_use": "When exposed login services found; only with explicit authorization and operator-provided user/pass lists.",
         "inputs": "service URI, userlist, passlist", "outputs": "valid creds",
-        "prerequisites": "AUTH_TO_BRUTE_FORCE granted, lists",
+        "prerequisites": "SCAN_AUTH_USERLIST, SCAN_AUTH_PASSLIST and SCAN_AUTH_PROTOCOL; Kali profile runs hydra -L users.txt -P passlist.txt <target> <protocol>",
     },
     "medusa": {
         "category": "exploit", "phase": "P14",

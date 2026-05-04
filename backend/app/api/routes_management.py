@@ -1825,6 +1825,43 @@ def create_learning_from_urls(
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Falha no aprendizado: {exc}") from exc
 
 
+@router.post("/learning/vulnerabilities/manual-analyze")
+def create_learning_from_manual_prompt(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import (
+        create_manual_vulnerability_learning,
+        serialize_vulnerability_learning,
+        vulnerability_learning_summary,
+    )
+
+    attack_id = str(payload.get("attack_id") or "").strip()
+    phase_id = str(payload.get("phase_id") or "").strip()
+    instruction_text = str(payload.get("instruction_text") or payload.get("prompt") or "").strip()
+    urls_text = str(payload.get("urls_text") or "").strip()
+
+    try:
+        row = create_manual_vulnerability_learning(
+            db,
+            current_user,
+            attack_id=attack_id,
+            phase_id=phase_id,
+            instruction_text=instruction_text,
+            urls_text=urls_text,
+        )
+        return {
+            "summary": vulnerability_learning_summary(db),
+            "item": serialize_vulnerability_learning(row),
+            "message": "Proposta criada. Revise abaixo e aceite para liberar aos agentes.",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Falha ao analisar prompt manual: {exc}") from exc
+
+
 @router.get("/learning/vulnerabilities/task/{task_id}")
 def check_learning_task_status(
     task_id: str,
@@ -1922,6 +1959,16 @@ def learning_vulnerability_attack_index(
     return vulnerability_learning_attack_index(db)
 
 
+@router.get("/learning/vulnerabilities/phase-index")
+def learning_vulnerability_phase_index(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import vulnerability_learning_phase_index
+
+    return vulnerability_learning_phase_index(db)
+
+
 @router.post("/learning/vulnerabilities/mission-prompt")
 def build_learning_vulnerability_mission_prompt(
     db: Session = Depends(get_db),
@@ -1930,6 +1977,22 @@ def build_learning_vulnerability_mission_prompt(
     from app.services.vulnerability_learning_service import build_consolidated_vulnerability_mission_prompt
 
     return build_consolidated_vulnerability_mission_prompt(db)
+
+
+@router.delete("/learning/vulnerabilities/{learning_id}")
+def delete_vulnerability_learning(
+    learning_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import vulnerability_learning_summary
+
+    row = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == learning_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted_id": learning_id, "summary": vulnerability_learning_summary(db)}
 
 
 @router.put("/learning/vulnerabilities/{learning_id}/accept")

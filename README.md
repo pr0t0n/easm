@@ -278,7 +278,7 @@ A plataforma expoe 9 fases executivas de Cyber Kill Chain:
 | `ACTIONS_ON_OBJECTIVES` | derivado de evidencias | Impacto, secrets, SAST e supply chain |
 | `REPORTING` | `executive_analyst` | Narrativa, rating, recomendacoes e relatorio |
 
-Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/mission.py`. O `Phase Monitor` usa essas fases para verificar se as ferramentas esperadas foram tentadas.
+Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/mission.py`. O `Phase Monitor` usa essas fases para verificar se as ferramentas esperadas foram tentadas. O modulo de aprendizado tambem separa conhecimento por essas 22 fases: cada aprendizado aceito passa a informar fase, worker/agente, ferramentas, tecnicas, evidencia esperada e missao.
 
 ### Catálogo de ferramentas por fase técnica
 
@@ -302,7 +302,7 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P16` | `risk_assessment` | `worker_exploitation` | API Security | `nuclei`, `arjun`, `wapiti` |
 | `P17` | `risk_assessment` | `worker_exploitation` | Upload & WebShell Bypass | `nuclei` |
 | `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Weakness & Cipher Audit | `sslscan`, `nmap`, `testssl` |
-| `P19` | `risk_assessment` | `worker_exploitation` | IDOR & Access Control Flaws | `nuclei` |
+| `P19` | `risk_assessment` | `worker_exploitation` / `worker_installation` | IDOR & Access Control Flaws | `nuclei`, `katana`, `arjun`, `curl-headers` |
 | `P20` | `risk_assessment` | `worker_exploitation` | CMS-Specific Scan | `wpscan`, `nuclei`, `nikto` |
 | `P21` | `threat_intel` | `worker_actions` / `worker_weaponization` | Secret & Credential Exposure | `trufflehog`, `gitleaks`, `semgrep`, `bandit` |
 | `P22` | `risk_assessment` | `worker_actions` | Dependency & Supply Chain Risk | `retire`, `trivy`, `semgrep`, `bandit`, `gitleaks` |
@@ -506,6 +506,13 @@ O registro `vulnerability_learnings` guarda esses três blocos em colunas própr
 
 Depois disso, o conjunto é enviado para a LLM local para gerar missão, prompt e técnicas operacionais, criando o aprendizado com status `pending_review`.
 
+Além de URLs, a tela permite ensino manual: o operador escolhe uma classe de ataque/skill, escolhe a fase `P01` a `P22`, escreve como a técnica deve ser reproduzida e opcionalmente anexa URLs de apoio. A LLM transforma esse texto em proposta de aprendizado; somente após `Aceitar aprendizado` a técnica passa a contar para aquela fase e para os workers responsáveis.
+
+O índice de aprendizado é exibido em duas visões:
+
+- por ataque/skill, para agrupar famílias como XSS, CSRF, SQLi, IDOR, SSRF, XXE, Information Exposure etc.;
+- por fase `P01` a `P22`, para mostrar conhecimento separado, workers responsáveis, ferramentas Kali, aprendizados aceitos/pendentes e técnicas disponíveis naquela etapa.
+
 Para acelerar a maturidade inicial, a tela também tem `Antecipar catálogo`. Essa ação cria aprendizados pendentes, sem depender de download externo, para as famílias:
 
 - SQL Injection, Resource Injection, Remote File Inclusion, Path Traversal;
@@ -523,6 +530,7 @@ O operador vê antes do aceite:
 - resumo da vulnerabilidade aprendida;
 - quantidade de técnicas recebidas;
 - fases, skills e ferramentas sugeridas;
+- conhecimento por fase `P01` a `P22` e por worker/agente;
 - `steps_to_reproduce`, usado como aprendizado de exploração/reprodução;
 - `impact`, que será levado para o relatório;
 - `remediation`, que será levado para o relatório;
@@ -562,8 +570,8 @@ Esses contratos aparecem em `GET /api/worker-manager/groups`, em `GET /api/worke
 | `worker_recon` | `worker.*.reconnaissance` | subfinder, amass, dnsx, shuffledns, assetfinder, alterx, naabu, nmap, masscan, httpx, whatweb, wafw00f, curl-headers, sslscan, testssl, katana, hakrawler, gau, waybackurls, gospider, arjun, paramspider |
 | `worker_weaponization` | `worker.*.weaponization` | nuclei, nmap-vulscan, shodan-cli, theHarvester, h8mail, trufflehog, gitleaks, subjack |
 | `worker_delivery` | `worker.*.delivery` | ffuf, gobuster, feroxbuster, dirsearch, arjun, paramspider |
-| `worker_exploitation` | `worker.*.exploitation` | nuclei, sqlmap, dalfox, wapiti, wpscan, nikto, interactsh-client |
-| `worker_installation` | `worker.*.installation` | hydra, medusa, crackmapexec, jwt_tool |
+| `worker_exploitation` | `worker.*.exploitation` | nuclei, sqlmap, dalfox, wapiti, wpscan, nikto, interactsh-client, katana, arjun, curl-headers |
+| `worker_installation` | `worker.*.installation` | hydra, medusa, crackmapexec, jwt_tool, nuclei, curl-headers, arjun |
 | `worker_c2` | `worker.*.command_control` | nuclei, interactsh-client, testssl |
 | `worker_actions` | `worker.*.actions_on_objectives` | semgrep, bandit, trufflehog, gitleaks, retire, trivy |
 | `worker_reporting` | `worker.*.reporting` | Sem CLI ofensiva; consolidacao |
@@ -748,6 +756,7 @@ Variaveis importantes:
 | `KALI_RUNNER_URL` | URL interna do runner para backend/workers |
 | `SHODAN_API_KEY` | habilita `shodan-cli` |
 | `SCAN_AUTH_USERNAME` / `SCAN_AUTH_PASSWORD` | habilitam perfis que exigem credencial |
+| `SCAN_AUTH_USERLIST` / `SCAN_AUTH_PASSLIST` / `SCAN_AUTH_PROTOCOL` | habilitam `hydra_wordlist_auth` dentro do Kali runner (`hydra -L users.txt -P passlist.txt <target> <protocol>`) |
 
 ### 2. Subir stack
 
@@ -928,7 +937,7 @@ Validado em scan **#34** contra `http://juice-shop:3000` (OWASP Juice Shop):
 | Metrica | Valor |
 | --- | --- |
 | Containers ativos | 16/16 healthy |
-| Kali runner | reachable - 4 077 tools detected - 48 profiles |
+| Kali runner | reachable - 4 077 tools detected - 50 profiles |
 | Backend image | 4.06 GB (sem qualquer ferramenta de analise) |
 | Workers (9) | 0 ferramentas de analise cada |
 | Tools executadas no scan | 43 (25 success - 18 fail por DNS/timeout esperado) |

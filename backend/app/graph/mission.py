@@ -59,7 +59,7 @@ PENTEST_PHASES = [
     {"id": "P18", "title": "SSL/TLS Weakness & Cipher Audit", "node": "risk_assessment",
      "tools": ["sslscan", "nmap", "testssl"]},
     {"id": "P19", "title": "IDOR & Access Control Flaws", "node": "risk_assessment",
-     "tools": ["nuclei"]},
+     "tools": ["nuclei", "katana", "arjun", "curl-headers"]},
     {"id": "P20", "title": "CMS-Specific Scan (WP/Joomla/Drupal)", "node": "risk_assessment",
      "tools": ["wpscan", "nuclei", "nikto"]},
     # Phase 5 – Code/Supply Chain
@@ -146,6 +146,14 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "triggers": ["dir", "path", "admin", "backup", "ffuf", "gobuster", "dirsearch", "feroxbuster"],
         "playbook": ["ffuf", "gobuster", "feroxbuster", "dirsearch"],
         "phases": ["P15"],
+    },
+    {
+        "id": "vuln-idor-access-control",
+        "category": "vulnerabilities",
+        "description": "Validação de IDOR/BOLA e falhas de controle de acesso com duas identidades autorizadas.",
+        "triggers": ["idor", "bola", "access control", "authorization", "tenant", "role", "object id"],
+        "playbook": ["katana", "arjun", "nuclei", "curl-headers"],
+        "phases": ["P14", "P16", "P19"],
     },
     {
         "id": "vuln-api-graphql",

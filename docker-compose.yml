@@ -69,6 +69,12 @@ services:
     environment:
       KALI_WORKSPACE: /workspace
       KALI_MAX_PARALLEL: "8"
+      SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
+      SCAN_AUTH_USERNAME: "${SCAN_AUTH_USERNAME:-}"
+      SCAN_AUTH_PASSWORD: "${SCAN_AUTH_PASSWORD:-}"
+      SCAN_AUTH_USERLIST: "${SCAN_AUTH_USERLIST:-}"
+      SCAN_AUTH_PASSLIST: "${SCAN_AUTH_PASSLIST:-}"
+      SCAN_AUTH_PROTOCOL: "${SCAN_AUTH_PROTOCOL:-}"
       TZ: America/Sao_Paulo
     ports:
       - "${KALI_RUNNER_HOST_PORT:-8088}:8088"
