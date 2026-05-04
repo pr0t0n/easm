@@ -250,6 +250,9 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: "${FRONTEND_NODE_IMAGE:-node:20-alpine}"
+        INSTALL_DEPS: "${FRONTEND_INSTALL_DEPS:-true}"
     container_name: scriptkiddo_frontend
     environment:
       VITE_API_URL: "${VITE_API_URL:-http://localhost:8001}"
