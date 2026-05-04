@@ -1887,6 +1887,8 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
     if tool == "sslscan":
         return _extract_sslscan_findings(stdout, step_name, default_target)
+    if tool == "testssl":
+        return _extract_testssl_findings(stdout, step_name, default_target)
     if tool == "wapiti":
         return _extract_wapiti_findings(stdout, step_name, default_target)
     if tool == "shodan-cli":
@@ -2124,15 +2126,56 @@ def _extract_shcheck_findings(stdout: str, step_name: str, default_target: str) 
 def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
 
-    expected_headers = [
-        "strict-transport-security",
-        "content-security-policy",
-        "x-frame-options",
-        "x-content-type-options",
-        "referrer-policy",
-        "permissions-policy",
-        "x-xss-protection",
-    ]
+    expected_headers = {
+        "strict-transport-security": {
+            "owasp": "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+            "reason": "reduz downgrade HTTPS e risco de cookie/token em canal inseguro",
+            "remediation": "habilitar HSTS com max-age adequado, includeSubDomains e preload quando aplicavel",
+            "severity": "medium",
+        },
+        "content-security-policy": {
+            "owasp": "A03:2021 Injection / A05:2021 Security Misconfiguration",
+            "reason": "limita execucao de scripts, carregamento de recursos e abuso de XSS",
+            "remediation": "definir CSP restritiva com default-src, script-src, object-src 'none' e frame-ancestors",
+            "severity": "medium",
+        },
+        "x-frame-options": {
+            "owasp": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
+            "reason": "reduz risco de clickjacking quando frame-ancestors ainda nao cobre o caso",
+            "remediation": "usar DENY/SAMEORIGIN ou preferir CSP frame-ancestors com politica equivalente",
+            "severity": "medium",
+        },
+        "x-content-type-options": {
+            "owasp": "A05:2021 Security Misconfiguration",
+            "reason": "reduz MIME sniffing e interpretacao incorreta de conteudo",
+            "remediation": "configurar X-Content-Type-Options: nosniff",
+            "severity": "low",
+        },
+        "referrer-policy": {
+            "owasp": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
+            "reason": "reduz vazamento de caminhos, parametros e tokens por Referer",
+            "remediation": "configurar strict-origin-when-cross-origin ou politica mais restritiva",
+            "severity": "low",
+        },
+        "permissions-policy": {
+            "owasp": "A05:2021 Security Misconfiguration",
+            "reason": "reduz exposicao de APIs sensiveis do navegador",
+            "remediation": "desabilitar recursos nao usados, como camera, microphone, geolocation e payment",
+            "severity": "low",
+        },
+        "cross-origin-opener-policy": {
+            "owasp": "A05:2021 Security Misconfiguration",
+            "reason": "isola contexto de navegacao e reduz abuso cross-origin",
+            "remediation": "avaliar same-origin para aplicacoes que suportam isolamento",
+            "severity": "low",
+        },
+        "cross-origin-resource-policy": {
+            "owasp": "A05:2021 Security Misconfiguration",
+            "reason": "reduz carregamento indevido de recursos por origens externas",
+            "remediation": "avaliar same-origin ou same-site conforme necessidade funcional",
+            "severity": "low",
+        },
+    }
 
     blocks: list[tuple[str, str]] = []
     current_url = default_target
@@ -2156,12 +2199,10 @@ def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: 
         blocks.append((default_target, stdout.strip()))
 
     seen: set[tuple[str, str, str]] = set()
-    high_value_headers = {"strict-transport-security", "content-security-policy", "x-frame-options"}
-
     for block_url, block_text in blocks:
         block_lower = block_text.lower()
 
-        for header in expected_headers:
+        for header, metadata in expected_headers.items():
             present = re.search(rf"(?im)^\s*{re.escape(header)}\s*:\s*.+$", block_text) is not None
             issue = "present" if present else "missing"
             dedupe_key = (str(block_url or default_target).strip().lower(), header, issue)
@@ -2185,13 +2226,17 @@ def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: 
                             "tool": "curl-headers",
                             "header_name": header,
                             "header_issue": "present",
+                            "owasp_category": metadata["owasp"],
+                            "owasp_top_10": metadata["owasp"],
+                            "header_expected_reason": metadata["reason"],
+                            "remediation": metadata["remediation"],
                             "evidence": evidence,
                             "http_headers_raw": block_text[:1400],
                         },
                     }
                 )
             else:
-                sev = "medium" if header in high_value_headers else "low"
+                sev = str(metadata.get("severity") or "low")
                 findings.append(
                     {
                         "title": f"Header de seguranca ausente: {header}",
@@ -2205,6 +2250,10 @@ def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: 
                             "tool": "curl-headers",
                             "header_name": header,
                             "header_issue": "missing",
+                            "owasp_category": metadata["owasp"],
+                            "owasp_top_10": metadata["owasp"],
+                            "header_expected_reason": metadata["reason"],
+                            "remediation": metadata["remediation"],
                             "evidence": f"{header}: missing",
                             "http_headers_raw": block_text[:1400],
                         },
@@ -2226,6 +2275,7 @@ def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: 
                         "asset": block_url or default_target,
                         "tool": "curl-headers",
                         "http_status": status_code,
+                        "owasp_category": "A05:2021 Security Misconfiguration",
                         "evidence": re.search(r"(?im)^\s*HTTP/\S+\s+\d{3}.*$", block_text).group(0),
                         "http_headers_raw": block_text[:1400],
                     },
@@ -2380,42 +2430,144 @@ def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: 
 
 def _extract_sslscan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(title: str, severity: str, evidence: str, category: str, remediation: str) -> None:
+        key = (title, evidence[:160])
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append(
+            {
+                "title": title,
+                "severity": severity,
+                "risk_score": _severity_to_risk_score(severity),
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "sslscan",
+                    "owasp_category": category,
+                    "owasp_top_10": category,
+                    "remediation": remediation,
+                    "evidence": evidence,
+                },
+            }
+        )
+
     for raw_line in stdout.splitlines():
         line = str(raw_line or "").strip()
         if not line:
             continue
         lowered = line.lower()
-        if "tlsv1.0" in lowered or "tlsv1.1" in lowered:
-            findings.append(
-                {
-                    "title": "TLS legado habilitado no endpoint",
-                    "severity": "medium",
-                    "risk_score": 5,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "sslscan",
-                        "evidence": line,
-                    },
-                }
+        if "sslv2" in lowered or "sslv3" in lowered:
+            _add(
+                "SSL legado habilitado no endpoint",
+                "high",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "desabilitar SSLv2/SSLv3 e permitir apenas TLS moderno",
             )
-        if "self signed" in lowered or "certificate expired" in lowered:
-            findings.append(
-                {
-                    "title": "Problema de certificado TLS detectado",
-                    "severity": "high",
-                    "risk_score": 7,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "sslscan",
-                        "evidence": line,
-                    },
-                }
+        if "tlsv1.0" in lowered or "tlsv1.1" in lowered:
+            _add(
+                "TLS legado habilitado no endpoint",
+                "medium",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "desabilitar TLS 1.0/1.1 e exigir TLS 1.2+ ou TLS 1.3",
+            )
+        if any(token in lowered for token in ["self signed", "certificate expired", "expired", "not trusted", "unable to get local issuer"]):
+            _add(
+                "Problema de certificado TLS detectado",
+                "high",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "emitir certificado valido, corrigir cadeia intermediaria e monitorar renovacao antes do vencimento",
+            )
+        if any(token in lowered for token in [" rc4", " 3des", " des ", " null", " anonymous", " export", " md5"]):
+            _add(
+                "Cipher suite fraco detectado",
+                "medium",
+                line,
+                "A02:2021 Cryptographic Failures",
+                "remover cipher suites fracos e priorizar AEAD como TLS_AES_* ou ECDHE com AES-GCM/CHACHA20",
+            )
+    return findings
+
+
+def _extract_testssl_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(title: str, severity: str, evidence: str, category: str, remediation: str) -> None:
+        key = (title, evidence[:160])
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append(
+            {
+                "title": title,
+                "severity": severity,
+                "risk_score": _severity_to_risk_score(severity),
+                "source_worker": "analise_vulnerabilidade",
+                "details": {
+                    "node": "vuln",
+                    "step": step_name,
+                    "asset": default_target,
+                    "tool": "testssl",
+                    "owasp_category": category,
+                    "owasp_top_10": category,
+                    "remediation": remediation,
+                    "evidence": evidence,
+                },
+            }
+        )
+
+    for raw_line in stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if ("ssl" in lowered and "offered" in lowered) or "sslv2" in lowered or "sslv3" in lowered:
+            _add(
+                "SSL legado habilitado no endpoint",
+                "high",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "desabilitar SSLv2/SSLv3 e permitir apenas TLS moderno",
+            )
+        if any(token in lowered for token in ["tls 1.0", "tlsv1.0", "tls 1.1", "tlsv1.1"]):
+            _add(
+                "TLS legado habilitado no endpoint",
+                "medium",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "desabilitar TLS 1.0/1.1 e exigir TLS 1.2+ ou TLS 1.3",
+            )
+        if any(token in lowered for token in ["expired", "self-signed", "self signed", "not trusted", "chain of trust", "hostname mismatch"]):
+            _add(
+                "Problema de certificado TLS detectado",
+                "high",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "corrigir validade, hostname, cadeia intermediaria e autoridade emissora confiavel",
+            )
+        if any(token in lowered for token in ["rc4", "3des", "sweet32", "null cipher", "anonymous", "export cipher", "md5"]):
+            _add(
+                "Cipher suite fraco detectado",
+                "medium",
+                line,
+                "A02:2021 Cryptographic Failures",
+                "remover suites legadas/fracas e priorizar TLS 1.3 ou TLS 1.2 com AEAD",
+            )
+        if "hsts" in lowered and any(token in lowered for token in ["not offered", "missing", "not set"]):
+            _add(
+                "HSTS ausente no endpoint HTTPS",
+                "medium",
+                line,
+                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
+                "habilitar Strict-Transport-Security com max-age adequado",
             )
     return findings
 

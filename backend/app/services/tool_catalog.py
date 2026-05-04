@@ -90,8 +90,8 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     },
     "httpx": {
         "category": "recon", "phase": "P02|P05",
-        "description": "Fast HTTP/HTTPS prober — status, title, tech, TLS, redirects.",
-        "when_to_use": "Right after subdomain enum to find live web targets and fingerprint.",
+        "description": "Fast HTTP/HTTPS prober — status, title, tech, TLS metadata, redirects.",
+        "when_to_use": "Right after subdomain enum to find live web targets, HTTPS posture and fingerprint.",
         "inputs": "host list", "outputs": "live URLs + HTTP metadata",
         "prerequisites": "subdomain list",
     },
@@ -103,10 +103,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "live URL",
     },
     "curl-headers": {
-        "category": "recon", "phase": "P05|P06",
-        "description": "HTTP header analysis via curl — inspect security headers, WAF signatures.",
-        "when_to_use": "Lightweight header inspection for security posture and WAF fingerprinting.",
-        "inputs": "URL", "outputs": "HTTP headers + analysis",
+        "category": "recon", "phase": "P05|P06|P12",
+        "description": "OWASP Top 10 security-header analysis via curl — HSTS, CSP, X-Frame-Options/frame-ancestors, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, COOP/COEP/CORP, server disclosure and WAF hints.",
+        "when_to_use": "Every live web target before active validation; maps A05 Security Misconfiguration, A01 access-control UI hardening, A02 HTTPS downgrade risk and A03 header injection context.",
+        "inputs": "URL", "outputs": "HTTP headers, missing/present security-header findings, OWASP category hints",
         "prerequisites": "curl installed",
     },
     "wafw00f": {
@@ -118,16 +118,16 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     },
     "sslscan": {
         "category": "recon", "phase": "P18",
-        "description": "TLS cipher/protocol/cert audit (heartbleed, weak ciphers, expired certs).",
-        "when_to_use": "Every HTTPS host; cheap and feeds compliance scoring.",
-        "inputs": "host:port", "outputs": "TLS report",
+        "description": "TLS certificate/protocol/cipher audit: chain, expiry, self-signed certs, TLS 1.0/1.1, SSLv2/v3, weak ciphers and server-preferred suites.",
+        "when_to_use": "Every HTTPS host; cheap first-pass certificate and cipher evidence.",
+        "inputs": "host:port", "outputs": "TLS certificate and cipher report",
         "prerequisites": "443/HTTPS reachable",
     },
     "testssl": {
         "category": "recon", "phase": "P18",
-        "description": "Comprehensive TLS auditor (vulns, ciphers, HSTS, OCSP).",
-        "when_to_use": "Deeper than sslscan when compliance/PCI evidence is needed.",
-        "inputs": "host:port", "outputs": "JSON TLS report",
+        "description": "Comprehensive TLS/certificate auditor: protocols, ciphers, certificate trust/validity, OCSP, HSTS, compression, known TLS vulns.",
+        "when_to_use": "Deeper than sslscan when compliance/PCI or strong evidence is needed.",
+        "inputs": "host:port", "outputs": "TLS report with certificate/protocol/cipher findings",
         "prerequisites": "HTTPS endpoint",
     },
 

@@ -55,10 +55,10 @@ CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {
         "decision_rules": ["sem escopo aprovado, nao executar ferramentas ofensivas"],
     },
     "reconnaissance": {
-        "mission": "Mapear superficie externa, portas, tecnologias, endpoints, parametros e sinais HTTP/TLS antes de testes intrusivos, incluindo fuzzing leve de nomes de parametros.",
+        "mission": "Mapear superficie externa, portas, tecnologias, endpoints, parametros, cabecalhos OWASP Top 10 e sinais HTTP/TLS antes de testes intrusivos, incluindo fuzzing leve de nomes de parametros.",
         "phases": ["P01", "P02", "P03", "P04", "P05", "P06", "P18"],
-        "techniques": ["subdomain enumeration", "port/service fingerprinting", "web crawling", "parameter discovery", "GET parameter-name fuzzing", "WAF/TLS fingerprint"],
-        "evidence_focus": ["asset", "port", "service", "url", "parameter", "header", "technology"],
+        "techniques": ["subdomain enumeration", "port/service fingerprinting", "web crawling", "parameter discovery", "GET parameter-name fuzzing", "OWASP security-header analysis", "TLS certificate/protocol/cipher fingerprint", "WAF/TLS fingerprint"],
+        "evidence_focus": ["asset", "port", "service", "url", "parameter", "header", "OWASP category", "certificate", "cipher", "technology"],
         "decision_rules": ["priorizar ferramentas passivas/baixa intrusividade antes de validacoes ativas"],
     },
     "weaponization": {
@@ -92,8 +92,8 @@ CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {
     "command_control": {
         "mission": "Avaliar risco de callbacks, interacoes outbound, TLS fraco e sinais de persistencia apenas como validacao defensiva.",
         "phases": ["P13", "P18"],
-        "techniques": ["OOB interaction validation", "TLS weakness validation", "callback evidence review"],
-        "evidence_focus": ["OOB callback", "cipher/certificate", "egress behavior", "timestamp"],
+        "techniques": ["OOB interaction validation", "TLS weakness validation", "certificate chain review", "callback evidence review"],
+        "evidence_focus": ["OOB callback", "cipher", "certificate chain", "certificate expiry", "egress behavior", "timestamp"],
         "decision_rules": ["usar listeners controlados e nunca manter persistencia real"],
     },
     "actions_on_objectives": {

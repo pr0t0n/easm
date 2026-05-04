@@ -28,7 +28,7 @@ PENTEST_PHASES = [
     {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
      "tools": ["arjun", "paramspider", "ffuf-params", "ffuf-values", "wfuzz"]},
     # Phase 2 – Tech Fingerprint
-    {"id": "P05", "title": "HTTP/TLS Fingerprint", "node": "asset_discovery",
+    {"id": "P05", "title": "HTTP Security Headers & OWASP Top 10 Fingerprint", "node": "asset_discovery",
      "tools": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]},
     {"id": "P06", "title": "WAF Detection & Evasion Profile", "node": "asset_discovery",
      "tools": ["wafw00f", "curl-headers"]},
@@ -56,8 +56,8 @@ PENTEST_PHASES = [
      "tools": ["nuclei", "arjun", "wapiti", "ffuf-params", "ffuf-post"]},
     {"id": "P17", "title": "Upload & WebShell Bypass", "node": "risk_assessment",
      "tools": ["nuclei"]},
-    {"id": "P18", "title": "SSL/TLS Weakness & Cipher Audit", "node": "risk_assessment",
-     "tools": ["sslscan", "nmap", "testssl"]},
+    {"id": "P18", "title": "SSL/TLS Certificate, Protocol & Cipher Audit", "node": "risk_assessment",
+     "tools": ["sslscan", "testssl", "nmap", "curl-headers"]},
     {"id": "P19", "title": "IDOR & Access Control Flaws", "node": "risk_assessment",
      "tools": ["nuclei", "katana", "arjun", "curl-headers"]},
     {"id": "P20", "title": "CMS-Specific Scan (WP/Joomla/Drupal)", "node": "risk_assessment",
@@ -101,10 +101,18 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "tech-http-fingerprint",
         "category": "technologies",
-        "description": "Fingerprint HTTP/TLS, headers de segurança e detecção de WAF.",
-        "triggers": ["http", "https", "header", "tls", "ssl", "whatweb", "nikto", "waf", "cloudflare"],
+        "description": "Fingerprint HTTP/TLS, headers de segurança, OWASP Top 10 security misconfiguration e detecção de WAF.",
+        "triggers": ["http", "https", "header", "headers", "owasp", "tls", "ssl", "whatweb", "nikto", "waf", "cloudflare"],
         "playbook": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
         "phases": ["P05", "P06"],
+    },
+    {
+        "id": "tech-owasp-header-analysis",
+        "category": "technologies",
+        "description": "Analise de cabecalhos HTTP alinhada ao OWASP Top 10: HSTS, CSP, anti-clickjacking, MIME sniffing, referrer e permissions policy.",
+        "triggers": ["security header", "owasp top 10", "hsts", "csp", "x-frame-options", "content-security-policy", "permissions-policy", "referrer-policy"],
+        "playbook": ["curl-headers", "nikto", "httpx", "whatweb", "nuclei"],
+        "phases": ["P05", "P06", "P12"],
     },
     {
         "id": "tech-cms-fingerprint",
@@ -174,10 +182,10 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "vuln-ssl-tls",
         "category": "protocols",
-        "description": "Auditoria de SSL/TLS, cipher suites fracos e certificados.",
-        "triggers": ["ssl", "tls", "cipher", "cert", "sslscan", "testssl"],
-        "playbook": ["sslscan", "nmap", "testssl"],
-        "phases": ["P18"],
+        "description": "Auditoria de SSL/TLS, certificados, cadeia, validade, protocolos legados e cipher suites fracos.",
+        "triggers": ["ssl", "tls", "cipher", "cert", "certificate", "chain", "expired", "self signed", "sslscan", "testssl"],
+        "playbook": ["sslscan", "testssl", "nmap", "curl-headers"],
+        "phases": ["P05", "P18"],
     },
     # ── CATEGORY 4: OSINT ────────────────────────────────────────────────────
     {

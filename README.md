@@ -288,7 +288,7 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P02` | `asset_discovery` | `worker_recon` | Port & Service Scan | `naabu`, `nmap`, `masscan`, `httpx` |
 | `P03` | `asset_discovery` | `worker_recon` | Web Crawling & JS Extraction | `katana`, `hakrawler`, `gau`, `waybackurls`, `gospider` |
 | `P04` | `asset_discovery` | `worker_recon` / `worker_delivery` | Parameter Discovery + GET fuzzing | `arjun`, `paramspider`, `ffuf-params`, `ffuf-values`, `wfuzz` |
-| `P05` | `asset_discovery` | `worker_recon` | HTTP/TLS Fingerprint | `httpx`, `whatweb`, `nikto`, `curl-headers`, `sslscan`, `wafw00f` |
+| `P05` | `asset_discovery` | `worker_recon` | HTTP Security Headers & OWASP Top 10 Fingerprint | `httpx`, `whatweb`, `nikto`, `curl-headers`, `sslscan`, `wafw00f` |
 | `P06` | `asset_discovery` | `worker_recon` | WAF Detection & Evasion Profile | `wafw00f`, `curl-headers` |
 | `P07` | `threat_intel` | `worker_weaponization` | OSINT & Leak Intelligence | `shodan-cli`, `theHarvester`, `h8mail`, `trufflehog`, `gitleaks` |
 | `P08` | `threat_intel` | `worker_weaponization` | Email Security Posture | `theHarvester` |
@@ -301,7 +301,7 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P15` | `risk_assessment` | `worker_delivery` | Directory & File Enumeration + fuzzing | `ffuf`, `ffuf-files`, `ffuf-params`, `gobuster`, `feroxbuster`, `dirsearch`, `wfuzz` |
 | `P16` | `risk_assessment` | `worker_exploitation` | API Security + POST/form fuzzing | `nuclei`, `arjun`, `wapiti`, `ffuf-params`, `ffuf-post` |
 | `P17` | `risk_assessment` | `worker_exploitation` | Upload & WebShell Bypass | `nuclei` |
-| `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Weakness & Cipher Audit | `sslscan`, `nmap`, `testssl` |
+| `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Certificate, Protocol & Cipher Audit | `sslscan`, `testssl`, `nmap`, `curl-headers` |
 | `P19` | `risk_assessment` | `worker_exploitation` / `worker_installation` | IDOR & Access Control Flaws | `nuclei`, `katana`, `arjun`, `curl-headers` |
 | `P20` | `risk_assessment` | `worker_exploitation` | CMS-Specific Scan | `wpscan`, `nuclei`, `nikto` |
 | `P21` | `threat_intel` | `worker_actions` / `worker_weaponization` | Secret & Credential Exposure | `trufflehog`, `gitleaks`, `semgrep`, `bandit` |
@@ -514,6 +514,8 @@ O índice de aprendizado é exibido em duas visões:
 - por fase `P01` a `P22`, para mostrar conhecimento separado, workers responsáveis, ferramentas Kali, aprendizados aceitos/pendentes e técnicas disponíveis naquela etapa.
 
 Fuzzing é tratado como aprendizado essencial e transversal. A plataforma separa as técnicas em: descoberta de subdiretórios, arquivos não indexados, nomes de variáveis na URL, valores de variáveis, campos de formulários/caixas de diálogo e fuzzing controlado de credenciais. Os perfis principais são `ffuf`, `ffuf-files`, `ffuf-params`, `ffuf-values`, `ffuf-post`, `wfuzz` e `hydra`.
+
+Cabeçalhos HTTP e SSL/TLS também são skills explícitas. `curl-headers` avalia headers alinhados ao OWASP Top 10/A05 Security Misconfiguration, incluindo HSTS, CSP, X-Frame-Options ou `frame-ancestors`, X-Content-Type-Options, Referrer-Policy, Permissions-Policy e políticas Cross-Origin. `sslscan` e `testssl` validam certificado, cadeia, validade, trust, protocolos legados e cipher suites fracos; os achados entram em P18 e no relatório com evidência e remediação.
 
 Para acelerar a maturidade inicial, a tela também tem `Antecipar catálogo`. Essa ação cria aprendizados pendentes, sem depender de download externo, para as famílias:
 
