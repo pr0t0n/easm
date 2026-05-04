@@ -74,6 +74,11 @@ TOOL_TO_PROFILE: dict[str, str] = {
 
     # Delivery / Exploitation
     "ffuf": "ffuf_dirs",
+    "ffuf-files": "ffuf_files",
+    "ffuf-params": "ffuf_param_names",
+    "ffuf-values": "ffuf_param_values",
+    "ffuf-post": "ffuf_post_form",
+    "wfuzz": "wfuzz_param_names",
     "gobuster": "gobuster_dir",
     "feroxbuster": "feroxbuster_recursive",
     "dirsearch": "dirsearch_paths",

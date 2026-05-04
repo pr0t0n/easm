@@ -34,7 +34,7 @@ ENV GOPATH=/root/go \
 #  kali-linux-everything; see `apt-cache search '^kali-linux-'`.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       kali-linux-everything \
-      seclists hydra gobuster feroxbuster dirsearch medusa \
+      seclists hydra gobuster feroxbuster dirsearch medusa wfuzz patator \
     && rm -rf /var/lib/apt/lists/*
 
 # ProjectDiscovery suite — most active recon/vuln tools we use are NOT in Kali
@@ -105,9 +105,11 @@ COPY runner.py .
 COPY profiles ./profiles
 
 RUN set -eux; \
-    for tool in ffuf hydra gobuster feroxbuster dirsearch medusa crackmapexec jwt_tool; do command -v "$tool"; done; \
+    for tool in ffuf hydra gobuster feroxbuster dirsearch medusa crackmapexec jwt_tool wfuzz patator; do command -v "$tool"; done; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-files.txt; \
+    test -f /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt; \
+    test -f /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt; \
     test -f /usr/share/seclists/Usernames/top-usernames-shortlist.txt; \
     test -f /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt
 

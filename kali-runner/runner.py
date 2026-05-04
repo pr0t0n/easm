@@ -290,8 +290,13 @@ def _target_context(target: str) -> dict[str, str]:
         "SCAN_AUTH_USERLIST",
         "SCAN_AUTH_PASSLIST",
         "SCAN_AUTH_PROTOCOL",
+        "SCAN_FUZZ_PARAM",
+        "SCAN_FUZZ_POST_DATA",
+        "SCAN_FUZZ_CONTENT_TYPE",
     ):
         context.setdefault(f"env_{env_name}", "")
+    if not context.get("env_SCAN_FUZZ_CONTENT_TYPE", "").strip():
+        context["env_SCAN_FUZZ_CONTENT_TYPE"] = "application/x-www-form-urlencoded"
     return context
 
 

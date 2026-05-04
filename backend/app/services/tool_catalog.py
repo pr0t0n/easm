@@ -188,6 +188,34 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL, wordlist", "outputs": "found paths",
         "prerequisites": "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt and raft-small-files.txt inside kali_runner",
     },
+    "ffuf-files": {
+        "category": "recon", "phase": "P15",
+        "description": "FFUF profile alias for non-indexed file discovery using raft-small-files.",
+        "when_to_use": "After directory fuzzing to catch backups, old files, configs and exposed static artifacts.",
+        "inputs": "URL", "outputs": "found files",
+        "prerequisites": "ffuf binary and /usr/share/seclists/Discovery/Web-Content/raft-small-files.txt in kali_runner",
+    },
+    "ffuf-params": {
+        "category": "recon", "phase": "P04|P15|P16",
+        "description": "FFUF profile alias for GET parameter-name fuzzing using burp-parameter-names.",
+        "when_to_use": "When a page/API endpoint may have hidden URL variables; feeds SQLi, XSS, IDOR, SSRF and auth tests.",
+        "inputs": "URL", "outputs": "candidate parameter names",
+        "prerequisites": "ffuf binary and /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt in kali_runner",
+    },
+    "ffuf-values": {
+        "category": "recon", "phase": "P04|P16",
+        "description": "FFUF profile alias for fuzzing values of an operator-selected URL parameter.",
+        "when_to_use": "When a parameter name is known and the agent needs value discovery or anomaly comparison.",
+        "inputs": "URL, SCAN_FUZZ_PARAM", "outputs": "interesting parameter values",
+        "prerequisites": "SCAN_FUZZ_PARAM; ffuf binary and raft-small-words in kali_runner",
+    },
+    "ffuf-post": {
+        "category": "recon", "phase": "P16",
+        "description": "FFUF profile alias for POST/form/dialog-box fuzzing. Request body must contain FUZZ.",
+        "when_to_use": "For login/search/dialog form fields and API bodies where fuzzing the URL alone is insufficient.",
+        "inputs": "URL, SCAN_FUZZ_POST_DATA, optional SCAN_FUZZ_CONTENT_TYPE", "outputs": "interesting form/API responses",
+        "prerequisites": "SCAN_FUZZ_POST_DATA containing FUZZ; defaults to application/x-www-form-urlencoded",
+    },
     "gobuster": {
         "category": "recon", "phase": "P15",
         "description": "Directory/DNS/vhost brute-force with extension filtering.",
@@ -277,11 +305,11 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "katana/hakrawler crawl done",
     },
     "wfuzz": {
-        "category": "vuln", "phase": "P15",
+        "category": "vuln", "phase": "P04|P15|P16",
         "description": "Web app fuzzer for parameters, headers, paths, methods.",
-        "when_to_use": "Custom payload fuzzing where ffuf grammar isn't expressive enough.",
+        "when_to_use": "Alternative anomaly-based parameter fuzzing where ffuf filters are not expressive enough.",
         "inputs": "URL template, wordlist", "outputs": "responses ranked by anomaly",
-        "prerequisites": "URL with FUZZ marker",
+        "prerequisites": "wfuzz binary and Seclists in kali_runner",
     },
     "sqlmap": {
         "category": "vuln", "phase": "P12",
@@ -316,7 +344,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "hydra": {
         "category": "exploit", "phase": "P14",
         "description": "Network login bruteforcer (SSH, FTP, RDP, HTTP-POST, SMB).",
-        "when_to_use": "When exposed login services found; only with explicit authorization and operator-provided user/pass lists.",
+        "when_to_use": "Credential fuzzing when exposed login services or dialog boxes are found; only with explicit authorization and operator-provided user/pass lists.",
         "inputs": "service URI, userlist, passlist", "outputs": "valid creds",
         "prerequisites": "SCAN_AUTH_USERLIST, SCAN_AUTH_PASSLIST and SCAN_AUTH_PROTOCOL; Kali profile runs hydra -L users.txt -P passlist.txt <target> <protocol>",
     },

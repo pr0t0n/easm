@@ -287,7 +287,7 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P01` | `asset_discovery` | `worker_recon` | Subdomain Enumeration | `subfinder`, `amass`, `dnsx`, `shuffledns`, `assetfinder`, `alterx` |
 | `P02` | `asset_discovery` | `worker_recon` | Port & Service Scan | `naabu`, `nmap`, `masscan`, `httpx` |
 | `P03` | `asset_discovery` | `worker_recon` | Web Crawling & JS Extraction | `katana`, `hakrawler`, `gau`, `waybackurls`, `gospider` |
-| `P04` | `asset_discovery` | `worker_recon` / `worker_delivery` | Parameter Discovery | `arjun`, `paramspider`, `ffuf` |
+| `P04` | `asset_discovery` | `worker_recon` / `worker_delivery` | Parameter Discovery + GET fuzzing | `arjun`, `paramspider`, `ffuf-params`, `ffuf-values`, `wfuzz` |
 | `P05` | `asset_discovery` | `worker_recon` | HTTP/TLS Fingerprint | `httpx`, `whatweb`, `nikto`, `curl-headers`, `sslscan`, `wafw00f` |
 | `P06` | `asset_discovery` | `worker_recon` | WAF Detection & Evasion Profile | `wafw00f`, `curl-headers` |
 | `P07` | `threat_intel` | `worker_weaponization` | OSINT & Leak Intelligence | `shodan-cli`, `theHarvester`, `h8mail`, `trufflehog`, `gitleaks` |
@@ -298,8 +298,8 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P12` | `risk_assessment` | `worker_exploitation` | Web Injection | `sqlmap`, `dalfox`, `wapiti`, `nikto` |
 | `P13` | `risk_assessment` | `worker_exploitation` / `worker_c2` | SSRF & Open Redirect | `nuclei`, `interactsh-client` |
 | `P14` | `risk_assessment` | `worker_installation` | Authentication Bypass & Brute Force | `hydra`, `medusa`, `jwt_tool`, `nuclei`, `crackmapexec` |
-| `P15` | `risk_assessment` | `worker_delivery` | Directory & File Enumeration | `ffuf`, `gobuster`, `feroxbuster`, `dirsearch` |
-| `P16` | `risk_assessment` | `worker_exploitation` | API Security | `nuclei`, `arjun`, `wapiti` |
+| `P15` | `risk_assessment` | `worker_delivery` | Directory & File Enumeration + fuzzing | `ffuf`, `ffuf-files`, `ffuf-params`, `gobuster`, `feroxbuster`, `dirsearch`, `wfuzz` |
+| `P16` | `risk_assessment` | `worker_exploitation` | API Security + POST/form fuzzing | `nuclei`, `arjun`, `wapiti`, `ffuf-params`, `ffuf-post` |
 | `P17` | `risk_assessment` | `worker_exploitation` | Upload & WebShell Bypass | `nuclei` |
 | `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Weakness & Cipher Audit | `sslscan`, `nmap`, `testssl` |
 | `P19` | `risk_assessment` | `worker_exploitation` / `worker_installation` | IDOR & Access Control Flaws | `nuclei`, `katana`, `arjun`, `curl-headers` |
@@ -513,6 +513,8 @@ O índice de aprendizado é exibido em duas visões:
 - por ataque/skill, para agrupar famílias como XSS, CSRF, SQLi, IDOR, SSRF, XXE, Information Exposure etc.;
 - por fase `P01` a `P22`, para mostrar conhecimento separado, workers responsáveis, ferramentas Kali, aprendizados aceitos/pendentes e técnicas disponíveis naquela etapa.
 
+Fuzzing é tratado como aprendizado essencial e transversal. A plataforma separa as técnicas em: descoberta de subdiretórios, arquivos não indexados, nomes de variáveis na URL, valores de variáveis, campos de formulários/caixas de diálogo e fuzzing controlado de credenciais. Os perfis principais são `ffuf`, `ffuf-files`, `ffuf-params`, `ffuf-values`, `ffuf-post`, `wfuzz` e `hydra`.
+
 Para acelerar a maturidade inicial, a tela também tem `Antecipar catálogo`. Essa ação cria aprendizados pendentes, sem depender de download externo, para as famílias:
 
 - SQL Injection, Resource Injection, Remote File Inclusion, Path Traversal;
@@ -567,10 +569,10 @@ Esses contratos aparecem em `GET /api/worker-manager/groups`, em `GET /api/worke
 | Worker | Filas principais | Ferramentas esperadas |
 | --- | --- | --- |
 | `worker_scope` | `scan.unit`, `scan.scheduled`, `worker.*.scope_validation` | Sem tools ofensivas; escopo e entrada |
-| `worker_recon` | `worker.*.reconnaissance` | subfinder, amass, dnsx, shuffledns, assetfinder, alterx, naabu, nmap, masscan, httpx, whatweb, wafw00f, curl-headers, sslscan, testssl, katana, hakrawler, gau, waybackurls, gospider, arjun, paramspider |
+| `worker_recon` | `worker.*.reconnaissance` | subfinder, amass, dnsx, shuffledns, assetfinder, alterx, naabu, nmap, masscan, httpx, whatweb, wafw00f, curl-headers, sslscan, testssl, katana, hakrawler, gau, waybackurls, gospider, arjun, paramspider, ffuf-params, wfuzz |
 | `worker_weaponization` | `worker.*.weaponization` | nuclei, nmap-vulscan, shodan-cli, theHarvester, h8mail, trufflehog, gitleaks, subjack |
-| `worker_delivery` | `worker.*.delivery` | ffuf, gobuster, feroxbuster, dirsearch, arjun, paramspider |
-| `worker_exploitation` | `worker.*.exploitation` | nuclei, sqlmap, dalfox, wapiti, wpscan, nikto, interactsh-client, katana, arjun, curl-headers |
+| `worker_delivery` | `worker.*.delivery` | ffuf, ffuf-files, ffuf-params, ffuf-values, ffuf-post, wfuzz, gobuster, feroxbuster, dirsearch, arjun, paramspider |
+| `worker_exploitation` | `worker.*.exploitation` | nuclei, sqlmap, dalfox, wapiti, wpscan, nikto, interactsh-client, katana, arjun, curl-headers, ffuf-params, ffuf-post |
 | `worker_installation` | `worker.*.installation` | hydra, medusa, crackmapexec, jwt_tool, nuclei, curl-headers, arjun |
 | `worker_c2` | `worker.*.command_control` | nuclei, interactsh-client, testssl |
 | `worker_actions` | `worker.*.actions_on_objectives` | semgrep, bandit, trufflehog, gitleaks, retire, trivy |
@@ -757,6 +759,8 @@ Variaveis importantes:
 | `SHODAN_API_KEY` | habilita `shodan-cli` |
 | `SCAN_AUTH_USERNAME` / `SCAN_AUTH_PASSWORD` | habilitam perfis que exigem credencial |
 | `SCAN_AUTH_USERLIST` / `SCAN_AUTH_PASSLIST` / `SCAN_AUTH_PROTOCOL` | habilitam `hydra_wordlist_auth` dentro do Kali runner (`hydra -L users.txt -P passlist.txt <target> <protocol>`) |
+| `SCAN_FUZZ_PARAM` | habilita fuzzing de valores com `ffuf-values` para um parâmetro conhecido |
+| `SCAN_FUZZ_POST_DATA` / `SCAN_FUZZ_CONTENT_TYPE` | habilitam fuzzing de caixas/formulários/API bodies com `ffuf-post`; o body deve conter `FUZZ` |
 
 ### 2. Subir stack
 
@@ -937,7 +941,7 @@ Validado em scan **#34** contra `http://juice-shop:3000` (OWASP Juice Shop):
 | Metrica | Valor |
 | --- | --- |
 | Containers ativos | 16/16 healthy |
-| Kali runner | reachable - 4 077 tools detected - 50 profiles |
+| Kali runner | reachable - 4 077 tools detected - 54 profiles |
 | Backend image | 4.06 GB (sem qualquer ferramenta de analise) |
 | Workers (9) | 0 ferramentas de analise cada |
 | Tools executadas no scan | 43 (25 success - 18 fail por DNS/timeout esperado) |
