@@ -1469,10 +1469,12 @@ def create_vulnerability_learning_task(self, owner_id: int, urls_text: str):
         if not owner:
             return {"error": f"User {owner_id} not found"}
         
-        row = create_vulnerability_learning(db, owner, urls_text)
+        rows = create_vulnerability_learning(db, owner, urls_text)
         return {
             "success": True,
-            "item": serialize_vulnerability_learning(row),
+            "item": serialize_vulnerability_learning(rows[0]),
+            "items": [serialize_vulnerability_learning(r) for r in rows],
+            "items_count": len(rows),
         }
     except ValueError as exc:
         return {"error": str(exc)}

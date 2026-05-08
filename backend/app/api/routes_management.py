@@ -39,10 +39,18 @@ def _parse_targets(targets_text: str) -> list[str]:
 
 
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+SIMPLE_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 IPV4_RE = re.compile(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")
 
 
 def _normalize_domain_candidate(raw_target: str) -> str | None:
+    """Returns a canonical host string if the target is a valid domain,
+    IPv4, or single-label hostname (`localhost`, container name, etc.).
+
+    Strips any URL noise: scheme, port, path, fragment (`/#/...`), querystring.
+    Single-label hosts like `localhost` and `juice-shop` ARE accepted because
+    the platform routes targets through the docker bridge for in-scope tests.
+    """
     raw = str(raw_target or "").strip().lower()
     if not raw:
         return None
@@ -52,14 +60,24 @@ def _normalize_domain_candidate(raw_target: str) -> str | None:
     elif raw.startswith("https://"):
         raw = raw[8:]
 
-    raw = raw.split("/")[0].split(":")[0].strip(".")
+    # Strip fragment first so '/#/' doesn't pollute the path split, then trim
+    # path, then port. This is what was breaking `http://localhost:3001/#/`.
+    raw = raw.split("#", 1)[0]
+    raw = raw.split("?", 1)[0]
+    raw = raw.split("/", 1)[0]
+    raw = raw.split(":", 1)[0]
+    raw = raw.strip(".")
     wildcard = raw.startswith("*.")
     host = raw[2:] if wildcard else raw
 
     is_valid_domain = DOMAIN_RE.match(host)
     is_valid_ipv4 = IPV4_RE.match(host)
-    
-    if not host or (not is_valid_domain and not is_valid_ipv4):
+    is_valid_simple = SIMPLE_HOSTNAME_RE.match(host)
+
+    if not host or not (is_valid_domain or is_valid_ipv4 or is_valid_simple):
+        return None
+    if wildcard and not is_valid_domain:
+        # `*.localhost` doesn't make sense; only allow wildcard on real FQDNs.
         return None
     return f"*.{host}" if wildcard and is_valid_domain else host
 
@@ -1855,11 +1873,16 @@ def create_learning_from_urls(
         logger.warning("Falha ao enfileirar aprendizado; executando sincronamente: %s", exc)
         # Fallback to synchronous execution if Celery not available
         try:
-            row = create_vulnerability_learning(db, current_user, urls_text, force=force)
+            rows = create_vulnerability_learning(db, current_user, urls_text, force=force)
+            # Granular sources (e.g. juice-shop walkthrough) emit one row per
+            # technique. Caller can review each one independently.
+            primary = rows[0]
             return {
                 "summary": vulnerability_learning_summary(db),
-                "item": serialize_vulnerability_learning(row),
-                "novelty": ((row.raw_extraction or {}).get("novelty")) if row.raw_extraction else None,
+                "item": serialize_vulnerability_learning(primary),
+                "items": [serialize_vulnerability_learning(r) for r in rows],
+                "items_count": len(rows),
+                "novelty": ((primary.raw_extraction or {}).get("novelty")) if primary.raw_extraction else None,
             }
         except AlreadyLearnedError as exc:
             # 409 CONFLICT — payload tells the UI which entries already exist
