@@ -69,20 +69,48 @@ def _extract_first_json_object(text: str) -> dict[str, Any] | None:
 def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
     """Calls the local Ollama /api/chat endpoint and returns the text reply."""
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": settings.llm_primary_model,
-        "stream": False,
-        "format": "json",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "options": {"temperature": 0.1, "num_predict": 1024},
-    }
-    r = httpx.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    return str(data.get("message", {}).get("content") or "").strip()
+    models = []
+    for model in (
+        settings.llm_primary_model,
+        settings.ollama_model,
+        settings.ollama_qwen_model,
+        settings.ollama_cloudcode_model,
+    ):
+        model_name = str(model or "").strip()
+        if model_name and model_name not in models:
+            models.append(model_name)
+
+    last_error: Exception | None = None
+    for model_name in models:
+        payload = {
+            "model": model_name,
+            "stream": False,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "options": {"temperature": 0.1, "num_predict": 1024},
+        }
+        try:
+            r = httpx.post(url, json=payload, timeout=timeout)
+            if r.status_code == 404 and len(models) > 1:
+                last_error = httpx.HTTPStatusError(
+                    f"model not found: {model_name}",
+                    request=r.request,
+                    response=r,
+                )
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return str(data.get("message", {}).get("content") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("no Ollama model configured")
 
 
 def _deterministic_fallback(

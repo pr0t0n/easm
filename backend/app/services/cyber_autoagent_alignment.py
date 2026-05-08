@@ -295,6 +295,7 @@ def build_supervisor_prompt_contract(
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
         worker_missions=worker_missions,
         accepted_vulnerability_learning=accepted_vulnerability_learning,
+        tool_selection_supervisor_contract=TOOL_SELECTION_SUPERVISOR_CONTRACT,
         tool_catalog=tool_catalog,
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
     )
@@ -311,6 +312,7 @@ def build_supervisor_prompt_contract(
         "system_prompt": prompt.strip(),
         "worker_missions": worker_missions,
         "accepted_vulnerability_learning": accepted_vulnerability_learning,
+        "tool_selection_supervisor_contract": TOOL_SELECTION_SUPERVISOR_CONTRACT,
         "active_skills": skills,
         "skills_summary": [
             {

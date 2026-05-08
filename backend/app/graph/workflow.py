@@ -1543,6 +1543,17 @@ def _target_host(target: str) -> str:
     return host.lstrip("*.").strip(".")
 
 
+def _target_explicit_port(target: str) -> int | None:
+    raw = str(target or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        return parsed.port
+    except ValueError:
+        return None
+
+
 def _infer_target_type(target: str) -> str:
     """
     Infere tipo de alvo: 'site' vs 'dominio'.
@@ -1578,6 +1589,11 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
     if not _is_local_target(target):
         return tools
 
+    if _target_explicit_port(target):
+        preferred = ["httpx", "katana", "curl-headers", "whatweb", "wafw00f"]
+        filtered = [tool for tool in preferred if tool in tools]
+        return filtered or [tool for tool in tools if tool in {"httpx", "katana", "curl-headers"}] or tools[:1]
+
     preferred = ["httpx", "katana", "gowitness", "naabu"]
     filtered = [tool for tool in preferred if tool in tools]
     return filtered or [tool for tool in tools if tool in {"httpx", "naabu"}] or tools[:1]
@@ -1590,6 +1606,13 @@ def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
     if not _is_local_target(target):
         return tools
+
+    if _target_explicit_port(target):
+        preferred = ["nuclei", "nikto", "wapiti", "dalfox", "sqlmap"]
+        filtered = [tool for tool in preferred if tool in tools]
+        if filtered:
+            return filtered
+        return tools[:3]
 
     preferred = ["nuclei", "nmap-vulscan", "nikto", "wapiti"]
     filtered = [tool for tool in preferred if tool in tools]
@@ -1769,6 +1792,27 @@ def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: 
     return []
 
 
+def _extract_url_from_tool_line(line: str) -> str:
+    """Extract a URL from raw or JSONL tool output without swallowing JSON fields."""
+    raw = str(line or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            for key in ("url", "input", "matched-at", "host"):
+                value = str(data.get(key) or "").strip()
+                if value.startswith(("http://", "https://")):
+                    return value
+
+    url_match = re.search(r"https?://[^\s\]\"'<>]+", raw)
+    return url_match.group(0).rstrip(".,;") if url_match else ""
+
+
 def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") -> dict[int, dict[str, str]]:
     normalized_tool = str(tool_name or "").strip().lower()
     stdout = str(result.get("stdout") or "")
@@ -1826,16 +1870,17 @@ def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") 
             line = str(raw or "").strip()
             if not line:
                 continue
-            url_match = re.search(r"https?://[^\s\]]+", line)
-            if not url_match:
+            url_raw = _extract_url_from_tool_line(line)
+            if not url_raw:
                 continue
-            url_raw = url_match.group(0)
             parsed = urlparse(url_raw)
-            if parsed.port:
+            try:
                 port = parsed.port
-            elif parsed.scheme == "https":
+            except ValueError:
+                continue
+            if port is None and parsed.scheme == "https":
                 port = 443
-            else:
+            elif port is None:
                 port = 80
             if not (1 <= int(port) <= 65535):
                 continue

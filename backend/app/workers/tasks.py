@@ -1172,8 +1172,12 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.flush()
         # ───────────────────────────────────────────────────────────────────────
 
+        progress_ctx["computed_progress"] = progress
+        progress_ctx["ui_progress"] = 100
+        final_state["mission_progress_context"] = progress_ctx
+        final_state["mission_progress"] = 100
         job.state_data = final_state
-        job.mission_progress = progress
+        job.mission_progress = 100
         job.current_step = "5. ExecutiveAnalysis"
         job.status = "completed"
         job.last_error = None
