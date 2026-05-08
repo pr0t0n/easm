@@ -68,7 +68,7 @@ const reportCard = {
 export default function ReportsPage() {
   const apiUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [wizardStep, setWizardStep] = useState(1);
-  const [persona, setPersona] = useState("executive");
+  const [persona, setPersona] = useState("technical");
   const [outputMode, setOutputMode] = useState("visual");
   const [severityMin, setSeverityMin] = useState("all");
   const [periodDays, setPeriodDays] = useState("all");

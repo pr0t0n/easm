@@ -5,7 +5,7 @@
 const query = new URLSearchParams(window.location.search);
 const SCAN_ID = Number(query.get('scan_id') || query.get('id') || 1);
 const INCLUDE_TARGETS = String(query.get('include_targets') || '').trim();
-const PERSONA_MODE = String(query.get('persona') || 'executive').trim().toLowerCase();
+const PERSONA_MODE = String(query.get('persona') || 'technical').trim().toLowerCase();
 const OUTPUT_MODE = String(query.get('output_mode') || 'visual').trim().toLowerCase();
 const SEVERITY_MIN = String(query.get('severity_min') || 'all').trim().toLowerCase();
 const PERIOD_DAYS = String(query.get('period_days') || 'all').trim().toLowerCase();
@@ -741,9 +741,9 @@ function renderVulnCard(vuln, index) {
         <div class="vuln-code">${esc(truncate(evidence, 800))}</div>
       </div>` : ''}
       ${payload && payload !== evidence ? `
-      <div class="vuln-evidence-box" style="border-left-color:#facc15">
-        <div class="vuln-detail-label" style="color:#facc15"><i class="fas fa-terminal"></i> Payload</div>
-        <div class="vuln-code" style="color:#facc15">${esc(truncate(payload, 500))}</div>
+      <div class="vuln-evidence-box" style="border-left-color:#a47700">
+        <div class="vuln-detail-label" style="color:#a47700"><i class="fas fa-terminal"></i> Payload</div>
+        <div class="vuln-code" style="color:#1c1c1c">${esc(truncate(payload, 500))}</div>
       </div>` : ''}
       ${cve && (cveSummary || cveActions.length) ? `
       <div class="vuln-rec-box" style="border-left-color:#fb7185">
@@ -752,14 +752,14 @@ function renderVulnCard(vuln, index) {
         ${cveActions.length ? `<div class="vuln-detail-value" style="margin-top:8px">${cveActions.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
       </div>` : ''}
       ${envRequiredFix || envControls.length ? `
-      <div class="vuln-rec-box" style="border-left-color:#60a5fa">
-        <div class="vuln-detail-label" style="color:#60a5fa"><i class="fas fa-server"></i> Recomendação para o ambiente</div>
+      <div class="vuln-rec-box" style="border-left-color:#4b73ff">
+        <div class="vuln-detail-label" style="color:#2d52e6"><i class="fas fa-server"></i> Recomendação para o ambiente</div>
         <div class="vuln-detail-value">${esc(envRequiredFix || rec)}</div>
         ${envControls.length ? `<div class="vuln-detail-value" style="margin-top:8px">${envControls.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
       </div>` : ''}
       ${llmSummary || llmMitigations.length ? `
-      <div class="vuln-rec-box" style="border-left-color:#34d399">
-        <div class="vuln-detail-label" style="color:#34d399"><i class="fas fa-brain"></i> Recomendação gerada por IA</div>
+      <div class="vuln-rec-box" style="border-left-color:#229160">
+        <div class="vuln-detail-label" style="color:#1f8a59"><i class="fas fa-brain"></i> Recomendação gerada por IA</div>
         <div class="vuln-detail-value">${esc(llmSummary || rec)}</div>
         ${llmMitigations.length ? `<div class="vuln-detail-value" style="margin-top:8px">${llmMitigations.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
       </div>` : ''}
@@ -1163,10 +1163,10 @@ function injectPrintButton() {
   box.className = 'no-print';
   box.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px';
   box.innerHTML = `
-    <button onclick="window.printReport()" style="background:linear-gradient(135deg,#3b82f6,#22d3ee);border:none;color:#fff;font-weight:700;padding:12px 20px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:0.85rem;display:flex;align-items:center;gap:8px;box-shadow:0 4px 24px rgba(59,130,246,0.4)">
+    <button onclick="window.printReport()" style="background:#e96363;border:1px solid #e96363;color:#fff;font-weight:700;padding:12px 20px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:0.85rem;display:flex;align-items:center;gap:8px;box-shadow:0 2px 6px rgba(233,99,99,0.30)">
       <i class="fas fa-print"></i> Imprimir / PDF
     </button>
-    <button onclick="window.toggleAll()" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:0.78rem;display:flex;align-items:center;gap:6px">
+    <button onclick="window.toggleAll()" style="background:#ffffff;border:1px solid #e5dcd5;color:#3d3d3d;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:0.78rem;display:flex;align-items:center;gap:6px">
       <i class="fas fa-expand-alt"></i> Expandir Todos
     </button>
   `;
@@ -1189,9 +1189,9 @@ window.printReport = function() {
 function injectGroupStyles() {
   const style = document.createElement('style');
   style.textContent = `
-    .vuln-group-header {display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,255,255,0.02);border:1px solid #1e293b;border-radius:6px;margin-bottom:6px}
-    .vgh-name {flex:1;font-size:0.82rem;font-weight:600;color:#f1f5f9}
-    .vgh-count {font-size:0.72rem;color:#64748b;background:rgba(255,255,255,0.04);padding:3px 10px;border-radius:20px;border:1px solid #1e293b}
+    .vuln-group-header {display:flex;align-items:center;gap:10px;padding:8px 12px;background:#faf8f4;border:1px solid #e5dcd5;border-radius:6px;margin-bottom:6px}
+    .vgh-name {flex:1;font-size:0.82rem;font-weight:600;color:#1c1c1c}
+    .vgh-count {font-size:0.72rem;color:#6b6b6b;background:#ffffff;padding:3px 10px;border-radius:20px;border:1px solid #e5dcd5}
   `;
   document.head.appendChild(style);
 }
@@ -1250,7 +1250,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error(err);
     const container = document.getElementById('vulnContainer');
     if (container) {
-      container.innerHTML = `<div style="text-align:center;padding:40px;color:#94a3b8"><i class="fas fa-exclamation-circle" style="font-size:2rem;color:#ef4444;margin-bottom:12px;display:block"></i><strong>Não foi possível carregar os dados do relatório.</strong><br><span style="font-size:0.8rem;color:#64748b">${esc(err.message)}</span></div>`;
+      container.innerHTML = `<div style="text-align:center;padding:40px;color:#6b6b6b;background:#ffffff;border:1px solid #e5dcd5;border-radius:8px"><i class="fas fa-exclamation-circle" style="font-size:2rem;color:#b03333;margin-bottom:12px;display:block"></i><strong style="color:#1c1c1c">Não foi possível carregar os dados do relatório.</strong><br><span style="font-size:0.8rem;color:#6b6b6b">${esc(err.message)}</span></div>`;
     }
   }
 });

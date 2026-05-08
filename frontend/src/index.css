@@ -437,7 +437,7 @@ td {
   border-color: var(--sev-info-border);
 }
 
-/* ── Progress bar (KPI cards / EASM rating) ──────────────────────────────── */
+/* ── Progress bar (KPI cards / vulnerability rating) ─────────────────────── */
 .ds-progress {
   height: 8px; background: var(--canvas-muted); border-radius: 999px;
   overflow: hidden; margin-top: 12px;
@@ -525,7 +525,7 @@ td {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -539,7 +539,7 @@ td {
 .sb {
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
-  padding: 20px 14px;
+  padding: 22px 16px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -603,7 +603,7 @@ td {
   padding: 10px 14px;
   font-size: 13.5px;
   font-weight: 500;
-  color: #a8b1c0;
+  color: var(--sidebar-muted);
   border-radius: 9px;
   text-decoration: none;
   transition: background 160ms ease, color 160ms ease;
