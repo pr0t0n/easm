@@ -365,6 +365,159 @@ td {
 .ds-grade-d { color: var(--grade-d); }
 .ds-grade-f { color: var(--grade-f); }
 
+/* ── FAIR pillar bar (decomposition cards) ───────────────────────────────── */
+.ds-pillar {
+  margin-bottom: 14px;
+}
+.ds-pillar:last-child { margin-bottom: 0; }
+.ds-pillar-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 6px;
+}
+.ds-pillar-name {
+  font-size: 13px; font-weight: 500; color: var(--ink);
+}
+.ds-pillar-value {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+  color: var(--brand-700);
+}
+.ds-pillar-track {
+  height: 6px; background: var(--canvas-muted); border-radius: 999px;
+  overflow: hidden;
+}
+.ds-pillar-track > div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand-300), var(--brand-500));
+  border-radius: 999px;
+}
+.ds-pillar-meta {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--ink-muted); margin-top: 4px;
+}
+
+/* ── Alert row (severity-aware, used in Active Alerts feed) ──────────────── */
+.ds-alert {
+  padding: 12px 14px; border-radius: 9px;
+  border: 1px solid; margin-bottom: 8px;
+}
+.ds-alert:last-child { margin-bottom: 0; }
+.ds-alert-title {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; font-weight: 600;
+}
+.ds-alert-detail {
+  font-size: 12px; margin-top: 4px; opacity: 0.85;
+}
+.ds-alert-time {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 500; opacity: 0.7;
+}
+.ds-alert--critical {
+  color: var(--sev-critical-text);
+  background: var(--sev-critical-bg);
+  border-color: var(--sev-critical-border);
+}
+.ds-alert--high {
+  color: var(--sev-high-text);
+  background: var(--sev-high-bg);
+  border-color: var(--sev-high-border);
+}
+.ds-alert--medium {
+  color: var(--sev-medium-text);
+  background: var(--sev-medium-bg);
+  border-color: var(--sev-medium-border);
+}
+.ds-alert--low {
+  color: var(--sev-low-text);
+  background: var(--sev-low-bg);
+  border-color: var(--sev-low-border);
+}
+.ds-alert--info {
+  color: var(--sev-info-text);
+  background: var(--sev-info-bg);
+  border-color: var(--sev-info-border);
+}
+
+/* ── Progress bar (KPI cards / EASM rating) ──────────────────────────────── */
+.ds-progress {
+  height: 8px; background: var(--canvas-muted); border-radius: 999px;
+  overflow: hidden; margin-top: 12px;
+}
+.ds-progress > div {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--brand-500), var(--brand-700));
+}
+
+/* ── Sidebar — collapsible submenus (used when nav grows) ────────────────── */
+.sb-parent {
+  display: flex; align-items: center;
+  cursor: pointer; user-select: none;
+  justify-content: space-between;
+}
+.sb-parent .sb-caret {
+  margin-left: auto;
+  font-size: 11px; opacity: 0.55;
+  transition: transform 160ms ease;
+}
+.sb-parent.open .sb-caret {
+  transform: rotate(180deg);
+  opacity: 0.9;
+}
+.sb-sub {
+  display: flex; flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 6px 30px;
+  margin: 0 6px 4px 22px;
+  border-left: 1px solid rgba(255,255,255,0.08);
+}
+.sb-sub.hidden { display: none; }
+.sb-sub-item {
+  display: block;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--sidebar-group-label);
+  text-decoration: none;
+  border-radius: 6px;
+  transition: background 160ms ease, color 160ms ease;
+}
+.sb-sub-item:hover {
+  background: var(--sidebar-hover-bg);
+  color: var(--sidebar-hover-text);
+}
+.sb-sub-item.active {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ── Card primitive (KPI cards used by Dashboard) ────────────────────────── */
+.ds-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-card);
+}
+.ds-card-key {
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  font-weight: 600; color: var(--ink-muted);
+}
+.ds-card-value {
+  font-family: var(--font-display);
+  font-size: 36px; font-weight: 700; letter-spacing: -0.025em;
+  line-height: 1; margin-top: 8px;
+}
+.ds-card-hint {
+  font-size: 12px; color: var(--ink-muted); margin-top: 6px;
+}
+.ds-card-title {
+  font-family: var(--font-display);
+  font-size: 16px; font-weight: 700; letter-spacing: -0.005em;
+  margin: 0 0 14px; color: var(--ink);
+}
+.ds-card-subtitle {
+  font-size: 11px; color: var(--ink-muted); margin: -10px 0 14px;
+}
+
 /* ============================================================
    APP SHELL — dark sidebar + light main (validcertificadora)
    Matches /scriptkidd-o-design-system/site/app.css
