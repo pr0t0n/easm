@@ -86,6 +86,11 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    extra_hosts:
+      # Linux hosts don't auto-populate host.docker.internal; this maps it to
+      # the docker host so `localhost:3001` from the operator becomes
+      # reachable inside the Kali container as host.docker.internal:3001.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/healthz"]
       interval: 30s

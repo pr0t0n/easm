@@ -106,6 +106,55 @@ TOOL_TO_PROFILE: dict[str, str] = {
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
 LOST_JOB_RETRIES = 2
 
+# Hosts that the operator types but that, inside the Kali container, would
+# loop back to the runner itself (useless). Translate them at dispatch time
+# to `host.docker.internal` — kept here in the BACKEND on purpose so we can
+# evolve routing without rebuilding the Kali image.
+_LOCAL_HOST_ALIASES = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def _normalize_target_for_kali(target: str) -> str:
+    """Rewrites `localhost` and 127.0.0.1 to `host.docker.internal` so the
+    Kali container can reach the operator's machine. Preserves scheme/port/
+    path/query/fragment.
+
+    The Kali image already resolves `host.docker.internal` (Linux via
+    `extra_hosts: host-gateway`, Mac/Windows natively).
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return raw
+    # No scheme: simple host token like "localhost:3001/path"
+    has_scheme = "://" in raw
+    work = raw if has_scheme else f"//{raw}"
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(work)
+    except Exception:  # noqa: BLE001
+        return raw
+    host = (parsed.hostname or "").lower()
+    if host not in _LOCAL_HOST_ALIASES:
+        return raw
+    new_host = "host.docker.internal"
+    new_netloc = f"{new_host}:{parsed.port}" if parsed.port else new_host
+    if not has_scheme:
+        # Preserve the operator's original style (no scheme) but still emit
+        # the rewritten host so anything downstream that splits on `://`
+        # gets the docker-routable hostname.
+        suffix = parsed.path or ""
+        if parsed.query:
+            suffix = f"{suffix}?{parsed.query}"
+        return f"{new_netloc}{suffix}"
+    rewritten = urlunparse((
+        parsed.scheme or "http",
+        new_netloc,
+        parsed.path or "",
+        parsed.params or "",
+        parsed.query or "",
+        parsed.fragment or "",
+    ))
+    return rewritten
+
 
 def execute_via_kali(
     tool_name: str,
@@ -125,6 +174,11 @@ def execute_via_kali(
     if not profile:
         return _kali_failure(tool_name, target, scan_mode, "no_profile_mapping")
 
+    # Rewrite operator-friendly localhost into a docker-routable hostname.
+    # We keep the original in the failure trail for audit.
+    original_target = target
+    target = _normalize_target_for_kali(target)
+
     base = _runner_url()
     started = time.perf_counter()
     try:
@@ -135,6 +189,7 @@ def execute_via_kali(
                 "target": target,
                 "scan_id": scan_id,
                 "tool": tool_name,
+                "original_target": original_target if original_target != target else None,
             },
             timeout=10,
         )

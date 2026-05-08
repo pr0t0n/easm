@@ -237,6 +237,23 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "playbook": ["retire", "trivy", "semgrep", "bandit", "gitleaks"],
         "phases": ["P22"],
     },
+    # ── New skills absorbed from juice-shop walkthrough ──────────────────────
+    {
+        "id": "weak-cryptography",
+        "category": "vulnerabilities",
+        "description": "Identificação de hashing fraco (MD5/SHA1), encoding como criptografia (Base64/ROT13/z85), e cifras quebradas em cookies/JWT/cupons.",
+        "triggers": ["md5", "rainbow", "base64 cookie", "rot13", "z85", "broken hash", "weak cipher", "encoding misuse", "jwt none"],
+        "playbook": ["jwt_tool", "burp-cli", "trufflehog", "hashcat"],
+        "phases": ["P11", "P14", "P22"],
+    },
+    {
+        "id": "vuln-information-disclosure",
+        "category": "vulnerabilities",
+        "description": "Exposição não autorizada de paths, comentários HTML, mensagens de erro verbosas, JS bundles, robots.txt e sitemap.",
+        "triggers": ["info exposure", "html comment", "stack trace", "verbose error", "leaked path", "easter egg", "score board", "robots.txt"],
+        "playbook": ["katana", "hakrawler", "gau", "curl-headers", "trufflehog", "nuclei"],
+        "phases": ["P03", "P05", "P22"],
+    },
     # ── CATEGORY 6: PROTOCOLS ────────────────────────────────────────────────
     {
         "id": "waf-aware-validation",
