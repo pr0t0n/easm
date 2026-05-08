@@ -503,10 +503,33 @@ export default function LearningPage() {
         setReviewItem(data.item || null);
         setNotes("");
         setUrlsText("");
+        const created = Number(data.items_count || 0);
+        if (created > 1) {
+          // Granular catalog ingest (e.g. juice-shop walkthrough → 14 rows).
+          // Tell the operator there are N pending learnings to review.
+          setTaskStatus(
+            `${created} aprendizados criados em pending_review. Cada técnica pode ser aceita/rejeitada individualmente abaixo.`,
+          );
+        } else if (data.novelty?.summary) {
+          setTaskStatus(data.novelty.summary);
+        }
         await load();
       }
     } catch (err) {
-      setError(err?.response?.data?.detail || err?.message || "Falha ao enviar URLs para aprendizagem.");
+      const detail = err?.response?.data?.detail;
+      if (err?.response?.status === 409 && detail?.reason === "already_learned") {
+        const matchTitles = (detail.matches || [])
+          .map((m) => `#${m.existing_learning_id} ${m.existing_title || ""}`.trim())
+          .filter(Boolean)
+          .join(", ");
+        setError(
+          `URL já aprendida anteriormente: ${matchTitles}. Marque "force" para reaprender.`,
+        );
+      } else if (typeof detail === "object") {
+        setError(detail.message || JSON.stringify(detail));
+      } else {
+        setError(detail || err?.message || "Falha ao enviar URLs para aprendizagem.");
+      }
     } finally {
       setTaskStatus("");
       setSubmitting(false);
