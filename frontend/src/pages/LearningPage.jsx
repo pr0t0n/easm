@@ -48,30 +48,55 @@ function LearningIndex({ index, onLearn }) {
         </div>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {items.map((item) => (
-          <div key={item.id} className="rounded-lg border p-4" style={{ borderColor: "var(--line)", background: "#fff" }}>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.label}</h3>
-                <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-                  {item.accepted_learnings} aceitos · {item.pending_learnings} pendentes · {item.techniques_accepted} técnicas
-                </p>
+        {items.map((item) => {
+          const trainings = Number(item.total_learnings || 0);
+          const accepted = Number(item.accepted_learnings || 0);
+          const pending = Number(item.pending_learnings || 0);
+          const target = Math.max(1, Number(item.target_techniques || 1));
+          const learningPct = Math.min(100, Math.round((accepted / target) * 100));
+          return (
+            <div key={item.id} className="rounded-lg border p-4" style={{ borderColor: "var(--line)", background: "#fff" }}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{item.label}</h3>
+                  <p className="mt-1 text-2xl font-bold" style={{ color: "var(--brand-700)" }}>
+                    {trainings}
+                    <span className="ml-2 text-xs font-normal" style={{ color: "var(--ink-muted)" }}>
+                      treinamento{trainings === 1 ? "" : "s"} recebido{trainings === 1 ? "" : "s"}
+                    </span>
+                  </p>
+                  <p className="mt-1 text-[11px]" style={{ color: "var(--ink-muted)" }}>
+                    {accepted} aceito{accepted === 1 ? "" : "s"} · {pending} pendente{pending === 1 ? "" : "s"} · meta {target}
+                  </p>
+                </div>
+                <button className="btn-secondary" type="button" onClick={() => onLearn?.(item.id)}>
+                  Aprender
+                </button>
               </div>
-              <button className="btn-secondary" type="button" onClick={() => onLearn?.(item.id)}>
-                Aprender
-              </button>
+              <div className="mt-3 h-2 w-full overflow-hidden rounded-full" style={{ background: "var(--surface-soft)" }}>
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${learningPct}%`,
+                    background: "linear-gradient(90deg, var(--brand-500), var(--brand-700))",
+                  }}
+                />
+              </div>
+              <p className="mt-1 text-[10px]" style={{ color: "var(--ink-muted)" }}>
+                Aprendizado da skill: {learningPct}%
+              </p>
+              <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
+                Skills: {(item.skills || []).join(", ") || "-"}
+              </p>
+              <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+                Fases: {(item.phases || []).join(", ") || "-"}
+              </p>
+              <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
+                Ferramentas: {(item.tools || []).join(", ") || "-"}
+              </p>
             </div>
-            <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
-              Skills: {(item.skills || []).join(", ") || "-"}
-            </p>
-            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
-              Fases: {(item.phases || []).join(", ") || "-"}
-            </p>
-            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
-              Ferramentas: {(item.tools || []).join(", ") || "-"}
-            </p>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );

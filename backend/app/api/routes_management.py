@@ -1780,6 +1780,39 @@ def list_vulnerability_learnings(
     }
 
 
+@router.post("/learning/vulnerabilities/check")
+def check_learning_urls_already_learned(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Pre-flight: tells the UI which URLs were already learned BEFORE
+    spending an LLM call. Returns one entry per URL with already_learned
+    flag + the matching learning_id when applicable.
+    """
+    from app.services.vulnerability_learning_service import (
+        parse_learning_urls,
+        find_existing_learning_for_urls,
+    )
+
+    urls_text = str(payload.get("urls_text") or payload.get("urls") or "").strip()
+    if not urls_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe URLs separadas por ponto e virgula.")
+    try:
+        urls = parse_learning_urls(urls_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    matches = find_existing_learning_for_urls(db, urls)
+    already = sum(1 for m in matches if m.get("already_learned"))
+    return {
+        "total_urls": len(urls),
+        "already_learned_count": already,
+        "new_count": len(urls) - already,
+        "items": matches,
+    }
+
+
 @router.post("/learning/vulnerabilities")
 def create_learning_from_urls(
     payload: dict,
@@ -1790,13 +1823,21 @@ def create_learning_from_urls(
         create_vulnerability_learning,
         serialize_vulnerability_learning,
         vulnerability_learning_summary,
+        AlreadyLearnedError,
     )
 
     urls_text = str(payload.get("urls_text") or payload.get("urls") or "").strip()
+    force = bool(payload.get("force"))
     if not urls_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Informe URLs separadas por ponto e virgula.")
-    
+
     try:
+        # When force=True we skip the async path so the operator gets the
+        # response synchronously (otherwise we lose the AlreadyLearnedError
+        # signal across the Celery boundary).
+        if force:
+            raise RuntimeError("force=True forces sync execution")
+
         # Try async task first
         task = create_vulnerability_learning_task.apply_async(
             args=(current_user.id, urls_text),
@@ -1814,11 +1855,23 @@ def create_learning_from_urls(
         logger.warning("Falha ao enfileirar aprendizado; executando sincronamente: %s", exc)
         # Fallback to synchronous execution if Celery not available
         try:
-            row = create_vulnerability_learning(db, current_user, urls_text)
+            row = create_vulnerability_learning(db, current_user, urls_text, force=force)
             return {
                 "summary": vulnerability_learning_summary(db),
                 "item": serialize_vulnerability_learning(row),
+                "novelty": ((row.raw_extraction or {}).get("novelty")) if row.raw_extraction else None,
             }
+        except AlreadyLearnedError as exc:
+            # 409 CONFLICT — payload tells the UI which entries already exist
+            # and lets it offer "abrir aprendizado existente" or "reanalisar (force)".
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "already_learned",
+                    "message": str(exc),
+                    "matches": exc.matches,
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -1977,6 +2030,51 @@ def build_learning_vulnerability_mission_prompt(
     from app.services.vulnerability_learning_service import build_consolidated_vulnerability_mission_prompt
 
     return build_consolidated_vulnerability_mission_prompt(db)
+
+
+@router.post("/agents/supervisor/decide")
+def supervisor_orchestration_decide(
+    payload: dict,
+    current_user: User = Depends(require_admin),
+):
+    """Run the orchestration supervisor on a playbook + execution_context.
+    Body: { playbook: dict, execution_context: dict, tool_catalog: list|str (optional) }
+    Returns the validated JSON decision (or 423 BlockedDecision if blocked).
+    """
+    from app.agents.supervisor_runtime import decide_next_technique, BlockedDecision
+    from app.services.tool_catalog import render_tool_catalog_for_prompt
+
+    playbook = payload.get("playbook") or {}
+    execution_context = payload.get("execution_context") or {}
+    tool_catalog = payload.get("tool_catalog")
+    if tool_catalog is None:
+        try:
+            tool_catalog = render_tool_catalog_for_prompt(only_installed=True)
+        except Exception:
+            tool_catalog = "(tool catalog unavailable)"
+
+    try:
+        decision = decide_next_technique(
+            playbook=playbook,
+            execution_context=execution_context,
+            tool_catalog=tool_catalog,
+        )
+    except BlockedDecision as exc:
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail={"reason": str(exc), "decision": exc.raw},
+        )
+    return decision
+
+
+@router.get("/agents/supervisor/prompt")
+def supervisor_orchestration_prompt(current_user: User = Depends(require_admin)):
+    """Returns the static SUPERVISOR_ORCHESTRATION_SYSTEM_PROMPT verbatim
+    so the frontend Learning page can show what the agent is being told.
+    """
+    from app.agents.supervisor_prompt import SUPERVISOR_ORCHESTRATION_SYSTEM_PROMPT
+
+    return {"prompt": SUPERVISOR_ORCHESTRATION_SYSTEM_PROMPT}
 
 
 @router.delete("/learning/vulnerabilities/{learning_id}")

@@ -441,6 +441,89 @@ def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
     return [item[1] for item in ranked]
 
 
+def _consult_supervisor_orchestration(
+    state: AgentState,
+    group: str,
+    candidate_tools: list[str],
+) -> dict[str, Any] | None:
+    """Asks the orchestration supervisor to pick ONE technique before tool fan-out.
+
+    This is the deterministic decision point: the supervisor reads the
+    current execution context + a learning-derived playbook and emits a
+    JSON-only decision (`proceed | block | needs_review`). The decision is
+    persisted in `state["orchestration_decisions"]` for audit and feeds the
+    Phase Monitor.
+
+    Returning None means we couldn't consult (LLM unreachable AND no fallback
+    info) — the legacy fan-out runs as before. Returning a `block` decision
+    short-circuits this node.
+    """
+    try:
+        from app.agents.supervisor_runtime import decide_next_technique, BlockedDecision
+    except Exception:  # noqa: BLE001
+        return None
+
+    target = str(state.get("target") or "").strip()
+    phase_label = str(state.get("current_phase") or group)
+
+    # Build a thin playbook from active skills + tool runtime signals.
+    skills = list(state.get("active_skills") or [])
+    primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
+    playbook = {
+        "title": f"{group} playbook",
+        "vulnerability_type": str(primary_skill.get("category") or group),
+        "techniques": [
+            {"name": t, "objective": f"execute {t} for {group}", "risk": "low"}
+            for t in candidate_tools
+        ],
+        "evidence_signals": list(primary_skill.get("triggers") or [])[:8],
+    }
+
+    execution_context = {
+        "scan_id": state.get("scan_id"),
+        "target": target,
+        "phase": phase_label,
+        "skill": str(primary_skill.get("id") or group),
+        "authorized_scope": True,  # ScanAuthorization gate runs upstream
+        "auth_available": bool(state.get("auth_available")),
+        "max_risk_allowed": "medium",
+        "iteration": int(state.get("loop_iteration", 0)),
+    }
+
+    try:
+        from app.services.tool_catalog import render_tool_catalog_for_prompt
+        catalog = render_tool_catalog_for_prompt(only_installed=True)
+    except Exception:  # noqa: BLE001
+        catalog = "(tool catalog unavailable)"
+
+    try:
+        decision = decide_next_technique(
+            playbook=playbook,
+            execution_context=execution_context,
+            tool_catalog=catalog,
+            timeout=45,
+        )
+    except BlockedDecision as exc:
+        state.setdefault("orchestration_decisions", []).append({
+            "group": group, "decision": "block", "reason": str(exc),
+        })
+        state["logs_terminais"].append(f"[{group}] supervisor BLOCK: {exc}")
+        return {"execution_decision": "block", "notes": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        state["logs_terminais"].append(f"[{group}] supervisor consult error: {exc}")
+        return None
+
+    state.setdefault("orchestration_decisions", []).append({
+        "group": group,
+        "decision": decision.get("execution_decision"),
+        "technique": decision.get("selected_technique", {}).get("name"),
+        "phase": decision.get("execution_context", {}).get("phase"),
+        "skill": decision.get("execution_context", {}).get("skill"),
+        "confidence": decision.get("confidence"),
+    })
+    return decision
+
+
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
     """Returns every Kali-mapped tool applicable to the group, minus those
     that already ran successfully in this scan.
@@ -3220,6 +3303,11 @@ def asset_discovery_node(state: AgentState) -> AgentState:
             f"AssetDiscovery: target_type={target_type}, full_recon_pipeline ativado"
         )
     recon_tools = _select_tool_batch_for_iteration(state, group="asset_discovery", tools=recon_tools)
+    # Supervisor de Orquestração — decide a técnica antes do fan-out
+    _orchestration = _consult_supervisor_orchestration(state, "asset_discovery", recon_tools)
+    if _orchestration and _orchestration.get("execution_decision") == "block":
+        state["logs_terminais"].append("AssetDiscovery: bloqueado pelo supervisor de orquestração")
+        recon_tools = []
     _append_note(state, f"AssetDiscovery selecionou ferramentas: {', '.join(recon_tools)}", phase="asset-discovery")
     
     if _is_local_target(state["target"]):
@@ -3387,6 +3475,11 @@ def risk_assessment_node(state: AgentState) -> AgentState:
             )
             vuln_tools = learning_validation_tools + [tool for tool in vuln_tools if tool not in learning_validation_tools]
     vuln_tools = _select_tool_batch_for_iteration(state, group="risk_assessment", tools=vuln_tools)
+    # Supervisor de Orquestração — decide a técnica antes do fan-out
+    _orchestration = _consult_supervisor_orchestration(state, "risk_assessment", vuln_tools)
+    if _orchestration and _orchestration.get("execution_decision") == "block":
+        state["logs_terminais"].append("RiskAssessment: bloqueado pelo supervisor de orquestração")
+        vuln_tools = []
     if _is_local_target(state.get("target", "")):
         state["logs_terminais"].append(
             f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
@@ -3568,6 +3661,11 @@ def threat_intel_node(state: AgentState) -> AgentState:
 
     osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
     osint_tools = _select_tool_batch_for_iteration(state, group="threat_intel", tools=osint_tools)
+    # Supervisor de Orquestração — decide a técnica antes do fan-out
+    _orchestration = _consult_supervisor_orchestration(state, "threat_intel", osint_tools)
+    if _orchestration and _orchestration.get("execution_decision") == "block":
+        state["logs_terminais"].append("ThreatIntel: bloqueado pelo supervisor de orquestração")
+        osint_tools = []
     targets = _targets_for_deep_scan(state, limit=6)
     
     # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR
