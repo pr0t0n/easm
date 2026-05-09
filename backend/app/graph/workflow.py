@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from time import perf_counter
 from typing import Any, TypedDict
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
@@ -466,7 +466,10 @@ def _consult_supervisor_orchestration(
     target = str(state.get("target") or "").strip()
     phase_label = str(state.get("current_phase") or group)
 
-    # Build a thin playbook from active skills + tool runtime signals.
+    # Build a thin playbook from active skills + tool runtime signals. When
+    # accepted vulnerability learning exists, it becomes the primary playbook:
+    # the supervisor should reason over operational techniques, not just tool
+    # names.
     skills = list(state.get("active_skills") or [])
     primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
     playbook = {
@@ -478,6 +481,22 @@ def _consult_supervisor_orchestration(
         ],
         "evidence_signals": list(primary_skill.get("triggers") or [])[:8],
     }
+    try:
+        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+
+        learned_playbook = build_runtime_learning_playbook(
+            candidate_tools=candidate_tools,
+            phase=phase_label,
+            limit=12,
+        )
+        if learned_playbook:
+            playbook = learned_playbook
+            state["logs_terminais"].append(
+                f"[{group}] supervisor usando playbook de aprendizado aceito: "
+                f"techniques={len(learned_playbook.get('techniques') or [])}"
+            )
+    except Exception:
+        pass
 
     execution_context = {
         "scan_id": state.get("scan_id"),
@@ -854,9 +873,51 @@ def adversarial_hypothesis_node(state: AgentState) -> AgentState:
         if str(v.get("severity", "")).lower() in {"critical", "high", "medium"}
     ]
     try:
-        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+        from app.services.vulnerability_learning_service import (
+            build_accepted_learning_validation_backlog,
+            enrich_findings_with_accepted_learning,
+        )
 
         high_signal = enrich_findings_with_accepted_learning(high_signal)
+        learned_backlog = build_accepted_learning_validation_backlog(
+            target=str(state.get("target") or ""),
+            discovered_urls=_discovered_validation_targets(
+                state,
+                str(state.get("target") or ""),
+                limit=60,
+            ),
+            limit=18,
+        )
+        if learned_backlog:
+            existing_backlog = list(state.get("validation_backlog") or [])
+            existing_learning_ids = {
+                (((item.get("details") or {}).get("learning_match") or {}).get("id"))
+                for item in existing_backlog
+                if isinstance(item, dict)
+            }
+            added = 0
+            for item in learned_backlog:
+                learning_id = (((item.get("details") or {}).get("learning_match") or {}).get("id"))
+                if learning_id and learning_id in existing_learning_ids:
+                    continue
+                existing_backlog.append(item)
+                existing_learning_ids.add(learning_id)
+                added += 1
+            state["validation_backlog"] = existing_backlog
+            if added:
+                _append_todo(
+                    state,
+                    f"Executar {added} validação(ões) guiadas por aprendizado aceito",
+                    priority="high",
+                )
+                _append_observation(
+                    state,
+                    f"Accepted learning materializado em backlog: {added}",
+                    source="adversarial_hypothesis",
+                )
+                state["logs_terminais"].append(
+                    f"AdversarialHypothesis: accepted_learning_backlog={added}"
+                )
         learning_guided = [
             item for item in high_signal
             if (item.get("details") or {}).get("reproduction_playbook")
@@ -1758,7 +1819,144 @@ def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
         if host and host not in candidates:
             candidates.append(host)
 
+    # Inclui endpoints/URLs descobertos pelo crawler/fuzzing para que sqlmap,
+    # dalfox, wapiti e validadores aprendidos rodem no ponto real de entrada,
+    # nao apenas na raiz da aplicacao.
+    for url in _discovered_validation_targets(state, root, limit=limit * 6):
+        if url and url not in candidates:
+            candidates.append(url)
+
     return candidates[: max(1, limit)]
+
+
+def _scope_compare_host(target: str) -> str:
+    parsed = urlparse(str(target or "") if "://" in str(target or "") else f"http://{target}")
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}:
+        return "local"
+    return host
+
+
+def _base_url_for_target(target: str) -> str:
+    raw = str(target or "").strip()
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = parsed.hostname or raw.split("/")[0]
+    if not host:
+        return raw
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return f"{parsed.scheme or 'http'}://{netloc}/"
+
+
+def _normalize_discovered_url(raw_value: Any, root: str) -> str:
+    raw = str(raw_value or "").strip().strip("'\"<>")
+    raw = raw.rstrip(".,);]")
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        raw = f"http:{raw}"
+    elif raw.startswith("/"):
+        raw = urljoin(_base_url_for_target(root), raw)
+    elif not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        return ""
+
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+
+    root_host = _scope_compare_host(root)
+    url_host = _scope_compare_host(raw)
+    if root_host and url_host and root_host != url_host:
+        return ""
+
+    return raw.split("#", 1)[0]
+
+
+def _collect_url_strings(value: Any, out: list[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        out.extend(re.findall(r"https?://[^\s'\"<>]+", value))
+        if value.startswith("/"):
+            out.append(value)
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            _collect_url_strings(nested, out)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            _collect_url_strings(nested, out)
+
+
+def _is_parameterized_url(url: str) -> bool:
+    parsed = urlparse(str(url or "") if "://" in str(url or "") else f"http://{url}")
+    return bool(parsed.query and "=" in parsed.query)
+
+
+def _is_interesting_validation_path(url: str) -> bool:
+    parsed = urlparse(str(url or "") if "://" in str(url or "") else f"http://{url}")
+    path = (parsed.path or "").lower()
+    if _is_parameterized_url(url):
+        return True
+    tokens = (
+        "/api/", "/rest/", "/admin", "/login", "/user", "/users", "/basket",
+        "/cart", "/order", "/ftp", "backup", ".bak", ".old", ".zip", ".sql",
+        ".env", ".kdbx", "package.json", "package-lock.json", "node_modules",
+    )
+    return any(token in path for token in tokens)
+
+
+def _discovered_validation_targets(state: AgentState, root: str, limit: int = 40) -> list[str]:
+    raw_values: list[str] = []
+    for finding in list(state.get("vulnerabilidades_encontradas") or []):
+        if not isinstance(finding, dict):
+            continue
+        details = finding.get("details") if isinstance(finding.get("details"), dict) else {}
+        for key in (
+            "discovered_urls",
+            "sensitive_urls",
+            "candidate_urls",
+            "robots_urls",
+            "sitemap_urls",
+            "urls",
+            "endpoints",
+            "evidence",
+            "discovered_paths",
+            "sensitive_paths",
+            "exposed_artifacts",
+            "exposed_source_paths",
+            "sensitive_api_urls",
+            "redirect_candidate_urls",
+        ):
+            _collect_url_strings(details.get(key), raw_values)
+
+    normalized: list[str] = []
+    for raw in raw_values:
+        url = _normalize_discovered_url(raw, root)
+        if url and _is_interesting_validation_path(url) and url not in normalized:
+            normalized.append(url)
+
+    normalized.sort(
+        key=lambda item: (
+            0 if _is_parameterized_url(item) else 1,
+            0 if "/rest/" in item.lower() or "/api/" in item.lower() else 1,
+            len(item),
+        )
+    )
+    return normalized[: max(1, limit)]
+
+
+def _tools_for_validation_target(scan_target: str, tools: list[str]) -> list[str]:
+    """Avoid running path-fuzzers against full query URLs.
+
+    Parameterized URLs are validation targets for injection/XSS/API scanners;
+    root URLs remain the right place for ffuf/gobuster/dirsearch discovery.
+    """
+    if not _is_parameterized_url(scan_target):
+        return tools
+    preferred = {"sqlmap", "dalfox", "wapiti", "nuclei", "arjun", "curl-headers"}
+    selected = [tool for tool in tools if tool in preferred]
+    return selected or tools
 
 
 def _split_input_targets(raw_target: str) -> list[str]:
@@ -2017,6 +2215,10 @@ def _extract_tool_output_findings(result: dict[str, Any], step_name: str, defaul
         return _extract_sslscan_findings(stdout, step_name, default_target)
     if tool == "testssl":
         return _extract_testssl_findings(stdout, step_name, default_target)
+    if tool == "sqlmap":
+        return _extract_sqlmap_findings(stdout, step_name, default_target)
+    if tool == "dalfox":
+        return _extract_dalfox_findings(stdout, step_name, default_target)
     if tool == "wapiti":
         return _extract_wapiti_findings(stdout, step_name, default_target)
     if tool == "shodan-cli":
@@ -2816,6 +3018,116 @@ def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -
     return findings
 
 
+def _extract_sqlmap_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    text = str(stdout or "")
+    if not text.strip():
+        return []
+
+    vulnerable = bool(
+        re.search(r"(?i)\b(is|appears to be)\s+vulnerable\b", text)
+        or re.search(r"(?i)\bParameter:\s+.+?\((GET|POST|URI|Cookie|Header)\)", text)
+        or re.search(r"(?i)\bPayload:\s+", text)
+    )
+    if not vulnerable:
+        return []
+
+    parameter_match = re.search(r"(?im)^\s*Parameter:\s*(.+?)\s*\((GET|POST|URI|Cookie|Header)\)", text)
+    payloads = re.findall(r"(?im)^\s*Payload:\s*(.+)$", text)
+    dbms_match = re.search(r"(?i)back-end DBMS:\s*(.+)", text)
+    techniques = re.findall(r"(?im)^\s*Type:\s*(.+)$", text)
+    evidence_lines = []
+    for raw in text.splitlines():
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        if re.search(r"(?i)(Parameter:|Type:|Title:|Payload:|back-end DBMS|is vulnerable|appears to be vulnerable)", line):
+            evidence_lines.append(line)
+        if len(evidence_lines) >= 16:
+            break
+
+    details = {
+        "node": "vuln",
+        "step": step_name,
+        "asset": default_target,
+        "tool": "sqlmap",
+        "evidence": "\n".join(evidence_lines) or text[:1200],
+        "validation_status": "verified",
+        "owasp_category": "A03:2021 Injection",
+        "impact": "Injeção SQL pode permitir leitura indevida, bypass de autenticação e acesso a dados sensíveis conforme privilégios do backend.",
+        "remediation": "Usar queries parametrizadas/prepared statements, validação server-side, ORM seguro, least privilege no banco e testes automatizados de payloads.",
+    }
+    if parameter_match:
+        details["parameter"] = parameter_match.group(1).strip()
+        details["injection_location"] = parameter_match.group(2).strip()
+    if payloads:
+        details["payload"] = payloads[0][:500]
+        details["payloads"] = payloads[:8]
+    if dbms_match:
+        details["dbms"] = dbms_match.group(1).strip()[:160]
+    if techniques:
+        details["sqlmap_techniques"] = [item.strip() for item in techniques[:8]]
+
+    findings.append(
+        {
+            "title": "SQL Injection validado por sqlmap",
+            "severity": "high",
+            "risk_score": 8,
+            "source_worker": "analise_vulnerabilidade",
+            "details": details,
+        }
+    )
+    return findings
+
+
+def _extract_dalfox_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    lines = [str(line or "").strip() for line in (stdout or "").splitlines() if str(line or "").strip()]
+    if not lines:
+        return []
+
+    positive_lines = [
+        line for line in lines
+        if re.search(r"(?i)(\[V\]|verified|vulnerable|poc|payload|reflected|stored xss|dom xss|alert\()", line)
+    ]
+    if not positive_lines:
+        return []
+
+    payloads: list[str] = []
+    for line in positive_lines:
+        payload_match = re.search(r"(?i)payload[:=]\s*(.+)$", line)
+        if payload_match:
+            payloads.append(payload_match.group(1).strip())
+            continue
+        if "<script" in line.lower() or "alert(" in line.lower():
+            payloads.append(line)
+
+    verified = any(re.search(r"(?i)(\[V\]|verified|vulnerable|poc)", line) for line in positive_lines)
+    severity = "high" if verified else "medium"
+    findings.append(
+        {
+            "title": "Cross-Site Scripting (XSS) validado por dalfox" if verified else "Possível XSS/reflection detectado por dalfox",
+            "severity": severity,
+            "risk_score": 8 if severity == "high" else 5,
+            "source_worker": "analise_vulnerabilidade",
+            "details": {
+                "node": "vuln",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "dalfox",
+                "evidence": "\n".join(positive_lines[:16]),
+                "payload": payloads[0][:500] if payloads else "",
+                "payloads": payloads[:8],
+                "validation_status": "verified" if verified else "hypothesis",
+                "owasp_category": "A03:2021 Injection",
+                "impact": "XSS pode permitir execução de JavaScript no contexto do usuário, roubo de sessão, ações indevidas e pivô para abuso de conta.",
+                "remediation": "Aplicar encoding contextual, sanitização server-side, validação de entrada e CSP restritiva; evitar confiar somente em validação no frontend.",
+            },
+        }
+    )
+    return findings
+
+
 # ── Parsers de ferramentas parcialmente implementadas ────────────────────────
 
 
@@ -3220,6 +3532,24 @@ def _extract_katana_findings(stdout: str, step_name: str, default_target: str) -
     forms: list[str] = []
     sensitive_params: list[str] = []
     param_pattern = re.compile(r"[?&](search|user|username|password|passwd|id|token|key|api_key|secret|session|auth)=", re.IGNORECASE)
+    exposed_artifact_pattern = re.compile(
+        r"(\.bak$|\.old$|\.backup$|\.zip$|\.tar$|\.gz$|\.sql$|\.env$|\.kdbx$|\.pyc$|"
+        r"/ftp/|package(?:-lock)?\.json$|suspicious_errors\.ya?ml$)",
+        re.IGNORECASE,
+    )
+    source_exposure_pattern = re.compile(
+        r"(/node_modules/|/build/routes/|/src/|/server/|/juice-shop/)",
+        re.IGNORECASE,
+    )
+    admin_api_pattern = re.compile(
+        r"(/rest/admin|/rest/user|/api/users|/api/basket|/api/cards|/api/address|/rest/order|/rest/wallet|/rest/deluxe)",
+        re.IGNORECASE,
+    )
+    redirect_param_pattern = re.compile(r"[?&](to|url|redirect|next|return|continue)=", re.IGNORECASE)
+    exposed_artifacts: list[str] = []
+    source_paths: list[str] = []
+    admin_api_paths: list[str] = []
+    redirect_candidates: list[str] = []
 
     for raw_line in (stdout or "").splitlines():
         line = raw_line.strip()
@@ -3234,6 +3564,14 @@ def _extract_katana_findings(stdout: str, step_name: str, default_target: str) -
                 sitemap_entries.append(line)
             if param_pattern.search(line):
                 sensitive_params.append(line)
+            if exposed_artifact_pattern.search(line):
+                exposed_artifacts.append(line)
+            if source_exposure_pattern.search(line):
+                source_paths.append(line)
+            if admin_api_pattern.search(line):
+                admin_api_paths.append(line)
+            if redirect_param_pattern.search(line):
+                redirect_candidates.append(line)
 
     if robots_entries:
         findings.append({
@@ -3279,6 +3617,91 @@ def _extract_katana_findings(stdout: str, step_name: str, default_target: str) -
                 "evidence": "\n".join(sensitive_params[:20]),
                 "sensitive_urls": sensitive_params[:100],
                 "count": len(sensitive_params),
+            },
+        })
+    if exposed_artifacts:
+        high_signal = [
+            url for url in exposed_artifacts
+            if re.search(r"(\.kdbx$|\.env$|\.sql$|suspicious_errors\.ya?ml$|package-lock\.json(?:\.bak)?$)", url, re.IGNORECASE)
+        ]
+        severity = "high" if high_signal else "medium"
+        findings.append({
+            "title": f"Artefatos sensiveis ou backups expostos: {len(exposed_artifacts)} itens",
+            "severity": severity,
+            "risk_score": 7 if severity == "high" else 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(exposed_artifacts[:25]),
+                "exposed_artifacts": exposed_artifacts[:120],
+                "validation_status": "verified",
+                "owasp_category": "A05:2021 Security Misconfiguration / A01:2021 Broken Access Control",
+                "impact": "Arquivos de backup, metadados de dependencias ou artefatos internos podem revelar versoes, rotas, segredos operacionais ou material reutilizavel em ataques.",
+                "remediation": "Remover diretorios/arquivos de apoio do deploy publico, bloquear listagem/acesso direto e validar pipeline para impedir publicacao de backups e artefatos internos.",
+                "count": len(exposed_artifacts),
+            },
+        })
+    if source_paths:
+        findings.append({
+            "title": f"Codigo/rotas internas expostas via frontend: {len(source_paths)} caminhos",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(source_paths[:25]),
+                "exposed_source_paths": source_paths[:120],
+                "validation_status": "verified",
+                "owasp_category": "A05:2021 Security Misconfiguration",
+                "impact": "Rotas internas e dependencias expostas aceleram engenharia reversa, enumeração de APIs e priorização de exploração.",
+                "remediation": "Revisar build/public assets, source maps, bundles e regras de static hosting para publicar somente artefatos necessarios.",
+                "count": len(source_paths),
+            },
+        })
+    if admin_api_paths:
+        findings.append({
+            "title": f"Endpoints administrativos/API sensiveis descobertos: {len(admin_api_paths)} caminhos",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(admin_api_paths[:25]),
+                "sensitive_api_urls": admin_api_paths[:120],
+                "validation_status": "hypothesis",
+                "owasp_category": "A01:2021 Broken Access Control / API1 Broken Object Level Authorization",
+                "impact": "Endpoints administrativos ou de identidade exigem validação de autenticação/autorização para descartar IDOR, enumeração e acesso indevido.",
+                "remediation": "Aplicar autorização server-side por rota/objeto, respostas consistentes para não autorizados e testes automatizados de controle de acesso.",
+                "count": len(admin_api_paths),
+            },
+        })
+    if redirect_candidates:
+        findings.append({
+            "title": f"Possiveis parametros de redirecionamento abertos: {len(redirect_candidates)} URLs",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": step_name,
+                "asset": default_target,
+                "tool": "katana",
+                "evidence": "\n".join(redirect_candidates[:25]),
+                "redirect_candidate_urls": redirect_candidates[:80],
+                "validation_status": "hypothesis",
+                "owasp_category": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
+                "impact": "Redirecionamentos não validados podem facilitar phishing, token leakage e bypass de fluxos de confiança.",
+                "remediation": "Usar allowlist estrita de destinos, normalização de URL e rejeição de esquemas/dominios externos.",
+                "count": len(redirect_candidates),
             },
         })
     if urls:
@@ -3529,12 +3952,19 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(
             f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
         )
-    primary_targets = _targets_for_deep_scan(state, limit=3)
+    target_limit = 10 if _is_local_target(state.get("target", "")) else 6
+    primary_targets = _targets_for_deep_scan(state, limit=target_limit)
     resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
     explicit_target = str(state.get("target") or "").strip()
-    if explicit_target and _is_local_target(explicit_target) and explicit_target not in resolvable_targets:
-        # Mantém o alvo local original (incluindo porta) para evitar downgrade para :80.
-        resolvable_targets = [explicit_target] + [t for t in resolvable_targets if t != explicit_target]
+    if explicit_target and _is_local_target(explicit_target):
+        # Mantém alvos locais originais e descobertos (incluindo path/query) para
+        # evitar downgrade para :80 e permitir que o Kali normalize para
+        # host.docker.internal no momento da execução.
+        local_targets = [t for t in primary_targets if _is_local_target(t)]
+        if explicit_target not in local_targets:
+            local_targets.insert(0, explicit_target)
+        resolvable_targets = list(dict.fromkeys(local_targets + resolvable_targets))
+        unresolved_targets = [t for t in unresolved_targets if not _is_local_target(t)]
     if not resolvable_targets:
         # Fallback defensivo: mantém alvo principal para evitar no-op total.
         resolvable_targets = [state.get("target", "")]
@@ -3555,8 +3985,13 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
     
     for scan_target in primary_targets:
-        if vuln_tools:
-            vuln_findings, _, _, _ = _run_tools_and_collect(state, vuln_tools, scan_target, current, "RiskAssessment")
+        target_tools = _tools_for_validation_target(scan_target, vuln_tools)
+        if target_tools != vuln_tools:
+            state["logs_terminais"].append(
+                f"RiskAssessment: target={scan_target} validation_tools={','.join(target_tools)}"
+            )
+        if target_tools:
+            vuln_findings, _, _, _ = _run_tools_and_collect(state, target_tools, scan_target, current, "RiskAssessment")
             if vuln_findings:
                 all_findings.extend(vuln_findings)
         
