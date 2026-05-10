@@ -227,10 +227,11 @@ class AgentState(TypedDict):
     active_skills: list[dict[str, Any]]
     active_skill: str
     current_skill: str
-    skill_runtime_ready: bool
-    skill_runtime_contract: dict[str, Any]
-    skill_runtime_gate: dict[str, Any]
-    skill_runtime_invocation: dict[str, Any]
+    skill_selector_ready: bool
+    skill_selector_gate: dict[str, Any]
+    skill_invocation: dict[str, Any]
+    skill_contract: dict[str, Any]
+    skill_plan_contract: dict[str, Any]
     skill_invocations: list[dict[str, Any]]
     capability_context: dict[str, Any]
     tool_selection_contract: dict[str, Any]
@@ -268,24 +269,28 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
 def _node_for_step(step_name: str, scan_mode: str) -> str:
     step = str(step_name or "").strip().lower()
     if step in {"", "done"}:
-        return "threat_intel"
+        return "supervisor"
     if "supervisor" in step:
         return "supervisor"
     if "planning" in step or "strategic" in step:
-        return "strategic_planning"
+        return "skill_planner"
+    if "selector" in step:
+        return "tool_selector"
+    if "executor" in step:
+        return "tool_executor"
     if "asset" in step or "recon" in step or "discovery" in step:
         return "asset_discovery"
     if "hypothesis" in step:
-        return "adversarial_hypothesis"
+        return "skill_planner"
     if "risk" in step or "vuln" in step or "assessment" in step:
         return "risk_assessment"
     if "adjudication" in step or "evidence" in step:
-        return "evidence_adjudication"
+        return "evidence_gate"
     if "governance" in step:
         return "governance"
     if "executive" in step:
         return "executive_analyst"
-    return "threat_intel"
+    return "supervisor"
 
 
 def _count_high_signal_findings(state: AgentState) -> int:
@@ -316,7 +321,7 @@ def _route_from_supervisor(state: AgentState):
         return END
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = str(next_node)
-        return "skill_runtime"
+        return "skill_selector"
     return next_node
 
 
@@ -508,7 +513,7 @@ def _build_skill_playbook_for_context(
     return playbook
 
 
-def _invoke_skill_runtime_for_context(
+def _invoke_skill_for_context(
     state: AgentState,
     group: str,
     candidate_tools: list[str],
@@ -568,8 +573,8 @@ def _invoke_skill_runtime_for_context(
         state["skill_invocations"] = invocations[-80:]
         state["current_skill"] = selected_skill_id
         state["active_skill"] = selected_skill_id
-        state["skill_runtime_contract"] = invocation_record
-        state["skill_runtime_invocation"] = dict(skill_invocation)
+        state["skill_contract"] = invocation_record
+        state["skill_invocation"] = dict(skill_invocation)
         _append_action(state, "skill_invoked", invocation_record)
         state["logs_terminais"].append(
             f"[{group}] skill_call skill={selected_skill_id} "
@@ -577,239 +582,9 @@ def _invoke_skill_runtime_for_context(
             f"tools={','.join(invocation_record['recommended_tools'][:6]) or '-'}"
         )
     except Exception as exc:
-        state["logs_terminais"].append(f"[{group}] erro ao invocar skill-runtime: {exc}")
+        state["logs_terminais"].append(f"[{group}] erro ao invocar skill service: {exc}")
 
     return skill_invocation, primary_skill, candidate_tools
-
-
-def _consult_supervisor_orchestration(
-    state: AgentState,
-    group: str,
-    candidate_tools: list[str],
-) -> dict[str, Any] | None:
-    """Asks the orchestration supervisor to pick ONE technique before tool fan-out.
-
-    This is the deterministic decision point: the supervisor reads the
-    current execution context + a learning-derived playbook and emits a
-    JSON-only decision (`proceed | block | needs_review`). The decision is
-    persisted in `state["orchestration_decisions"]` for audit and feeds the
-    Phase Monitor.
-
-    A worker may only fan out tools after skill runtime emits a callable
-    skill contract. When the LLM is unavailable, the skill runtime produces
-    the operational fallback decision instead of falling back to blind fan-out.
-    """
-    try:
-        from app.agents.supervisor_runtime import decide_next_technique, BlockedDecision
-    except Exception:  # noqa: BLE001
-        decide_next_technique = None
-
-        class BlockedDecision(Exception):
-            pass
-
-    target = str(state.get("target") or "").strip()
-    phase_label = str(state.get("current_phase") or group)
-
-    # Build a thin playbook from active skills + tool runtime signals. When
-    # accepted vulnerability learning exists, it becomes the primary playbook:
-    # the supervisor should reason over operational techniques, not just tool
-    # names.
-    skills = list(state.get("active_skills") or [])
-    primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
-    knowledge_context: dict[str, Any] = {}
-    playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
-    skill_invocation, primary_skill, candidate_tools = _invoke_skill_runtime_for_context(
-        state,
-        group,
-        candidate_tools,
-        playbook,
-        phase_label,
-        purpose="pre_dispatch",
-    )
-    if not skill_invocation.get("called"):
-        state.setdefault("orchestration_decisions", []).append({
-            "group": group,
-            "decision": "block",
-            "reason": "skill_runtime_not_called",
-            "phase": phase_label,
-        })
-        state["logs_terminais"].append(
-            f"[{group}] tool fan-out bloqueado: skill-runtime nao materializou contrato"
-        )
-        return {"execution_decision": "block", "notes": "skill_runtime_not_called"}
-
-    try:
-        from app.services.agent_context_service import build_worker_knowledge_context
-
-        knowledge_bundle = build_worker_knowledge_context(
-            worker_group=group,
-            skill=str(primary_skill.get("id") or group),
-            phase=phase_label,
-            target=target,
-            candidate_tools=candidate_tools,
-            mode=str(state.get("scan_mode") or "unit"),
-        )
-        knowledge_context = dict(knowledge_bundle.get("prompt_context") or {})
-        knowledge_context["knowledge_items"] = list(knowledge_bundle.get("knowledge_items") or [])[:5]
-        if knowledge_bundle.get("recommended_tools"):
-            preferred = list(knowledge_bundle["recommended_tools"])
-            candidate_tools = preferred + [tool for tool in candidate_tools if tool not in preferred]
-        state["logs_terminais"].append(
-            f"[{group}] skill-memory synced={knowledge_bundle.get('sync_status', {}).get('ingested', 0)} "
-            f"retrieved={len(knowledge_bundle.get('knowledge_items') or [])}"
-        )
-    except Exception as exc:
-        state["logs_terminais"].append(f"[{group}] erro ao montar skill-memory: {exc}")
-
-    execution_context = {
-        "scan_id": state.get("scan_id"),
-        "target": target,
-        "phase": phase_label,
-        "skill": str(primary_skill.get("id") or group),
-        "skill_invocation_id": skill_invocation.get("invocation_id"),
-        "skill_runtime_called": bool(skill_invocation.get("called")),
-        "authorized_scope": True,  # ScanAuthorization gate runs upstream
-        "auth_available": bool(state.get("auth_available")),
-        "max_risk_allowed": "medium",
-        "iteration": int(state.get("loop_iteration", 0)),
-        "tool_execution_path": "mcp_to_kali",
-        "skill_memory_available": bool(knowledge_context),
-    }
-
-    try:
-        from app.services.tool_catalog import render_tool_catalog_for_prompt
-        catalog = render_tool_catalog_for_prompt(only_installed=True)
-
-        # Enrich catalog with RAG context if available
-        rag_patterns = list(state.get("rag_patterns") or [])
-        if rag_patterns:
-            catalog += "\n\nRAG Context:\n"
-            for pattern in rag_patterns[:3]:
-                content = pattern.get("content", "")
-                score = pattern.get("score", 0)
-                if score > 0.6:  # Only include relevant patterns
-                    catalog += f"- {content[:150]}...\n"
-            state["logs_terminais"].append(
-                f"[{group}] enriched catalog with {len(rag_patterns)} RAG patterns"
-            )
-
-    except Exception:  # noqa: BLE001
-        catalog = "(tool catalog unavailable)"
-
-    try:
-        if decide_next_technique is None:
-            raise RuntimeError("supervisor_runtime unavailable; using skill-runtime fallback")
-        decision = decide_next_technique(
-            playbook=playbook,
-            execution_context=execution_context,
-            tool_catalog=catalog,
-            skill_memory=knowledge_context,
-            timeout=8,
-        )
-    except BlockedDecision as exc:
-        state.setdefault("orchestration_decisions", []).append({
-            "group": group, "decision": "block", "reason": str(exc),
-            "skill_invocation_id": skill_invocation.get("invocation_id"),
-        })
-        state["logs_terminais"].append(f"[{group}] supervisor BLOCK: {exc}")
-        return {"execution_decision": "block", "notes": str(exc)}
-    except Exception as exc:  # noqa: BLE001
-        state["logs_terminais"].append(f"[{group}] supervisor consult error: {exc}")
-        try:
-            from app.services.skill_runtime import build_skill_guided_fallback_decision
-
-            fallback = build_skill_guided_fallback_decision(
-                skill_invocation=skill_invocation,
-                execution_context=execution_context,
-                candidate_tools=candidate_tools,
-                playbook=playbook,
-                reason=str(exc),
-            )
-            if fallback:
-                state.setdefault("orchestration_decisions", []).append({
-                    "group": group,
-                    "decision": fallback.get("execution_decision"),
-                    "technique": (fallback.get("selected_technique") or {}).get("name"),
-                    "phase": execution_context.get("phase"),
-                    "skill": execution_context.get("skill"),
-                    "confidence": fallback.get("confidence"),
-                    "decision_source": fallback.get("decision_source"),
-                    "skill_invocation_id": skill_invocation.get("invocation_id"),
-                })
-                state["logs_terminais"].append(
-                    f"[{group}] supervisor fallback por skill-runtime: "
-                    f"skill={execution_context.get('skill')} tools={','.join(fallback.get('preferred_tools') or []) or '-'}"
-                )
-                return fallback
-        except Exception as fallback_exc:  # noqa: BLE001
-            state["logs_terminais"].append(f"[{group}] skill-runtime fallback error: {fallback_exc}")
-        return None
-
-    state.setdefault("orchestration_decisions", []).append({
-        "group": group,
-        "decision": decision.get("execution_decision"),
-        "technique": decision.get("selected_technique", {}).get("name"),
-        "phase": decision.get("execution_context", {}).get("phase"),
-        "skill": decision.get("execution_context", {}).get("skill"),
-        "confidence": decision.get("confidence"),
-        "memory_items": len((decision.get("memory_context") or {}).get("knowledge_items") or []),
-        "skill_invocation_id": skill_invocation.get("invocation_id"),
-    })
-    selected_name = str((decision.get("selected_technique") or {}).get("name") or "").strip().lower()
-    preferred_tools: list[str] = []
-    for technique in list(playbook.get("techniques") or []):
-        if not isinstance(technique, dict):
-            continue
-        technique_name = str(technique.get("name") or "").strip().lower()
-        if selected_name and selected_name != technique_name:
-            continue
-        preferred_tools.extend(str(tool).strip() for tool in (technique.get("recommended_kali_tools") or []) if str(tool).strip())
-        break
-    preferred_tools.extend(
-        str(tool).strip()
-        for tool in ((decision.get("memory_context") or {}).get("recommended_tools") or [])
-        if str(tool).strip()
-    )
-    preferred_tools.extend(
-        str(tool).strip()
-        for tool in (skill_invocation.get("recommended_tools") or [])
-        if str(tool).strip()
-    )
-    decision["preferred_tools"] = [
-        tool for tool in dict.fromkeys(preferred_tools)
-        if tool in candidate_tools
-    ]
-    decision["playbook_title"] = playbook.get("title")
-    decision["skill_invocation"] = {
-        "invocation_id": skill_invocation.get("invocation_id"),
-        "skill_id": skill_invocation.get("skill_id"),
-        "matched_by": list(skill_invocation.get("matched_by") or []),
-        "source": skill_invocation.get("source"),
-    }
-    return decision
-
-
-def _apply_orchestration_tool_guidance(
-    state: AgentState,
-    node_label: str,
-    tools: list[str],
-    decision: dict[str, Any] | None,
-) -> list[str]:
-    if not tools or not decision:
-        return tools
-
-    preferred = [
-        str(tool).strip()
-        for tool in (decision.get("preferred_tools") or [])
-        if str(tool).strip() in tools
-    ]
-    if not preferred:
-        return tools
-
-    state["logs_terminais"].append(
-        f"{node_label}: orchestration_selected_tools={','.join(preferred)}"
-    )
-    return preferred
 
 
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
@@ -980,10 +755,10 @@ def _bootstrap_skill_group(state: AgentState) -> str:
     if pending in TOOL_CAPABILITY_NODES:
         return pending
     next_node = str(state.get("routing_next_node") or "").strip()
-    if next_node in {"asset_discovery", "threat_intel", "risk_assessment", "adversarial_hypothesis"}:
+    if next_node in TOOL_CAPABILITY_NODES:
         return next_node
     current = str(state.get("current_phase") or "").strip()
-    if current in {"asset_discovery", "threat_intel", "risk_assessment", "adversarial_hypothesis"}:
+    if current in TOOL_CAPABILITY_NODES:
         return current
     return "asset_discovery"
 
@@ -1006,15 +781,14 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
 
 
-def skill_runtime_node(state: AgentState) -> AgentState:
-    """Skill-first workflow gate.
+def skill_selector_node(state: AgentState) -> AgentState:
+    """Select the operational skill for the pending capability.
 
     This node does not execute Kali tools. It materializes the operational
-    skill contract that the supervisor and workers must follow before any
-    tool fan-out happens.
+    skill contract that the planner, selector and executor must follow.
     """
     started_at = _metric_start()
-    _sync_step_to_db(state, "Skill Runtime")
+    _sync_step_to_db(state, "Skill Selector")
 
     try:
         _refresh_active_skills(state)
@@ -1024,16 +798,18 @@ def skill_runtime_node(state: AgentState) -> AgentState:
         skills = list(state.get("active_skills") or [])
         primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
         playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
-        invocation, _, guided_tools = _invoke_skill_runtime_for_context(
+        invocation, _, guided_tools = _invoke_skill_for_context(
             state,
             group,
             candidate_tools,
             playbook,
             phase_label,
-            purpose="workflow_gate",
+            purpose="skill_selector",
         )
-        state["skill_runtime_ready"] = bool(invocation.get("called"))
-        state["skill_runtime_gate"] = {
+        ready = bool(invocation.get("called"))
+        state["skill_selector_ready"] = ready
+        state["skill_contract"] = dict(state.get("skill_contract") or {})
+        state["skill_selector_gate"] = {
             "group": group,
             "phase": phase_label,
             "called": bool(invocation.get("called")),
@@ -1043,16 +819,58 @@ def skill_runtime_node(state: AgentState) -> AgentState:
             "playbook_title": playbook.get("title"),
         }
         state["logs_terminais"].append(
-            f"[SKILL] runtime gate ready={state['skill_runtime_ready']} "
+            f"[SKILL] selector ready={state['skill_selector_ready']} "
             f"group={group} skill={invocation.get('skill_id') or '-'}"
         )
 
     except Exception as exc:
-        state["skill_runtime_ready"] = False
-        state["logs_terminais"].append(f"[SKILL] runtime gate failed: {exc}")
-        logger.warning("Skill runtime gate failed: %s", exc)
+        state["skill_selector_ready"] = False
+        state["logs_terminais"].append(f"[SKILL] selector failed: {exc}")
+        logger.warning("Skill selector failed: %s", exc)
 
-    _metric_end(state, "skill_runtime", started_at)
+    _metric_end(state, "skill_selector", started_at)
+    return state
+
+
+def skill_planner_node(state: AgentState) -> AgentState:
+    """Turn the selected skill into an executable plan contract."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "Skill Planner")
+
+    gate = dict(state.get("skill_selector_gate") or {})
+    contract = dict(state.get("skill_contract") or {})
+    invocation = dict(state.get("skill_invocation") or {})
+    capability = str(gate.get("group") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
+    techniques = [dict(item) for item in list(invocation.get("techniques") or []) if isinstance(item, dict)]
+    selected_technique = techniques[0] if techniques else {
+        "name": f"{contract.get('skill_id') or capability} plan",
+        "objective": "Execute the selected skill with one authorized tool and reproducible evidence.",
+        "recommended_kali_tools": list(gate.get("recommended_tools") or []),
+        "evidence_signals": [],
+        "safe_validation_steps": [],
+    }
+    plan = {
+        "capability": capability,
+        "phase": gate.get("phase") or state.get("current_phase") or capability,
+        "skill_id": contract.get("skill_id") or invocation.get("skill_id"),
+        "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
+        "skill_contract": contract,
+        "technique": selected_technique,
+        "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
+        "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
+        "evidence_required": list(selected_technique.get("evidence_signals") or []),
+        "constraints": list(selected_technique.get("safe_validation_steps") or []),
+        "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
+        "decision_source": "skill_planner",
+    }
+    state["skill_plan_contract"] = plan
+    _append_action(state, "skill_planned", plan)
+    state["logs_terminais"].append(
+        f"[SKILL] planned capability={capability} skill={plan.get('skill_id')} "
+        f"technique={selected_technique.get('name') or '-'}"
+    )
+
+    _metric_end(state, "skill_planner", started_at)
     return state
 
 
@@ -1071,20 +889,25 @@ def tool_selector_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "Tool Selector")
 
-    capability = str(state.get("pending_capability_node") or _bootstrap_skill_group(state))
-    gate = dict(state.get("skill_runtime_gate") or {})
-    contract = dict(state.get("skill_runtime_contract") or {})
-    invocation = dict(state.get("skill_runtime_invocation") or {})
-    candidate_tools = [str(tool) for tool in list(gate.get("candidate_tools") or []) if str(tool or "").strip()]
-    recommended_tools = [str(tool) for tool in list(contract.get("recommended_tools") or invocation.get("recommended_tools") or []) if str(tool or "").strip()]
+    plan = dict(state.get("skill_plan_contract") or {})
+    capability = str(plan.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
+    gate = dict(state.get("skill_selector_gate") or {})
+    contract = dict(plan.get("skill_contract") or state.get("skill_contract") or {})
+    invocation = dict(state.get("skill_invocation") or {})
+    candidate_tools = [str(tool) for tool in list(plan.get("candidate_tools") or gate.get("candidate_tools") or []) if str(tool or "").strip()]
+    recommended_tools = [
+        str(tool)
+        for tool in list(plan.get("recommended_tools") or contract.get("recommended_tools") or invocation.get("recommended_tools") or [])
+        if str(tool or "").strip()
+    ]
 
     try:
         from app.services.agent_context_service import build_worker_knowledge_context
 
         bundle = build_worker_knowledge_context(
             worker_group=capability,
-            skill=str(contract.get("skill_id") or invocation.get("skill_id") or capability),
-            phase=str(gate.get("phase") or state.get("current_phase") or capability),
+            skill=str(plan.get("skill_id") or contract.get("skill_id") or invocation.get("skill_id") or capability),
+            phase=str(plan.get("phase") or gate.get("phase") or state.get("current_phase") or capability),
             target=str(state.get("target") or ""),
             candidate_tools=candidate_tools,
             mode=str(state.get("scan_mode") or "unit"),
@@ -1103,26 +926,26 @@ def tool_selector_node(state: AgentState) -> AgentState:
     if not selected_tools and candidate_tools and contract.get("skill_id"):
         selected_tools = [candidate_tools[0]]
 
-    # Skill-first means no phase fan-out. One skill invocation selects one
+    # Skill-first means no phase batch execution. One skill invocation selects one
     # concrete tool execution; additional tools require another supervisor loop.
     selected_tools = selected_tools[:1]
     selected_tool = selected_tools[0] if selected_tools else ""
-    technique = _technique_for_selected_tool(invocation, selected_tool)
-    evidence_required = list(technique.get("evidence_signals") or [])
-    constraints = list(technique.get("safe_validation_steps") or [])
+    technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
+    evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])
+    constraints = list(plan.get("constraints") or technique.get("safe_validation_steps") or [])
 
     selection = {
         "capability": capability,
         "selected_tools": selected_tools,
         "candidate_tools": candidate_tools,
-        "skill_id": contract.get("skill_id") or invocation.get("skill_id"),
-        "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
+        "skill_id": plan.get("skill_id") or contract.get("skill_id") or invocation.get("skill_id"),
+        "skill_invocation_id": plan.get("skill_invocation_id") or contract.get("invocation_id") or invocation.get("invocation_id"),
         "skill_contract": contract,
         "technique": technique,
         "evidence_required": evidence_required,
         "constraints": constraints,
-        "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
-        "decision_source": "skill_runtime_selector",
+        "playbook_title": plan.get("playbook_title") or contract.get("playbook_title") or gate.get("playbook_title"),
+        "decision_source": "skill_selector",
     }
     state["tool_selection_contract"] = selection
     _append_action(state, "tool_selected", selection)
@@ -1328,8 +1151,8 @@ def tool_executor_node(state: AgentState) -> AgentState:
         state["validation_backlog"] = []
     _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
     state["pending_capability_node"] = ""
-    state["proxima_ferramenta"] = "evidence_adjudication"
-    state["routing_next_node"] = "evidence_adjudication"
+    state["proxima_ferramenta"] = "evidence_gate"
+    state["routing_next_node"] = "evidence_gate"
     state["mission_index"] += 1
     _append_observation(
         state,
@@ -1339,6 +1162,12 @@ def tool_executor_node(state: AgentState) -> AgentState:
 
     _metric_end(state, "tool_executor", started_at)
     return state
+
+
+def evidence_gate_node(state: AgentState) -> AgentState:
+    """Evidence gate after every skill-bound execution."""
+    state["logs_terminais"].append("[EVIDENCE] gate evaluating skill-bound execution")
+    return _evaluate_evidence_gate(state)
 
 
 def supervisor_node(state: AgentState) -> AgentState:
@@ -1364,16 +1193,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     last_node = str(state.get("last_completed_node") or "").strip()
     pending_validation = list(state.get("validation_backlog") or [])
 
-    capability_nodes = {
-        "strategic_planning",
-        "asset_discovery",
-        "threat_intel",
-        "adversarial_hypothesis",
-        "risk_assessment",
-        "evidence_adjudication",
-        "governance",
-        "executive_analyst",
-    }
+    capability_nodes = {"governance", "executive_analyst"}
     if last_node in capability_nodes:
         if last_node not in completed:
             completed.append(last_node)
@@ -1389,7 +1209,7 @@ def supervisor_node(state: AgentState) -> AgentState:
         _register_delegation_task(state, node="asset_discovery", reason="low_confidence_expand_surface", priority=1)
         _register_delegation_task(state, node="threat_intel", reason="low_confidence_collect_intel", priority=2)
     elif confidence < ANALYST_CONFIDENCE_THRESHOLDS["high"]:
-        _register_delegation_task(state, node="adversarial_hypothesis", reason="medium_confidence_refine_hypothesis", priority=2)
+        _register_delegation_task(state, node="threat_intel", reason="medium_confidence_collect_more_context", priority=2)
     else:
         _register_delegation_task(state, node="risk_assessment", reason="high_confidence_validate_exploitability", priority=1)
 
@@ -1410,18 +1230,12 @@ def supervisor_node(state: AgentState) -> AgentState:
         else:
             next_node = "END"
             termination_reason = termination_reason or "objective_already_met"
-    elif "strategic_planning" not in completed:
-        next_node = "strategic_planning"
     elif "asset_discovery" not in completed:
         next_node = "asset_discovery"
     elif "threat_intel" not in completed:
         next_node = "threat_intel"
-    elif "adversarial_hypothesis" not in completed:
-        next_node = "adversarial_hypothesis"
     elif "risk_assessment" not in completed:
         next_node = "risk_assessment"
-    elif "evidence_adjudication" not in completed:
-        next_node = "evidence_adjudication"
     elif "governance" not in completed:
         next_node = "governance"
     elif "executive_analyst" not in completed:
@@ -1450,9 +1264,9 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     ctrl = dict(state.get("execution_control") or {})
     remaining = int(ctrl.get("remaining_iterations", max_iterations))
-    if bool(ctrl.get("paused", False)) and next_node in {"risk_assessment", "evidence_adjudication"}:
+    if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
         _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
-        next_node = "threat_intel" if confidence < ANALYST_CONFIDENCE_THRESHOLDS["high"] else "adversarial_hypothesis"
+        next_node = "threat_intel"
     if remaining <= 2 and next_node not in {"governance", "executive_analyst", "END"}:
         _append_note(state, "Forçando finalização contextual por orçamento baixo.", phase="execution-control")
         next_node = "governance" if "governance" not in completed else "executive_analyst"
@@ -1460,7 +1274,7 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     # Delegation override only after FULL cycle (essential + executive_analyst).
     # Sem isso, delegação atropelava o caminho sequencial e voltava para fases já feitas.
-    essential_phases = {"strategic_planning", "asset_discovery", "threat_intel", "adversarial_hypothesis", "risk_assessment", "evidence_adjudication", "governance"}
+    essential_phases = {"asset_discovery", "threat_intel", "risk_assessment", "governance"}
     full_cycle_done = essential_phases.issubset(set(completed)) and "executive_analyst" in completed
     if full_cycle_done:
         for delegated in list(state.get("delegated_tasks") or []):
@@ -1480,13 +1294,13 @@ def supervisor_node(state: AgentState) -> AgentState:
         state["current_phase"] = next_node
         return state
 
-    route_node = "skill_runtime" if next_node in TOOL_CAPABILITY_NODES else next_node
+    route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
         state["logs_terminais"].append(
-            f"Supervisor: capability={next_node} encaminhada para skill_runtime"
+            f"Supervisor: capability={next_node} encaminhada para skill_selector"
         )
-    elif next_node not in {"END", "evidence_adjudication"}:
+    elif next_node != "END":
         state["pending_capability_node"] = ""
 
     state["completed_capabilities"] = completed
@@ -1519,183 +1333,11 @@ def supervisor_node(state: AgentState) -> AgentState:
     return state
 
 
-def strategic_planning_node(state: AgentState) -> AgentState:
-    """Define plano tático inicial e contratos de execução do agente sênior."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "1. StrategicPlanning")
-
-    target = str(state.get("target") or "").strip()
-    max_iterations = int(state.get("max_iterations", 12))
-    _refresh_active_skills(state)
-    mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
-    prompt_contract = build_supervisor_prompt_contract(
-        target=target,
-        objective=f"Assess external attack surface and exploitable risk for {target}",
-        max_iterations=max_iterations,
-        active_skills=list(state.get("active_skills") or []),
-    )
-    plan = {
-        "objective": f"Assess external attack surface and exploitable risk for {target}",
-        "current_phase": 1,
-        "total_phases": len(GROUP_MISSION_ITEMS),
-        "checkpoints": [20, 40, 60, 80],
-        "phases": [
-            {"id": idx + 1, "title": item, "status": "active" if idx == 0 else "pending"}
-            for idx, item in enumerate(GROUP_MISSION_ITEMS)
-        ],
-    }
-
-    state["analyst_framework"] = {
-        "name": "senior-cyber-analyst-framework",
-        "version": "2026.04",
-        "loop": ["know", "think", "test", "validate"],
-        "confidence_thresholds": ANALYST_CONFIDENCE_THRESHOLDS,
-        "prompt_contract": prompt_contract,
-        "mission_contract": mission_contract,
-    }
-    state["operation_plan"] = plan
-    state["evidence_contract"] = {
-        "rules": EVIDENCE_RULES,
-        "status_values": ["hypothesis", "unverified", "verified"],
-    }
-    state["confidence_state"] = {
-        "global_confidence": 60,
-        "reason": "initial_plan_created",
-        "last_updated": datetime.utcnow().isoformat(),
-    }
-    _append_note(state, "Plano estratégico inicial criado com contrato de autonomia.", phase="strategic-planning")
-    _append_todo(state, "Executar ciclo inicial de descoberta de ativos", priority="high")
-    _append_todo(state, "Correlacionar OSINT com superficie descoberta", priority="high")
-    _append_todo(state, "Validar findings high/critical com prova reproduzível", priority="high")
-    _complete_delegation_task(state, "strategic_planning", "planning_contract_ready")
-    state["logs_terminais"].append(
-        f"StrategicPlanning: framework=senior-cyber-analyst, confidence=60, skills={len(state.get('active_skills') or [])}, plan_initialized"
-    )
-    state["proxima_ferramenta"] = "asset_discovery"
-    state["routing_next_node"] = "asset_discovery"
-    state["mission_index"] += 1
-    _metric_end(state, "strategic_planning", started_at)
-    _sync_step_to_db(state, "1. StrategicPlanning")
-    return state
-
-
-def adversarial_hypothesis_node(state: AgentState) -> AgentState:
-    """Consolida hipóteses ofensivas antes da fase de validação técnica."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "4. AdversarialHypothesis")
-
-    vulns = state.get("vulnerabilidades_encontradas") or []
-    high_signal = [
-        v for v in vulns
-        if str(v.get("severity", "")).lower() in {"critical", "high", "medium"}
-    ]
-    try:
-        from app.services.vulnerability_learning_service import (
-            build_accepted_learning_validation_backlog,
-            enrich_findings_with_accepted_learning,
-        )
-
-        high_signal = enrich_findings_with_accepted_learning(high_signal)
-        learned_backlog = build_accepted_learning_validation_backlog(
-            target=str(state.get("target") or ""),
-            discovered_urls=_discovered_validation_targets(
-                state,
-                str(state.get("target") or ""),
-                limit=60,
-            ),
-            limit=18,
-        )
-        if learned_backlog:
-            existing_backlog = list(state.get("validation_backlog") or [])
-            existing_learning_ids = {
-                (((item.get("details") or {}).get("learning_match") or {}).get("id"))
-                for item in existing_backlog
-                if isinstance(item, dict)
-            }
-            added = 0
-            for item in learned_backlog:
-                learning_id = (((item.get("details") or {}).get("learning_match") or {}).get("id"))
-                if learning_id and learning_id in existing_learning_ids:
-                    continue
-                existing_backlog.append(item)
-                existing_learning_ids.add(learning_id)
-                added += 1
-            state["validation_backlog"] = existing_backlog
-            if added:
-                _append_todo(
-                    state,
-                    f"Executar {added} validação(ões) guiadas por aprendizado aceito",
-                    priority="high",
-                )
-                _append_observation(
-                    state,
-                    f"Accepted learning materializado em backlog: {added}",
-                    source="adversarial_hypothesis",
-                )
-                state["logs_terminais"].append(
-                    f"AdversarialHypothesis: accepted_learning_backlog={added}"
-                )
-        learning_guided = [
-            item for item in high_signal
-            if (item.get("details") or {}).get("reproduction_playbook")
-        ]
-        if learning_guided:
-            _append_todo(
-                state,
-                f"Validar {len(learning_guided)} hipótese(s) usando técnicas aprendidas aceitas",
-                priority="high",
-            )
-            _append_observation(
-                state,
-                f"Learning-guided hypotheses ready: {len(learning_guided)}",
-                source="adversarial_hypothesis",
-            )
-    except Exception:
-        pass
-
-    hypothesis = {
-        "candidate_paths": max(1, min(6, len(high_signal) + 1)),
-        "priority_focus": [
-            "authentication",
-            "exposed_services",
-            "web_attack_surface",
-        ],
-        "observed_signals": len(high_signal),
-    }
-    state["confidence_state"] = {
-        "global_confidence": 70 if high_signal else 55,
-        "reason": "adversarial_hypothesis_built",
-        "last_updated": datetime.utcnow().isoformat(),
-        "hypothesis": hypothesis,
-    }
-    _append_observation(
-        state,
-        (
-            "THINK checkpoint: "
-            f"candidate_paths={hypothesis['candidate_paths']} "
-            f"signals={hypothesis['observed_signals']} "
-            f"confidence={state['confidence_state']['global_confidence']}"
-        ),
-        source="adversarial_hypothesis",
-    )
-    _append_todo(state, "Executar teste mínimo para confirmar hipótese prioritária", priority="high")
-    _complete_delegation_task(state, "adversarial_hypothesis", "hypothesis_checkpoint_done")
-    state["logs_terminais"].append(
-        f"AdversarialHypothesis: signals={len(high_signal)} confidence={state['confidence_state']['global_confidence']}"
-    )
-    state["proxima_ferramenta"] = "risk_assessment"
-    state["mission_index"] += 1
-    _metric_end(state, "adversarial_hypothesis", started_at)
-    _sync_step_to_db(state, "4. AdversarialHypothesis")
-    return state
-
-
-def evidence_adjudication_node(state: AgentState) -> AgentState:
-
+def _evaluate_evidence_gate(state: AgentState) -> AgentState:
     """Aplica contrato de evidência para separar hipótese de finding verificável."""
     state["routing_next_node"] = "governance"
     started_at = _metric_start()
-    _sync_step_to_db(state, "6. EvidenceAdjudication")
+    _sync_step_to_db(state, "Evidence Gate")
 
     rules = (state.get("evidence_contract") or {}).get("rules") or EVIDENCE_RULES
     min_conf = int(rules.get("minimum_confidence_for_promote", 70))
@@ -1765,16 +1407,16 @@ def evidence_adjudication_node(state: AgentState) -> AgentState:
         _append_note(
             state,
             f"Evidence gate bloqueou promoção de {len(backlog)} finding(s) por falta de reprodução.",
-            phase="evidence-adjudication",
+            phase="evidence-gate",
         )
-    _complete_delegation_task(state, "evidence_adjudication", f"promoted={promoted}; backlog={len(backlog)}")
+    _complete_delegation_task(state, "evidence_gate", f"promoted={promoted}; backlog={len(backlog)}")
     state["logs_terminais"].append(
-        f"EvidenceAdjudication: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
+        f"EvidenceGate: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
     )
     state["proxima_ferramenta"] = "governance"
     state["mission_index"] += 1
-    _metric_end(state, "evidence_adjudication", started_at)
-    _sync_step_to_db(state, "6. EvidenceAdjudication")
+    _metric_end(state, "evidence_gate", started_at)
+    _sync_step_to_db(state, "Evidence Gate")
     return state
 
 
@@ -1879,26 +1521,22 @@ def _tool_for_step(step_name: str) -> str | None:
 
 
 def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
-    """Returns the union of tools from all groups relevant to a graph node.
+    """Returns the candidate tool catalog for a capability label.
 
-    Graph nodes (asset_discovery / threat_intel / risk_assessment) map to
-    multiple worker_groups so the agent can fan-out across all phases. Without
-    this, P15 (dir enum) and P22 (deps) would never run because their tools
-    live in different worker groups than the node that owns the phase.
+    The graph itself is skill-first. Capability labels only seed the skill
+    selector with an allowed candidate catalog; tool_selector still reduces the
+    execution to the concrete tool authorized by the active skill contract.
     """
     groups = get_worker_groups(mode=scan_mode)
 
-    # Multi-group composition per graph node → Kill Chain phase groups.
+    # Multi-group composition per capability label -> Kill Chain phase groups.
     # Phase groups live in worker_groups.CANONICAL_GROUP_TOOLS and align with
     # the celery queue names (worker.{mode}.{group}).
     node_to_groups: dict[str, list[str]] = {
-        # Graph node              → list of phase groups feeding it
-        "strategic_planning":     ["scope_validation"],
+        # Capability label        -> list of phase groups feeding it
         "asset_discovery":        ["reconnaissance"],
         "threat_intel":           ["weaponization", "actions_on_objectives"],
-        "adversarial_hypothesis": ["delivery"],
         "risk_assessment":        ["exploitation", "delivery", "weaponization", "actions_on_objectives"],
-        "evidence_adjudication":  ["installation", "actions_on_objectives"],
         "governance":             ["command_control"],
         "executive_analyst":      ["reporting"],
         # Legacy aliases — kept so old persisted state still resolves.
@@ -4522,11 +4160,11 @@ def asset_discovery_node(state: AgentState) -> AgentState:
         "target_type": target_type,
     }
     state["pending_capability_node"] = "asset_discovery"
-    state["routing_next_node"] = "skill_runtime"
-    state["proxima_ferramenta"] = "skill_runtime"
+    state["routing_next_node"] = "skill_selector"
+    state["proxima_ferramenta"] = "skill_selector"
     _append_note(
         state,
-        f"AssetDiscovery preparou contexto para skill_runtime: {', '.join(recon_tools)}",
+        f"AssetDiscovery preparou contexto para skill_selector: {', '.join(recon_tools)}",
         phase="asset-discovery",
     )
     _metric_end(state, "asset_discovery_context", started_at)
@@ -4615,11 +4253,11 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         "pending_validation": len(pending_validation),
     }
     state["pending_capability_node"] = "risk_assessment"
-    state["routing_next_node"] = "skill_runtime"
-    state["proxima_ferramenta"] = "skill_runtime"
+    state["routing_next_node"] = "skill_selector"
+    state["proxima_ferramenta"] = "skill_selector"
     _append_note(
         state,
-        f"RiskAssessment preparou contexto para skill_runtime: {', '.join(vuln_tools)}",
+        f"RiskAssessment preparou contexto para skill_selector: {', '.join(vuln_tools)}",
         phase="risk-assessment",
     )
     _metric_end(state, "risk_assessment_context", started_at)
@@ -4745,11 +4383,11 @@ def threat_intel_node(state: AgentState) -> AgentState:
         "candidate_tools": osint_tools,
     }
     state["pending_capability_node"] = "threat_intel"
-    state["routing_next_node"] = "skill_runtime"
-    state["proxima_ferramenta"] = "skill_runtime"
+    state["routing_next_node"] = "skill_selector"
+    state["proxima_ferramenta"] = "skill_selector"
     _append_note(
         state,
-        f"ThreatIntel preparou contexto para skill_runtime: {', '.join(osint_tools)}",
+        f"ThreatIntel preparou contexto para skill_selector: {', '.join(osint_tools)}",
         phase="threat-intel",
     )
     _metric_end(state, "threat_intel_context", started_at)
@@ -4909,22 +4547,19 @@ def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: st
 def build_graph(mode: ScanMode = "unit"):
     """Single-Agent Meta-Everything (Supervisor-Centric) LangGraph.
 
-    O fluxo é skill-first: RAG enriquece contexto, skill_runtime materializa
-    a skill operacional, e só então o supervisor roteia capacidades.
+    O fluxo real é skill-first:
+    rag_enrichment -> supervisor -> skill_selector -> skill_planner ->
+    tool_selector -> tool_executor -> evidence_gate -> supervisor.
     """
     graph = StateGraph(AgentState)
 
     graph.add_node("rag_enrichment", rag_enrichment_node)
-    graph.add_node("skill_runtime", skill_runtime_node)
+    graph.add_node("skill_selector", skill_selector_node)
+    graph.add_node("skill_planner", skill_planner_node)
     graph.add_node("tool_selector", tool_selector_node)
     graph.add_node("tool_executor", tool_executor_node)
+    graph.add_node("evidence_gate", evidence_gate_node)
     graph.add_node("supervisor", supervisor_node)
-    graph.add_node("strategic_planning", strategic_planning_node)
-    graph.add_node("asset_discovery",   asset_discovery_node)
-    graph.add_node("risk_assessment",   risk_assessment_node)
-    graph.add_node("threat_intel",      threat_intel_node)
-    graph.add_node("adversarial_hypothesis", adversarial_hypothesis_node)
-    graph.add_node("evidence_adjudication", evidence_adjudication_node)
     graph.add_node("governance",        governance_node)
     graph.add_node("executive_analyst", executive_analyst_node)
 
@@ -4934,27 +4569,19 @@ def build_graph(mode: ScanMode = "unit"):
         "supervisor",
         _route_from_supervisor,
         {
-            "skill_runtime": "skill_runtime",
-            "strategic_planning": "strategic_planning",
-            "adversarial_hypothesis": "adversarial_hypothesis",
-            "evidence_adjudication": "evidence_adjudication",
+            "skill_selector": "skill_selector",
             "governance": "governance",
             "executive_analyst": "executive_analyst",
             END: END,
         },
     )
-    graph.add_edge("skill_runtime", "tool_selector")
+    graph.add_edge("skill_selector", "skill_planner")
+    graph.add_edge("skill_planner", "tool_selector")
     graph.add_edge("tool_selector", "tool_executor")
-    graph.add_edge("tool_executor", "evidence_adjudication")
+    graph.add_edge("tool_executor", "evidence_gate")
+    graph.add_edge("evidence_gate", "supervisor")
 
-    # Back-edges: cada capability node retorna ao supervisor para roteamento contínuo
-    for node_name in [
-        "strategic_planning",
-        "adversarial_hypothesis",
-        "evidence_adjudication",
-        "governance",
-        "executive_analyst",
-    ]:
+    for node_name in ["governance", "executive_analyst"]:
         graph.add_edge(node_name, "supervisor")
 
     return graph.compile(checkpointer=checkpointer)
@@ -4995,7 +4622,7 @@ def initial_state(
         "lista_ativos": [],
         "logs_terminais": [],
         "vulnerabilidades_encontradas": [],
-        "proxima_ferramenta": "asset_discovery",
+        "proxima_ferramenta": "skill_selector",
         "discovered_ports": [],
         "pending_port_tests": [],
         "pending_asset_scans": [],
@@ -5041,7 +4668,7 @@ def initial_state(
         "max_iterations": max_iterations,
         "objective_met": False,
         "termination_reason": "",
-        "routing_next_node": "strategic_planning",
+        "routing_next_node": "skill_selector",
         "pending_capability_node": "",
         "current_phase": "",
         "last_completed_node": "",
@@ -5049,10 +4676,11 @@ def initial_state(
         "active_skills": initial_skills,
         "active_skill": "",
         "current_skill": "",
-        "skill_runtime_ready": False,
-        "skill_runtime_contract": {},
-        "skill_runtime_gate": {},
-        "skill_runtime_invocation": {},
+        "skill_selector_ready": False,
+        "skill_selector_gate": {},
+        "skill_invocation": {},
+        "skill_contract": {},
+        "skill_plan_contract": {},
         "skill_invocations": [],
         "capability_context": {},
         "tool_selection_contract": {},

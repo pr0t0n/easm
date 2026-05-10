@@ -311,12 +311,11 @@ def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
         # xalgorix-inspired finish gate
         "finish_gate": {
             "minimum_phases_before_finish": [
-                "strategic_planning",
-                "asset_discovery",
-                "threat_intel",
-                "adversarial_hypothesis",
-                "risk_assessment",
-                "evidence_adjudication",
+                "skill_selector",
+                "skill_planner",
+                "tool_selector",
+                "tool_executor",
+                "evidence_gate",
                 "governance",
                 "executive_analyst",
             ],

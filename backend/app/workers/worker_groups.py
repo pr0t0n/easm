@@ -115,7 +115,7 @@ CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {
 
 
 CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
-    "core_orchestration": ["supervisor", "strategic_planning", "evidence_adjudication"],
+    "core_orchestration": ["supervisor", "skill_selector", "skill_planner", "tool_selector", "tool_executor", "evidence_gate"],
     "native_execution": ["shell", "http_request"],
     "memory_and_reflection": ["store_plan", "get_plan", "store_finding", "checkpoint_review"],
     "meta_tooling": ["editor", "load_tool"],
@@ -197,13 +197,14 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "contract": contract,
             "skill_context": {
                 "retrieval_required": True,
-                "runtime_invocation_required": True,
+                "selector_invocation_required": True,
                 "knowledge_sources": ["accepted_learning", "repo_tests", "mcp_rag"],
                 "execution_path": "mcp_to_kali",
-                "pre_execution_step": "invoke skill runtime, then retrieve skill memory before selecting/dispatching tool",
+                "pre_execution_step": "run skill_selector and skill_planner before selecting/dispatching tool",
             },
             "operational_sequence": [
-                "invoke_skill_runtime",
+                "skill_selector",
+                "skill_planner",
                 "retrieve_skill_memory",
                 "select_learning_guided_technique",
                 "dispatch_tool_via_mcp",

@@ -1,10 +1,16 @@
 from app.graph.workflow import (
-    _apply_orchestration_tool_guidance,
-    _consult_supervisor_orchestration,
     _route_from_supervisor,
     _run_tools_and_collect,
-    skill_runtime_node,
+    asset_discovery_node,
+    build_graph,
+    risk_assessment_node,
+    skill_planner_node,
+    skill_selector_node,
+    threat_intel_node,
+    tool_selector_node,
 )
+import inspect
+
 from app.services.skill_runtime import resolve_skill_invocation
 
 
@@ -41,7 +47,7 @@ def test_skill_runtime_prefers_learning_skill_over_first_active_skill() -> None:
     assert any(str(item).startswith("learning_skill:") for item in invocation["matched_by"])
 
 
-def test_supervisor_orchestration_records_skill_invocation_and_falls_back(monkeypatch) -> None:
+def test_skill_pipeline_turns_learning_into_single_tool_contract(monkeypatch) -> None:
     playbook = {
         "title": "Accepted vulnerability learning playbook",
         "recommended_tools": ["katana"],
@@ -62,46 +68,53 @@ def test_supervisor_orchestration_records_skill_invocation_and_falls_back(monkey
         lambda **_kwargs: playbook,
     )
     monkeypatch.setattr(
-        "app.services.agent_context_service.build_worker_knowledge_context",
-        lambda **_kwargs: {
-            "prompt_context": {},
-            "knowledge_items": [],
-            "recommended_tools": [],
-            "sync_status": {"ingested": 0},
-        },
+        "app.graph.workflow._candidate_tools_for_skill_bootstrap",
+        lambda _state, _group: ["httpx", "katana", "curl-headers"],
     )
     monkeypatch.setattr(
-        "app.agents.supervisor_runtime.decide_next_technique",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("LLM unavailable")),
+        "app.services.agent_context_service.build_worker_knowledge_context",
+        lambda **_kwargs: {"knowledge_items": [], "recommended_tools": []},
     )
 
     state = {
         "target": "http://localhost:3001/",
-        "current_phase": "asset_discovery",
-        "active_skills": [{"id": "recon-subdomain-enum", "category": "reconnaissance"}],
+        "target_type": "site",
+        "current_phase": "",
+        "routing_next_node": "asset_discovery",
+        "active_skills": [],
+        "vulnerabilidades_encontradas": [],
+        "discovered_ports": [],
         "logs_terminais": [],
         "scan_mode": "unit",
         "loop_iteration": 0,
         "autonomy_actions": [],
-        "orchestration_decisions": [],
+        "skill_invocations": [],
+        "tool_runtime": {},
+        "activity_metrics": [],
+        "node_history": [],
+        "mission_index": 0,
+        "last_completed_node": "",
     }
 
-    decision = _consult_supervisor_orchestration(
-        state,
-        "asset_discovery",
-        ["httpx", "katana", "curl-headers"],
-    )
+    skill_selector_node(state)
+    skill_planner_node(state)
+    tool_selector_node(state)
 
-    assert decision is not None
-    assert decision["decision_source"] == "skill_runtime_fallback"
-    assert decision["preferred_tools"] == ["katana"]
+    selection = state["tool_selection_contract"]
+    assert selection["decision_source"] == "skill_selector"
+    assert selection["selected_tools"] == ["katana"]
+    assert selection["skill_id"] == "vuln-information-disclosure"
+    assert selection["evidence_required"] == ["score board"]
     assert state["current_skill"] == "vuln-information-disclosure"
     assert state["skill_invocations"][0]["skill_id"] == "vuln-information-disclosure"
-    assert state["autonomy_actions"][0]["action"] == "skill_invoked"
-    assert state["orchestration_decisions"][0]["decision_source"] == "skill_runtime_fallback"
+    assert [item["action"] for item in state["autonomy_actions"]] == [
+        "skill_invoked",
+        "skill_planned",
+        "tool_selected",
+    ]
 
 
-def test_skill_runtime_node_materializes_workflow_gate(monkeypatch) -> None:
+def test_skill_selector_node_materializes_skill_contract(monkeypatch) -> None:
     playbook = {
         "title": "Accepted vulnerability learning playbook",
         "recommended_tools": ["katana"],
@@ -145,35 +158,86 @@ def test_skill_runtime_node_materializes_workflow_gate(monkeypatch) -> None:
         "last_completed_node": "",
     }
 
-    skill_runtime_node(state)
+    skill_selector_node(state)
 
-    assert state["skill_runtime_ready"] is True
-    assert state["skill_runtime_gate"]["skill_id"] == "vuln-information-disclosure"
-    assert state["skill_runtime_contract"]["purpose"] == "workflow_gate"
-    assert state["skill_invocations"][0]["purpose"] == "workflow_gate"
-    assert "skill_runtime" in state["node_history"]
+    assert state["skill_selector_ready"] is True
+    assert state["skill_selector_gate"]["skill_id"] == "vuln-information-disclosure"
+    assert state["skill_contract"]["purpose"] == "skill_selector"
+    assert state["skill_invocations"][0]["purpose"] == "skill_selector"
+    assert "skill_selector" in state["node_history"]
 
 
-def test_supervisor_routes_tool_capabilities_to_skill_runtime() -> None:
+def test_supervisor_routes_tool_capabilities_to_skill_selector() -> None:
     state = {"routing_next_node": "risk_assessment"}
 
     route = _route_from_supervisor(state)
 
-    assert route == "skill_runtime"
+    assert route == "skill_selector"
     assert state["pending_capability_node"] == "risk_assessment"
 
 
-def test_orchestration_guidance_selects_only_skill_tools() -> None:
-    state = {"logs_terminais": []}
+def test_build_graph_uses_skill_first_pipeline_not_phase_executors() -> None:
+    source = inspect.getsource(build_graph)
 
-    selected = _apply_orchestration_tool_guidance(
-        state,
-        "RiskAssessment",
-        ["nuclei", "sqlmap", "dalfox"],
-        {"preferred_tools": ["sqlmap"]},
+    assert 'graph.add_node("skill_selector", skill_selector_node)' in source
+    assert 'graph.add_node("skill_planner", skill_planner_node)' in source
+    assert 'graph.add_node("tool_selector", tool_selector_node)' in source
+    assert 'graph.add_node("tool_executor", tool_executor_node)' in source
+    assert 'graph.add_node("evidence_gate", evidence_gate_node)' in source
+    assert 'graph.add_edge("skill_selector", "skill_planner")' in source
+    assert 'graph.add_edge("skill_planner", "tool_selector")' in source
+    assert 'graph.add_edge("tool_selector", "tool_executor")' in source
+    assert 'graph.add_edge("tool_executor", "evidence_gate")' in source
+    assert 'graph.add_node("strategic_planning"' not in source
+    assert 'graph.add_node("asset_discovery"' not in source
+    assert 'graph.add_node("threat_intel"' not in source
+    assert 'graph.add_node("risk_assessment"' not in source
+    assert 'graph.add_node("adversarial_hypothesis"' not in source
+    assert 'graph.add_node("evidence_adjudication"' not in source
+
+
+def test_phase_nodes_do_not_execute_tools_directly() -> None:
+    for node in [asset_discovery_node, threat_intel_node, risk_assessment_node]:
+        source = inspect.getsource(node)
+        assert "_run_tools_and_collect(" not in source
+
+
+def test_tool_selector_does_not_keep_phase_fan_out(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.agent_context_service.build_worker_knowledge_context",
+        lambda **_kwargs: {"knowledge_items": [], "recommended_tools": ["dalfox"]},
     )
+    state = {
+        "target": "http://localhost:3001/",
+        "scan_mode": "unit",
+        "skill_plan_contract": {
+            "capability": "risk_assessment",
+            "phase": "risk_assessment",
+            "skill_id": "vuln-injection",
+            "skill_invocation_id": "skill-test",
+            "skill_contract": {"skill_id": "vuln-injection", "invocation_id": "skill-test"},
+            "technique": {"name": "SQLi validation", "recommended_kali_tools": ["sqlmap"]},
+            "candidate_tools": ["nuclei", "sqlmap", "dalfox"],
+            "recommended_tools": ["sqlmap"],
+            "evidence_required": ["sql error"],
+            "constraints": ["safe batch mode"],
+            "playbook_title": "accepted learning",
+        },
+        "skill_selector_gate": {},
+        "skill_invocation": {},
+        "skill_contract": {},
+        "logs_terminais": [],
+        "autonomy_actions": [],
+        "activity_metrics": [],
+        "node_history": [],
+        "mission_index": 0,
+        "last_completed_node": "",
+    }
 
-    assert selected == ["sqlmap"]
+    tool_selector_node(state)
+
+    assert state["tool_selection_contract"]["selected_tools"] == ["sqlmap"]
+    assert state["tool_selection_contract"]["decision_source"] == "skill_selector"
 
 
 def test_tool_execution_dispatch_receives_skill_contract(monkeypatch) -> None:
