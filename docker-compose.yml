@@ -56,6 +56,30 @@ services:
       TZ: America/Sao_Paulo
 
   # ─────────────────────────────────────────────────────────────────
+  # MCP Server — RAG and Model Context Protocol
+  # ─────────────────────────────────────────────────────────────────
+
+  mcp_server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_mcp_server
+    profiles: ["dev", "prod"]
+    environment:
+      MCP_PORT: "${MCP_PORT:-3000}"
+      TZ: America/Sao_Paulo
+    ports:
+      - "${MCP_HOST_PORT:-3000}:3000"
+    volumes:
+      - mcp_chroma_data:/app/chroma_db
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ─────────────────────────────────────────────────────────────────
   # Kali Runner — single source of truth for offensive tools
   # All workers dispatch jobs HERE via HTTP (POST /jobs).
   # ─────────────────────────────────────────────────────────────────
@@ -276,3 +300,4 @@ volumes:
   postgres_data:
   ollama_data:
   kali_workspace:
+  mcp_chroma_data:

@@ -124,7 +124,21 @@ def _deterministic_fallback(
     if not techniques:
         techniques = [{"name": playbook.get("title") or "first-pass", "objective": "explore phase"}]
 
-    chosen = techniques[0]
+    # Improved fallback: try to match phase if possible
+    matched_techniques = []
+    for tech in techniques:
+        if isinstance(tech, dict):
+            affected_phases = tech.get("affected_phases", [])
+            if phase and any(phase.lower() in str(ph).lower() or str(ph).lower() in phase.lower() for ph in affected_phases):
+                matched_techniques.append(tech)
+        elif isinstance(tech, str):
+            # If technique is just a string, include it
+            matched_techniques.append({"name": tech, "objective": "fallback step"})
+
+    # Use matched techniques if available, otherwise all
+    chosen_pool = matched_techniques if matched_techniques else techniques
+    chosen = chosen_pool[0] if chosen_pool else techniques[0]
+
     if isinstance(chosen, str):
         chosen = {"name": chosen, "objective": "fallback first-step", "reason": "deterministic"}
 
@@ -133,7 +147,7 @@ def _deterministic_fallback(
         "selected_technique": {
             "name": str(chosen.get("name") or "first-pass"),
             "objective": str(chosen.get("objective") or "explore"),
-            "reason": "fallback: LLM indisponível, primeiro técnica do playbook",
+            "reason": "fallback: LLM indisponível, primeira técnica compatível do playbook",
         },
         "execution_context": {
             "target": str(execution_context.get("target") or ""),

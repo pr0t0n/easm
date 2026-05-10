@@ -23,6 +23,7 @@ def _strip_ansi_codes(text: str) -> str:
 
 from app.graph.checkpointer import create_checkpointer
 from app.graph.mission import MISSION_ITEMS as AUTONOMOUS_MISSION_ITEMS
+from app.services.mcp_client import get_rag_service
 
 # Mapeamento de fases/atividades para grupos de worker
 MISSION_PHASE_TO_GROUP = {
@@ -495,8 +496,23 @@ def _consult_supervisor_orchestration(
                 f"[{group}] supervisor usando playbook de aprendizado aceito: "
                 f"techniques={len(learned_playbook.get('techniques') or [])}"
             )
-    except Exception:
-        pass
+        else:
+            # Fallback: try without phase filter to get broader learning
+            learned_playbook = build_runtime_learning_playbook(
+                candidate_tools=candidate_tools,
+                phase=None,  # Remove phase filter
+                limit=12,
+            )
+            if learned_playbook:
+                playbook = learned_playbook
+                state["logs_terminais"].append(
+                    f"[{group}] supervisor usando playbook de aprendizado aceito (sem filtro de fase): "
+                    f"techniques={len(learned_playbook.get('techniques') or [])}"
+                )
+    except Exception as exc:
+        state["logs_terminais"].append(
+            f"[{group}] erro ao carregar aprendizado: {exc}"
+        )
 
     execution_context = {
         "scan_id": state.get("scan_id"),
@@ -512,6 +528,20 @@ def _consult_supervisor_orchestration(
     try:
         from app.services.tool_catalog import render_tool_catalog_for_prompt
         catalog = render_tool_catalog_for_prompt(only_installed=True)
+
+        # Enrich catalog with RAG context if available
+        rag_patterns = list(state.get("rag_patterns") or [])
+        if rag_patterns:
+            catalog += "\n\nRAG Context:\n"
+            for pattern in rag_patterns[:3]:
+                content = pattern.get("content", "")
+                score = pattern.get("score", 0)
+                if score > 0.6:  # Only include relevant patterns
+                    catalog += f"- {content[:150]}...\n"
+            state["logs_terminais"].append(
+                f"[{group}] enriched catalog with {len(rag_patterns)} RAG patterns"
+            )
+
     except Exception:  # noqa: BLE001
         catalog = "(tool catalog unavailable)"
 
@@ -631,6 +661,74 @@ def _find_node_with_uncovered_tools(state: AgentState) -> str | None:
     if _has_uncovered("risk_assessment"):
         return "risk_assessment"
     return None
+
+
+def rag_enrichment_node(state: AgentState) -> AgentState:
+    """RAG enrichment node: enriches prompts and context with knowledge base."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "RAG Enrichment")
+
+    try:
+        rag_service = await get_rag_service()
+
+        if not await rag_service.is_available():
+            state["logs_terminais"].append("[RAG] MCP server not available, skipping enrichment")
+            _metric_end(state, "rag_enrichment", started_at)
+            return state
+
+        # Enrich current context with RAG knowledge
+        target_info = {
+            "target": state.get("target", ""),
+            "phase": state.get("current_phase", ""),
+            "tools": list(state.get("executed_tool_runs", []))[:5],  # Recent tools
+        }
+
+        # Determine context type based on current phase
+        phase = str(state.get("current_phase", "")).lower()
+        if "recon" in phase or "discovery" in phase:
+            context_type = "reconnaissance"
+        elif "vuln" in phase or "assessment" in phase:
+            context_type = "vulnerability_analysis"
+        elif "exploit" in phase or "weaponization" in phase:
+            context_type = "tool_usage"
+        else:
+            context_type = "vulnerability_analysis"
+
+        # Get relevant patterns for current target
+        patterns = await rag_service.get_relevant_patterns(
+            target_description=f"Target: {target_info['target']} in phase {phase}",
+            vulnerability_type=None
+        )
+
+        if patterns:
+            state["logs_terminais"].append(
+                f"[RAG] Found {len(patterns)} relevant patterns for {context_type}"
+            )
+
+            # Store patterns in state for use by other nodes
+            state.setdefault("rag_patterns", []).extend(patterns[:5])
+
+            # Store learning insights for future use
+            for pattern in patterns[:3]:
+                insight = f"Pattern identified: {pattern.get('content', '')[:200]}..."
+                metadata = {
+                    "source": "rag_enrichment",
+                    "phase": phase,
+                    "target": target_info["target"],
+                    "pattern_type": pattern.get("metadata", {}).get("type", "unknown")
+                }
+                await rag_service.store_learning_insight(insight, metadata)
+
+        # Enrich prompts for upcoming LLM calls
+        state["rag_enriched"] = True
+        state["logs_terminais"].append("[RAG] Context enrichment completed")
+
+    except Exception as exc:
+        state["logs_terminais"].append(f"[RAG] Enrichment failed: {exc}")
+        logger.warning(f"RAG enrichment failed: {exc}")
+
+    _metric_end(state, "rag_enrichment", started_at)
+    return state
 
 
 def supervisor_node(state: AgentState) -> AgentState:
@@ -4358,6 +4456,7 @@ def build_graph(mode: ScanMode = "unit"):
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("rag_enrichment", rag_enrichment_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("strategic_planning", strategic_planning_node)
     graph.add_node("asset_discovery",   asset_discovery_node)
@@ -4368,7 +4467,8 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_node("governance",        governance_node)
     graph.add_node("executive_analyst", executive_analyst_node)
 
-    graph.set_entry_point("supervisor")
+    graph.set_entry_point("rag_enrichment")
+    graph.add_edge("rag_enrichment", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         _route_from_supervisor,
