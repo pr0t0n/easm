@@ -50,6 +50,14 @@ MISSION_PHASE_TO_GROUP = {
 
 TOOL_CAPABILITY_NODES = {"asset_discovery", "threat_intel", "risk_assessment"}
 
+# Preferred skill categories per capability node — used by supervisor to select
+# the operational skill before handing off to the skill pipeline.
+CAPABILITY_SKILL_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "asset_discovery": ("reconnaissance", "technologies", "protocols"),
+    "threat_intel": ("osint", "code", "vulnerabilities"),
+    "risk_assessment": ("vulnerabilities", "protocols", "technologies"),
+}
+
 # Função utilitária para obter o grupo de worker para uma fase
 def get_worker_group_for_phase(phase_title: str) -> str:
     for key, group in MISSION_PHASE_TO_GROUP.items():
@@ -233,6 +241,7 @@ class AgentState(TypedDict):
     skill_contract: dict[str, Any]
     skill_plan_contract: dict[str, Any]
     skill_invocations: list[dict[str, Any]]
+    selected_skill: dict[str, Any]          # Skill escolhida pelo supervisor para o próximo ciclo
     capability_context: dict[str, Any]
     tool_selection_contract: dict[str, Any]
     tool_execution_results: list[dict[str, Any]]
@@ -319,6 +328,13 @@ def _route_from_supervisor(state: AgentState):
     next_node = state.get("routing_next_node")
     if next_node in (END, "END"):
         return END
+    # If the supervisor already committed to a skill, head straight to the pipeline.
+    # pending_capability_node carries the capability label for context.
+    if state.get("selected_skill"):
+        if next_node in TOOL_CAPABILITY_NODES:
+            state["pending_capability_node"] = str(next_node)
+        return "skill_selector"
+    # Backward-compat: capability label alone still routes to skill_selector.
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = str(next_node)
         return "skill_selector"
@@ -677,6 +693,64 @@ def _find_node_with_uncovered_tools(state: AgentState) -> str | None:
     return None
 
 
+def _select_skill_for_capability(
+    capability: str,
+    active_skills: list[dict[str, Any]],
+    scan_mode: str,
+) -> dict[str, Any] | None:
+    """Pick the best skill from active_skills for the given capability node.
+
+    Returns a selected_skill dict with skill_id, allowed_tools, preferred_tool,
+    objective, and reason — the supervisor's executable decision.
+    Returns None only when active_skills is completely empty.
+    """
+    preferred_cats = set(CAPABILITY_SKILL_CATEGORIES.get(capability, ()))
+    candidate_tools = _tools_for_group(scan_mode, capability)
+    candidate_lower = {t.lower() for t in candidate_tools}
+
+    best_skill: dict[str, Any] | None = None
+    best_score = -1
+
+    for skill in active_skills:
+        cat = str(skill.get("category") or "").lower()
+        skill_tool_lower = {str(t).lower() for t in (skill.get("playbook") or [])}
+        score = 0
+        if cat in preferred_cats:
+            score += 10
+        score += len(skill_tool_lower & candidate_lower) * 3
+        if score > best_score:
+            best_score = score
+            best_skill = skill
+
+    if not best_skill:
+        if not active_skills:
+            return None
+        best_skill = dict(active_skills[0])
+
+    skill_tools = [str(t) for t in (best_skill.get("playbook") or [])]
+    # allowed_tools = skill playbook intersected with capability's candidate pool
+    allowed_tools = [t for t in skill_tools if t.lower() in candidate_lower]
+    if not allowed_tools:
+        allowed_tools = [t for t in candidate_tools if t.lower() in {s.lower() for s in skill_tools}]
+    if not allowed_tools:
+        # Last resort: use the full capability catalog (capped)
+        allowed_tools = candidate_tools[:8]
+
+    preferred_tool = allowed_tools[0] if allowed_tools else ""
+
+    return {
+        "skill_id": str(best_skill.get("id") or capability),
+        "capability": capability,
+        "objective": str(best_skill.get("description") or f"Execute {capability} using {best_skill.get('id')}"),
+        "allowed_tools": allowed_tools,
+        "preferred_tool": preferred_tool,
+        "reason": (
+            f"Skill '{best_skill.get('id')}' selecionada para capability '{capability}' "
+            f"(score={best_score}, categoria={best_skill.get('category')})"
+        ),
+    }
+
+
 def rag_enrichment_node(state: AgentState) -> AgentState:
     """RAG enrichment node: enriches prompts and context with knowledge base."""
     started_at = _metric_start()
@@ -782,10 +856,14 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
 
 
 def skill_selector_node(state: AgentState) -> AgentState:
-    """Select the operational skill for the pending capability.
+    """Validate/enrich the supervisor's selected_skill and materialise the skill contract.
 
-    This node does not execute Kali tools. It materializes the operational
-    skill contract that the planner, selector and executor must follow.
+    When the supervisor has already committed to a skill (state["selected_skill"] is
+    populated), this node uses that as the authoritative source — it never overrides
+    the supervisor's choice with active_skills[0] or an inferred skill.
+
+    When selected_skill is absent (e.g., unit tests calling this node directly), the
+    node falls back to the original scored-inference logic for backward compatibility.
     """
     started_at = _metric_start()
     _sync_step_to_db(state, "Skill Selector")
@@ -796,32 +874,125 @@ def skill_selector_node(state: AgentState) -> AgentState:
         phase_label = str(state.get("current_phase") or group)
         candidate_tools = _candidate_tools_for_skill_bootstrap(state, group)
         skills = list(state.get("active_skills") or [])
-        primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
-        playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
-        invocation, _, guided_tools = _invoke_skill_for_context(
-            state,
-            group,
-            candidate_tools,
-            playbook,
-            phase_label,
-            purpose="skill_selector",
-        )
-        ready = bool(invocation.get("called"))
-        state["skill_selector_ready"] = ready
-        state["skill_contract"] = dict(state.get("skill_contract") or {})
-        state["skill_selector_gate"] = {
-            "group": group,
-            "phase": phase_label,
-            "called": bool(invocation.get("called")),
-            "skill_id": invocation.get("skill_id"),
-            "recommended_tools": list(invocation.get("recommended_tools") or []),
-            "candidate_tools": guided_tools,
-            "playbook_title": playbook.get("title"),
-        }
-        state["logs_terminais"].append(
-            f"[SKILL] selector ready={state['skill_selector_ready']} "
-            f"group={group} skill={invocation.get('skill_id') or '-'}"
-        )
+
+        supervisor_selected = dict(state.get("selected_skill") or {})
+        supervisor_skill_id = str(supervisor_selected.get("skill_id") or "").strip()
+
+        if supervisor_skill_id:
+            # ── Supervisor-driven path: use selected_skill as source of truth ──
+            allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
+            preferred_tool = str(supervisor_selected.get("preferred_tool") or "").strip().lower()
+            allowed_lower = {t.lower() for t in allowed_tools}
+
+            # candidate_tools filtered to what the skill permits
+            guided_tools = [t for t in candidate_tools if t.lower() in allowed_lower]
+            if not guided_tools and allowed_tools:
+                # allowed_tools may name tools not in the current candidate pool; keep them
+                guided_tools = allowed_tools
+
+            # Locate the full skill object (for techniques, triggers, etc.)
+            from app.graph.mission import SKILL_CATALOG as _SC
+            skill_obj = next(
+                (dict(s) for s in _SC if str(s.get("id") or "") == supervisor_skill_id),
+                None,
+            )
+            if skill_obj is None:
+                skill_obj = next(
+                    (dict(s) for s in skills if str(s.get("id") or "") == supervisor_skill_id),
+                    None,
+                )
+            if skill_obj is None:
+                skill_obj = {
+                    "id": supervisor_skill_id,
+                    "category": supervisor_selected.get("capability", group),
+                    "description": supervisor_selected.get("objective", ""),
+                    "playbook": allowed_tools,
+                    "phases": [],
+                    "triggers": [],
+                }
+
+            invocation_id = f"skill-{uuid4().hex[:12]}"
+            invocation_record = {
+                "invocation_id": invocation_id,
+                "skill_id": supervisor_skill_id,
+                "worker_group": group,
+                "phase": phase_label,
+                "purpose": "skill_selector",
+                "source": "supervisor_selected",
+                "matched_by": ["supervisor_selected_skill"],
+                "candidate_tools": candidate_tools,
+                "recommended_tools": guided_tools,
+                "confidence": 0.9,
+                "playbook_title": None,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            invocations = list(state.get("skill_invocations") or [])
+            invocations.append(invocation_record)
+            state["skill_invocations"] = invocations[-80:]
+            state["current_skill"] = supervisor_skill_id
+            state["active_skill"] = supervisor_skill_id
+            state["skill_contract"] = invocation_record
+            state["skill_invocation"] = {
+                "called": True,
+                "invocation_id": invocation_id,
+                "skill_id": supervisor_skill_id,
+                "skill": skill_obj,
+                "worker_group": group,
+                "phase": phase_label,
+                "target": str(state.get("target") or ""),
+                "candidate_tools": candidate_tools,
+                "recommended_tools": guided_tools,
+                "matched_by": ["supervisor_selected_skill"],
+                "score": 90,
+                "confidence": 0.9,
+                "techniques": [],
+                "source": "supervisor_selected",
+            }
+            _append_action(state, "skill_invoked", invocation_record)
+            state["skill_selector_ready"] = True
+            state["skill_selector_gate"] = {
+                "group": group,
+                "phase": phase_label,
+                "called": True,
+                "skill_id": supervisor_skill_id,
+                "recommended_tools": guided_tools,
+                "candidate_tools": guided_tools,
+                "allowed_tools": allowed_tools,
+                "preferred_tool": preferred_tool,
+                "playbook_title": None,
+            }
+            state["logs_terminais"].append(
+                f"[SKILL] selector supervisor-driven skill={supervisor_skill_id} "
+                f"group={group} allowed={allowed_tools[:4]} guided={guided_tools[:4]}"
+            )
+        else:
+            # ── Inference path (no supervisor-selected skill) ─────────────────
+            primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
+            playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
+            invocation, _, guided_tools = _invoke_skill_for_context(
+                state,
+                group,
+                candidate_tools,
+                playbook,
+                phase_label,
+                purpose="skill_selector",
+            )
+            ready = bool(invocation.get("called"))
+            state["skill_selector_ready"] = ready
+            state["skill_contract"] = dict(state.get("skill_contract") or {})
+            state["skill_selector_gate"] = {
+                "group": group,
+                "phase": phase_label,
+                "called": bool(invocation.get("called")),
+                "skill_id": invocation.get("skill_id"),
+                "recommended_tools": list(invocation.get("recommended_tools") or []),
+                "candidate_tools": guided_tools,
+                "playbook_title": playbook.get("title"),
+            }
+            state["logs_terminais"].append(
+                f"[SKILL] selector inferred ready={state['skill_selector_ready']} "
+                f"group={group} skill={invocation.get('skill_id') or '-'}"
+            )
 
     except Exception as exc:
         state["skill_selector_ready"] = False
@@ -921,13 +1092,37 @@ def tool_selector_node(state: AgentState) -> AgentState:
     except Exception as exc:
         state["logs_terminais"].append(f"[selector] skill-memory unavailable: {exc}")
 
-    candidate_set = set(candidate_tools)
-    selected_tools = [tool for tool in dict.fromkeys(recommended_tools) if tool in candidate_set]
-    if not selected_tools and candidate_tools and contract.get("skill_id"):
-        selected_tools = [candidate_tools[0]]
+    supervisor_selected = dict(state.get("selected_skill") or {})
+    allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
+    preferred_tool = str(supervisor_selected.get("preferred_tool") or "").strip().lower()
 
-    # Skill-first means no phase batch execution. One skill invocation selects one
-    # concrete tool execution; additional tools require another supervisor loop.
+    if allowed_tools:
+        # ── Skill-constrained selection ───────────────────────────────────────
+        # Only tools that the supervisor's selected_skill explicitly permits.
+        allowed_lower = {t.lower() for t in allowed_tools}
+        from_allowed = [t for t in candidate_tools if t.lower() in allowed_lower]
+        if preferred_tool:
+            pref_first = [t for t in from_allowed if t.lower() == preferred_tool]
+            rest = [t for t in from_allowed if t.lower() != preferred_tool]
+            selected_tools = pref_first + rest
+        else:
+            selected_tools = from_allowed
+
+        if not selected_tools:
+            state["logs_terminais"].append(
+                f"[selector] BLOCKED: nenhum candidate_tool corresponde a "
+                f"allowed_tools={allowed_tools} para skill={supervisor_selected.get('skill_id')}; "
+                "execução bloqueada"
+            )
+            # selected_tools stays empty — executor will catch and abort cleanly
+    else:
+        # ── No allowed_tools constraint (no supervisor skill / inference path) ─
+        candidate_set = set(candidate_tools)
+        selected_tools = [tool for tool in dict.fromkeys(recommended_tools) if tool in candidate_set]
+        # NOTE: the old candidate_tools[0] fallback has been intentionally removed.
+        # Without a skill contract there is no safe basis for choosing an arbitrary tool.
+
+    # Skill-first: one tool per supervisor cycle.
     selected_tools = selected_tools[:1]
     selected_tool = selected_tools[0] if selected_tools else ""
     technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
@@ -1098,8 +1293,52 @@ def tool_executor_node(state: AgentState) -> AgentState:
     _sync_step_to_db(state, "Tool Executor")
 
     selection = dict(state.get("tool_selection_contract") or {})
+    supervisor_selected = dict(state.get("selected_skill") or {})
     capability = str(selection.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
     selected_tools = [str(tool) for tool in list(selection.get("selected_tools") or []) if str(tool or "").strip()]
+
+    skill_id = str(
+        supervisor_selected.get("skill_id")
+        or selection.get("skill_id")
+        or ""
+    ).strip()
+    allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
+
+    # ── Pre-execution contract validation ────────────────────────────────────
+    def _abort(reason: str) -> AgentState:
+        state["logs_terminais"].append(f"[executor] BLOCKED: {reason}")
+        _append_error(state, reason, source="tool_executor")
+        # Mark capability complete to prevent the supervisor from looping on it.
+        completed = list(state.get("completed_capabilities") or [])
+        if capability in TOOL_CAPABILITY_NODES and capability not in completed:
+            completed.append(capability)
+        state["completed_capabilities"] = completed
+        state["pending_capability_node"] = ""
+        state["proxima_ferramenta"] = "evidence_gate"
+        state["routing_next_node"] = "evidence_gate"
+        state["mission_index"] = int(state.get("mission_index", 0)) + 1
+        _metric_end(state, "tool_executor", started_at)
+        return state
+
+    if not supervisor_selected:
+        return _abort("selected_skill ausente; nenhuma execução sem contrato de skill")
+
+    if not skill_id:
+        return _abort("skill_id ausente; nenhuma execução sem skill_id")
+
+    if not selected_tools:
+        return _abort(f"selected_tools vazio para skill={skill_id}; nada a executar")
+
+    if allowed_tools:
+        allowed_lower = {t.lower() for t in allowed_tools}
+        invalid = [t for t in selected_tools if t.lower() not in allowed_lower]
+        if invalid:
+            return _abort(
+                f"ferramentas {invalid} não pertencem a allowed_tools={allowed_tools} "
+                f"da skill={skill_id}; execução bloqueada"
+            )
+
+    # ── Safe to execute ───────────────────────────────────────────────────────
     targets = _targets_for_tool_pipeline(state, capability)
     all_results: list[dict[str, Any]] = []
 
@@ -1239,14 +1478,19 @@ def supervisor_node(state: AgentState) -> AgentState:
     elif "governance" not in completed:
         next_node = "governance"
     elif "executive_analyst" not in completed:
-        # Antes de fechar com analista executivo, exigir SEGUNDA PASSADA
-        # nas fases de coleta cuja cobertura de profiles Kali prontos ainda e baixa.
-        # Caso contrário o relatório executivo é assinado em cima de scan superficial.
-        coverage_gap_node = _find_node_with_uncovered_tools(state)
+        # Segunda passada de cobertura SOMENTE quando coverage_mode está explicitamente
+        # habilitado. Por padrão o fluxo segue direto para o analista executivo.
+        ctrl_now = dict(state.get("execution_control") or {})
+        coverage_mode_active = bool(ctrl_now.get("coverage_mode", False))
+        coverage_gap_node = (
+            _find_node_with_uncovered_tools(state)
+            if coverage_mode_active
+            else None
+        )
         if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
             _append_note(
                 state,
-                f"Segunda passada: {coverage_gap_node} ainda tem profiles Kali prontos sem rodar.",
+                f"Segunda passada (coverage_mode=true): {coverage_gap_node} ainda tem profiles sem rodar.",
                 phase="coverage-sweep",
             )
             next_node = coverage_gap_node
@@ -1295,11 +1539,29 @@ def supervisor_node(state: AgentState) -> AgentState:
         return state
 
     route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
+
+    # ── Skill selection: supervisor commits to a skill before the pipeline ─────
+    # Always clear the previous iteration's selected_skill to avoid stale state.
+    state["selected_skill"] = {}
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
-        state["logs_terminais"].append(
-            f"Supervisor: capability={next_node} encaminhada para skill_selector"
+        chosen_skill = _select_skill_for_capability(
+            capability=next_node,
+            active_skills=list(state.get("active_skills") or []),
+            scan_mode=str(state.get("scan_mode") or "unit"),
         )
+        if chosen_skill:
+            state["selected_skill"] = chosen_skill
+            state["logs_terminais"].append(
+                f"Supervisor: skill={chosen_skill['skill_id']} "
+                f"capability={next_node} "
+                f"allowed_tools={chosen_skill['allowed_tools'][:4]} "
+                f"preferred={chosen_skill['preferred_tool']}"
+            )
+        else:
+            state["logs_terminais"].append(
+                f"Supervisor: capability={next_node} sem skills ativas; pipeline seguirá sem selected_skill"
+            )
     elif next_node != "END":
         state["pending_capability_node"] = ""
 
