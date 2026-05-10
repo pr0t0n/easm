@@ -277,14 +277,22 @@ async def list_mcp_tools() -> dict[str, Any]:
 async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
     if kali_client is None:
         raise HTTPException(status_code=503, detail="Kali runner not available")
+
+    # Ensure scan_id is int or None
+    scan_id = parameters.get("scan_id")
+    if scan_id is not None:
+        try:
+            scan_id = int(str(scan_id))
+        except (ValueError, TypeError):
+            scan_id = None
+
     response = await kali_client.post(
         "/jobs",
         json={
             "profile": profile_name,
             "target": parameters["target"],
-            "scan_id": parameters.get("scan_id"),
+            "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
-            "original_target": parameters.get("original_target"),
         },
     )
     response.raise_for_status()
