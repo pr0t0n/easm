@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.config import settings
+from app.services.mcp_client import mcp_client
 from app.services.kali_executor import execute_via_kali
 
 
@@ -27,10 +29,22 @@ def run_tool_execution(
     scan_mode: str = "unit",
     **legacy_kwargs: Any,
 ) -> dict[str, Any]:
-    """Shim: every call routes to the Kali runner via HTTP."""
+    """Shim: tools prefer MCP -> Kali, falling back to direct Kali runner."""
+    scan_id = legacy_kwargs.get("scan_id")
+    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
+        result = mcp_client.execute_kali_tool_sync(
+            tool_name=tool_name,
+            target=target,
+            scan_id=scan_id,
+        )
+        if str(result.get("status") or "").lower() not in {"error", "failed"}:
+            result.setdefault("scan_mode", scan_mode)
+            result.setdefault("target", target)
+            return result
+
     return execute_via_kali(
         tool_name=tool_name,
         target=target,
-        scan_id=legacy_kwargs.get("scan_id"),
+        scan_id=scan_id,
         scan_mode=scan_mode,
     )

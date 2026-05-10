@@ -543,6 +543,22 @@ def _worker_result(
     """Executa ferramenta preservando contrato legado de worker com identidade de agente."""
     mode: ScanMode = "scheduled" if str(scan_mode).strip().lower() == "scheduled" else "unit"
     agent = get_worker_agent_profile(worker_group, mode=mode)
+    knowledge_context: dict[str, Any] = {}
+    try:
+        from app.services.agent_context_service import build_worker_knowledge_context
+
+        knowledge_bundle = build_worker_knowledge_context(
+            worker_group=worker_group,
+            skill=str(agent.get("agent_id") or worker_group),
+            phase=",".join(list(agent.get("phases") or [])[:3]),
+            target=target,
+            candidate_tools=[tool],
+            mode=mode,
+            top_k=3,
+        )
+        knowledge_context = dict(knowledge_bundle.get("prompt_context") or {})
+    except Exception:
+        knowledge_context = {}
 
     result = run_tool_execution(
         tool_name=tool,
@@ -572,7 +588,11 @@ def _worker_result(
         "evidence_focus": list(agent.get("evidence_focus") or []),
         "decision_rules": list(agent.get("decision_rules") or []),
         "tools": list(agent.get("tools") or []),
+        "skill_context": dict(agent.get("skill_context") or {}),
+        "operational_sequence": list(agent.get("operational_sequence") or []),
     })
+    if knowledge_context:
+        normalized.setdefault("skill_memory", knowledge_context)
     if params:
         normalized.setdefault("runtime_params", dict(params))
 

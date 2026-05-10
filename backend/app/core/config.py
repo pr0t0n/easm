@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     use_kali_executor: bool = True
     kali_runner_url: str = "http://kali_runner:8088"
     kali_executor_tools: str = ""  # legacy canary list; ignored when use_kali_executor=true
+    mcp_server_url: str = "http://mcp_server:3000"
+    mcp_rag_enabled: bool = True
+    mcp_execute_tools_via_mcp: bool = True
+    mcp_default_top_k: int = 5
+    mcp_request_timeout_seconds: int = 20
 
 
 settings = Settings()

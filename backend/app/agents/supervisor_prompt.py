@@ -8,6 +8,7 @@ Engine, which then dispatches to the Kali runner.
 Inputs the supervisor receives at runtime (substituted into the prompt):
   - PLAYBOOK_APRENDIDO   = serialized seed/learning entry (JSON)
   - EXECUTION_CONTEXT    = current scan state (phase, target, signals)
+  - SKILL_MEMORY         = RAG context for the worker/skill (tests + learnings)
   - TOOL_CATALOG         = list of available tools with descriptions
 
 Output (strict JSON, no prose) drives:
@@ -38,7 +39,8 @@ ENTRADA:
 
 1. PLAYBOOK_APRENDIDO (JSON estruturado)
 2. EXECUTION_CONTEXT (estado atual do scan)
-3. TOOL_CATALOG (lista de ferramentas disponíveis)
+3. SKILL_MEMORY (aprendizado recuperado por skill, incluindo testes e historico)
+4. TOOL_CATALOG (lista de ferramentas disponíveis)
 
 OBJETIVO:
 
@@ -57,6 +59,7 @@ REGRAS:
 - phase atual
 - skill necessária
 - objetivo da execução
+- quais sinais do aprendizado recuperado realmente sustentam a decisao
 
 3. NÃO ambíguo:
 - Nunca retornar múltiplas técnicas
@@ -113,6 +116,7 @@ def build_supervisor_orchestration_prompt(
     playbook: dict[str, Any],
     execution_context: dict[str, Any],
     tool_catalog: list[dict[str, Any]] | str,
+    skill_memory: dict[str, Any] | None = None,
 ) -> str:
     """Materializes the supervisor instance prompt with concrete inputs.
 
@@ -130,6 +134,8 @@ def build_supervisor_orchestration_prompt(
         + json.dumps(playbook or {}, ensure_ascii=False, indent=2)
         + "\n\nEXECUTION_CONTEXT:\n"
         + json.dumps(execution_context or {}, ensure_ascii=False, indent=2)
+        + "\n\nSKILL_MEMORY:\n"
+        + json.dumps(skill_memory or {}, ensure_ascii=False, indent=2)
         + "\n\nTOOL_CATALOG:\n"
         + catalog_block
         + "\n\nResponda APENAS com o JSON da SAÍDA OBRIGATÓRIA."

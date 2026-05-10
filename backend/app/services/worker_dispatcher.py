@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.core.config import settings
+from app.services.mcp_client import mcp_client
 from app.services.kali_executor import execute_via_kali, TOOL_TO_PROFILE
 from app.workers.worker_groups import find_agent_by_tool
 
@@ -56,12 +58,19 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    result = execute_via_kali(
-        tool_name=tool_name,
-        target=target,
-        scan_id=scan_id,
-        scan_mode=scan_mode,
-    )
+    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
+        result = mcp_client.execute_kali_tool_sync(
+            tool_name=tool_name,
+            target=target,
+            scan_id=scan_id,
+        )
+    else:
+        result = execute_via_kali(
+            tool_name=tool_name,
+            target=target,
+            scan_id=scan_id,
+            scan_mode=scan_mode,
+        )
     try:
         agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
         result.setdefault("source_agent_id", agent.get("agent_id"))

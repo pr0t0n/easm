@@ -1,158 +1,209 @@
-"""MCP Client for EASM - Model Context Protocol Integration.
-
-Provides RAG (Retrieval-Augmented Generation) capabilities by connecting
-to the MCP server for enhanced LLM context and knowledge retrieval.
-"""
+from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.services.kali_executor import TOOL_TO_PROFILE
+
 
 logger = logging.getLogger(__name__)
 
 
 class MCPClient:
-    """Client for interacting with the MCP server."""
+    """HTTP client for the local MCP server.
 
-    def __init__(self, base_url: str = None):
-        self.base_url = base_url or getattr(settings, 'mcp_server_url', 'http://mcp_server:3000')
-        self.client = httpx.AsyncClient(timeout=30.0)
+    The backend uses MCP for two things:
+    1. RAG retrieval over accepted learnings + tests + worker knowledge
+    2. Optional tool execution proxy to the Kali runner
+    """
 
-    async def __aenter__(self):
-        return self
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = str(base_url or settings.mcp_server_url).rstrip("/")
+        self.timeout = float(settings.mcp_request_timeout_seconds)
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.client.aclose()
+    def _sync_client(self) -> httpx.Client:
+        return httpx.Client(base_url=self.base_url, timeout=self.timeout)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def _async_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def health_check(self) -> bool:
-        """Check if MCP server is healthy."""
         try:
-            response = await self.client.get(f"{self.base_url}/health")
-            response.raise_for_status()
-            data = response.json()
-            return data.get("status") == "healthy"
-        except Exception as e:
-            logger.warning(f"MCP server health check failed: {e}")
+            async with self._async_client() as client:
+                response = await client.get("/health")
+                response.raise_for_status()
+                return str(response.json().get("status") or "").lower() == "healthy"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP async health check failed: %s", exc)
             return False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def health_check_sync(self) -> bool:
+        try:
+            with self._sync_client() as client:
+                response = client.get("/health")
+                response.raise_for_status()
+                return str(response.json().get("status") or "").lower() == "healthy"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP sync health check failed: %s", exc)
+            return False
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def query_knowledge(
         self,
         query: str,
         top_k: int = 5,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Query the RAG knowledge base."""
+        filters: dict[str, Any] | None = None,
+        skill: str | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            payload = {
-                "query": query,
-                "top_k": top_k,
-                "filters": filters
-            }
-
-            response = await self.client.post(
-                f"{self.base_url}/rag/query",
-                json=payload,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-
-            data = response.json()
-            return data.get("results", [])
-
-        except Exception as e:
-            logger.error(f"MCP knowledge query failed: {e}")
+            async with self._async_client() as client:
+                response = await client.post(
+                    "/rag/query",
+                    json={
+                        "query": query,
+                        "top_k": top_k,
+                        "filters": filters or None,
+                        "skill": skill,
+                    },
+                )
+                response.raise_for_status()
+                return list(response.json().get("results") or [])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP async query failed: %s", exc)
             return []
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def query_knowledge_sync(
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+        skill: str | None = None,
+    ) -> list[dict[str, Any]]:
+        try:
+            with self._sync_client() as client:
+                response = client.post(
+                    "/rag/query",
+                    json={
+                        "query": query,
+                        "top_k": top_k,
+                        "filters": filters or None,
+                        "skill": skill,
+                    },
+                )
+                response.raise_for_status()
+                return list(response.json().get("results") or [])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP sync query failed: %s", exc)
+            return []
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def ingest_document(
         self,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        source: str = "easm_backend"
+        metadata: dict[str, Any] | None = None,
+        source: str = "easm_backend",
+        document_id: str | None = None,
     ) -> bool:
-        """Ingest a document into the knowledge base."""
         try:
-            payload = {
-                "content": content,
-                "metadata": metadata or {},
-                "source": source
-            }
-
-            response = await self.client.post(
-                f"{self.base_url}/rag/ingest",
-                json=payload,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-
-            return True
-
-        except Exception as e:
-            logger.error(f"MCP document ingestion failed: {e}")
+            async with self._async_client() as client:
+                response = await client.post(
+                    "/rag/ingest",
+                    json={
+                        "content": content,
+                        "metadata": metadata or {},
+                        "source": source,
+                        "document_id": document_id,
+                    },
+                )
+                response.raise_for_status()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP async ingest failed: %s", exc)
             return False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def call_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Call an MCP tool."""
+    def ingest_document_sync(
+        self,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        source: str = "easm_backend",
+        document_id: str | None = None,
+    ) -> bool:
         try:
-            response = await self.client.post(
-                f"{self.base_url}/mcp/tools/{tool_name}/call",
-                json=parameters,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
+            with self._sync_client() as client:
+                response = client.post(
+                    "/rag/ingest",
+                    json={
+                        "content": content,
+                        "metadata": metadata or {},
+                        "source": source,
+                        "document_id": document_id,
+                    },
+                )
+                response.raise_for_status()
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP sync ingest failed: %s", exc)
+            return False
 
-            return response.json()
+    def list_tools_sync(self) -> list[dict[str, Any]]:
+        try:
+            with self._sync_client() as client:
+                response = client.get("/mcp/tools")
+                response.raise_for_status()
+                payload = response.json()
+                return list(payload.get("tools") if isinstance(payload, dict) else payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP list tools failed: %s", exc)
+            return []
 
-        except Exception as e:
-            logger.error(f"MCP tool call failed: {e}")
-            return {"error": str(e)}
+    def call_tool_sync(self, tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with self._sync_client() as client:
+                response = client.post(f"/mcp/tools/{tool_name}/call", json=parameters)
+                response.raise_for_status()
+                return dict(response.json())
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MCP tool call failed: %s", exc)
+            return {"status": "error", "error": str(exc), "tool": tool_name}
 
-    async def search_security_knowledge(
+    def execute_kali_tool_sync(
         self,
-        query: str,
-        category: Optional[str] = None,
-        limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Search security knowledge base."""
-        return await self.call_tool("security_knowledge_search", {
-            "query": query,
-            "category": category,
-            "limit": limit
-        })
+        tool_name: str,
+        target: str,
+        *,
+        scan_id: int | str | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        requested = str(tool_name or "").strip()
+        if not requested:
+            return {"status": "error", "error": "empty_tool_name", "tool": requested}
 
-    async def find_vulnerability_patterns(
-        self,
-        target_description: str,
-        vulnerability_type: Optional[str] = None,
-        severity: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Find vulnerability patterns matching criteria."""
-        return await self.call_tool("vulnerability_pattern_match", {
-            "target_description": target_description,
-            "vulnerability_type": vulnerability_type,
-            "severity": severity
-        })
+        mcp_tools = self.list_tools_sync()
+        tool_names = {str(item.get("name") or "") for item in mcp_tools}
+        profile_name = TOOL_TO_PROFILE.get(requested.lower(), requested)
+        selected_name = requested if requested in tool_names else profile_name
+        payload: dict[str, Any] = {"target": target, "scan_id": scan_id or "mcp_scan"}
+        if timeout:
+            payload["timeout"] = timeout
+        result = self.call_tool_sync(selected_name, payload)
+        result.setdefault("tool", requested)
+        result.setdefault("profile", profile_name)
+        result.setdefault("execution_path", "mcp_to_kali")
+        return result
 
 
 class RAGService:
-    """RAG service that integrates MCP client for enhanced LLM context."""
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.mcp_client = MCPClient()
-        self.enabled = True
 
     async def is_available(self) -> bool:
-        """Check if RAG service is available."""
-        if not self.enabled:
+        if not settings.mcp_rag_enabled:
             return False
         return await self.mcp_client.health_check()
 
@@ -160,100 +211,47 @@ class RAGService:
         self,
         base_prompt: str,
         context_type: str,
-        target_info: Dict[str, Any]
+        target_info: dict[str, Any],
     ) -> str:
-        """Enrich a prompt with relevant context from RAG."""
         if not await self.is_available():
-            logger.info("RAG service not available, using base prompt")
             return base_prompt
 
-        try:
-            # Build context query based on type
-            if context_type == "vulnerability_analysis":
-                query = f"vulnerability analysis for {target_info.get('target', '')}"
-                category = "vulnerability"
-            elif context_type == "reconnaissance":
-                query = f"reconnaissance techniques for {target_info.get('target', '')}"
-                category = "reconnaissance"
-            elif context_type == "tool_usage":
-                query = f"how to use {target_info.get('tool', '')} for security testing"
-                category = "technique"
-            else:
-                query = f"security knowledge for {target_info.get('target', '')}"
-                category = None
+        query = " ".join(
+            part for part in [
+                context_type,
+                target_info.get("target"),
+                target_info.get("skill"),
+                target_info.get("phase"),
+                target_info.get("tool"),
+            ]
+            if str(part or "").strip()
+        )
+        results = await self.mcp_client.query_knowledge(
+            query=query,
+            top_k=min(5, settings.mcp_default_top_k),
+            skill=str(target_info.get("skill") or "") or None,
+        )
+        if not results:
+            return base_prompt
 
-            # Query knowledge base
-            knowledge_results = await self.mcp_client.query_knowledge(
-                query=query,
-                top_k=3,
-                filters={"category": category} if category else None
-            )
-
-            if not knowledge_results:
-                return base_prompt
-
-            # Build enriched context
-            context_parts = []
-            for result in knowledge_results[:3]:  # Limit to top 3
-                content = result.get("content", "")
-                score = result.get("score", 0)
-                if score > 0.7:  # Only include highly relevant results
-                    context_parts.append(f"- {content[:200]}...")
-
-            if context_parts:
-                enriched_context = "\n".join(context_parts)
-                enriched_prompt = f"{base_prompt}\n\nRelevant Security Context:\n{enriched_context}\n\nUse this context to inform your analysis and recommendations."
-                logger.info(f"Enriched prompt with {len(context_parts)} context items")
-                return enriched_prompt
-
-        except Exception as e:
-            logger.error(f"Failed to enrich prompt with RAG context: {e}")
-
-        return base_prompt
-
-    async def store_learning_insight(
-        self,
-        insight: str,
-        metadata: Dict[str, Any],
-        source: str = "easm_workflow"
-    ) -> bool:
-        """Store a learning insight in the knowledge base."""
-        if not await self.is_available():
-            return False
-
-        try:
-            return await self.mcp_client.ingest_document(
-                content=insight,
-                metadata=metadata,
-                source=source
-            )
-        except Exception as e:
-            logger.error(f"Failed to store learning insight: {e}")
-            return False
-
-    async def get_relevant_patterns(
-        self,
-        target_description: str,
-        vulnerability_type: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Get relevant vulnerability patterns for a target."""
-        if not await self.is_available():
-            return []
-
-        try:
-            return await self.mcp_client.find_vulnerability_patterns(
-                target_description=target_description,
-                vulnerability_type=vulnerability_type
-            )
-        except Exception as e:
-            logger.error(f"Failed to get relevant patterns: {e}")
-            return []
+        context_block = "\n".join(
+            f"- {str(item.get('content') or '')[:200]}"
+            for item in results[:3]
+            if str(item.get("content") or "").strip()
+        )
+        if not context_block:
+            return base_prompt
+        return f"{base_prompt}\n\nRelevant Skill Memory:\n{context_block}"
 
 
-# Global RAG service instance
+mcp_client = MCPClient()
 rag_service = RAGService()
 
 
 async def get_rag_service() -> RAGService:
-    """Get the global RAG service instance."""
     return rag_service
+
+
+def run_async(coro: Any) -> Any:
+    return asyncio.run(coro)
+

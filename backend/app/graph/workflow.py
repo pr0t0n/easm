@@ -23,7 +23,6 @@ def _strip_ansi_codes(text: str) -> str:
 
 from app.graph.checkpointer import create_checkpointer
 from app.graph.mission import MISSION_ITEMS as AUTONOMOUS_MISSION_ITEMS
-from app.services.mcp_client import get_rag_service
 
 # Mapeamento de fases/atividades para grupos de worker
 MISSION_PHASE_TO_GROUP = {
@@ -473,6 +472,7 @@ def _consult_supervisor_orchestration(
     # names.
     skills = list(state.get("active_skills") or [])
     primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
+    knowledge_context: dict[str, Any] = {}
     playbook = {
         "title": f"{group} playbook",
         "vulnerability_type": str(primary_skill.get("category") or group),
@@ -514,6 +514,29 @@ def _consult_supervisor_orchestration(
             f"[{group}] erro ao carregar aprendizado: {exc}"
         )
 
+    try:
+        from app.services.agent_context_service import build_worker_knowledge_context
+
+        knowledge_bundle = build_worker_knowledge_context(
+            worker_group=group,
+            skill=str(primary_skill.get("id") or group),
+            phase=phase_label,
+            target=target,
+            candidate_tools=candidate_tools,
+            mode=str(state.get("scan_mode") or "unit"),
+        )
+        knowledge_context = dict(knowledge_bundle.get("prompt_context") or {})
+        knowledge_context["knowledge_items"] = list(knowledge_bundle.get("knowledge_items") or [])[:5]
+        if knowledge_bundle.get("recommended_tools"):
+            preferred = list(knowledge_bundle["recommended_tools"])
+            candidate_tools = preferred + [tool for tool in candidate_tools if tool not in preferred]
+        state["logs_terminais"].append(
+            f"[{group}] skill-memory synced={knowledge_bundle.get('sync_status', {}).get('ingested', 0)} "
+            f"retrieved={len(knowledge_bundle.get('knowledge_items') or [])}"
+        )
+    except Exception as exc:
+        state["logs_terminais"].append(f"[{group}] erro ao montar skill-memory: {exc}")
+
     execution_context = {
         "scan_id": state.get("scan_id"),
         "target": target,
@@ -523,6 +546,8 @@ def _consult_supervisor_orchestration(
         "auth_available": bool(state.get("auth_available")),
         "max_risk_allowed": "medium",
         "iteration": int(state.get("loop_iteration", 0)),
+        "tool_execution_path": "mcp_to_kali",
+        "skill_memory_available": bool(knowledge_context),
     }
 
     try:
@@ -550,6 +575,7 @@ def _consult_supervisor_orchestration(
             playbook=playbook,
             execution_context=execution_context,
             tool_catalog=catalog,
+            skill_memory=knowledge_context,
             timeout=45,
         )
     except BlockedDecision as exc:
@@ -569,6 +595,7 @@ def _consult_supervisor_orchestration(
         "phase": decision.get("execution_context", {}).get("phase"),
         "skill": decision.get("execution_context", {}).get("skill"),
         "confidence": decision.get("confidence"),
+        "memory_items": len((decision.get("memory_context") or {}).get("knowledge_items") or []),
     })
     return decision
 
@@ -669,9 +696,10 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
     _sync_step_to_db(state, "RAG Enrichment")
 
     try:
-        rag_service = await get_rag_service()
+        from app.core.config import settings
+        from app.services.mcp_client import mcp_client
 
-        if not await rag_service.is_available():
+        if not settings.mcp_rag_enabled or not mcp_client.health_check_sync():
             state["logs_terminais"].append("[RAG] MCP server not available, skipping enrichment")
             _metric_end(state, "rag_enrichment", started_at)
             return state
@@ -694,10 +722,10 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
         else:
             context_type = "vulnerability_analysis"
 
-        # Get relevant patterns for current target
-        patterns = await rag_service.get_relevant_patterns(
-            target_description=f"Target: {target_info['target']} in phase {phase}",
-            vulnerability_type=None
+        patterns = mcp_client.query_knowledge_sync(
+            query=f"{context_type} target {target_info['target']} phase {phase}",
+            top_k=5,
+            skill=str(state.get("current_phase") or "") or None,
         )
 
         if patterns:
@@ -717,7 +745,11 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
                     "target": target_info["target"],
                     "pattern_type": pattern.get("metadata", {}).get("type", "unknown")
                 }
-                await rag_service.store_learning_insight(insight, metadata)
+                mcp_client.ingest_document_sync(
+                    content=insight,
+                    metadata=metadata,
+                    source="rag_enrichment",
+                )
 
         # Enrich prompts for upcoming LLM calls
         state["rag_enriched"] = True

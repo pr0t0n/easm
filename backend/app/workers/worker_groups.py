@@ -137,10 +137,16 @@ def get_cyber_autoagent_tool_catalog() -> dict[str, list[str]]:
 def _base_agent_contract() -> dict[str, Any]:
     return {
         "reasoning_loop": ["know", "think", "test", "validate", "adapt"],
+        "knowledge_loop": [
+            "retrieve skill memory from MCP/RAG",
+            "ground execution on accepted learning and tests",
+            "dispatch selected tool via MCP -> Kali",
+        ],
         "evidence_policy": "critical/high require reproducible proof; without it stays hypothesis",
         "confidence_thresholds": {"high": 80, "medium": 50, "low": 0},
         "pivot_rule": "confidence<50 or stagnation × 3 iterations → change tools/approach",
         "circuit_breaker": {"tool_failure_threshold": 5, "cooldown_seconds": 60},
+        "tool_execution_path": "mcp_to_kali",
     }
 
 
@@ -174,6 +180,19 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "decision_rules": list(group_data.get("decision_rules") or []),
             "tools": list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(group_key, [])),
             "contract": contract,
+            "skill_context": {
+                "retrieval_required": True,
+                "knowledge_sources": ["accepted_learning", "repo_tests", "mcp_rag"],
+                "execution_path": "mcp_to_kali",
+                "pre_execution_step": "retrieve skill memory before selecting/dispatching tool",
+            },
+            "operational_sequence": [
+                "retrieve_skill_memory",
+                "select_learning_guided_technique",
+                "dispatch_tool_via_mcp",
+                "validate_evidence",
+                "update_learning_feedback",
+            ],
         }
 
     aliases = {

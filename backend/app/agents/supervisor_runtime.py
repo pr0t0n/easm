@@ -168,6 +168,7 @@ def decide_next_technique(
     playbook: dict[str, Any],
     execution_context: dict[str, Any],
     tool_catalog: list[dict[str, Any]] | str,
+    skill_memory: dict[str, Any] | None = None,
     *,
     timeout: int = 60,
 ) -> dict[str, Any]:
@@ -182,6 +183,7 @@ def decide_next_technique(
         playbook=playbook,
         execution_context=execution_context,
         tool_catalog=tool_catalog,
+        skill_memory=skill_memory,
     )
 
     raw_text: str | None = None
@@ -211,6 +213,13 @@ def decide_next_technique(
 
     if decision["execution_decision"] == "block":
         raise BlockedDecision(reason=decision.get("notes") or "blocked by supervisor", raw=decision)
+
+    if skill_memory:
+        decision.setdefault("memory_context", {
+            "knowledge_items": list(skill_memory.get("knowledge_items") or [])[:5],
+            "recommended_tools": list(skill_memory.get("recommended_tools") or [])[:10],
+            "retrieval_query": skill_memory.get("retrieval_query"),
+        })
 
     return decision
 
