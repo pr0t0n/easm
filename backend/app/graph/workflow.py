@@ -576,7 +576,7 @@ def _consult_supervisor_orchestration(
             execution_context=execution_context,
             tool_catalog=catalog,
             skill_memory=knowledge_context,
-            timeout=45,
+            timeout=8,
         )
     except BlockedDecision as exc:
         state.setdefault("orchestration_decisions", []).append({
@@ -597,7 +597,51 @@ def _consult_supervisor_orchestration(
         "confidence": decision.get("confidence"),
         "memory_items": len((decision.get("memory_context") or {}).get("knowledge_items") or []),
     })
+    selected_name = str((decision.get("selected_technique") or {}).get("name") or "").strip().lower()
+    preferred_tools: list[str] = []
+    for technique in list(playbook.get("techniques") or []):
+        if not isinstance(technique, dict):
+            continue
+        technique_name = str(technique.get("name") or "").strip().lower()
+        if selected_name and selected_name != technique_name:
+            continue
+        preferred_tools.extend(str(tool).strip() for tool in (technique.get("recommended_kali_tools") or []) if str(tool).strip())
+        break
+    preferred_tools.extend(
+        str(tool).strip()
+        for tool in ((decision.get("memory_context") or {}).get("recommended_tools") or [])
+        if str(tool).strip()
+    )
+    decision["preferred_tools"] = [
+        tool for tool in dict.fromkeys(preferred_tools)
+        if tool in candidate_tools
+    ]
+    decision["playbook_title"] = playbook.get("title")
     return decision
+
+
+def _apply_orchestration_tool_guidance(
+    state: AgentState,
+    node_label: str,
+    tools: list[str],
+    decision: dict[str, Any] | None,
+) -> list[str]:
+    if not tools or not decision:
+        return tools
+
+    preferred = [
+        str(tool).strip()
+        for tool in (decision.get("preferred_tools") or [])
+        if str(tool).strip() in tools
+    ]
+    if not preferred:
+        return tools
+
+    guided = preferred + [tool for tool in tools if tool not in preferred]
+    state["logs_terminais"].append(
+        f"{node_label}: orchestration_guided_tools={','.join(preferred)}"
+    )
+    return guided
 
 
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
@@ -760,6 +804,115 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
         logger.warning(f"RAG enrichment failed: {exc}")
 
     _metric_end(state, "rag_enrichment", started_at)
+    return state
+
+
+def tool_execution_node(state: AgentState) -> AgentState:
+    """Execute Kali tools via MCP based on selected skill."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "Tool Execution")
+
+    try:
+        from app.core.config import settings
+        from app.services.mcp_client import mcp_client
+
+        # Get current skill and target
+        current_skill = state.get("current_skill") or state.get("active_skill")
+        target = state.get("target", "")
+        scan_id = state.get("scan_id", "unknown")
+
+        if not current_skill or not target:
+            state["logs_terminais"].append("[TOOL] No skill or target, skipping tool execution")
+            _metric_end(state, "tool_execution", started_at)
+            return state
+
+        if not settings.mcp_rag_enabled or not mcp_client.health_check_sync():
+            state["logs_terminais"].append("[TOOL] MCP server not available, skipping execution")
+            _metric_end(state, "tool_execution", started_at)
+            return state
+
+        # Find relevant tools for the skill
+        available_tools = mcp_client.list_tools_sync()
+        if not available_tools:
+            state["logs_terminais"].append("[TOOL] No tools available from Kali runner")
+            _metric_end(state, "tool_execution", started_at)
+            return state
+
+        # Filter tools by category matching the skill
+        skill_to_category = {
+            "recon-subdomain-enum": "recon",
+            "recon-port-service": "recon",
+            "tech-http-fingerprint": "recon",
+            "vuln-nuclei-cve": "vuln",
+            "vuln-sql-injection": "vuln",
+            "vuln-xss-injection": "vuln",
+            "osint-exposure-intel": "osint",
+        }
+
+        skill_category = skill_to_category.get(current_skill, current_skill.split("-")[0] if "-" in current_skill else "recon")
+
+        relevant_tools = [
+            tool for tool in available_tools
+            if tool.get("metadata", {}).get("category") == skill_category
+        ]
+
+        if not relevant_tools:
+            state["logs_terminais"].append(f"[TOOL] No tools found for skill {current_skill}")
+            _metric_end(state, "tool_execution", started_at)
+            return state
+
+        # Execute the first relevant tool
+        tool_to_execute = relevant_tools[0]
+        tool_name = tool_to_execute.get("name", "")
+
+        state["logs_terminais"].append(f"[TOOL] Executing {tool_name} for skill {current_skill} against {target}")
+
+        result = mcp_client.execute_kali_tool_sync(
+            tool_name=tool_name,
+            target=target,
+            scan_id=scan_id,
+            timeout=300  # 5-minute timeout per tool
+        )
+
+        # Store execution result
+        execution_result = {
+            "tool": tool_name,
+            "skill": current_skill,
+            "target": target,
+            "status": result.get("status", "unknown"),
+            "output": result.get("output", ""),
+            "error": result.get("error", ""),
+            "execution_time": result.get("execution_time", 0),
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Store results in state
+        state.setdefault("executed_tools", []).append(execution_result)
+        state.setdefault("tool_results", []).append(result)
+
+        # Log learning from execution
+        if result.get("status") == "done":
+            learning_metadata = {
+                "source": "tool_execution",
+                "tool": tool_name,
+                "skill": current_skill,
+                "target": target,
+                "status": "successful"
+            }
+            mcp_client.ingest_document_sync(
+                content=f"Tool {tool_name} executed successfully for {current_skill}: {result.get('output', '')[:500]}",
+                metadata=learning_metadata,
+                source="tool_execution"
+            )
+            state["logs_terminais"].append(f"[TOOL] Tool execution completed successfully")
+        else:
+            state["logs_terminais"].append(f"[TOOL] Tool execution failed: {result.get('error', 'unknown error')}")
+
+    except Exception as exc:
+        state["logs_terminais"].append(f"[TOOL] Execution failed: {exc}")
+        logger.warning(f"Tool execution failed: {exc}")
+
+    _metric_end(state, "tool_execution", started_at)
     return state
 
 
@@ -3906,6 +4059,7 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     if _orchestration and _orchestration.get("execution_decision") == "block":
         state["logs_terminais"].append("AssetDiscovery: bloqueado pelo supervisor de orquestração")
         recon_tools = []
+    recon_tools = _apply_orchestration_tool_guidance(state, "AssetDiscovery", recon_tools, _orchestration)
     _append_note(state, f"AssetDiscovery selecionou ferramentas: {', '.join(recon_tools)}", phase="asset-discovery")
     
     if _is_local_target(state["target"]):
@@ -4078,6 +4232,7 @@ def risk_assessment_node(state: AgentState) -> AgentState:
     if _orchestration and _orchestration.get("execution_decision") == "block":
         state["logs_terminais"].append("RiskAssessment: bloqueado pelo supervisor de orquestração")
         vuln_tools = []
+    vuln_tools = _apply_orchestration_tool_guidance(state, "RiskAssessment", vuln_tools, _orchestration)
     if _is_local_target(state.get("target", "")):
         state["logs_terminais"].append(
             f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
@@ -4276,6 +4431,7 @@ def threat_intel_node(state: AgentState) -> AgentState:
     if _orchestration and _orchestration.get("execution_decision") == "block":
         state["logs_terminais"].append("ThreatIntel: bloqueado pelo supervisor de orquestração")
         osint_tools = []
+    osint_tools = _apply_orchestration_tool_guidance(state, "ThreatIntel", osint_tools, _orchestration)
     targets = _targets_for_deep_scan(state, limit=6)
     
     # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR

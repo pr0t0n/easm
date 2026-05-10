@@ -284,6 +284,7 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "target": parameters["target"],
             "scan_id": parameters.get("scan_id"),
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
+            "original_target": parameters.get("original_target"),
         },
     )
     response.raise_for_status()

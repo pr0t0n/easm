@@ -102,6 +102,7 @@ def _read_test_knowledge(
 def _learning_documents(
     *,
     skill: str,
+    worker_group: str,
     phase: str,
     candidate_tools: list[str],
     limit: int = 6,
@@ -134,7 +135,8 @@ def _learning_documents(
                     "type": "accepted_learning",
                     "skill": skill,
                     "phase": phase,
-                    "worker_group": "learning",
+                    "worker_group": worker_group,
+                    "knowledge_scope": "accepted_learning",
                     "recommended_tools": technique.get("recommended_kali_tools") or [],
                 },
                 "source": "accepted_learning",
@@ -157,6 +159,7 @@ def sync_worker_knowledge_to_mcp(
 
     docs, playbook = _learning_documents(
         skill=skill,
+        worker_group=worker_group,
         phase=phase,
         candidate_tools=candidate_tools,
         limit=8,
@@ -225,9 +228,16 @@ def build_worker_knowledge_context(
     results = mcp_client.query_knowledge_sync(
         query=query,
         top_k=top_k or settings.mcp_default_top_k,
-        filters={"worker_group": worker_group} if worker_group else None,
+        filters={"phase": phase} if phase else None,
         skill=skill or None,
     ) if sync_status.get("available") else []
+    if not results and sync_status.get("available"):
+        results = mcp_client.query_knowledge_sync(
+            query=query,
+            top_k=top_k or settings.mcp_default_top_k,
+            filters=None,
+            skill=skill or None,
+        )
 
     playbook = sync_status.get("playbook")
     recommended_tools = list(dict.fromkeys(
@@ -263,4 +273,3 @@ def build_worker_knowledge_context(
         "prompt_context": prompt_context,
         "playbook": playbook,
     }
-

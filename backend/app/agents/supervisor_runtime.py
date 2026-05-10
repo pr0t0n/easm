@@ -16,18 +16,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
 from app.agents.supervisor_prompt import (
+    REQUIRED_TOP_LEVEL,
     SUPERVISOR_ORCHESTRATION_SYSTEM_PROMPT,
     build_supervisor_orchestration_prompt,
     validate_orchestration_decision,
 )
 
 logger = logging.getLogger(__name__)
+_OLLAMA_MODELS_CACHE: dict[str, Any] = {"expires_at": 0.0, "models": []}
 
 
 class BlockedDecision(Exception):
@@ -69,16 +72,7 @@ def _extract_first_json_object(text: str) -> dict[str, Any] | None:
 def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
     """Calls the local Ollama /api/chat endpoint and returns the text reply."""
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
-    models = []
-    for model in (
-        settings.llm_primary_model,
-        settings.ollama_model,
-        settings.ollama_qwen_model,
-        settings.ollama_cloudcode_model,
-    ):
-        model_name = str(model or "").strip()
-        if model_name and model_name not in models:
-            models.append(model_name)
+    models = _candidate_ollama_models()
 
     last_error: Exception | None = None
     for model_name in models:
@@ -111,6 +105,75 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
     if last_error:
         raise last_error
     raise RuntimeError("no Ollama model configured")
+
+
+def _fetch_ollama_models() -> list[str]:
+    now = time.time()
+    cached = list(_OLLAMA_MODELS_CACHE.get("models") or [])
+    if cached and float(_OLLAMA_MODELS_CACHE.get("expires_at") or 0.0) > now:
+        return cached
+
+    try:
+        response = httpx.get(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
+            timeout=10,
+        )
+        response.raise_for_status()
+        models = [
+            str(item.get("name") or "").strip()
+            for item in (response.json().get("models") or [])
+            if str(item.get("name") or "").strip()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to fetch Ollama tags: %s", exc)
+        models = cached
+
+    _OLLAMA_MODELS_CACHE["models"] = models
+    _OLLAMA_MODELS_CACHE["expires_at"] = now + 60
+    return models
+
+
+def _resolve_ollama_model(preferred: str, available_models: list[str]) -> str | None:
+    preferred = str(preferred or "").strip()
+    if not preferred:
+        return None
+    if preferred in available_models:
+        return preferred
+
+    preferred_lower = preferred.lower()
+    available_lower = {model.lower(): model for model in available_models}
+    if preferred_lower in available_lower:
+        return available_lower[preferred_lower]
+
+    for model in available_models:
+        lowered = model.lower()
+        if lowered.startswith(preferred_lower):
+            return model
+        if preferred_lower.startswith(lowered):
+            return model
+        if preferred_lower in lowered:
+            return model
+    return None
+
+
+def _candidate_ollama_models() -> list[str]:
+    configured = [
+        str(settings.llm_primary_model or "").strip(),
+        str(settings.ollama_qwen_model or "").strip(),
+        str(settings.ollama_model or "").strip(),
+        str(settings.ollama_cloudcode_model or "").strip(),
+    ]
+    available = _fetch_ollama_models()
+    ordered: list[str] = []
+    for preferred in configured:
+        resolved = _resolve_ollama_model(preferred, available)
+        candidate = resolved or preferred
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+    for model in available:
+        if model and model not in ordered:
+            ordered.append(model)
+    return ordered
 
 
 def _deterministic_fallback(
@@ -164,6 +227,109 @@ def _deterministic_fallback(
     }
 
 
+def _pick_playbook_technique(
+    playbook: dict[str, Any],
+    execution_context: dict[str, Any],
+    hint: str = "",
+) -> dict[str, Any]:
+    phase = str(execution_context.get("phase") or "").strip().lower()
+    hint_blob = str(hint or "").strip().lower()
+    techniques = list(playbook.get("techniques") or [])
+    if not techniques:
+        return {
+            "name": str(playbook.get("title") or "first-pass"),
+            "objective": "explore phase",
+            "reason": "playbook fallback",
+        }
+
+    for technique in techniques:
+        if not isinstance(technique, dict):
+            continue
+        technique_blob = json.dumps(technique, ensure_ascii=False).lower()
+        if hint_blob and hint_blob in technique_blob:
+            return technique
+        affected_phases = [str(item or "").strip().lower() for item in (technique.get("affected_phases") or [])]
+        if phase and any(phase in item or item in phase for item in affected_phases if item):
+            return technique
+
+    first = techniques[0]
+    return first if isinstance(first, dict) else {"name": str(first), "objective": "explore phase"}
+
+
+def _coerce_orchestration_payload(
+    parsed: dict[str, Any] | None,
+    playbook: dict[str, Any],
+    execution_context: dict[str, Any],
+    skill_memory: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(parsed, dict):
+        return None
+
+    candidate = dict(parsed)
+    for wrapper_key in ("result", "decision", "output", "response", "data"):
+        wrapped = candidate.get(wrapper_key)
+        if isinstance(wrapped, dict):
+            candidate = dict(wrapped)
+            break
+
+    if REQUIRED_TOP_LEVEL.issubset(candidate.keys()):
+        return candidate
+
+    fallback = _deterministic_fallback(playbook, execution_context)
+    selected = candidate.get("selected_technique")
+    if not isinstance(selected, dict):
+        hint = candidate.get("selected_technique") or candidate.get("technique") or candidate.get("selected_tool") or candidate.get("notes")
+        selected = _pick_playbook_technique(playbook, execution_context, hint=str(hint or ""))
+    if not str(selected.get("name") or "").strip():
+        selected = _pick_playbook_technique(playbook, execution_context, hint=json.dumps(candidate, ensure_ascii=False))
+
+    context = candidate.get("execution_context")
+    if not isinstance(context, dict):
+        context = {}
+
+    signals = candidate.get("signals_to_validate")
+    if not isinstance(signals, list) or not signals:
+        signals = list(selected.get("evidence_signals") or playbook.get("evidence_signals") or fallback.get("signals_to_validate") or [])
+
+    constraints = candidate.get("constraints")
+    if not isinstance(constraints, list) or not constraints:
+        constraints = ["read-only", "no-destructive-payload"]
+
+    try:
+        confidence = float(candidate.get("confidence"))
+    except (TypeError, ValueError):
+        confidence = float(fallback["confidence"])
+
+    notes = str(candidate.get("notes") or candidate.get("reason") or "").strip() or "coerced supervisor payload"
+    coerced = {
+        "execution_decision": str(candidate.get("execution_decision") or "proceed").strip().lower(),
+        "selected_technique": {
+            "name": str(selected.get("name") or fallback["selected_technique"]["name"]).strip(),
+            "objective": str(selected.get("objective") or fallback["selected_technique"]["objective"]).strip(),
+            "reason": str(selected.get("reason") or notes or fallback["selected_technique"]["reason"]).strip(),
+        },
+        "execution_context": {
+            "target": str(context.get("target") or execution_context.get("target") or fallback["execution_context"]["target"]).strip(),
+            "phase": str(context.get("phase") or execution_context.get("phase") or fallback["execution_context"]["phase"]).strip(),
+            "skill": str(context.get("skill") or execution_context.get("skill") or fallback["execution_context"]["skill"]).strip(),
+            "authorized_scope": bool(context.get("authorized_scope", execution_context.get("authorized_scope", True))),
+            "auth_available": bool(context.get("auth_available", execution_context.get("auth_available", False))),
+            "max_risk_allowed": str(context.get("max_risk_allowed") or execution_context.get("max_risk_allowed") or "medium").strip().lower(),
+        },
+        "signals_to_validate": [str(item).strip() for item in signals if str(item).strip()][:8],
+        "constraints": [str(item).strip() for item in constraints if str(item).strip()][:8],
+        "notes": notes,
+        "confidence": max(0.0, min(confidence, 1.0)),
+    }
+    if skill_memory:
+        coerced["memory_context"] = {
+            "knowledge_items": list(skill_memory.get("knowledge_items") or [])[:5],
+            "recommended_tools": list(skill_memory.get("recommended_tools") or [])[:10],
+            "retrieval_query": skill_memory.get("retrieval_query"),
+        }
+    return coerced
+
+
 def decide_next_technique(
     playbook: dict[str, Any],
     execution_context: dict[str, Any],
@@ -203,7 +369,8 @@ def decide_next_technique(
         decision = _deterministic_fallback(playbook, execution_context)
     else:
         try:
-            decision = validate_orchestration_decision(parsed)
+            normalized = _coerce_orchestration_payload(parsed, playbook, execution_context, skill_memory)
+            decision = validate_orchestration_decision(normalized or parsed)
         except ValueError as exc:
             logger.warning("supervisor LLM produced invalid output: %s", exc)
             decision = _deterministic_fallback(playbook, execution_context)

@@ -113,7 +113,7 @@ LOST_JOB_RETRIES = 2
 _LOCAL_HOST_ALIASES = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
-def _normalize_target_for_kali(target: str) -> str:
+def normalize_target_for_kali(target: str) -> str:
     """Rewrites `localhost` and 127.0.0.1 to `host.docker.internal` so the
     Kali container can reach the operator's machine. Preserves scheme/port/
     path/query/fragment.
@@ -177,7 +177,7 @@ def execute_via_kali(
     # Rewrite operator-friendly localhost into a docker-routable hostname.
     # We keep the original in the failure trail for audit.
     original_target = target
-    target = _normalize_target_for_kali(target)
+    target = normalize_target_for_kali(target)
 
     base = _runner_url()
     started = time.perf_counter()
@@ -283,10 +283,10 @@ def execute_via_kali(
             dispatch_task_id=job_id,
         )
 
-    return _normalize_to_legacy_shape(tool_name, target, scan_mode, result)
+    return normalize_kali_result(tool_name, target, scan_mode, result)
 
 
-def _normalize_to_legacy_shape(
+def normalize_kali_result(
     tool_name: str, target: str, scan_mode: str, result: dict
 ) -> dict[str, Any]:
     runner_status = result.get("status")

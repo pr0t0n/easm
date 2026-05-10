@@ -8,7 +8,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.services.kali_executor import TOOL_TO_PROFILE
+from app.services.kali_executor import TOOL_TO_PROFILE, normalize_kali_result, normalize_target_for_kali
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,10 @@ class MCPClient:
 
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
+
+    def _sync_timeout(self, timeout: float | None = None) -> httpx.Timeout | float:
+        value = float(timeout if timeout is not None else self.timeout)
+        return httpx.Timeout(connect=min(value, 10.0), read=value, write=value, pool=value)
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def health_check(self) -> bool:
@@ -162,9 +166,15 @@ class MCPClient:
             logger.error("MCP list tools failed: %s", exc)
             return []
 
-    def call_tool_sync(self, tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    def call_tool_sync(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         try:
-            with self._sync_client() as client:
+            with httpx.Client(base_url=self.base_url, timeout=self._sync_timeout(timeout)) as client:
                 response = client.post(f"/mcp/tools/{tool_name}/call", json=parameters)
                 response.raise_for_status()
                 return dict(response.json())
@@ -184,18 +194,41 @@ class MCPClient:
         if not requested:
             return {"status": "error", "error": "empty_tool_name", "tool": requested}
 
+        original_target = str(target or "").strip()
+        normalized_target = normalize_target_for_kali(original_target)
         mcp_tools = self.list_tools_sync()
         tool_names = {str(item.get("name") or "") for item in mcp_tools}
         profile_name = TOOL_TO_PROFILE.get(requested.lower(), requested)
         selected_name = requested if requested in tool_names else profile_name
-        payload: dict[str, Any] = {"target": target, "scan_id": scan_id or "mcp_scan"}
-        if timeout:
-            payload["timeout"] = timeout
-        result = self.call_tool_sync(selected_name, payload)
-        result.setdefault("tool", requested)
-        result.setdefault("profile", profile_name)
-        result.setdefault("execution_path", "mcp_to_kali")
-        return result
+        runner_timeout = int(timeout or max(self.timeout * 6, 120))
+        client_timeout = max(float(runner_timeout) + 15.0, self.timeout)
+        payload: dict[str, Any] = {
+            "target": normalized_target,
+            "scan_id": scan_id or "mcp_scan",
+            "timeout": runner_timeout,
+        }
+        if normalized_target != original_target:
+            payload["original_target"] = original_target
+        result = self.call_tool_sync(selected_name, payload, timeout=client_timeout)
+        if str(result.get("status") or "").lower() == "error":
+            result.setdefault("tool", requested)
+            result.setdefault("profile", profile_name)
+            result.setdefault("execution_path", "mcp_to_kali")
+            result.setdefault("target", normalized_target)
+            return result
+
+        legacy = normalize_kali_result(
+            tool_name=requested,
+            target=normalized_target,
+            scan_mode="unit",
+            result=result,
+        )
+        legacy["execution_path"] = "mcp_to_kali"
+        legacy["profile"] = result.get("profile") or profile_name
+        legacy["raw_mcp_status"] = result.get("status")
+        if normalized_target != original_target:
+            legacy["original_target"] = original_target
+        return legacy
 
 
 class RAGService:
@@ -254,4 +287,3 @@ async def get_rag_service() -> RAGService:
 
 def run_async(coro: Any) -> Any:
     return asyncio.run(coro)
-
