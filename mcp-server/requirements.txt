@@ -7,8 +7,5 @@ sentence-transformers==3.2.1
 numpy==1.26.4
 python-multipart==0.0.9
 websockets==13.1
-asyncio-mcp-server==0.1.0
-mcp==1.1.1
 langchain==0.3.7
 langchain-community==0.3.2
-faiss-cpu==1.8.0
