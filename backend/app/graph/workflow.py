@@ -48,6 +48,8 @@ MISSION_PHASE_TO_GROUP = {
     "Report": "recon",
 }
 
+TOOL_CAPABILITY_NODES = {"asset_discovery", "threat_intel", "risk_assessment"}
+
 # Função utilitária para obter o grupo de worker para uma fase
 def get_worker_group_for_phase(phase_title: str) -> str:
     for key, group in MISSION_PHASE_TO_GROUP.items():
@@ -216,6 +218,7 @@ class AgentState(TypedDict):
     objective_met: bool                      # Flag de término de operação
     termination_reason: str                  # Motivo de término da operação
     routing_next_node: str                   # Próximo nó escolhido pelo supervisor
+    pending_capability_node: str             # Capability aguardando skill/tool pipeline
     current_phase: str                       # Fase atual (usado para proteção contra loop)
     last_completed_node: str                 # Último nó de capacidade concluído
     agent_validation: dict[str, Any]         # Score de qualidade da execução
@@ -227,7 +230,11 @@ class AgentState(TypedDict):
     skill_runtime_ready: bool
     skill_runtime_contract: dict[str, Any]
     skill_runtime_gate: dict[str, Any]
+    skill_runtime_invocation: dict[str, Any]
     skill_invocations: list[dict[str, Any]]
+    capability_context: dict[str, Any]
+    tool_selection_contract: dict[str, Any]
+    tool_execution_results: list[dict[str, Any]]
     delegated_tasks: list[dict[str, Any]]
     delegation_log: list[dict[str, Any]]
     autonomy_notes: list[dict[str, Any]]
@@ -307,6 +314,9 @@ def _route_from_supervisor(state: AgentState):
     next_node = state.get("routing_next_node")
     if next_node in (END, "END"):
         return END
+    if next_node in TOOL_CAPABILITY_NODES:
+        state["pending_capability_node"] = str(next_node)
+        return "skill_runtime"
     return next_node
 
 
@@ -559,6 +569,7 @@ def _invoke_skill_runtime_for_context(
         state["current_skill"] = selected_skill_id
         state["active_skill"] = selected_skill_id
         state["skill_runtime_contract"] = invocation_record
+        state["skill_runtime_invocation"] = dict(skill_invocation)
         _append_action(state, "skill_invoked", invocation_record)
         state["logs_terminais"].append(
             f"[{group}] skill_call skill={selected_skill_id} "
@@ -795,11 +806,10 @@ def _apply_orchestration_tool_guidance(
     if not preferred:
         return tools
 
-    guided = preferred + [tool for tool in tools if tool not in preferred]
     state["logs_terminais"].append(
-        f"{node_label}: orchestration_guided_tools={','.join(preferred)}"
+        f"{node_label}: orchestration_selected_tools={','.join(preferred)}"
     )
-    return guided
+    return preferred
 
 
 def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
@@ -966,6 +976,9 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
 
 
 def _bootstrap_skill_group(state: AgentState) -> str:
+    pending = str(state.get("pending_capability_node") or "").strip()
+    if pending in TOOL_CAPABILITY_NODES:
+        return pending
     next_node = str(state.get("routing_next_node") or "").strip()
     if next_node in {"asset_discovery", "threat_intel", "risk_assessment", "adversarial_hypothesis"}:
         return next_node
@@ -976,6 +989,13 @@ def _bootstrap_skill_group(state: AgentState) -> str:
 
 
 def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[str]:
+    context = dict(state.get("capability_context") or {})
+    if str(context.get("node") or "") == group and context.get("candidate_tools"):
+        return _select_tool_batch_for_iteration(
+            state,
+            group=group,
+            tools=[str(tool) for tool in list(context.get("candidate_tools") or [])],
+        )
     scan_mode = str(state.get("scan_mode") or "unit")
     tools = _tools_for_group(scan_mode, group)
     target = str(state.get("target") or "")
@@ -1033,6 +1053,291 @@ def skill_runtime_node(state: AgentState) -> AgentState:
         logger.warning("Skill runtime gate failed: %s", exc)
 
     _metric_end(state, "skill_runtime", started_at)
+    return state
+
+
+def _technique_for_selected_tool(invocation: dict[str, Any], selected_tool: str) -> dict[str, Any]:
+    selected = str(selected_tool or "").strip().lower()
+    techniques = [dict(item) for item in list(invocation.get("techniques") or []) if isinstance(item, dict)]
+    for technique in techniques:
+        tools = {str(tool).strip().lower() for tool in list(technique.get("recommended_kali_tools") or [])}
+        if selected and selected in tools:
+            return technique
+    return techniques[0] if techniques else {}
+
+
+def tool_selector_node(state: AgentState) -> AgentState:
+    """Select exactly the tool(s) authorized by the current skill contract."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "Tool Selector")
+
+    capability = str(state.get("pending_capability_node") or _bootstrap_skill_group(state))
+    gate = dict(state.get("skill_runtime_gate") or {})
+    contract = dict(state.get("skill_runtime_contract") or {})
+    invocation = dict(state.get("skill_runtime_invocation") or {})
+    candidate_tools = [str(tool) for tool in list(gate.get("candidate_tools") or []) if str(tool or "").strip()]
+    recommended_tools = [str(tool) for tool in list(contract.get("recommended_tools") or invocation.get("recommended_tools") or []) if str(tool or "").strip()]
+
+    try:
+        from app.services.agent_context_service import build_worker_knowledge_context
+
+        bundle = build_worker_knowledge_context(
+            worker_group=capability,
+            skill=str(contract.get("skill_id") or invocation.get("skill_id") or capability),
+            phase=str(gate.get("phase") or state.get("current_phase") or capability),
+            target=str(state.get("target") or ""),
+            candidate_tools=candidate_tools,
+            mode=str(state.get("scan_mode") or "unit"),
+        )
+        for tool in list(bundle.get("recommended_tools") or []):
+            if str(tool).strip():
+                recommended_tools.append(str(tool).strip())
+        state["logs_terminais"].append(
+            f"[selector] skill-memory retrieved={len(bundle.get('knowledge_items') or [])}"
+        )
+    except Exception as exc:
+        state["logs_terminais"].append(f"[selector] skill-memory unavailable: {exc}")
+
+    candidate_set = set(candidate_tools)
+    selected_tools = [tool for tool in dict.fromkeys(recommended_tools) if tool in candidate_set]
+    if not selected_tools and candidate_tools and contract.get("skill_id"):
+        selected_tools = [candidate_tools[0]]
+
+    # Skill-first means no phase fan-out. One skill invocation selects one
+    # concrete tool execution; additional tools require another supervisor loop.
+    selected_tools = selected_tools[:1]
+    selected_tool = selected_tools[0] if selected_tools else ""
+    technique = _technique_for_selected_tool(invocation, selected_tool)
+    evidence_required = list(technique.get("evidence_signals") or [])
+    constraints = list(technique.get("safe_validation_steps") or [])
+
+    selection = {
+        "capability": capability,
+        "selected_tools": selected_tools,
+        "candidate_tools": candidate_tools,
+        "skill_id": contract.get("skill_id") or invocation.get("skill_id"),
+        "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
+        "skill_contract": contract,
+        "technique": technique,
+        "evidence_required": evidence_required,
+        "constraints": constraints,
+        "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
+        "decision_source": "skill_runtime_selector",
+    }
+    state["tool_selection_contract"] = selection
+    _append_action(state, "tool_selected", selection)
+    if selected_tools:
+        state["logs_terminais"].append(
+            f"[selector] capability={capability} skill={selection.get('skill_id')} selected={','.join(selected_tools)}"
+        )
+    else:
+        state["logs_terminais"].append(
+            f"[selector] capability={capability} sem ferramenta selecionada pela skill"
+        )
+
+    _metric_end(state, "tool_selector", started_at)
+    return state
+
+
+def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
+    context = dict(state.get("capability_context") or {})
+    if str(context.get("node") or "") == capability and context.get("targets"):
+        return [str(target) for target in list(context.get("targets") or []) if str(target or "").strip()]
+
+    if capability == "threat_intel":
+        return _validate_osint_targets(_targets_for_deep_scan(state, limit=6))
+
+    if capability == "risk_assessment":
+        limit = 10 if _is_local_target(state.get("target", "")) else 6
+        primary_targets = _targets_for_deep_scan(state, limit=limit)
+        resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
+        explicit_target = str(state.get("target") or "").strip()
+        if explicit_target and _is_local_target(explicit_target):
+            local_targets = [t for t in primary_targets if _is_local_target(t)]
+            if explicit_target not in local_targets:
+                local_targets.insert(0, explicit_target)
+            resolvable_targets = list(dict.fromkeys(local_targets + resolvable_targets))
+            unresolved_targets = [t for t in unresolved_targets if not _is_local_target(t)]
+        if not resolvable_targets:
+            resolvable_targets = [state.get("target", "")]
+        state["risk_targets_resolvable"] = list(resolvable_targets)
+        state["risk_targets_unresolved"] = list(unresolved_targets)
+        if unresolved_targets:
+            state["logs_terminais"].append(
+                f"RiskAssessment: unresolved_targets_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
+            )
+        return list(resolvable_targets)
+
+    return [str(state.get("target") or "").strip()]
+
+
+def _apply_tool_execution_findings(
+    state: AgentState,
+    capability: str,
+    target: str,
+    tools: list[str],
+    findings: list[dict[str, Any]],
+    ports: list[int],
+    assets: list[str],
+    port_evidence: dict[int, dict[str, str]],
+) -> None:
+    current = _step_name(state)
+    if findings:
+        state["vulnerabilidades_encontradas"].extend(findings)
+
+    if capability == "asset_discovery":
+        if ports:
+            state["discovered_ports"] = sorted(set((state.get("discovered_ports") or []) + ports))
+            state["pending_port_tests"] = state["discovered_ports"].copy()
+        if assets:
+            root_domain = _target_host(state.get("target") or target)
+            _register_discovered_assets(state, root_domain=root_domain, assets=assets)
+            owner_id = state.get("owner_id")
+            scan_id = state.get("scan_id")
+            if owner_id and scan_id:
+                inserted = _persist_discovered_assets_to_db(
+                    scan_job_id=scan_id,
+                    owner_id=owner_id,
+                    assets=assets,
+                    source_tool="recon",
+                )
+                state["discovered_subdomains_persisted"].extend(
+                    [a.lower() for a in assets[:MAX_DISCOVERED_ASSETS]]
+                )
+                state["logs_terminais"].append(
+                    f"ReconNode: {len(assets)} subdomínios persistidos no banco (novos: {inserted})"
+                )
+            for asset in assets[:MAX_DISCOVERED_ASSETS]:
+                state["vulnerabilidades_encontradas"].append(
+                    {
+                        "title": f"Ativo descoberto no reconhecimento: {asset}",
+                        "severity": "info",
+                        "risk_score": 1,
+                        "source_worker": "reconhecimento",
+                        "details": {
+                            "node": "recon",
+                            "step": current,
+                            "asset": asset,
+                            "tool": "reconhecimento",
+                        },
+                    }
+                )
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"Ativo externo mapeado: {state['target']}",
+                "severity": "low",
+                "risk_score": 2,
+                "source_worker": "asset_discovery",
+                "details": {"node": "asset_discovery", "step": current, "tools": tools},
+            }
+        )
+        return
+
+    if capability == "threat_intel":
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"Threat Intel executado em {target}",
+                "severity": "info",
+                "risk_score": 1,
+                "source_worker": "threat_intel",
+                "details": {
+                    "node": "threat_intel",
+                    "step": current,
+                    "asset": target,
+                    "tool": "threat_intel",
+                    "tools": tools,
+                },
+            }
+        )
+        return
+
+    if capability == "risk_assessment":
+        state["vulnerabilidades_encontradas"].append(
+            {
+                "title": f"Avaliação de risco executada em {target}",
+                "severity": "info",
+                "risk_score": 1,
+                "source_worker": "risk_assessment",
+                "details": {
+                    "node": "risk_assessment",
+                    "step": current,
+                    "asset": target,
+                    "tool": "risk_assessment",
+                    "tools": tools,
+                },
+            }
+        )
+
+
+def tool_executor_node(state: AgentState) -> AgentState:
+    """Execute the selected skill-bound tool through MCP/Kali."""
+    started_at = _metric_start()
+    _sync_step_to_db(state, "Tool Executor")
+
+    selection = dict(state.get("tool_selection_contract") or {})
+    capability = str(selection.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
+    selected_tools = [str(tool) for tool in list(selection.get("selected_tools") or []) if str(tool or "").strip()]
+    targets = _targets_for_tool_pipeline(state, capability)
+    all_results: list[dict[str, Any]] = []
+
+    if not selected_tools:
+        state["logs_terminais"].append(f"[executor] capability={capability} sem tool selecionada; nada executado")
+    for scan_target in targets:
+        target_tools = selected_tools
+        if capability == "risk_assessment":
+            target_tools = _tools_for_validation_target(scan_target, selected_tools)
+        if not target_tools:
+            continue
+        findings, ports, assets, port_evidence = _run_tools_and_collect(
+            state,
+            target_tools,
+            scan_target,
+            _step_name(state),
+            f"ToolExecutor:{capability}",
+            root_domain=_target_host(state.get("target") or scan_target),
+            skill_context=selection,
+        )
+        _apply_tool_execution_findings(
+            state,
+            capability,
+            scan_target,
+            target_tools,
+            findings,
+            ports,
+            assets,
+            port_evidence,
+        )
+        all_results.append(
+            {
+                "target": scan_target,
+                "tools": target_tools,
+                "findings": len(findings),
+                "ports": ports,
+                "assets": assets,
+                "skill_id": selection.get("skill_id"),
+                "technique": (selection.get("technique") or {}).get("name"),
+            }
+        )
+
+    state["tool_execution_results"] = list(state.get("tool_execution_results") or []) + all_results
+    completed = list(state.get("completed_capabilities") or [])
+    if capability in TOOL_CAPABILITY_NODES and capability not in completed:
+        completed.append(capability)
+    state["completed_capabilities"] = completed
+    if capability == "risk_assessment" and state.get("validation_backlog"):
+        state["validation_backlog"] = []
+    _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
+    state["pending_capability_node"] = ""
+    state["proxima_ferramenta"] = "evidence_adjudication"
+    state["routing_next_node"] = "evidence_adjudication"
+    state["mission_index"] += 1
+    _append_observation(
+        state,
+        f"Skill-bound execution completed: capability={capability} tools={','.join(selected_tools) or '-'}",
+        source="tool_executor",
+    )
+
+    _metric_end(state, "tool_executor", started_at)
     return state
 
 
@@ -1175,11 +1480,20 @@ def supervisor_node(state: AgentState) -> AgentState:
         state["current_phase"] = next_node
         return state
 
+    route_node = "skill_runtime" if next_node in TOOL_CAPABILITY_NODES else next_node
+    if next_node in TOOL_CAPABILITY_NODES:
+        state["pending_capability_node"] = next_node
+        state["logs_terminais"].append(
+            f"Supervisor: capability={next_node} encaminhada para skill_runtime"
+        )
+    elif next_node not in {"END", "evidence_adjudication"}:
+        state["pending_capability_node"] = ""
+
     state["completed_capabilities"] = completed
     state["current_phase"] = next_node
-    state["routing_next_node"] = END if next_node == "END" else next_node
+    state["routing_next_node"] = END if route_node == "END" else route_node
     state["termination_reason"] = termination_reason
-    state["proxima_ferramenta"] = next_node
+    state["proxima_ferramenta"] = route_node
     state["logs_terminais"].append(
         "Supervisor: "
         f"iter={state['loop_iteration']}/{max_iterations} "
@@ -1684,6 +1998,7 @@ def _run_tools_and_collect(
     step_name: str,
     log_prefix: str,
     root_domain: str = "",
+    skill_context: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
     """Runs the given tools against `scan_target` with parallel dispatch.
 
@@ -1700,6 +2015,8 @@ def _run_tools_and_collect(
     discovered_assets: set[str] = set()
     port_evidence: dict[int, dict[str, str]] = {}
     step_success = False
+    skill_context = dict(skill_context or {})
+    skill_id = str(skill_context.get("skill_id") or "").strip()
 
     # 1) Skip tools already executed (in-state or in-DB)
     pending_tools: list[str] = []
@@ -1731,6 +2048,12 @@ def _run_tools_and_collect(
                 scan_target,
                 scan_mode=state["scan_mode"],
                 scan_id=scan_id if isinstance(scan_id, int) else None,
+                skill_id=skill_id or None,
+                skill_contract=dict(skill_context.get("skill_contract") or {}),
+                technique=dict(skill_context.get("technique") or {}),
+                evidence_required=list(skill_context.get("evidence_required") or []),
+                constraints=list(skill_context.get("constraints") or []),
+                playbook=str(skill_context.get("playbook_title") or ""),
             )
         except Exception as exc:
             r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
@@ -1753,8 +2076,20 @@ def _run_tools_and_collect(
         _append_action(
             state,
             "tool_start",
-            {"tool": tool, "target": scan_target, "step": step_name, "group": log_prefix},
+            {
+                "tool": tool,
+                "target": scan_target,
+                "step": step_name,
+                "group": log_prefix,
+                "skill_id": skill_id,
+                "skill_invocation_id": skill_context.get("skill_invocation_id"),
+                "technique": (skill_context.get("technique") or {}).get("name"),
+            },
         )
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_invocation_id", skill_context.get("skill_invocation_id"))
+            result.setdefault("technique", (skill_context.get("technique") or {}).get("name"))
         state["executed_tool_runs"].append(run_id)
 
         raw_command = str(result.get("command") or "").strip()
@@ -4143,9 +4478,7 @@ def asset_discovery_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "1. AssetDiscovery")
     current = _step_name(state)
-    state["proxima_ferramenta"] = "threat_intel"
-    state["routing_next_node"] = "threat_intel"
-    state["logs_terminais"].append(f"AssetDiscovery: {current}")
+    state["logs_terminais"].append(f"AssetDiscovery(context): {current}")
     seed_targets = list(state.get("input_targets") or [])
     if not seed_targets:
         seed_targets = _split_input_targets(state.get("target") or "") or [state["target"]]
@@ -4174,137 +4507,29 @@ def asset_discovery_node(state: AgentState) -> AgentState:
             f"AssetDiscovery: target_type={target_type}, full_recon_pipeline ativado"
         )
     recon_tools = _select_tool_batch_for_iteration(state, group="asset_discovery", tools=recon_tools)
-    # Supervisor de Orquestração — decide a técnica antes do fan-out
-    _orchestration = _consult_supervisor_orchestration(state, "asset_discovery", recon_tools)
-    if _orchestration and _orchestration.get("execution_decision") == "block":
-        state["logs_terminais"].append("AssetDiscovery: bloqueado pelo supervisor de orquestração")
-        recon_tools = []
-    recon_tools = _apply_orchestration_tool_guidance(state, "AssetDiscovery", recon_tools, _orchestration)
-    _append_note(state, f"AssetDiscovery selecionou ferramentas: {', '.join(recon_tools)}", phase="asset-discovery")
-    
+
     if _is_local_target(state["target"]):
         state["logs_terminais"].append(
-            f"AssetDiscovery: local_target detected, reduced_tools={','.join(recon_tools)}"
+            f"AssetDiscovery: local_target detected, candidate_tools={','.join(recon_tools)}"
         )
-    # Ferramentas de port scan a serem executadas também nos subdomínios descobertos
-    PORT_SCAN_TOOLS = {"naabu", "nmap"}
-    port_scan_tools = [t for t in recon_tools if t in PORT_SCAN_TOOLS]
 
-    root_domain = _target_host(state["target"])
-    recon_findings, recon_ports, recon_assets, recon_port_evidence = _run_tools_and_collect(
+    state["capability_context"] = {
+        "node": "asset_discovery",
+        "step": current,
+        "targets": [state["target"]],
+        "candidate_tools": recon_tools,
+        "root_domain": _target_host(state["target"]),
+        "target_type": target_type,
+    }
+    state["pending_capability_node"] = "asset_discovery"
+    state["routing_next_node"] = "skill_runtime"
+    state["proxima_ferramenta"] = "skill_runtime"
+    _append_note(
         state,
-        recon_tools,
-        state["target"],
-        current,
-        "ReconNode",
-        root_domain=root_domain,
+        f"AssetDiscovery preparou contexto para skill_runtime: {', '.join(recon_tools)}",
+        phase="asset-discovery",
     )
-    if recon_findings:
-        state["vulnerabilidades_encontradas"].extend(recon_findings)
-    if recon_ports:
-        state["discovered_ports"] = sorted(set((state.get("discovered_ports") or []) + recon_ports))
-        state["pending_port_tests"] = state["discovered_ports"].copy()
-    if recon_assets:
-        _register_discovered_assets(state, root_domain=root_domain, assets=recon_assets)
-        
-        # Persiste os subdomínios descobertos no banco de dados para auditoria/rastreabilidade
-        owner_id = state.get("owner_id")
-        scan_id = state.get("scan_id")
-        if owner_id and scan_id:
-            inserted = _persist_discovered_assets_to_db(
-                scan_job_id=scan_id,
-                owner_id=owner_id,
-                assets=recon_assets,
-                source_tool="recon"
-            )
-            state["discovered_subdomains_persisted"].extend(
-                [a.lower() for a in recon_assets[:MAX_DISCOVERED_ASSETS]]
-            )
-            state["logs_terminais"].append(
-                f"ReconNode: {len(recon_assets)} subdomínios persistidos no banco (novos: {inserted})"
-            )
-
-        # Executa port scan nos subdomínios recém-descobertos (naabu + nmap)
-        if port_scan_tools:
-            subdomain_targets = [
-                a for a in recon_assets[:MAX_DISCOVERED_ASSETS]
-                if _target_host(a) != root_domain
-            ]
-            if subdomain_targets:
-                state["logs_terminais"].append(
-                    f"ReconNode:PortScan: executando em {len(subdomain_targets)} subdominios descobertos"
-                )
-            for sub_asset in subdomain_targets:
-                _, sub_ports, _, sub_port_ev = _run_tools_and_collect(
-                    state,
-                    port_scan_tools,
-                    sub_asset,
-                    current,
-                    f"ReconNode:PortScan:{sub_asset}",
-                    root_domain=root_domain,
-                )
-                if sub_ports:
-                    state["discovered_ports"] = sorted(
-                        set((state.get("discovered_ports") or []) + sub_ports)
-                    )
-                    for port in sub_ports:
-                        technical = sub_port_ev.get(port, {})
-                        service_name = str(technical.get("service") or "").strip()
-                        state["vulnerabilidades_encontradas"].append(
-                            {
-                                "title": (
-                                    f"Porta aberta em subdominio: {sub_asset}:{port}"
-                                    + (f" ({service_name})" if service_name else "")
-                                ),
-                                "severity": "medium",
-                                "risk_score": 4,
-                                "source_worker": "reconhecimento",
-                                "details": {
-                                    "node": "recon",
-                                    "step": current,
-                                    "asset": sub_asset,
-                                    "port": port,
-                                    "service": service_name,
-                                    "version": str(technical.get("version") or "").strip(),
-                                    "tool": technical.get("tool") or "portscan",
-                                    "evidence": technical.get("evidence") or "",
-                                    "open_ports": [port],
-                                },
-                            }
-                        )
-                    state["logs_terminais"].append(
-                        f"ReconNode:PortScan:{sub_asset}: portas={sorted(sub_ports)}"
-                    )
-
-        for asset in recon_assets[:MAX_DISCOVERED_ASSETS]:
-            state["vulnerabilidades_encontradas"].append(
-                {
-                    "title": f"Ativo descoberto no reconhecimento: {asset}",
-                    "severity": "info",
-                    "risk_score": 1,
-                    "source_worker": "reconhecimento",
-                    "details": {
-                        "node": "recon",
-                        "step": current,
-                        "asset": asset,
-                        "tool": "reconhecimento",
-                    },
-                }
-            )
-
-    state["vulnerabilidades_encontradas"].append(
-        {
-            "title": f"Ativo externo mapeado: {state['target']}",
-            "severity": "low",
-            "risk_score": 2,
-            "source_worker": "asset_discovery",
-            "details": {"node": "asset_discovery", "step": current},
-        }
-    )
-    _complete_delegation_task(state, "asset_discovery", f"assets={len(state.get('lista_ativos') or [])}")
-    state["mission_index"] += 1
-    _metric_end(state, "asset_discovery", started_at)
-    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    _metric_end(state, "asset_discovery_context", started_at)
     _sync_step_to_db(state, "1. AssetDiscovery")
     return state
 
@@ -4347,15 +4572,9 @@ def risk_assessment_node(state: AgentState) -> AgentState:
             )
             vuln_tools = learning_validation_tools + [tool for tool in vuln_tools if tool not in learning_validation_tools]
     vuln_tools = _select_tool_batch_for_iteration(state, group="risk_assessment", tools=vuln_tools)
-    # Supervisor de Orquestração — decide a técnica antes do fan-out
-    _orchestration = _consult_supervisor_orchestration(state, "risk_assessment", vuln_tools)
-    if _orchestration and _orchestration.get("execution_decision") == "block":
-        state["logs_terminais"].append("RiskAssessment: bloqueado pelo supervisor de orquestração")
-        vuln_tools = []
-    vuln_tools = _apply_orchestration_tool_guidance(state, "RiskAssessment", vuln_tools, _orchestration)
     if _is_local_target(state.get("target", "")):
         state["logs_terminais"].append(
-            f"RiskAssessment: local_target detected, reduced_tools={','.join(vuln_tools)}"
+            f"RiskAssessment: local_target detected, candidate_tools={','.join(vuln_tools)}"
         )
     target_limit = 10 if _is_local_target(state.get("target", "")) else 6
     primary_targets = _targets_for_deep_scan(state, limit=target_limit)
@@ -4381,66 +4600,29 @@ def risk_assessment_node(state: AgentState) -> AgentState:
         )
     state["risk_targets_resolvable"] = list(resolvable_targets)
     state["risk_targets_unresolved"] = list(unresolved_targets)
-    all_findings: list[dict[str, Any]] = []
     if pending_validation:
         state["logs_terminais"].append(
             f"RiskAssessment: validation_backlog_detected={len(pending_validation)}"
         )
     if len(primary_targets) > 1:
         state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
-    
-    for scan_target in primary_targets:
-        target_tools = _tools_for_validation_target(scan_target, vuln_tools)
-        if target_tools != vuln_tools:
-            state["logs_terminais"].append(
-                f"RiskAssessment: target={scan_target} validation_tools={','.join(target_tools)}"
-            )
-        if target_tools:
-            vuln_findings, _, _, _ = _run_tools_and_collect(state, target_tools, scan_target, current, "RiskAssessment")
-            if vuln_findings:
-                all_findings.extend(vuln_findings)
-        
-        all_findings.append(
-            {
-                "title": f"Avaliação de risco executada em {scan_target}",
-                "severity": "info",
-                "risk_score": 1,
-                "source_worker": "risk_assessment",
-                "details": {
-                    "node": "risk_assessment",
-                    "step": current,
-                    "asset": scan_target,
-                    "tool": "risk_assessment",
-                },
-            }
-        )
 
-    state["logs_terminais"].append(f"RiskAssessment: {current}")
-
-    if all_findings:
-        try:
-            from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
-
-            all_findings = enrich_findings_with_accepted_learning(all_findings)
-        except Exception:
-            pass
-        state["vulnerabilidades_encontradas"].extend(all_findings)
-    else:
-        state["logs_terminais"].append(f"RiskAssessment: sem achados tecnicos no passo {current}")
-    if pending_validation:
-        state["validation_backlog"] = []
-        _append_observation(
-            state,
-            f"Validation backlog processado durante risk_assessment: {len(pending_validation)} itens.",
-            source="risk_assessment",
-        )
-    _append_note(state, f"RiskAssessment selecionou ferramentas: {', '.join(vuln_tools)}", phase="risk-assessment")
-    _complete_delegation_task(state, "risk_assessment", f"findings={len(all_findings)}")
-    state["proxima_ferramenta"] = "evidence_adjudication"
-    state["routing_next_node"] = "evidence_adjudication"
-    state["mission_index"] += 1
-    _metric_end(state, "risk_assessment", started_at)
-    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    state["capability_context"] = {
+        "node": "risk_assessment",
+        "step": current,
+        "targets": primary_targets,
+        "candidate_tools": vuln_tools,
+        "pending_validation": len(pending_validation),
+    }
+    state["pending_capability_node"] = "risk_assessment"
+    state["routing_next_node"] = "skill_runtime"
+    state["proxima_ferramenta"] = "skill_runtime"
+    _append_note(
+        state,
+        f"RiskAssessment preparou contexto para skill_runtime: {', '.join(vuln_tools)}",
+        phase="risk-assessment",
+    )
+    _metric_end(state, "risk_assessment_context", started_at)
     _sync_step_to_db(state, "3. RiskAssessment")
     return state
 
@@ -4541,17 +4723,10 @@ def threat_intel_node(state: AgentState) -> AgentState:
     started_at = _metric_start()
     _sync_step_to_db(state, "2. ThreatIntel")
     current = _step_name(state)
-    state["logs_terminais"].append(f"ThreatIntel: {current}")
-    state["routing_next_node"] = "risk_assessment"
+    state["logs_terminais"].append(f"ThreatIntel(context): {current}")
 
     osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
     osint_tools = _select_tool_batch_for_iteration(state, group="threat_intel", tools=osint_tools)
-    # Supervisor de Orquestração — decide a técnica antes do fan-out
-    _orchestration = _consult_supervisor_orchestration(state, "threat_intel", osint_tools)
-    if _orchestration and _orchestration.get("execution_decision") == "block":
-        state["logs_terminais"].append("ThreatIntel: bloqueado pelo supervisor de orquestração")
-        osint_tools = []
-    osint_tools = _apply_orchestration_tool_guidance(state, "ThreatIntel", osint_tools, _orchestration)
     targets = _targets_for_deep_scan(state, limit=6)
     
     # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR
@@ -4562,46 +4737,22 @@ def threat_intel_node(state: AgentState) -> AgentState:
     
     if len(valid_targets) > 1:
         state["logs_terminais"].append(f"ThreatIntel: valid_targets={len(valid_targets)}")
-    for scan_target in valid_targets:
-        osint_findings, _, _, _ = _run_tools_and_collect(state, osint_tools, scan_target, current, "ThreatIntel")
-        if osint_findings:
-            state["vulnerabilidades_encontradas"].extend(osint_findings)
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"Threat Intel executado em {scan_target}",
-                "severity": "info",
-                "risk_score": 1,
-                "source_worker": "threat_intel",
-                "details": {
-                    "node": "threat_intel",
-                    "step": current,
-                    "asset": scan_target,
-                    "tool": "threat_intel",
-                },
-            }
-        )
 
-    if osint_tools:
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"OSINT exposure indicators for {state['target']}",
-                "severity": "low",
-                "risk_score": 3,
-                "source_worker": "threat_intel",
-                "details": {
-                    "node": "threat_intel",
-                    "tools": osint_tools,
-                    "step": current,
-                },
-            }
-        )
-    _append_note(state, f"ThreatIntel selecionou ferramentas: {', '.join(osint_tools)}", phase="threat-intel")
-    _complete_delegation_task(state, "threat_intel", f"targets={len(valid_targets)}")
-
-    state["proxima_ferramenta"] = "risk_assessment"
-    state["mission_index"] += 1
-    _metric_end(state, "threat_intel", started_at)
-    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
+    state["capability_context"] = {
+        "node": "threat_intel",
+        "step": current,
+        "targets": valid_targets,
+        "candidate_tools": osint_tools,
+    }
+    state["pending_capability_node"] = "threat_intel"
+    state["routing_next_node"] = "skill_runtime"
+    state["proxima_ferramenta"] = "skill_runtime"
+    _append_note(
+        state,
+        f"ThreatIntel preparou contexto para skill_runtime: {', '.join(osint_tools)}",
+        phase="threat-intel",
+    )
+    _metric_end(state, "threat_intel_context", started_at)
     _sync_step_to_db(state, "2. ThreatIntel")
     return state
 
@@ -4765,6 +4916,8 @@ def build_graph(mode: ScanMode = "unit"):
 
     graph.add_node("rag_enrichment", rag_enrichment_node)
     graph.add_node("skill_runtime", skill_runtime_node)
+    graph.add_node("tool_selector", tool_selector_node)
+    graph.add_node("tool_executor", tool_executor_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("strategic_planning", strategic_planning_node)
     graph.add_node("asset_discovery",   asset_discovery_node)
@@ -4776,31 +4929,28 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_node("executive_analyst", executive_analyst_node)
 
     graph.set_entry_point("rag_enrichment")
-    graph.add_edge("rag_enrichment", "skill_runtime")
-    graph.add_edge("skill_runtime", "supervisor")
+    graph.add_edge("rag_enrichment", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         _route_from_supervisor,
         {
+            "skill_runtime": "skill_runtime",
             "strategic_planning": "strategic_planning",
-            "asset_discovery": "asset_discovery",
-            "threat_intel": "threat_intel",
             "adversarial_hypothesis": "adversarial_hypothesis",
-            "risk_assessment": "risk_assessment",
             "evidence_adjudication": "evidence_adjudication",
             "governance": "governance",
             "executive_analyst": "executive_analyst",
             END: END,
         },
     )
+    graph.add_edge("skill_runtime", "tool_selector")
+    graph.add_edge("tool_selector", "tool_executor")
+    graph.add_edge("tool_executor", "evidence_adjudication")
 
     # Back-edges: cada capability node retorna ao supervisor para roteamento contínuo
     for node_name in [
         "strategic_planning",
-        "asset_discovery",
-        "threat_intel",
         "adversarial_hypothesis",
-        "risk_assessment",
         "evidence_adjudication",
         "governance",
         "executive_analyst",
@@ -4892,6 +5042,7 @@ def initial_state(
         "objective_met": False,
         "termination_reason": "",
         "routing_next_node": "strategic_planning",
+        "pending_capability_node": "",
         "current_phase": "",
         "last_completed_node": "",
         "agent_validation": {},
@@ -4901,7 +5052,11 @@ def initial_state(
         "skill_runtime_ready": False,
         "skill_runtime_contract": {},
         "skill_runtime_gate": {},
+        "skill_runtime_invocation": {},
         "skill_invocations": [],
+        "capability_context": {},
+        "tool_selection_contract": {},
+        "tool_execution_results": [],
         "delegated_tasks": [],
         "delegation_log": [],
         "autonomy_notes": [],

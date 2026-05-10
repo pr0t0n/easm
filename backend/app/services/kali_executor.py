@@ -164,6 +164,7 @@ def execute_via_kali(
     scan_mode: str = "unit",
     poll_interval: float = 3.0,
     max_wait: int = 1800,
+    skill_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Dispatches `tool` to the Kali runner via HTTP and waits for completion.
 
@@ -190,6 +191,7 @@ def execute_via_kali(
                 "scan_id": scan_id,
                 "tool": tool_name,
                 "original_target": original_target if original_target != target else None,
+                "skill_context": dict(skill_context or {}),
             },
             timeout=10,
         )
@@ -283,7 +285,12 @@ def execute_via_kali(
             dispatch_task_id=job_id,
         )
 
-    return normalize_kali_result(tool_name, target, scan_mode, result)
+    normalized = normalize_kali_result(tool_name, target, scan_mode, result)
+    if skill_context:
+        normalized["skill_context"] = dict(skill_context)
+        if skill_context.get("skill_id"):
+            normalized["skill_id"] = skill_context.get("skill_id")
+    return normalized
 
 
 def normalize_kali_result(

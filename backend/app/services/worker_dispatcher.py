@@ -29,6 +29,12 @@ def execute_tool_with_workers(
     target: str,
     scan_mode: str = "unit",
     scan_id: int | None = None,
+    skill_id: str | None = None,
+    skill_contract: dict[str, Any] | None = None,
+    technique: dict[str, Any] | None = None,
+    evidence_required: list[str] | None = None,
+    constraints: list[str] | None = None,
+    playbook: str | None = None,
 ) -> dict[str, Any]:
     """Single-path tool execution: always via the Kali runner."""
     if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
@@ -63,6 +69,14 @@ def execute_tool_with_workers(
             tool_name=tool_name,
             target=target,
             scan_id=scan_id,
+            skill_context={
+                "skill_id": skill_id,
+                "skill_contract": skill_contract or {},
+                "technique": technique or {},
+                "evidence_required": evidence_required or [],
+                "constraints": constraints or [],
+                "playbook": playbook or "",
+            },
         )
     else:
         result = execute_via_kali(
@@ -70,7 +84,22 @@ def execute_tool_with_workers(
             target=target,
             scan_id=scan_id,
             scan_mode=scan_mode,
+            skill_context={
+                "skill_id": skill_id,
+                "skill_contract": skill_contract or {},
+                "technique": technique or {},
+                "evidence_required": evidence_required or [],
+                "constraints": constraints or [],
+                "playbook": playbook or "",
+            },
         )
+    if skill_id:
+        result.setdefault("skill_id", skill_id)
+        result.setdefault("skill_contract", skill_contract or {})
+        result.setdefault("technique", (technique or {}).get("name") or technique or {})
+        result.setdefault("evidence_required", evidence_required or [])
+        result.setdefault("constraints", constraints or [])
+        result.setdefault("playbook", playbook or "")
     try:
         agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
         result.setdefault("source_agent_id", agent.get("agent_id"))

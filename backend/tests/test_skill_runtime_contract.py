@@ -1,4 +1,10 @@
-from app.graph.workflow import _consult_supervisor_orchestration, skill_runtime_node
+from app.graph.workflow import (
+    _apply_orchestration_tool_guidance,
+    _consult_supervisor_orchestration,
+    _route_from_supervisor,
+    _run_tools_and_collect,
+    skill_runtime_node,
+)
 from app.services.skill_runtime import resolve_skill_invocation
 
 
@@ -146,3 +152,80 @@ def test_skill_runtime_node_materializes_workflow_gate(monkeypatch) -> None:
     assert state["skill_runtime_contract"]["purpose"] == "workflow_gate"
     assert state["skill_invocations"][0]["purpose"] == "workflow_gate"
     assert "skill_runtime" in state["node_history"]
+
+
+def test_supervisor_routes_tool_capabilities_to_skill_runtime() -> None:
+    state = {"routing_next_node": "risk_assessment"}
+
+    route = _route_from_supervisor(state)
+
+    assert route == "skill_runtime"
+    assert state["pending_capability_node"] == "risk_assessment"
+
+
+def test_orchestration_guidance_selects_only_skill_tools() -> None:
+    state = {"logs_terminais": []}
+
+    selected = _apply_orchestration_tool_guidance(
+        state,
+        "RiskAssessment",
+        ["nuclei", "sqlmap", "dalfox"],
+        {"preferred_tools": ["sqlmap"]},
+    )
+
+    assert selected == ["sqlmap"]
+
+
+def test_tool_execution_dispatch_receives_skill_contract(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _dispatch(tool_name: str, target: str, **kwargs):
+        captured["tool_name"] = tool_name
+        captured["target"] = target
+        captured.update(kwargs)
+        return {
+            "status": "executed",
+            "tool": tool_name,
+            "target": target,
+            "stdout": "",
+            "stderr": "",
+            "command": "sqlmap --batch",
+            "return_code": 0,
+        }
+
+    monkeypatch.setattr("app.graph.workflow.execute_tool_with_workers", _dispatch)
+
+    state = {
+        "scan_id": None,
+        "scan_mode": "unit",
+        "executed_tool_runs": [],
+        "logs_terminais": [],
+        "mission_metrics": {},
+        "autonomy_actions": [],
+        "autonomy_observations": [],
+        "autonomy_errors": [],
+        "tool_runtime": {},
+    }
+
+    _run_tools_and_collect(
+        state,
+        ["sqlmap"],
+        "http://localhost:3001/",
+        "risk_assessment",
+        "ToolExecutor:risk_assessment",
+        skill_context={
+            "skill_id": "vuln-injection",
+            "skill_invocation_id": "skill-test",
+            "skill_contract": {"skill_id": "vuln-injection"},
+            "technique": {"name": "SQLi validation"},
+            "evidence_required": ["sql error"],
+            "constraints": ["safe batch mode"],
+            "playbook_title": "accepted learning",
+        },
+    )
+
+    assert captured["skill_id"] == "vuln-injection"
+    assert captured["skill_contract"] == {"skill_id": "vuln-injection"}
+    assert captured["technique"] == {"name": "SQLi validation"}
+    assert captured["evidence_required"] == ["sql error"]
+    assert captured["constraints"] == ["safe batch mode"]

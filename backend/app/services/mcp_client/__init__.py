@@ -189,6 +189,7 @@ class MCPClient:
         *,
         scan_id: int | str | None = None,
         timeout: int | None = None,
+        skill_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested = str(tool_name or "").strip()
         if not requested:
@@ -207,6 +208,8 @@ class MCPClient:
             "scan_id": scan_id or "mcp_scan",
             "timeout": runner_timeout,
         }
+        if skill_context:
+            payload["skill_context"] = dict(skill_context)
         if normalized_target != original_target:
             payload["original_target"] = original_target
         result = self.call_tool_sync(selected_name, payload, timeout=client_timeout)
@@ -226,6 +229,10 @@ class MCPClient:
         legacy["execution_path"] = "mcp_to_kali"
         legacy["profile"] = result.get("profile") or profile_name
         legacy["raw_mcp_status"] = result.get("status")
+        if skill_context:
+            legacy["skill_context"] = dict(skill_context)
+            if skill_context.get("skill_id"):
+                legacy["skill_id"] = skill_context.get("skill_id")
         if normalized_target != original_target:
             legacy["original_target"] = original_target
         return legacy
