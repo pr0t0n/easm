@@ -222,6 +222,12 @@ class AgentState(TypedDict):
     owner_id: int                            # ID do usuário dono do scan
     # Autonomous agent runtime
     active_skills: list[dict[str, Any]]
+    active_skill: str
+    current_skill: str
+    skill_runtime_ready: bool
+    skill_runtime_contract: dict[str, Any]
+    skill_runtime_gate: dict[str, Any]
+    skill_invocations: list[dict[str, Any]]
     delegated_tasks: list[dict[str, Any]]
     delegation_log: list[dict[str, Any]]
     autonomy_notes: list[dict[str, Any]]
@@ -441,6 +447,130 @@ def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
     return [item[1] for item in ranked]
 
 
+def _default_skill_playbook(group: str, candidate_tools: list[str], primary_skill: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": f"{group} skill-first playbook",
+        "vulnerability_type": str(primary_skill.get("category") or group),
+        "techniques": [
+            {"name": t, "objective": f"execute {t} for {group}", "risk": "low"}
+            for t in candidate_tools
+        ],
+        "evidence_signals": list(primary_skill.get("triggers") or [])[:8],
+    }
+
+
+def _build_skill_playbook_for_context(
+    state: AgentState,
+    group: str,
+    candidate_tools: list[str],
+    phase_label: str,
+    primary_skill: dict[str, Any],
+) -> dict[str, Any]:
+    playbook = _default_skill_playbook(group, candidate_tools, primary_skill)
+    try:
+        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+
+        learned_playbook = build_runtime_learning_playbook(
+            candidate_tools=candidate_tools,
+            phase=phase_label,
+            limit=12,
+        )
+        if learned_playbook:
+            state["logs_terminais"].append(
+                f"[{group}] supervisor usando playbook de aprendizado aceito: "
+                f"techniques={len(learned_playbook.get('techniques') or [])}"
+            )
+            return learned_playbook
+
+        learned_playbook = build_runtime_learning_playbook(
+            candidate_tools=candidate_tools,
+            phase=None,
+            limit=12,
+        )
+        if learned_playbook:
+            state["logs_terminais"].append(
+                f"[{group}] supervisor usando playbook de aprendizado aceito (sem filtro de fase): "
+                f"techniques={len(learned_playbook.get('techniques') or [])}"
+            )
+            return learned_playbook
+    except Exception as exc:
+        state["logs_terminais"].append(f"[{group}] erro ao carregar aprendizado: {exc}")
+    return playbook
+
+
+def _invoke_skill_runtime_for_context(
+    state: AgentState,
+    group: str,
+    candidate_tools: list[str],
+    playbook: dict[str, Any],
+    phase_label: str | None = None,
+    purpose: str = "pre_dispatch",
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    target = str(state.get("target") or "").strip()
+    resolved_phase = str(phase_label or state.get("current_phase") or group)
+    skills = list(state.get("active_skills") or [])
+    primary_skill = skills[0] if skills else {"id": group, "phases": [resolved_phase]}
+    skill_invocation: dict[str, Any] = {}
+
+    try:
+        from app.services.skill_runtime import resolve_skill_invocation
+
+        skill_invocation = resolve_skill_invocation(
+            worker_group=group,
+            phase=resolved_phase,
+            target=target,
+            candidate_tools=candidate_tools,
+            active_skills=skills,
+            playbook=playbook,
+        )
+        if not skill_invocation.get("called"):
+            state["logs_terminais"].append(
+                f"[{group}] skill_call skipped: {skill_invocation.get('reason', 'no skill')}"
+            )
+            return skill_invocation, primary_skill, candidate_tools
+
+        primary_skill = dict(skill_invocation.get("skill") or primary_skill)
+        selected_skill_id = str(skill_invocation.get("skill_id") or primary_skill.get("id") or group)
+        preferred = [
+            str(tool).strip()
+            for tool in (skill_invocation.get("recommended_tools") or [])
+            if str(tool).strip() in candidate_tools
+        ]
+        if preferred:
+            candidate_tools = preferred + [tool for tool in candidate_tools if tool not in preferred]
+
+        invocation_record = {
+            "invocation_id": skill_invocation.get("invocation_id"),
+            "skill_id": selected_skill_id,
+            "worker_group": group,
+            "phase": resolved_phase,
+            "purpose": purpose,
+            "source": skill_invocation.get("source"),
+            "matched_by": list(skill_invocation.get("matched_by") or []),
+            "candidate_tools": list(skill_invocation.get("candidate_tools") or []),
+            "recommended_tools": list(skill_invocation.get("recommended_tools") or []),
+            "confidence": skill_invocation.get("confidence"),
+            "playbook_title": skill_invocation.get("playbook_title"),
+            "created_at": skill_invocation.get("created_at"),
+        }
+        invocations = list(state.get("skill_invocations") or [])
+        invocations.append(invocation_record)
+        state["skill_invocations"] = invocations[-80:]
+        state["current_skill"] = selected_skill_id
+        state["active_skill"] = selected_skill_id
+        state["skill_runtime_contract"] = invocation_record
+        _append_action(state, "skill_invoked", invocation_record)
+        state["logs_terminais"].append(
+            f"[{group}] skill_call skill={selected_skill_id} "
+            f"purpose={purpose} source={skill_invocation.get('source')} "
+            f"tools={','.join(invocation_record['recommended_tools'][:6]) or '-'}"
+        )
+    except Exception as exc:
+        state["logs_terminais"].append(f"[{group}] erro ao invocar skill-runtime: {exc}")
+
+    return skill_invocation, primary_skill, candidate_tools
+
+
 def _consult_supervisor_orchestration(
     state: AgentState,
     group: str,
@@ -454,14 +584,17 @@ def _consult_supervisor_orchestration(
     persisted in `state["orchestration_decisions"]` for audit and feeds the
     Phase Monitor.
 
-    Returning None means we couldn't consult (LLM unreachable AND no fallback
-    info) — the legacy fan-out runs as before. Returning a `block` decision
-    short-circuits this node.
+    A worker may only fan out tools after skill runtime emits a callable
+    skill contract. When the LLM is unavailable, the skill runtime produces
+    the operational fallback decision instead of falling back to blind fan-out.
     """
     try:
         from app.agents.supervisor_runtime import decide_next_technique, BlockedDecision
     except Exception:  # noqa: BLE001
-        return None
+        decide_next_technique = None
+
+        class BlockedDecision(Exception):
+            pass
 
     target = str(state.get("target") or "").strip()
     phase_label = str(state.get("current_phase") or group)
@@ -473,46 +606,26 @@ def _consult_supervisor_orchestration(
     skills = list(state.get("active_skills") or [])
     primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
     knowledge_context: dict[str, Any] = {}
-    playbook = {
-        "title": f"{group} playbook",
-        "vulnerability_type": str(primary_skill.get("category") or group),
-        "techniques": [
-            {"name": t, "objective": f"execute {t} for {group}", "risk": "low"}
-            for t in candidate_tools
-        ],
-        "evidence_signals": list(primary_skill.get("triggers") or [])[:8],
-    }
-    try:
-        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
-
-        learned_playbook = build_runtime_learning_playbook(
-            candidate_tools=candidate_tools,
-            phase=phase_label,
-            limit=12,
-        )
-        if learned_playbook:
-            playbook = learned_playbook
-            state["logs_terminais"].append(
-                f"[{group}] supervisor usando playbook de aprendizado aceito: "
-                f"techniques={len(learned_playbook.get('techniques') or [])}"
-            )
-        else:
-            # Fallback: try without phase filter to get broader learning
-            learned_playbook = build_runtime_learning_playbook(
-                candidate_tools=candidate_tools,
-                phase=None,  # Remove phase filter
-                limit=12,
-            )
-            if learned_playbook:
-                playbook = learned_playbook
-                state["logs_terminais"].append(
-                    f"[{group}] supervisor usando playbook de aprendizado aceito (sem filtro de fase): "
-                    f"techniques={len(learned_playbook.get('techniques') or [])}"
-                )
-    except Exception as exc:
+    playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
+    skill_invocation, primary_skill, candidate_tools = _invoke_skill_runtime_for_context(
+        state,
+        group,
+        candidate_tools,
+        playbook,
+        phase_label,
+        purpose="pre_dispatch",
+    )
+    if not skill_invocation.get("called"):
+        state.setdefault("orchestration_decisions", []).append({
+            "group": group,
+            "decision": "block",
+            "reason": "skill_runtime_not_called",
+            "phase": phase_label,
+        })
         state["logs_terminais"].append(
-            f"[{group}] erro ao carregar aprendizado: {exc}"
+            f"[{group}] tool fan-out bloqueado: skill-runtime nao materializou contrato"
         )
+        return {"execution_decision": "block", "notes": "skill_runtime_not_called"}
 
     try:
         from app.services.agent_context_service import build_worker_knowledge_context
@@ -542,6 +655,8 @@ def _consult_supervisor_orchestration(
         "target": target,
         "phase": phase_label,
         "skill": str(primary_skill.get("id") or group),
+        "skill_invocation_id": skill_invocation.get("invocation_id"),
+        "skill_runtime_called": bool(skill_invocation.get("called")),
         "authorized_scope": True,  # ScanAuthorization gate runs upstream
         "auth_available": bool(state.get("auth_available")),
         "max_risk_allowed": "medium",
@@ -571,6 +686,8 @@ def _consult_supervisor_orchestration(
         catalog = "(tool catalog unavailable)"
 
     try:
+        if decide_next_technique is None:
+            raise RuntimeError("supervisor_runtime unavailable; using skill-runtime fallback")
         decision = decide_next_technique(
             playbook=playbook,
             execution_context=execution_context,
@@ -581,11 +698,40 @@ def _consult_supervisor_orchestration(
     except BlockedDecision as exc:
         state.setdefault("orchestration_decisions", []).append({
             "group": group, "decision": "block", "reason": str(exc),
+            "skill_invocation_id": skill_invocation.get("invocation_id"),
         })
         state["logs_terminais"].append(f"[{group}] supervisor BLOCK: {exc}")
         return {"execution_decision": "block", "notes": str(exc)}
     except Exception as exc:  # noqa: BLE001
         state["logs_terminais"].append(f"[{group}] supervisor consult error: {exc}")
+        try:
+            from app.services.skill_runtime import build_skill_guided_fallback_decision
+
+            fallback = build_skill_guided_fallback_decision(
+                skill_invocation=skill_invocation,
+                execution_context=execution_context,
+                candidate_tools=candidate_tools,
+                playbook=playbook,
+                reason=str(exc),
+            )
+            if fallback:
+                state.setdefault("orchestration_decisions", []).append({
+                    "group": group,
+                    "decision": fallback.get("execution_decision"),
+                    "technique": (fallback.get("selected_technique") or {}).get("name"),
+                    "phase": execution_context.get("phase"),
+                    "skill": execution_context.get("skill"),
+                    "confidence": fallback.get("confidence"),
+                    "decision_source": fallback.get("decision_source"),
+                    "skill_invocation_id": skill_invocation.get("invocation_id"),
+                })
+                state["logs_terminais"].append(
+                    f"[{group}] supervisor fallback por skill-runtime: "
+                    f"skill={execution_context.get('skill')} tools={','.join(fallback.get('preferred_tools') or []) or '-'}"
+                )
+                return fallback
+        except Exception as fallback_exc:  # noqa: BLE001
+            state["logs_terminais"].append(f"[{group}] skill-runtime fallback error: {fallback_exc}")
         return None
 
     state.setdefault("orchestration_decisions", []).append({
@@ -596,6 +742,7 @@ def _consult_supervisor_orchestration(
         "skill": decision.get("execution_context", {}).get("skill"),
         "confidence": decision.get("confidence"),
         "memory_items": len((decision.get("memory_context") or {}).get("knowledge_items") or []),
+        "skill_invocation_id": skill_invocation.get("invocation_id"),
     })
     selected_name = str((decision.get("selected_technique") or {}).get("name") or "").strip().lower()
     preferred_tools: list[str] = []
@@ -612,11 +759,22 @@ def _consult_supervisor_orchestration(
         for tool in ((decision.get("memory_context") or {}).get("recommended_tools") or [])
         if str(tool).strip()
     )
+    preferred_tools.extend(
+        str(tool).strip()
+        for tool in (skill_invocation.get("recommended_tools") or [])
+        if str(tool).strip()
+    )
     decision["preferred_tools"] = [
         tool for tool in dict.fromkeys(preferred_tools)
         if tool in candidate_tools
     ]
     decision["playbook_title"] = playbook.get("title")
+    decision["skill_invocation"] = {
+        "invocation_id": skill_invocation.get("invocation_id"),
+        "skill_id": skill_invocation.get("skill_id"),
+        "matched_by": list(skill_invocation.get("matched_by") or []),
+        "source": skill_invocation.get("source"),
+    }
     return decision
 
 
@@ -807,112 +965,74 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
     return state
 
 
-def tool_execution_node(state: AgentState) -> AgentState:
-    """Execute Kali tools via MCP based on selected skill."""
+def _bootstrap_skill_group(state: AgentState) -> str:
+    next_node = str(state.get("routing_next_node") or "").strip()
+    if next_node in {"asset_discovery", "threat_intel", "risk_assessment", "adversarial_hypothesis"}:
+        return next_node
+    current = str(state.get("current_phase") or "").strip()
+    if current in {"asset_discovery", "threat_intel", "risk_assessment", "adversarial_hypothesis"}:
+        return current
+    return "asset_discovery"
+
+
+def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[str]:
+    scan_mode = str(state.get("scan_mode") or "unit")
+    tools = _tools_for_group(scan_mode, group)
+    target = str(state.get("target") or "")
+    if group == "asset_discovery":
+        tools = _adapt_recon_tools_for_target(target, tools)
+    elif group == "risk_assessment":
+        tools = _adapt_vuln_tools_for_target(target, tools)
+    return _select_tool_batch_for_iteration(state, group=group, tools=tools)
+
+
+def skill_runtime_node(state: AgentState) -> AgentState:
+    """Skill-first workflow gate.
+
+    This node does not execute Kali tools. It materializes the operational
+    skill contract that the supervisor and workers must follow before any
+    tool fan-out happens.
+    """
     started_at = _metric_start()
-    _sync_step_to_db(state, "Tool Execution")
+    _sync_step_to_db(state, "Skill Runtime")
 
     try:
-        from app.core.config import settings
-        from app.services.mcp_client import mcp_client
-
-        # Get current skill and target
-        current_skill = state.get("current_skill") or state.get("active_skill")
-        target = state.get("target", "")
-        scan_id = state.get("scan_id", "unknown")
-
-        if not current_skill or not target:
-            state["logs_terminais"].append("[TOOL] No skill or target, skipping tool execution")
-            _metric_end(state, "tool_execution", started_at)
-            return state
-
-        if not settings.mcp_rag_enabled or not mcp_client.health_check_sync():
-            state["logs_terminais"].append("[TOOL] MCP server not available, skipping execution")
-            _metric_end(state, "tool_execution", started_at)
-            return state
-
-        # Find relevant tools for the skill
-        available_tools = mcp_client.list_tools_sync()
-        if not available_tools:
-            state["logs_terminais"].append("[TOOL] No tools available from Kali runner")
-            _metric_end(state, "tool_execution", started_at)
-            return state
-
-        # Filter tools by category matching the skill
-        skill_to_category = {
-            "recon-subdomain-enum": "recon",
-            "recon-port-service": "recon",
-            "tech-http-fingerprint": "recon",
-            "vuln-nuclei-cve": "vuln",
-            "vuln-sql-injection": "vuln",
-            "vuln-xss-injection": "vuln",
-            "osint-exposure-intel": "osint",
+        _refresh_active_skills(state)
+        group = _bootstrap_skill_group(state)
+        phase_label = str(state.get("current_phase") or group)
+        candidate_tools = _candidate_tools_for_skill_bootstrap(state, group)
+        skills = list(state.get("active_skills") or [])
+        primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
+        playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
+        invocation, _, guided_tools = _invoke_skill_runtime_for_context(
+            state,
+            group,
+            candidate_tools,
+            playbook,
+            phase_label,
+            purpose="workflow_gate",
+        )
+        state["skill_runtime_ready"] = bool(invocation.get("called"))
+        state["skill_runtime_gate"] = {
+            "group": group,
+            "phase": phase_label,
+            "called": bool(invocation.get("called")),
+            "skill_id": invocation.get("skill_id"),
+            "recommended_tools": list(invocation.get("recommended_tools") or []),
+            "candidate_tools": guided_tools,
+            "playbook_title": playbook.get("title"),
         }
-
-        skill_category = skill_to_category.get(current_skill, current_skill.split("-")[0] if "-" in current_skill else "recon")
-
-        relevant_tools = [
-            tool for tool in available_tools
-            if tool.get("metadata", {}).get("category") == skill_category
-        ]
-
-        if not relevant_tools:
-            state["logs_terminais"].append(f"[TOOL] No tools found for skill {current_skill}")
-            _metric_end(state, "tool_execution", started_at)
-            return state
-
-        # Execute the first relevant tool
-        tool_to_execute = relevant_tools[0]
-        tool_name = tool_to_execute.get("name", "")
-
-        state["logs_terminais"].append(f"[TOOL] Executing {tool_name} for skill {current_skill} against {target}")
-
-        result = mcp_client.execute_kali_tool_sync(
-            tool_name=tool_name,
-            target=target,
-            scan_id=scan_id,
-            timeout=300  # 5-minute timeout per tool
+        state["logs_terminais"].append(
+            f"[SKILL] runtime gate ready={state['skill_runtime_ready']} "
+            f"group={group} skill={invocation.get('skill_id') or '-'}"
         )
 
-        # Store execution result
-        execution_result = {
-            "tool": tool_name,
-            "skill": current_skill,
-            "target": target,
-            "status": result.get("status", "unknown"),
-            "output": result.get("output", ""),
-            "error": result.get("error", ""),
-            "execution_time": result.get("execution_time", 0),
-            "timestamp": datetime.now().isoformat()
-        }
-
-        # Store results in state
-        state.setdefault("executed_tools", []).append(execution_result)
-        state.setdefault("tool_results", []).append(result)
-
-        # Log learning from execution
-        if result.get("status") == "done":
-            learning_metadata = {
-                "source": "tool_execution",
-                "tool": tool_name,
-                "skill": current_skill,
-                "target": target,
-                "status": "successful"
-            }
-            mcp_client.ingest_document_sync(
-                content=f"Tool {tool_name} executed successfully for {current_skill}: {result.get('output', '')[:500]}",
-                metadata=learning_metadata,
-                source="tool_execution"
-            )
-            state["logs_terminais"].append(f"[TOOL] Tool execution completed successfully")
-        else:
-            state["logs_terminais"].append(f"[TOOL] Tool execution failed: {result.get('error', 'unknown error')}")
-
     except Exception as exc:
-        state["logs_terminais"].append(f"[TOOL] Execution failed: {exc}")
-        logger.warning(f"Tool execution failed: {exc}")
+        state["skill_runtime_ready"] = False
+        state["logs_terminais"].append(f"[SKILL] runtime gate failed: {exc}")
+        logger.warning("Skill runtime gate failed: %s", exc)
 
-    _metric_end(state, "tool_execution", started_at)
+    _metric_end(state, "skill_runtime", started_at)
     return state
 
 
@@ -4638,13 +4758,13 @@ def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: st
 def build_graph(mode: ScanMode = "unit"):
     """Single-Agent Meta-Everything (Supervisor-Centric) LangGraph.
 
-    O supervisor é o único decisor estratégico e roteia capacidades dinamicamente:
-    strategic_planning, asset_discovery, threat_intel, adversarial_hypothesis,
-    risk_assessment, evidence_adjudication, governance e executive_analyst.
+    O fluxo é skill-first: RAG enriquece contexto, skill_runtime materializa
+    a skill operacional, e só então o supervisor roteia capacidades.
     """
     graph = StateGraph(AgentState)
 
     graph.add_node("rag_enrichment", rag_enrichment_node)
+    graph.add_node("skill_runtime", skill_runtime_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("strategic_planning", strategic_planning_node)
     graph.add_node("asset_discovery",   asset_discovery_node)
@@ -4656,7 +4776,8 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_node("executive_analyst", executive_analyst_node)
 
     graph.set_entry_point("rag_enrichment")
-    graph.add_edge("rag_enrichment", "supervisor")
+    graph.add_edge("rag_enrichment", "skill_runtime")
+    graph.add_edge("skill_runtime", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         _route_from_supervisor,
@@ -4775,6 +4896,12 @@ def initial_state(
         "last_completed_node": "",
         "agent_validation": {},
         "active_skills": initial_skills,
+        "active_skill": "",
+        "current_skill": "",
+        "skill_runtime_ready": False,
+        "skill_runtime_contract": {},
+        "skill_runtime_gate": {},
+        "skill_invocations": [],
         "delegated_tasks": [],
         "delegation_log": [],
         "autonomy_notes": [],

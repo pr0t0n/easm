@@ -362,6 +362,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "JWT string", "outputs": "vulnerabilities + forged tokens",
         "prerequisites": "captured JWT",
     },
+    "crackmapexec": {
+        "category": "exploit", "phase": "P14",
+        "description": "Network protocol assessment for SMB/WinRM/LDAP exposure and credential validation.",
+        "when_to_use": "Only inside authorized internal scope or explicit lab targets when auth/Windows service evidence exists.",
+        "inputs": "host, protocol, optional authorized credentials", "outputs": "service/auth findings",
+        "prerequisites": "explicit authorization and reachable Windows protocol service",
+    },
     "impacket": {
         "category": "exploit", "phase": "P14",
         "description": "Suite for Windows protocols (psexec, smbexec, secretsdump, GetNPUsers).",

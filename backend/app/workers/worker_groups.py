@@ -29,20 +29,21 @@ def _group_config(
 CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "scope_validation": [],
     "reconnaissance": [
-        "subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx",
+        "subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx",
         "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers",
         "sslscan", "testssl", "katana", "hakrawler", "gau", "waybackurls",
-        "gospider", "arjun", "paramspider", "ffuf-params", "wfuzz",
+        "gospider", "js-snooper", "jsniper", "arjun", "paramspider", "ffuf-params",
+        "ffuf-values", "wfuzz", "nikto",
     ],
     "weaponization": [
         "nuclei", "nmap-vulscan", "shodan-cli", "theHarvester", "h8mail",
-        "trufflehog", "gitleaks", "subjack",
+        "trufflehog", "gitleaks", "subjack", "metagoofil",
     ],
     "delivery": ["ffuf", "ffuf-files", "ffuf-params", "ffuf-values", "ffuf-post", "wfuzz", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider"],
-    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client", "katana", "arjun", "curl-headers", "ffuf-params", "ffuf-post"],
-    "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool", "nuclei", "curl-headers", "arjun"],
+    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client", "katana", "arjun", "curl-headers", "ffuf-params", "ffuf-post", "hydra", "medusa", "crackmapexec", "jwt_tool", "impacket", "evilwinrm", "sslscan", "testssl", "nmap"],
+    "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool", "impacket", "evilwinrm", "nuclei", "curl-headers", "arjun"],
     "command_control": ["nuclei", "interactsh-client", "testssl"],
-    "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy"],
+    "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy", "eslint", "jshint", "ast-grep"],
     "reporting": [],
 }
 
@@ -123,7 +124,21 @@ CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
 
 
 def get_canonical_group_tools() -> dict[str, list[str]]:
-    return {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
+    tools_by_group = {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
+    aliases = {
+        "recon": "reconnaissance",
+        "reconhecimento": "reconnaissance",
+        "osint": "weaponization",
+        "vuln": "exploitation",
+        "analise_vulnerabilidade": "exploitation",
+        "exploit": "installation",
+        "api": "delivery",
+        "code": "actions_on_objectives",
+    }
+    for alias, target in aliases.items():
+        if target in tools_by_group:
+            tools_by_group[alias] = list(tools_by_group[target])
+    return tools_by_group
 
 
 def get_canonical_group_missions() -> dict[str, dict[str, Any]]:
@@ -182,11 +197,13 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "contract": contract,
             "skill_context": {
                 "retrieval_required": True,
+                "runtime_invocation_required": True,
                 "knowledge_sources": ["accepted_learning", "repo_tests", "mcp_rag"],
                 "execution_path": "mcp_to_kali",
-                "pre_execution_step": "retrieve skill memory before selecting/dispatching tool",
+                "pre_execution_step": "invoke skill runtime, then retrieve skill memory before selecting/dispatching tool",
             },
             "operational_sequence": [
+                "invoke_skill_runtime",
                 "retrieve_skill_memory",
                 "select_learning_guided_technique",
                 "dispatch_tool_via_mcp",

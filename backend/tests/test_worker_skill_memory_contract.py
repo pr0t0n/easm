@@ -8,8 +8,11 @@ def test_worker_profiles_require_skill_memory_step() -> None:
     recon = profiles["reconnaissance"]
 
     assert recon["skill_context"]["retrieval_required"] is True
+    assert recon["skill_context"]["runtime_invocation_required"] is True
     assert recon["skill_context"]["execution_path"] == "mcp_to_kali"
+    assert "invoke_skill_runtime" in recon["operational_sequence"]
     assert "retrieve_skill_memory" in recon["operational_sequence"]
+    assert recon["operational_sequence"].index("invoke_skill_runtime") < recon["operational_sequence"].index("retrieve_skill_memory")
     assert recon["contract"]["tool_execution_path"] == "mcp_to_kali"
 
 
