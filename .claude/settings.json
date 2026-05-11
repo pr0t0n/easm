@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:8088/api/tools)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(type\\(d\\), str\\(d\\)[:500]\\)\")",
+      "Bash(curl -s http://localhost:8088/profiles)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); names=[x.get\\('name',''\\) for x in \\(d if isinstance\\(d,list\\) else d.get\\('profiles',d.get\\('tools',[]\\)\\)\\)]; print\\(sorted\\(names\\)\\)\")"
+    ]
+  }
+}
