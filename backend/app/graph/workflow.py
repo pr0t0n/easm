@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import re
 import socket
@@ -10,60 +12,52 @@ from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
-# ─────────────────────────────────────────────────────────────
-# Utilidades
-# ─────────────────────────────────────────────────────────────
-ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m|\[[0-9]{1,3}m')
-
-def _strip_ansi_codes(text: str) -> str:
-    """Remove ANSI color codes from text (e.g., [92m, [0m, etc)."""
-    if not text:
-        return text
-    return ANSI_ESCAPE_PATTERN.sub('', text)
-
 from app.graph.checkpointer import create_checkpointer
 from app.graph.mission import MISSION_ITEMS as AUTONOMOUS_MISSION_ITEMS
 
-# Mapeamento de fases/atividades para grupos de worker
-MISSION_PHASE_TO_GROUP = {
-    "Recon": "recon",
-    "Vuln Scan": "vuln",
-    "Content": "recon",
-    "SSL/TLS": "recon",
-    "Auth": "vuln",
-    "Injection": "vuln",
-    "SSRF": "vuln",
-    "IDOR": "vuln",
-    "API": "vuln",
-    "Upload": "vuln",
-    "RCE": "vuln",
-    "Race": "vuln",
-    "Takeover": "recon",
-    "Email": "osint",
-    "Cloud": "osint",
-    "WebSocket": "vuln",
-    "CMS": "vuln",
-    "Links": "recon",
-    "Supply Chain": "osint",
-    "Report": "recon",
-}
+# ─────────────────────────────────────────────────────────────
+# Re-exports from split modules (keep existing callers working)
+# ─────────────────────────────────────────────────────────────
+from app.graph.state import (
+    AgentState,
+    MISSION_PHASE_TO_GROUP,
+    TOOL_CAPABILITY_NODES,
+    CAPABILITY_SKILL_CATEGORIES,
+)
+from app.graph.tool_parsers import (
+    ANSI_ESCAPE_PATTERN,
+    KNOWN_WAF_MODELS,
+    WAF_VENDOR_ALIASES,
+    _strip_ansi_codes,
+    _sanitize_cli_text,
+    _normalize_waf_vendor,
+    _truncate_log,
+    _severity_to_risk_score,
+    _extract_asm_findings,
+    _extract_tool_output_findings,
+    _extract_shodan_findings,
+    _extract_wafw00f_findings,
+    _extract_shcheck_findings,
+    _extract_curl_headers_findings,
+    _extract_nikto_findings,
+    _extract_nmap_vulscan_findings,
+    _extract_sslscan_findings,
+    _extract_testssl_findings,
+    _extract_wapiti_findings,
+    _extract_sqlmap_findings,
+    _extract_dalfox_findings,
+    _extract_amass_findings,
+    _extract_sublist3r_findings,
+    _extract_dnsenum_findings,
+    _extract_massdns_findings,
+    _extract_subjack_findings,
+    _extract_ffuf_findings,
+    _extract_gobuster_findings,
+    _extract_cloudenum_findings,
+    _extract_whatweb_findings,
+    _extract_katana_findings,
+)
 
-TOOL_CAPABILITY_NODES = {"asset_discovery", "threat_intel", "risk_assessment"}
-
-# Preferred skill categories per capability node — used by supervisor to select
-# the operational skill before handing off to the skill pipeline.
-CAPABILITY_SKILL_CATEGORIES: dict[str, tuple[str, ...]] = {
-    "asset_discovery": ("reconnaissance", "technologies", "protocols"),
-    "threat_intel": ("osint", "code", "vulnerabilities"),
-    "risk_assessment": ("vulnerabilities", "protocols", "technologies"),
-}
-
-# Função utilitária para obter o grupo de worker para uma fase
-def get_worker_group_for_phase(phase_title: str) -> str:
-    for key, group in MISSION_PHASE_TO_GROUP.items():
-        if key.lower() in phase_title.lower():
-            return group
-    return "recon"  # fallback padrão
 from app.graph.mission import build_autonomous_mission_contract, select_mission_skills
 from app.services.risk_service import (
     build_fair_decomposition,
@@ -78,44 +72,13 @@ from app.workers.worker_groups import ScanMode, get_worker_groups
 
 logger = logging.getLogger(__name__)
 
+# Função utilitária para obter o grupo de worker para uma fase
+def get_worker_group_for_phase(phase_title: str) -> str:
+    for key, group in MISSION_PHASE_TO_GROUP.items():
+        if key.lower() in phase_title.lower():
+            return group
+    return "recon"  # fallback padrão
 
-def _sync_step_to_db(state: "AgentState", step_label: str) -> None:
-    """Persiste current_step, mission_index, e node_history no ScanJob durante execução do grafo.
-
-    Chamado no início de cada node para que o frontend veja progresso em tempo
-    real, sem depender do pulse thread.
-    """
-    scan_id = state.get("scan_id")
-    if not scan_id:
-        return
-    try:
-        from app.db.session import SessionLocal
-        from app.models.models import ScanJob
-        _db = SessionLocal()
-        try:
-            job = _db.query(ScanJob).filter(ScanJob.id == scan_id).first()
-            if job and job.status not in ("completed", "failed", "stopped"):
-                job.current_step = step_label
-                mission_items = state.get("mission_items") or []
-                mi = state.get("mission_index", 0)
-                total = max(1, len(mission_items))
-                job.mission_progress = int(round(min(mi, total) / total * 100))
-                current_node = _node_for_step(step_label, state.get("scan_mode", "unit"))
-                snapshot_node_history = list(state.get("node_history", []))
-                if current_node and (not snapshot_node_history or snapshot_node_history[-1] != current_node):
-                    snapshot_node_history.append(current_node)
-                # Snapshot para o frontend consultar via /status
-                sd = dict(job.state_data or {})
-                sd["mission_index"] = mi
-                sd["mission_items"] = mission_items
-                sd["node_history"] = snapshot_node_history
-                sd["current_node"] = current_node
-                job.state_data = sd
-                _db.commit()
-        finally:
-            _db.close()
-    except Exception:
-        logger.exception("Falha ao sincronizar step no banco")
 
 # Senior Cyber Analyst pipeline (framework-driven)
 GROUP_MISSION_ITEMS: list[str] = [
@@ -133,1609 +96,6 @@ EVIDENCE_RULES: dict[str, Any] = {
     "high_requires": ["impact", "technical_evidence"],
     "minimum_confidence_for_promote": 70,
 }
-
-KNOWN_WAF_MODELS: list[str] = [
-    "cloudflare",
-    "akamai",
-    "imperva",
-    "modsecurity",
-    "mod_security",
-    "f5",
-    "aws waf",
-    "barracuda",
-    "fortiweb",
-    "google cloud armor",
-    "google cloud app armor",
-]
-
-WAF_VENDOR_ALIASES: list[tuple[str, tuple[str, ...]]] = [
-    ("Cloudflare", ("cloudflare",)),
-    ("Akamai", ("akamai",)),
-    ("Imperva", ("imperva", "incapsula")),
-    ("ModSecurity", ("modsecurity", "mod_security")),
-    ("F5", ("f5", "big-ip asm", "bigip asm")),
-    ("AWS WAF", ("aws waf", "amazon waf", "amazon web application firewall")),
-    ("Barracuda", ("barracuda",)),
-    ("FortiWeb", ("fortiweb",)),
-    ("Google Cloud Armor", ("google cloud armor", "google cloud app armor", "app armor (google cloud)", "gcp armor")),
-]
-
-
-def _sanitize_cli_text(value: str | None) -> str:
-    if not value:
-        return ""
-    sanitized = str(value)
-    sanitized = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", sanitized)
-    sanitized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", sanitized)
-    sanitized = re.sub(r"\s+", " ", sanitized).strip()
-    return sanitized
-
-
-def _normalize_waf_vendor(value: str | None) -> str:
-    blob = _sanitize_cli_text(value).lower()
-    if not blob:
-        return ""
-    for canonical, aliases in WAF_VENDOR_ALIASES:
-        if any(alias in blob for alias in aliases):
-            return canonical
-    for model in KNOWN_WAF_MODELS:
-        if model in blob:
-            return model.title()
-    return ""
-
-
-class AgentState(TypedDict):
-    trace_id: str
-    scan_id: int
-    target: str
-    scan_mode: str                          # "unit" | "scheduled"
-    target_type: str                        # "site" | "dominio" — controla expansão de subdomínios
-    easm_segment: str                       # Segmento de mercado inferido
-    input_targets: list[str]
-    lista_ativos: list[str]
-    logs_terminais: list[str]
-    vulnerabilidades_encontradas: list[dict[str, Any]]
-    proxima_ferramenta: str
-    discovered_ports: list[int]
-    pending_port_tests: list[int]
-    pending_asset_scans: list[str]
-    scanned_assets: list[str]
-    discovered_subdomains_persisted: list[str]  # Subdomínios já salvos no banco (idempotência)
-    port_followup_done: bool
-    activity_metrics: list[dict[str, Any]]
-    mission_metrics: dict[str, int]
-    node_history: list[str]
-    mission_index: int
-    mission_items: list[str]
-    known_vulnerability_patterns: list[str]
-    executed_tool_runs: list[str]
-    # Governance fields (preenchidos pelo GovernanceNode)
-    asset_fingerprints: dict[str, dict]     # asset -> {waf, tech, ports, cvss}
-    fair_decomposition: dict[str, Any]      # 3-pillar FAIR breakdown
-    easm_rating: dict[str, Any]             # {score, grade, factors, methodology}
-    # Executive fields (preenchidos pelo ExecutiveAnalystNode)
-    executive_summary: str                  # Narrativa LLM gerada
-    # Senior framework contracts
-    analyst_framework: dict[str, Any]       # Framework ativo e política de decisão
-    operation_plan: dict[str, Any]          # Plano estruturado por fases
-    confidence_state: dict[str, Any]        # Confiança por hipótese/fase
-    evidence_contract: dict[str, Any]       # Regras de promoção de achados
-    completed_capabilities: list[str]       # Capacidades já executadas no ciclo atual
-    loop_iteration: int                      # Iteração atual do supervisor
-    max_iterations: int                      # Orçamento máximo de iterações
-    objective_met: bool                      # Flag de término de operação
-    termination_reason: str                  # Motivo de término da operação
-    routing_next_node: str                   # Próximo nó escolhido pelo supervisor
-    pending_capability_node: str             # Capability aguardando skill/tool pipeline
-    current_phase: str                       # Fase atual (usado para proteção contra loop)
-    last_completed_node: str                 # Último nó de capacidade concluído
-    agent_validation: dict[str, Any]         # Score de qualidade da execução
-    owner_id: int                            # ID do usuário dono do scan
-    # Autonomous agent runtime
-    active_skills: list[dict[str, Any]]
-    active_skill: str
-    current_skill: str
-    skill_selector_ready: bool
-    skill_selector_gate: dict[str, Any]
-    skill_invocation: dict[str, Any]
-    skill_contract: dict[str, Any]
-    skill_plan_contract: dict[str, Any]
-    skill_invocations: list[dict[str, Any]]
-    selected_skill: dict[str, Any]          # Skill escolhida pelo supervisor para o próximo ciclo
-    capability_context: dict[str, Any]
-    tool_selection_contract: dict[str, Any]
-    tool_execution_results: list[dict[str, Any]]
-    delegated_tasks: list[dict[str, Any]]
-    delegation_log: list[dict[str, Any]]
-    autonomy_notes: list[dict[str, Any]]
-    autonomy_todos: list[dict[str, Any]]
-    autonomy_actions: list[dict[str, Any]]
-    autonomy_observations: list[dict[str, Any]]
-    autonomy_errors: list[dict[str, Any]]
-    execution_control: dict[str, Any]
-    tool_runtime: dict[str, dict[str, int]]
-    validation_backlog: list[dict[str, Any]]
-
-
-def _metric_start() -> float:
-    return perf_counter()
-
-
-def _metric_end(state: AgentState, node_name: str, started_at: float):
-    duration_ms = round((perf_counter() - started_at) * 1000, 2)
-    state["activity_metrics"].append(
-        {
-            "node": node_name,
-            "duration_ms": duration_ms,
-            "timestamp": datetime.utcnow().isoformat(),
-            "mission_index": state.get("mission_index", 0),
-        }
-    )
-    state["node_history"].append(node_name)
-    state["last_completed_node"] = node_name
-
-
-def _node_for_step(step_name: str, scan_mode: str) -> str:
-    step = str(step_name or "").strip().lower()
-    if step in {"", "done"}:
-        return "supervisor"
-    if "supervisor" in step:
-        return "supervisor"
-    if "planning" in step or "strategic" in step:
-        return "skill_planner"
-    if "selector" in step:
-        return "tool_selector"
-    if "executor" in step:
-        return "tool_executor"
-    if "asset" in step or "recon" in step or "discovery" in step:
-        return "asset_discovery"
-    if "hypothesis" in step:
-        return "skill_planner"
-    if "risk" in step or "vuln" in step or "assessment" in step:
-        return "risk_assessment"
-    if "adjudication" in step or "evidence" in step:
-        return "evidence_gate"
-    if "governance" in step:
-        return "governance"
-    if "executive" in step:
-        return "executive_analyst"
-    return "supervisor"
-
-
-def _count_high_signal_findings(state: AgentState) -> int:
-    findings = state.get("vulnerabilidades_encontradas") or []
-    return sum(
-        1
-        for finding in findings
-        if str(finding.get("severity", "")).lower() in {"critical", "high"}
-    )
-
-
-def _has_verified_or_strong_evidence(state: AgentState) -> bool:
-    findings = state.get("vulnerabilidades_encontradas") or []
-    for finding in findings:
-        details = dict(finding.get("details") or {})
-        status = str(details.get("validation_status") or "").lower()
-        risk_score = float(finding.get("risk_score") or 0)
-        if status == "verified":
-            return True
-        if str(finding.get("severity", "")).lower() in {"critical", "high"} and risk_score >= 7:
-            return True
-    return False
-
-
-def _route_from_supervisor(state: AgentState):
-    next_node = state.get("routing_next_node")
-    if next_node in (END, "END"):
-        return END
-    # If the supervisor already committed to a skill, head straight to the pipeline.
-    # pending_capability_node carries the capability label for context.
-    if state.get("selected_skill"):
-        if next_node in TOOL_CAPABILITY_NODES:
-            state["pending_capability_node"] = str(next_node)
-        return "skill_selector"
-    # Backward-compat: capability label alone still routes to skill_selector.
-    if next_node in TOOL_CAPABILITY_NODES:
-        state["pending_capability_node"] = str(next_node)
-        return "skill_selector"
-    return next_node
-
-
-def _append_autonomy_entry(state: AgentState, key: str, payload: dict[str, Any]) -> None:
-    bucket = list(state.get(key) or [])
-    bucket.append(
-        {
-            **payload,
-            "ts": datetime.utcnow().isoformat(),
-            "iteration": int(state.get("loop_iteration", 0)),
-        }
-    )
-    state[key] = bucket
-
-
-def _append_note(state: AgentState, text: str, phase: str) -> None:
-    _append_autonomy_entry(state, "autonomy_notes", {"phase": phase, "text": str(text)})
-
-
-def _append_todo(state: AgentState, title: str, priority: str = "medium") -> None:
-    _append_autonomy_entry(
-        state,
-        "autonomy_todos",
-        {"title": str(title), "priority": str(priority), "status": "open"},
-    )
-
-
-def _append_action(state: AgentState, action: str, data: dict[str, Any] | None = None) -> None:
-    _append_autonomy_entry(state, "autonomy_actions", {"action": str(action), "data": dict(data or {})})
-
-
-def _append_observation(state: AgentState, text: str, source: str) -> None:
-    _append_autonomy_entry(state, "autonomy_observations", {"source": source, "text": str(text)})
-
-
-def _append_error(state: AgentState, text: str, source: str) -> None:
-    _append_autonomy_entry(state, "autonomy_errors", {"source": source, "text": str(text)})
-
-
-def _refresh_active_skills(state: AgentState) -> None:
-    selected = select_mission_skills(
-        target=str(state.get("target") or ""),
-        findings=list(state.get("vulnerabilidades_encontradas") or []),
-        target_type=str(state.get("target_type") or "dominio"),
-        discovered_ports=list(state.get("discovered_ports") or []),
-        max_skills=5,
-    )
-    prev_ids = {str(item.get("id") or "") for item in list(state.get("active_skills") or [])}
-    state["active_skills"] = selected
-    selected_ids = [str(item.get("id") or "") for item in selected]
-    if set(selected_ids) != prev_ids:
-        _append_note(state, f"Skills ativas atualizadas: {', '.join(selected_ids)}", phase="skill-selection")
-
-
-def _register_delegation_task(state: AgentState, node: str, reason: str, priority: int) -> None:
-    tasks = list(state.get("delegated_tasks") or [])
-    duplicate = any(
-        str(item.get("node") or "") == node and str(item.get("status") or "") == "pending"
-        for item in tasks
-    )
-    if duplicate:
-        return
-    task = {
-        "id": f"deleg-{uuid4().hex[:10]}",
-        "node": node,
-        "reason": reason,
-        "priority": int(priority),
-        "status": "pending",
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    tasks.append(task)
-    tasks.sort(key=lambda item: int(item.get("priority", 999)))
-    state["delegated_tasks"] = tasks
-    _append_action(state, "delegate_task_created", task)
-
-
-def _complete_delegation_task(state: AgentState, node: str, summary: str) -> None:
-    tasks = list(state.get("delegated_tasks") or [])
-    changed = False
-    for item in tasks:
-        if str(item.get("node") or "") == node and str(item.get("status") or "") == "pending":
-            item["status"] = "done"
-            item["completed_at"] = datetime.utcnow().isoformat()
-            item["summary"] = summary
-            changed = True
-            break
-    state["delegated_tasks"] = tasks
-    if changed:
-        delegation_log = list(state.get("delegation_log") or [])
-        delegation_log.append({"node": node, "summary": summary, "ts": datetime.utcnow().isoformat()})
-        state["delegation_log"] = delegation_log
-
-
-def _update_execution_guardrails(state: AgentState) -> None:
-    ctrl = dict(state.get("execution_control") or {})
-    max_iterations = int(state.get("max_iterations", 12))
-    iteration = int(state.get("loop_iteration", 0))
-    findings_total = len(state.get("vulnerabilidades_encontradas") or [])
-    last_total = int(ctrl.get("last_findings_total", 0))
-    no_progress = int(ctrl.get("no_progress_iterations", 0))
-
-    if findings_total <= last_total:
-        no_progress += 1
-    else:
-        no_progress = 0
-
-    ctrl["last_findings_total"] = findings_total
-    ctrl["no_progress_iterations"] = no_progress
-    ctrl["approaching_limit"] = iteration >= max(1, int(max_iterations * 0.85))
-    ctrl["remaining_iterations"] = max(0, max_iterations - iteration)
-    ctrl["paused"] = bool(ctrl.get("paused", False))
-
-    if ctrl["approaching_limit"]:
-        _append_note(
-            state,
-            f"Orçamento de iterações próximo do limite ({iteration}/{max_iterations}).",
-            phase="execution-control",
-        )
-    if no_progress >= 3:
-        _append_todo(state, "Pivotar estratégia por estagnação de evidências", priority="high")
-        ctrl["paused"] = True
-    else:
-        ctrl["paused"] = False
-
-    state["execution_control"] = ctrl
-
-
-def _rank_tools_for_iteration(state: AgentState, tools: list[str]) -> list[str]:
-    runtime = dict(state.get("tool_runtime") or {})
-    ranked: list[tuple[tuple[int, int, int], str]] = []
-    for tool in tools:
-        stats = dict(runtime.get(str(tool), {}))
-        failures = int(stats.get("failures", 0))
-        attempts = int(stats.get("attempts", 0))
-        success = int(stats.get("success", 0))
-        ranked.append(((failures, attempts, -success), tool))
-    ranked.sort(key=lambda item: item[0])
-    return [item[1] for item in ranked]
-
-
-def _default_skill_playbook(group: str, candidate_tools: list[str], primary_skill: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "title": f"{group} skill-first playbook",
-        "vulnerability_type": str(primary_skill.get("category") or group),
-        "techniques": [
-            {"name": t, "objective": f"execute {t} for {group}", "risk": "low"}
-            for t in candidate_tools
-        ],
-        "evidence_signals": list(primary_skill.get("triggers") or [])[:8],
-    }
-
-
-def _build_skill_playbook_for_context(
-    state: AgentState,
-    group: str,
-    candidate_tools: list[str],
-    phase_label: str,
-    primary_skill: dict[str, Any],
-) -> dict[str, Any]:
-    playbook = _default_skill_playbook(group, candidate_tools, primary_skill)
-    try:
-        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
-
-        learned_playbook = build_runtime_learning_playbook(
-            candidate_tools=candidate_tools,
-            phase=phase_label,
-            limit=12,
-        )
-        if learned_playbook:
-            state["logs_terminais"].append(
-                f"[{group}] supervisor usando playbook de aprendizado aceito: "
-                f"techniques={len(learned_playbook.get('techniques') or [])}"
-            )
-            return learned_playbook
-
-        learned_playbook = build_runtime_learning_playbook(
-            candidate_tools=candidate_tools,
-            phase=None,
-            limit=12,
-        )
-        if learned_playbook:
-            state["logs_terminais"].append(
-                f"[{group}] supervisor usando playbook de aprendizado aceito (sem filtro de fase): "
-                f"techniques={len(learned_playbook.get('techniques') or [])}"
-            )
-            return learned_playbook
-    except Exception as exc:
-        state["logs_terminais"].append(f"[{group}] erro ao carregar aprendizado: {exc}")
-    return playbook
-
-
-def _invoke_skill_for_context(
-    state: AgentState,
-    group: str,
-    candidate_tools: list[str],
-    playbook: dict[str, Any],
-    phase_label: str | None = None,
-    purpose: str = "pre_dispatch",
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    target = str(state.get("target") or "").strip()
-    resolved_phase = str(phase_label or state.get("current_phase") or group)
-    skills = list(state.get("active_skills") or [])
-    primary_skill = skills[0] if skills else {"id": group, "phases": [resolved_phase]}
-    skill_invocation: dict[str, Any] = {}
-
-    try:
-        from app.services.skill_runtime import resolve_skill_invocation
-
-        skill_invocation = resolve_skill_invocation(
-            worker_group=group,
-            phase=resolved_phase,
-            target=target,
-            candidate_tools=candidate_tools,
-            active_skills=skills,
-            playbook=playbook,
-        )
-        if not skill_invocation.get("called"):
-            state["logs_terminais"].append(
-                f"[{group}] skill_call skipped: {skill_invocation.get('reason', 'no skill')}"
-            )
-            return skill_invocation, primary_skill, candidate_tools
-
-        primary_skill = dict(skill_invocation.get("skill") or primary_skill)
-        selected_skill_id = str(skill_invocation.get("skill_id") or primary_skill.get("id") or group)
-        preferred = [
-            str(tool).strip()
-            for tool in (skill_invocation.get("recommended_tools") or [])
-            if str(tool).strip() in candidate_tools
-        ]
-        if preferred:
-            candidate_tools = preferred + [tool for tool in candidate_tools if tool not in preferred]
-
-        invocation_record = {
-            "invocation_id": skill_invocation.get("invocation_id"),
-            "skill_id": selected_skill_id,
-            "worker_group": group,
-            "phase": resolved_phase,
-            "purpose": purpose,
-            "source": skill_invocation.get("source"),
-            "matched_by": list(skill_invocation.get("matched_by") or []),
-            "candidate_tools": list(skill_invocation.get("candidate_tools") or []),
-            "recommended_tools": list(skill_invocation.get("recommended_tools") or []),
-            "confidence": skill_invocation.get("confidence"),
-            "playbook_title": skill_invocation.get("playbook_title"),
-            "created_at": skill_invocation.get("created_at"),
-        }
-        invocations = list(state.get("skill_invocations") or [])
-        invocations.append(invocation_record)
-        state["skill_invocations"] = invocations[-80:]
-        state["current_skill"] = selected_skill_id
-        state["active_skill"] = selected_skill_id
-        state["skill_contract"] = invocation_record
-        state["skill_invocation"] = dict(skill_invocation)
-        _append_action(state, "skill_invoked", invocation_record)
-        state["logs_terminais"].append(
-            f"[{group}] skill_call skill={selected_skill_id} "
-            f"purpose={purpose} source={skill_invocation.get('source')} "
-            f"tools={','.join(invocation_record['recommended_tools'][:6]) or '-'}"
-        )
-    except Exception as exc:
-        state["logs_terminais"].append(f"[{group}] erro ao invocar skill service: {exc}")
-
-    return skill_invocation, primary_skill, candidate_tools
-
-
-def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[str]) -> list[str]:
-    """Returns every Kali-mapped tool applicable to the group, minus those
-    that already ran successfully in this scan.
-
-    The Kali runner ships every supported tool, so "is_tool_installed" reduces
-    to "does this tool have a profile mapping in TOOL_TO_PROFILE". Tools that
-    failed twice are also skipped to keep transient failures from looping.
-    """
-    if not tools:
-        return []
-    from app.services.tool_catalog import is_tool_installed
-
-    ranked = _rank_tools_for_iteration(state, tools)
-    runtime = dict(state.get("tool_runtime") or {})
-
-    selected: list[str] = []
-    no_profile: list[str] = []
-    skipped_already_done: list[str] = []
-    for t in ranked:
-        if not is_tool_installed(t):
-            no_profile.append(t)
-            continue
-        meta = runtime.get(t, {})
-        if int(meta.get("success", 0) or 0) >= 1:
-            skipped_already_done.append(t)
-            continue
-        if int(meta.get("attempts", 0) or 0) >= 1 and int(meta.get("success", 0) or 0) == 0:
-            skipped_already_done.append(t)
-            continue
-        selected.append(t)
-
-    if no_profile:
-        state["logs_terminais"].append(
-            f"[{group}] tools sem profile no Kali runner: {', '.join(sorted(no_profile))}"
-        )
-    if skipped_already_done:
-        state["logs_terminais"].append(
-            f"[{group}] tools já executadas no scan: {', '.join(sorted(skipped_already_done))}"
-        )
-    return selected
-
-
-def _update_tool_runtime_metrics(state: AgentState, tool: str, status: str) -> None:
-    runtime = dict(state.get("tool_runtime") or {})
-    current = dict(runtime.get(tool, {}))
-    current["attempts"] = int(current.get("attempts", 0)) + 1
-    if status == "executed":
-        current["success"] = int(current.get("success", 0)) + 1
-    else:
-        current["failures"] = int(current.get("failures", 0)) + 1
-    runtime[tool] = current
-    state["tool_runtime"] = runtime
-
-
-def _find_node_with_uncovered_tools(state: AgentState) -> str | None:
-    """Returns the first capability node that still has installed tools that
-    haven't been executed in this scan. Drives the second-pass sweep.
-
-    Order is intentional: asset_discovery feeds threat_intel feeds
-    risk_assessment, so we re-enter from upstream → downstream.
-    """
-    try:
-        from app.services.tool_catalog import is_tool_installed
-    except Exception:
-        return None
-
-    runtime = dict(state.get("tool_runtime") or {})
-
-    def _has_uncovered(group_alias: str) -> bool:
-        try:
-            tools = _tools_for_group(state.get("scan_mode", "unit"), group_alias)
-        except Exception:
-            tools = []
-        for t in tools:
-            if not is_tool_installed(t):
-                continue
-            meta = runtime.get(t, {})
-            if int(meta.get("success", 0) or 0) == 0 and int(meta.get("attempts", 0) or 0) < 2:
-                return True
-        return False
-
-    if _has_uncovered("asset_discovery"):
-        return "asset_discovery"
-    if _has_uncovered("threat_intel"):
-        return "threat_intel"
-    if _has_uncovered("risk_assessment"):
-        return "risk_assessment"
-    return None
-
-
-def _select_skill_for_capability(
-    capability: str,
-    active_skills: list[dict[str, Any]],
-    scan_mode: str,
-) -> dict[str, Any] | None:
-    """Pick the best skill from active_skills for the given capability node.
-
-    Returns a selected_skill dict with skill_id, allowed_tools, preferred_tool,
-    objective, and reason — the supervisor's executable decision.
-    Returns None only when active_skills is completely empty.
-    """
-    preferred_cats = set(CAPABILITY_SKILL_CATEGORIES.get(capability, ()))
-    candidate_tools = _tools_for_group(scan_mode, capability)
-    candidate_lower = {t.lower() for t in candidate_tools}
-
-    best_skill: dict[str, Any] | None = None
-    best_score = -1
-
-    for skill in active_skills:
-        cat = str(skill.get("category") or "").lower()
-        skill_tool_lower = {str(t).lower() for t in (skill.get("playbook") or [])}
-        score = 0
-        if cat in preferred_cats:
-            score += 10
-        score += len(skill_tool_lower & candidate_lower) * 3
-        if score > best_score:
-            best_score = score
-            best_skill = skill
-
-    if not best_skill:
-        if not active_skills:
-            return None
-        best_skill = dict(active_skills[0])
-
-    skill_tools = [str(t) for t in (best_skill.get("playbook") or [])]
-    # allowed_tools = skill playbook intersected with capability's candidate pool
-    allowed_tools = [t for t in skill_tools if t.lower() in candidate_lower]
-    if not allowed_tools:
-        allowed_tools = [t for t in candidate_tools if t.lower() in {s.lower() for s in skill_tools}]
-    if not allowed_tools:
-        # Last resort: use the full capability catalog (capped)
-        allowed_tools = candidate_tools[:8]
-
-    preferred_tool = allowed_tools[0] if allowed_tools else ""
-
-    return {
-        "skill_id": str(best_skill.get("id") or capability),
-        "capability": capability,
-        "objective": str(best_skill.get("description") or f"Execute {capability} using {best_skill.get('id')}"),
-        "allowed_tools": allowed_tools,
-        "preferred_tool": preferred_tool,
-        "reason": (
-            f"Skill '{best_skill.get('id')}' selecionada para capability '{capability}' "
-            f"(score={best_score}, categoria={best_skill.get('category')})"
-        ),
-    }
-
-
-def rag_enrichment_node(state: AgentState) -> AgentState:
-    """RAG enrichment node: enriches prompts and context with knowledge base."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "RAG Enrichment")
-
-    try:
-        from app.core.config import settings
-        from app.services.mcp_client import mcp_client
-
-        if not settings.mcp_rag_enabled or not mcp_client.health_check_sync():
-            state["logs_terminais"].append("[RAG] MCP server not available, skipping enrichment")
-            _metric_end(state, "rag_enrichment", started_at)
-            return state
-
-        # Enrich current context with RAG knowledge
-        target_info = {
-            "target": state.get("target", ""),
-            "phase": state.get("current_phase", ""),
-            "tools": list(state.get("executed_tool_runs", []))[:5],  # Recent tools
-        }
-
-        # Determine context type based on current phase
-        phase = str(state.get("current_phase", "")).lower()
-        if "recon" in phase or "discovery" in phase:
-            context_type = "reconnaissance"
-        elif "vuln" in phase or "assessment" in phase:
-            context_type = "vulnerability_analysis"
-        elif "exploit" in phase or "weaponization" in phase:
-            context_type = "tool_usage"
-        else:
-            context_type = "vulnerability_analysis"
-
-        patterns = mcp_client.query_knowledge_sync(
-            query=f"{context_type} target {target_info['target']} phase {phase}",
-            top_k=5,
-            skill=str(state.get("current_phase") or "") or None,
-        )
-
-        if patterns:
-            state["logs_terminais"].append(
-                f"[RAG] Found {len(patterns)} relevant patterns for {context_type}"
-            )
-
-            # Store patterns in state for use by other nodes
-            state.setdefault("rag_patterns", []).extend(patterns[:5])
-
-            # Store learning insights for future use
-            for pattern in patterns[:3]:
-                insight = f"Pattern identified: {pattern.get('content', '')[:200]}..."
-                metadata = {
-                    "source": "rag_enrichment",
-                    "phase": phase,
-                    "target": target_info["target"],
-                    "pattern_type": pattern.get("metadata", {}).get("type", "unknown")
-                }
-                mcp_client.ingest_document_sync(
-                    content=insight,
-                    metadata=metadata,
-                    source="rag_enrichment",
-                )
-
-        # Enrich prompts for upcoming LLM calls
-        state["rag_enriched"] = True
-        state["logs_terminais"].append("[RAG] Context enrichment completed")
-
-    except Exception as exc:
-        state["logs_terminais"].append(f"[RAG] Enrichment failed: {exc}")
-        logger.warning(f"RAG enrichment failed: {exc}")
-
-    _metric_end(state, "rag_enrichment", started_at)
-    return state
-
-
-def _bootstrap_skill_group(state: AgentState) -> str:
-    pending = str(state.get("pending_capability_node") or "").strip()
-    if pending in TOOL_CAPABILITY_NODES:
-        return pending
-    next_node = str(state.get("routing_next_node") or "").strip()
-    if next_node in TOOL_CAPABILITY_NODES:
-        return next_node
-    current = str(state.get("current_phase") or "").strip()
-    if current in TOOL_CAPABILITY_NODES:
-        return current
-    return "asset_discovery"
-
-
-def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[str]:
-    context = dict(state.get("capability_context") or {})
-    if str(context.get("node") or "") == group and context.get("candidate_tools"):
-        return _select_tool_batch_for_iteration(
-            state,
-            group=group,
-            tools=[str(tool) for tool in list(context.get("candidate_tools") or [])],
-        )
-    scan_mode = str(state.get("scan_mode") or "unit")
-    tools = _tools_for_group(scan_mode, group)
-    target = str(state.get("target") or "")
-    if group == "asset_discovery":
-        tools = _adapt_recon_tools_for_target(target, tools)
-        if str(state.get("target_type") or "") == "site":
-            subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
-            tools = [t for t in tools if t not in subdomain_expansion_tools]
-    elif group == "risk_assessment":
-        tools = _adapt_vuln_tools_for_target(target, tools)
-    return _select_tool_batch_for_iteration(state, group=group, tools=tools)
-
-
-def skill_selector_node(state: AgentState) -> AgentState:
-    """Validate/enrich the supervisor's selected_skill and materialise the skill contract.
-
-    When the supervisor has already committed to a skill (state["selected_skill"] is
-    populated), this node uses that as the authoritative source — it never overrides
-    the supervisor's choice with active_skills[0] or an inferred skill.
-
-    When selected_skill is absent (e.g., unit tests calling this node directly), the
-    node falls back to the original scored-inference logic for backward compatibility.
-    """
-    started_at = _metric_start()
-    _sync_step_to_db(state, "Skill Selector")
-
-    try:
-        _refresh_active_skills(state)
-        group = _bootstrap_skill_group(state)
-        phase_label = str(state.get("current_phase") or group)
-        candidate_tools = _candidate_tools_for_skill_bootstrap(state, group)
-        skills = list(state.get("active_skills") or [])
-
-        supervisor_selected = dict(state.get("selected_skill") or {})
-        supervisor_skill_id = str(supervisor_selected.get("skill_id") or "").strip()
-
-        if supervisor_skill_id:
-            # ── Supervisor-driven path: use selected_skill as source of truth ──
-            allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
-            preferred_tool = str(supervisor_selected.get("preferred_tool") or "").strip().lower()
-            allowed_lower = {t.lower() for t in allowed_tools}
-
-            # candidate_tools filtered to what the skill permits
-            guided_tools = [t for t in candidate_tools if t.lower() in allowed_lower]
-            if not guided_tools and allowed_tools:
-                # allowed_tools may name tools not in the current candidate pool; keep them
-                guided_tools = allowed_tools
-
-            # Locate the full skill object (for techniques, triggers, etc.)
-            from app.graph.mission import SKILL_CATALOG as _SC
-            skill_obj = next(
-                (dict(s) for s in _SC if str(s.get("id") or "") == supervisor_skill_id),
-                None,
-            )
-            if skill_obj is None:
-                skill_obj = next(
-                    (dict(s) for s in skills if str(s.get("id") or "") == supervisor_skill_id),
-                    None,
-                )
-            if skill_obj is None:
-                skill_obj = {
-                    "id": supervisor_skill_id,
-                    "category": supervisor_selected.get("capability", group),
-                    "description": supervisor_selected.get("objective", ""),
-                    "playbook": allowed_tools,
-                    "phases": [],
-                    "triggers": [],
-                }
-
-            invocation_id = f"skill-{uuid4().hex[:12]}"
-            invocation_record = {
-                "invocation_id": invocation_id,
-                "skill_id": supervisor_skill_id,
-                "worker_group": group,
-                "phase": phase_label,
-                "purpose": "skill_selector",
-                "source": "supervisor_selected",
-                "matched_by": ["supervisor_selected_skill"],
-                "candidate_tools": candidate_tools,
-                "recommended_tools": guided_tools,
-                "confidence": 0.9,
-                "playbook_title": None,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            invocations = list(state.get("skill_invocations") or [])
-            invocations.append(invocation_record)
-            state["skill_invocations"] = invocations[-80:]
-            state["current_skill"] = supervisor_skill_id
-            state["active_skill"] = supervisor_skill_id
-            state["skill_contract"] = invocation_record
-            state["skill_invocation"] = {
-                "called": True,
-                "invocation_id": invocation_id,
-                "skill_id": supervisor_skill_id,
-                "skill": skill_obj,
-                "worker_group": group,
-                "phase": phase_label,
-                "target": str(state.get("target") or ""),
-                "candidate_tools": candidate_tools,
-                "recommended_tools": guided_tools,
-                "matched_by": ["supervisor_selected_skill"],
-                "score": 90,
-                "confidence": 0.9,
-                "techniques": [],
-                "source": "supervisor_selected",
-            }
-            _append_action(state, "skill_invoked", invocation_record)
-            state["skill_selector_ready"] = True
-            state["skill_selector_gate"] = {
-                "group": group,
-                "phase": phase_label,
-                "called": True,
-                "skill_id": supervisor_skill_id,
-                "recommended_tools": guided_tools,
-                "candidate_tools": guided_tools,
-                "allowed_tools": allowed_tools,
-                "preferred_tool": preferred_tool,
-                "playbook_title": None,
-            }
-            state["logs_terminais"].append(
-                f"[SKILL] selector supervisor-driven skill={supervisor_skill_id} "
-                f"group={group} allowed={allowed_tools[:4]} guided={guided_tools[:4]}"
-            )
-        else:
-            # ── Inference path (no supervisor-selected skill) ─────────────────
-            primary_skill = skills[0] if skills else {"id": group, "phases": [phase_label]}
-            playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, primary_skill)
-            invocation, _, guided_tools = _invoke_skill_for_context(
-                state,
-                group,
-                candidate_tools,
-                playbook,
-                phase_label,
-                purpose="skill_selector",
-            )
-            ready = bool(invocation.get("called"))
-            inferred_skill_id = str(invocation.get("skill_id") or group)
-            invocation_id = f"inferred-{uuid4().hex[:12]}"
-            invocation_record = {
-                "invocation_id": invocation_id,
-                "skill_id": inferred_skill_id,
-                "worker_group": group,
-                "phase": phase_label,
-                "purpose": "skill_selector",
-                "source": "accepted_learning+skill_catalog",
-                "matched_by": list(invocation.get("matched_by") or []),
-                "candidate_tools": candidate_tools,
-                "recommended_tools": guided_tools,
-                "confidence": invocation.get("confidence", 0.7),
-                "playbook_title": playbook.get("title"),
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            invocations = list(state.get("skill_invocations") or [])
-            invocations.append(invocation_record)
-            state["skill_invocations"] = invocations[-80:]
-            state["current_skill"] = inferred_skill_id
-            state["active_skill"] = inferred_skill_id
-            state["skill_contract"] = invocation_record
-            state["skill_invocation"] = dict(invocation) | {
-                "invocation_id": invocation_id,
-                "source": "accepted_learning+skill_catalog",
-            }
-            # Populate selected_skill so tool_executor_node can proceed.
-            state["selected_skill"] = {
-                "skill_id": inferred_skill_id,
-                "capability": group,
-                "objective": str(invocation.get("objective") or ""),
-                "allowed_tools": guided_tools,
-                "preferred_tool": guided_tools[0] if guided_tools else "",
-                "reason": "inferred from accepted learning + skill catalog",
-            }
-            _append_action(state, "skill_invoked", invocation_record)
-            state["skill_selector_ready"] = ready
-            state["skill_selector_gate"] = {
-                "group": group,
-                "phase": phase_label,
-                "called": bool(invocation.get("called")),
-                "skill_id": inferred_skill_id,
-                "recommended_tools": guided_tools,
-                "candidate_tools": guided_tools,
-                "allowed_tools": guided_tools,
-                "playbook_title": playbook.get("title"),
-            }
-            state["logs_terminais"].append(
-                f"[SKILL] runtime gate ready={state['skill_selector_ready']} "
-                f"group={group} skill={inferred_skill_id}"
-            )
-
-    except Exception as exc:
-        state["skill_selector_ready"] = False
-        state["logs_terminais"].append(f"[SKILL] selector failed: {exc}")
-        logger.warning("Skill selector failed: %s", exc)
-
-    _metric_end(state, "skill_selector", started_at)
-    return state
-
-
-def skill_planner_node(state: AgentState) -> AgentState:
-    """Turn the selected skill into an executable plan contract."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "Skill Planner")
-
-    gate = dict(state.get("skill_selector_gate") or {})
-    contract = dict(state.get("skill_contract") or {})
-    invocation = dict(state.get("skill_invocation") or {})
-    capability = str(gate.get("group") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
-    techniques = [dict(item) for item in list(invocation.get("techniques") or []) if isinstance(item, dict)]
-    selected_technique = techniques[0] if techniques else {
-        "name": f"{contract.get('skill_id') or capability} plan",
-        "objective": "Execute the selected skill with one authorized tool and reproducible evidence.",
-        "recommended_kali_tools": list(gate.get("recommended_tools") or []),
-        "evidence_signals": [],
-        "safe_validation_steps": [],
-    }
-    plan = {
-        "capability": capability,
-        "phase": gate.get("phase") or state.get("current_phase") or capability,
-        "skill_id": contract.get("skill_id") or invocation.get("skill_id"),
-        "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
-        "skill_contract": contract,
-        "technique": selected_technique,
-        "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
-        "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
-        "evidence_required": list(selected_technique.get("evidence_signals") or []),
-        "constraints": list(selected_technique.get("safe_validation_steps") or []),
-        "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
-        "decision_source": "skill_planner",
-    }
-    state["skill_plan_contract"] = plan
-    _append_action(state, "skill_planned", plan)
-    state["logs_terminais"].append(
-        f"[SKILL] planned capability={capability} skill={plan.get('skill_id')} "
-        f"technique={selected_technique.get('name') or '-'}"
-    )
-
-    _metric_end(state, "skill_planner", started_at)
-    return state
-
-
-def _technique_for_selected_tool(invocation: dict[str, Any], selected_tool: str) -> dict[str, Any]:
-    selected = str(selected_tool or "").strip().lower()
-    techniques = [dict(item) for item in list(invocation.get("techniques") or []) if isinstance(item, dict)]
-    for technique in techniques:
-        tools = {str(tool).strip().lower() for tool in list(technique.get("recommended_kali_tools") or [])}
-        if selected and selected in tools:
-            return technique
-    return techniques[0] if techniques else {}
-
-
-def tool_selector_node(state: AgentState) -> AgentState:
-    """Select exactly the tool(s) authorized by the current skill contract."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "Tool Selector")
-
-    plan = dict(state.get("skill_plan_contract") or {})
-    capability = str(plan.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
-    gate = dict(state.get("skill_selector_gate") or {})
-    contract = dict(plan.get("skill_contract") or state.get("skill_contract") or {})
-    invocation = dict(state.get("skill_invocation") or {})
-    candidate_tools = [str(tool) for tool in list(plan.get("candidate_tools") or gate.get("candidate_tools") or []) if str(tool or "").strip()]
-    recommended_tools = [
-        str(tool)
-        for tool in list(plan.get("recommended_tools") or contract.get("recommended_tools") or invocation.get("recommended_tools") or [])
-        if str(tool or "").strip()
-    ]
-
-    try:
-        from app.services.agent_context_service import build_worker_knowledge_context
-
-        bundle = build_worker_knowledge_context(
-            worker_group=capability,
-            skill=str(plan.get("skill_id") or contract.get("skill_id") or invocation.get("skill_id") or capability),
-            phase=str(plan.get("phase") or gate.get("phase") or state.get("current_phase") or capability),
-            target=str(state.get("target") or ""),
-            candidate_tools=candidate_tools,
-            mode=str(state.get("scan_mode") or "unit"),
-        )
-        for tool in list(bundle.get("recommended_tools") or []):
-            if str(tool).strip():
-                recommended_tools.append(str(tool).strip())
-        state["logs_terminais"].append(
-            f"[selector] skill-memory retrieved={len(bundle.get('knowledge_items') or [])}"
-        )
-    except Exception as exc:
-        state["logs_terminais"].append(f"[selector] skill-memory unavailable: {exc}")
-
-    supervisor_selected = dict(state.get("selected_skill") or {})
-    allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
-    preferred_tool = str(supervisor_selected.get("preferred_tool") or "").strip().lower()
-
-    if allowed_tools:
-        # ── Skill-constrained selection ───────────────────────────────────────
-        # Only tools that the supervisor's selected_skill explicitly permits.
-        allowed_lower = {t.lower() for t in allowed_tools}
-        from_allowed = [t for t in candidate_tools if t.lower() in allowed_lower]
-        if preferred_tool:
-            pref_first = [t for t in from_allowed if t.lower() == preferred_tool]
-            rest = [t for t in from_allowed if t.lower() != preferred_tool]
-            selected_tools = pref_first + rest
-        else:
-            selected_tools = from_allowed
-
-        if not selected_tools:
-            state["logs_terminais"].append(
-                f"[selector] BLOCKED: nenhum candidate_tool corresponde a "
-                f"allowed_tools={allowed_tools} para skill={supervisor_selected.get('skill_id')}; "
-                "execução bloqueada"
-            )
-            # selected_tools stays empty — executor will catch and abort cleanly
-    else:
-        # ── No allowed_tools constraint (no supervisor skill / inference path) ─
-        candidate_set = set(candidate_tools)
-        selected_tools = [tool for tool in dict.fromkeys(recommended_tools) if tool in candidate_set]
-        # NOTE: the old candidate_tools[0] fallback has been intentionally removed.
-        # Without a skill contract there is no safe basis for choosing an arbitrary tool.
-
-    # Skill-first: one tool per supervisor cycle.
-    selected_tools = selected_tools[:1]
-    selected_tool = selected_tools[0] if selected_tools else ""
-    technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
-    evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])
-    constraints = list(plan.get("constraints") or technique.get("safe_validation_steps") or [])
-
-    selection = {
-        "capability": capability,
-        "selected_tools": selected_tools,
-        "candidate_tools": candidate_tools,
-        "skill_id": plan.get("skill_id") or contract.get("skill_id") or invocation.get("skill_id"),
-        "skill_invocation_id": plan.get("skill_invocation_id") or contract.get("invocation_id") or invocation.get("invocation_id"),
-        "skill_contract": contract,
-        "technique": technique,
-        "evidence_required": evidence_required,
-        "constraints": constraints,
-        "playbook_title": plan.get("playbook_title") or contract.get("playbook_title") or gate.get("playbook_title"),
-        "decision_source": "skill_selector",
-    }
-    state["tool_selection_contract"] = selection
-    _append_action(state, "tool_selected", selection)
-    if selected_tools:
-        state["logs_terminais"].append(
-            f"[selector] capability={capability} skill={selection.get('skill_id')} selected={','.join(selected_tools)}"
-        )
-    else:
-        state["logs_terminais"].append(
-            f"[selector] capability={capability} sem ferramenta selecionada pela skill"
-        )
-
-    _metric_end(state, "tool_selector", started_at)
-    return state
-
-
-def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
-    context = dict(state.get("capability_context") or {})
-    if str(context.get("node") or "") == capability and context.get("targets"):
-        return [str(target) for target in list(context.get("targets") or []) if str(target or "").strip()]
-
-    if capability == "threat_intel":
-        return _validate_osint_targets(_targets_for_deep_scan(state, limit=6))
-
-    if capability == "risk_assessment":
-        limit = 10 if _is_local_target(state.get("target", "")) else 6
-        primary_targets = _targets_for_deep_scan(state, limit=limit)
-        resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
-        explicit_target = str(state.get("target") or "").strip()
-        if explicit_target and _is_local_target(explicit_target):
-            local_targets = [t for t in primary_targets if _is_local_target(t)]
-            if explicit_target not in local_targets:
-                local_targets.insert(0, explicit_target)
-            resolvable_targets = list(dict.fromkeys(local_targets + resolvable_targets))
-            unresolved_targets = [t for t in unresolved_targets if not _is_local_target(t)]
-        if not resolvable_targets:
-            resolvable_targets = [state.get("target", "")]
-        state["risk_targets_resolvable"] = list(resolvable_targets)
-        state["risk_targets_unresolved"] = list(unresolved_targets)
-        if unresolved_targets:
-            state["logs_terminais"].append(
-                f"RiskAssessment: unresolved_targets_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
-            )
-        return list(resolvable_targets)
-
-    return [str(state.get("target") or "").strip()]
-
-
-def _apply_tool_execution_findings(
-    state: AgentState,
-    capability: str,
-    target: str,
-    tools: list[str],
-    findings: list[dict[str, Any]],
-    ports: list[int],
-    assets: list[str],
-    port_evidence: dict[int, dict[str, str]],
-) -> None:
-    current = _step_name(state)
-    if findings:
-        state["vulnerabilidades_encontradas"].extend(findings)
-
-    if capability == "asset_discovery":
-        if ports:
-            state["discovered_ports"] = sorted(set((state.get("discovered_ports") or []) + ports))
-            state["pending_port_tests"] = state["discovered_ports"].copy()
-        if assets:
-            root_domain = _target_host(state.get("target") or target)
-            _register_discovered_assets(state, root_domain=root_domain, assets=assets)
-            owner_id = state.get("owner_id")
-            scan_id = state.get("scan_id")
-            if owner_id and scan_id:
-                inserted = _persist_discovered_assets_to_db(
-                    scan_job_id=scan_id,
-                    owner_id=owner_id,
-                    assets=assets,
-                    source_tool="recon",
-                )
-                state["discovered_subdomains_persisted"].extend(
-                    [a.lower() for a in assets[:MAX_DISCOVERED_ASSETS]]
-                )
-                state["logs_terminais"].append(
-                    f"ReconNode: {len(assets)} subdomínios persistidos no banco (novos: {inserted})"
-                )
-            for asset in assets[:MAX_DISCOVERED_ASSETS]:
-                state["vulnerabilidades_encontradas"].append(
-                    {
-                        "title": f"Ativo descoberto no reconhecimento: {asset}",
-                        "severity": "info",
-                        "risk_score": 1,
-                        "source_worker": "reconhecimento",
-                        "details": {
-                            "node": "recon",
-                            "step": current,
-                            "asset": asset,
-                            "tool": "reconhecimento",
-                        },
-                    }
-                )
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"Ativo externo mapeado: {state['target']}",
-                "severity": "low",
-                "risk_score": 2,
-                "source_worker": "asset_discovery",
-                "details": {"node": "asset_discovery", "step": current, "tools": tools},
-            }
-        )
-        return
-
-    if capability == "threat_intel":
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"Threat Intel executado em {target}",
-                "severity": "info",
-                "risk_score": 1,
-                "source_worker": "threat_intel",
-                "details": {
-                    "node": "threat_intel",
-                    "step": current,
-                    "asset": target,
-                    "tool": "threat_intel",
-                    "tools": tools,
-                },
-            }
-        )
-        return
-
-    if capability == "risk_assessment":
-        state["vulnerabilidades_encontradas"].append(
-            {
-                "title": f"Avaliação de risco executada em {target}",
-                "severity": "info",
-                "risk_score": 1,
-                "source_worker": "risk_assessment",
-                "details": {
-                    "node": "risk_assessment",
-                    "step": current,
-                    "asset": target,
-                    "tool": "risk_assessment",
-                    "tools": tools,
-                },
-            }
-        )
-
-
-def tool_executor_node(state: AgentState) -> AgentState:
-    """Execute the selected skill-bound tool through MCP/Kali."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "Tool Executor")
-
-    selection = dict(state.get("tool_selection_contract") or {})
-    supervisor_selected = dict(state.get("selected_skill") or {})
-    capability = str(selection.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
-    selected_tools = [str(tool) for tool in list(selection.get("selected_tools") or []) if str(tool or "").strip()]
-
-    skill_id = str(
-        supervisor_selected.get("skill_id")
-        or selection.get("skill_id")
-        or ""
-    ).strip()
-    allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
-
-    # ── Pre-execution contract validation ────────────────────────────────────
-    def _abort(reason: str) -> AgentState:
-        state["logs_terminais"].append(f"[executor] BLOCKED: {reason}")
-        _append_error(state, reason, source="tool_executor")
-        # Mark capability complete to prevent the supervisor from looping on it.
-        completed = list(state.get("completed_capabilities") or [])
-        if capability in TOOL_CAPABILITY_NODES and capability not in completed:
-            completed.append(capability)
-        state["completed_capabilities"] = completed
-        state["pending_capability_node"] = ""
-        state["proxima_ferramenta"] = "evidence_gate"
-        state["routing_next_node"] = "evidence_gate"
-        state["mission_index"] = int(state.get("mission_index", 0)) + 1
-        _metric_end(state, "tool_executor", started_at)
-        return state
-
-    if not supervisor_selected:
-        return _abort("selected_skill ausente; nenhuma execução sem contrato de skill")
-
-    if not skill_id:
-        return _abort("skill_id ausente; nenhuma execução sem skill_id")
-
-    if not selected_tools:
-        return _abort(f"selected_tools vazio para skill={skill_id}; nada a executar")
-
-    if allowed_tools:
-        allowed_lower = {t.lower() for t in allowed_tools}
-        invalid = [t for t in selected_tools if t.lower() not in allowed_lower]
-        if invalid:
-            return _abort(
-                f"ferramentas {invalid} não pertencem a allowed_tools={allowed_tools} "
-                f"da skill={skill_id}; execução bloqueada"
-            )
-
-    # ── Safe to execute ───────────────────────────────────────────────────────
-    targets = _targets_for_tool_pipeline(state, capability)
-    all_results: list[dict[str, Any]] = []
-
-    if not selected_tools:
-        state["logs_terminais"].append(f"[executor] capability={capability} sem tool selecionada; nada executado")
-    for scan_target in targets:
-        target_tools = selected_tools
-        if capability == "risk_assessment":
-            target_tools = _tools_for_validation_target(scan_target, selected_tools)
-        if not target_tools:
-            continue
-        findings, ports, assets, port_evidence = _run_tools_and_collect(
-            state,
-            target_tools,
-            scan_target,
-            _step_name(state),
-            f"ToolExecutor:{capability}",
-            root_domain=_target_host(state.get("target") or scan_target),
-            skill_context=selection,
-        )
-        _apply_tool_execution_findings(
-            state,
-            capability,
-            scan_target,
-            target_tools,
-            findings,
-            ports,
-            assets,
-            port_evidence,
-        )
-        all_results.append(
-            {
-                "target": scan_target,
-                "tools": target_tools,
-                "findings": len(findings),
-                "ports": ports,
-                "assets": assets,
-                "skill_id": selection.get("skill_id"),
-                "technique": (selection.get("technique") or {}).get("name"),
-            }
-        )
-
-    state["tool_execution_results"] = list(state.get("tool_execution_results") or []) + all_results
-    completed = list(state.get("completed_capabilities") or [])
-    if capability in TOOL_CAPABILITY_NODES and capability not in completed:
-        completed.append(capability)
-    state["completed_capabilities"] = completed
-    if capability == "risk_assessment" and state.get("validation_backlog"):
-        state["validation_backlog"] = []
-    _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
-    state["pending_capability_node"] = ""
-    state["proxima_ferramenta"] = "evidence_gate"
-    state["routing_next_node"] = "evidence_gate"
-    state["mission_index"] += 1
-    _append_observation(
-        state,
-        f"Skill-bound execution completed: capability={capability} tools={','.join(selected_tools) or '-'}",
-        source="tool_executor",
-    )
-
-    _metric_end(state, "tool_executor", started_at)
-    return state
-
-
-def evidence_gate_node(state: AgentState) -> AgentState:
-    """Evidence gate after every skill-bound execution."""
-    state["logs_terminais"].append("[EVIDENCE] gate evaluating skill-bound execution")
-    return _evaluate_evidence_gate(state)
-
-
-def supervisor_node(state: AgentState) -> AgentState:
-    """Single decision-maker: roteia capacidades dinamicamente por confiança e evidência."""
-    started_at = _metric_start()
-    _sync_step_to_db(state, "0. Supervisor")
-
-    # Kill switch: proteção contra loops infinitos
-    state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
-    max_iterations = int(state.get("max_iterations", 12))
-    if state["loop_iteration"] > max_iterations:
-        state["routing_next_node"] = END
-        state["termination_reason"] = "max_iterations_reached"
-        state["objective_met"] = True
-        return state
-
-    _update_execution_guardrails(state)
-    _refresh_active_skills(state)
-    # completed_capabilities deve ser sempre list
-    if "completed_capabilities" not in state or not isinstance(state["completed_capabilities"], list):
-        state["completed_capabilities"] = []
-    completed = list(state.get("completed_capabilities") or [])
-    last_node = str(state.get("last_completed_node") or "").strip()
-    pending_validation = list(state.get("validation_backlog") or [])
-
-    capability_nodes = {"governance", "executive_analyst"}
-    if last_node in capability_nodes:
-        if last_node not in completed:
-            completed.append(last_node)
-            state["completed_capabilities"] = completed
-        # always close any pending delegation task for the node we just left
-        _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
-
-    confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
-    high_signals = _count_high_signal_findings(state)
-    has_strong_evidence = _has_verified_or_strong_evidence(state)
-
-    if confidence < ANALYST_CONFIDENCE_THRESHOLDS["medium"]:
-        _register_delegation_task(state, node="asset_discovery", reason="low_confidence_expand_surface", priority=1)
-        _register_delegation_task(state, node="threat_intel", reason="low_confidence_collect_intel", priority=2)
-    elif confidence < ANALYST_CONFIDENCE_THRESHOLDS["high"]:
-        _register_delegation_task(state, node="threat_intel", reason="medium_confidence_collect_more_context", priority=2)
-    else:
-        _register_delegation_task(state, node="risk_assessment", reason="high_confidence_validate_exploitability", priority=1)
-
-    next_node = "END"
-    termination_reason = str(state.get("termination_reason") or "")
-
-    if pending_validation:
-        _register_delegation_task(
-            state,
-            node="risk_assessment",
-            reason=f"validation_backlog={len(pending_validation)}",
-            priority=0,
-        )
-
-    if state.get("objective_met"):
-        if "executive_analyst" not in completed:
-            next_node = "executive_analyst"
-        else:
-            next_node = "END"
-            termination_reason = termination_reason or "objective_already_met"
-    elif "asset_discovery" not in completed:
-        next_node = "asset_discovery"
-    elif "threat_intel" not in completed:
-        next_node = "threat_intel"
-    elif "risk_assessment" not in completed:
-        next_node = "risk_assessment"
-    elif "governance" not in completed:
-        next_node = "governance"
-    elif "executive_analyst" not in completed:
-        # Segunda passada de cobertura SOMENTE quando coverage_mode está explicitamente
-        # habilitado. Por padrão o fluxo segue direto para o analista executivo.
-        ctrl_now = dict(state.get("execution_control") or {})
-        coverage_mode_active = bool(ctrl_now.get("coverage_mode", False))
-        coverage_gap_node = (
-            _find_node_with_uncovered_tools(state)
-            if coverage_mode_active
-            else None
-        )
-        if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
-            _append_note(
-                state,
-                f"Segunda passada (coverage_mode=true): {coverage_gap_node} ainda tem profiles sem rodar.",
-                phase="coverage-sweep",
-            )
-            next_node = coverage_gap_node
-        else:
-            state["objective_met"] = state.get("objective_met") or has_strong_evidence
-            termination_reason = termination_reason or "post_governance_executive_close"
-            next_node = "executive_analyst"
-    else:
-        # Loop adaptativo após primeiro ciclo completo (incluindo executive_analyst)
-        if pending_validation:
-            next_node = "risk_assessment"
-        else:
-            next_node = "END"
-            termination_reason = termination_reason or "full_cycle_completed"
-
-    ctrl = dict(state.get("execution_control") or {})
-    remaining = int(ctrl.get("remaining_iterations", max_iterations))
-    if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
-        _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
-        next_node = "threat_intel"
-    if remaining <= 2 and next_node not in {"governance", "executive_analyst", "END"}:
-        _append_note(state, "Forçando finalização contextual por orçamento baixo.", phase="execution-control")
-        next_node = "governance" if "governance" not in completed else "executive_analyst"
-        termination_reason = termination_reason or "forced_finalize_guardrail"
-
-    # Delegation override only after FULL cycle (essential + executive_analyst).
-    # Sem isso, delegação atropelava o caminho sequencial e voltava para fases já feitas.
-    essential_phases = {"asset_discovery", "threat_intel", "risk_assessment", "governance"}
-    full_cycle_done = essential_phases.issubset(set(completed)) and "executive_analyst" in completed
-    if full_cycle_done:
-        for delegated in list(state.get("delegated_tasks") or []):
-            if str(delegated.get("status") or "") != "pending":
-                continue
-            delegated_node = str(delegated.get("node") or "")
-            if delegated_node in essential_phases:
-                next_node = delegated_node
-                break
-
-    # Proteção contra loop do mesmo node
-    current_phase = str(state.get("current_phase") or "").strip()
-    if next_node == current_phase and next_node not in {"END", ""}:
-        state["routing_next_node"] = END
-        state["termination_reason"] = "loop_on_same_phase"
-        state["completed_capabilities"] = completed
-        state["current_phase"] = next_node
-        return state
-
-    route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
-
-    # ── Skill selection: supervisor commits to a skill before the pipeline ─────
-    # Always clear the previous iteration's selected_skill to avoid stale state.
-    state["selected_skill"] = {}
-    if next_node in TOOL_CAPABILITY_NODES:
-        state["pending_capability_node"] = next_node
-        chosen_skill = _select_skill_for_capability(
-            capability=next_node,
-            active_skills=list(state.get("active_skills") or []),
-            scan_mode=str(state.get("scan_mode") or "unit"),
-        )
-        if chosen_skill:
-            state["selected_skill"] = chosen_skill
-            state["logs_terminais"].append(
-                f"Supervisor: skill={chosen_skill['skill_id']} "
-                f"capability={next_node} "
-                f"allowed_tools={chosen_skill['allowed_tools'][:4]} "
-                f"preferred={chosen_skill['preferred_tool']}"
-            )
-        else:
-            state["logs_terminais"].append(
-                f"Supervisor: capability={next_node} sem skills ativas; pipeline seguirá sem selected_skill"
-            )
-    elif next_node != "END":
-        state["pending_capability_node"] = ""
-
-    state["completed_capabilities"] = completed
-    state["current_phase"] = next_node
-    state["routing_next_node"] = END if route_node == "END" else route_node
-    state["termination_reason"] = termination_reason
-    state["proxima_ferramenta"] = route_node
-    state["logs_terminais"].append(
-        "Supervisor: "
-        f"iter={state['loop_iteration']}/{max_iterations} "
-        f"confidence={confidence} "
-        f"high_signals={high_signals} "
-        f"skills={len(state.get('active_skills') or [])} "
-        f"pending_validation={len(pending_validation)} "
-        f"next={next_node}"
-    )
-    _append_action(
-        state,
-        "supervisor_route",
-        {
-            "next_node": next_node,
-            "confidence": confidence,
-            "high_signals": high_signals,
-            "pending_validation": len(pending_validation),
-        },
-    )
-
-    _metric_end(state, "supervisor", started_at)
-    _sync_step_to_db(state, "0. Supervisor")
-    return state
-
-
-def _evaluate_evidence_gate(state: AgentState) -> AgentState:
-    """Aplica contrato de evidência para separar hipótese de finding verificável."""
-    state["routing_next_node"] = "governance"
-    started_at = _metric_start()
-    _sync_step_to_db(state, "Evidence Gate")
-
-    rules = (state.get("evidence_contract") or {}).get("rules") or EVIDENCE_RULES
-    min_conf = int(rules.get("minimum_confidence_for_promote", 70))
-
-    adjudicated: list[dict[str, Any]] = []
-    promoted = 0
-    backlog: list[dict[str, Any]] = []
-    findings_for_adjudication = list(state.get("vulnerabilidades_encontradas") or [])
-    try:
-        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
-
-        findings_for_adjudication = enrich_findings_with_accepted_learning(findings_for_adjudication)
-    except Exception:
-        pass
-
-    for finding in findings_for_adjudication:
-        item = dict(finding)
-        details = dict(item.get("details") or {})
-        sev = str(item.get("severity", "low")).lower()
-        confidence = float(details.get("confidence") or item.get("risk_score") or 0)
-        evidence = str(details.get("evidence") or "").strip()
-        repro_steps = str(details.get("repro_steps") or "").strip()
-        has_minimum_proof = bool(evidence) and (
-            bool(repro_steps)
-            or bool(details.get("url"))
-            or bool(details.get("port"))
-        )
-
-        if sev in {"critical", "high"} and (confidence < min_conf or not has_minimum_proof):
-            details["validation_status"] = "hypothesis"
-            details["adjudication_reason"] = "insufficient_confidence_or_missing_reproducible_proof"
-            backlog.append({
-                "title": str(item.get("title") or ""),
-                "severity": sev,
-                "asset": str(details.get("asset") or state.get("target") or ""),
-                "reason": details["adjudication_reason"],
-                "required_action": "rerun_learning_guided_validation_with_repro_steps",
-                "details": {
-                    "tool": details.get("tool"),
-                    "evidence": evidence[:1200],
-                    "learning_match": details.get("learning_match"),
-                    "reproduction_playbook": details.get("reproduction_playbook"),
-                    "repro_steps": details.get("repro_steps"),
-                    "technical_evidence_expected": details.get("technical_evidence_expected"),
-                },
-            })
-        else:
-            if sev in {"critical", "high"}:
-                details["validation_status"] = "verified"
-            else:
-                details.setdefault("validation_status", "unverified")
-            if confidence >= min_conf:
-                promoted += 1
-        item["details"] = details
-        adjudicated.append(item)
-
-    state["vulnerabilidades_encontradas"] = adjudicated
-    state["validation_backlog"] = backlog
-    if backlog:
-        _register_delegation_task(
-            state,
-            node="risk_assessment",
-            reason=f"evidence_backlog={len(backlog)}",
-            priority=0,
-        )
-        _append_todo(state, f"Revalidar {len(backlog)} findings high/critical sem proof-pack", priority="high")
-        _append_note(
-            state,
-            f"Evidence gate bloqueou promoção de {len(backlog)} finding(s) por falta de reprodução.",
-            phase="evidence-gate",
-        )
-    _complete_delegation_task(state, "evidence_gate", f"promoted={promoted}; backlog={len(backlog)}")
-    state["logs_terminais"].append(
-        f"EvidenceGate: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
-    )
-    state["proxima_ferramenta"] = "governance"
-    state["mission_index"] += 1
-    _metric_end(state, "evidence_gate", started_at)
-    _sync_step_to_db(state, "Evidence Gate")
-    return state
-
-
-def _mark_step_metric(state: AgentState, success: bool) -> None:
-    metrics = state.get("mission_metrics", {})
-    metrics["steps_done"] = int(metrics.get("steps_done", 0)) + 1
-    if success:
-        metrics["steps_success"] = int(metrics.get("steps_success", 0)) + 1
-    state["mission_metrics"] = metrics
-
-
-def _register_tool_result_metric(state: AgentState, status: str) -> None:
-    metrics = state.get("mission_metrics", {})
-    metrics["tools_attempted"] = int(metrics.get("tools_attempted", 0)) + 1
-    if status == "executed":
-        metrics["tools_success"] = int(metrics.get("tools_success", 0)) + 1
-    state["mission_metrics"] = metrics
-
 
 checkpointer = create_checkpointer()
 
@@ -1805,6 +165,94 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────
+# Metric / step helpers
+# ─────────────────────────────────────────────────────────────
+
+def _metric_start() -> float:
+    return perf_counter()
+
+
+def _metric_end(state: AgentState, node_name: str, started_at: float):
+    duration_ms = round((perf_counter() - started_at) * 1000, 2)
+    state["activity_metrics"].append(
+        {
+            "node": node_name,
+            "duration_ms": duration_ms,
+            "timestamp": datetime.utcnow().isoformat(),
+            "mission_index": state.get("mission_index", 0),
+        }
+    )
+    state["node_history"].append(node_name)
+    state["last_completed_node"] = node_name
+
+
+def _node_for_step(step_name: str, scan_mode: str) -> str:
+    step = str(step_name or "").strip().lower()
+    if step in {"", "done"}:
+        return "supervisor"
+    if "supervisor" in step:
+        return "supervisor"
+    if "planning" in step or "strategic" in step:
+        return "skill_planner"
+    if "selector" in step:
+        return "tool_selector"
+    if "executor" in step:
+        return "tool_executor"
+    if "asset" in step or "recon" in step or "discovery" in step:
+        return "asset_discovery"
+    if "hypothesis" in step:
+        return "skill_planner"
+    if "risk" in step or "vuln" in step or "assessment" in step:
+        return "risk_assessment"
+    if "adjudication" in step or "evidence" in step:
+        return "evidence_gate"
+    if "governance" in step:
+        return "governance"
+    if "executive" in step:
+        return "executive_analyst"
+    return "supervisor"
+
+
+def _sync_step_to_db(state: AgentState, step_label: str) -> None:
+    """Persiste current_step, mission_index, e node_history no ScanJob durante execução do grafo."""
+    scan_id = state.get("scan_id")
+    if not scan_id:
+        return
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ScanJob
+        _db = SessionLocal()
+        try:
+            job = _db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+            if job and job.status not in ("completed", "failed", "stopped"):
+                job.current_step = step_label
+                mission_items = state.get("mission_items") or []
+                mi = state.get("mission_index", 0)
+                total = max(1, len(mission_items))
+                job.mission_progress = int(round(min(mi, total) / total * 100))
+                current_node = _node_for_step(step_label, state.get("scan_mode", "unit"))
+                snapshot_node_history = list(state.get("node_history", []))
+                if current_node and (not snapshot_node_history or snapshot_node_history[-1] != current_node):
+                    snapshot_node_history.append(current_node)
+                # Snapshot para o frontend consultar via /status
+                sd = dict(job.state_data or {})
+                sd["mission_index"] = mi
+                sd["mission_items"] = mission_items
+                sd["node_history"] = snapshot_node_history
+                sd["current_node"] = current_node
+                job.state_data = sd
+                _db.commit()
+        finally:
+            _db.close()
+    except Exception:
+        logger.exception("Falha ao sincronizar step no banco")
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool / step helpers
+# ─────────────────────────────────────────────────────────────
+
 def _tool_for_step(step_name: str) -> str | None:
     step = str(step_name or "").strip().lower()
     semantic_overrides = [
@@ -1822,25 +270,16 @@ def _tool_for_step(step_name: str) -> str | None:
 
 
 def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
-    """Returns the candidate tool catalog for a capability label.
-
-    The graph itself is skill-first. Capability labels only seed the skill
-    selector with an allowed candidate catalog; tool_selector still reduces the
-    execution to the concrete tool authorized by the active skill contract.
-    """
+    """Returns the candidate tool catalog for a capability label."""
     groups = get_worker_groups(mode=scan_mode)
 
-    # Multi-group composition per capability label -> Kill Chain phase groups.
-    # Phase groups live in worker_groups.CANONICAL_GROUP_TOOLS and align with
-    # the celery queue names (worker.{mode}.{group}).
     node_to_groups: dict[str, list[str]] = {
-        # Capability label        -> list of phase groups feeding it
         "asset_discovery":        ["reconnaissance"],
         "threat_intel":           ["weaponization", "actions_on_objectives"],
         "risk_assessment":        ["exploitation", "delivery", "weaponization", "actions_on_objectives"],
         "governance":             ["command_control"],
         "executive_analyst":      ["reporting"],
-        # Legacy aliases — kept so old persisted state still resolves.
+        # Legacy aliases
         "reconhecimento":         ["reconnaissance"],
         "analise_vulnerabilidade": ["exploitation", "weaponization"],
     }
@@ -1862,413 +301,37 @@ def _ordered_tools_for_step(scan_mode: str, group_name: str, step_name: str) -> 
     if primary_tool and primary_tool in tools:
         return [primary_tool] + [tool for tool in tools if tool != primary_tool]
     if primary_tool and primary_tool not in tools:
-        # Permite executar passos explicitos da missao (ex.: naabu/nmap)
-        # mesmo quando o grupo base do no nao inclui a ferramenta.
         return [primary_tool] + tools
     return tools
 
 
-def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
-    """Verifica se ferramenta já teve execução bem-sucedida para este target neste scan."""
-    try:
-        from app.db.session import SessionLocal
-        from app.models.models import ExecutedToolRun
-        
-        db = SessionLocal()
-        try:
-            existing = db.query(ExecutedToolRun).filter(
-                ExecutedToolRun.scan_job_id == scan_id,
-                ExecutedToolRun.tool_name == tool_name.lower(),
-                ExecutedToolRun.target == target.lower(),
-                ExecutedToolRun.status == "success",
-            ).first()
-            return existing is not None
-        finally:
-            db.close()
-    except Exception:
-        logger.exception("Falha ao verificar execução idempotente da ferramenta")
-        return False
+def _step_name(state: AgentState) -> str:
+    idx = state.get("mission_index", 0)
+    items = state.get("mission_items", GROUP_MISSION_ITEMS)
+    if idx >= len(items):
+        return "done"
+    return items[idx]
 
 
-def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, execution_status: str = "success", error_msg: str | None = None, exec_time: float | None = None) -> None:
-    """Registra execução da ferramenta no banco para idempotência."""
-    try:
-        from app.db.session import SessionLocal
-        from app.models.models import ExecutedToolRun
-        from datetime import datetime
-        
-        db = SessionLocal()
-        try:
-            normalized_tool = tool_name.lower()
-            normalized_target = target.lower()
-            existing = db.query(ExecutedToolRun).filter(
-                ExecutedToolRun.scan_job_id == scan_id,
-                ExecutedToolRun.tool_name == normalized_tool,
-                ExecutedToolRun.target == normalized_target,
-            ).first()
-
-            if existing:
-                existing.status = execution_status
-                existing.error_message = error_msg
-                existing.execution_time_seconds = exec_time
-                existing.created_at = datetime.utcnow()
-            else:
-                record = ExecutedToolRun(
-                    scan_job_id=scan_id,
-                    tool_name=normalized_tool,
-                    target=normalized_target,
-                    status=execution_status,
-                    error_message=error_msg,
-                    execution_time_seconds=exec_time,
-                    created_at=datetime.utcnow(),
-                )
-                db.add(record)
-            db.commit()
-        finally:
-            db.close()
-    except Exception:
-        logger.exception("Falha ao registrar execução da ferramenta")
+def _mark_step_metric(state: AgentState, success: bool) -> None:
+    metrics = state.get("mission_metrics", {})
+    metrics["steps_done"] = int(metrics.get("steps_done", 0)) + 1
+    if success:
+        metrics["steps_success"] = int(metrics.get("steps_success", 0)) + 1
+    state["mission_metrics"] = metrics
 
 
-def _run_tools_and_collect(
-    state: AgentState,
-    tools: list[str],
-    scan_target: str,
-    step_name: str,
-    log_prefix: str,
-    root_domain: str = "",
-    skill_context: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
-    """Runs the given tools against `scan_target` with parallel dispatch.
-
-    Tools are submitted in parallel through a ThreadPoolExecutor (max 6 in
-    flight) so a 25-tool node finishes in ~max(tool_runtime) instead of
-    sum(tool_runtime). State mutation stays serial after each future resolves
-    to keep the AgentState dict thread-safe.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from time import perf_counter
-
-    all_findings: list[dict[str, Any]] = []
-    discovered_ports: set[int] = set()
-    discovered_assets: set[str] = set()
-    port_evidence: dict[int, dict[str, str]] = {}
-    step_success = False
-    skill_context = dict(skill_context or {})
-    skill_id = str(skill_context.get("skill_id") or "").strip()
-
-    # 1) Skip tools already executed (in-state or in-DB)
-    pending_tools: list[str] = []
-    scan_id = state.get("scan_id")
-    for tool in tools:
-        run_id = f"{step_name}|{scan_target}|{tool}".lower()
-        if run_id in state.get("executed_tool_runs", []):
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
-            continue
-        if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
-            state["executed_tool_runs"].append(run_id)
-            continue
-        pending_tools.append(tool)
-
-    if not pending_tools:
-        return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
-
-    # 2) Dispatch in parallel
-    state["logs_terminais"].append(
-        f"{log_prefix}: dispatching {len(pending_tools)} tools in parallel: {', '.join(pending_tools)}"
-    )
-
-    def _dispatch_one(tool: str) -> tuple[str, dict, float]:
-        exec_start = perf_counter()
-        try:
-            r = execute_tool_with_workers(
-                tool,
-                scan_target,
-                scan_mode=state["scan_mode"],
-                scan_id=scan_id if isinstance(scan_id, int) else None,
-                skill_id=skill_id or None,
-                skill_contract=dict(skill_context.get("skill_contract") or {}),
-                technique=dict(skill_context.get("technique") or {}),
-                evidence_required=list(skill_context.get("evidence_required") or []),
-                constraints=list(skill_context.get("constraints") or []),
-                playbook=str(skill_context.get("playbook_title") or ""),
-            )
-        except Exception as exc:
-            r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
-        return tool, r, perf_counter() - exec_start
-
-    completions: list[tuple[str, dict, float]] = []
-    with ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"tool-{log_prefix}") as ex:
-        future_map = {ex.submit(_dispatch_one, t): t for t in pending_tools}
-        for fut in as_completed(future_map):
-            try:
-                completions.append(fut.result())
-            except Exception as exc:
-                t = future_map[fut]
-                completions.append((t, {"status": "error", "dispatch_error": str(exc)}, 0.0))
-
-    # 3) Serial post-processing — mutates state safely
-    for tool, result, exec_time in completions:
-        run_id = f"{step_name}|{scan_target}|{tool}".lower()
-        _sync_step_to_db(state, f"{step_name} · {tool}")
-        _append_action(
-            state,
-            "tool_start",
-            {
-                "tool": tool,
-                "target": scan_target,
-                "step": step_name,
-                "group": log_prefix,
-                "skill_id": skill_id,
-                "skill_invocation_id": skill_context.get("skill_invocation_id"),
-                "technique": (skill_context.get("technique") or {}).get("name"),
-            },
-        )
-        if skill_id:
-            result.setdefault("skill_id", skill_id)
-            result.setdefault("skill_invocation_id", skill_context.get("skill_invocation_id"))
-            result.setdefault("technique", (skill_context.get("technique") or {}).get("name"))
-        state["executed_tool_runs"].append(run_id)
-
-        raw_command = str(result.get("command") or "").strip()
-        raw_return_code = result.get("return_code")
-        raw_stdout = str(result.get("stdout") or "").strip()
-        raw_stderr = str(result.get("stderr") or "").strip()
-        raw_dispatch_error = str(result.get("dispatch_error") or "").strip()
-
-        execution_blob_parts: list[str] = []
-        if raw_command:
-            execution_blob_parts.append(f"command={raw_command}")
-        if raw_return_code is not None:
-            execution_blob_parts.append(f"return_code={raw_return_code}")
-        if raw_dispatch_error:
-            execution_blob_parts.append(f"dispatch_error={raw_dispatch_error}")
-        if raw_stdout:
-            execution_blob_parts.append(f"stdout:\n{raw_stdout}")
-        if raw_stderr:
-            execution_blob_parts.append(f"stderr:\n{raw_stderr}")
-        execution_blob = "\n\n".join(execution_blob_parts)
-        
-        # Record execution in database for idempotency across restarts.
-        # Preserve "skipped" separately so the phase monitor does not paint
-        # intentional/contextual skips as hard tool failures.
-        if scan_id:
-            exec_status = result.get("status", "unknown")
-            if exec_status == "executed":
-                db_status = "success"
-            elif exec_status == "skipped":
-                db_status = "skipped"
-            else:
-                db_status = "failed"
-            _record_tool_execution_in_db(
-                scan_id=scan_id,
-                tool_name=tool,
-                target=scan_target,
-                execution_status=db_status,
-                error_msg=_truncate_log(execution_blob, 12000) if execution_blob else None,
-                exec_time=exec_time,
-            )
-        
-        state["logs_terminais"].append(f"{log_prefix}: tool={tool} status={result.get('status', 'unknown')}")
-        if result.get("source_agent_name"):
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} agent={result.get('source_agent_name')}"
-            )
-        if result.get("source_agent_id"):
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} agent_id={result.get('source_agent_id')}"
-            )
-        if result.get("dispatch_task_name"):
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} dispatch_task={result.get('dispatch_task_name')}"
-            )
-        if result.get("dispatch_task_id"):
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} dispatch_id={result.get('dispatch_task_id')}"
-            )
-        if result.get("dispatch_error"):
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}"
-            )
-            _append_error(
-                state,
-                f"tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}",
-                source=log_prefix,
-            )
-        _register_tool_result_metric(state, str(result.get("status") or ""))
-        _update_tool_runtime_metrics(state, tool=tool, status=str(result.get("status") or ""))
-        if result.get("status") == "executed":
-            step_success = True
-            _append_observation(
-                state,
-                f"tool={tool} target={scan_target} executed em {round(exec_time, 2)}s",
-                source=log_prefix,
-            )
-        else:
-            _append_error(
-                state,
-                f"tool={tool} target={scan_target} status={result.get('status', 'unknown')}",
-                source=log_prefix,
-            )
-
-        cmd = _truncate_log(result.get("command"))
-        if cmd:
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} cmd={cmd}")
-
-        rc = result.get("return_code")
-        if rc is not None:
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} return_code={rc}")
-
-        preview_limit = 300
-
-        stdout_preview = _truncate_log(result.get("stdout"), preview_limit)
-        if stdout_preview:
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} stdout={stdout_preview}")
-
-        stderr_preview = _truncate_log(result.get("stderr"), preview_limit)
-        if stderr_preview:
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
-
-        tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
-        if tool_specific_findings:
-            all_findings.extend(tool_specific_findings)
-            _append_observation(
-                state,
-                f"tool={tool} generated_findings={len(tool_specific_findings)}",
-                source=log_prefix,
-            )
-            state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
-            )
-        extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
-        for port in extracted_ports:
-            discovered_ports.add(port)
-
-        for port, evidence in _extract_port_service_evidence(result, tool_name=tool).items():
-            if port not in port_evidence:
-                port_evidence[port] = evidence
-            else:
-                # Mantem o registro com mais contexto de versão/comando quando disponível.
-                existing = port_evidence.get(port, {})
-                if not existing.get("version") and evidence.get("version"):
-                    existing["version"] = evidence.get("version", "")
-                if not existing.get("service") and evidence.get("service"):
-                    existing["service"] = evidence.get("service", "")
-                if not existing.get("evidence") and evidence.get("evidence"):
-                    existing["evidence"] = evidence.get("evidence", "")
-                if not existing.get("command") and evidence.get("command"):
-                    existing["command"] = evidence.get("command", "")
-                port_evidence[port] = existing
-
-        for asset in _extract_assets_from_result(result, root_domain=root_domain):
-            discovered_assets.add(asset)
-
-    all_findings = _suppress_waf_proxy_false_positives(
-        all_findings,
-        step_name=step_name,
-        default_target=scan_target,
-    )
-    try:
-        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
-
-        all_findings = enrich_findings_with_accepted_learning(all_findings)
-    except Exception:
-        pass
-
-    _mark_step_metric(state, step_success)
-    return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
+def _register_tool_result_metric(state: AgentState, status: str) -> None:
+    metrics = state.get("mission_metrics", {})
+    metrics["tools_attempted"] = int(metrics.get("tools_attempted", 0)) + 1
+    if status == "executed":
+        metrics["tools_success"] = int(metrics.get("tools_success", 0)) + 1
+    state["mission_metrics"] = metrics
 
 
-def _suppress_waf_proxy_false_positives(
-    findings: list[dict[str, Any]],
-    step_name: str,
-    default_target: str,
-) -> list[dict[str, Any]]:
-    if not findings:
-        return findings
-
-    waf_vendors: set[str] = set()
-    header_blob_parts: list[str] = []
-    nmap_vulscan_cve_findings: list[dict[str, Any]] = []
-    evidence_blob_parts: list[str] = []
-
-    for item in findings:
-        details = item.get("details") or {}
-        tool = str(details.get("tool") or "").strip().lower()
-
-        if tool == "wafw00f" and details.get("waf_detected"):
-            vendor = str(details.get("waf_vendor") or "").strip().lower()
-            if vendor:
-                waf_vendors.add(vendor)
-
-        if tool == "curl-headers":
-            raw_headers = str(details.get("http_headers_raw") or "")
-            if raw_headers:
-                header_blob_parts.append(raw_headers.lower())
-
-        if tool == "nmap-vulscan" and details.get("cve"):
-            nmap_vulscan_cve_findings.append(item)
-            evidence = str(details.get("evidence") or "").lower()
-            if evidence:
-                evidence_blob_parts.append(evidence)
-
-    if not nmap_vulscan_cve_findings:
-        return findings
-
-    if not waf_vendors:
-        return findings
-
-    header_blob = "\n".join(header_blob_parts)
-    evidence_blob = "\n".join(evidence_blob_parts)
-
-    header_indicates_waf = any(
-        token in header_blob
-        for token in ["server: cloudflare", "cf-ray", "cf-cache-status", "__cf_bm", "cloudflare"]
-    )
-    evidence_indicates_proxy = any(
-        token in evidence_blob
-        for token in ["cloudflare", "http proxy", "reverse proxy", "proxy"]
-    )
-
-    known_waf = any(model in " ".join(sorted(waf_vendors)) for model in KNOWN_WAF_MODELS)
-
-    should_suppress = header_indicates_waf and known_waf and evidence_indicates_proxy
-    if not should_suppress:
-        return findings
-
-    filtered_findings = [
-        item
-        for item in findings
-        if not (
-            str((item.get("details") or {}).get("tool") or "").strip().lower() == "nmap-vulscan"
-            and bool((item.get("details") or {}).get("cve"))
-        )
-    ]
-
-    filtered_findings.append(
-        {
-            "title": "nmap-vulscan suprimido por possivel falso positivo de WAF/proxy",
-            "severity": "info",
-            "risk_score": 1,
-            "source_worker": "analise_vulnerabilidade",
-            "details": {
-                "node": "vuln",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "wafw00f",
-                "waf_detected": True,
-                "waf_vendors": sorted(waf_vendors),
-                "header_validated": True,
-                "suppressed_tool": "nmap-vulscan",
-                "suppressed_cve_count": len(nmap_vulscan_cve_findings),
-                "reason": "target protegido por WAF/proxy (ex.: Cloudflare) com comportamento de resposta em portas/proxy que gera CVEs nao aplicaveis",
-            },
-        }
-    )
-
-    return filtered_findings
-
+# ─────────────────────────────────────────────────────────────
+# Target helpers
+# ─────────────────────────────────────────────────────────────
 
 def _target_host(target: str) -> str:
     raw = str(target or "").strip()
@@ -2293,28 +356,19 @@ def _target_explicit_port(target: str) -> int | None:
 
 
 def _infer_target_type(target: str) -> str:
-    """
-    Infere tipo de alvo: 'site' vs 'dominio'.
-    
-    Site: https://app.example.com/path?key=value → NÃO expandir subdomínios
-    Dominio: example.com ou www.example.com (sem path) → Expandir subdomínios
-    """
     raw = str(target or "").strip()
     if not raw:
         return "dominio"
-    
+
     has_scheme = "://" in raw
     parsed = urlparse(raw if has_scheme else f"http://{raw}")
-    
-    # Se tem path, query ou fragment → site específico
+
     if parsed.path.rstrip("/") or parsed.query or parsed.fragment:
         return "site"
-    
-    # Se começar com scheme → site
+
     if has_scheme:
         return "site"
-    
-    # Padrão: dominio
+
     return "dominio"
 
 
@@ -2338,10 +392,6 @@ def _adapt_recon_tools_for_target(target: str, tools: list[str]) -> list[str]:
 
 
 def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
-    # Mantem a lista completa do no de risk_assessment. O contrato de cobertura
-    # exige sweep de todos os profiles Kali prontos; limitar globalmente a
-    # poucos scanners deixa dalfox/sqlmap/wapiti/code/deps fora da execucao.
-
     if not _is_local_target(target):
         return tools
 
@@ -2358,6 +408,188 @@ def _adapt_vuln_tools_for_target(target: str, tools: list[str]) -> list[str]:
         return filtered
     return tools[:3]
 
+
+def _split_input_targets(raw_target: str) -> list[str]:
+    raw = str(raw_target or "").strip()
+    if not raw:
+        return []
+
+    targets: list[str] = []
+    for token in re.split(r"[;,\n]", raw):
+        value = str(token or "").strip()
+        if value and value not in targets:
+            targets.append(value)
+    return targets
+
+
+# ─────────────────────────────────────────────────────────────
+# Port / network helpers
+# ─────────────────────────────────────────────────────────────
+
+def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: str = "") -> list[int]:
+    raw_ports = result.get("open_ports")
+    if isinstance(raw_ports, list):
+        parsed = []
+        for p in raw_ports:
+            try:
+                port = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                parsed.append(port)
+        if parsed:
+            return sorted(set(parsed))
+
+    return []
+
+
+def _extract_url_from_tool_line(line: str) -> str:
+    """Extract a URL from raw or JSONL tool output without swallowing JSON fields."""
+    raw = str(line or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            for key in ("url", "input", "matched-at", "host"):
+                value = str(data.get(key) or "").strip()
+                if value.startswith(("http://", "https://")):
+                    return value
+
+    url_match = re.search(r"https?://[^\s\]\"'<>]+", raw)
+    return url_match.group(0).rstrip(".,;") if url_match else ""
+
+
+def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") -> dict[int, dict[str, str]]:
+    normalized_tool = str(tool_name or "").strip().lower()
+    stdout = str(result.get("stdout") or "")
+    command = _truncate_log(result.get("command"), 350)
+    evidence: dict[int, dict[str, str]] = {}
+
+    if normalized_tool in {"nmap", "nmap-vulscan", "vulscan"}:
+        line_pattern = re.compile(r"^(?P<port>\d{1,5})/tcp\s+open\s+(?P<service>[a-zA-Z0-9\-_/\.]+)(?:\s+(?P<version>.*))?$")
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            match = line_pattern.match(line)
+            if not match:
+                continue
+            try:
+                port = int(match.group("port"))
+            except Exception:
+                continue
+            if not (1 <= port <= 65535):
+                continue
+            service = str(match.group("service") or "").strip()
+            version = str(match.group("version") or "").strip()
+            evidence[port] = {
+                "service": service,
+                "version": version,
+                "evidence": line,
+                "command": command,
+                "tool": normalized_tool,
+            }
+
+    if normalized_tool == "naabu":
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            match = re.search(r":(\d{1,5})\b", line)
+            if not match:
+                continue
+            try:
+                port = int(match.group(1))
+            except Exception:
+                continue
+            if not (1 <= port <= 65535):
+                continue
+            if port not in evidence:
+                evidence[port] = {
+                    "service": "",
+                    "version": "",
+                    "evidence": line,
+                    "command": command,
+                    "tool": "naabu",
+                }
+
+    if normalized_tool in {"httpx", "whatweb"}:
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            url_raw = _extract_url_from_tool_line(line)
+            if not url_raw:
+                continue
+            parsed = urlparse(url_raw)
+            try:
+                port = parsed.port
+            except ValueError:
+                continue
+            if port is None and parsed.scheme == "https":
+                port = 443
+            elif port is None:
+                port = 80
+            if not (1 <= int(port) <= 65535):
+                continue
+
+            service = "https" if parsed.scheme == "https" else "http"
+            version = ""
+            if normalized_tool == "whatweb":
+                server_match = re.search(r"Server\[([^\]]+)\]", line)
+                if server_match:
+                    version = str(server_match.group(1) or "").strip()
+
+            if int(port) not in evidence:
+                evidence[int(port)] = {
+                    "service": service,
+                    "version": version,
+                    "evidence": line,
+                    "command": command,
+                    "tool": normalized_tool,
+                }
+
+    if normalized_tool == "nikto":
+        target_port: int | None = None
+        target_proto = ""
+        target_host = ""
+        for raw in stdout.splitlines():
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            port_match = re.search(r"(?i)^\+\s*Target\s+Port:\s*(\d{1,5})\b", line)
+            if port_match:
+                try:
+                    parsed_port = int(port_match.group(1))
+                    if 1 <= parsed_port <= 65535:
+                        target_port = parsed_port
+                except Exception:
+                    pass
+            host_match = re.search(r"(?i)^\+\s*Target\s+Host(?:name)?:\s*(.+)$", line)
+            if host_match:
+                target_host = str(host_match.group(1) or "").strip()
+            proto_match = re.search(r"(?i)^\+\s*Target\s+IP:\s*\S+\s*\(([^\)]+)\)", line)
+            if proto_match:
+                target_proto = str(proto_match.group(1) or "").strip().lower()
+
+        if target_port is not None and target_port not in evidence:
+            service = "https" if target_port == 443 or "https" in target_proto else "http"
+            summary = f"Nikto target={target_host or '-'} port={target_port}"
+            evidence[target_port] = {
+                "service": service,
+                "version": "",
+                "evidence": summary,
+                "command": command,
+                "tool": "nikto",
+            }
+
+    return evidence
+
+
+# ─────────────────────────────────────────────────────────────
+# Asset discovery helpers
+# ─────────────────────────────────────────────────────────────
 
 def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> list[str]:
     scope = str(root_domain or "").strip().lower().lstrip("*.").strip(".")
@@ -2416,42 +648,33 @@ def _register_discovered_assets(state: AgentState, root_domain: str, assets: lis
 
 
 def _persist_discovered_assets_to_db(scan_job_id: int, owner_id: int, assets: list[str], source_tool: str = "recon") -> int:
-    """
-    Persiste subdomínios descobertos na tabela Asset do banco de dados.
-    Retorna número de novos assets inseridos.
-    Crítico para: rastreabilidade, auditoria, prevenção de perda de dados em falhas.
-    
-    Usa UNIQUE constraint via query dupla-check (não há constraint no modelo) para evitar duplicatas.
-    """
+    """Persiste subdomínios descobertos na tabela Asset do banco de dados."""
     try:
         from app.db.session import SessionLocal
         from app.models.models import Asset
         from datetime import datetime
-        
+
         _db = SessionLocal()
         try:
             inserted_count = 0
             now = datetime.utcnow()
-            
+
             for asset_str in (assets or []):
                 domain_normalized = str(asset_str or "").strip().lower()
                 if not domain_normalized:
                     continue
-                
+
                 try:
-                    # Verificar se asset já existe para este owner
                     existing = _db.query(Asset).filter(
                         Asset.owner_id == owner_id,
                         Asset.domain_or_ip == domain_normalized,
                     ).first()
-                    
+
                     if existing:
-                        # Atualizar last_seen e last_scan_id
                         existing.last_seen = now
                         existing.last_scan_id = scan_job_id
                         existing.scan_count = (existing.scan_count or 0) + 1
                     else:
-                        # Inserir novo asset
                         new_asset = Asset(
                             owner_id=owner_id,
                             domain_or_ip=domain_normalized,
@@ -2463,47 +686,149 @@ def _persist_discovered_assets_to_db(scan_job_id: int, owner_id: int, assets: li
                         )
                         _db.add(new_asset)
                         inserted_count += 1
-                except Exception as asset_err:
-                    # Log mas não bloqueia (um asset ruim não quebra todo o pipeline)
+                except Exception:
                     continue
-            
+
             _db.commit()
             return inserted_count
         finally:
             _db.close()
-    except Exception as e:
-        # Não bloqueia o pipeline se persistência falhar
+    except Exception:
         return 0
 
 
-def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
-    root = str(state.get("target") or "").strip()
-    candidates: list[str] = []
-    if root:
-        for token in re.split(r"[;,]", root):
-            value = str(token or "").strip()
-            if value and value not in candidates:
-                candidates.append(value)
+# ─────────────────────────────────────────────────────────────
+# DB execution tracking
+# ─────────────────────────────────────────────────────────────
 
-    for asset in list(state.get("scanned_assets") or []):
-        host = str(asset or "").strip()
-        if host and host not in candidates:
-            candidates.append(host)
+def _has_tool_run_in_db(scan_id: int, tool_name: str, target: str) -> bool:
+    """Verifica se ferramenta já teve execução bem-sucedida para este target neste scan."""
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ExecutedToolRun
 
-    # Inclui parte da fila descoberta para ampliar cobertura em subdominios.
-    for asset in list(state.get("pending_asset_scans") or []):
-        host = str(asset or "").strip()
-        if host and host not in candidates:
-            candidates.append(host)
+        db = SessionLocal()
+        try:
+            existing = db.query(ExecutedToolRun).filter(
+                ExecutedToolRun.scan_job_id == scan_id,
+                ExecutedToolRun.tool_name == tool_name.lower(),
+                ExecutedToolRun.target == target.lower(),
+                ExecutedToolRun.status == "success",
+            ).first()
+            return existing is not None
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Falha ao verificar execução idempotente da ferramenta")
+        return False
 
-    # Inclui endpoints/URLs descobertos pelo crawler/fuzzing para que sqlmap,
-    # dalfox, wapiti e validadores aprendidos rodem no ponto real de entrada,
-    # nao apenas na raiz da aplicacao.
-    for url in _discovered_validation_targets(state, root, limit=limit * 6):
-        if url and url not in candidates:
-            candidates.append(url)
 
-    return candidates[: max(1, limit)]
+def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, execution_status: str = "success", error_msg: str | None = None, exec_time: float | None = None) -> None:
+    """Registra execução da ferramenta no banco para idempotência."""
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ExecutedToolRun
+        from datetime import datetime
+
+        db = SessionLocal()
+        try:
+            normalized_tool = tool_name.lower()
+            normalized_target = target.lower()
+            existing = db.query(ExecutedToolRun).filter(
+                ExecutedToolRun.scan_job_id == scan_id,
+                ExecutedToolRun.tool_name == normalized_tool,
+                ExecutedToolRun.target == normalized_target,
+            ).first()
+
+            if existing:
+                existing.status = execution_status
+                existing.error_message = error_msg
+                existing.execution_time_seconds = exec_time
+                existing.created_at = datetime.utcnow()
+            else:
+                record = ExecutedToolRun(
+                    scan_job_id=scan_id,
+                    tool_name=normalized_tool,
+                    target=normalized_target,
+                    status=execution_status,
+                    error_message=error_msg,
+                    execution_time_seconds=exec_time,
+                    created_at=datetime.utcnow(),
+                )
+                db.add(record)
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Falha ao registrar execução da ferramenta")
+
+
+# ─────────────────────────────────────────────────────────────
+# Validation / target resolution helpers
+# ─────────────────────────────────────────────────────────────
+
+def _validate_osint_targets(targets: list[str]) -> list[str]:
+    import ipaddress
+
+    valid = []
+    for target in (targets or []):
+        if not target or not isinstance(target, str):
+            continue
+
+        target_str = str(target).strip().lower()
+        if not target_str or target_str in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+            continue
+
+        try:
+            ipaddress.ip_address(target_str.split("/")[0])
+            valid.append(target_str)
+            continue
+        except ValueError:
+            pass
+
+        if "." in target_str and len(target_str) > 4:
+            if (not target_str.startswith(".") and not target_str.endswith(".") and
+                    all(c.isalnum() or c in ".-" for c in target_str)):
+                valid.append(target_str)
+
+    return valid
+
+
+def _normalize_host_for_resolution(target: str) -> str:
+    raw = str(target or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        if "://" in raw:
+            parsed = urlparse(raw)
+            return str(parsed.hostname or "").strip().lower()
+    except Exception:
+        pass
+    return raw.split("/")[0].split(":")[0].strip().lower()
+
+
+def _is_target_resolvable(target: str) -> bool:
+    host = _normalize_host_for_resolution(target)
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return False
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except Exception:
+        return False
+
+
+def _filter_resolvable_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+    valid: list[str] = []
+    invalid: list[str] = []
+    for target in targets or []:
+        if _is_target_resolvable(target):
+            valid.append(target)
+        else:
+            invalid.append(target)
+    return valid, invalid
 
 
 def _scope_compare_host(target: str) -> str:
@@ -2623,12 +948,34 @@ def _discovered_validation_targets(state: AgentState, root: str, limit: int = 40
     return normalized[: max(1, limit)]
 
 
-def _tools_for_validation_target(scan_target: str, tools: list[str]) -> list[str]:
-    """Avoid running path-fuzzers against full query URLs.
+def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
+    root = str(state.get("target") or "").strip()
+    candidates: list[str] = []
+    if root:
+        for token in re.split(r"[;,]", root):
+            value = str(token or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
 
-    Parameterized URLs are validation targets for injection/XSS/API scanners;
-    root URLs remain the right place for ffuf/gobuster/dirsearch discovery.
-    """
+    for asset in list(state.get("scanned_assets") or []):
+        host = str(asset or "").strip()
+        if host and host not in candidates:
+            candidates.append(host)
+
+    for asset in list(state.get("pending_asset_scans") or []):
+        host = str(asset or "").strip()
+        if host and host not in candidates:
+            candidates.append(host)
+
+    for url in _discovered_validation_targets(state, root, limit=limit * 6):
+        if url and url not in candidates:
+            candidates.append(url)
+
+    return candidates[: max(1, limit)]
+
+
+def _tools_for_validation_target(scan_target: str, tools: list[str]) -> list[str]:
+    """Avoid running path-fuzzers against full query URLs."""
     if not _is_parameterized_url(scan_target):
         return tools
     preferred = {"sqlmap", "dalfox", "wapiti", "nuclei", "arjun", "curl-headers"}
@@ -2636,2012 +983,408 @@ def _tools_for_validation_target(scan_target: str, tools: list[str]) -> list[str
     return selected or tools
 
 
-def _split_input_targets(raw_target: str) -> list[str]:
-    raw = str(raw_target or "").strip()
-    if not raw:
-        return []
+# ─────────────────────────────────────────────────────────────
+# WAF false positive filter
+# ─────────────────────────────────────────────────────────────
 
-    targets: list[str] = []
-    for token in re.split(r"[;,\n]", raw):
-        value = str(token or "").strip()
-        if value and value not in targets:
-            targets.append(value)
-    return targets
+def _suppress_waf_proxy_false_positives(
+    findings: list[dict[str, Any]],
+    step_name: str,
+    default_target: str,
+) -> list[dict[str, Any]]:
+    if not findings:
+        return findings
 
+    waf_vendors: set[str] = set()
+    header_blob_parts: list[str] = []
+    nmap_vulscan_cve_findings: list[dict[str, Any]] = []
+    evidence_blob_parts: list[str] = []
 
-def _extract_open_ports(result: dict[str, Any], step_name: str = "", tool_name: str = "") -> list[int]:
-    raw_ports = result.get("open_ports")
-    if isinstance(raw_ports, list):
-        parsed = []
-        for p in raw_ports:
-            try:
-                port = int(p)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= port <= 65535:
-                parsed.append(port)
-        if parsed:
-            return sorted(set(parsed))
+    for item in findings:
+        details = item.get("details") or {}
+        tool = str(details.get("tool") or "").strip().lower()
 
-    # Sem fallback sintético: se não houver prova do scanner, não geramos porta aberta.
-    return []
+        if tool == "wafw00f" and details.get("waf_detected"):
+            vendor = str(details.get("waf_vendor") or "").strip().lower()
+            if vendor:
+                waf_vendors.add(vendor)
 
+        if tool == "curl-headers":
+            raw_headers = str(details.get("http_headers_raw") or "")
+            if raw_headers:
+                header_blob_parts.append(raw_headers.lower())
 
-def _extract_url_from_tool_line(line: str) -> str:
-    """Extract a URL from raw or JSONL tool output without swallowing JSON fields."""
-    raw = str(line or "").strip()
-    if not raw:
-        return ""
+        if tool == "nmap-vulscan" and details.get("cve"):
+            nmap_vulscan_cve_findings.append(item)
+            evidence = str(details.get("evidence") or "").lower()
+            if evidence:
+                evidence_blob_parts.append(evidence)
 
-    if raw.startswith("{"):
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            data = None
-        if isinstance(data, dict):
-            for key in ("url", "input", "matched-at", "host"):
-                value = str(data.get(key) or "").strip()
-                if value.startswith(("http://", "https://")):
-                    return value
+    if not nmap_vulscan_cve_findings:
+        return findings
 
-    url_match = re.search(r"https?://[^\s\]\"'<>]+", raw)
-    return url_match.group(0).rstrip(".,;") if url_match else ""
+    if not waf_vendors:
+        return findings
 
+    header_blob = "\n".join(header_blob_parts)
+    evidence_blob = "\n".join(evidence_blob_parts)
 
-def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") -> dict[int, dict[str, str]]:
-    normalized_tool = str(tool_name or "").strip().lower()
-    stdout = str(result.get("stdout") or "")
-    command = _truncate_log(result.get("command"), 350)
-    evidence: dict[int, dict[str, str]] = {}
+    header_indicates_waf = any(
+        token in header_blob
+        for token in ["server: cloudflare", "cf-ray", "cf-cache-status", "__cf_bm", "cloudflare"]
+    )
+    evidence_indicates_proxy = any(
+        token in evidence_blob
+        for token in ["cloudflare", "http proxy", "reverse proxy", "proxy"]
+    )
 
-    if normalized_tool in {"nmap", "nmap-vulscan", "vulscan"}:
-        # Exemplo: 22/tcp open ssh OpenSSH 8.2p1 Ubuntu 4ubuntu0.11
-        line_pattern = re.compile(r"^(?P<port>\d{1,5})/tcp\s+open\s+(?P<service>[a-zA-Z0-9\-_/\.]+)(?:\s+(?P<version>.*))?$")
-        for raw in stdout.splitlines():
-            line = str(raw or "").strip()
-            match = line_pattern.match(line)
-            if not match:
-                continue
-            try:
-                port = int(match.group("port"))
-            except Exception:
-                continue
-            if not (1 <= port <= 65535):
-                continue
-            service = str(match.group("service") or "").strip()
-            version = str(match.group("version") or "").strip()
-            evidence[port] = {
-                "service": service,
-                "version": version,
-                "evidence": line,
-                "command": command,
-                "tool": normalized_tool,
-            }
+    known_waf = any(model in " ".join(sorted(waf_vendors)) for model in KNOWN_WAF_MODELS)
 
-    if normalized_tool == "naabu":
-        # Exemplo comum: host:443
-        for raw in stdout.splitlines():
-            line = str(raw or "").strip()
-            match = re.search(r":(\d{1,5})\b", line)
-            if not match:
-                continue
-            try:
-                port = int(match.group(1))
-            except Exception:
-                continue
-            if not (1 <= port <= 65535):
-                continue
-            if port not in evidence:
-                evidence[port] = {
-                    "service": "",
-                    "version": "",
-                    "evidence": line,
-                    "command": command,
-                    "tool": "naabu",
-                }
+    should_suppress = header_indicates_waf and known_waf and evidence_indicates_proxy
+    if not should_suppress:
+        return findings
 
-    if normalized_tool in {"httpx", "whatweb"}:
-        for raw in stdout.splitlines():
-            line = str(raw or "").strip()
-            if not line:
-                continue
-            url_raw = _extract_url_from_tool_line(line)
-            if not url_raw:
-                continue
-            parsed = urlparse(url_raw)
-            try:
-                port = parsed.port
-            except ValueError:
-                continue
-            if port is None and parsed.scheme == "https":
-                port = 443
-            elif port is None:
-                port = 80
-            if not (1 <= int(port) <= 65535):
-                continue
-
-            service = "https" if parsed.scheme == "https" else "http"
-            version = ""
-            if normalized_tool == "whatweb":
-                server_match = re.search(r"Server\[([^\]]+)\]", line)
-                if server_match:
-                    version = str(server_match.group(1) or "").strip()
-
-            if int(port) not in evidence:
-                evidence[int(port)] = {
-                    "service": service,
-                    "version": version,
-                    "evidence": line,
-                    "command": command,
-                    "tool": normalized_tool,
-                }
-
-    if normalized_tool == "nikto":
-        target_port: int | None = None
-        target_proto = ""
-        target_host = ""
-        for raw in stdout.splitlines():
-            line = str(raw or "").strip()
-            if not line:
-                continue
-            port_match = re.search(r"(?i)^\+\s*Target\s+Port:\s*(\d{1,5})\b", line)
-            if port_match:
-                try:
-                    parsed_port = int(port_match.group(1))
-                    if 1 <= parsed_port <= 65535:
-                        target_port = parsed_port
-                except Exception:
-                    pass
-            host_match = re.search(r"(?i)^\+\s*Target\s+Host(?:name)?:\s*(.+)$", line)
-            if host_match:
-                target_host = str(host_match.group(1) or "").strip()
-            proto_match = re.search(r"(?i)^\+\s*Target\s+IP:\s*\S+\s*\(([^\)]+)\)", line)
-            if proto_match:
-                target_proto = str(proto_match.group(1) or "").strip().lower()
-
-        if target_port is not None and target_port not in evidence:
-            service = "https" if target_port == 443 or "https" in target_proto else "http"
-            summary = f"Nikto target={target_host or '-'} port={target_port}"
-            evidence[target_port] = {
-                "service": service,
-                "version": "",
-                "evidence": summary,
-                "command": command,
-                "tool": "nikto",
-            }
-
-    return evidence
-
-
-def _truncate_log(value: Any, limit: int = 400) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}..."
-
-
-def _severity_to_risk_score(severity: str) -> int:
-    sev = str(severity or "").strip().lower()
-    if sev == "critical":
-        return 9
-    if sev == "high":
-        return 7
-    if sev == "medium":
-        return 5
-    if sev == "low":
-        return 3
-    return 2
-
-
-def _extract_asm_findings(result: dict[str, Any], step_name: str, default_target: str) -> list[dict[str, Any]]:
-    raw = result.get("asm_findings")
-    if not isinstance(raw, list) or not raw:
-        return []
-
-    findings: list[dict[str, Any]] = []
-    tool = str(result.get("tool") or "unknown").strip().lower()
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        severity = str(item.get("severity") or "info").strip().lower()
-        rule_id = str(item.get("rule_id") or "asm-rule").strip()
-        title = str(item.get("title") or f"ASM Rule Match: {rule_id}").strip()
-        details: dict[str, Any] = {
-            "node": "scan",
-            "asset": default_target,
-            "step": step_name,
-            "tool": tool,
-            "rule_id": rule_id,
-            "tags": item.get("tags", []),
-            "matches": item.get("matches", []),
-            "match_count": int(item.get("match_count") or 0),
-            "remediation": item.get("remediation"),
-            "references": item.get("references", []),
-            "description": item.get("description"),
-        }
-        findings.append(
-            {
-                "title": f"ASM Rule: {title}",
-                "severity": severity,
-                "risk_score": _severity_to_risk_score(severity),
-                "source_worker": "scan",
-                "details": details,
-            }
+    filtered_findings = [
+        item
+        for item in findings
+        if not (
+            str((item.get("details") or {}).get("tool") or "").strip().lower() == "nmap-vulscan"
+            and bool((item.get("details") or {}).get("cve"))
         )
+    ]
 
-    return findings
-
-
-def _extract_tool_output_findings(result: dict[str, Any], step_name: str, default_target: str) -> list[dict[str, Any]]:
-    tool = str(result.get("tool") or "").strip().lower()
-    stdout = str(result.get("stdout") or result.get("output") or "")
-    if not tool or not stdout.strip():
-        return []
-
-    if tool == "wafw00f":
-        return _extract_wafw00f_findings(stdout, step_name, default_target)
-    if tool == "shcheck":
-        return _extract_shcheck_findings(stdout, step_name, default_target)
-    if tool == "curl-headers":
-        return _extract_curl_headers_findings(stdout, step_name, default_target)
-    if tool == "nikto":
-        return _extract_nikto_findings(stdout, step_name, default_target)
-    if tool in {"nmap-vulscan", "vulscan"}:
-        return _extract_nmap_vulscan_findings(stdout, step_name, default_target)
-    if tool == "sslscan":
-        return _extract_sslscan_findings(stdout, step_name, default_target)
-    if tool == "testssl":
-        return _extract_testssl_findings(stdout, step_name, default_target)
-    if tool == "sqlmap":
-        return _extract_sqlmap_findings(stdout, step_name, default_target)
-    if tool == "dalfox":
-        return _extract_dalfox_findings(stdout, step_name, default_target)
-    if tool == "wapiti":
-        return _extract_wapiti_findings(stdout, step_name, default_target)
-    if tool == "shodan-cli":
-        return _extract_shodan_findings(stdout, step_name, default_target)
-    if tool == "amass":
-        return _extract_amass_findings(stdout, step_name, default_target)
-    if tool == "sublist3r":
-        return _extract_sublist3r_findings(stdout, step_name, default_target)
-    if tool == "dnsenum":
-        return _extract_dnsenum_findings(stdout, step_name, default_target)
-    if tool == "massdns":
-        return _extract_massdns_findings(stdout, step_name, default_target)
-    if tool == "subjack":
-        return _extract_subjack_findings(stdout, step_name, default_target)
-    if tool == "ffuf":
-        return _extract_ffuf_findings(stdout, step_name, default_target)
-    if tool == "gobuster":
-        return _extract_gobuster_findings(stdout, step_name, default_target)
-    if tool == "cloudenum":
-        return _extract_cloudenum_findings(stdout, step_name, default_target)
-    if tool == "whatweb":
-        return _extract_whatweb_findings(stdout, step_name, default_target)
-    if tool == "katana":
-        return _extract_katana_findings(stdout, step_name, default_target)
-    return []
-
-
-def _extract_shodan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai CVEs e portas abertas da resposta JSON da API Shodan."""
-    try:
-        data = json.loads(stdout)
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    matches = data.get("matches", [])
-    if not matches or not isinstance(matches, list):
-        return []
-
-    findings: list[dict[str, Any]] = []
-    seen_cves: set[str] = set()
-    open_ports_per_ip: dict[str, list[str]] = {}
-
-    for match in matches:
-        if not isinstance(match, dict):
-            continue
-        ip_str = str(match.get("ip_str") or default_target)
-        port = match.get("port")
-        transport = str(match.get("transport") or "tcp")
-        product = _sanitize_cli_text(str(match.get("product") or ""))
-        version = _sanitize_cli_text(str(match.get("version") or ""))
-
-        # Agrupa portas por IP para finding informativo consolidado
-        if port:
-            service_label = f"{port}/{transport}"
-            if product:
-                service_label += f" ({product}"
-                if version:
-                    service_label += f" {version}"
-                service_label += ")"
-            open_ports_per_ip.setdefault(ip_str, []).append(service_label)
-
-        # CVEs reportados pelo Shodan para este host/servico
-        vulns = match.get("vulns") or {}
-        if not isinstance(vulns, dict):
-            continue
-        for cve_id, vuln_info in vulns.items():
-            cve_id = str(cve_id or "").upper().strip()
-            if not cve_id.startswith("CVE-"):
-                continue
-            if cve_id in seen_cves:
-                continue
-            seen_cves.add(cve_id)
-
-            cvss = 0.0
-            summary = ""
-            if isinstance(vuln_info, dict):
-                try:
-                    cvss = float(vuln_info.get("cvss") or 0)
-                except (TypeError, ValueError):
-                    cvss = 0.0
-                summary = _sanitize_cli_text(str(vuln_info.get("summary") or ""))
-
-            if cvss >= 9.0:
-                severity = "critical"
-            elif cvss >= 7.0:
-                severity = "high"
-            elif cvss >= 4.0:
-                severity = "medium"
-            else:
-                severity = "low"
-
-            risk_score = min(10, max(1, int(round(cvss))))
-            evidence = summary[:500] if summary else f"{cve_id} identificado pelo Shodan para {ip_str}"
-
-            findings.append({
-                "title": cve_id,
-                "severity": severity,
-                "risk_score": risk_score,
-                "source_worker": "osint",
-                "details": {
-                    "node": "osint",
-                    "step": step_name,
-                    "asset": ip_str,
-                    "tool": "shodan-cli",
-                    "evidence": evidence,
-                    "cvss": cvss,
-                    "cve_id": cve_id,
-                },
-            })
-
-    # Um finding informativo por IP com as portas expostas
-    for ip_str, ports in open_ports_per_ip.items():
-        ports_str = ", ".join(ports[:20])
-        findings.append({
-            "title": f"Portas expostas publicamente (Shodan): {ip_str}",
+    filtered_findings.append(
+        {
+            "title": "nmap-vulscan suprimido por possivel falso positivo de WAF/proxy",
             "severity": "info",
             "risk_score": 1,
-            "source_worker": "osint",
-            "details": {
-                "node": "osint",
-                "step": step_name,
-                "asset": ip_str,
-                "tool": "shodan-cli",
-                "evidence": f"Portas detectadas pelo Shodan: {ports_str}",
-                "open_ports": ports,
-            },
-        })
-
-    return findings
-
-
-def _extract_wafw00f_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    for raw_line in stdout.splitlines():
-        line = _sanitize_cli_text(raw_line)
-        if not line:
-            continue
-        match = re.search(r"is behind\s+(.+?)\s+WAF", line, re.IGNORECASE)
-        if match:
-            vendor = _sanitize_cli_text(match.group(1) or "")
-            normalized_vendor = _normalize_waf_vendor(vendor or line) or vendor
-            findings.append(
-                {
-                    "title": f"WAF detectado: {normalized_vendor}",
-                    "severity": "info",
-                    "risk_score": 1,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "wafw00f",
-                        "evidence": line,
-                        "waf_vendor": normalized_vendor,
-                        "waf_model_match": bool(_normalize_waf_vendor(normalized_vendor)),
-                        "waf_detected": True,
-                    },
-                }
-            )
-            break
-    return findings
-
-
-def _extract_shcheck_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen_missing: set[str] = set()
-    seen_present: set[str] = set()
-    header_pattern = re.compile(
-        r"(strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|x-xss-protection)",
-        re.IGNORECASE,
-    )
-    missing_tokens = ["missing", "not set", "absent", "not configured", "misconfigured"]
-    present_tokens = ["present", "set", "configured", "ok", "enabled", "good"]
-
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        header_match = header_pattern.search(line)
-        if not header_match:
-            continue
-        header = str(header_match.group(1) or "").strip().lower()
-        lowered = line.lower()
-        is_missing = any(token in lowered for token in missing_tokens)
-        is_present = any(token in lowered for token in present_tokens) or (":" in line and not is_missing)
-
-        if is_missing:
-            if header in seen_missing:
-                continue
-            seen_missing.add(header)
-            sev = "medium" if header in {"strict-transport-security", "content-security-policy", "x-frame-options"} else "low"
-            findings.append(
-                {
-                    "title": f"Header de seguranca ausente: {header}",
-                    "severity": sev,
-                    "risk_score": 5 if sev == "medium" else 3,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "shcheck",
-                        "header_name": header,
-                        "header_issue": "missing",
-                        "evidence": line,
-                    },
-                }
-            )
-            continue
-
-        if is_present:
-            if header in seen_present:
-                continue
-            seen_present.add(header)
-            findings.append(
-                {
-                    "title": f"Header de seguranca configurado: {header}",
-                    "severity": "info",
-                    "risk_score": 1,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "shcheck",
-                        "header_name": header,
-                        "header_issue": "present",
-                        "evidence": line,
-                    },
-                }
-            )
-    return findings
-
-
-def _extract_curl_headers_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-
-    expected_headers = {
-        "strict-transport-security": {
-            "owasp": "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-            "reason": "reduz downgrade HTTPS e risco de cookie/token em canal inseguro",
-            "remediation": "habilitar HSTS com max-age adequado, includeSubDomains e preload quando aplicavel",
-            "severity": "medium",
-        },
-        "content-security-policy": {
-            "owasp": "A03:2021 Injection / A05:2021 Security Misconfiguration",
-            "reason": "limita execucao de scripts, carregamento de recursos e abuso de XSS",
-            "remediation": "definir CSP restritiva com default-src, script-src, object-src 'none' e frame-ancestors",
-            "severity": "medium",
-        },
-        "x-frame-options": {
-            "owasp": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
-            "reason": "reduz risco de clickjacking quando frame-ancestors ainda nao cobre o caso",
-            "remediation": "usar DENY/SAMEORIGIN ou preferir CSP frame-ancestors com politica equivalente",
-            "severity": "medium",
-        },
-        "x-content-type-options": {
-            "owasp": "A05:2021 Security Misconfiguration",
-            "reason": "reduz MIME sniffing e interpretacao incorreta de conteudo",
-            "remediation": "configurar X-Content-Type-Options: nosniff",
-            "severity": "low",
-        },
-        "referrer-policy": {
-            "owasp": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
-            "reason": "reduz vazamento de caminhos, parametros e tokens por Referer",
-            "remediation": "configurar strict-origin-when-cross-origin ou politica mais restritiva",
-            "severity": "low",
-        },
-        "permissions-policy": {
-            "owasp": "A05:2021 Security Misconfiguration",
-            "reason": "reduz exposicao de APIs sensiveis do navegador",
-            "remediation": "desabilitar recursos nao usados, como camera, microphone, geolocation e payment",
-            "severity": "low",
-        },
-        "cross-origin-opener-policy": {
-            "owasp": "A05:2021 Security Misconfiguration",
-            "reason": "isola contexto de navegacao e reduz abuso cross-origin",
-            "remediation": "avaliar same-origin para aplicacoes que suportam isolamento",
-            "severity": "low",
-        },
-        "cross-origin-resource-policy": {
-            "owasp": "A05:2021 Security Misconfiguration",
-            "reason": "reduz carregamento indevido de recursos por origens externas",
-            "remediation": "avaliar same-origin ou same-site conforme necessidade funcional",
-            "severity": "low",
-        },
-    }
-
-    blocks: list[tuple[str, str]] = []
-    current_url = default_target
-    current_lines: list[str] = []
-
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "")
-        if line.startswith("# URL:"):
-            if current_lines:
-                blocks.append((current_url, "\n".join(current_lines).strip()))
-                current_lines = []
-            current_url = line.replace("# URL:", "", 1).strip() or default_target
-            continue
-        if line.strip():
-            current_lines.append(line)
-
-    if current_lines:
-        blocks.append((current_url, "\n".join(current_lines).strip()))
-
-    if not blocks and stdout.strip():
-        blocks.append((default_target, stdout.strip()))
-
-    seen: set[tuple[str, str, str]] = set()
-    for block_url, block_text in blocks:
-        block_lower = block_text.lower()
-
-        for header, metadata in expected_headers.items():
-            present = re.search(rf"(?im)^\s*{re.escape(header)}\s*:\s*.+$", block_text) is not None
-            issue = "present" if present else "missing"
-            dedupe_key = (str(block_url or default_target).strip().lower(), header, issue)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-
-            if present:
-                match = re.search(rf"(?im)^\s*{re.escape(header)}\s*:\s*(.+)$", block_text)
-                evidence = f"{header}: {str(match.group(1) if match else '').strip()}".strip()
-                findings.append(
-                    {
-                        "title": f"Header de seguranca configurado: {header}",
-                        "severity": "info",
-                        "risk_score": 1,
-                        "source_worker": "analise_vulnerabilidade",
-                        "details": {
-                            "node": "vuln",
-                            "step": step_name,
-                            "asset": block_url or default_target,
-                            "tool": "curl-headers",
-                            "header_name": header,
-                            "header_issue": "present",
-                            "owasp_category": metadata["owasp"],
-                            "owasp_top_10": metadata["owasp"],
-                            "header_expected_reason": metadata["reason"],
-                            "remediation": metadata["remediation"],
-                            "evidence": evidence,
-                            "http_headers_raw": block_text[:1400],
-                        },
-                    }
-                )
-            else:
-                sev = str(metadata.get("severity") or "low")
-                findings.append(
-                    {
-                        "title": f"Header de seguranca ausente: {header}",
-                        "severity": sev,
-                        "risk_score": 5 if sev == "medium" else 3,
-                        "source_worker": "analise_vulnerabilidade",
-                        "details": {
-                            "node": "vuln",
-                            "step": step_name,
-                            "asset": block_url or default_target,
-                            "tool": "curl-headers",
-                            "header_name": header,
-                            "header_issue": "missing",
-                            "owasp_category": metadata["owasp"],
-                            "owasp_top_10": metadata["owasp"],
-                            "header_expected_reason": metadata["reason"],
-                            "remediation": metadata["remediation"],
-                            "evidence": f"{header}: missing",
-                            "http_headers_raw": block_text[:1400],
-                        },
-                    }
-                )
-
-        status_match = re.search(r"(?im)^\s*HTTP/\S+\s+(\d{3})\b", block_text)
-        if status_match:
-            status_code = str(status_match.group(1) or "").strip()
-            findings.append(
-                {
-                    "title": f"HTTP status observado: {status_code}",
-                    "severity": "info",
-                    "risk_score": 1,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": block_url or default_target,
-                        "tool": "curl-headers",
-                        "http_status": status_code,
-                        "owasp_category": "A05:2021 Security Misconfiguration",
-                        "evidence": re.search(r"(?im)^\s*HTTP/\S+\s+\d{3}.*$", block_text).group(0),
-                        "http_headers_raw": block_text[:1400],
-                    },
-                }
-            )
-
-    return findings
-
-
-def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    seen_headers: set[str] = set()
-    
-    ignore_tokens = [
-        "target host",
-        "target ip",
-        "target port",
-        "start time",
-        "end time",
-        "no web server found",
-        "nikto installation",
-        "multiple ips",
-        "cloudflare detected",
-        "uncommon header",
-        "cgi directories",
-    ]
-    
-    header_pattern = re.compile(
-        r"Suggested security header missing:\s*(\S+)",
-        re.IGNORECASE,
-    )
-    
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line.startswith("+"):
-            continue
-        lowered = line.lower()
-        
-        # Extrai headers ausentes especialmente
-        header_match = header_pattern.search(line)
-        if header_match:
-            header = str(header_match.group(1) or "").strip().lower()
-            if header not in seen_headers:
-                seen_headers.add(header)
-                sev = "medium" if header in {"strict-transport-security", "content-security-policy", "permissions-policy"} else "low"
-                findings.append(
-                    {
-                        "title": f"Header de seguranca ausente: {header}",
-                        "severity": sev,
-                        "risk_score": 5 if sev == "medium" else 3,
-                        "source_worker": "analise_vulnerabilidade",
-                        "details": {
-                            "node": "vuln",
-                            "step": step_name,
-                            "asset": default_target,
-                            "tool": "nikto",
-                            "header_name": header,
-                            "header_issue": "missing",
-                            "evidence": line,
-                        },
-                    }
-                )
-            continue
-        
-        # Ignora linhas com tokens conhecidos
-        if any(token in lowered for token in ignore_tokens):
-            continue
-        
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        
-        # CVEs e vulnerabilidades
-        sev = "high" if ("cve-" in lowered or "osvdb" in lowered) else "medium"
-        findings.append(
-            {
-                "title": f"Nikto: {line.lstrip('+ ').strip()[:180]}",
-                "severity": sev,
-                "risk_score": 7 if sev == "high" else 5,
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "nikto",
-                    "evidence": line,
-                },
-            }
-        )
-        if len(findings) >= 30:
-            break
-    return findings
-
-
-def _extract_nmap_vulscan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    db_refs: list[str] = []
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        cve_match = re.search(r"\bCVE-\d{4}-\d{4,7}\b", line, re.IGNORECASE)
-        if cve_match:
-            cve_id = str(cve_match.group(0) or "").upper()
-            if cve_id in seen:
-                continue
-            seen.add(cve_id)
-            findings.append(
-                {
-                    "title": cve_id,
-                    "severity": "high",
-                    "risk_score": 7,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": {
-                        "node": "vuln",
-                        "step": step_name,
-                        "asset": default_target,
-                        "tool": "nmap-vulscan",
-                        "vuln_db": "vulscan",
-                        "cve": cve_id,
-                        "evidence": line,
-                    },
-                }
-            )
-            continue
-
-        lowered = line.lower()
-        if any(token in lowered for token in ["exploitdb", "osvdb", "securityfocus", "packetstorm"]):
-            db_refs.append(line)
-
-    if not findings and db_refs:
-        findings.append(
-            {
-                "title": "Referencias de vulnerabilidade identificadas (sem CVE explicito)",
-                "severity": "medium",
-                "risk_score": 5,
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "nmap-vulscan",
-                    "vuln_db": "vulscan",
-                    "evidence": " | ".join(db_refs[:5]),
-                },
-            }
-        )
-    return findings
-
-
-def _extract_sslscan_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def _add(title: str, severity: str, evidence: str, category: str, remediation: str) -> None:
-        key = (title, evidence[:160])
-        if key in seen:
-            return
-        seen.add(key)
-        findings.append(
-            {
-                "title": title,
-                "severity": severity,
-                "risk_score": _severity_to_risk_score(severity),
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "sslscan",
-                    "owasp_category": category,
-                    "owasp_top_10": category,
-                    "remediation": remediation,
-                    "evidence": evidence,
-                },
-            }
-        )
-
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if "sslv2" in lowered or "sslv3" in lowered:
-            _add(
-                "SSL legado habilitado no endpoint",
-                "high",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "desabilitar SSLv2/SSLv3 e permitir apenas TLS moderno",
-            )
-        if "tlsv1.0" in lowered or "tlsv1.1" in lowered:
-            _add(
-                "TLS legado habilitado no endpoint",
-                "medium",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "desabilitar TLS 1.0/1.1 e exigir TLS 1.2+ ou TLS 1.3",
-            )
-        if any(token in lowered for token in ["self signed", "certificate expired", "expired", "not trusted", "unable to get local issuer"]):
-            _add(
-                "Problema de certificado TLS detectado",
-                "high",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "emitir certificado valido, corrigir cadeia intermediaria e monitorar renovacao antes do vencimento",
-            )
-        if any(token in lowered for token in [" rc4", " 3des", " des ", " null", " anonymous", " export", " md5"]):
-            _add(
-                "Cipher suite fraco detectado",
-                "medium",
-                line,
-                "A02:2021 Cryptographic Failures",
-                "remover cipher suites fracos e priorizar AEAD como TLS_AES_* ou ECDHE com AES-GCM/CHACHA20",
-            )
-    return findings
-
-
-def _extract_testssl_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def _add(title: str, severity: str, evidence: str, category: str, remediation: str) -> None:
-        key = (title, evidence[:160])
-        if key in seen:
-            return
-        seen.add(key)
-        findings.append(
-            {
-                "title": title,
-                "severity": severity,
-                "risk_score": _severity_to_risk_score(severity),
-                "source_worker": "analise_vulnerabilidade",
-                "details": {
-                    "node": "vuln",
-                    "step": step_name,
-                    "asset": default_target,
-                    "tool": "testssl",
-                    "owasp_category": category,
-                    "owasp_top_10": category,
-                    "remediation": remediation,
-                    "evidence": evidence,
-                },
-            }
-        )
-
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if ("ssl" in lowered and "offered" in lowered) or "sslv2" in lowered or "sslv3" in lowered:
-            _add(
-                "SSL legado habilitado no endpoint",
-                "high",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "desabilitar SSLv2/SSLv3 e permitir apenas TLS moderno",
-            )
-        if any(token in lowered for token in ["tls 1.0", "tlsv1.0", "tls 1.1", "tlsv1.1"]):
-            _add(
-                "TLS legado habilitado no endpoint",
-                "medium",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "desabilitar TLS 1.0/1.1 e exigir TLS 1.2+ ou TLS 1.3",
-            )
-        if any(token in lowered for token in ["expired", "self-signed", "self signed", "not trusted", "chain of trust", "hostname mismatch"]):
-            _add(
-                "Problema de certificado TLS detectado",
-                "high",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "corrigir validade, hostname, cadeia intermediaria e autoridade emissora confiavel",
-            )
-        if any(token in lowered for token in ["rc4", "3des", "sweet32", "null cipher", "anonymous", "export cipher", "md5"]):
-            _add(
-                "Cipher suite fraco detectado",
-                "medium",
-                line,
-                "A02:2021 Cryptographic Failures",
-                "remover suites legadas/fracas e priorizar TLS 1.3 ou TLS 1.2 com AEAD",
-            )
-        if "hsts" in lowered and any(token in lowered for token in ["not offered", "missing", "not set"]):
-            _add(
-                "HSTS ausente no endpoint HTTPS",
-                "medium",
-                line,
-                "A02:2021 Cryptographic Failures / A05:2021 Security Misconfiguration",
-                "habilitar Strict-Transport-Security com max-age adequado",
-            )
-    return findings
-
-
-def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Parse wapiti inline warning lines (emitidos durante o scan com -v 1)."""
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    # (regex, severity, risk_score, title, header_name)
-    _PATTERNS = [
-        (
-            re.compile(r"CSP is not set for URL:\s*(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "Content Security Policy (CSP) ausente",
-            "content-security-policy",
-        ),
-        (
-            re.compile(r"X-Content-Type-Options is not set on\s*(\S+)", re.IGNORECASE),
-            "low", 3,
-            "X-Content-Type-Options ausente",
-            "x-content-type-options",
-        ),
-        (
-            re.compile(r"Host\s+(\S+)\s+serves HTTP content without redirecting to HTTPS", re.IGNORECASE),
-            "medium", 6,
-            "Canal nao cifrado: sem redirecionamento HTTPS",
-            None,
-        ),
-        (
-            re.compile(r"Strict-Transport-Security.*?not set.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "HSTS ausente",
-            "strict-transport-security",
-        ),
-        (
-            re.compile(r"X-Frame-Options.*?not set.*?(\S+)", re.IGNORECASE),
-            "low", 3,
-            "X-Frame-Options ausente (clickjacking)",
-            "x-frame-options",
-        ),
-        (
-            re.compile(r"\[!\].*?SQL\s+injection.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "SQL Injection detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?XSS.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Cross-Site Scripting (XSS) detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?Path\s+Traversal.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Path Traversal detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?SSRF.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Server-Side Request Forgery (SSRF) detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?CRLF\s+Injection.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "CRLF Injection detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?Open\s+Redirect.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "Open Redirect detectado",
-            None,
-        ),
-    ]
-
-    for raw_line in stdout.splitlines():
-        line = str(raw_line or "").strip()
-        if not line or line.startswith("[*]") or line.startswith("[+]"):
-            continue
-
-        for pattern, severity, risk_score, title, header_name in _PATTERNS:
-            m = pattern.search(line)
-            if not m:
-                continue
-            key = f"{title}:{default_target}"
-            if key in seen:
-                break
-            seen.add(key)
-            details: dict[str, Any] = {
-                "node": "vuln",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "wapiti",
-                "evidence": line[:500],
-            }
-            # Extrai payload se disponível na linha
-            payload_match = re.search(r"payload=([^\s]+)", line)
-            if payload_match:
-                details["payload"] = payload_match.group(1)
-            if header_name:
-                details["header_name"] = header_name
-                details["header_issue"] = "missing"
-            findings.append(
-                {
-                    "title": title,
-                    "severity": severity,
-                    "risk_score": risk_score,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": details,
-                }
-            )
-            break
-
-    return findings
-
-
-def _extract_sqlmap_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    text = str(stdout or "")
-    if not text.strip():
-        return []
-
-    vulnerable = bool(
-        re.search(r"(?i)\b(is|appears to be)\s+vulnerable\b", text)
-        or re.search(r"(?i)\bParameter:\s+.+?\((GET|POST|URI|Cookie|Header)\)", text)
-        or re.search(r"(?i)\bPayload:\s+", text)
-    )
-    if not vulnerable:
-        return []
-
-    parameter_match = re.search(r"(?im)^\s*Parameter:\s*(.+?)\s*\((GET|POST|URI|Cookie|Header)\)", text)
-    payloads = re.findall(r"(?im)^\s*Payload:\s*(.+)$", text)
-    dbms_match = re.search(r"(?i)back-end DBMS:\s*(.+)", text)
-    techniques = re.findall(r"(?im)^\s*Type:\s*(.+)$", text)
-    evidence_lines = []
-    for raw in text.splitlines():
-        line = str(raw or "").strip()
-        if not line:
-            continue
-        if re.search(r"(?i)(Parameter:|Type:|Title:|Payload:|back-end DBMS|is vulnerable|appears to be vulnerable)", line):
-            evidence_lines.append(line)
-        if len(evidence_lines) >= 16:
-            break
-
-    details = {
-        "node": "vuln",
-        "step": step_name,
-        "asset": default_target,
-        "tool": "sqlmap",
-        "evidence": "\n".join(evidence_lines) or text[:1200],
-        "validation_status": "verified",
-        "owasp_category": "A03:2021 Injection",
-        "impact": "Injeção SQL pode permitir leitura indevida, bypass de autenticação e acesso a dados sensíveis conforme privilégios do backend.",
-        "remediation": "Usar queries parametrizadas/prepared statements, validação server-side, ORM seguro, least privilege no banco e testes automatizados de payloads.",
-    }
-    if parameter_match:
-        details["parameter"] = parameter_match.group(1).strip()
-        details["injection_location"] = parameter_match.group(2).strip()
-    if payloads:
-        details["payload"] = payloads[0][:500]
-        details["payloads"] = payloads[:8]
-    if dbms_match:
-        details["dbms"] = dbms_match.group(1).strip()[:160]
-    if techniques:
-        details["sqlmap_techniques"] = [item.strip() for item in techniques[:8]]
-
-    findings.append(
-        {
-            "title": "SQL Injection validado por sqlmap",
-            "severity": "high",
-            "risk_score": 8,
-            "source_worker": "analise_vulnerabilidade",
-            "details": details,
-        }
-    )
-    return findings
-
-
-def _extract_dalfox_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    lines = [str(line or "").strip() for line in (stdout or "").splitlines() if str(line or "").strip()]
-    if not lines:
-        return []
-
-    positive_lines = [
-        line for line in lines
-        if re.search(r"(?i)(\[V\]|verified|vulnerable|poc|payload|reflected|stored xss|dom xss|alert\()", line)
-    ]
-    if not positive_lines:
-        return []
-
-    payloads: list[str] = []
-    for line in positive_lines:
-        payload_match = re.search(r"(?i)payload[:=]\s*(.+)$", line)
-        if payload_match:
-            payloads.append(payload_match.group(1).strip())
-            continue
-        if "<script" in line.lower() or "alert(" in line.lower():
-            payloads.append(line)
-
-    verified = any(re.search(r"(?i)(\[V\]|verified|vulnerable|poc)", line) for line in positive_lines)
-    severity = "high" if verified else "medium"
-    findings.append(
-        {
-            "title": "Cross-Site Scripting (XSS) validado por dalfox" if verified else "Possível XSS/reflection detectado por dalfox",
-            "severity": severity,
-            "risk_score": 8 if severity == "high" else 5,
             "source_worker": "analise_vulnerabilidade",
             "details": {
                 "node": "vuln",
                 "step": step_name,
                 "asset": default_target,
-                "tool": "dalfox",
-                "evidence": "\n".join(positive_lines[:16]),
-                "payload": payloads[0][:500] if payloads else "",
-                "payloads": payloads[:8],
-                "validation_status": "verified" if verified else "hypothesis",
-                "owasp_category": "A03:2021 Injection",
-                "impact": "XSS pode permitir execução de JavaScript no contexto do usuário, roubo de sessão, ações indevidas e pivô para abuso de conta.",
-                "remediation": "Aplicar encoding contextual, sanitização server-side, validação de entrada e CSP restritiva; evitar confiar somente em validação no frontend.",
+                "tool": "wafw00f",
+                "waf_detected": True,
+                "waf_vendors": sorted(waf_vendors),
+                "header_validated": True,
+                "suppressed_tool": "nmap-vulscan",
+                "suppressed_cve_count": len(nmap_vulscan_cve_findings),
+                "reason": "target protegido por WAF/proxy (ex.: Cloudflare) com comportamento de resposta em portas/proxy que gera CVEs nao aplicaveis",
             },
         }
     )
-    return findings
+
+    return filtered_findings
 
 
-# ── Parsers de ferramentas parcialmente implementadas ────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Core tool execution engine
+# ─────────────────────────────────────────────────────────────
 
+def _run_tools_and_collect(
+    state: AgentState,
+    tools: list[str],
+    scan_target: str,
+    step_name: str,
+    log_prefix: str,
+    root_domain: str = "",
+    skill_context: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
+    """Runs the given tools against `scan_target` with parallel dispatch."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from time import perf_counter
+    # Import autonomy helpers lazily to avoid circular import at module level
+    from app.graph.nodes.supervisor import (
+        _append_action,
+        _append_observation,
+        _append_error,
+        _update_tool_runtime_metrics,
+    )
 
-def _extract_amass_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai subdomínios descobertos pelo amass enum."""
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_line in (stdout or "").splitlines():
-        subdomain = raw_line.strip().lower()
-        if not subdomain or subdomain in seen:
+    all_findings: list[dict[str, Any]] = []
+    discovered_ports: set[int] = set()
+    discovered_assets: set[str] = set()
+    port_evidence: dict[int, dict[str, str]] = {}
+    step_success = False
+    skill_context = dict(skill_context or {})
+    skill_id = str(skill_context.get("skill_id") or "").strip()
+
+    # 1) Skip tools already executed (in-state or in-DB)
+    pending_tools: list[str] = []
+    scan_id = state.get("scan_id")
+    for tool in tools:
+        run_id = f"{step_name}|{scan_target}|{tool}".lower()
+        if run_id in state.get("executed_tool_runs", []):
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
             continue
-        if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", subdomain):
+        if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
+            state["executed_tool_runs"].append(run_id)
             continue
-        seen.add(subdomain)
-    if not seen:
-        return []
-    subdomains_list = sorted(seen)
-    findings.append({
-        "title": f"Subdominios descobertos (amass): {len(subdomains_list)} encontrados",
-        "severity": "info",
-        "risk_score": 2,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "amass",
-            "evidence": ", ".join(subdomains_list[:50]),
-            "subdomains": subdomains_list[:200],
-            "count": len(subdomains_list),
-        },
-    })
-    return findings
+        pending_tools.append(tool)
 
+    if not pending_tools:
+        return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
 
-def _extract_sublist3r_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai subdomínios descobertos pelo sublist3r."""
-    findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_line in (stdout or "").splitlines():
-        # Remove ANSI color codes (e.g., [92m, [0m, etc)
-        line = _strip_ansi_codes(raw_line).strip().lower()
-        if not line or "sublist3r" in line or line.startswith("[") or line.startswith("-"):
-            continue
-        if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", line):
-            continue
-        seen.add(line)
-    if not seen:
-        return []
-    subdomains_list = sorted(seen)
-    findings.append({
-        "title": f"Subdominios descobertos (sublist3r): {len(subdomains_list)} encontrados",
-        "severity": "info",
-        "risk_score": 2,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "sublist3r",
-            "evidence": ", ".join(subdomains_list[:50]),
-            "subdomains": subdomains_list[:200],
-            "count": len(subdomains_list),
-        },
-    })
-    return findings
+    # 2) Dispatch in parallel
+    state["logs_terminais"].append(
+        f"{log_prefix}: dispatching {len(pending_tools)} tools in parallel: {', '.join(pending_tools)}"
+    )
 
-
-def _extract_dnsenum_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai registros DNS do dnsenum."""
-    findings: list[dict[str, Any]] = []
-    records: list[str] = []
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("dnsenum") or line.startswith("--"):
-            continue
-        if re.search(r"\d+\.\d+\.\d+\.\d+", line) or re.search(r"(NS|MX|A|AAAA|TXT|SOA|CNAME)\s", line, re.IGNORECASE):
-            records.append(line[:200])
-    if not records:
-        return []
-    findings.append({
-        "title": f"Registros DNS enumerados (dnsenum): {len(records)} registros",
-        "severity": "info",
-        "risk_score": 1,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "dnsenum",
-            "evidence": "\n".join(records[:30]),
-            "dns_records": records[:100],
-            "count": len(records),
-        },
-    })
-    # Zone Transfer detection
-    if re.search(r"zone\s+transfer|AXFR", stdout, re.IGNORECASE):
-        findings.append({
-            "title": "Transferencia de zona DNS permitida (AXFR)",
-            "severity": "high",
-            "risk_score": 8,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "dnsenum",
-                "evidence": "Zone transfer (AXFR) habilitado — expoe toda a estrutura DNS do dominio.",
-            },
-        })
-    return findings
-
-
-def _extract_massdns_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai subdomínios validados pelo massdns (formato: subdomain. A ip)."""
-    findings: list[dict[str, Any]] = []
-    resolved: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # formato massdns -o S: sub.domain.com. A 1.2.3.4
-        parts = line.split()
-        if len(parts) >= 3:
-            subdomain = parts[0].rstrip(".").lower()
-            record_type = parts[1].upper()
-            value = parts[2]
-            if subdomain not in seen and re.match(r"^[a-z0-9\-\.]+\.[a-z]{2,}$", subdomain):
-                seen.add(subdomain)
-                resolved.append({"subdomain": subdomain, "type": record_type, "value": value})
-    if not resolved:
-        return []
-    findings.append({
-        "title": f"Subdominios validados (massdns): {len(resolved)} resolvidos",
-        "severity": "info",
-        "risk_score": 2,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "massdns",
-            "evidence": ", ".join(r["subdomain"] for r in resolved[:50]),
-            "resolved_records": resolved[:200],
-            "count": len(resolved),
-        },
-    })
-    return findings
-
-
-def _extract_subjack_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai subdominios vulneraveis a takeover do subjack."""
-    findings: list[dict[str, Any]] = []
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # formato subjack: [Vulnerable] sub.domain.com  [service]
-        m = re.search(r"\[Vulnerable\]\s+(\S+)", line, re.IGNORECASE)
-        if m:
-            subdomain = m.group(1).strip().lower()
-            service_m = re.search(r"\[(\w+)\]\s*$", line)
-            service = service_m.group(1) if service_m else "unknown"
-            findings.append({
-                "title": f"Subdomain Takeover: {subdomain}",
-                "severity": "high",
-                "risk_score": 9,
-                "source_worker": "osint",
-                "details": {
-                    "node": "osint",
-                    "step": step_name,
-                    "asset": subdomain,
-                    "tool": "subjack",
-                    "evidence": line[:500],
-                    "takeover_service": service,
-                },
-            })
-    return findings
-
-
-def _extract_ffuf_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai paths/vhosts descobertos pelo ffuf."""
-    findings: list[dict[str, Any]] = []
-    paths: list[dict[str, str]] = []
-    # Tenta JSON primeiro (ffuf -of json)
-    try:
-        data = json.loads(stdout)
-        for result in (data.get("results") or []):
-            url = result.get("url", "")
-            status_code = result.get("status", 0)
-            length = result.get("length", 0)
-            paths.append({"url": url, "status": str(status_code), "length": str(length)})
-    except (json.JSONDecodeError, ValueError):
-        # Parse formato texto: /path [Status: 200, Size: 1234, Words: 56]
-        for raw_line in (stdout or "").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("::") or line.startswith("_"):
-                continue
-            m = re.match(r"^(\S+)\s+\[Status:\s*(\d+),\s*Size:\s*(\d+)", line)
-            if m:
-                paths.append({"url": m.group(1), "status": m.group(2), "length": m.group(3)})
-    if not paths:
-        return []
-    findings.append({
-        "title": f"Paths descobertos (ffuf): {len(paths)} endpoints",
-        "severity": "info",
-        "risk_score": 3,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "ffuf",
-            "evidence": "\n".join(f"{p['url']} [{p['status']}]" for p in paths[:30]),
-            "discovered_paths": paths[:200],
-            "count": len(paths),
-        },
-    })
-    return findings
-
-
-def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai paths descobertos pelo gobuster dir."""
-    findings: list[dict[str, Any]] = []
-    paths: list[dict[str, str]] = []
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("=") or line.startswith("Gobuster"):
-            continue
-        # formato: /path (Status: 200) [Size: 1234]
-        m = re.match(r"^(/\S*)\s+\(Status:\s*(\d+)\)", line)
-        if m:
-            paths.append({"path": m.group(1), "status": m.group(2)})
-            continue
-        # formato quiet (-q): /path
-        m2 = re.match(r"^(/[^\s]+)$", line)
-        if m2:
-            paths.append({"path": m2.group(1), "status": "200"})
-    if not paths:
-        return []
-    sensitive_patterns = re.compile(r"(admin|backup|config|\.env|\.git|\.htaccess|wp-admin|phpmyadmin|api|debug|test|staging)", re.IGNORECASE)
-    sensitive_paths = [p for p in paths if sensitive_patterns.search(p["path"])]
-    if sensitive_paths:
-        findings.append({
-            "title": f"Paths sensiveis expostos (gobuster): {len(sensitive_paths)} encontrados",
-            "severity": "medium",
-            "risk_score": 6,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "gobuster",
-                "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in sensitive_paths[:20]),
-                "sensitive_paths": sensitive_paths[:100],
-                "count": len(sensitive_paths),
-            },
-        })
-    findings.append({
-        "title": f"Content Discovery (gobuster): {len(paths)} paths",
-        "severity": "info",
-        "risk_score": 2,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "gobuster",
-            "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in paths[:30]),
-            "discovered_paths": paths[:200],
-            "count": len(paths),
-        },
-    })
-    return findings
-
-
-def _extract_cloudenum_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai buckets/blobs/containers do cloud_enum."""
-    findings: list[dict[str, Any]] = []
-    buckets: list[str] = []
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # cloud_enum imprime: [+] Open S3 bucket: https://bucket.s3.amazonaws.com
-        # ou: OPEN S3 BUCKET: name
-        if re.search(r"(OPEN|found|bucket|blob|container)", line, re.IGNORECASE):
-            url_m = re.search(r"(https?://\S+)", line)
-            if url_m:
-                buckets.append(url_m.group(1))
-            elif ":" in line:
-                buckets.append(line.split(":", 1)[1].strip())
-    if not buckets:
-        return []
-    findings.append({
-        "title": f"Cloud Storage Expostos: {len(buckets)} recursos",
-        "severity": "high",
-        "risk_score": 8,
-        "source_worker": "osint",
-        "details": {
-            "node": "osint",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "cloudenum",
-            "evidence": "\n".join(buckets[:20]),
-            "cloud_resources": buckets[:100],
-            "count": len(buckets),
-        },
-    })
-    return findings
-
-
-def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai tecnologias fingerprinted pelo whatweb."""
-    findings: list[dict[str, Any]] = []
-    technologies: list[str] = []
-    server_header = ""
-    powered_by = ""
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # whatweb: http://target [200 OK] Apache[2.4], PHP[7.4], ...
-        for m in re.finditer(r"\b([A-Za-z][A-Za-z0-9\-_.]+)\[([^\]]+)\]", line):
-            tech_name = m.group(1).strip()
-            tech_version = m.group(2).strip()
-            technologies.append(f"{tech_name}/{tech_version}")
-            if tech_name.lower() in {"apache", "nginx", "iis", "lighttpd", "server"}:
-                server_header = f"{tech_name}/{tech_version}"
-            if tech_name.lower() in {"php", "asp.net", "x-powered-by"}:
-                powered_by = f"{tech_name}/{tech_version}"
+    def _dispatch_one(tool: str) -> tuple[str, dict, float]:
+        exec_start = perf_counter()
         try:
-            data = json.loads(line)
-            if isinstance(data, dict):
-                for tech in data.get("technologies", []):
-                    if isinstance(tech, dict):
-                        name = tech.get("name", "")
-                        version = tech.get("version", "")
-                        technologies.append(f"{name}/{version}" if version else name)
-        except (json.JSONDecodeError, ValueError):
-            pass
-    if not technologies:
-        return []
-    tech_unique = sorted(set(technologies))
-    findings.append({
-        "title": f"Tecnologias detectadas: {len(tech_unique)} componentes",
-        "severity": "info",
-        "risk_score": 2,
-        "source_worker": "osint",
-        "details": {
-            "node": "osint",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "whatweb",
-            "evidence": ", ".join(tech_unique[:30]),
-            "technologies": tech_unique[:100],
-            "count": len(tech_unique),
-        },
-    })
-    if server_header:
-        findings.append({
-            "title": f"Header Server Exposto: {server_header}",
-            "severity": "low",
-            "risk_score": 3,
-            "source_worker": "osint",
-            "details": {
-                "node": "osint",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "whatweb",
-                "evidence": f"Server header expoe versao: {server_header}",
-                "header_name": "server",
-                "header_value": server_header,
-            },
-        })
-    if powered_by:
-        findings.append({
-            "title": f"Header X-Powered-By Exposto: {powered_by}",
-            "severity": "low",
-            "risk_score": 3,
-            "source_worker": "osint",
-            "details": {
-                "node": "osint",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "whatweb",
-                "evidence": f"X-Powered-By expoe tecnologia: {powered_by}",
-                "header_name": "x-powered-by",
-                "header_value": powered_by,
-            },
-        })
-    return findings
+            r = execute_tool_with_workers(
+                tool,
+                scan_target,
+                scan_mode=state["scan_mode"],
+                scan_id=scan_id if isinstance(scan_id, int) else None,
+                skill_id=skill_id or None,
+                skill_contract=dict(skill_context.get("skill_contract") or {}),
+                technique=dict(skill_context.get("technique") or {}),
+                evidence_required=list(skill_context.get("evidence_required") or []),
+                constraints=list(skill_context.get("constraints") or []),
+                playbook=str(skill_context.get("playbook_title") or ""),
+            )
+        except Exception as exc:
+            r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
+        return tool, r, perf_counter() - exec_start
 
+    completions: list[tuple[str, dict, float]] = []
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"tool-{log_prefix}") as ex:
+        future_map = {ex.submit(_dispatch_one, t): t for t in pending_tools}
+        for fut in as_completed(future_map):
+            try:
+                completions.append(fut.result())
+            except Exception as exc:
+                t = future_map[fut]
+                completions.append((t, {"status": "error", "dispatch_error": str(exc)}, 0.0))
 
-def _extract_katana_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai URLs descobertas pelo katana, incluindo robots.txt e sitemap.xml."""
-    findings: list[dict[str, Any]] = []
-    urls: list[str] = []
-    robots_entries: list[str] = []
-    sitemap_entries: list[str] = []
-    forms: list[str] = []
-    sensitive_params: list[str] = []
-    param_pattern = re.compile(r"[?&](search|user|username|password|passwd|id|token|key|api_key|secret|session|auth)=", re.IGNORECASE)
-    exposed_artifact_pattern = re.compile(
-        r"(\.bak$|\.old$|\.backup$|\.zip$|\.tar$|\.gz$|\.sql$|\.env$|\.kdbx$|\.pyc$|"
-        r"/ftp/|package(?:-lock)?\.json$|suspicious_errors\.ya?ml$)",
-        re.IGNORECASE,
+    # 3) Serial post-processing — mutates state safely
+    for tool, result, exec_time in completions:
+        run_id = f"{step_name}|{scan_target}|{tool}".lower()
+        _sync_step_to_db(state, f"{step_name} · {tool}")
+        _append_action(
+            state,
+            "tool_start",
+            {
+                "tool": tool,
+                "target": scan_target,
+                "step": step_name,
+                "group": log_prefix,
+                "skill_id": skill_id,
+                "skill_invocation_id": skill_context.get("skill_invocation_id"),
+                "technique": (skill_context.get("technique") or {}).get("name"),
+            },
+        )
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_invocation_id", skill_context.get("skill_invocation_id"))
+            result.setdefault("technique", (skill_context.get("technique") or {}).get("name"))
+        state["executed_tool_runs"].append(run_id)
+
+        raw_command = str(result.get("command") or "").strip()
+        raw_return_code = result.get("return_code")
+        raw_stdout = str(result.get("stdout") or "").strip()
+        raw_stderr = str(result.get("stderr") or "").strip()
+        raw_dispatch_error = str(result.get("dispatch_error") or "").strip()
+
+        execution_blob_parts: list[str] = []
+        if raw_command:
+            execution_blob_parts.append(f"command={raw_command}")
+        if raw_return_code is not None:
+            execution_blob_parts.append(f"return_code={raw_return_code}")
+        if raw_dispatch_error:
+            execution_blob_parts.append(f"dispatch_error={raw_dispatch_error}")
+        if raw_stdout:
+            execution_blob_parts.append(f"stdout:\n{raw_stdout}")
+        if raw_stderr:
+            execution_blob_parts.append(f"stderr:\n{raw_stderr}")
+        execution_blob = "\n\n".join(execution_blob_parts)
+
+        if scan_id:
+            exec_status = result.get("status", "unknown")
+            if exec_status == "executed":
+                db_status = "success"
+            elif exec_status == "skipped":
+                db_status = "skipped"
+            else:
+                db_status = "failed"
+            _record_tool_execution_in_db(
+                scan_id=scan_id,
+                tool_name=tool,
+                target=scan_target,
+                execution_status=db_status,
+                error_msg=_truncate_log(execution_blob, 12000) if execution_blob else None,
+                exec_time=exec_time,
+            )
+
+        state["logs_terminais"].append(f"{log_prefix}: tool={tool} status={result.get('status', 'unknown')}")
+        if result.get("source_agent_name"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} agent={result.get('source_agent_name')}"
+            )
+        if result.get("source_agent_id"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} agent_id={result.get('source_agent_id')}"
+            )
+        if result.get("dispatch_task_name"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_task={result.get('dispatch_task_name')}"
+            )
+        if result.get("dispatch_task_id"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_id={result.get('dispatch_task_id')}"
+            )
+        if result.get("dispatch_error"):
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}"
+            )
+            _append_error(
+                state,
+                f"tool={tool} dispatch_error={_truncate_log(result.get('dispatch_error'), 220)}",
+                source=log_prefix,
+            )
+        _register_tool_result_metric(state, str(result.get("status") or ""))
+        _update_tool_runtime_metrics(state, tool=tool, status=str(result.get("status") or ""))
+        if result.get("status") == "executed":
+            step_success = True
+            _append_observation(
+                state,
+                f"tool={tool} target={scan_target} executed em {round(exec_time, 2)}s",
+                source=log_prefix,
+            )
+        else:
+            _append_error(
+                state,
+                f"tool={tool} target={scan_target} status={result.get('status', 'unknown')}",
+                source=log_prefix,
+            )
+
+        cmd = _truncate_log(result.get("command"))
+        if cmd:
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} cmd={cmd}")
+
+        rc = result.get("return_code")
+        if rc is not None:
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} return_code={rc}")
+
+        preview_limit = 300
+
+        stdout_preview = _truncate_log(result.get("stdout"), preview_limit)
+        if stdout_preview:
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} stdout={stdout_preview}")
+
+        stderr_preview = _truncate_log(result.get("stderr"), preview_limit)
+        if stderr_preview:
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
+
+        tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
+        if tool_specific_findings:
+            all_findings.extend(tool_specific_findings)
+            _append_observation(
+                state,
+                f"tool={tool} generated_findings={len(tool_specific_findings)}",
+                source=log_prefix,
+            )
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
+            )
+        extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
+        for port in extracted_ports:
+            discovered_ports.add(port)
+
+        for port, evidence in _extract_port_service_evidence(result, tool_name=tool).items():
+            if port not in port_evidence:
+                port_evidence[port] = evidence
+            else:
+                existing = port_evidence.get(port, {})
+                if not existing.get("version") and evidence.get("version"):
+                    existing["version"] = evidence.get("version", "")
+                if not existing.get("service") and evidence.get("service"):
+                    existing["service"] = evidence.get("service", "")
+                if not existing.get("evidence") and evidence.get("evidence"):
+                    existing["evidence"] = evidence.get("evidence", "")
+                if not existing.get("command") and evidence.get("command"):
+                    existing["command"] = evidence.get("command", "")
+                port_evidence[port] = existing
+
+        for asset in _extract_assets_from_result(result, root_domain=root_domain):
+            discovered_assets.add(asset)
+
+    all_findings = _suppress_waf_proxy_false_positives(
+        all_findings,
+        step_name=step_name,
+        default_target=scan_target,
     )
-    source_exposure_pattern = re.compile(
-        r"(/node_modules/|/build/routes/|/src/|/server/|/juice-shop/)",
-        re.IGNORECASE,
-    )
-    admin_api_pattern = re.compile(
-        r"(/rest/admin|/rest/user|/api/users|/api/basket|/api/cards|/api/address|/rest/order|/rest/wallet|/rest/deluxe)",
-        re.IGNORECASE,
-    )
-    redirect_param_pattern = re.compile(r"[?&](to|url|redirect|next|return|continue)=", re.IGNORECASE)
-    exposed_artifacts: list[str] = []
-    source_paths: list[str] = []
-    admin_api_paths: list[str] = []
-    redirect_candidates: list[str] = []
-
-    for raw_line in (stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if re.match(r"^https?://", line):
-            urls.append(line)
-            path_lower = line.lower()
-            if "/robots.txt" in path_lower:
-                robots_entries.append(line)
-            if "/sitemap" in path_lower and ".xml" in path_lower:
-                sitemap_entries.append(line)
-            if param_pattern.search(line):
-                sensitive_params.append(line)
-            if exposed_artifact_pattern.search(line):
-                exposed_artifacts.append(line)
-            if source_exposure_pattern.search(line):
-                source_paths.append(line)
-            if admin_api_pattern.search(line):
-                admin_api_paths.append(line)
-            if redirect_param_pattern.search(line):
-                redirect_candidates.append(line)
-
-    if robots_entries:
-        findings.append({
-            "title": "Robots.txt acessivel",
-            "severity": "info",
-            "risk_score": 2,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(robots_entries[:10]),
-                "robots_urls": robots_entries[:20],
-            },
-        })
-    if sitemap_entries:
-        findings.append({
-            "title": "Sitemap.xml acessivel",
-            "severity": "info",
-            "risk_score": 2,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(sitemap_entries[:10]),
-                "sitemap_urls": sitemap_entries[:20],
-            },
-        })
-    if sensitive_params:
-        findings.append({
-            "title": f"Parametros sensiveis identificados: {len(sensitive_params)} URLs",
-            "severity": "medium",
-            "risk_score": 5,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(sensitive_params[:20]),
-                "sensitive_urls": sensitive_params[:100],
-                "count": len(sensitive_params),
-            },
-        })
-    if exposed_artifacts:
-        high_signal = [
-            url for url in exposed_artifacts
-            if re.search(r"(\.kdbx$|\.env$|\.sql$|suspicious_errors\.ya?ml$|package-lock\.json(?:\.bak)?$)", url, re.IGNORECASE)
-        ]
-        severity = "high" if high_signal else "medium"
-        findings.append({
-            "title": f"Artefatos sensiveis ou backups expostos: {len(exposed_artifacts)} itens",
-            "severity": severity,
-            "risk_score": 7 if severity == "high" else 5,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(exposed_artifacts[:25]),
-                "exposed_artifacts": exposed_artifacts[:120],
-                "validation_status": "verified",
-                "owasp_category": "A05:2021 Security Misconfiguration / A01:2021 Broken Access Control",
-                "impact": "Arquivos de backup, metadados de dependencias ou artefatos internos podem revelar versoes, rotas, segredos operacionais ou material reutilizavel em ataques.",
-                "remediation": "Remover diretorios/arquivos de apoio do deploy publico, bloquear listagem/acesso direto e validar pipeline para impedir publicacao de backups e artefatos internos.",
-                "count": len(exposed_artifacts),
-            },
-        })
-    if source_paths:
-        findings.append({
-            "title": f"Codigo/rotas internas expostas via frontend: {len(source_paths)} caminhos",
-            "severity": "medium",
-            "risk_score": 5,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(source_paths[:25]),
-                "exposed_source_paths": source_paths[:120],
-                "validation_status": "verified",
-                "owasp_category": "A05:2021 Security Misconfiguration",
-                "impact": "Rotas internas e dependencias expostas aceleram engenharia reversa, enumeração de APIs e priorização de exploração.",
-                "remediation": "Revisar build/public assets, source maps, bundles e regras de static hosting para publicar somente artefatos necessarios.",
-                "count": len(source_paths),
-            },
-        })
-    if admin_api_paths:
-        findings.append({
-            "title": f"Endpoints administrativos/API sensiveis descobertos: {len(admin_api_paths)} caminhos",
-            "severity": "medium",
-            "risk_score": 5,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(admin_api_paths[:25]),
-                "sensitive_api_urls": admin_api_paths[:120],
-                "validation_status": "hypothesis",
-                "owasp_category": "A01:2021 Broken Access Control / API1 Broken Object Level Authorization",
-                "impact": "Endpoints administrativos ou de identidade exigem validação de autenticação/autorização para descartar IDOR, enumeração e acesso indevido.",
-                "remediation": "Aplicar autorização server-side por rota/objeto, respostas consistentes para não autorizados e testes automatizados de controle de acesso.",
-                "count": len(admin_api_paths),
-            },
-        })
-    if redirect_candidates:
-        findings.append({
-            "title": f"Possiveis parametros de redirecionamento abertos: {len(redirect_candidates)} URLs",
-            "severity": "medium",
-            "risk_score": 5,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(redirect_candidates[:25]),
-                "redirect_candidate_urls": redirect_candidates[:80],
-                "validation_status": "hypothesis",
-                "owasp_category": "A01:2021 Broken Access Control / A05:2021 Security Misconfiguration",
-                "impact": "Redirecionamentos não validados podem facilitar phishing, token leakage e bypass de fluxos de confiança.",
-                "remediation": "Usar allowlist estrita de destinos, normalização de URL e rejeição de esquemas/dominios externos.",
-                "count": len(redirect_candidates),
-            },
-        })
-    if urls:
-        findings.append({
-            "title": f"URLs crawled (katana): {len(urls)} endpoints",
-            "severity": "info",
-            "risk_score": 1,
-            "source_worker": "recon",
-            "details": {
-                "node": "recon",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "katana",
-                "evidence": "\n".join(urls[:30]),
-                "discovered_urls": urls[:200],
-                "count": len(urls),
-            },
-        })
-    return findings
-
-
-def _step_name(state: AgentState) -> str:
-    idx = state.get("mission_index", 0)
-    items = state.get("mission_items", GROUP_MISSION_ITEMS)
-    if idx >= len(items):
-        return "done"
-    return items[idx]
-
-
-def _validate_osint_targets(targets: list[str]) -> list[str]:
-    """
-    Valida targets para OSINT (Shodan, Threat Intel).
-    Remove targets claramente inválidos para evitar erros em APIs externas.
-    
-    Aceita:
-    - IPs válidos (v4/v6)
-    - Domínios com TLD válido
-    - Hostnames com dots
-    
-    Rejeita:
-    - Valores vazios/None
-    - IPs malformados
-    - Localhost/127.0.0.1/::1
-    - Ranges CIDR
-    """
-    import ipaddress
-    
-    valid = []
-    for target in (targets or []):
-        if not target or not isinstance(target, str):
-            continue
-        
-        target_str = str(target).strip().lower()
-        if not target_str or target_str in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
-            continue
-        
-        # Tenta parsear como IP
-        try:
-            ipaddress.ip_address(target_str.split("/")[0])  # Rejeita ranges CIDR
-            valid.append(target_str)
-            continue
-        except ValueError:
-            pass
-        
-        # Tenta como domínio: deve ter pelo menos um dot ou ser hostname
-        if "." in target_str and len(target_str) > 4:
-            # Validação básica: não começa/termina com dot, sem caracteres inválidos
-            if (not target_str.startswith(".") and not target_str.endswith(".") and
-                all(c.isalnum() or c in ".-" for c in target_str)):
-                valid.append(target_str)
-    
-    return valid
-
-
-def _normalize_host_for_resolution(target: str) -> str:
-    raw = str(target or "").strip().lower()
-    if not raw:
-        return ""
     try:
-        if "://" in raw:
-            parsed = urlparse(raw)
-            return str(parsed.hostname or "").strip().lower()
+        from app.services.vulnerability_learning_service import enrich_findings_with_accepted_learning
+
+        all_findings = enrich_findings_with_accepted_learning(all_findings)
     except Exception:
         pass
-    return raw.split("/")[0].split(":")[0].strip().lower()
+
+    _mark_step_metric(state, step_success)
+    return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
 
 
-def _is_target_resolvable(target: str) -> bool:
-    host = _normalize_host_for_resolution(target)
-    if not host:
-        return False
-    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
-        return False
-    try:
-        socket.getaddrinfo(host, None)
-        return True
-    except Exception:
-        return False
+# ─────────────────────────────────────────────────────────────
+# Node imports (lazy via the node modules)
+# Import here so workflow.py can expose them for re-export
+# ─────────────────────────────────────────────────────────────
+from app.graph.nodes.supervisor import (
+    _count_high_signal_findings,
+    _has_verified_or_strong_evidence,
+    _route_from_supervisor,
+    _append_autonomy_entry,
+    _append_note,
+    _append_todo,
+    _append_action,
+    _append_observation,
+    _append_error,
+    _refresh_active_skills,
+    _register_delegation_task,
+    _complete_delegation_task,
+    _update_execution_guardrails,
+    _rank_tools_for_iteration,
+    _default_skill_playbook,
+    _build_skill_playbook_for_context,
+    _invoke_skill_for_context,
+    _select_tool_batch_for_iteration,
+    _update_tool_runtime_metrics,
+    _find_node_with_uncovered_tools,
+    _select_skill_for_capability,
+    supervisor_node,
+)
+
+from app.graph.nodes.skill_pipeline import (
+    rag_enrichment_node,
+    _bootstrap_skill_group,
+    _candidate_tools_for_skill_bootstrap,
+    skill_selector_node,
+    skill_planner_node,
+    _technique_for_selected_tool,
+    tool_selector_node,
+    _targets_for_tool_pipeline,
+    _apply_tool_execution_findings,
+    tool_executor_node,
+    evidence_gate_node,
+    _evaluate_evidence_gate,
+)
+
+from app.graph.nodes.reporting import (
+    governance_node,
+    executive_analyst_node,
+    _fallback_executive_summary,
+)
 
 
-def _filter_resolvable_targets(targets: list[str]) -> tuple[list[str], list[str]]:
-    valid: list[str] = []
-    invalid: list[str] = []
-    for target in targets or []:
-        if _is_target_resolvable(target):
-            valid.append(target)
-        else:
-            invalid.append(target)
-    return valid, invalid
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ScriptKidd.o Agent 4: Governance (The Rating Engine)
-# Agente Python puro — sem ferramentas externas.
-# Calcula FAIR+AGE por ativo e emite o rating contínuo com decomposição formal.
-# ─────────────────────────────────────────────────────────────────────────────
-def governance_node(state: AgentState) -> AgentState:
-    state["routing_next_node"] = "executive_analyst"
-    started_at = _metric_start()
-    _sync_step_to_db(state, "4. Governance")
-    state["logs_terminais"].append("Governance: calculando FAIR+AGE rating")
-
-    findings = state.get("vulnerabilidades_encontradas") or []
-    discovered = state.get("lista_ativos") or [state["target"]]
-    n_assets = max(1, len(discovered))
-
-    # Computa Ra por finding e coleta para o rating global
-    risk_per_asset: list[dict[str, Any]] = []
-    for f in findings:
-        sev = str(f.get("severity") or "info").lower()
-        if sev in {"info"}:
-            continue
-        details = f.get("details") or {}
-        asset = str(details.get("asset") or state["target"])
-        days = int(details.get("known_in_environment_days") or details.get("age_days") or 0)
-        cvss = details.get("cvss_score") or details.get("cvss")
-        port = details.get("port")
-        ra = compute_asset_risk(
-            asset_url=asset,
-            severity=sev,
-            days_open=days,
-            cvss=float(cvss) if cvss is not None else None,
-            port=int(port) if port is not None else None,
-        )
-        risk_per_asset.append(ra)
-
-    # Score global normalizado pela superfície digital
-    easm_rating = compute_easm_rating(risk_per_asset, n_assets=n_assets)
-
-    # Decomposição formal por 3 pilares FAIR
-    fair_decomp = build_fair_decomposition(findings, n_assets=n_assets)
-
-    state["easm_rating"] = {
-        **easm_rating,
-        "methodology": f"{METHODOLOGY_VERSION}/easm_fair_age_v1",
-        "n_assets_scanned": n_assets,
-    }
-    state["fair_decomposition"] = fair_decomp
-    state["logs_terminais"].append(
-        f"Governance: score={easm_rating['score']} grade={easm_rating['grade']} "
-        f"n_assets={n_assets} total_ra={easm_rating['total_ra']}"
-    )
-    _complete_delegation_task(state, "governance", f"score={easm_rating.get('score', 0)}")
-    # mission_index já foi incrementado pelos agentes paralelos (threat_intel + risk_assessment)
-    _metric_end(state, "governance", started_at)
-    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
-    _sync_step_to_db(state, "4. Governance")
-    return state
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ScriptKidd.o Agent 5: Executive Analyst
-# Usa LLM (Ollama) para gerar narrativa executiva baseada na decomposição FAIR.
-# Se Ollama não estiver disponível, gera template estruturado sem LLM.
-# ─────────────────────────────────────────────────────────────────────────────
-def executive_analyst_node(state: AgentState) -> AgentState:
-    state["routing_next_node"] = "END"
-    started_at = _metric_start()
-    _sync_step_to_db(state, "5. ExecutiveAnalysis")
-    state["logs_terminais"].append("ExecutiveAnalyst: gerando narrativa executiva")
-
-    easm_rating = state.get("easm_rating") or {}
-    fair_decomp = state.get("fair_decomposition") or {}
-    target = state.get("target", "alvo")
-    score = easm_rating.get("score", 0)
-    grade = easm_rating.get("grade", "F")
-    pillars = fair_decomp.get("pillars") or []
-    n_assets = easm_rating.get("n_assets_scanned", 1)
-
-    # Tenta gerar narrativa via Ollama; se falhar, usa template estruturado
-    try:
-        import httpx
-        from app.core.config import settings
-
-        pillar_lines = ""
-        for p in pillars:
-            pillar_lines += (
-                f"  - {p['name']} ({p['weight_pct']}): "
-                f"score={p['score']}, impact=-{p['impact_pts']}pts, "
-                f"{p['finding_count']} findings\n"
-            )
-        top_pilar = max(pillars, key=lambda x: x.get("impact_pts", 0), default={}) if pillars else {}
-
-        prompt = (
-            f"Atue como CISO. Converta os dados técnicos abaixo em uma análise executiva em português. "
-            f"Seja direto, use impacto financeiro e mencione urgência de remediação.\n\n"
-            f"Alvo: {target}\n"
-            f"Rating: {score}/100 (Grau {grade})\n"
-            f"Ativos mapeados: {n_assets}\n"
-            f"Decomposição FAIR:\n{pillar_lines}"
-            f"Principal detrator: {top_pilar.get('name', 'N/A')} (-{top_pilar.get('impact_pts', 0)}pts)\n\n"
-            f"Gere: (1) Resumo executivo 2 frases, (2) Principal risco com impacto de negócio, "
-            f"(3) Ação imediata recomendada. Máximo 150 palavras."
-        )
-        resp = httpx.post(
-            f"{settings.ollama_base_url}/api/generate",
-            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-            timeout=20.0,
-        )
-        if resp.status_code == 200:
-            narrative = str(resp.json().get("response") or "").strip()
-            state["executive_summary"] = narrative if narrative else _fallback_executive_summary(easm_rating, fair_decomp, target)
-        else:
-            state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
-    except Exception as exc:
-        state["logs_terminais"].append(f"ExecutiveAnalyst: ollama_unavailable ({exc.__class__.__name__}), usando template")
-        state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
-
-    state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
-    _complete_delegation_task(state, "executive_analyst", "executive_summary_generated")
-    state["mission_index"] += 1
-    _metric_end(state, "executive_analyst", started_at)
-    # Sincronizar novamente apos _metric_end para garantir node_history atualizado
-    _sync_step_to_db(state, "5. ExecutiveAnalysis")
-    return state
-
-
-def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: str) -> str:
-    """Template estruturado usado quando o Ollama não está disponível."""
-    score = easm_rating.get("score", 0)
-    grade = easm_rating.get("grade", "F")
-    pillars = fair_decomp.get("pillars") or []
-    top_pilar = max(pillars, key=lambda x: x.get("impact_pts", 0), default={}) if pillars else {}
-    main_detractor = top_pilar.get("name", "vulnerabilidades não remediadas")
-    main_pts = top_pilar.get("impact_pts", 0)
-    finding_count = sum(p.get("finding_count", 0) for p in pillars)
-    return (
-        f"A postura de segurança externa de '{target}' recebeu rating {score}/100 (Grau {grade}). "
-        f"Foram identificados {finding_count} issues técnicos distribuídos em {len(pillars)} dimensões de risco. "
-        f"O principal detrator é '{main_detractor}', responsável por {main_pts} pontos de impacto no rating. "
-        f"Ação imediata: priorizar remediação dos findings críticos/altos — a penalidade AGE "
-        f"aumenta logaritmicamente a cada dia sem correção, amplificando o risco de exploração."
-    )
-
+# ─────────────────────────────────────────────────────────────
+# Graph builder
+# ─────────────────────────────────────────────────────────────
 
 def build_graph(mode: ScanMode = "unit"):
-    """Single-Agent Meta-Everything (Supervisor-Centric) LangGraph.
-
-    O fluxo real é skill-first:
-    rag_enrichment -> supervisor -> skill_selector -> skill_planner ->
-    tool_selector -> tool_executor -> evidence_gate -> supervisor.
-    """
+    """Single-Agent Meta-Everything (Supervisor-Centric) LangGraph."""
     graph = StateGraph(AgentState)
 
     graph.add_node("rag_enrichment", rag_enrichment_node)
@@ -4773,6 +1516,7 @@ def initial_state(
         "skill_contract": {},
         "skill_plan_contract": {},
         "skill_invocations": [],
+        "selected_skill": {},
         "capability_context": {},
         "tool_selection_contract": {},
         "tool_execution_results": [],
