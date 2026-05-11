@@ -30,17 +30,19 @@ KILL_CHAIN_PHASES: list[str] = [
 
 
 # Map graph node → Kill Chain phase
+# Only nodes that actually exist in build_graph() are listed here.
+# Capability labels (asset_discovery, threat_intel, risk_assessment) are tracked
+# in completed_capabilities, not in node_history — so they use the "completed" check.
 NODE_TO_PHASE: dict[str, str] = {
-    "strategic_planning":     "SCOPE_VALIDATION",
-    "asset_discovery":        "RECONNAISSANCE",
-    "threat_intel":           "WEAPONIZATION_SIMULATION",
-    "adversarial_hypothesis": "DELIVERY_MAPPING",
-    "risk_assessment":        "EXPLOITATION_VALIDATION",
-    "evidence_adjudication":  "INSTALLATION_RISK_ANALYSIS",
-    "governance":             "COMMAND_AND_CONTROL_RISK",
-    "executive_analyst":      "REPORTING",
-    # ACTIONS_ON_OBJECTIVES is computed implicitly from
-    # finding severity + exposure (no dedicated node yet — see KILL_CHAIN.md).
+    "supervisor":        "SCOPE_VALIDATION",
+    "asset_discovery":   "RECONNAISSANCE",           # capability label in completed_capabilities
+    "threat_intel":      "WEAPONIZATION_SIMULATION",  # capability label in completed_capabilities
+    "skill_selector":    "DELIVERY_MAPPING",
+    "risk_assessment":   "EXPLOITATION_VALIDATION",   # capability label in completed_capabilities
+    "evidence_gate":     "INSTALLATION_RISK_ANALYSIS",
+    "governance":        "COMMAND_AND_CONTROL_RISK",
+    "executive_analyst": "REPORTING",
+    # ACTIONS_ON_OBJECTIVES is derived from finding severity + exposure (no dedicated node).
 }
 
 # Reverse lookup

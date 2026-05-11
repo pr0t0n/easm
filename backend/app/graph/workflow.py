@@ -629,7 +629,7 @@ def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[
         if int(meta.get("success", 0) or 0) >= 1:
             skipped_already_done.append(t)
             continue
-        if int(meta.get("attempts", 0) or 0) >= 2 and int(meta.get("success", 0) or 0) == 0:
+        if int(meta.get("attempts", 0) or 0) >= 1 and int(meta.get("success", 0) or 0) == 0:
             skipped_already_done.append(t)
             continue
         selected.append(t)
@@ -850,6 +850,9 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
     target = str(state.get("target") or "")
     if group == "asset_discovery":
         tools = _adapt_recon_tools_for_target(target, tools)
+        if str(state.get("target_type") or "") == "site":
+            subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
+            tools = [t for t in tools if t not in subdomain_expansion_tools]
     elif group == "risk_assessment":
         tools = _adapt_vuln_tools_for_target(target, tools)
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
@@ -978,20 +981,56 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 purpose="skill_selector",
             )
             ready = bool(invocation.get("called"))
+            inferred_skill_id = str(invocation.get("skill_id") or group)
+            invocation_id = f"inferred-{uuid4().hex[:12]}"
+            invocation_record = {
+                "invocation_id": invocation_id,
+                "skill_id": inferred_skill_id,
+                "worker_group": group,
+                "phase": phase_label,
+                "purpose": "skill_selector",
+                "source": "accepted_learning+skill_catalog",
+                "matched_by": list(invocation.get("matched_by") or []),
+                "candidate_tools": candidate_tools,
+                "recommended_tools": guided_tools,
+                "confidence": invocation.get("confidence", 0.7),
+                "playbook_title": playbook.get("title"),
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            invocations = list(state.get("skill_invocations") or [])
+            invocations.append(invocation_record)
+            state["skill_invocations"] = invocations[-80:]
+            state["current_skill"] = inferred_skill_id
+            state["active_skill"] = inferred_skill_id
+            state["skill_contract"] = invocation_record
+            state["skill_invocation"] = dict(invocation) | {
+                "invocation_id": invocation_id,
+                "source": "accepted_learning+skill_catalog",
+            }
+            # Populate selected_skill so tool_executor_node can proceed.
+            state["selected_skill"] = {
+                "skill_id": inferred_skill_id,
+                "capability": group,
+                "objective": str(invocation.get("objective") or ""),
+                "allowed_tools": guided_tools,
+                "preferred_tool": guided_tools[0] if guided_tools else "",
+                "reason": "inferred from accepted learning + skill catalog",
+            }
+            _append_action(state, "skill_invoked", invocation_record)
             state["skill_selector_ready"] = ready
-            state["skill_contract"] = dict(state.get("skill_contract") or {})
             state["skill_selector_gate"] = {
                 "group": group,
                 "phase": phase_label,
                 "called": bool(invocation.get("called")),
-                "skill_id": invocation.get("skill_id"),
-                "recommended_tools": list(invocation.get("recommended_tools") or []),
+                "skill_id": inferred_skill_id,
+                "recommended_tools": guided_tools,
                 "candidate_tools": guided_tools,
+                "allowed_tools": guided_tools,
                 "playbook_title": playbook.get("title"),
             }
             state["logs_terminais"].append(
-                f"[SKILL] selector inferred ready={state['skill_selector_ready']} "
-                f"group={group} skill={invocation.get('skill_id') or '-'}"
+                f"[SKILL] runtime gate ready={state['skill_selector_ready']} "
+                f"group={group} skill={inferred_skill_id}"
             )
 
     except Exception as exc:
@@ -4369,174 +4408,6 @@ def _step_name(state: AgentState) -> str:
     return items[idx]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ScriptKidd.o Agent 1: Asset Discovery
-# Descobre subdomínios, IPs, portas e tecnologias expostas.
-# Ferramentas: subfinder → amass → dnsx → naabu → httpx → gowitness
-# ─────────────────────────────────────────────────────────────────────────────
-def asset_discovery_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    _sync_step_to_db(state, "1. AssetDiscovery")
-    current = _step_name(state)
-    state["logs_terminais"].append(f"AssetDiscovery(context): {current}")
-    seed_targets = list(state.get("input_targets") or [])
-    if not seed_targets:
-        seed_targets = _split_input_targets(state.get("target") or "") or [state["target"]]
-
-    for seed in seed_targets:
-        if seed not in state["lista_ativos"]:
-            state["lista_ativos"].append(seed)
-        if seed not in state["pending_asset_scans"] and seed not in state["scanned_assets"]:
-            state["pending_asset_scans"].append(seed)
-
-    # Usa asset_discovery group (que aponta para mesma fila reconhecimento)
-    recon_tools = _tools_for_group(state["scan_mode"], "asset_discovery") or _tools_for_group(state["scan_mode"], "reconhecimento")
-    recon_tools = _adapt_recon_tools_for_target(state["target"], recon_tools)
-    
-    # Lógica condicional: Se target_type é "site" (URL com path), pula expansão de subdomínios
-    # Ferramentas de expansão: amass, sublist3r, massdns (evita descoberta incontrolada)
-    target_type = state.get("target_type", "dominio")
-    if target_type == "site":
-        subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
-        recon_tools = [t for t in recon_tools if t not in subdomain_expansion_tools]
-        state["logs_terminais"].append(
-            f"AssetDiscovery: target_type=site, subdomain_expansion desabilitada (skip={subdomain_expansion_tools})"
-        )
-    else:
-        state["logs_terminais"].append(
-            f"AssetDiscovery: target_type={target_type}, full_recon_pipeline ativado"
-        )
-    recon_tools = _select_tool_batch_for_iteration(state, group="asset_discovery", tools=recon_tools)
-
-    if _is_local_target(state["target"]):
-        state["logs_terminais"].append(
-            f"AssetDiscovery: local_target detected, candidate_tools={','.join(recon_tools)}"
-        )
-
-    state["capability_context"] = {
-        "node": "asset_discovery",
-        "step": current,
-        "targets": [state["target"]],
-        "candidate_tools": recon_tools,
-        "root_domain": _target_host(state["target"]),
-        "target_type": target_type,
-    }
-    state["pending_capability_node"] = "asset_discovery"
-    state["routing_next_node"] = "skill_selector"
-    state["proxima_ferramenta"] = "skill_selector"
-    _append_note(
-        state,
-        f"AssetDiscovery preparou contexto para skill_selector: {', '.join(recon_tools)}",
-        phase="asset-discovery",
-    )
-    _metric_end(state, "asset_discovery_context", started_at)
-    _sync_step_to_db(state, "1. AssetDiscovery")
-    return state
-
-
-# Alias legado para backward compat
-def recon_node(state: AgentState) -> AgentState:
-    return asset_discovery_node(state)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ScriptKidd.o Agent 3: Risk Assessment
-# Avalia vulnerabilidades técnicas nos ativos descobertos.
-# Ferramentas ativas: Kali runner profiles de nuclei, nmap-vulscan, nikto,
-# sqlmap, dalfox, wapiti e demais scanners aplicaveis.
-# ─────────────────────────────────────────────────────────────────────────────
-def risk_assessment_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    _sync_step_to_db(state, "3. RiskAssessment")
-    current = _step_name(state)
-    pending_validation = list(state.get("validation_backlog") or [])
-    vuln_tools = _tools_for_group(state["scan_mode"], "risk_assessment") or _tools_for_group(state["scan_mode"], "analise_vulnerabilidade")
-    vuln_tools = _adapt_vuln_tools_for_target(state.get("target", ""), vuln_tools)
-    learning_validation_tools: list[str] = []
-    if pending_validation:
-        try:
-            from app.services.vulnerability_learning_service import recommended_learning_tools_for_findings
-
-            learning_validation_tools = recommended_learning_tools_for_findings(pending_validation, limit=8)
-        except Exception:
-            learning_validation_tools = []
-        if learning_validation_tools:
-            state["logs_terminais"].append(
-                "RiskAssessment: learning_guided_tools="
-                f"{','.join(learning_validation_tools)}"
-            )
-            _append_note(
-                state,
-                f"Revalidacao guiada por aprendizado aceito usando tools: {', '.join(learning_validation_tools)}",
-                phase="risk-assessment",
-            )
-            vuln_tools = learning_validation_tools + [tool for tool in vuln_tools if tool not in learning_validation_tools]
-    vuln_tools = _select_tool_batch_for_iteration(state, group="risk_assessment", tools=vuln_tools)
-    if _is_local_target(state.get("target", "")):
-        state["logs_terminais"].append(
-            f"RiskAssessment: local_target detected, candidate_tools={','.join(vuln_tools)}"
-        )
-    target_limit = 10 if _is_local_target(state.get("target", "")) else 6
-    primary_targets = _targets_for_deep_scan(state, limit=target_limit)
-    resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
-    explicit_target = str(state.get("target") or "").strip()
-    if explicit_target and _is_local_target(explicit_target):
-        # Mantém alvos locais originais e descobertos (incluindo path/query) para
-        # evitar downgrade para :80 e permitir que o Kali normalize para
-        # host.docker.internal no momento da execução.
-        local_targets = [t for t in primary_targets if _is_local_target(t)]
-        if explicit_target not in local_targets:
-            local_targets.insert(0, explicit_target)
-        resolvable_targets = list(dict.fromkeys(local_targets + resolvable_targets))
-        unresolved_targets = [t for t in unresolved_targets if not _is_local_target(t)]
-    if not resolvable_targets:
-        # Fallback defensivo: mantém alvo principal para evitar no-op total.
-        resolvable_targets = [state.get("target", "")]
-    primary_targets = list(resolvable_targets)
-
-    if unresolved_targets:
-        state["logs_terminais"].append(
-            f"RiskAssessment: unresolved_targets_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
-        )
-    state["risk_targets_resolvable"] = list(resolvable_targets)
-    state["risk_targets_unresolved"] = list(unresolved_targets)
-    if pending_validation:
-        state["logs_terminais"].append(
-            f"RiskAssessment: validation_backlog_detected={len(pending_validation)}"
-        )
-    if len(primary_targets) > 1:
-        state["logs_terminais"].append(f"RiskAssessment: targets={len(primary_targets)}")
-
-    state["capability_context"] = {
-        "node": "risk_assessment",
-        "step": current,
-        "targets": primary_targets,
-        "candidate_tools": vuln_tools,
-        "pending_validation": len(pending_validation),
-    }
-    state["pending_capability_node"] = "risk_assessment"
-    state["routing_next_node"] = "skill_selector"
-    state["proxima_ferramenta"] = "skill_selector"
-    _append_note(
-        state,
-        f"RiskAssessment preparou contexto para skill_selector: {', '.join(vuln_tools)}",
-        phase="risk-assessment",
-    )
-    _metric_end(state, "risk_assessment_context", started_at)
-    _sync_step_to_db(state, "3. RiskAssessment")
-    return state
-
-
-# Alias legado
-def vuln_node(state: AgentState) -> AgentState:
-    return risk_assessment_node(state)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ScriptKidd.o Agent 2: Threat Intel
-# Coleta inteligência externa: credenciais vazadas, reputação de IPs, OSINT.
-# Ferramentas: theharvester → shodan-cli → h8mail → subjack
-# ─────────────────────────────────────────────────────────────────────────────
 def _validate_osint_targets(targets: list[str]) -> list[str]:
     """
     Valida targets para OSINT (Shodan, Threat Intel).
@@ -4618,48 +4489,6 @@ def _filter_resolvable_targets(targets: list[str]) -> tuple[list[str], list[str]
             invalid.append(target)
     return valid, invalid
 
-
-def threat_intel_node(state: AgentState) -> AgentState:
-    started_at = _metric_start()
-    _sync_step_to_db(state, "2. ThreatIntel")
-    current = _step_name(state)
-    state["logs_terminais"].append(f"ThreatIntel(context): {current}")
-
-    osint_tools = _tools_for_group(state["scan_mode"], "threat_intel") or _tools_for_group(state["scan_mode"], "osint")
-    osint_tools = _select_tool_batch_for_iteration(state, group="threat_intel", tools=osint_tools)
-    targets = _targets_for_deep_scan(state, limit=6)
-    
-    # Valida targets para OSINT: remove inválidos, localhost, ranges CIDR
-    valid_targets = _validate_osint_targets(targets)
-    skipped = len(targets) - len(valid_targets)
-    if skipped > 0:
-        state["logs_terminais"].append(f"ThreatIntel: {skipped} targets inválidos ignorados")
-    
-    if len(valid_targets) > 1:
-        state["logs_terminais"].append(f"ThreatIntel: valid_targets={len(valid_targets)}")
-
-    state["capability_context"] = {
-        "node": "threat_intel",
-        "step": current,
-        "targets": valid_targets,
-        "candidate_tools": osint_tools,
-    }
-    state["pending_capability_node"] = "threat_intel"
-    state["routing_next_node"] = "skill_selector"
-    state["proxima_ferramenta"] = "skill_selector"
-    _append_note(
-        state,
-        f"ThreatIntel preparou contexto para skill_selector: {', '.join(osint_tools)}",
-        phase="threat-intel",
-    )
-    _metric_end(state, "threat_intel_context", started_at)
-    _sync_step_to_db(state, "2. ThreatIntel")
-    return state
-
-
-# Alias legado
-def osint_node(state: AgentState) -> AgentState:
-    return threat_intel_node(state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

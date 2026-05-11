@@ -1,12 +1,9 @@
 from app.graph.workflow import (
     _route_from_supervisor,
     _run_tools_and_collect,
-    asset_discovery_node,
     build_graph,
-    risk_assessment_node,
     skill_planner_node,
     skill_selector_node,
-    threat_intel_node,
     tool_selector_node,
 )
 import inspect
@@ -195,11 +192,6 @@ def test_build_graph_uses_skill_first_pipeline_not_phase_executors() -> None:
     assert 'graph.add_node("adversarial_hypothesis"' not in source
     assert 'graph.add_node("evidence_adjudication"' not in source
 
-
-def test_phase_nodes_do_not_execute_tools_directly() -> None:
-    for node in [asset_discovery_node, threat_intel_node, risk_assessment_node]:
-        source = inspect.getsource(node)
-        assert "_run_tools_and_collect(" not in source
 
 
 def test_tool_selector_does_not_keep_phase_fan_out(monkeypatch) -> None:

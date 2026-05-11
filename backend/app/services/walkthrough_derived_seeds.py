@@ -366,6 +366,163 @@ WALKTHROUGH_DERIVED_SEEDS: list[dict[str, Any]] = [
         "Bypass de sanitização cliente, viabiliza Stored XSS persistente em todo o e-commerce.",
         "Renovate/Dependabot, lockfile review obrigatório, Trivy/SBOM no CI, sanitização também no servidor (nunca confiar só no front).",
     ),
+
+    # ── Server misconfiguration via nikto scan ───────────────────────────────
+    _seed(
+        "server-misconfiguration-nikto-scan",
+        "Server misconfiguration and exposed sensitive paths detected by web scanner",
+        "Server Misconfiguration — Exposed Paths",
+        ["admin panel exposed", "backup file accessible", "directory listing", "ftp exposed", "outdated server", "debug endpoint"],
+        ["ServerMisconfiguration", "InformationExposure"],
+        ["P03", "P05", "P11", "P12"],
+        ["vuln-information-disclosure", "vuln-directory-enum", "recon-web-crawl"],
+        ["nikto", "nuclei", "ffuf", "feroxbuster"],
+        [
+            "diretório /ftp/ ou /backup/ acessível sem autenticação retorna listagem",
+            "painel de administração acessível via rota não autenticada (/admin, /administration)",
+            "arquivos sensíveis (.env, .bak, .sql, acquisitions.md) expostos publicamente",
+            "cabeçalho Server expõe versão com CVE conhecido",
+            "endpoint de debug (/console, /actuator, /api/swagger) responde 200",
+        ],
+        [
+            "executar nikto -h URL para varredura automática de 6700+ misconfigs",
+            "verificar /ftp/, /admin, /backup, /console, /actuator sem autenticação",
+            "confirmar listagem de diretório com GET simples e anotar arquivos expostos",
+            "registrar conteúdo dos metadados sem baixar dados sensíveis além do nome",
+        ],
+        "Atacante acessa documentos internos, backups de DB, credenciais e configs de infra sem autenticação.",
+        "Desabilitar listagem de diretório, proteger rotas admin com autenticação obrigatória, remover arquivos temporários do build, security headers.",
+    ),
+
+    # ── Directory fuzzing with wordlist (ffuf/feroxbuster) ───────────────────
+    _seed(
+        "directory-fuzzing-wordlist-discovery",
+        "Hidden endpoints and admin routes discovered via wordlist-based directory fuzzing",
+        "Information Disclosure — Hidden Endpoints",
+        ["dir busting", "directory fuzzing", "hidden admin", "wordlist enumeration", "content discovery"],
+        ["InformationExposure", "BrokenAccessControl"],
+        ["P03", "P05", "P15"],
+        ["vuln-directory-enum", "vuln-information-disclosure", "recon-web-crawl"],
+        ["ffuf", "feroxbuster", "gobuster", "dirsearch", "nikto"],
+        [
+            "rota /admin, /score-board, /management retorna 200 sem aparecer na navegação",
+            "endpoint /api/internal, /api/admin retorna dados privilegiados para qualquer cliente",
+            "arquivo de configuração /config.js, /env.js, /.env exposto em path padrão",
+            "rota sensível encontrada via raft-small-directories wordlist",
+        ],
+        [
+            "executar ffuf com raft-small-directories wordlist contra a raiz do alvo",
+            "filtrar respostas por status 200, 301, 302 excluindo 404 e 403 padrão",
+            "confirmar conteúdo de cada rota descoberta sem autenticar",
+            "registrar nome da rota e tipo de dado exposto sem extrair PII",
+        ],
+        "Rotas administrativas ou de diagnóstico acessíveis expõem dados de usuários, configurações e mecanismos de controle.",
+        "Implementar autenticação em todas as rotas, remover endpoints de debug em produção, security.txt com policy de divulgação.",
+    ),
+
+    # ── Comprehensive black-box web vulnerability scan (wapiti) ──────────────
+    _seed(
+        "comprehensive-blackbox-web-vuln-scan",
+        "Comprehensive black-box web application vulnerability scan via autonomous scanner",
+        "Comprehensive Web Vulnerability — SQLi, XSS, Path Traversal",
+        ["wapiti scan", "blackbox scan", "autonomous web scan", "sqli xss path traversal combined"],
+        ["SQLi", "XSS", "PathTraversal", "SSRF"],
+        ["P12", "P14", "P16", "P19"],
+        ["vuln-injection", "vuln-api-graphql", "vuln-auth-bypass"],
+        ["wapiti", "nikto", "nuclei", "dalfox"],
+        [
+            "scanner autônomo descobre SQL injection em endpoints de busca/filtro REST",
+            "scanner detecta XSS refletido em parâmetros de query e campos de formulário",
+            "endpoint vulnerável a path traversal identificado na fase de crawling interno",
+            "SSRF interno detectado via resposta com timing ou conteúdo interno",
+        ],
+        [
+            "executar wapiti -u URL -f json --flush-session -d 2 para varredura completa",
+            "aguardar relatório JSON com seções por tipo de vulnerabilidade",
+            "confirmar cada achado com payload mínimo read-only antes de reportar",
+            "registrar endpoint, método HTTP, parâmetro afetado e resposta anômala",
+        ],
+        "Vulnerabilidades de injeção, XSS e traversal expostas em endpoints de produção permitem comprometimento de dados e execução de código.",
+        "Parametrizar queries, output encoding por contexto, validação server-side de paths, CSP, WAF com regras de injeção.",
+    ),
+
+    # ── DOM XSS and reflected XSS in SPA via dalfox ─────────────────────────
+    _seed(
+        "dom-xss-spa-dalfox-scan",
+        "DOM-based and reflected XSS in single-page application detected via automated XSS scanner",
+        "Cross-Site Scripting — DOM/Reflected SPA",
+        ["dom xss", "spa xss", "angular xss", "iframe javascript src", "reflected xss parameter"],
+        ["DOMXSS", "ReflectedXSS"],
+        ["P12", "P16"],
+        ["vuln-injection"],
+        ["dalfox", "wapiti", "nuclei", "katana"],
+        [
+            "parâmetro de busca/filtro renderizado no DOM sem sanitização via framework Angular/React/Vue",
+            "iframe com src controlado por parâmetro URL aceita javascript: scheme",
+            "campo de input com ng-bind ou v-html reflete payload XSS sem escape",
+            "endpoint retorna JSON com campo HTML não sanitizado renderizado diretamente",
+        ],
+        [
+            "executar dalfox url URL para varredura XSS abrangente incluindo DOM",
+            "testar parâmetros de busca com payload <script>alert(1)</script> e variantes encode",
+            "verificar contexto de renderização (innerHTML, setAttribute, eval) sem executar payload destrutivo",
+            "documentar parâmetro vulnerável, contexto DOM e método de escape ausente",
+        ],
+        "Atacante executa código arbitrário no browser da vítima, comprometendo sessão, cookies e dados sensíveis.",
+        "Sanitização server-side e client-side, DOMPurify para conteúdo HTML dinâmico, CSP strict-dynamic, jamais usar innerHTML com dados não-confiáveis.",
+    ),
+
+    # ── CVE and template-driven vulnerability scan (nuclei) ──────────────────
+    _seed(
+        "cve-template-driven-nuclei-scan",
+        "CVE and known vulnerability detection via template-driven scanner",
+        "Known CVE — Template-Driven Detection",
+        ["nuclei cve", "cve detection", "known vulnerability", "security misconfiguration nuclei"],
+        ["KnownCVE", "SecurityMisconfiguration"],
+        ["P11", "P12", "P14"],
+        ["vuln-injection", "vuln-auth-bypass", "vuln-information-disclosure"],
+        ["nuclei", "nikto", "wapiti", "retire"],
+        [
+            "CVE conhecido detectado via template nuclei na versão de software exposta",
+            "cabeçalho de resposta ou banner revela versão com vulnerabilidade pública",
+            "endpoint com configuração padrão fraca identificado por template de misconfiguration",
+            "biblioteca JavaScript com CVE detectada via fingerprint de versão",
+        ],
+        [
+            "executar nuclei -u URL -severity critical,high,medium,low para cobertura ampla",
+            "cruzar versões identificadas com NVD/OSV para CVEs aplicáveis",
+            "confirmar exploitabilidade com request read-only antes de reportar",
+            "registrar CVE-ID, CVSS score, evidência de versão e endpoint afetado",
+        ],
+        "CVEs conhecidos permitem comprometimento remoto sem necessidade de descoberta de zero-day.",
+        "Patch management automatizado, asset inventory com versões, SCA no CI/CD, monitoramento de CVEs por stack tecnológico.",
+    ),
+
+    # ── REST API parameter injection (wapiti + arjun) ────────────────────────
+    _seed(
+        "rest-api-parameter-injection",
+        "SQL injection and parameter pollution in REST API endpoints via automated discovery",
+        "SQL Injection — REST API Parameter",
+        ["rest api sqli", "api parameter injection", "json sqli", "search api injection"],
+        ["RESTAPISQLi", "ParameterPollution"],
+        ["P12", "P19"],
+        ["vuln-injection", "vuln-api-graphql"],
+        ["wapiti", "arjun", "sqlmap", "ffuf"],
+        [
+            "endpoint REST /api/search?q= ou /rest/products/search aceita payload SQLi",
+            "parâmetro JSON em POST body não sanitizado resulta em erro de DB ou dados extras",
+            "endpoint de login /api/auth aceita payload tautológico via JSON body",
+            "campo 'q' em endpoint de busca retorna resultado diferente com quote único",
+        ],
+        [
+            "descobrir parâmetros de API com arjun antes de injetar",
+            "executar wapiti para crawling + injeção automática em endpoints REST",
+            "testar endpoint de busca com payload SQLi minimal e comparar contagem de resultados",
+            "registrar endpoint, payload e diferença de resposta sem persistir alteração",
+        ],
+        "Extração de dados, bypass de autenticação ou comprometimento total do banco via injeção em API.",
+        "Queries parametrizadas em toda camada ORM/DB, validação de schema em inputs JSON, rate limiting em endpoints de busca.",
+    ),
 ]
 
 
