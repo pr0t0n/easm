@@ -398,6 +398,9 @@ export default function AgentFlowPage() {
   const [traceEvents, setTraceEvents] = useState([]);
   const [logEvents, setLogEvents] = useState([]);
   const [scores, setScores] = useState([]);
+  const [hypotheses, setHypotheses] = useState([]);
+  const [killChainStage, setKillChainStage] = useState("");
+  const [techStack, setTechStack] = useState([]);
   const [selected, setSelected] = useState(null);
   const [traceState, setTraceState] = useState("idle");
   const [logState, setLogState] = useState("idle");
@@ -503,9 +506,15 @@ export default function AgentFlowPage() {
     if (traceResult.status === "fulfilled") {
       setTraceEvents(traceResult.value.data?.trace || []);
       setScores(traceResult.value.data?.scores || []);
+      setHypotheses(traceResult.value.data?.hypotheses || []);
+      setKillChainStage(String(traceResult.value.data?.kill_chain_stage || ""));
+      setTechStack(traceResult.value.data?.detected_tech_stack || []);
     } else {
       setTraceEvents([]);
       setScores([]);
+      setHypotheses([]);
+      setKillChainStage("");
+      setTechStack([]);
     }
 
     if (logsResult.status === "fulfilled") {
@@ -685,6 +694,75 @@ export default function AgentFlowPage() {
                   onSelect={setSelected}
                 />
               ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-12">
+          <div className="border border-emerald-800/50 bg-emerald-950/15">
+            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-emerald-800/50 p-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-emerald-300">hipoteses do pentest (recon-driven)</div>
+                <div className="text-sm text-slate-300">
+                  Cada execucao precisa estar lastreada por uma hipotese. Sem hipotese = sem tool.
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+                <span className="border border-emerald-700 bg-emerald-900/30 px-3 py-1 text-emerald-200">
+                  stage: <span className="text-amber-200">{killChainStage || "-"}</span>
+                </span>
+                <span className="border border-slate-700 bg-slate-950 px-3 py-1 text-slate-300">
+                  stack: <span className="text-sky-200">{techStack.join(", ") || "-"}</span>
+                </span>
+                <span className="border border-slate-700 bg-slate-950 px-3 py-1 text-slate-300">
+                  hipoteses: <span className="text-violet-200">{hypotheses.length}</span>
+                </span>
+              </div>
+            </div>
+            <div className="max-h-[360px] overflow-auto">
+              {hypotheses.length === 0 ? (
+                <div className="p-6 text-sm text-slate-500">
+                  Sem hipoteses ainda. O engine refresca apos cada execucao de ferramenta - aguarde o recon coletar evidencia.
+                </div>
+              ) : (
+                <table className="w-full border-collapse text-left font-mono text-xs">
+                  <thead className="sticky top-0 bg-emerald-950/60 text-[11px] uppercase tracking-[0.16em] text-emerald-300">
+                    <tr>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">#</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">familia</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">alvo</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">param</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">skill</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">ferramenta</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">extra_args</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">conf</th>
+                      <th className="border-b border-emerald-800/60 px-3 py-2">razao / sinal esperado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hypotheses.map((h, idx) => (
+                      <tr key={h.id || idx} className="hover:bg-slate-900/40">
+                        <td className="border-b border-slate-900 px-3 py-2 text-slate-500">{idx + 1}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-emerald-200 uppercase">{h.family}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-slate-200 max-w-[300px] truncate" title={h.target}>{h.target}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-amber-200">{h.target_param || "-"}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-violet-200">{h.suggested_skill}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-sky-200">{h.suggested_tool}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-emerald-300 max-w-[280px] truncate" title={JSON.stringify(h.suggested_extra_args || {})}>
+                          {h.suggested_extra_args && Object.keys(h.suggested_extra_args).length
+                            ? Object.entries(h.suggested_extra_args).map(([t, args]) => `${t}: ${Array.isArray(args) ? args.slice(0,3).join(" ") : args}`).join(" | ")
+                            : "-"}
+                        </td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-amber-300">{Number(h.confidence || 0).toFixed(2)}</td>
+                        <td className="border-b border-slate-900 px-3 py-2 text-slate-300">
+                          <div className="text-slate-200">{h.rationale}</div>
+                          <div className="mt-1 text-[10px] text-emerald-400">sinal: {h.signal_expected}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         </div>

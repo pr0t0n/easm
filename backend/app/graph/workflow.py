@@ -243,6 +243,7 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["current_node"] = current_node
                 sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
                 sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
+                sd["pentest_hypotheses"] = list(state.get("pentest_hypotheses") or [])[:30]
                 job.state_data = sd
                 # Persist tech_stack to its dedicated column too (queryable by GIN index).
                 try:
@@ -277,6 +278,24 @@ def _refresh_tech_stack(state: AgentState) -> bool:
     previous = str(state.get("tech_stack_signature") or "")
     state["detected_tech_stack"] = stack
     state["tech_stack_signature"] = signature
+
+    # ── Hypothesis engine: always refresh after any state change in tech
+    # stack or findings. Idempotent: same evidence -> same hypothesis ids.
+    try:
+        from app.services.hypothesis_engine import extract_pentest_hypotheses
+        hypotheses = extract_pentest_hypotheses(dict(state))
+        prev_ids = {str(h.get("id") or "") for h in (state.get("pentest_hypotheses") or [])}
+        new_ids = {str(h.get("id") or "") for h in hypotheses}
+        state["pentest_hypotheses"] = hypotheses
+        added = new_ids - prev_ids
+        if added:
+            state.setdefault("logs_terminais", []).append(
+                f"[hypothesis-engine] +{len(added)} novas hipoteses "
+                f"(total={len(hypotheses)}, families={sorted({h.get('family') for h in hypotheses})})"
+            )
+    except Exception as exc:
+        logger.warning("hypothesis engine failed: %s", exc)
+
     if signature != previous:
         state.setdefault("logs_terminais", []).append(
             f"[tech-stack] detectado={','.join(stack) or '-'} (mudanca de fingerprint)"
@@ -1595,6 +1614,7 @@ def initial_state(
         "detected_tech_stack": [],
         "tech_stack_signature": "",
         "kill_chain_stage": "RECONNAISSANCE",
+        "pentest_hypotheses": [],
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},

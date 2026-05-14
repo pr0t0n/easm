@@ -120,3 +120,7 @@ class AgentState(TypedDict):
     # Default initial value is "RECONNAISSANCE"; only advances when stage-exit
     # criteria are satisfied (see app.graph.kill_chain.advance_kill_chain_stage).
     kill_chain_stage: str
+    # Hypothesis-driven execution: every tactic must be backed by at least
+    # one hypothesis derived from recon evidence. Refreshed by the workflow
+    # after each tool run via app.services.hypothesis_engine.
+    pentest_hypotheses: list[dict[str, Any]]

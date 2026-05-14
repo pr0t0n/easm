@@ -188,28 +188,41 @@ STAGE_ALLOWED_SKILLS: dict[str, set[str]] = {
 # - finding_severity_required: minimum severity of at least one promoted finding
 STAGE_EXIT_CRITERIA: dict[str, dict[str, Any]] = {
     "RECONNAISSANCE": {
-        # Need at least 4 distinct recon tools so that the stage actually
-        # produces a useful inventory before moving on (httpx/whatweb/curl-
-        # headers/nikto, or katana/gau/wayback, or nmap/naabu).
-        "tool_runs": 4,
+        # Need broad coverage of the recon checklist before exit:
+        # >=6 distinct tools AND mandatory ones present.
+        "tool_runs": 6,
+        "mandatory_tools_any_of": [
+            # curl-style fingerprint is cheap and mandatory at minimum.
+            ["curl-headers", "httpx", "whatweb"],
+        ],
+        "mandatory_tools_all_of": [
+            # We require at least one HTTP fingerprint AND one crawl/probe.
+            ["curl-headers", "httpx", "whatweb", "nikto"],
+            ["katana", "gau", "waybackurls", "gospider", "hakrawler", "naabu", "nmap", "subfinder"],
+        ],
         # ANY of these counts as "I learned something about the target".
-        # tech_stack proves fingerprinting succeeded; ports/assets prove
-        # surface mapping found something; findings >=2 means we already
-        # have enough recon signal to graduate.
         "recon_evidence_any_of": True,
     },
     "VULNERABILITY_ANALYSIS": {
-        # Need at least 2 vuln-analysis tool runs so we get coverage from
-        # both template-driven (nuclei) AND protocol/TLS audit (sslscan/
-        # testssl/wafw00f) before opening exploitation.
-        "tool_runs": 2,
+        # Coverage: template DAST (nuclei) AND protocol audit. Plus the
+        # cheap curl-based audit (security headers, CRLF, open-redirect probe).
+        "tool_runs": 3,
         "vuln_analysis_tool_required": True,
+        "mandatory_tools_all_of": [
+            # At least one templated scanner.
+            ["nuclei", "nmap-vulscan"],
+            # At least one protocol audit when target is HTTPS.
+            ["sslscan", "testssl", "wafw00f", "curl-headers"],
+        ],
     },
     "EXPLOITATION": {
-        # At least one exploitation attempt before we'd consider going to
-        # actions-on-objectives. No severity gate — give the supervisor
-        # freedom to pivot once exploitation has been attempted.
-        "tool_runs": 1,
+        # Real exploitation must combine an injection tester with one of
+        # the curl-based validators (auth, ssrf, rce, xxe) before the
+        # supervisor is allowed to call the stage done.
+        "tool_runs": 3,
+        "mandatory_tools_any_of": [
+            ["sqlmap", "dalfox", "wapiti", "ffuf", "wpscan", "hydra", "curl-headers"],
+        ],
     },
     "ACTIONS_ON_OBJECTIVES": {},  # terminal
 }
@@ -262,6 +275,17 @@ def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
     min_tool_runs = int(criteria.get("tool_runs", 0))
     if min_tool_runs and len(distinct_tools) < min_tool_runs:
         return current, False, f"need_tool_runs>={min_tool_runs}_have={len(distinct_tools)}"
+
+    # mandatory_tools_any_of: each inner group requires at least one match.
+    for group in (criteria.get("mandatory_tools_any_of") or []):
+        if not any(t in distinct_tools for t in group):
+            return current, False, f"missing_any_of:{','.join(group[:6])}"
+
+    # mandatory_tools_all_of: each inner group requires at least one match
+    # — same semantics as any_of but iterating over multiple groups.
+    for group in (criteria.get("mandatory_tools_all_of") or []):
+        if not any(t in distinct_tools for t in group):
+            return current, False, f"missing_group:{','.join(group[:6])}"
 
     if criteria.get("tech_stack_required") and not tech_stack:
         return current, False, "tech_stack_empty"

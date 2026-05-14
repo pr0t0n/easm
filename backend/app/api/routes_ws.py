@@ -190,6 +190,11 @@ async def get_scan_trace(scan_id: int, token: str = "", limit: int = 200):
                 }
                 for row in scores
             ],
+            # Hypothesis trail + kill-chain stage + tech-stack persisted by
+            # the workflow's _sync_step_to_db.
+            "hypotheses": list((job.state_data or {}).get("pentest_hypotheses") or [])[:30],
+            "kill_chain_stage": str((job.state_data or {}).get("kill_chain_stage") or ""),
+            "detected_tech_stack": list((job.state_data or {}).get("detected_tech_stack") or []),
         }
     finally:
         db.close()

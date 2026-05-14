@@ -187,6 +187,65 @@ def _maybe_advance_kill_chain_stage(state: AgentState) -> None:
         )
 
 
+def _hypothesis_driven_tactic(state: AgentState, *, capability: str) -> dict[str, Any] | None:
+    """Pick the highest-confidence pending hypothesis whose suggested_skill is
+    allowed in the current kill-chain stage, and materialise it as a tactic.
+
+    Hypotheses come from `app.services.hypothesis_engine` and are refreshed
+    by the workflow after each tool execution. This is the PRIMARY source
+    of tactic decisions — beats both tech-stack auto-lock and the strategy
+    queue. If no hypothesis applies, the supervisor falls back to the
+    other paths (auto-lock → queue → heuristic).
+
+    The function NEVER returns hypotheses already executed (tracked via the
+    `pentest_tactics_completed` list with tactic_id `hypothesis:family:hid`).
+    """
+    try:
+        from app.graph.kill_chain import stage_allows_skill
+        from app.services.hypothesis_engine import hypothesis_to_tactic
+    except Exception:
+        return None
+
+    hypotheses = list(state.get("pentest_hypotheses") or [])
+    if not hypotheses:
+        return None
+
+    stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+    completed_ids = _completed_pentest_tactic_ids(state)
+
+    # Sort by confidence descending; iterate until we find one whose
+    # suggested_skill is permitted in current stage AND not already done.
+    sorted_hs = sorted(
+        hypotheses, key=lambda h: -float(h.get("confidence") or 0)
+    )
+    for h in sorted_hs:
+        skill_id = str(h.get("suggested_skill") or "")
+        if not stage_allows_skill(stage, skill_id):
+            continue
+        tactic = hypothesis_to_tactic(h, capability=capability)
+        if str(tactic.get("capability") or "") != capability:
+            # mismatched capability — keep iterating
+            continue
+        if str(tactic.get("tactic_id") or "") in completed_ids:
+            continue
+        state["pending_pentest_tactic"] = dict(tactic)
+        _append_action(state, "hypothesis_driven_tactic", {
+            "hypothesis_id": h.get("id"),
+            "family": h.get("family"),
+            "confidence": h.get("confidence"),
+            "skill_id": skill_id,
+            "tool": h.get("suggested_tool"),
+            "target": h.get("target"),
+            "param": h.get("target_param"),
+        })
+        state.setdefault("logs_terminais", []).append(
+            f"[hypothesis] driver={h.get('family')} skill={skill_id} "
+            f"tool={h.get('suggested_tool')} conf={h.get('confidence')}"
+        )
+        return tactic
+    return None
+
+
 def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | None:
     """Builds a high-priority pentest tactic from detected_tech_stack.
 
@@ -999,23 +1058,27 @@ def supervisor_node(state: AgentState) -> AgentState:
     state["capability_context"] = {}
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
-        # Tech-stack auto-lock takes precedence over both the strategy queue
-        # and the heuristic selector: when fingerprint matches a locked tactic
-        # we force that path so the supervisor cannot drift away from the
-        # environment-specific skill (e.g. ASP/MSSQL → vuln-injection sqlmap).
-        auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
-        if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
-            chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
-        elif next_tactic:
-            chosen_skill = _selected_skill_from_tactic(next_tactic)
+        # ── Hypothesis-driven tactic takes precedence over everything else.
+        # If recon produced a hypothesis whose suggested_skill is allowed in
+        # the current stage AND capability, we lock to it. No hypothesis ->
+        # fall through to tech-stack auto-lock -> queue -> heuristic.
+        hypothesis_tactic = _hypothesis_driven_tactic(state, capability=next_node)
+        if hypothesis_tactic:
+            chosen_skill = _selected_skill_from_tactic(hypothesis_tactic)
         else:
-            chosen_skill = _select_skill_for_capability(
-                capability=next_node,
-                active_skills=list(state.get("active_skills") or []),
-                scan_mode=str(state.get("scan_mode") or "unit"),
-                tech_stack=list(state.get("detected_tech_stack") or []),
-                kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
-            )
+            auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
+            if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
+                chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+            elif next_tactic:
+                chosen_skill = _selected_skill_from_tactic(next_tactic)
+            else:
+                chosen_skill = _select_skill_for_capability(
+                    capability=next_node,
+                    active_skills=list(state.get("active_skills") or []),
+                    scan_mode=str(state.get("scan_mode") or "unit"),
+                    tech_stack=list(state.get("detected_tech_stack") or []),
+                    kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+                )
         if chosen_skill:
             state["selected_skill"] = chosen_skill
             if chosen_skill.get("tactic_id"):
@@ -1069,6 +1132,20 @@ def supervisor_node(state: AgentState) -> AgentState:
                             "lock_skill": bool(chosen_skill.get("lock_skill")),
                             "extra_args": dict(chosen_skill.get("extra_args") or {}),
                             "kill_chain_stage": str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+                            # Hypothesis trail: when the tactic came from the
+                            # hypothesis engine, expose family + signal so the
+                            # UI can show "porque essa ferramenta".
+                            "hypothesis_driver": (
+                                {
+                                    "family": (chosen_skill.get("tactic_id") or "").split(":")[1]
+                                    if str(chosen_skill.get("tactic_id") or "").startswith("hypothesis:") else None,
+                                    "tactic_id": chosen_skill.get("tactic_id"),
+                                    "signal_expected": (chosen_skill.get("evidence_required") or [""])[0],
+                                }
+                                if str(chosen_skill.get("strategy_source") or "") == "hypothesis_engine"
+                                else None
+                            ),
+                            "hypotheses_pending": len(state.get("pentest_hypotheses") or []),
                         },
                     )
             except Exception:
