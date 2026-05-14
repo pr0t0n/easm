@@ -14,9 +14,76 @@ nmap_vuln_scripts:
   tool: nmap-vulscan
   category: vuln
   phase: WEAPONIZATION_SIMULATION
-  description: "Nmap NSE vuln category — maps services to known CVEs."
-  cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4", "{host}"]
+  description: "Nmap NSE vuln category — maps detected services to known CVEs (article §8: nmap --script vuln)."
+  # Article: 'nmap --script vuln example.com'. We add -sV to ensure scripts have
+  # service context, --top-ports 200 to bound runtime, -T4 aggressive timing,
+  # --max-retries 2 to avoid hanging on filtered ports.
+  cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4",
+        "--top-ports", "200", "--max-retries", "2", "{host}"]
   timeout: 900
+  parser: raw
+
+nmap_http_enum:
+  tool: nmap-http-enum
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "NSE http-enum + http-vuln-* scripts — discovers admin panels, default creds, known CVEs over HTTP."
+  # NSE scripts targeting common HTTP misconfigurations and CVEs. Faster than
+  # full --script vuln when target is known to be HTTP-only.
+  cmd: ["nmap", "-sV", "-Pn", "-T4", "-p", "80,443,8080,8443,8000,8888",
+        "--script", "http-enum,http-title,http-headers,http-methods,http-vuln-cve2017-5638,http-vuln-cve2017-1001000,http-shellshock,http-slowloris-check,http-stored-xss,http-sql-injection,http-cors,http-trace,http-auth,http-default-accounts",
+        "--script-args", "http.useragent=Mozilla/5.0",
+        "{host}"]
+  timeout: 900
+  parser: raw
+
+nmap_smb_vuln:
+  tool: nmap-smb-vuln
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "NSE SMB vuln scan — EternalBlue (MS17-010), Conficker, SambaCry, null sessions."
+  # Useful when port 445/139 is detected. Skipped automatically by the supervisor
+  # for plain web targets via require_scheme / requires_port heuristics.
+  cmd: ["nmap", "-Pn", "-T4", "-p", "139,445",
+        "--script", "smb-vuln-ms17-010,smb-vuln-conficker,smb-vuln-cve-2017-7494,smb-vuln-ms08-067,smb-os-discovery,smb-enum-shares,smb-enum-users",
+        "{host}"]
+  timeout: 600
+  parser: raw
+
+nmap_dns_vuln:
+  tool: nmap-dns-vuln
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "NSE DNS recursion / cache snooping / zone-transfer / dns-fuzz."
+  cmd: ["nmap", "-sU", "-sV", "-Pn", "-p", "53",
+        "--script", "dns-recursion,dns-cache-snoop,dns-zone-transfer,dns-nsid",
+        "{host}"]
+  timeout: 300
+  parser: raw
+  allowed_return_codes: [0, 1]
+
+nmap_ssh_audit:
+  tool: nmap-ssh-audit
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "NSE SSH auth method discovery + algorithm audit (weak ciphers/HostKey)."
+  cmd: ["nmap", "-sV", "-Pn", "-T4", "-p", "22",
+        "--script", "ssh-auth-methods,ssh2-enum-algos,ssh-hostkey,ssh-publickey-acceptance",
+        "{host}"]
+  timeout: 300
+  parser: raw
+  allowed_return_codes: [0, 1]
+
+nmap_ssl_vuln:
+  tool: nmap-ssl-vuln
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "NSE SSL/TLS vuln battery — Heartbleed, POODLE, BEAST, CCS, DROWN."
+  requires_scheme: ["https"]
+  cmd: ["nmap", "-sV", "-Pn", "-T4", "-p", "443,8443",
+        "--script", "ssl-heartbleed,ssl-poodle,ssl-ccs-injection,ssl-dh-params,ssl-enum-ciphers,sslv2-drown",
+        "{host}"]
+  timeout: 600
   parser: raw
 
 nikto_basic:

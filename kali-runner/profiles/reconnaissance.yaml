@@ -5,19 +5,96 @@ subfinder_passive:
   tool: subfinder
   category: recon
   phase: RECONNAISSANCE
-  description: "Passive subdomain enumeration via 30+ data sources (CT logs, DNS-DB)."
-  cmd: ["subfinder", "-d", "{host}", "-silent", "-t", "100"]
-  timeout: 180
+  description: "Passive subdomain enumeration via ALL 30+ data sources (CT logs, DNS-DB, certspotter, virustotal, etc)."
+  # `-all` enables every source (article: 'subfinder -d X -all -o sub.txt')
+  cmd: ["subfinder", "-d", "{host}", "-all", "-silent", "-t", "100"]
+  timeout: 240
   parser: lines
 
 amass_enum:
   tool: amass
   category: recon
   phase: RECONNAISSANCE
-  description: "Active+passive subdomain enumeration with brute force."
+  description: "Passive subdomain enumeration via amass (CT logs, DNS DB, OSINT). For brute use amass_brute."
   cmd: ["amass", "enum", "-passive", "-d", "{host}", "-timeout", "5"]
   timeout: 300
   parser: lines
+
+amass_brute:
+  tool: amass-brute
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Active amass brute-force enumeration with the SecLists subdomains top wordlist."
+  # Article: 'amass brute -d X -w wordlist.txt'
+  cmd: ["amass", "enum", "-brute", "-d", "{host}",
+        "-w", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",
+        "-timeout", "10"]
+  timeout: 900
+  parser: lines
+
+amass_intel:
+  tool: amass-intel
+  category: recon
+  phase: RECONNAISSANCE
+  description: "OSINT mode: WHOIS-based + reverse WHOIS + ASN-based domain discovery."
+  # Article: 'amass intel -src -d X' / 'amass intel -d X -whois'
+  cmd: ["amass", "intel", "-d", "{host}", "-whois", "-timeout", "5"]
+  timeout: 300
+  parser: lines
+
+sublist3r_basic:
+  tool: sublist3r
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Subdomain enum via search engines (Google, Bing, Yahoo, Virustotal, Netcraft). Second opinion to subfinder/amass."
+  # Article section 2: 'sublist3r -d example.com'. Output is plain stdout.
+  cmd: ["sublist3r", "-d", "{host}", "-v", "-t", "20"]
+  timeout: 300
+  parser: lines
+
+findomain_passive:
+  tool: findomain
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Findomain — fast passive subdomain enum from cert transparency + DB sources."
+  cmd: ["findomain", "-t", "{host}", "--quiet"]
+  timeout: 180
+  parser: lines
+
+dnsrecon_brute:
+  tool: dnsrecon-brt
+  category: recon
+  phase: RECONNAISSANCE
+  description: "DNS brute force using common subdomain wordlist (-t brt)."
+  # Article section 4: 'dnsrecon -d X -t brt'
+  cmd: ["dnsrecon", "-d", "{host}", "-t", "brt",
+        "-D", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+        "--threads", "20"]
+  timeout: 600
+  parser: lines
+  allowed_return_codes: [0, 1]
+
+dnsrecon_zone_transfer:
+  tool: dnsrecon-zt
+  category: recon
+  phase: RECONNAISSANCE
+  description: "DNS zone transfer attempt (axfr). Rare success = jackpot."
+  # Article section 4: 'dnsrecon -d X -t zt'
+  cmd: ["dnsrecon", "-d", "{host}", "-t", "axfr"]
+  timeout: 60
+  parser: lines
+  allowed_return_codes: [0, 1]
+
+dnsenum_basic:
+  tool: dnsenum
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Multipurpose DNS discovery (NS, MX, AXFR attempt, brute, reverse). Quick DNS insights."
+  # Article section 5: 'dnsenum example.com'
+  cmd: ["dnsenum", "--noreverse", "--nocolor", "-t", "5", "{host}"]
+  timeout: 300
+  parser: lines
+  allowed_return_codes: [0, 1, 2]
 
 assetfinder_passive:
   tool: assetfinder
@@ -60,7 +137,7 @@ naabu_top1000:
   tool: naabu
   category: recon
   phase: RECONNAISSANCE
-  description: "Fast TCP port scan top-1000."
+  description: "Fast TCP port scan top-1000 (article §1 subfinder | naabu pipeline equivalent)."
   cmd: ["naabu", "-host", "{host_ip}", "-top-ports", "1000", "-silent", "-rate", "1000"]
   timeout: 600
   parser: lines
@@ -69,16 +146,18 @@ nmap_service_detect:
   tool: nmap
   category: recon
   phase: RECONNAISSANCE
-  description: "Service/version detection with default scripts."
-  cmd: ["nmap", "-sV", "-sC", "-Pn", "--top-ports", "200", "-T4", "{host}"]
-  timeout: 600
+  description: "Service/version detection + default scripts + OS fingerprint (article §8: `nmap -sV -sC -O`)."
+  # -sV service version, -sC default scripts, -O OS detection (-O may need root in some envs),
+  # --top-ports 1000 ensures broad coverage but still fast, -T4 aggressive timing.
+  cmd: ["nmap", "-sV", "-sC", "-Pn", "--top-ports", "1000", "-T4", "--max-retries", "2", "{host}"]
+  timeout: 900
   parser: raw
 
 masscan_full:
   tool: masscan
   category: recon
   phase: RECONNAISSANCE
-  description: "Internet-scale stateless TCP port scanner."
+  description: "Internet-scale stateless TCP port scanner — full 1-65535 (article §10)."
   cmd: ["masscan", "{host_ip}", "-p1-65535", "--rate", "5000", "--wait", "3"]
   timeout: 900
   parser: raw
@@ -87,9 +166,15 @@ httpx_probe:
   tool: httpx
   category: recon
   phase: RECONNAISSANCE
-  description: "Live HTTP/HTTPS prober with status, title, tech."
-  cmd: ["httpx", "-u", "{url}", "-silent", "-status-code", "-title", "-tech-detect", "-tls-probe", "-json"]
-  timeout: 120
+  description: "Live HTTP/HTTPS prober with status, title, tech, TLS (article §6: alive/dead check)."
+  # Article: 'httpx -threads 100 -l subs.txt' uses list mode + threads. We are
+  # single-target here; -follow-redirects + -no-color + -tls-probe + -json keep
+  # the parser happy. -fr ensures redirects don't hide the real status.
+  cmd: ["httpx", "-u", "{url}", "-silent",
+        "-status-code", "-title", "-tech-detect", "-tls-probe",
+        "-follow-redirects", "-no-color", "-json",
+        "-threads", "50"]
+  timeout: 180
   parser: jsonl
 
 whatweb_fingerprint:

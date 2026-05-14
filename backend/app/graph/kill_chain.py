@@ -151,6 +151,9 @@ STAGE_ALLOWED_SKILLS: dict[str, set[str]] = {
         "osint-cloud-exposure",
     },
     "VULNERABILITY_ANALYSIS": {
+        # nuclei + nmap-vulscan + targeted NSE batteries (http/smb/ssh/ssl/dns)
+        # belong here. The skill `vuln-nuclei-cve` declares them all in its
+        # playbook so kill-chain just needs to allow the skill.
         "vuln-nuclei-cve",
         "vuln-ssl-tls",
         "vuln-information-disclosure",
@@ -209,10 +212,11 @@ STAGE_EXIT_CRITERIA: dict[str, dict[str, Any]] = {
         "tool_runs": 3,
         "vuln_analysis_tool_required": True,
         "mandatory_tools_all_of": [
-            # At least one templated scanner.
-            ["nuclei", "nmap-vulscan"],
+            # At least one templated scanner — nmap-vulscan and the targeted
+            # NSE batteries all count as nmap-side coverage.
+            ["nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-ssl-vuln"],
             # At least one protocol audit when target is HTTPS.
-            ["sslscan", "testssl", "wafw00f", "curl-headers"],
+            ["sslscan", "testssl", "wafw00f", "curl-headers", "nmap-ssl-vuln"],
         ],
     },
     "EXPLOITATION": {
@@ -299,7 +303,11 @@ def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
             return current, False, "no_recon_evidence_yet"
 
     if criteria.get("vuln_analysis_tool_required"):
-        vuln_tools = {"nuclei", "nmap-vulscan", "sslscan", "testssl", "wafw00f"}
+        vuln_tools = {
+            "nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+            "nmap-ssh-audit", "nmap-ssl-vuln", "nmap-dns-vuln",
+            "sslscan", "testssl", "wafw00f",
+        }
         if not (vuln_tools & distinct_tools):
             return current, False, "no_vuln_analysis_tool_ran_yet"
 

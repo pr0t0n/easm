@@ -30,14 +30,30 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "scope_validation": [],
     "reconnaissance": [
         "code-analyzer",
-        "subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx",
-        "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers",
-        "sslscan", "testssl", "katana", "hakrawler", "gau", "waybackurls",
-        "gospider", "js-snooper", "jsniper", "arjun", "paramspider", "ffuf-params",
-        "ffuf-values", "wfuzz", "nikto",
+        # Subdomain enum (article §1-§2): use parallel sources, dedupe later.
+        "subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain",
+        "assetfinder", "alterx", "shuffledns", "massdns",
+        # DNS recon (article §4-§5)
+        "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+        # Port/service scan (article §8-§10)
+        "naabu", "nmap", "masscan",
+        # Web fingerprint (article §6, §8)
+        "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan", "testssl",
+        # Content/JS/parameter discovery
+        "katana", "hakrawler", "gau", "waybackurls", "gospider",
+        "js-snooper", "jsniper", "arjun", "paramspider",
+        "ffuf-params", "ffuf-values", "wfuzz",
+        # Header misconfig — runs early, complements code-analyzer
+        "nikto",
     ],
     "weaponization": [
-        "nuclei", "nmap-vulscan", "shodan-cli", "theHarvester", "h8mail",
+        # Templated DAST + multi-NSE vuln scanners. nmap is intentionally
+        # listed in BOTH recon (service detect) and weaponization (vuln NSE),
+        # via distinct tool aliases (`nmap` vs `nmap-vulscan`/`nmap-http-enum`/…).
+        "nuclei",
+        "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+        "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
+        "shodan-cli", "theHarvester", "h8mail",
         "trufflehog", "gitleaks", "subjack", "metagoofil",
     ],
     "delivery": ["ffuf", "ffuf-files", "ffuf-params", "ffuf-values", "ffuf-post", "wfuzz", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider"],

@@ -76,17 +76,27 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "recon-subdomain-enum",
         "category": "reconnaissance",
-        "description": "Enumeração de subdomínios, validação DNS e expansão de superfície.",
-        "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder", "dnsx"],
-        "playbook": ["subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx"],
+        "description": "Enumeração de subdomínios via passive (subfinder/amass/sublist3r/findomain/assetfinder), active brute (amass-brute/shuffledns), DNS recon (dnsrecon/dnsenum), e validação DNS.",
+        "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder",
+                     "dnsx", "sublist3r", "findomain", "dnsrecon", "dnsenum", "axfr", "zone transfer"],
+        # Article ordering: passive first (fast, no noise) → DNS-level recon
+        # → active brute (heavier) → DNS records (dnsx). Multi-source dedupe
+        # happens downstream when findings are normalised into lista_ativos.
+        "playbook": [
+            "subfinder", "amass", "sublist3r", "findomain", "assetfinder",
+            "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+            "amass-brute", "amass-intel", "shuffledns", "alterx",
+            "dnsx",
+        ],
         "phases": ["P01"],
     },
     {
         "id": "recon-port-service",
         "category": "reconnaissance",
-        "description": "Enumeração de portas e fingerprint de serviços expostos.",
-        "triggers": ["port", "service", "banner", "naabu", "nmap", "masscan"],
-        "playbook": ["naabu", "nmap", "masscan", "httpx"],
+        "description": "Enumeração de portas + fingerprint de serviços. Pipeline article §8-§10: masscan/naabu (descoberta rápida) → nmap -sV -sC (versionamento) → httpx (alive check + tech detect).",
+        "triggers": ["port", "service", "banner", "naabu", "nmap", "masscan", "rustscan"],
+        # Pipeline order: fast port discovery → service version detect → HTTP probe
+        "playbook": ["naabu", "masscan", "nmap", "httpx"],
         "phases": ["P02"],
     },
     {
@@ -199,9 +209,17 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "vuln-nuclei-cve",
         "category": "vulnerabilities",
-        "description": "Scan de CVEs e misconfigurations com Nuclei.",
-        "triggers": ["cve", "nuclei", "misconfiguration", "exploit", "known"],
-        "playbook": ["nuclei", "nmap-vulscan"],
+        "description": "Scan de CVEs e misconfigurations: nuclei (templates YAML) + bateria NMAP NSE (vuln, http-enum, smb-vuln, ssh-audit, ssl-vuln, dns-vuln). nmap aqui não faz port scan — usa scripts NSE de vulnerabilidade.",
+        "triggers": ["cve", "nuclei", "misconfiguration", "exploit", "known",
+                     "ms17-010", "eternalblue", "heartbleed", "shellshock",
+                     "smb", "ssh weak", "ssl weak", "http-enum"],
+        # nmap dual-role: also belongs here as `nmap-vulscan` (NSE vuln category)
+        # plus targeted NSE batteries (http/smb/ssh/ssl/dns).
+        "playbook": [
+            "nuclei",
+            "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+            "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
+        ],
         "phases": ["P11"],
     },
     {
