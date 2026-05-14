@@ -149,11 +149,21 @@ def skill_selector_node(state: AgentState) -> AgentState:
         _trace_iter = int(state.get("loop_iteration", 0))
         _trace_cap = str(state.get("pending_capability_node") or state.get("current_phase") or "")
         if _trace_scan_id:
+            _supervisor_intent = dict(state.get("selected_skill") or {})
             _emit_trace(
                 scan_id=int(_trace_scan_id), iteration=_trace_iter,
                 event_type="skill_lookup", from_node="agent", to_node="library",
+                skill_id=_supervisor_intent.get("skill_id") or None,
                 capability=_trace_cap, status="pending",
-                payload={"phase": _trace_cap},
+                payload={
+                    "phase": _trace_cap,
+                    "supervisor_intent_skill": _supervisor_intent.get("skill_id"),
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "lock_skill": bool(_supervisor_intent.get("lock_skill")),
+                    "reason": _supervisor_intent.get("reason", ""),
+                    "tactic_id": _supervisor_intent.get("tactic_id", ""),
+                    "query": "Buscando skill compatível com tech_stack + capability + learning aceito",
+                },
             )
     except Exception:
         pass
@@ -428,13 +438,29 @@ def skill_selector_node(state: AgentState) -> AgentState:
         _trace_scan_id = state.get("scan_id")
         if _trace_scan_id:
             _skill_found_id = str(state.get("current_skill") or state.get("active_skill") or "")
+            _inv = dict(state.get("skill_invocation") or {})
+            _gate = dict(state.get("skill_selector_gate") or {})
+            _contract = dict(state.get("skill_contract") or {})
             _emit_trace(
                 scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
                 event_type="skill_found", from_node="library", to_node="agent",
                 skill_id=_skill_found_id or None,
                 capability=str(state.get("pending_capability_node") or state.get("current_phase") or ""),
                 status="success" if state.get("skill_selector_ready") else "failure",
-                payload={"skill_id": _skill_found_id},
+                payload={
+                    "skill_id": _skill_found_id,
+                    # ── PORQUE essa skill saiu como vencedora ──
+                    "score": _inv.get("score"),
+                    "matched_by": list(_inv.get("matched_by") or _contract.get("matched_by") or [])[:8],
+                    "source": _inv.get("source") or _contract.get("source"),
+                    "confidence": _inv.get("confidence") or _contract.get("confidence"),
+                    "recommended_tools": list(_gate.get("recommended_tools") or [])[:6],
+                    "allowed_tools": list(_gate.get("allowed_tools") or [])[:6],
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "techniques_count": len(_inv.get("techniques") or []),
+                    "first_technique": (list(_inv.get("techniques") or [{}])[0] if _inv.get("techniques") else {}).get("name", ""),
+                    "playbook_title": _gate.get("playbook_title") or _contract.get("playbook_title"),
+                },
             )
     except Exception:
         pass
@@ -613,6 +639,8 @@ def tool_selector_node(state: AgentState) -> AgentState:
         from app.graph.tracer import emit_trace as _emit_trace
         _trace_scan_id = state.get("scan_id")
         if _trace_scan_id:
+            _technique_full = dict(selection.get("technique") or {})
+            _extra_args_by_tool = _technique_full.get("extra_args") or {}
             _emit_trace(
                 scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
                 event_type="tool_select", from_node="agent", to_node="kali",
@@ -622,8 +650,22 @@ def tool_selector_node(state: AgentState) -> AgentState:
                 status="success" if selected_tool else "skipped",
                 payload={
                     "selected_tool": selected_tool,
+                    "selected_tools_all": selected_tools,
+                    "candidate_tools": candidate_tools[:8],
+                    "allowed_tools_from_skill": list(supervisor_selected.get("allowed_tools") or [])[:8],
+                    "preferred_tool": preferred_tool,
                     "capability": capability,
-                    "technique": (selection.get("technique") or {}).get("name", ""),
+                    "technique": _technique_full.get("name", ""),
+                    "technique_objective": _technique_full.get("objective", ""),
+                    "extra_args": dict(_extra_args_by_tool) if isinstance(_extra_args_by_tool, dict) else {},
+                    "evidence_required": evidence_required[:6],
+                    "playbook_title": selection.get("playbook_title"),
+                    "reason": (
+                        f"ferramenta '{selected_tool}' selecionada por estar em allowed_tools={list(supervisor_selected.get('allowed_tools') or [])[:4]} "
+                        f"da skill '{selection.get('skill_id')}'"
+                        if selected_tool else
+                        f"nenhuma ferramenta autorizada pela skill '{selection.get('skill_id')}'"
+                    ),
                 },
             )
             if selected_tool:
@@ -910,13 +952,27 @@ def tool_executor_node(state: AgentState) -> AgentState:
         from app.graph.tracer import emit_trace as _emit_trace
         _trace_scan_id_ex = state.get("scan_id")
         if _trace_scan_id_ex and selected_tools:
+            _tech_for_emit = dict(selection.get("technique") or {})
+            _exec_extra_args = _tech_for_emit.get("extra_args") or {}
             _emit_trace(
                 scan_id=int(_trace_scan_id_ex), iteration=int(state.get("loop_iteration", 0)),
                 event_type="tool_execute", from_node="agent", to_node="kali",
                 skill_id=skill_id or None,
                 tool_name=selected_tools[0] if selected_tools else None,
                 capability=capability, status="pending",
-                payload={"tools": selected_tools, "targets": [str(t) for t in targets[:3]]},
+                payload={
+                    "tools": selected_tools,
+                    "targets": [str(t) for t in targets[:3]],
+                    "extra_args": dict(_exec_extra_args) if isinstance(_exec_extra_args, dict) else {},
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "skill_id": skill_id,
+                    "lock_skill": bool(supervisor_selected.get("lock_skill")),
+                    "reason": (
+                        f"executando {len(selected_tools)} ferramenta(s) da skill '{skill_id}' "
+                        f"com argumentos calibrados pelo tech_stack: "
+                        f"{','.join(state.get('detected_tech_stack') or []) or '-'}"
+                    ),
+                },
             )
     except Exception:
         pass

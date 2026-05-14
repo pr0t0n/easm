@@ -63,17 +63,37 @@ function nodeFromActor(actor) {
 function summarizePayload(payload) {
   if (!payload || typeof payload !== "object") return "";
   const parts = [];
+  if (payload.skill_id) parts.push(`Skill: ${payload.skill_id}`);
+  if (payload.selected_tool) parts.push(`Ferramenta: ${payload.selected_tool}`);
   if (payload.objective) parts.push(`Objetivo: ${payload.objective}`);
   if (payload.capability) parts.push(`Capacidade: ${payload.capability}`);
   if (payload.phase) parts.push(`Fase: ${payload.phase}`);
   if (payload.target) parts.push(`Alvo: ${payload.target}`);
+  if (Array.isArray(payload.tech_stack) && payload.tech_stack.length) {
+    parts.push(`Stack: ${payload.tech_stack.slice(0, 6).join(", ")}`);
+  }
+  if (Array.isArray(payload.matched_by) && payload.matched_by.length) {
+    parts.push(`Porque: ${payload.matched_by.slice(0, 4).join(" / ")}`);
+  }
+  if (payload.score !== undefined && payload.score !== null) {
+    parts.push(`Score: ${payload.score}`);
+  }
   if (Array.isArray(payload.allowed_tools) && payload.allowed_tools.length) {
-    parts.push(`Ferramentas: ${payload.allowed_tools.slice(0, 6).join(", ")}`);
+    parts.push(`Permitidas: ${payload.allowed_tools.slice(0, 6).join(", ")}`);
   }
   if (Array.isArray(payload.tools) && payload.tools.length) {
     parts.push(`Ferramentas: ${payload.tools.slice(0, 6).join(", ")}`);
   }
+  if (payload.extra_args && typeof payload.extra_args === "object" && Object.keys(payload.extra_args).length) {
+    const argsSummary = Object.entries(payload.extra_args)
+      .slice(0, 3)
+      .map(([tool, args]) => `${tool}=${Array.isArray(args) ? args.slice(0, 4).join(" ") : args}`)
+      .join(" | ");
+    parts.push(`Extra-args: ${argsSummary}`);
+  }
+  if (payload.reason) parts.push(`Razao: ${payload.reason}`);
   if (payload.findings_count !== undefined) parts.push(`Findings: ${payload.findings_count}`);
+  if (payload.findings_added !== undefined) parts.push(`Novos findings: ${payload.findings_added}`);
   return parts.join(" | ");
 }
 
@@ -258,6 +278,76 @@ function ConversationItem({ item, selected, onSelect }) {
   );
 }
 
+function WhyPanel({ payload }) {
+  if (!payload || typeof payload !== "object") return null;
+  const techStack = Array.isArray(payload.tech_stack) ? payload.tech_stack : [];
+  const matchedBy = Array.isArray(payload.matched_by) ? payload.matched_by : [];
+  const allowedTools = Array.isArray(payload.allowed_tools) ? payload.allowed_tools : [];
+  const selectedAll = Array.isArray(payload.selected_tools_all) ? payload.selected_tools_all : [];
+  const extraArgs = payload.extra_args && typeof payload.extra_args === "object" ? payload.extra_args : null;
+  const hasContent =
+    techStack.length || matchedBy.length || payload.reason || payload.score !== undefined ||
+    payload.skill_id || payload.selected_tool || extraArgs;
+  if (!hasContent) return null;
+
+  return (
+    <section className="border border-emerald-800/50 bg-emerald-950/20 p-3">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-emerald-300">por que essa escolha</div>
+      <div className="mt-2 space-y-2 text-xs text-slate-200">
+        {payload.skill_id && (
+          <div><span className="text-slate-500">Skill →</span> <span className="font-mono text-violet-200">{payload.skill_id}</span>{payload.score !== undefined && <span className="ml-2 text-amber-300">score {payload.score}</span>}</div>
+        )}
+        {payload.selected_tool && (
+          <div><span className="text-slate-500">Ferramenta →</span> <span className="font-mono text-emerald-200">{payload.selected_tool}</span></div>
+        )}
+        {techStack.length > 0 && (
+          <div>
+            <span className="text-slate-500">Tech stack detectado:</span>{" "}
+            <span className="font-mono text-sky-200">{techStack.join(", ")}</span>
+          </div>
+        )}
+        {matchedBy.length > 0 && (
+          <div>
+            <div className="text-slate-500">Razoes do match:</div>
+            <ul className="mt-1 ml-3 list-disc space-y-0.5 font-mono text-[11px] text-slate-300">
+              {matchedBy.map((m, idx) => <li key={idx}>{m}</li>)}
+            </ul>
+          </div>
+        )}
+        {selectedAll.length > 0 && (
+          <div>
+            <span className="text-slate-500">Ferramentas escolhidas:</span>{" "}
+            <span className="font-mono text-emerald-200">{selectedAll.join(", ")}</span>
+          </div>
+        )}
+        {allowedTools.length > 0 && (
+          <div>
+            <span className="text-slate-500">Permitidas pela skill:</span>{" "}
+            <span className="font-mono text-slate-300">{allowedTools.join(", ")}</span>
+          </div>
+        )}
+        {extraArgs && Object.keys(extraArgs).length > 0 && (
+          <div>
+            <div className="text-slate-500">Extra-args calibrados pelo stack:</div>
+            <ul className="mt-1 ml-3 font-mono text-[11px] text-emerald-200">
+              {Object.entries(extraArgs).slice(0, 6).map(([tool, args]) => (
+                <li key={tool}>
+                  <span className="text-amber-200">{tool}</span> {Array.isArray(args) ? args.join(" ") : String(args)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {payload.reason && (
+          <div className="border-t border-slate-800 pt-2 text-slate-300">
+            <span className="text-slate-500">Resumo:</span> {payload.reason}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function PayloadPanel({ item }) {
   if (!item) {
     return (
@@ -277,6 +367,7 @@ function PayloadPanel({ item }) {
         </div>
       </div>
       <div className="space-y-4 p-4">
+        <WhyPanel payload={item.payload} />
         <section>
           <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">conteudo</div>
           <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{item.body || "Sem corpo textual."}</p>

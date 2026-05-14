@@ -712,6 +712,10 @@ def _select_skill_for_capability(
             f"Skill '{best_skill.get('id')}' selecionada para capability '{capability}' "
             f"(score={best_score}, categoria={best_skill.get('category')})"
         ),
+        "matched_by": [
+            f"category:{best_skill.get('category')}",
+            f"tool_overlap:{best_score}",
+        ],
     }
 
 
@@ -938,6 +942,12 @@ def supervisor_node(state: AgentState) -> AgentState:
                             "evidence_required": list(chosen_skill.get("evidence_required") or [])[:6],
                             "targets": list(chosen_skill.get("targets") or [])[:3],
                             "allowed_tools": chosen_skill.get("allowed_tools", [])[:4],
+                            # ── PORQUE essa skill ──
+                            "reason": chosen_skill.get("reason", ""),
+                            "matched_by": list(chosen_skill.get("matched_by") or [])[:8],
+                            "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                            "lock_skill": bool(chosen_skill.get("lock_skill")),
+                            "extra_args": dict(chosen_skill.get("extra_args") or {}),
                         },
                     )
             except Exception:
