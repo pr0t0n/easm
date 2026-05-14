@@ -246,6 +246,37 @@ def _hypothesis_driven_tactic(state: AgentState, *, capability: str) -> dict[str
     return None
 
 
+def _stack_evidence_strict(state: AgentState) -> dict[str, bool]:
+    """Returns {tag: True/False} where True means the actual evidence
+    blob from recon findings contains a high-confidence keyword for the
+    tag — used to suppress tech-stack false positives that the permissive
+    regex detector produces.
+
+    Only tags listed here are strict-checked. Tags absent return True so
+    the auto-lock keeps working for them.
+    """
+    findings = list(state.get("vulnerabilidades_encontradas") or [])
+    blob = ""
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        details = f.get("details") or {}
+        if isinstance(details, dict):
+            blob += " " + str(details.get("evidence") or "")
+            blob += " " + str(details.get("stdout") or "")
+            blob += " " + str(details.get("http_headers_raw") or "")
+        blob += " " + str(f.get("title") or "")
+    blob_l = blob.lower()
+    return {
+        "wordpress": ("wp-content" in blob_l) or ("wp-admin" in blob_l) or ("wp-includes" in blob_l) or ("wpscan" in blob_l) or ("x-pingback" in blob_l),
+        "php":       ("phpsessid" in blob_l) or ("x-powered-by: php" in blob_l) or (".php" in blob_l) or ("php/" in blob_l),
+        "mysql":     ("you have an error in your sql syntax" in blob_l) or ("mariadb" in blob_l) or ("mysql" in blob_l) or ("phpmyadmin" in blob_l),
+        "asp.net":   ("x-aspnet-version" in blob_l) or ("asp.net_sessionid" in blob_l) or ("aspsessionid" in blob_l) or (".aspx" in blob_l) or (".asp" in blob_l) or ("microsoft-iis" in blob_l),
+        "iis":       ("microsoft-iis" in blob_l) or ("x-aspnet-version" in blob_l),
+        "mssql":     ("microsoft sql server" in blob_l) or ("mssql" in blob_l) or ("sqlserver" in blob_l) or ("sqlexpress" in blob_l) or ("x-aspnet-version" in blob_l),
+    }
+
+
 def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | None:
     """Builds a high-priority pentest tactic from detected_tech_stack.
 
@@ -275,9 +306,29 @@ def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | Non
         if str(pending_existing.get("tactic_id") or "") not in completed_ids:
             return pending_existing
 
+    # Tools with attempts/success > 0 → no point in re-firing the same
+    # tactic. The runtime metrics map tool → {attempts, success, failures}.
+    runtime = dict(state.get("tool_runtime") or {})
+
+    # Strict evidence gate per tag: only fire WordPress/CMS auto-lock when
+    # the actual stdout from recon contained 'wp-content' or 'wp-admin'.
+    # The tech-stack detector is permissive (matches the substring "wordpress"
+    # anywhere) so it produced FPs on testaspnet. Strengthen by re-checking
+    # the actual findings evidence.
+    strong_evidence = _stack_evidence_strict(state)
+
     for tag in stack:
         spec = TECH_STACK_TACTIC_LOCKS.get(tag)
         if not spec:
+            continue
+        # Drop tags whose strict evidence isn't present in findings — this
+        # prevents wpscan from firing against ASP.NET targets just because
+        # the tech-stack detector matched a stray substring.
+        if tag in strong_evidence and not strong_evidence.get(tag):
+            state.setdefault("logs_terminais", []).append(
+                f"[kill-chain] auto-lock '{tag}'→'{spec.get('skill_id')}' bloqueado "
+                f"por falta de evidencia forte (sem keyword especifica nos findings)."
+            )
             continue
         # ── Stage gate: do not lock an exploitation skill while we are still
         # in RECON or VULN_ANALYSIS. The lock takes effect when the stage
@@ -288,6 +339,16 @@ def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | Non
                 f"pela stage atual ({current_stage})."
             )
             continue
+        # Runtime gate: if the preferred tool already attempted, skip.
+        preferred = str(spec.get("preferred_tool") or "").lower()
+        if preferred:
+            meta = runtime.get(preferred, {})
+            if int(meta.get("attempts", 0) or 0) >= 1:
+                state.setdefault("logs_terminais", []).append(
+                    f"[kill-chain] auto-lock '{tag}'→'{preferred}' bloqueado "
+                    f"porque tool ja tentou ({meta}) — aceitando proxima tactic."
+                )
+                continue
         tactic_id = f"tech-stack:{tag}:{spec['skill_id']}"
         if tactic_id in completed_ids:
             continue

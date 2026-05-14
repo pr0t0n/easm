@@ -1164,17 +1164,28 @@ def _run_tools_and_collect(
     skill_context = dict(skill_context or {})
     skill_id = str(skill_context.get("skill_id") or "").strip()
 
-    # 1) Skip tools already executed (in-state or in-DB)
+    # 1) Skip tools already executed (in-state or in-DB).
+    # Dedup key is `tool|target` (NOT step_name|target|tool) because the
+    # supervisor rotates skills/iterations and the step_name changes each
+    # iteration — using step_name as part of the key was causing wpscan to
+    # re-run 3x in scan #14 against the same target with different steps.
+    # Same target + same tool = identical work, regardless of which skill
+    # triggered it.
     pending_tools: list[str] = []
     scan_id = state.get("scan_id")
     for tool in tools:
-        run_id = f"{step_name}|{scan_target}|{tool}".lower()
-        if run_id in state.get("executed_tool_runs", []):
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
+        run_key_global = f"{tool}|{scan_target}".lower()
+        run_id_step = f"{step_name}|{scan_target}|{tool}".lower()  # kept for legacy logs
+        runs_so_far = state.get("executed_tool_runs", []) or []
+        already_in_state = any(
+            r.lower().endswith(f"|{scan_target.lower()}|{tool.lower()}") for r in runs_so_far
+        ) or run_key_global in runs_so_far
+        if already_in_state:
+            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_this_scan")
             continue
         if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
-            state["executed_tool_runs"].append(run_id)
+            state["executed_tool_runs"].append(run_key_global)
             continue
         pending_tools.append(tool)
 

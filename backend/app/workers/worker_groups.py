@@ -31,17 +31,18 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "reconnaissance": [
         "code-analyzer",
         # Subdomain enum (article §1-§2): use parallel sources, dedupe later.
+        # Removed: massdns (no profile/binary in our Kali image).
         "subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain",
-        "assetfinder", "alterx", "shuffledns", "massdns",
+        "assetfinder", "alterx", "shuffledns",
         # DNS recon (article §4-§5)
         "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
         # Port/service scan (article §8-§10)
         "naabu", "nmap", "masscan",
         # Web fingerprint (article §6, §8)
         "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan", "testssl",
-        # Content/JS/parameter discovery
+        # Content/JS/parameter discovery — removed: js-snooper, jsniper (no profile).
         "katana", "hakrawler", "gau", "waybackurls", "gospider",
-        "js-snooper", "jsniper", "arjun", "paramspider",
+        "arjun", "paramspider",
         "ffuf-params", "ffuf-values", "wfuzz",
         # Header misconfig — runs early, complements code-analyzer
         "nikto",
@@ -50,17 +51,20 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
         # Templated DAST + multi-NSE vuln scanners. nmap is intentionally
         # listed in BOTH recon (service detect) and weaponization (vuln NSE),
         # via distinct tool aliases (`nmap` vs `nmap-vulscan`/`nmap-http-enum`/…).
+        # Removed: metagoofil (no profile in our Kali image).
         "nuclei",
         "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
         "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
         "shodan-cli", "theHarvester", "h8mail",
-        "trufflehog", "gitleaks", "subjack", "metagoofil",
+        "trufflehog", "gitleaks", "subjack",
     ],
     "delivery": ["ffuf", "ffuf-files", "ffuf-params", "ffuf-values", "ffuf-post", "wfuzz", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider"],
-    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client", "katana", "arjun", "curl-headers", "ffuf-params", "ffuf-post", "hydra", "medusa", "crackmapexec", "jwt_tool", "impacket", "evilwinrm", "sslscan", "testssl", "nmap"],
-    "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool", "impacket", "evilwinrm", "nuclei", "curl-headers", "arjun"],
+    # Removed: impacket, evilwinrm (no profiles/binaries in our Kali image yet).
+    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client", "katana", "arjun", "curl-headers", "ffuf-params", "ffuf-post", "hydra", "medusa", "crackmapexec", "jwt_tool", "sslscan", "testssl", "nmap"],
+    "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool", "nuclei", "curl-headers", "arjun"],
     "command_control": ["nuclei", "interactsh-client", "testssl"],
-    "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy", "eslint", "jshint", "ast-grep"],
+    # Removed: eslint, jshint, ast-grep (no profiles/binaries in our Kali image).
+    "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy"],
     "reporting": [],
 }
 

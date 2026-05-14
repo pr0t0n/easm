@@ -191,41 +191,53 @@ STAGE_ALLOWED_SKILLS: dict[str, set[str]] = {
 # - finding_severity_required: minimum severity of at least one promoted finding
 STAGE_EXIT_CRITERIA: dict[str, dict[str, Any]] = {
     "RECONNAISSANCE": {
-        # Need broad coverage of the recon checklist before exit:
-        # >=6 distinct tools AND mandatory ones present.
-        "tool_runs": 6,
-        "mandatory_tools_any_of": [
-            # curl-style fingerprint is cheap and mandatory at minimum.
-            ["curl-headers", "httpx", "whatweb"],
-        ],
+        # Broad coverage of the article's checklist before exit. The user
+        # observed 9% coverage (5/53 tools) in scan #14 — we now require
+        # 12 distinct tools AND specific coverage groups so the agent
+        # cannot skip categories (subdomain enum, port scan, web finger).
+        "tool_runs": 12,
         "mandatory_tools_all_of": [
-            # We require at least one HTTP fingerprint AND one crawl/probe.
-            ["curl-headers", "httpx", "whatweb", "nikto"],
-            ["katana", "gau", "waybackurls", "gospider", "hakrawler", "naabu", "nmap", "subfinder"],
+            # Article §1: subdomain enum — at least one passive source ran
+            ["subfinder", "amass", "sublist3r", "assetfinder", "findomain"],
+            # Article §4-§5: DNS recon
+            ["dnsx", "dnsrecon-brt", "dnsenum"],
+            # Article §8-§10: port/service scan
+            ["naabu", "nmap", "masscan"],
+            # Article §6, §8: HTTP fingerprint + alive check
+            ["httpx", "whatweb", "curl-headers", "nikto"],
+            # Code-analyzer: ALWAYS — it produces param matrix evidence
+            ["code-analyzer"],
+            # Content/JS extraction
+            ["katana", "gau", "waybackurls", "gospider", "hakrawler"],
         ],
         # ANY of these counts as "I learned something about the target".
         "recon_evidence_any_of": True,
     },
     "VULNERABILITY_ANALYSIS": {
-        # Coverage: template DAST (nuclei) AND protocol audit. Plus the
-        # cheap curl-based audit (security headers, CRLF, open-redirect probe).
-        "tool_runs": 3,
+        # User reported failures here too — we now require 5 distinct tools
+        # including BOTH templated and protocol audits to ensure depth.
+        "tool_runs": 5,
         "vuln_analysis_tool_required": True,
         "mandatory_tools_all_of": [
-            # At least one templated scanner — nmap-vulscan and the targeted
-            # NSE batteries all count as nmap-side coverage.
+            # Templated DAST — must include nuclei OR an nmap NSE battery.
             ["nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-ssl-vuln"],
-            # At least one protocol audit when target is HTTPS.
+            # Protocol audit on HTTPS targets; curl-headers covers HTTP-only.
             ["sslscan", "testssl", "wafw00f", "curl-headers", "nmap-ssl-vuln"],
+            # At least one NSE-targeted scan beyond generic --script vuln.
+            ["nmap-http-enum", "nmap-ssl-vuln", "nmap-ssh-audit", "nmap-smb-vuln"],
         ],
     },
     "EXPLOITATION": {
-        # Real exploitation must combine an injection tester with one of
-        # the curl-based validators (auth, ssrf, rce, xxe) before the
-        # supervisor is allowed to call the stage done.
-        "tool_runs": 3,
-        "mandatory_tools_any_of": [
-            ["sqlmap", "dalfox", "wapiti", "ffuf", "wpscan", "hydra", "curl-headers"],
+        # Real exploitation: at least 1 injection-class scanner AND 1
+        # curl-based validator (auth/ssrf/rce/xxe) AND 1 brute/cred tool.
+        "tool_runs": 5,
+        "mandatory_tools_all_of": [
+            # Injection/automation scanners
+            ["sqlmap", "dalfox", "wapiti", "wpscan"],
+            # Curl-based validators (the cheap probes)
+            ["curl-headers"],
+            # Content/param fuzz
+            ["ffuf", "ffuf-params", "ffuf-files", "wfuzz", "gobuster", "feroxbuster"],
         ],
     },
     "ACTIONS_ON_OBJECTIVES": {},  # terminal

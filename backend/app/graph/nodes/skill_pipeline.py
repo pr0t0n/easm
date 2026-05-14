@@ -114,9 +114,14 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
     target = str(state.get("target") or "")
     if group == "asset_discovery":
         tools = _adapt_recon_tools_for_target(target, tools)
+        # When target_type=="site" we DO NOT prune passive subdomain enum.
+        # Even single-URL targets can have sibling subdomains discoverable
+        # via cert transparency / passive sources, and the user requested
+        # ALL recon tools per the article. Only skip heavy active brute
+        # (amass-brute, shuffledns) and tools that have no profile.
         if str(state.get("target_type") or "") == "site":
-            subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
-            tools = [t for t in tools if t not in subdomain_expansion_tools]
+            heavy_active_brute = {"amass-brute", "shuffledns"}
+            tools = [t for t in tools if t not in heavy_active_brute]
     elif group == "risk_assessment":
         tools = _adapt_vuln_tools_for_target(target, tools)
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
@@ -608,12 +613,37 @@ def tool_selector_node(state: AgentState) -> AgentState:
         # NOTE: the old candidate_tools[0] fallback has been intentionally removed.
         # Without a skill contract there is no safe basis for choosing an arbitrary tool.
 
-    # Skill-first: execute pelo menos 2 ferramentas distintas quando disponíveis
-    # para validar a hipótese da skill com triangulação de evidência.
-    # Motivo: rodar uma única ferramenta e parar deixa SQLi/XSS/LFI passando em
-    # ambientes ASP/PHP onde a primeira ferramenta retorna pouco mas a segunda
-    # confirma. Mantemos o limite em 2 para evitar explosão de runtime.
-    selected_tools = selected_tools[:2]
+    # Skill-first: regra do usuario = "no MINIMO 2" (sem cap maximo).
+    # Rodamos TODAS as ferramentas elegiveis ainda nao executadas no scan.
+    # O ThreadPoolExecutor em _run_tools_and_collect ja limita paralelismo
+    # a max_workers=6 e o dedup global em workflow.py protege contra
+    # repeticao. Sem cap = cobertura maxima por iteracao.
+    #
+    # Filtro: preferir tools que AINDA NAO RODARAM neste scan, ordenadas
+    # pela skill_runtime (heuristica que ja prioriza por sucesso/falha).
+    runtime = dict(state.get("tool_runtime") or {})
+    executed_runs = set(state.get("executed_tool_runs") or [])
+    def _already_done(t: str) -> bool:
+        if any(r.lower().endswith(f"|{str(t).lower()}") for r in executed_runs):
+            return True
+        meta = runtime.get(t, {})
+        return int(meta.get("attempts", 0) or 0) >= 1
+    not_yet_run = [t for t in selected_tools if not _already_done(t)]
+    if not_yet_run:
+        # Garantir minimo 2 quando o pool permite, sem cap maximo.
+        selected_tools = not_yet_run
+        if len(selected_tools) == 1 and len(candidate_tools) > 1:
+            # Apenas 1 sobrou no pool da skill — busca extras no candidate_tools
+            # para garantir o minimo de 2 (regra do usuario).
+            for extra in candidate_tools:
+                if extra not in selected_tools and not _already_done(extra):
+                    selected_tools.append(extra)
+                    if len(selected_tools) >= 2:
+                        break
+    else:
+        # Todas ja rodaram — manter 1 para o supervisor seguir; o dedup
+        # interno vai pular a execucao mas a iteracao avanca.
+        selected_tools = selected_tools[:1]
     selected_tool = selected_tools[0] if selected_tools else ""
     technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
     evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])
