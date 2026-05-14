@@ -102,12 +102,83 @@ def _refresh_active_skills(state: AgentState) -> None:
         target_type=str(state.get("target_type") or "dominio"),
         discovered_ports=list(state.get("discovered_ports") or []),
         max_skills=8,
+        detected_tech_stack=list(state.get("detected_tech_stack") or []),
     )
     prev_ids = {str(item.get("id") or "") for item in list(state.get("active_skills") or [])}
     state["active_skills"] = selected
     selected_ids = [str(item.get("id") or "") for item in selected]
     if set(selected_ids) != prev_ids:
         _append_note(state, f"Skills ativas atualizadas: {', '.join(selected_ids)}", phase="skill-selection")
+    # Consumed: clear pending_skill_refresh hint set by skill_pipeline when
+    # the tech-stack signature changed last iteration.
+    if state.get("pending_skill_refresh"):
+        state["pending_skill_refresh"] = False
+
+
+def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | None:
+    """Builds a high-priority pentest tactic from detected_tech_stack.
+
+    Returns the tactic dict (also stored in state["pending_pentest_tactic"])
+    when a matching tag is present and the tactic was not already completed.
+    Returns None when no auto-lock applies — the regular strategy queue path
+    handles fallback in that case.
+    """
+    try:
+        from app.services.tech_stack_detector import TECH_STACK_TACTIC_LOCKS
+    except Exception:
+        return None
+
+    stack = [str(item).strip().lower() for item in (state.get("detected_tech_stack") or [])]
+    if not stack:
+        return None
+
+    completed_ids = _completed_pentest_tactic_ids(state)
+    pending_existing = dict(state.get("pending_pentest_tactic") or {})
+    if pending_existing.get("tactic_id", "").startswith("tech-stack:"):
+        # Already locked from a previous iteration; honour it instead of
+        # rebuilding on every supervisor pass.
+        if str(pending_existing.get("tactic_id") or "") not in completed_ids:
+            return pending_existing
+
+    for tag in stack:
+        spec = TECH_STACK_TACTIC_LOCKS.get(tag)
+        if not spec:
+            continue
+        tactic_id = f"tech-stack:{tag}:{spec['skill_id']}"
+        if tactic_id in completed_ids:
+            continue
+        tactic = {
+            "tactic_id": tactic_id,
+            "skill_id": spec["skill_id"],
+            "capability": spec["capability"],
+            "objective": f"Auto-lock por fingerprint do ambiente: {tag}.",
+            "hypothesis": spec.get("hypothesis", ""),
+            "allowed_tools": list(spec.get("allowed_tools") or []),
+            "preferred_tool": spec.get("preferred_tool", ""),
+            "extra_args": dict(spec.get("extra_args") or {}),
+            "strategy_source": "tech_stack_auto_lock",
+            "strategy_score": 95,
+            "learning_techniques": [],
+            "evidence_required": [],
+            "constraints": [],
+            "phase_refs": [],
+            "targets": [],
+            "reason": f"detected_tech_stack contains '{tag}' → lock skill '{spec['skill_id']}' on capability '{spec['capability']}'",
+        }
+        state["pending_pentest_tactic"] = tactic
+        _append_action(state, "tech_stack_auto_lock", {
+            "tag": tag,
+            "tactic_id": tactic_id,
+            "skill_id": spec["skill_id"],
+            "preferred_tool": spec.get("preferred_tool"),
+            "extra_args_keys": list((spec.get("extra_args") or {}).keys()),
+        })
+        state.setdefault("logs_terminais", []).append(
+            f"[supervisor] tech_stack auto-lock tag={tag} → skill={spec['skill_id']} "
+            f"tool={spec.get('preferred_tool')} extra_args={list((spec.get('extra_args') or {}).keys())}"
+        )
+        return tactic
+    return None
 
 
 def _register_delegation_task(state: AgentState, node: str, reason: str, priority: int) -> None:
@@ -499,6 +570,9 @@ def _selected_skill_from_tactic(tactic: dict[str, Any]) -> dict[str, Any]:
         "constraints": list(tactic.get("constraints") or []),
         "phase_refs": list(tactic.get("phase_refs") or []),
         "targets": list(tactic.get("targets") or []),
+        # Per-tool extra_args propagated to the Kali runner via the workflow's
+        # `technique_extra_args_by_tool` extractor (see _run_tools_and_collect).
+        "extra_args": dict(tactic.get("extra_args") or {}),
         "lock_skill": True,
     }
 
@@ -507,6 +581,7 @@ def _select_skill_for_capability(
     capability: str,
     active_skills: list[dict[str, Any]],
     scan_mode: str,
+    tech_stack: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Pick the best skill from active_skills for the given capability node.
 
@@ -531,6 +606,7 @@ def _select_skill_for_capability(
             candidate_tools=candidate_tools,
             phase=capability,
             limit=16,
+            tech_stack=tech_stack,
         )
         if learning_playbook:
             learning_invocation = resolve_skill_invocation(
@@ -540,6 +616,7 @@ def _select_skill_for_capability(
                 candidate_tools=candidate_tools,
                 active_skills=active_skills,
                 playbook=learning_playbook,
+                tech_stack=tech_stack,
             )
     except Exception as exc:
         logger.debug("learning-guided skill selection unavailable: %s", exc)
@@ -799,13 +876,21 @@ def supervisor_node(state: AgentState) -> AgentState:
     state["capability_context"] = {}
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
-        if next_tactic:
+        # Tech-stack auto-lock takes precedence over both the strategy queue
+        # and the heuristic selector: when fingerprint matches a locked tactic
+        # we force that path so the supervisor cannot drift away from the
+        # environment-specific skill (e.g. ASP/MSSQL → vuln-injection sqlmap).
+        auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
+        if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
+            chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+        elif next_tactic:
             chosen_skill = _selected_skill_from_tactic(next_tactic)
         else:
             chosen_skill = _select_skill_for_capability(
                 capability=next_node,
                 active_skills=list(state.get("active_skills") or []),
                 scan_mode=str(state.get("scan_mode") or "unit"),
+                tech_stack=list(state.get("detected_tech_stack") or []),
             )
         if chosen_skill:
             state["selected_skill"] = chosen_skill

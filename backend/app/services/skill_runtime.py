@@ -38,6 +38,8 @@ GROUP_CATEGORY_HINTS: dict[str, set[str]] = {
 SEMANTIC_SKILL_ALIASES: dict[str, set[str]] = {
     "sqli": {"vuln-injection"},
     "sql injection": {"vuln-injection"},
+    "injection_battery": {"vuln-injection"},
+    "injection battery": {"vuln-injection"},
     "xss": {"vuln-injection"},
     "ssti": {"vuln-injection"},
     "xxe": {"vuln-injection"},
@@ -55,6 +57,68 @@ SEMANTIC_SKILL_ALIASES: dict[str, set[str]] = {
     "score board": {"vuln-information-disclosure"},
     "hidden route": {"recon-web-crawl", "vuln-information-disclosure"},
     "path disclosure": {"vuln-information-disclosure"},
+    # Worker-group → skill_id mappings — accepted learnings often label
+    # `affected_skills` with the worker group name instead of the catalog id.
+    # Without these aliases the scorer never credits learning-skill overlap.
+    "asset_discovery": {"recon-subdomain-enum", "recon-web-crawl", "recon-port-service"},
+    "reconnaissance": {"recon-subdomain-enum", "recon-web-crawl", "recon-port-service"},
+    "recon": {"recon-subdomain-enum", "recon-web-crawl", "recon-port-service"},
+    "threat_intel": {"osint-exposure-intel", "osint-email-infra", "osint-subdomain-takeover", "osint-cloud-exposure"},
+    "weaponization": {"vuln-nuclei-cve", "vuln-injection"},
+    "risk_assessment": {
+        "vuln-injection", "vuln-ssrf-redirect", "vuln-auth-bypass", "vuln-directory-enum",
+        "vuln-idor-access-control", "vuln-api-graphql", "vuln-nuclei-cve", "vuln-ssl-tls",
+        "vuln-information-disclosure",
+    },
+    "exploitation": {"vuln-injection", "vuln-auth-bypass", "vuln-ssrf-redirect", "vuln-idor-access-control"},
+    "actions_on_objectives": {"vuln-injection", "vuln-auth-bypass", "weak-cryptography"},
+    "command_and_control": {"vuln-auth-bypass"},
+    "tool_usage": set(),  # generic; no specific skill alias
+}
+
+# Direct map worker_group → SKILL_CATALOG ids. Used as a hard bridge when
+# an accepted learning references a worker group instead of a catalog skill.
+WORKER_GROUP_TO_SKILL_IDS: dict[str, set[str]] = {
+    "asset_discovery": {"recon-subdomain-enum", "recon-web-crawl", "recon-port-service"},
+    "threat_intel": {"osint-exposure-intel", "osint-email-infra", "osint-subdomain-takeover", "osint-cloud-exposure"},
+    "risk_assessment": {
+        "vuln-injection", "vuln-ssrf-redirect", "vuln-auth-bypass", "vuln-directory-enum",
+        "vuln-idor-access-control", "vuln-api-graphql", "vuln-nuclei-cve", "vuln-ssl-tls",
+        "vuln-information-disclosure", "weak-cryptography",
+    },
+    "exploitation": {"vuln-injection", "vuln-auth-bypass", "vuln-ssrf-redirect", "vuln-idor-access-control"},
+    "evidence_adjudication": {"evidence-proof-pack"},
+    "governance": {"supervisor-guardrails"},
+}
+
+# Tech-stack tag → skill_ids that should be boosted when the tag is detected.
+TECH_STACK_SKILL_BOOST: dict[str, set[str]] = {
+    "asp.net":     {"vuln-injection", "tech-http-fingerprint", "vuln-auth-bypass"},
+    "iis":         {"vuln-injection", "tech-http-fingerprint", "tech-owasp-header-analysis"},
+    "mssql":       {"vuln-injection"},
+    "php":         {"vuln-injection", "vuln-information-disclosure"},
+    "mysql":       {"vuln-injection"},
+    "mariadb":     {"vuln-injection"},
+    "postgresql":  {"vuln-injection"},
+    "oracle":      {"vuln-injection"},
+    "wordpress":   {"tech-cms-fingerprint", "vuln-injection"},
+    "joomla":      {"tech-cms-fingerprint"},
+    "drupal":      {"tech-cms-fingerprint"},
+    "node.js":     {"vuln-injection", "vuln-api-graphql"},
+    "express":     {"vuln-injection", "vuln-api-graphql"},
+    "django":      {"vuln-injection"},
+    "flask":       {"vuln-injection"},
+    "java":        {"vuln-injection", "vuln-auth-bypass"},
+    "spring":      {"vuln-injection"},
+    "tomcat":      {"vuln-injection", "tech-http-fingerprint"},
+    "cloudflare":  {"waf-aware-validation"},
+    "akamai":      {"waf-aware-validation"},
+    "imperva":     {"waf-aware-validation"},
+    "sucuri":      {"waf-aware-validation"},
+    "kubernetes":  {"osint-cloud-exposure"},
+    "aws":         {"osint-cloud-exposure"},
+    "azure":       {"osint-cloud-exposure"},
+    "gcp":         {"osint-cloud-exposure"},
 }
 
 
@@ -190,6 +254,7 @@ def _score_skill(
     active_ids: set[str],
     learning: dict[str, Any],
     target: str,
+    tech_stack: list[str] | None = None,
 ) -> tuple[int, list[str]]:
     skill_id = str(skill.get("id") or "").strip()
     skill_tools = _lower_set(skill.get("playbook"))
@@ -199,9 +264,29 @@ def _score_skill(
     learning_phases = _lower_set(learning.get("phases"))
     category = str(skill.get("category") or "").lower()
     group_key = _clean_text(worker_group).lower()
+    tech_stack = [str(item).strip().lower() for item in (tech_stack or []) if str(item).strip()]
 
     score = 0
     matched_by: list[str] = []
+
+    # ── Tech-stack boost (strongest single signal when env is detected) ──
+    if tech_stack:
+        boosted_skills: set[str] = set()
+        matched_tags: list[str] = []
+        for tag in tech_stack:
+            for sid in TECH_STACK_SKILL_BOOST.get(tag, set()):
+                if sid == skill_id:
+                    boosted_skills.add(sid)
+                    matched_tags.append(tag)
+        if boosted_skills:
+            score += min(40, 12 * len(matched_tags))
+            matched_by.append("tech_stack:" + ",".join(matched_tags[:4]))
+
+    # Worker_group → skill_id hard bridge for accepted-learning content that
+    # labels affected_skills with the worker group name.
+    if skill_id in WORKER_GROUP_TO_SKILL_IDS.get(group_key, set()):
+        score += 6
+        matched_by.append("worker_group_bridge:" + group_key)
 
     if skill_id in active_ids:
         score += 4
@@ -291,6 +376,7 @@ def resolve_skill_invocation(
     candidate_tools: list[str] | None,
     active_skills: list[dict[str, Any]] | None,
     playbook: dict[str, Any] | None = None,
+    tech_stack: list[str] | None = None,
 ) -> dict[str, Any]:
     """Select and record the operational skill that must guide tool choice.
 
@@ -315,6 +401,7 @@ def resolve_skill_invocation(
             active_ids=active_ids,
             learning=learning,
             target=target,
+            tech_stack=tech_stack,
         )
         if matched_by or score > 0:
             scored.append((score, catalog_order.get(str(skill.get("id") or ""), 10_000), skill, matched_by))

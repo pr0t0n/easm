@@ -165,6 +165,7 @@ def execute_via_kali(
     poll_interval: float = 3.0,
     max_wait: int = 1800,
     skill_context: dict[str, Any] | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Dispatches `tool` to the Kali runner via HTTP and waits for completion.
 
@@ -192,6 +193,7 @@ def execute_via_kali(
                 "tool": tool_name,
                 "original_target": original_target if original_target != target else None,
                 "skill_context": dict(skill_context or {}),
+                "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
             },
             timeout=10,
         )

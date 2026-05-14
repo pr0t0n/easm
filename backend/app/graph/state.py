@@ -111,3 +111,8 @@ class AgentState(TypedDict):
     execution_control: dict[str, Any]
     tool_runtime: dict[str, dict[str, int]]
     validation_backlog: list[dict[str, Any]]
+    # Environment fingerprint inferred from recon evidence (httpx/whatweb/curl-headers/nikto/wafw00f).
+    # Normalised tags like ["asp.net","iis","mssql","cloudflare"]. Steers skill scoring,
+    # learning playbook prioritisation, and tactic-lock by the supervisor.
+    detected_tech_stack: list[str]
+    tech_stack_signature: str  # hash of sorted stack — used to detect changes between iterations

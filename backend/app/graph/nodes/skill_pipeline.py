@@ -207,7 +207,14 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 for item in list(supervisor_selected.get("learning_techniques") or [])
                 if isinstance(item, dict)
             ]
+            tactic_extra_args = dict(supervisor_selected.get("extra_args") or {})
             if selected_techniques:
+                # If techniques came from accepted learning we still want the
+                # tactic-level extra_args to ride along when the technique
+                # itself didn't carry any.
+                if tactic_extra_args:
+                    for tech in selected_techniques:
+                        tech.setdefault("extra_args", dict(tactic_extra_args))
                 playbook = {
                     "title": "Supervisor pentest tactic playbook",
                     "vulnerability_type": str(supervisor_selected.get("skill_id") or group),
@@ -220,6 +227,12 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 }
             else:
                 playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, skill_obj)
+                if tactic_extra_args and isinstance(playbook, dict):
+                    techniques = list(playbook.get("techniques") or [])
+                    for tech in techniques:
+                        if isinstance(tech, dict):
+                            tech.setdefault("extra_args", dict(tactic_extra_args))
+                    playbook["techniques"] = techniques
             runtime_invocation: dict[str, Any] = {}
             try:
                 from app.services.skill_runtime import resolve_skill_invocation
@@ -231,6 +244,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
                     candidate_tools=candidate_tools,
                     active_skills=[skill_obj, *skills],
                     playbook=playbook,
+                    tech_stack=list(state.get("detected_tech_stack") or []),
                 )
             except Exception as exc:
                 state["logs_terminais"].append(f"[SKILL] learning runtime unavailable: {exc}")
@@ -949,6 +963,19 @@ def tool_executor_node(state: AgentState) -> AgentState:
         )
 
     state["tool_execution_results"] = list(state.get("tool_execution_results") or []) + all_results
+
+    # ── Tech-stack refresh after every execution that touched recon/vuln. ─
+    # The detector reads ALL findings, so even when this cycle ran a vuln
+    # tool we update the fingerprint with anything new the workers produced.
+    try:
+        from app.graph.workflow import _refresh_tech_stack
+        stack_changed = _refresh_tech_stack(state)
+        if stack_changed:
+            # Force supervisor to re-evaluate active_skills next iteration.
+            state["pending_skill_refresh"] = True
+    except Exception:
+        pass
+
     completed = list(state.get("completed_capabilities") or [])
     if capability in TOOL_CAPABILITY_NODES and capability not in completed:
         completed.append(capability)

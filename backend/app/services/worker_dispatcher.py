@@ -35,6 +35,7 @@ def execute_tool_with_workers(
     evidence_required: list[str] | None = None,
     constraints: list[str] | None = None,
     playbook: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Single-path tool execution: always via the Kali runner."""
     if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
@@ -76,6 +77,7 @@ def execute_tool_with_workers(
                 "evidence_required": evidence_required or [],
                 "constraints": constraints or [],
                 "playbook": playbook or "",
+                "extra_args": list(extra_args or []),
             },
         )
     else:
@@ -92,6 +94,7 @@ def execute_tool_with_workers(
                 "constraints": constraints or [],
                 "playbook": playbook or "",
             },
+            extra_args=list(extra_args or []),
         )
     if skill_id:
         result.setdefault("skill_id", skill_id)

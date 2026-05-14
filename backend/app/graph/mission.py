@@ -102,7 +102,13 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "id": "tech-http-fingerprint",
         "category": "technologies",
         "description": "Fingerprint HTTP/TLS, headers de segurança, OWASP Top 10 security misconfiguration e detecção de WAF.",
-        "triggers": ["http", "https", "header", "headers", "owasp", "tls", "ssl", "whatweb", "nikto", "waf", "cloudflare"],
+        "triggers": [
+            "http", "https", "header", "headers", "owasp", "tls", "ssl", "whatweb", "nikto", "waf",
+            "cloudflare", "akamai", "imperva", "sucuri",
+            # tech-stack tags from detected_tech_stack
+            "asp.net", "iis", "apache", "nginx", "tomcat", "openresty", "lighttpd",
+            "x-aspnet-version", "x-powered-by", "server:",
+        ],
         "playbook": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
         "phases": ["P05", "P06"],
     },
@@ -117,8 +123,12 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "tech-cms-fingerprint",
         "category": "technologies",
-        "description": "Detecção e scan de CMS (WordPress, Joomla, Drupal).",
-        "triggers": ["cms", "wordpress", "wp", "joomla", "drupal", "wpscan"],
+        "description": "Detecção e scan de CMS (WordPress, Joomla, Drupal, Magento, Shopify, Sharepoint).",
+        "triggers": [
+            "cms", "wordpress", "wp", "joomla", "drupal", "wpscan",
+            "magento", "shopify", "ghost", "sharepoint",
+            "wp-content", "wp-admin", "wp-includes",
+        ],
         "playbook": ["whatweb", "wpscan", "nuclei"],
         "phases": ["P20"],
     },
@@ -126,9 +136,17 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "vuln-injection",
         "category": "vulnerabilities",
-        "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível.",
-        "triggers": ["sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox"],
-        "playbook": ["sqlmap", "dalfox", "wapiti", "nikto"],
+        "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível, sensível ao stack detectado (ASP/MSSQL, PHP/MySQL, Node, etc).",
+        "triggers": [
+            "sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox", "wapiti",
+            # back-end DB hints — quando aparecem na evidência, SQLi é a skill alvo
+            "mssql", "mysql", "mariadb", "postgresql", "postgres", "oracle", "mongodb",
+            # framework/lang que tipicamente concatena SQL/HTML cru
+            "asp.net", "asp", "aspx", "iis", "php", "node.js", "express", "rails", "django", "flask",
+            # parâmetros vulneráveis comuns que aparecem em evidência
+            "search=", "?id=", "?q=", "?query=", "?keyword=", "?category=", "?name=",
+        ],
+        "playbook": ["sqlmap", "dalfox", "wapiti", "nikto", "nuclei"],
         "phases": ["P12"],
     },
     {
@@ -143,7 +161,11 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "id": "vuln-auth-bypass",
         "category": "vulnerabilities",
         "description": "Bypass de autenticação, brute-force/fuzzing de credenciais, JWT/OAuth e MFA abuse.",
-        "triggers": ["auth", "bypass", "brute", "fuzz credentials", "jwt", "oauth", "token", "hydra", "medusa"],
+        "triggers": [
+            "auth", "bypass", "brute", "fuzz credentials", "jwt", "oauth", "token",
+            "hydra", "medusa", "login", "signin", "session", "aspnet_sessionid", "phpsessid",
+            "jsessionid", "csrf",
+        ],
         "playbook": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"],
         "phases": ["P14"],
     },
@@ -339,10 +361,18 @@ def _text_blob(
     findings: list[dict[str, Any]],
     target_type: str,
     discovered_ports: list[int],
+    detected_tech_stack: list[str] | None = None,
 ) -> str:
     chunks = [str(target or ""), str(target_type or "")]
     if discovered_ports:
         chunks.append("ports:" + ",".join(str(p) for p in discovered_ports[:12]))
+    # Tech-stack tags weigh in via duplication so they outweigh isolated noise.
+    # Repeating the stack tag 3x acts as a soft +3 score boost on any skill
+    # whose triggers include the tag.
+    for tag in (detected_tech_stack or []):
+        tag_str = str(tag or "").strip()
+        if tag_str:
+            chunks.extend([tag_str, tag_str, tag_str])
     for finding in findings[:40]:
         details = finding.get("details") or {}
         chunks.extend([
@@ -360,10 +390,12 @@ def select_mission_skills(
     target_type: str = "dominio",
     discovered_ports: list[int] | None = None,
     max_skills: int = 5,
+    detected_tech_stack: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     findings = list(findings or [])
     discovered_ports = list(discovered_ports or [])
-    blob = _text_blob(target, findings, target_type, discovered_ports)
+    detected_tech_stack = list(detected_tech_stack or [])
+    blob = _text_blob(target, findings, target_type, discovered_ports, detected_tech_stack)
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for skill in SKILL_CATALOG:

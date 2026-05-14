@@ -241,12 +241,47 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["mission_items"] = mission_items
                 sd["node_history"] = snapshot_node_history
                 sd["current_node"] = current_node
+                sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
                 job.state_data = sd
+                # Persist tech_stack to its dedicated column too (queryable by GIN index).
+                try:
+                    job.tech_stack = list(state.get("detected_tech_stack") or [])
+                except Exception:
+                    pass
                 _db.commit()
         finally:
             _db.close()
     except Exception:
         logger.exception("Falha ao sincronizar step no banco")
+
+
+def _refresh_tech_stack(state: AgentState) -> bool:
+    """Re-detecta a fingerprint do ambiente e persiste no estado.
+
+    Retorna True quando a assinatura mudou em relacao a iteracao anterior,
+    sinalizando ao supervisor que deve reavaliar active_skills.
+    """
+    try:
+        from app.services.tech_stack_detector import detect_tech_stack, tech_stack_signature
+
+        stack = detect_tech_stack(
+            findings=list(state.get("vulnerabilidades_encontradas") or []),
+            target=str(state.get("target") or ""),
+        )
+    except Exception as exc:
+        logger.warning("tech_stack detection failed: %s", exc)
+        return False
+
+    signature = tech_stack_signature(stack)
+    previous = str(state.get("tech_stack_signature") or "")
+    state["detected_tech_stack"] = stack
+    state["tech_stack_signature"] = signature
+    if signature != previous:
+        state.setdefault("logs_terminais", []).append(
+            f"[tech-stack] detectado={','.join(stack) or '-'} (mudanca de fingerprint)"
+        )
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1131,8 +1166,25 @@ def _run_tools_and_collect(
         f"{log_prefix}: dispatching {len(pending_tools)} tools in parallel: {', '.join(pending_tools)}"
     )
 
+    # Per-tool extra_args derived from the selected technique. The supervisor
+    # may have populated tactic.extra_args (e.g. `--dbms=mssql` for sqlmap on
+    # ASP/MSSQL stacks) via the tech-stack auto-lock. We thread that down to
+    # the Kali runner so the materialised command reflects the strategy.
+    technique_extra_args_by_tool: dict[str, list[str]] = {}
+    raw_tech_args = (skill_context.get("technique") or {}).get("extra_args") or {}
+    if isinstance(raw_tech_args, dict):
+        for key, value in raw_tech_args.items():
+            if isinstance(value, list):
+                technique_extra_args_by_tool[str(key).strip().lower()] = [str(v) for v in value]
+    contract_extra_args = (skill_context.get("skill_contract") or {}).get("extra_args") or {}
+    if isinstance(contract_extra_args, dict):
+        for key, value in contract_extra_args.items():
+            if isinstance(value, list):
+                technique_extra_args_by_tool.setdefault(str(key).strip().lower(), [str(v) for v in value])
+
     def _dispatch_one(tool: str) -> tuple[str, dict, float]:
         exec_start = perf_counter()
+        tool_args = technique_extra_args_by_tool.get(str(tool).strip().lower(), [])
         try:
             r = execute_tool_with_workers(
                 tool,
@@ -1145,6 +1197,7 @@ def _run_tools_and_collect(
                 evidence_required=list(skill_context.get("evidence_required") or []),
                 constraints=list(skill_context.get("constraints") or []),
                 playbook=str(skill_context.get("playbook_title") or ""),
+                extra_args=tool_args,
             )
         except Exception as exc:
             r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
@@ -1538,6 +1591,8 @@ def initial_state(
         },
         "tool_runtime": {},
         "validation_backlog": [],
+        "detected_tech_stack": [],
+        "tech_stack_signature": "",
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},
