@@ -142,6 +142,10 @@ STAGE_ALLOWED_SKILLS: dict[str, set[str]] = {
         "recon-subdomain-enum",
         "recon-port-service",
         "recon-web-crawl",
+        # P04 Parameter Discovery is reconnaissance/delivery work. The skill
+        # also owns deeper P15/P16 fuzzing, but in this stage the supervisor
+        # constrains it to parameter-discovery tools only.
+        "vuln-directory-enum",
         "tech-http-fingerprint",
         "tech-owasp-header-analysis",
         "tech-cms-fingerprint",
@@ -157,6 +161,8 @@ STAGE_ALLOWED_SKILLS: dict[str, set[str]] = {
         "vuln-nuclei-cve",
         "vuln-ssl-tls",
         "vuln-information-disclosure",
+        "tech-http-fingerprint",
+        "tech-owasp-header-analysis",
         "waf-aware-validation",
         "weak-cryptography",
         "code-secrets-sast",
@@ -209,6 +215,15 @@ STAGE_EXIT_CRITERIA: dict[str, dict[str, Any]] = {
             ["code-analyzer"],
             # Content/JS extraction
             ["katana", "gau", "waybackurls", "gospider", "hakrawler"],
+            # P04: active/passive parameter discovery.
+            ["arjun", "paramspider", "ffuf-params", "wfuzz"],
+        ],
+        "min_tools_by_group": [
+            {
+                "name": "P04 Parameter Discovery",
+                "tools": ["arjun", "paramspider", "ffuf-params", "wfuzz"],
+                "count": 2,
+            },
         ],
         # ANY of these counts as "I learned something about the target".
         "recon_evidence_any_of": True,
@@ -219,8 +234,11 @@ STAGE_EXIT_CRITERIA: dict[str, dict[str, Any]] = {
         "tool_runs": 5,
         "vuln_analysis_tool_required": True,
         "mandatory_tools_all_of": [
-            # Templated DAST — must include nuclei OR an nmap NSE battery.
-            ["nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-ssl-vuln"],
+            # Templated DAST and web-server audit are both mandatory; nikto
+            # complements nuclei and catches IIS/ASP.NET misconfigurations
+            # that generic templates may not report.
+            ["nuclei"],
+            ["nikto"],
             # Protocol audit on HTTPS targets; curl-headers covers HTTP-only.
             ["sslscan", "testssl", "wafw00f", "curl-headers", "nmap-ssl-vuln"],
             # At least one NSE-targeted scan beyond generic --script vuln.
@@ -302,6 +320,20 @@ def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
     for group in (criteria.get("mandatory_tools_all_of") or []):
         if not any(t in distinct_tools for t in group):
             return current, False, f"missing_group:{','.join(group[:6])}"
+
+    for group_spec in (criteria.get("min_tools_by_group") or []):
+        tools = {
+            str(tool).strip().lower()
+            for tool in list(group_spec.get("tools") or [])
+            if str(tool).strip()
+        }
+        required = int(group_spec.get("count", 0) or 0)
+        if not tools or required <= 0:
+            continue
+        have = len(tools & distinct_tools)
+        if have < required:
+            name = str(group_spec.get("name") or ",".join(sorted(tools)))
+            return current, False, f"missing_min_tools:{name}:need={required}:have={have}"
 
     if criteria.get("tech_stack_required") and not tech_stack:
         return current, False, "tech_stack_empty"

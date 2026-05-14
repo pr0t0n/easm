@@ -259,6 +259,7 @@ async def list_mcp_tools() -> dict[str, Any]:
                         "target": {"type": "string"},
                         "scan_id": {"type": "string"},
                         "timeout": {"type": "integer"},
+                        "extra_args": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["target"],
                 },
@@ -266,6 +267,7 @@ async def list_mcp_tools() -> dict[str, Any]:
                     "tool": spec.get("tool") or profile_name,
                     "category": spec.get("category"),
                     "phase": spec.get("phase"),
+                    "timeout": spec.get("timeout"),
                     "execution_path": "mcp_to_kali",
                 },
             }
@@ -286,6 +288,7 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
         except (ValueError, TypeError):
             scan_id = None
 
+    timeout = int(parameters.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
     response = await kali_client.post(
         "/jobs",
         json={
@@ -293,11 +296,16 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "target": parameters["target"],
             "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
+            "timeout": timeout,
+            "extra_args": [
+                str(arg)
+                for arg in list(parameters.get("extra_args") or [])
+                if str(arg).strip()
+            ],
         },
     )
     response.raise_for_status()
     job_id = response.json()["job_id"]
-    timeout = int(parameters.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
     start = asyncio.get_running_loop().time()
     while True:
         if asyncio.get_running_loop().time() - start > timeout:

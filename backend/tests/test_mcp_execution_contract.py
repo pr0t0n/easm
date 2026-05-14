@@ -34,13 +34,15 @@ def test_mcp_execution_normalizes_localhost_and_legacy_status(monkeypatch) -> No
         tool_name="sqlmap",
         target="http://localhost:3001/",
         scan_id=27,
+        extra_args=["--dbms=mssql", "--batch"],
     )
 
     assert captured["tool_name"] == "sqlmap_basic"
     assert captured["parameters"]["target"] == "http://host.docker.internal:3001/"
     assert captured["parameters"]["original_target"] == "http://localhost:3001/"
-    assert captured["parameters"]["timeout"] == 120
-    assert captured["timeout"] == 135.0
+    assert captured["parameters"]["timeout"] == 600
+    assert captured["parameters"]["extra_args"] == ["--dbms=mssql", "--batch"]
+    assert captured["timeout"] == 615.0
     assert result["status"] == "executed"
     assert result["target"] == "http://host.docker.internal:3001/"
     assert result["original_target"] == "http://localhost:3001/"

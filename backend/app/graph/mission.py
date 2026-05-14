@@ -216,7 +216,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         # nmap dual-role: also belongs here as `nmap-vulscan` (NSE vuln category)
         # plus targeted NSE batteries (http/smb/ssh/ssl/dns).
         "playbook": [
-            "nuclei",
+            "nuclei", "nikto",
             "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
             "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
         ],

@@ -101,6 +101,7 @@ def execute_tool_with_workers(
                 "playbook": playbook or "",
                 "extra_args": list(extra_args or []),
             },
+            extra_args=list(extra_args or []),
         )
     else:
         result = execute_via_kali(
