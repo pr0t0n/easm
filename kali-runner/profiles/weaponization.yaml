@@ -24,9 +24,10 @@ nikto_basic:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Legacy web server scanner (6700+ tests for misconfigs)."
-  cmd: ["nikto", "-h", "{url}", "-Format", "json", "-Tuning", "1234567890abc"]
+  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "600s", "-Tuning", "123bde", "-Display", "V"]
   timeout: 900
   parser: raw
+  allowed_return_codes: [0, 1]
 
 shodan_lookup:
   tool: shodan-cli

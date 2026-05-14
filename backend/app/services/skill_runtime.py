@@ -235,9 +235,12 @@ def _score_skill(
         score += min(36, 18 * len(learning_skill_matches))
         matched_by.append("learning_skill:" + ",".join(learning_skill_matches[:4]))
 
-    if category in GROUP_CATEGORY_HINTS.get(group_key, set()):
-        score += 2
+    category_hints = GROUP_CATEGORY_HINTS.get(group_key, set())
+    if category in category_hints:
+        score += 18
         matched_by.append("group_category:" + category)
+    elif category_hints:
+        score -= 8
 
     target_text = _clean_text(target).lower()
     if target_text.startswith(("http://", "https://")) and skill_id in {

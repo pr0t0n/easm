@@ -101,7 +101,7 @@ def _refresh_active_skills(state: AgentState) -> None:
         findings=list(state.get("vulnerabilidades_encontradas") or []),
         target_type=str(state.get("target_type") or "dominio"),
         discovered_ports=list(state.get("discovered_ports") or []),
-        max_skills=5,
+        max_skills=8,
     )
     prev_ids = {str(item.get("id") or "") for item in list(state.get("active_skills") or [])}
     state["active_skills"] = selected
@@ -414,6 +414,95 @@ def _find_node_with_uncovered_tools(state: AgentState) -> str | None:
     return None
 
 
+def _completed_pentest_tactic_ids(state: AgentState) -> set[str]:
+    return {
+        str(item.get("tactic_id") or "")
+        for item in list(state.get("pentest_tactics_completed") or [])
+        if isinstance(item, dict) and str(item.get("tactic_id") or "").strip()
+    }
+
+
+def _ensure_pentest_strategy(state: AgentState) -> dict[str, Any]:
+    strategy = dict(state.get("pentest_strategy") or {})
+    queue = list(strategy.get("queue") or [])
+    completed_ids = _completed_pentest_tactic_ids(state)
+    has_pending = any(
+        str(item.get("tactic_id") or "") not in completed_ids
+        for item in queue
+        if isinstance(item, dict)
+    )
+    if has_pending:
+        return strategy
+
+    try:
+        from app.services.pentest_strategy_service import build_pentest_strategy
+
+        strategy = build_pentest_strategy(dict(state), max_items=8)
+    except Exception as exc:
+        logger.warning("pentest strategy build failed: %s", exc)
+        strategy = {
+            "mode": "pentest_strategy",
+            "queue": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    state["pentest_strategy"] = strategy
+    _append_action(
+        state,
+        "pentest_strategy_built",
+        {
+            "items": len(strategy.get("queue") or []),
+            "candidate_count": strategy.get("candidate_count"),
+            "mcp_rag_hits": strategy.get("mcp_rag_hits"),
+            "llm": strategy.get("llm"),
+        },
+    )
+    state["logs_terminais"].append(
+        "SupervisorStrategy: "
+        f"items={len(strategy.get('queue') or [])} "
+        f"candidates={strategy.get('candidate_count', 0)} "
+        f"rag_hits={strategy.get('mcp_rag_hits', 0)} "
+        f"llm_used={bool((strategy.get('llm') or {}).get('used'))}"
+    )
+    return strategy
+
+
+def _next_pentest_tactic(state: AgentState) -> dict[str, Any] | None:
+    strategy = _ensure_pentest_strategy(state)
+    completed_ids = _completed_pentest_tactic_ids(state)
+    for item in list(strategy.get("queue") or []):
+        if not isinstance(item, dict):
+            continue
+        tactic_id = str(item.get("tactic_id") or "")
+        if tactic_id and tactic_id not in completed_ids:
+            state["pending_pentest_tactic"] = dict(item)
+            return dict(item)
+    state["pending_pentest_tactic"] = {}
+    return None
+
+
+def _selected_skill_from_tactic(tactic: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "skill_id": str(tactic.get("skill_id") or ""),
+        "capability": str(tactic.get("capability") or ""),
+        "objective": str(tactic.get("objective") or ""),
+        "allowed_tools": list(tactic.get("allowed_tools") or []),
+        "preferred_tool": str(tactic.get("preferred_tool") or ""),
+        "reason": str(tactic.get("reason") or ""),
+        "tactic_id": str(tactic.get("tactic_id") or ""),
+        "hypothesis": str(tactic.get("hypothesis") or ""),
+        "strategy_source": str(tactic.get("strategy_source") or ""),
+        "strategy_score": tactic.get("strategy_score"),
+        "learning_guided": bool(tactic.get("learning_techniques")),
+        "learning_techniques": list(tactic.get("learning_techniques") or []),
+        "evidence_required": list(tactic.get("evidence_required") or []),
+        "constraints": list(tactic.get("constraints") or []),
+        "phase_refs": list(tactic.get("phase_refs") or []),
+        "targets": list(tactic.get("targets") or []),
+        "lock_skill": True,
+    }
+
+
 def _select_skill_for_capability(
     capability: str,
     active_skills: list[dict[str, Any]],
@@ -431,6 +520,80 @@ def _select_skill_for_capability(
     preferred_cats = set(CAPABILITY_SKILL_CATEGORIES.get(capability, ()))
     candidate_tools = _tools_for_group(scan_mode, capability)
     candidate_lower = {t.lower() for t in candidate_tools}
+
+    learning_playbook: dict[str, Any] | None = None
+    learning_invocation: dict[str, Any] = {}
+    try:
+        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+        from app.services.skill_runtime import resolve_skill_invocation
+
+        learning_playbook = build_runtime_learning_playbook(
+            candidate_tools=candidate_tools,
+            phase=capability,
+            limit=16,
+        )
+        if learning_playbook:
+            learning_invocation = resolve_skill_invocation(
+                worker_group=capability,
+                phase=capability,
+                target="",
+                candidate_tools=candidate_tools,
+                active_skills=active_skills,
+                playbook=learning_playbook,
+            )
+    except Exception as exc:
+        logger.debug("learning-guided skill selection unavailable: %s", exc)
+
+    if learning_invocation.get("called"):
+        skill = dict(learning_invocation.get("skill") or {})
+        recommended = [
+            str(tool)
+            for tool in list(learning_invocation.get("recommended_tools") or [])
+            if str(tool).strip()
+        ]
+        if not recommended:
+            recommended = [
+                str(tool)
+                for tool in list(learning_invocation.get("learned_recommended_tools") or [])
+                if str(tool).strip().lower() in candidate_lower
+            ]
+        allowed_tools = recommended or [
+            str(tool)
+            for tool in list(skill.get("playbook") or [])
+            if str(tool).strip().lower() in candidate_lower
+        ]
+        if allowed_tools:
+            source_ids = [
+                str(item.get("source_learning_id"))
+                for item in list(learning_invocation.get("techniques") or [])
+                if isinstance(item, dict) and item.get("source_learning_id")
+            ]
+            technique = next(
+                (
+                    str(item.get("name") or "")
+                    for item in list(learning_invocation.get("techniques") or [])
+                    if isinstance(item, dict) and str(item.get("name") or "").strip()
+                ),
+                "",
+            )
+            return {
+                "skill_id": str(learning_invocation.get("skill_id") or skill.get("id") or capability),
+                "capability": capability,
+                "objective": str(skill.get("description") or (learning_playbook or {}).get("learned_mission") or f"Execute {capability} com aprendizado aceito"),
+                "allowed_tools": list(dict.fromkeys(allowed_tools))[:8],
+                "preferred_tool": allowed_tools[0],
+                "reason": (
+                    "Skill selecionada por aprendizado aceito "
+                    f"(source={learning_invocation.get('source')}, "
+                    f"technique={technique or '-'}, "
+                    f"learning_ids={','.join(list(dict.fromkeys(source_ids))[:5]) or '-'})"
+                ),
+                "learning_guided": True,
+                "learning_playbook_title": (learning_playbook or {}).get("title"),
+                "learning_techniques": list(learning_invocation.get("techniques") or [])[:8],
+                "learning_sources": list((learning_playbook or {}).get("sources") or [])[:8],
+                "matched_by": list(learning_invocation.get("matched_by") or []),
+            }
 
     best_skill: dict[str, Any] | None = None
     best_score = -1
@@ -523,6 +686,8 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     next_node = "END"
     termination_reason = str(state.get("termination_reason") or "")
+    ctrl = dict(state.get("execution_control") or {})
+    remaining = int(ctrl.get("remaining_iterations", max_iterations))
 
     if pending_validation:
         _register_delegation_task(
@@ -532,12 +697,30 @@ def supervisor_node(state: AgentState) -> AgentState:
             priority=0,
         )
 
-    if state.get("objective_met"):
+    next_tactic: dict[str, Any] | None = None
+    if not state.get("objective_met") and remaining > 2:
+        next_tactic = _next_pentest_tactic(state)
+
+    if next_tactic:
+        next_node = str(next_tactic.get("capability") or "risk_assessment")
+        termination_reason = ""
+    elif state.get("objective_met"):
         if "executive_analyst" not in completed:
             next_node = "executive_analyst"
         else:
             next_node = "END"
             termination_reason = termination_reason or "objective_already_met"
+    elif state.get("pentest_strategy") and list((state.get("pentest_strategy") or {}).get("queue") or []):
+        # The tactical pentest queue is the source of truth. Once exhausted, close
+        # with governance/executive analysis instead of falling back to a generic
+        # vulnerability-assessment pass.
+        if "governance" not in completed:
+            next_node = "governance"
+        elif "executive_analyst" not in completed:
+            next_node = "executive_analyst"
+        else:
+            next_node = "END"
+            termination_reason = termination_reason or "pentest_tactic_queue_completed"
     elif "asset_discovery" not in completed:
         next_node = "asset_discovery"
     elif "threat_intel" not in completed:
@@ -575,8 +758,6 @@ def supervisor_node(state: AgentState) -> AgentState:
             next_node = "END"
             termination_reason = termination_reason or "full_cycle_completed"
 
-    ctrl = dict(state.get("execution_control") or {})
-    remaining = int(ctrl.get("remaining_iterations", max_iterations))
     if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
         _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
         next_node = "threat_intel"
@@ -601,31 +782,48 @@ def supervisor_node(state: AgentState) -> AgentState:
     # Proteção contra loop do mesmo node
     current_phase = str(state.get("current_phase") or "").strip()
     if next_node == current_phase and next_node not in {"END", ""}:
-        state["routing_next_node"] = END
-        state["termination_reason"] = "loop_on_same_phase"
-        state["completed_capabilities"] = completed
-        state["current_phase"] = next_node
-        return state
+        pending_tactic = dict(state.get("pending_pentest_tactic") or {})
+        pending_id = str(pending_tactic.get("tactic_id") or "")
+        if not pending_id or pending_id in _completed_pentest_tactic_ids(state):
+            state["routing_next_node"] = END
+            state["termination_reason"] = "loop_on_same_phase"
+            state["completed_capabilities"] = completed
+            state["current_phase"] = next_node
+            return state
 
     route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
 
     # ── Skill selection: supervisor commits to a skill before the pipeline ─────
     # Always clear the previous iteration's selected_skill to avoid stale state.
     state["selected_skill"] = {}
+    state["capability_context"] = {}
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
-        chosen_skill = _select_skill_for_capability(
-            capability=next_node,
-            active_skills=list(state.get("active_skills") or []),
-            scan_mode=str(state.get("scan_mode") or "unit"),
-        )
+        if next_tactic:
+            chosen_skill = _selected_skill_from_tactic(next_tactic)
+        else:
+            chosen_skill = _select_skill_for_capability(
+                capability=next_node,
+                active_skills=list(state.get("active_skills") or []),
+                scan_mode=str(state.get("scan_mode") or "unit"),
+            )
         if chosen_skill:
             state["selected_skill"] = chosen_skill
+            if chosen_skill.get("tactic_id"):
+                state["capability_context"] = {
+                    "node": next_node,
+                    "candidate_tools": list(chosen_skill.get("allowed_tools") or []),
+                    "targets": list(chosen_skill.get("targets") or []),
+                    "tactic_id": chosen_skill.get("tactic_id"),
+                    "hypothesis": chosen_skill.get("hypothesis"),
+                    "strategy_source": chosen_skill.get("strategy_source"),
+                }
             state["logs_terminais"].append(
                 f"Supervisor: skill={chosen_skill['skill_id']} "
                 f"capability={next_node} "
                 f"allowed_tools={chosen_skill['allowed_tools'][:4]} "
-                f"preferred={chosen_skill['preferred_tool']}"
+                f"preferred={chosen_skill['preferred_tool']} "
+                f"tactic={chosen_skill.get('tactic_id') or '-'}"
             )
             try:
                 from app.graph.tracer import emit_trace as _emit_trace
@@ -644,6 +842,16 @@ def supervisor_node(state: AgentState) -> AgentState:
                         payload={
                             "capability": next_node,
                             "objective": chosen_skill.get("objective", ""),
+                            "hypothesis": chosen_skill.get("hypothesis", ""),
+                            "tactic_id": chosen_skill.get("tactic_id", ""),
+                            "strategy_source": chosen_skill.get("strategy_source", ""),
+                            "technique": (
+                                list(chosen_skill.get("learning_techniques") or [{}])[0]
+                                if chosen_skill.get("learning_techniques")
+                                else {}
+                            ).get("name", ""),
+                            "evidence_required": list(chosen_skill.get("evidence_required") or [])[:6],
+                            "targets": list(chosen_skill.get("targets") or [])[:3],
                             "allowed_tools": chosen_skill.get("allowed_tools", [])[:4],
                         },
                     )

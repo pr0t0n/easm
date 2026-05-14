@@ -13,7 +13,7 @@ Este README descreve o fluxo real de operacao da plataforma: o que acontece quan
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
-| Visibilidade | 5 paineis frontend + 8 endpoints REST de telemetria |
+| Visibilidade | 6 paineis frontend + 10 endpoints REST de telemetria + WebSocket de trace |
 
 ## Diagrama do fluxo (cerebro vs. maos)
 
@@ -555,6 +555,59 @@ Quando um agente identifica uma possível vulnerabilidade, os aprendizados aceit
 
 Esse enriquecimento é usado em `risk_assessment` e `evidence_adjudication`. Se um achado crítico/alto não tiver prova suficiente, ele entra em `validation_backlog` com o playbook aprendido para que o próximo ciclo priorize as ferramentas e passos corretos. O relatório preserva esses campos em `Finding.details`, permitindo mostrar não só o achado, mas também como ele foi reproduzido ou o que faltou para comprovação.
 
+## Base de Conhecimento de Bug Bounty
+
+Alem do aprendizado manual e por URL, a plataforma inclui uma base pre-carregada de 32 tecnicas extraidas de dois repositorios publicos de bug bounty:
+
+- **KingOfBugBountyTips** (github.com/KingOfBugbounty/KingOfBugBountyTips)
+- **AllAboutBugBounty** (github.com/daffainfo/AllAboutBugBounty)
+
+Todos os registros foram inseridos com `status="accepted"` e `source_kind="bug_bounty_repository"`, ou seja, passam imediatamente a influenciar o prompt do supervisor sem necessitar de revisao humana.
+
+Tecnicas cobertas:
+
+| Categoria | Fases |
+| --- | --- |
+| Subdomain Enumeration | P01 |
+| Port & Service Scan | P02 |
+| Web Crawling & JS Extraction | P03 |
+| Parameter & GET Fuzzing | P04 |
+| XSS (Reflected, Stored, DOM, Blind) | P04, P12 |
+| SQL Injection | P12 |
+| SSRF | P13 |
+| Open Redirect | P13 |
+| IDOR & Access Control | P19 |
+| JWT Attacks | P14 |
+| 2FA/MFA Bypass | P14 |
+| Directory & File Enumeration | P15 |
+| File Upload & WebShell Bypass | P17 |
+| OSINT & Google Dorks | P07 |
+| API Key & Secret Exposure | P07, P21 |
+| Subdomain Takeover | P09 |
+| CSRF | P12, P16 |
+| OAuth Security | P14 |
+| Host Header Injection | P12 |
+| LFI/RFI | P15 |
+| WordPress Scan | P20 |
+| Jenkins Exposure | P11 |
+| Mass Assignment & Business Logic | P16, P19 |
+| SSL/TLS & Certificate Audit | P18 |
+| API Security & POST Fuzzing | P16 |
+| Cloud Assets (S3, Firebase, Azure) | P10 |
+| CRLF Injection | P12 |
+| Nuclei Automation Pipeline | P11 |
+| Email Security (SPF/DMARC) | P08 |
+| Account Takeover | P14 |
+| Web Cache Poisoning | P12 |
+| SSTI | P12 |
+| Supply Chain & Dependencies | P22 |
+
+O script de ingestao e idempotente: `backend/scripts/seed_bugrepo_learnings.py`. Para reinserir apos limpeza:
+
+```bash
+docker exec scriptkiddo_backend python3 scripts/seed_bugrepo_learnings.py
+```
+
 ## Workers e Filas
 
 Os workers sao especializados por fase, mas todos chamam o mesmo executor Kali. Cada grupo tem contrato próprio em `backend/app/workers/worker_groups.py`:
@@ -635,6 +688,8 @@ Campos relevantes:
 | `AssetRatingHistory` | final do scan | rating temporal por asset | Attack Evolution, Trends |
 | `WorkerHeartbeat` | inicio/pulse de worker | worker online, scan atual, fase | Workers |
 | `ScanAuditLog` | autonomia/execucao | notas, acoes, observacoes, erros | `/api/scans/{id}/autonomy` |
+| `agent_trace_events` | `tracer.py` (emit_trace) | evento de fluxo: from_node, to_node, skill_id, tool_name, capability, status, duration_ms, payload | `/ws/scans/{id}/trace`, `/api/scans/{id}/trace` |
+| `skill_scores` | `tracer.py` (save_skill_score) | pontuacao por skill: library_hits, tool_attempts/successes/failures, findings, efficiency_score, productivity_score | `/api/scans/{id}/trace` |
 | Kali job JSON | `kali_runner` | status, comando, stdout/stderr, workdir | `/jobs/{id}`, volume `kali_workspace` |
 
 ## Telas e o que cada uma mostra
@@ -653,6 +708,66 @@ Campos relevantes:
 | Worker Logs | `/worker-logs` | logs administrativos agregados |
 | Settings | `/configuracao` | runtime, IA, workers e parametros operacionais |
 | Kali Catalog | `/workers` | profiles Kali, binario executavel, worker, skills e fases |
+| Fluxo de Agentes | `/agent-flow` | diagrama SVG Supervisor→Agente→Biblioteca/MCP→Kali, feed de eventos em tempo real via WebSocket e scores de skills por fase (admin only) |
+
+## Fluxo de Agentes (Agent Flow)
+
+A pagina `/agent-flow` (sidebar: Security → Fluxo de Agentes, visivel apenas para admin) exibe em tempo real a comunicacao interna do ciclo de decisao do LangGraph.
+
+### Diagrama SVG
+
+Quatro nos conectados por arestas animadas:
+
+```
+Supervisor (verde) ──► Agente (azul) ──► Biblioteca/MCP (roxo) ──► Kali (laranja)
+```
+
+Cada no acende quando um evento de trace passa por ele. As arestas iluminam conforme o evento percorre o caminho `from_node → to_node`.
+
+### Eventos de trace instrumentados
+
+| event_type | De | Para | Significado |
+| --- | --- | --- | --- |
+| `supervisor_dispatch` | supervisor | agent | supervisor selecionou uma skill |
+| `skill_lookup` | agent | library | agente consultou biblioteca MCP |
+| `skill_found` | library | agent | biblioteca retornou skill |
+| `tool_usage_lookup` | agent | library | agente consultou uso de ferramenta |
+| `tool_select` | agent | library | agente selecionou ferramenta |
+| `tool_usage_found` | library | agent | biblioteca confirmou ferramenta |
+| `tool_execute` | agent | kali | agente disparou ferramenta no Kali |
+| `result_return` | kali | agent | resultado retornou do Kali |
+
+### Skill Scores
+
+Apos cada skill executada, `tracer.save_skill_score()` persiste:
+
+| Campo | Descricao |
+| --- | --- |
+| `library_hits` | consultas respondidas pela biblioteca |
+| `tool_attempts` | tentativas de execucao no Kali |
+| `tool_successes` | execucoes com sucesso |
+| `tool_failures` | execucoes com falha |
+| `findings_raw` | achados brutos produzidos |
+| `findings_promoted` | achados promovidos com evidencia |
+| `efficiency_score` | sucessos / tentativas |
+| `productivity_score` | promovidos / tentativas |
+
+### Arquivos relevantes
+
+```text
+backend/app/graph/tracer.py            # emit_trace() e save_skill_score()
+backend/app/graph/nodes/supervisor.py  # emite supervisor_dispatch apos selecao de skill
+backend/app/graph/nodes/skill_pipeline.py # emite todos os eventos skill_* e tool_*
+backend/app/api/routes_ws.py           # WS /ws/scans/{id}/trace e REST /api/scans/{id}/trace
+frontend/src/pages/AgentFlowPage.jsx   # pagina React com SVG, feed de eventos e tabela de scores
+```
+
+### DB tables
+
+- `agent_trace_events`: scan_id, iteration, event_type, from_node, to_node, skill_id, tool_name, capability, status, duration_ms, payload (JSONB), created_at
+- `skill_scores`: scan_id, iteration, skill_id, capability, library_hits, tool_attempts, tool_successes, tool_failures, findings_raw, findings_promoted, duration_ms, efficiency_score, productivity_score, created_at
+
+Migration: `backend/app/migrations/versions/0011_agent_trace_events.py`
 
 ## Phase Monitor: como interpretar
 
@@ -741,6 +856,8 @@ docker compose --profile dev logs --tail 200 worker_recon worker_exploitation
 | `GET /api/dashboard/insights` | dados agregados do dashboard |
 | `GET /api/vulnerability-management/dashboard` | evolucao e gestao de vulnerabilidades |
 | `GET /api/scans/{id}/report` | relatorio tecnico/executivo |
+| `WS /ws/scans/{id}/trace` | stream em tempo real de eventos de trace do agente (poll 0.5s) |
+| `GET /api/scans/{id}/trace` | historico completo de eventos de trace e skill scores |
 
 ## Operacao Local
 

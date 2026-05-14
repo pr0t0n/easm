@@ -1,368 +1,731 @@
-import { useEffect, useRef, useState } from "react";
-import client, { getApiBaseUrl, getWsBaseUrl } from "../api/client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import client, { getWsBaseUrl } from "../api/client";
 
-// ── node definitions ──────────────────────────────────────────────────────────
 const NODES = {
-  supervisor: { label: "Supervisor",     x: 360, y: 60,  color: "#22c55e", icon: "🧠" },
-  agent:      { label: "Agente",         x: 360, y: 300, color: "#3b82f6", icon: "🤖" },
-  library:    { label: "Biblioteca/MCP", x: 100, y: 180, color: "#a855f7", icon: "📚" },
-  kali:       { label: "Repositório Kali", x: 620, y: 180, color: "#f97316", icon: "⚔️" },
+  supervisor: { label: "Supervisor", x: 50, y: 16, color: "#4b73ff" },
+  agent: { label: "Agent Runtime", x: 50, y: 50, color: "#e96363" },
+  library: { label: "Learning / MCP", x: 18, y: 72, color: "#8b5cf6" },
+  kali: { label: "Kali Runner", x: 82, y: 72, color: "#f59e0b" },
+  evidence: { label: "Evidence DB", x: 50, y: 88, color: "#10b981" },
 };
 
 const FLOW_EDGES = {
-  supervisor_dispatch:  { from: "supervisor", to: "agent",    label: "dispatch skill" },
-  skill_lookup:         { from: "agent",      to: "library",  label: "buscar skill" },
-  skill_found:          { from: "library",    to: "agent",    label: "skill encontrada" },
-  tool_select:          { from: "agent",      to: "kali",     label: "selecionar tool" },
-  tool_usage_lookup:    { from: "agent",      to: "library",  label: "buscar uso da tool" },
-  tool_usage_found:     { from: "library",    to: "agent",    label: "como usar tool" },
-  tool_execute:         { from: "agent",      to: "kali",     label: "executar tool" },
-  result_return:        { from: "agent",      to: "supervisor", label: "resultado" },
+  supervisor_dispatch: { from: "supervisor", to: "agent", label: "dispatch" },
+  skill_lookup: { from: "agent", to: "library", label: "lookup" },
+  skill_found: { from: "library", to: "agent", label: "skill found" },
+  tool_select: { from: "agent", to: "kali", label: "select" },
+  tool_usage_lookup: { from: "agent", to: "library", label: "how-to" },
+  tool_usage_found: { from: "library", to: "agent", label: "playbook" },
+  tool_execute: { from: "agent", to: "kali", label: "execute" },
+  result_return: { from: "kali", to: "evidence", label: "evidence" },
+  finding_promoted: { from: "evidence", to: "supervisor", label: "finding" },
 };
 
-const STATUS_COLOR = { success: "#22c55e", failure: "#ef4444", pending: "#f59e0b", skipped: "#6b7280" };
+const STATUS_COLOR = {
+  success: "#10b981",
+  done: "#10b981",
+  executed: "#10b981",
+  failure: "#ef4444",
+  failed: "#ef4444",
+  error: "#ef4444",
+  pending: "#f59e0b",
+  running: "#38bdf8",
+  skipped: "#94a3b8",
+  info: "#4b73ff",
+};
 
-const W = 760, H = 400;
+function toneForLevel(level) {
+  const value = String(level || "").toLowerCase();
+  if (value.includes("error") || value.includes("fail")) return "failed";
+  if (value.includes("warn")) return "pending";
+  return "info";
+}
 
-// ── SVG arrow between two nodes ───────────────────────────────────────────────
-function Arrow({ from, to, active, label, status }) {
-  const fn = NODES[from], tn = NODES[to];
-  if (!fn || !tn) return null;
+function actorFromLog(log) {
+  const blob = `${log.source || ""} ${log.message || ""}`.toLowerCase();
+  if (blob.includes("supervisor")) return "Supervisor";
+  if (blob.includes("kali") || blob.includes("tool") || blob.includes("runner")) return "Kali Runner";
+  if (blob.includes("worker")) return log.source || "Worker";
+  if (blob.includes("learning") || blob.includes("skill") || blob.includes("mcp")) return "Learning / MCP";
+  if (blob.includes("finding") || blob.includes("evidence")) return "Evidence DB";
+  return log.source || "System";
+}
 
-  const r = 44;
-  const dx = tn.x - fn.x, dy = tn.y - fn.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const ux = dx / dist, uy = dy / dist;
-  const x1 = fn.x + ux * r, y1 = fn.y + uy * r;
-  const x2 = tn.x - ux * r, y2 = tn.y - uy * r;
-  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+function nodeFromActor(actor) {
+  const value = String(actor || "").toLowerCase();
+  if (value.includes("supervisor")) return "supervisor";
+  if (value.includes("kali") || value.includes("runner") || value.includes("tool")) return "kali";
+  if (value.includes("learning") || value.includes("mcp") || value.includes("skill")) return "library";
+  if (value.includes("evidence") || value.includes("finding")) return "evidence";
+  return "agent";
+}
 
-  const color = active ? (STATUS_COLOR[status] || "#60a5fa") : "#374151";
-  const strokeW = active ? 2.5 : 1;
+function summarizePayload(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const parts = [];
+  if (payload.objective) parts.push(`Objetivo: ${payload.objective}`);
+  if (payload.capability) parts.push(`Capacidade: ${payload.capability}`);
+  if (payload.phase) parts.push(`Fase: ${payload.phase}`);
+  if (payload.target) parts.push(`Alvo: ${payload.target}`);
+  if (Array.isArray(payload.allowed_tools) && payload.allowed_tools.length) {
+    parts.push(`Ferramentas: ${payload.allowed_tools.slice(0, 6).join(", ")}`);
+  }
+  if (Array.isArray(payload.tools) && payload.tools.length) {
+    parts.push(`Ferramentas: ${payload.tools.slice(0, 6).join(", ")}`);
+  }
+  if (payload.findings_count !== undefined) parts.push(`Findings: ${payload.findings_count}`);
+  return parts.join(" | ");
+}
 
+function traceToConversation(ev) {
+  const from = ev.from_node || "agent";
+  const to = ev.to_node || "agent";
+  const title = String(ev.event_type || "trace").replace(/_/g, " ");
+  const payloadSummary = summarizePayload(ev.payload);
+  const details = [
+    ev.capability && `capability=${ev.capability}`,
+    ev.skill_id && `skill=${ev.skill_id}`,
+    ev.tool_name && `tool=${ev.tool_name}`,
+    ev.duration_ms !== null && ev.duration_ms !== undefined && `${Math.round(ev.duration_ms)}ms`,
+  ].filter(Boolean);
+  return {
+    id: `trace-${ev.id}`,
+    rawId: ev.id,
+    kind: "trace",
+    actor: NODES[from]?.label || from,
+    target: NODES[to]?.label || to,
+    node: from,
+    eventType: ev.event_type,
+    status: ev.status || "info",
+    title,
+    body: payloadSummary || details.join(" | ") || "Evento de orquestracao recebido.",
+    meta: details.join(" | "),
+    payload: ev.payload,
+    createdAt: ev.created_at,
+    iteration: ev.iteration,
+  };
+}
+
+function logToConversation(log) {
+  const actor = actorFromLog(log);
+  return {
+    id: `log-${log.id}`,
+    rawId: log.id,
+    kind: "log",
+    actor,
+    target: "Timeline",
+    node: nodeFromActor(actor),
+    eventType: "scan_log",
+    status: toneForLevel(log.level),
+    title: log.level || "LOG",
+    body: log.message || "",
+    meta: log.source || "",
+    payload: null,
+    createdAt: log.created_at,
+    iteration: null,
+  };
+}
+
+function mergeByTime(traceEvents, logEvents) {
+  const rows = [
+    ...traceEvents.map(traceToConversation),
+    ...logEvents.map(logToConversation),
+  ];
+  rows.sort((a, b) => {
+    const ta = new Date(a.createdAt || 0).getTime();
+    const tb = new Date(b.createdAt || 0).getTime();
+    if (ta !== tb) return ta - tb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return rows.slice(-260);
+}
+
+function ConnectionBadge({ label, state }) {
+  const normalized = state || "idle";
+  const color = {
+    open: "bg-emerald-400",
+    connecting: "bg-sky-400",
+    closed: "bg-slate-500",
+    error: "bg-rose-500",
+    idle: "bg-slate-600",
+  }[normalized] || "bg-slate-600";
   return (
-    <g>
-      <defs>
-        <marker id={`arrow-${from}-${to}`} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-          <path d="M0,0 L0,6 L8,3 z" fill={color} />
-        </marker>
-      </defs>
-      <line
-        x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke={color} strokeWidth={strokeW}
-        strokeDasharray={active ? "none" : "4 3"}
-        markerEnd={`url(#arrow-${from}-${to})`}
-        style={{ transition: "stroke 0.3s, stroke-width 0.3s" }}
-      />
-      {active && label && (
-        <text x={mx} y={my - 8} textAnchor="middle" fill={color} fontSize="10" fontWeight="600">
-          {label}
-        </text>
-      )}
-    </g>
+    <span className="inline-flex items-center gap-2 rounded border border-slate-700 bg-slate-950/70 px-2 py-1 text-xs text-slate-300">
+      <span className={`h-2 w-2 rounded-full ${color}`} />
+      {label}: {normalized}
+    </span>
   );
 }
 
-// ── single node circle ────────────────────────────────────────────────────────
-function NodeCircle({ id, active, pulsing }) {
-  const n = NODES[id];
-  const r = 44;
+function Metric({ label, value, accent = "text-white" }) {
   return (
-    <g>
-      {pulsing && (
-        <circle cx={n.x} cy={n.y} r={r + 10} fill="none" stroke={n.color} strokeWidth="2" opacity="0.4"
-          style={{ animation: "pulse 1.2s infinite" }} />
-      )}
-      <circle cx={n.x} cy={n.y} r={r} fill={active ? n.color : "#1f2937"} stroke={n.color}
-        strokeWidth={active ? 3 : 1.5}
-        style={{ transition: "fill 0.3s, stroke-width 0.3s" }} />
-      <text x={n.x} y={n.y - 6} textAnchor="middle" fontSize="20">{n.icon}</text>
-      <text x={n.x} y={n.y + 12} textAnchor="middle" fill="white" fontSize="10" fontWeight="600">
-        {n.label}
-      </text>
-    </g>
-  );
-}
-
-// ── skill score bar ───────────────────────────────────────────────────────────
-function ScoreBar({ value, color }) {
-  return (
-    <div className="relative h-2 bg-gray-700 rounded-full overflow-hidden w-full">
-      <div className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-        style={{ width: `${Math.min(100, value || 0)}%`, background: color }} />
+    <div className="border border-slate-800 bg-slate-950/70 p-3">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
+      <div className={`mt-1 font-mono text-xl font-semibold ${accent}`}>{value}</div>
     </div>
   );
 }
 
-// ── main page ─────────────────────────────────────────────────────────────────
+function NodeMap({ activeNode, activeEdge, counts }) {
+  return (
+    <div className="relative min-h-[390px] overflow-hidden border border-slate-800 bg-[#070a12]">
+      <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(rgba(75,115,255,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(75,115,255,.08)_1px,transparent_1px)] [background-size:34px_34px]" />
+      <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full">
+        {Object.entries(FLOW_EDGES).map(([key, edge]) => {
+          const from = NODES[edge.from];
+          const to = NODES[edge.to];
+          const active = activeEdge === key || (activeNode === edge.from && activeNode === edge.to);
+          const color = active ? STATUS_COLOR.running : "rgba(148,163,184,.32)";
+          return (
+            <g key={key}>
+              <line
+                x1={from.x}
+                y1={from.y}
+                x2={to.x}
+                y2={to.y}
+                stroke={color}
+                strokeWidth={active ? 0.9 : 0.35}
+                strokeDasharray={active ? "0" : "1.5 1.6"}
+              />
+              {active && (
+                <text
+                  x={(from.x + to.x) / 2}
+                  y={(from.y + to.y) / 2 - 1.8}
+                  textAnchor="middle"
+                  fontSize="2.7"
+                  fill="#e2e8f0"
+                >
+                  {edge.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        {Object.entries(NODES).map(([id, node]) => {
+          const active = activeNode === id;
+          return (
+            <g key={id}>
+              <circle
+                cx={node.x}
+                cy={node.y}
+                r={active ? 7.2 : 6.1}
+                fill="#0f172a"
+                stroke={node.color}
+                strokeWidth={active ? 1.3 : 0.65}
+              />
+              {active && <circle cx={node.x} cy={node.y} r="10" fill="none" stroke={node.color} strokeWidth=".35" opacity=".75" />}
+              <text x={node.x} y={node.y + 0.8} textAnchor="middle" fontSize="2.3" fill="#f8fafc" fontWeight="700">
+                {node.label}
+              </text>
+              <text x={node.x} y={node.y + 4.5} textAnchor="middle" fontSize="2" fill="#94a3b8">
+                {counts[id] || 0} events
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function ConversationItem({ item, selected, onSelect }) {
+  const color = STATUS_COLOR[item.status] || STATUS_COLOR.info;
+  const isRight = item.node === "kali" || item.node === "evidence";
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(item)}
+      className={`flex w-full text-left ${isRight ? "justify-end" : "justify-start"}`}
+    >
+      <div
+        className={`max-w-[88%] border p-3 transition ${
+          selected ? "border-sky-400 bg-sky-950/50" : "border-slate-800 bg-slate-950/80 hover:border-slate-600"
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+          <span className="font-mono text-xs font-semibold uppercase tracking-[0.14em] text-slate-300">{item.actor}</span>
+          {item.target && <span className="text-xs text-slate-600">to {item.target}</span>}
+          <span className="ml-auto text-[11px] text-slate-500">
+            {item.createdAt ? new Date(item.createdAt).toLocaleTimeString() : ""}
+          </span>
+        </div>
+        <div className="mt-2 text-sm font-semibold text-slate-100">{item.title}</div>
+        <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-400">{item.body}</div>
+        {item.meta && <div className="mt-2 font-mono text-[11px] text-slate-500">{item.meta}</div>}
+      </div>
+    </button>
+  );
+}
+
+function PayloadPanel({ item }) {
+  if (!item) {
+    return (
+      <div className="flex h-full min-h-64 items-center justify-center border border-slate-800 bg-slate-950/70 p-6 text-sm text-slate-500">
+        Selecione uma mensagem para ver instrucao, resposta e payload.
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full border border-slate-800 bg-slate-950/70">
+      <div className="border-b border-slate-800 p-4">
+        <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">pacote selecionado</div>
+        <div className="mt-1 text-base font-semibold text-white">{item.title}</div>
+        <div className="mt-1 text-xs text-slate-400">
+          {item.actor} to {item.target} | {item.status}
+        </div>
+      </div>
+      <div className="space-y-4 p-4">
+        <section>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">conteudo</div>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{item.body || "Sem corpo textual."}</p>
+        </section>
+        <section>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">resposta bruta</div>
+          <pre className="mt-2 max-h-72 overflow-auto border border-slate-800 bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-emerald-200">
+            {item.payload ? JSON.stringify(item.payload, null, 2) : "Sem payload estruturado para este evento."}
+          </pre>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ScoreBar({ value, color }) {
+  const width = Math.max(0, Math.min(100, Number(value || 0)));
+  return (
+    <div className="h-2 overflow-hidden bg-slate-800">
+      <div className="h-full transition-all duration-500" style={{ width: `${width}%`, backgroundColor: color }} />
+    </div>
+  );
+}
+
 export default function AgentFlowPage() {
   const [scanId, setScanId] = useState("");
-  const [scanning, setScanning] = useState(false);
-  const [events, setEvents] = useState([]);
-  const [scores, setScores] = useState([]);
-  const [activeEvent, setActiveEvent] = useState(null);
-  const [activeNodes, setActiveNodes] = useState(new Set());
   const [scans, setScans] = useState([]);
-  const wsRef = useRef(null);
+  const [traceEvents, setTraceEvents] = useState([]);
+  const [logEvents, setLogEvents] = useState([]);
+  const [scores, setScores] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [traceState, setTraceState] = useState("idle");
+  const [logState, setLogState] = useState("idle");
+  const [diagnostic, setDiagnostic] = useState("");
+  const traceWsRef = useRef(null);
+  const logWsRef = useRef(null);
   const feedRef = useRef(null);
 
-  // load recent scans for selector
+  const conversation = useMemo(() => mergeByTime(traceEvents, logEvents), [traceEvents, logEvents]);
+  const activeItem = selected || conversation[conversation.length - 1] || null;
+  const activeNode = activeItem?.node || "supervisor";
+  const activeEdge = activeItem?.kind === "trace" ? activeItem.eventType : "";
+  const counts = useMemo(() => {
+    const out = {};
+    for (const item of conversation) out[item.node] = (out[item.node] || 0) + 1;
+    return out;
+  }, [conversation]);
+
+  // Agregar uso de skills a partir dos trace events.
+  // Cada evento que carrega skill_id conta como 1 uso. Capability = agente.
+  const skillUsage = useMemo(() => {
+    const map = new Map();
+    const eligibleEvents = new Set([
+      "skill_lookup",
+      "skill_found",
+      "tool_usage_lookup",
+      "tool_select",
+      "tool_usage_found",
+      "tool_execute",
+      "result_return",
+    ]);
+    for (const ev of traceEvents) {
+      const skillId = String(ev.skill_id || "").trim();
+      if (!skillId) continue;
+      if (!eligibleEvents.has(String(ev.event_type || ""))) continue;
+      const capability = String(ev.capability || "").trim() || "unknown";
+      const tool = String(ev.tool_name || "").trim();
+      const entry = map.get(skillId) || {
+        skill_id: skillId,
+        uses: 0,
+        agents: new Map(),
+        tools: new Map(),
+        lastIteration: 0,
+        statuses: { success: 0, failure: 0, pending: 0, skipped: 0, other: 0 },
+      };
+      entry.uses += 1;
+      entry.agents.set(capability, (entry.agents.get(capability) || 0) + 1);
+      if (tool) entry.tools.set(tool, (entry.tools.get(tool) || 0) + 1);
+      entry.lastIteration = Math.max(entry.lastIteration, Number(ev.iteration || 0));
+      const status = String(ev.status || "").toLowerCase();
+      if (entry.statuses[status] !== undefined) entry.statuses[status] += 1;
+      else entry.statuses.other += 1;
+      map.set(skillId, entry);
+    }
+    return [...map.values()]
+      .map((entry) => ({
+        ...entry,
+        agents: [...entry.agents.entries()].sort((a, b) => b[1] - a[1]),
+        tools: [...entry.tools.entries()].sort((a, b) => b[1] - a[1]),
+      }))
+      .sort((a, b) => b.uses - a.uses);
+  }, [traceEvents]);
+
+  const skillTotals = useMemo(() => {
+    const totalUses = skillUsage.reduce((acc, s) => acc + s.uses, 0);
+    return { distinct: skillUsage.length, totalUses };
+  }, [skillUsage]);
+
   useEffect(() => {
-    client.get("/api/scans?limit=20").then(r => setScans(r.data?.items || r.data || [])).catch(() => {});
+    client.get("/api/scans?limit=30").then((r) => {
+      const items = r.data?.items || r.data || [];
+      setScans(items);
+      if (!scanId && items[0]?.id) setScanId(String(items[0].id));
+    }).catch((err) => {
+      setDiagnostic(`Falha ao listar scans: ${err?.response?.data?.detail || err.message}`);
+    });
   }, []);
-
-  const connect = (id) => {
-    if (wsRef.current) wsRef.current.close();
-    const token = localStorage.getItem("token") || "";
-    const ws = new WebSocket(`${getWsBaseUrl()}/ws/scans/${id}/trace?token=${token}`);
-    wsRef.current = ws;
-
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type !== "trace") return;
-      const items = msg.items || [];
-      setEvents(prev => {
-        const combined = [...prev, ...items];
-        return combined.slice(-120);
-      });
-      if (items.length > 0) {
-        const last = items[items.length - 1];
-        setActiveEvent(last);
-        const edge = FLOW_EDGES[last.event_type];
-        if (edge) {
-          setActiveNodes(new Set([edge.from, edge.to]));
-          setTimeout(() => setActiveNodes(new Set()), 2500);
-        }
-      }
-    };
-    ws.onclose = () => setScanning(false);
-
-    // Also fetch historical data
-    client.get(`/api/scans/${id}/trace?token=${token}&limit=200`)
-      .then(r => {
-        setEvents(r.data?.trace || []);
-        setScores(r.data?.scores || []);
-      })
-      .catch(() => {});
-  };
-
-  const handleStart = () => {
-    if (!scanId) return;
-    setScanning(true);
-    setEvents([]);
-    setScores([]);
-    setActiveEvent(null);
-    connect(scanId);
-  };
-
-  const handleStop = () => {
-    wsRef.current?.close();
-    setScanning(false);
-  };
 
   useEffect(() => {
     if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
-  }, [events]);
+  }, [conversation.length]);
 
-  // cleanup
-  useEffect(() => () => wsRef.current?.close(), []);
+  useEffect(() => () => {
+    traceWsRef.current?.close();
+    logWsRef.current?.close();
+  }, []);
 
-  const activeEdge = activeEvent ? FLOW_EDGES[activeEvent.event_type] : null;
+  const resetStreams = () => {
+    traceWsRef.current?.close();
+    logWsRef.current?.close();
+    traceWsRef.current = null;
+    logWsRef.current = null;
+    setTraceState("idle");
+    setLogState("idle");
+  };
+
+  const loadHistorical = async (id, token) => {
+    const [traceResult, logsResult] = await Promise.allSettled([
+      client.get(`/api/scans/${id}/trace`, { params: { token, limit: 300 }, _skipToast: true }),
+      client.get(`/api/scans/${id}/logs`, { _skipToast: true }),
+    ]);
+
+    if (traceResult.status === "fulfilled") {
+      setTraceEvents(traceResult.value.data?.trace || []);
+      setScores(traceResult.value.data?.scores || []);
+    } else {
+      setTraceEvents([]);
+      setScores([]);
+    }
+
+    if (logsResult.status === "fulfilled") {
+      setLogEvents(logsResult.value.data || []);
+    } else {
+      setLogEvents([]);
+    }
+
+    const traceCount = traceResult.status === "fulfilled" ? (traceResult.value.data?.trace || []).length : 0;
+    const logCount = logsResult.status === "fulfilled" ? (logsResult.value.data || []).length : 0;
+    if (traceCount === 0 && logCount > 0) {
+      setDiagnostic("Este scan nao possui eventos agent_trace_events. A visualizacao esta usando ScanLog como fallback conversacional.");
+    } else if (traceCount === 0 && logCount === 0) {
+      setDiagnostic("Nenhum evento encontrado ainda. Inicie um scan novo ou aguarde os workers emitirem logs/trace.");
+    } else {
+      setDiagnostic("");
+    }
+  };
+
+  const connectTrace = (id, token) => {
+    setTraceState("connecting");
+    const ws = new WebSocket(`${getWsBaseUrl()}/ws/scans/${id}/trace?token=${encodeURIComponent(token)}`);
+    traceWsRef.current = ws;
+    ws.onopen = () => setTraceState("open");
+    ws.onerror = () => setTraceState("error");
+    ws.onclose = (event) => {
+      setTraceState(event.code === 1000 ? "closed" : "error");
+      if (event.code === 4401 || event.code === 4403) {
+        setDiagnostic(`WebSocket trace recusado pelo backend: code=${event.code}. Verifique login/permissao do scan.`);
+      }
+    };
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type !== "trace") return;
+      const items = msg.items || [];
+      setTraceEvents((prev) => [...prev, ...items].slice(-220));
+      if (items.length) setSelected(traceToConversation(items[items.length - 1]));
+    };
+  };
+
+  const connectLogs = (id, token) => {
+    setLogState("connecting");
+    const ws = new WebSocket(`${getWsBaseUrl()}/ws/scans/${id}/logs?token=${encodeURIComponent(token)}`);
+    logWsRef.current = ws;
+    ws.onopen = () => setLogState("open");
+    ws.onerror = () => setLogState("error");
+    ws.onclose = (event) => setLogState(event.code === 1000 ? "closed" : "error");
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type !== "logs") return;
+      const items = msg.items || [];
+      setLogEvents((prev) => {
+        const byId = new Map(prev.map((item) => [item.id, item]));
+        for (const item of items) byId.set(item.id, item);
+        return [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id)).slice(-260);
+      });
+      if (items.length && !traceEvents.length) setSelected(logToConversation(items[items.length - 1]));
+    };
+  };
+
+  const handleConnect = async () => {
+    if (!scanId) return;
+    resetStreams();
+    setTraceEvents([]);
+    setLogEvents([]);
+    setScores([]);
+    setSelected(null);
+    setDiagnostic("Carregando historico e abrindo WebSockets...");
+    const token = localStorage.getItem("token") || "";
+    await loadHistorical(scanId, token);
+    connectTrace(scanId, token);
+    connectLogs(scanId, token);
+  };
+
+  const handleDisconnect = () => {
+    resetStreams();
+    setDiagnostic("Streams desconectados pelo operador.");
+  };
+
+  const selectedScan = scans.find((scan) => String(scan.id) === String(scanId));
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 p-6">
+    <div className="min-h-screen bg-[#05070d] p-5 text-slate-100">
       <style>{`
-        @keyframes pulse { 0%,100% { opacity:0.4; transform:scale(1); } 50% { opacity:0.8; transform:scale(1.15); } }
+        @keyframes flow-scan { 0% { transform: translateX(-100%); opacity: .2; } 50% { opacity: .8; } 100% { transform: translateX(100%); opacity: .2; } }
+        .agent-flow-scanline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(56,189,248,.18), transparent); animation: flow-scan 3.2s linear infinite; pointer-events: none; }
       `}</style>
 
-      {/* header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-white">Fluxo Supervisor → Agentes</h1>
-        <p className="text-gray-400 text-sm mt-1">
-          Visualização em tempo real do ciclo: Supervisor → Agente → Biblioteca → Kali → Resultado
-        </p>
-      </div>
-
-      {/* controls */}
-      <div className="flex gap-3 mb-6 items-center">
-        <select
-          value={scanId}
-          onChange={e => setScanId(e.target.value)}
-          className="bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm text-white min-w-56"
-        >
-          <option value="">Selecione um scan…</option>
-          {scans.map(s => (
-            <option key={s.id} value={s.id}>
-              #{s.id} — {s.target_query || s.target} ({s.status})
-            </option>
-          ))}
-        </select>
-        {!scanning ? (
-          <button onClick={handleStart}
-            className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-semibold transition">
-            Conectar
-          </button>
-        ) : (
-          <button onClick={handleStop}
-            className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded text-sm font-semibold transition">
-            Desconectar
-          </button>
-        )}
-        {scanning && (
-          <span className="flex items-center gap-2 text-green-400 text-sm">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            Conectado
-          </span>
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-
-        {/* SVG flow diagram */}
-        <div className="xl:col-span-2 bg-gray-900 rounded-xl border border-gray-700 p-4">
-          <h2 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">Diagrama de Fluxo</h2>
-          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 420 }}>
-
-            {/* static background edges */}
-            {Object.entries(FLOW_EDGES).map(([type, edge]) => {
-              const isActive = activeEdge?.from === edge.from && activeEdge?.to === edge.to;
-              return (
-                <Arrow key={type}
-                  from={edge.from} to={edge.to}
-                  active={isActive}
-                  label={isActive ? edge.label : ""}
-                  status={activeEvent?.status || "success"}
-                />
-              );
-            })}
-
-            {/* nodes */}
-            {Object.keys(NODES).map(id => (
-              <NodeCircle key={id} id={id}
-                active={activeNodes.has(id)}
-                pulsing={activeNodes.has(id)} />
-            ))}
-
-            {/* active event label */}
-            {activeEvent && (
-              <g>
-                <rect x={W / 2 - 130} y={H - 44} width={260} height={36} rx={8}
-                  fill="#1f2937" stroke={STATUS_COLOR[activeEvent.status] || "#60a5fa"} strokeWidth="1.5" />
-                <text x={W / 2} y={H - 22} textAnchor="middle" fill="white" fontSize="11" fontWeight="600">
-                  {activeEvent.event_type.replace(/_/g, " ")}
-                  {activeEvent.skill_id ? ` · ${activeEvent.skill_id}` : ""}
-                  {activeEvent.tool_name ? ` · ${activeEvent.tool_name}` : ""}
-                </text>
-              </g>
-            )}
-          </svg>
-
-          {/* legend */}
-          <div className="flex flex-wrap gap-3 mt-3">
-            {Object.entries(NODES).map(([id, n]) => (
-              <span key={id} className="flex items-center gap-1 text-xs text-gray-400">
-                <span className="w-3 h-3 rounded-full inline-block" style={{ background: n.color }} />
-                {n.label}
-              </span>
-            ))}
+      <div className="mb-5 border border-slate-800 bg-slate-950/80 p-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-sky-300">agent telemetry console</div>
+            <h1 className="mt-1 text-2xl font-semibold text-white">Fluxo de agentes em tempo real</h1>
+            <p className="mt-1 max-w-4xl text-sm text-slate-400">
+              Mostra trace estruturado quando existir e usa logs do scan como fallback visual para chamadas,
+              respostas, instrucoes, evidencias e descobertas.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={scanId}
+              onChange={(event) => setScanId(event.target.value)}
+              className="min-w-72 border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"
+            >
+              <option value="">Selecione um scan</option>
+              {scans.map((scan) => (
+                <option key={scan.id} value={scan.id}>
+                  #{scan.id} - {scan.target_query || scan.target} ({scan.status})
+                </option>
+              ))}
+            </select>
+            <button onClick={handleConnect} className="border border-emerald-500 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25">
+              Conectar
+            </button>
+            <button onClick={handleDisconnect} className="border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800">
+              Pausar
+            </button>
           </div>
         </div>
-
-        {/* event feed */}
-        <div className="bg-gray-900 rounded-xl border border-gray-700 p-4 flex flex-col">
-          <h2 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">
-            Feed de Eventos ({events.length})
-          </h2>
-          <div ref={feedRef} className="flex-1 overflow-y-auto space-y-1.5 max-h-80 pr-1">
-            {events.length === 0 && (
-              <p className="text-gray-600 text-xs">Aguardando eventos…</p>
-            )}
-            {events.map((ev, i) => (
-              <div key={ev.id ?? i}
-                className="flex items-start gap-2 text-xs p-2 rounded-lg bg-gray-800 border border-gray-700">
-                <span className="mt-0.5 w-2 h-2 rounded-full flex-shrink-0"
-                  style={{ background: STATUS_COLOR[ev.status] || "#60a5fa" }} />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1 text-gray-200 font-medium">
-                    <span className="text-gray-500">#{ev.iteration}</span>
-                    <span>{ev.event_type.replace(/_/g, " ")}</span>
-                  </div>
-                  <div className="text-gray-500 truncate">
-                    {ev.from_node} → {ev.to_node}
-                    {ev.skill_id && <span className="text-purple-400 ml-1">[{ev.skill_id}]</span>}
-                    {ev.tool_name && <span className="text-orange-400 ml-1">{ev.tool_name}</span>}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* skill scores */}
-        <div className="xl:col-span-3 bg-gray-900 rounded-xl border border-gray-700 p-4">
-          <h2 className="text-sm font-semibold text-gray-400 mb-4 uppercase tracking-wider">
-            Scores por Skill · Eficiência da Biblioteca e Aprendizado
-          </h2>
-          {scores.length === 0 ? (
-            <p className="text-gray-600 text-sm">Nenhum score disponível ainda. Execute um scan para gerar dados.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-gray-500 text-xs border-b border-gray-700">
-                    <th className="text-left pb-2 pr-4">Iter.</th>
-                    <th className="text-left pb-2 pr-4">Skill</th>
-                    <th className="text-left pb-2 pr-4">Capacidade</th>
-                    <th className="text-left pb-2 pr-4">Hits Biblioteca</th>
-                    <th className="text-left pb-2 pr-4">Tools (ok/total)</th>
-                    <th className="text-left pb-2 pr-4">Findings (prom./total)</th>
-                    <th className="text-left pb-2 min-w-36">Eficiência</th>
-                    <th className="text-left pb-2 pl-4 min-w-36">Produtividade</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-800">
-                  {scores.map((s, i) => (
-                    <tr key={s.id ?? i} className="hover:bg-gray-800/50 transition">
-                      <td className="py-2 pr-4 text-gray-400">{s.iteration}</td>
-                      <td className="py-2 pr-4 text-purple-300 font-mono text-xs">{s.skill_id}</td>
-                      <td className="py-2 pr-4 text-blue-300">{s.capability}</td>
-                      <td className="py-2 pr-4 text-center text-gray-300">{s.library_hits}</td>
-                      <td className="py-2 pr-4 text-gray-300">
-                        <span className="text-green-400">{s.tool_successes}</span>
-                        <span className="text-gray-600">/{s.tool_attempts}</span>
-                      </td>
-                      <td className="py-2 pr-4 text-gray-300">
-                        <span className="text-yellow-400">{s.findings_promoted}</span>
-                        <span className="text-gray-600">/{s.findings_raw}</span>
-                      </td>
-                      <td className="py-2 pr-4">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-300 w-10 text-right">
-                            {s.efficiency_score?.toFixed(0)}%
-                          </span>
-                          <div className="flex-1 min-w-20">
-                            <ScoreBar value={s.efficiency_score} color="#3b82f6" />
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-2 pl-4">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-300 w-10 text-right">
-                            {s.productivity_score?.toFixed(0)}%
-                          </span>
-                          <div className="flex-1 min-w-20">
-                            <ScoreBar value={s.productivity_score} color="#22c55e" />
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <ConnectionBadge label="trace ws" state={traceState} />
+          <ConnectionBadge label="logs ws" state={logState} />
+          {selectedScan && (
+            <span className="border border-slate-700 bg-slate-950/70 px-2 py-1 text-xs text-slate-300">
+              scan #{selectedScan.id} | {selectedScan.status} | {selectedScan.target_query || selectedScan.target}
+            </span>
           )}
         </div>
+        {diagnostic && (
+          <div className="mt-3 border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">
+            {diagnostic}
+          </div>
+        )}
+      </div>
 
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+        <div className="xl:col-span-7">
+          <div className="agent-flow-scanline relative overflow-hidden border border-slate-800 bg-slate-950/80 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">topologia operacional</div>
+                <div className="text-sm text-slate-300">Supervisor, agentes, biblioteca, Kali e evidencia</div>
+              </div>
+              <div className="font-mono text-xs text-slate-500">{conversation.length} mensagens</div>
+            </div>
+            <NodeMap activeNode={activeNode} activeEdge={activeEdge} counts={counts} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 xl:col-span-5">
+          <Metric label="trace events" value={traceEvents.length} accent="text-sky-300" />
+          <Metric label="scan logs" value={logEvents.length} accent="text-emerald-300" />
+          <Metric label="skill scores" value={scores.length} accent="text-violet-300" />
+          <Metric label="last actor" value={activeItem?.actor || "--"} accent="text-amber-200" />
+          <div className="col-span-2">
+            <PayloadPanel item={activeItem} />
+          </div>
+        </div>
+
+        <div className="xl:col-span-8">
+          <div className="border border-slate-800 bg-slate-950/80">
+            <div className="border-b border-slate-800 p-4">
+              <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">conversa dos agentes</div>
+              <div className="text-sm text-slate-400">Cada bolha representa uma chamada, resposta, instrucao ou observacao operacional.</div>
+            </div>
+            <div ref={feedRef} className="max-h-[620px] space-y-3 overflow-auto p-4">
+              {conversation.length === 0 && (
+                <div className="border border-slate-800 bg-slate-950 p-6 text-sm text-slate-500">
+                  Sem eventos carregados. Escolha um scan e clique em Conectar.
+                </div>
+              )}
+              {conversation.map((item) => (
+                <ConversationItem
+                  key={item.id}
+                  item={item}
+                  selected={activeItem?.id === item.id}
+                  onSelect={setSelected}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-12">
+          <div className="border border-slate-800 bg-slate-950/80">
+            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-800 p-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">skills utilizadas</div>
+                <div className="text-sm text-slate-400">
+                  Quantas skills foram chamadas, quais foram, quais agentes (capability) e ferramentas as usaram. Uma skill pode aparecer varias vezes.
+                </div>
+              </div>
+              <div className="flex gap-4 font-mono text-xs">
+                <span className="border border-slate-700 bg-slate-950 px-3 py-1 text-slate-300">
+                  distintas: <span className="text-violet-300">{skillTotals.distinct}</span>
+                </span>
+                <span className="border border-slate-700 bg-slate-950 px-3 py-1 text-slate-300">
+                  invocacoes totais: <span className="text-amber-200">{skillTotals.totalUses}</span>
+                </span>
+              </div>
+            </div>
+            <div className="max-h-[420px] overflow-auto">
+              {skillUsage.length === 0 ? (
+                <div className="p-6 text-sm text-slate-500">
+                  Nenhuma skill registrada para este scan ainda. Aguardando trace events com skill_id.
+                </div>
+              ) : (
+                <table className="w-full border-collapse text-left font-mono text-xs">
+                  <thead className="sticky top-0 bg-slate-950 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    <tr>
+                      <th className="border-b border-slate-800 px-4 py-2">#</th>
+                      <th className="border-b border-slate-800 px-4 py-2">skill_id</th>
+                      <th className="border-b border-slate-800 px-4 py-2">usos</th>
+                      <th className="border-b border-slate-800 px-4 py-2">agentes (capability x usos)</th>
+                      <th className="border-b border-slate-800 px-4 py-2">ferramentas usadas</th>
+                      <th className="border-b border-slate-800 px-4 py-2">status</th>
+                      <th className="border-b border-slate-800 px-4 py-2">iter</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {skillUsage.map((row, idx) => (
+                      <tr key={`${row.skill_id}-${idx}`} className="hover:bg-slate-900/60">
+                        <td className="border-b border-slate-900 px-4 py-2 text-slate-500">{idx + 1}</td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-violet-200">{row.skill_id}</td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-amber-200">{row.uses}</td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-slate-300">
+                          <div className="flex flex-wrap gap-1">
+                            {row.agents.map(([agent, count]) => (
+                              <span key={agent} className="border border-slate-700 bg-slate-900 px-2 py-[2px]">
+                                {agent}<span className="text-slate-500"> x{count}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-slate-300">
+                          {row.tools.length === 0 ? (
+                            <span className="text-slate-600">-</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {row.tools.map(([tool, count]) => (
+                                <span key={tool} className="border border-emerald-700/60 bg-emerald-900/20 px-2 py-[2px] text-emerald-200">
+                                  {tool}<span className="text-emerald-500"> x{count}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-[10px]">
+                          <span className="text-emerald-300">ok {row.statuses.success}</span>
+                          <span className="ml-2 text-rose-300">fail {row.statuses.failure}</span>
+                          <span className="ml-2 text-amber-300">pend {row.statuses.pending}</span>
+                          <span className="ml-2 text-slate-400">skip {row.statuses.skipped}</span>
+                        </td>
+                        <td className="border-b border-slate-900 px-4 py-2 text-slate-400">{row.lastIteration}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-4">
+          <div className="border border-slate-800 bg-slate-950/80">
+            <div className="border-b border-slate-800 p-4">
+              <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">eficiencia por skill</div>
+              <div className="text-sm text-slate-400">Disponivel quando o scan grava skill_scores.</div>
+            </div>
+            <div className="max-h-[620px] overflow-auto p-4">
+              {scores.length === 0 ? (
+                <div className="text-sm text-slate-500">Nenhum score para este scan.</div>
+              ) : (
+                <div className="space-y-3">
+                  {scores.map((score) => (
+                    <div key={score.id} className="border border-slate-800 bg-slate-950 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate font-mono text-xs text-violet-200">{score.skill_id}</div>
+                          <div className="truncate text-xs text-slate-500">{score.capability || "capability"}</div>
+                        </div>
+                        <div className="font-mono text-xs text-slate-400">iter {score.iteration}</div>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        <div>
+                          <div className="mb-1 flex justify-between text-[11px] text-slate-500">
+                            <span>eficiencia</span>
+                            <span>{Number(score.efficiency_score || 0).toFixed(0)}%</span>
+                          </div>
+                          <ScoreBar value={score.efficiency_score} color="#38bdf8" />
+                        </div>
+                        <div>
+                          <div className="mb-1 flex justify-between text-[11px] text-slate-500">
+                            <span>produtividade</span>
+                            <span>{Number(score.productivity_score || 0).toFixed(0)}%</span>
+                          </div>
+                          <ScoreBar value={score.productivity_score} color="#10b981" />
+                        </div>
+                      </div>
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-center font-mono text-[11px] text-slate-400">
+                        <span className="bg-slate-900 p-2">lib {score.library_hits}</span>
+                        <span className="bg-slate-900 p-2">tools {score.tool_successes}/{score.tool_attempts}</span>
+                        <span className="bg-slate-900 p-2">find {score.findings_promoted}/{score.findings_raw}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -371,13 +371,20 @@ def select_mission_skills(
         if score > 0:
             scored.append((score, skill))
 
-    # Guaranteed baseline when no signals yet
+    # Guaranteed baseline when no signals yet. Keep this web-pentest oriented:
+    # early scans often have no findings yet, but the supervisor still needs
+    # exploit-relevant skills available so accepted learning can steer the
+    # first tool choices instead of falling back to a generic vuln scan.
     if not scored:
         defaults = [
             "recon-subdomain-enum",
-            "recon-port-service",
+            "recon-web-crawl",
+            "vuln-directory-enum",
+            "vuln-injection",
+            "vuln-api-graphql",
+            "vuln-ssrf-redirect",
+            "vuln-auth-bypass",
             "tech-http-fingerprint",
-            "vuln-nuclei-cve",
             "osint-exposure-intel",
         ]
         by_id = {item["id"]: item for item in SKILL_CATALOG}
