@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pipx \
       build-essential pkg-config libssl-dev libpcap-dev \
       golang-go ruby ruby-dev \
+      nodejs npm \
       openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
@@ -75,10 +76,8 @@ ENV PIPX_HOME=/opt/pipx \
 RUN set -eux; \
     pipx install bandit==1.9.4; \
     pipx install semgrep==1.161.0; \
-    corepack prepare pnpm@9.15.4 --activate; \
-    corepack enable; \
-    PNPM_HOME=/usr/local/bin pnpm add -g retire@5.4.2; \
-    rm -rf /root/.cache /root/.local/share/pnpm/store
+    npm install -g pnpm@9.15.4 retire@5.4.2; \
+    rm -rf /root/.npm
 
 # jwt_tool is distributed as a source repository, not an installable Python
 # package. Clone it and expose a stable wrapper command expected by profiles.

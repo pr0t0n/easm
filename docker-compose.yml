@@ -159,7 +159,7 @@ services:
       mcp_server:
         condition: service_started
     ports:
-      - "${BACKEND_HOST_PORT:-8000}:8000"
+      - "${BACKEND_HOST_PORT:-8001}:8000"
     profiles: ["dev"]
     volumes:
       - ./backend:/app

@@ -144,6 +144,21 @@ def skill_selector_node(state: AgentState) -> AgentState:
     _sync_step_to_db(state, "Skill Selector")
 
     try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        _trace_iter = int(state.get("loop_iteration", 0))
+        _trace_cap = str(state.get("pending_capability_node") or state.get("current_phase") or "")
+        if _trace_scan_id:
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=_trace_iter,
+                event_type="skill_lookup", from_node="agent", to_node="library",
+                capability=_trace_cap, status="pending",
+                payload={"phase": _trace_cap},
+            )
+    except Exception:
+        pass
+
+    try:
         _refresh_active_skills(state)
         group = _bootstrap_skill_group(state)
         phase_label = str(state.get("current_phase") or group)
@@ -310,6 +325,22 @@ def skill_selector_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(f"[SKILL] selector failed: {exc}")
         logger.warning("Skill selector failed: %s", exc)
 
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _skill_found_id = str(state.get("current_skill") or state.get("active_skill") or "")
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="skill_found", from_node="library", to_node="agent",
+                skill_id=_skill_found_id or None,
+                capability=str(state.get("pending_capability_node") or state.get("current_phase") or ""),
+                status="success" if state.get("skill_selector_ready") else "failure",
+                payload={"skill_id": _skill_found_id},
+            )
+    except Exception:
+        pass
+
     _metric_end(state, "skill_selector", started_at)
     return state
 
@@ -390,6 +421,20 @@ def tool_selector_node(state: AgentState) -> AgentState:
     ]
 
     try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_usage_lookup", from_node="agent", to_node="library",
+                skill_id=str(plan.get("skill_id") or "") or None,
+                capability=capability, status="pending",
+                payload={"capability": capability, "candidate_tools": candidate_tools[:4]},
+            )
+    except Exception:
+        pass
+
+    try:
         from app.services.agent_context_service import build_worker_knowledge_context
 
         bundle = build_worker_knowledge_context(
@@ -461,6 +506,37 @@ def tool_selector_node(state: AgentState) -> AgentState:
     }
     state["tool_selection_contract"] = selection
     _append_action(state, "tool_selected", selection)
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_select", from_node="agent", to_node="kali",
+                skill_id=str(selection.get("skill_id") or "") or None,
+                tool_name=selected_tool or None,
+                capability=capability,
+                status="success" if selected_tool else "skipped",
+                payload={
+                    "selected_tool": selected_tool,
+                    "capability": capability,
+                    "technique": (selection.get("technique") or {}).get("name", ""),
+                },
+            )
+            if selected_tool:
+                _emit_trace(
+                    scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                    event_type="tool_usage_found", from_node="library", to_node="agent",
+                    skill_id=str(selection.get("skill_id") or "") or None,
+                    tool_name=selected_tool,
+                    capability=capability,
+                    status="success",
+                    payload={"tool": selected_tool, "technique": (selection.get("technique") or {}).get("name", "")},
+                )
+    except Exception:
+        pass
+
     if selected_tools:
         state["logs_terminais"].append(
             f"[selector] capability={capability} skill={selection.get('skill_id')} selected={','.join(selected_tools)}"
@@ -690,6 +766,23 @@ def tool_executor_node(state: AgentState) -> AgentState:
     targets = _targets_for_tool_pipeline(state, capability)
     all_results: list[dict[str, Any]] = []
 
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id_ex = state.get("scan_id")
+        if _trace_scan_id_ex and selected_tools:
+            _emit_trace(
+                scan_id=int(_trace_scan_id_ex), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_execute", from_node="agent", to_node="kali",
+                skill_id=skill_id or None,
+                tool_name=selected_tools[0] if selected_tools else None,
+                capability=capability, status="pending",
+                payload={"tools": selected_tools, "targets": [str(t) for t in targets[:3]]},
+            )
+    except Exception:
+        pass
+
+    _executor_findings_before = len(state.get("vulnerabilidades_encontradas") or [])
+
     if not selected_tools:
         state["logs_terminais"].append(f"[executor] capability={capability} sem tool selecionada; nada executado")
     for scan_target in targets:
@@ -737,6 +830,47 @@ def tool_executor_node(state: AgentState) -> AgentState:
     if capability == "risk_assessment" and state.get("validation_backlog"):
         state["validation_backlog"] = []
     _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace, save_skill_score as _save_score
+        _trace_scan_id_ex = state.get("scan_id")
+        if _trace_scan_id_ex:
+            _findings_now = len(state.get("vulnerabilidades_encontradas") or [])
+            _findings_delta = max(0, _findings_now - _executor_findings_before)
+            _tool_runs = list(state.get("executed_tool_runs") or [])
+            _tool_ok = sum(1 for r in all_results if r.get("findings", 0) >= 0)
+            _elapsed = _findings_delta  # proxy
+            _emit_trace(
+                scan_id=int(_trace_scan_id_ex), iteration=int(state.get("loop_iteration", 0)),
+                event_type="result_return", from_node="agent", to_node="supervisor",
+                skill_id=skill_id or None,
+                tool_name=selected_tools[0] if selected_tools else None,
+                capability=capability,
+                status="success" if all_results else "skipped",
+                payload={
+                    "findings_added": _findings_delta,
+                    "targets_executed": len(all_results),
+                    "tools": selected_tools,
+                },
+            )
+            _save_score(
+                scan_id=int(_trace_scan_id_ex),
+                iteration=int(state.get("loop_iteration", 0)),
+                skill_id=skill_id or capability,
+                capability=capability,
+                library_hits=2,  # skill_lookup + tool_usage_lookup
+                tool_attempts=len(all_results),
+                tool_successes=_tool_ok,
+                tool_failures=max(0, len(all_results) - _tool_ok),
+                findings_raw=_findings_delta,
+                findings_promoted=sum(
+                    1 for f in (state.get("vulnerabilidades_encontradas") or [])[-_findings_delta:]
+                    if str(f.get("severity", "")).lower() in {"critical", "high"}
+                ),
+                duration_ms=float(state.get("tool_runtime", {}).get(selected_tools[0], {}).get("attempts", 0)) * 1000,
+            )
+    except Exception:
+        pass
     state["pending_capability_node"] = ""
     state["proxima_ferramenta"] = "evidence_gate"
     state["routing_next_node"] = "evidence_gate"

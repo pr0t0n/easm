@@ -416,3 +416,45 @@ class EASMAlertRule(Base):
     asset_filter: Mapped[dict] = mapped_column(JSONB, default=dict)  # {min_criticality: 70, types: [...]}
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentTraceEvent(Base):
+    """Real-time trace of each message between supervisor, agent, library and kali."""
+
+    __tablename__ = "agent_trace_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0)
+    event_type: Mapped[str] = mapped_column(String(60), index=True)
+    from_node: Mapped[str] = mapped_column(String(60))
+    to_node: Mapped[str] = mapped_column(String(60))
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    capability: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="success")
+    duration_ms: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class SkillScore(Base):
+    """Efficiency and productivity score for each skill execution per iteration."""
+
+    __tablename__ = "skill_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0)
+    skill_id: Mapped[str] = mapped_column(String(120), index=True)
+    capability: Mapped[str] = mapped_column(String(60), default="")
+    library_hits: Mapped[int] = mapped_column(Integer, default=0)
+    tool_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    tool_successes: Mapped[int] = mapped_column(Integer, default=0)
+    tool_failures: Mapped[int] = mapped_column(Integer, default=0)
+    findings_raw: Mapped[int] = mapped_column(Integer, default=0)
+    findings_promoted: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[float] = mapped_column(sa.Float, default=0.0)
+    efficiency_score: Mapped[float] = mapped_column(sa.Float, default=0.0)
+    productivity_score: Mapped[float] = mapped_column(sa.Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

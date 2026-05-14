@@ -26,6 +26,7 @@ export default function Sidebar() {
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
         { to: "/evolucao", label: "Attack Evolution", adminOnly: false },
         { to: "/aprendizado", label: "Aprendizado", adminOnly: true },
+        { to: "/agent-flow", label: "Fluxo de Agentes", adminOnly: true },
         { to: "/relatorios", label: "Relatórios", adminOnly: false },
       ],
     },

@@ -627,6 +627,28 @@ def supervisor_node(state: AgentState) -> AgentState:
                 f"allowed_tools={chosen_skill['allowed_tools'][:4]} "
                 f"preferred={chosen_skill['preferred_tool']}"
             )
+            try:
+                from app.graph.tracer import emit_trace as _emit_trace
+                _scan_id = state.get("scan_id")
+                if _scan_id:
+                    _emit_trace(
+                        scan_id=int(_scan_id),
+                        iteration=int(state.get("loop_iteration", 0)),
+                        event_type="supervisor_dispatch",
+                        from_node="supervisor",
+                        to_node="agent",
+                        skill_id=chosen_skill.get("skill_id"),
+                        tool_name=chosen_skill.get("preferred_tool") or None,
+                        capability=next_node,
+                        status="pending",
+                        payload={
+                            "capability": next_node,
+                            "objective": chosen_skill.get("objective", ""),
+                            "allowed_tools": chosen_skill.get("allowed_tools", [])[:4],
+                        },
+                    )
+            except Exception:
+                pass
         else:
             state["logs_terminais"].append(
                 f"Supervisor: capability={next_node} sem skills ativas; pipeline seguirá sem selected_skill"
