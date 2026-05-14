@@ -96,6 +96,8 @@ def _append_error(state: AgentState, text: str, source: str) -> None:
 
 def _refresh_active_skills(state: AgentState) -> None:
     from app.graph.mission import select_mission_skills
+    from app.graph.kill_chain import STAGE_ALLOWED_SKILLS, KILL_CHAIN_STAGES
+
     selected = select_mission_skills(
         target=str(state.get("target") or ""),
         findings=list(state.get("vulnerabilidades_encontradas") or []),
@@ -104,6 +106,36 @@ def _refresh_active_skills(state: AgentState) -> None:
         max_skills=8,
         detected_tech_stack=list(state.get("detected_tech_stack") or []),
     )
+    # ── Kill-chain gating: drop skills that are not allowed in the current stage.
+    # Without this, a recon iteration could pick vuln-injection (exploitation) just
+    # because the trigger matched, jumping ahead of vuln-analysis.
+    stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+    allowed = STAGE_ALLOWED_SKILLS.get(stage, set())
+    if allowed:
+        gated = [skill for skill in selected if str(skill.get("id") or "") in allowed]
+        if gated:
+            blocked = [str(s.get("id") or "") for s in selected if s not in gated]
+            if blocked:
+                _append_note(
+                    state,
+                    f"Kill-chain gate (stage={stage}) bloqueou skills fora da fase: {', '.join(blocked[:8])}",
+                    phase="kill-chain-gate",
+                )
+            selected = gated
+        else:
+            # No allowed skill matched the heuristic — surface this so the
+            # supervisor can pick from the stage's allowlist directly.
+            from app.graph.mission import SKILL_CATALOG
+            fallback = [dict(s) for s in SKILL_CATALOG if str(s.get("id") or "") in allowed][:6]
+            if fallback:
+                _append_note(
+                    state,
+                    f"Kill-chain gate (stage={stage}) usou catalogo direto (heuristica nao bateu): "
+                    f"{', '.join(str(s.get('id') or '') for s in fallback)}",
+                    phase="kill-chain-gate",
+                )
+                selected = fallback
+
     prev_ids = {str(item.get("id") or "") for item in list(state.get("active_skills") or [])}
     state["active_skills"] = selected
     selected_ids = [str(item.get("id") or "") for item in selected]
@@ -115,22 +147,66 @@ def _refresh_active_skills(state: AgentState) -> None:
         state["pending_skill_refresh"] = False
 
 
+def _maybe_advance_kill_chain_stage(state: AgentState) -> None:
+    """Called once per supervisor iteration; logs + persists transitions."""
+    from app.graph.kill_chain import advance_kill_chain_stage
+
+    new_stage, advanced, reason = advance_kill_chain_stage(dict(state))
+    state["kill_chain_stage"] = new_stage
+    if advanced:
+        _append_note(
+            state,
+            f"Kill-chain stage advanced -> {new_stage} ({reason})",
+            phase="kill-chain-gate",
+        )
+        try:
+            from app.graph.tracer import emit_trace as _emit_trace
+            _scan_id = state.get("scan_id")
+            if _scan_id:
+                _emit_trace(
+                    scan_id=int(_scan_id),
+                    iteration=int(state.get("loop_iteration", 0)),
+                    event_type="stage_advanced",
+                    from_node="supervisor",
+                    to_node="supervisor",
+                    capability=str(state.get("pending_capability_node") or ""),
+                    status="success",
+                    payload={
+                        "new_stage": new_stage,
+                        "reason": reason,
+                        "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                        "discovered_ports": list(state.get("discovered_ports") or [])[:8],
+                    },
+                )
+        except Exception:
+            pass
+    else:
+        # Optional breadcrumb so the operator sees why the stage held.
+        state.setdefault("logs_terminais", []).append(
+            f"[kill-chain] stage={new_stage} held: {reason}"
+        )
+
+
 def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | None:
     """Builds a high-priority pentest tactic from detected_tech_stack.
 
     Returns the tactic dict (also stored in state["pending_pentest_tactic"])
-    when a matching tag is present and the tactic was not already completed.
+    when a matching tag is present, the tactic was not already completed,
+    AND the current kill-chain stage allows the locked skill.
     Returns None when no auto-lock applies — the regular strategy queue path
     handles fallback in that case.
     """
     try:
         from app.services.tech_stack_detector import TECH_STACK_TACTIC_LOCKS
+        from app.graph.kill_chain import stage_allows_skill
     except Exception:
         return None
 
     stack = [str(item).strip().lower() for item in (state.get("detected_tech_stack") or [])]
     if not stack:
         return None
+
+    current_stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
 
     completed_ids = _completed_pentest_tactic_ids(state)
     pending_existing = dict(state.get("pending_pentest_tactic") or {})
@@ -143,6 +219,15 @@ def _auto_lock_tactic_from_tech_stack(state: AgentState) -> dict[str, Any] | Non
     for tag in stack:
         spec = TECH_STACK_TACTIC_LOCKS.get(tag)
         if not spec:
+            continue
+        # ── Stage gate: do not lock an exploitation skill while we are still
+        # in RECON or VULN_ANALYSIS. The lock takes effect when the stage
+        # actually permits the skill.
+        if not stage_allows_skill(current_stage, str(spec.get("skill_id") or "")):
+            state.setdefault("logs_terminais", []).append(
+                f"[kill-chain] auto-lock '{tag}'→'{spec.get('skill_id')}' bloqueado "
+                f"pela stage atual ({current_stage})."
+            )
             continue
         tactic_id = f"tech-stack:{tag}:{spec['skill_id']}"
         if tactic_id in completed_ids:
@@ -539,15 +624,32 @@ def _ensure_pentest_strategy(state: AgentState) -> dict[str, Any]:
 
 
 def _next_pentest_tactic(state: AgentState) -> dict[str, Any] | None:
+    from app.graph.kill_chain import stage_allows_skill
+
     strategy = _ensure_pentest_strategy(state)
     completed_ids = _completed_pentest_tactic_ids(state)
+    current_stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+    blocked_ids: list[str] = []
     for item in list(strategy.get("queue") or []):
         if not isinstance(item, dict):
             continue
         tactic_id = str(item.get("tactic_id") or "")
-        if tactic_id and tactic_id not in completed_ids:
-            state["pending_pentest_tactic"] = dict(item)
-            return dict(item)
+        if not tactic_id or tactic_id in completed_ids:
+            continue
+        # ── Kill-chain gate: skip queued tactics whose skill_id is not allowed
+        # in the current stage. The supervisor will revisit them once we
+        # advance to a stage that permits the skill.
+        skill_id = str(item.get("skill_id") or "")
+        if skill_id and not stage_allows_skill(current_stage, skill_id):
+            blocked_ids.append(f"{tactic_id}({skill_id})")
+            continue
+        state["pending_pentest_tactic"] = dict(item)
+        return dict(item)
+    if blocked_ids:
+        state.setdefault("logs_terminais", []).append(
+            f"[kill-chain] stage={current_stage} bloqueou {len(blocked_ids)} tactic(s) da fila: "
+            f"{', '.join(blocked_ids[:5])}"
+        )
     state["pending_pentest_tactic"] = {}
     return None
 
@@ -582,6 +684,7 @@ def _select_skill_for_capability(
     active_skills: list[dict[str, Any]],
     scan_mode: str,
     tech_stack: list[str] | None = None,
+    kill_chain_stage: str | None = None,
 ) -> dict[str, Any] | None:
     """Pick the best skill from active_skills for the given capability node.
 
@@ -591,10 +694,13 @@ def _select_skill_for_capability(
     """
     # Import here to avoid circular dependency
     from app.graph.workflow import _tools_for_group
+    from app.graph.kill_chain import STAGE_ALLOWED_SKILLS
 
     preferred_cats = set(CAPABILITY_SKILL_CATEGORIES.get(capability, ()))
     candidate_tools = _tools_for_group(scan_mode, capability)
     candidate_lower = {t.lower() for t in candidate_tools}
+    stage_key = str(kill_chain_stage or "RECONNAISSANCE").upper()
+    stage_allowed = STAGE_ALLOWED_SKILLS.get(stage_key, set())
 
     learning_playbook: dict[str, Any] | None = None
     learning_invocation: dict[str, Any] = {}
@@ -675,7 +781,18 @@ def _select_skill_for_capability(
     best_skill: dict[str, Any] | None = None
     best_score = -1
 
-    for skill in active_skills:
+    # Stage-aware: only consider skills the current kill-chain stage allows.
+    candidate_skills_pool = (
+        [s for s in active_skills if str(s.get("id") or "") in stage_allowed]
+        if stage_allowed else list(active_skills)
+    )
+    # If active_skills got filtered to nothing, fall back to the full stage
+    # allowlist from the catalog so the supervisor still has a path forward.
+    if not candidate_skills_pool and stage_allowed:
+        from app.graph.mission import SKILL_CATALOG
+        candidate_skills_pool = [dict(s) for s in SKILL_CATALOG if str(s.get("id") or "") in stage_allowed]
+
+    for skill in candidate_skills_pool:
         cat = str(skill.get("category") or "").lower()
         skill_tool_lower = {str(t).lower() for t in (skill.get("playbook") or [])}
         score = 0
@@ -737,6 +854,8 @@ def supervisor_node(state: AgentState) -> AgentState:
         return state
 
     _update_execution_guardrails(state)
+    # Advance kill-chain BEFORE refreshing skills so the stage gate is current.
+    _maybe_advance_kill_chain_stage(state)
     _refresh_active_skills(state)
     # completed_capabilities deve ser sempre list
     if "completed_capabilities" not in state or not isinstance(state["completed_capabilities"], list):
@@ -895,6 +1014,7 @@ def supervisor_node(state: AgentState) -> AgentState:
                 active_skills=list(state.get("active_skills") or []),
                 scan_mode=str(state.get("scan_mode") or "unit"),
                 tech_stack=list(state.get("detected_tech_stack") or []),
+                kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
             )
         if chosen_skill:
             state["selected_skill"] = chosen_skill
@@ -948,6 +1068,7 @@ def supervisor_node(state: AgentState) -> AgentState:
                             "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
                             "lock_skill": bool(chosen_skill.get("lock_skill")),
                             "extra_args": dict(chosen_skill.get("extra_args") or {}),
+                            "kill_chain_stage": str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
                         },
                     )
             except Exception:

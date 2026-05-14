@@ -242,6 +242,7 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["node_history"] = snapshot_node_history
                 sd["current_node"] = current_node
                 sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
+                sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
                 job.state_data = sd
                 # Persist tech_stack to its dedicated column too (queryable by GIN index).
                 try:
@@ -1593,6 +1594,7 @@ def initial_state(
         "validation_backlog": [],
         "detected_tech_stack": [],
         "tech_stack_signature": "",
+        "kill_chain_stage": "RECONNAISSANCE",
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},

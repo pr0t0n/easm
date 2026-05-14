@@ -116,3 +116,7 @@ class AgentState(TypedDict):
     # learning playbook prioritisation, and tactic-lock by the supervisor.
     detected_tech_stack: list[str]
     tech_stack_signature: str  # hash of sorted stack — used to detect changes between iterations
+    # Kill-chain gate: enforces recon → vuln-analysis → exploitation → actions order.
+    # Default initial value is "RECONNAISSANCE"; only advances when stage-exit
+    # criteria are satisfied (see app.graph.kill_chain.advance_kill_chain_stage).
+    kill_chain_stage: str
