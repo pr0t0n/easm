@@ -68,6 +68,272 @@ LFI_PARAM_HINTS = (
 )
 CMD_PARAM_HINTS = ("cmd", "exec", "command", "ping", "host", "ip", "domain")
 
+# ─────────────────────────────────────────────────────────────────────
+# PARAM × INJECTION-FAMILY MATRIX
+# Every discovered parameter is mapped to ALL applicable injection
+# families. Source: user-defined principle + EdOverflow/coffinxp +
+# OWASP API Top 10 (BOLA/BFLA).
+# Each entry is (regex matching param name) -> set of family ids.
+#
+# Family taxonomy (used by recipes below):
+#   sqli, xss, lfi, rfi, ssrf, redirect, crlf, xxe, ssti, rce,
+#   command_injection, csrf, csv_injection, type_juggle, idor, bola,
+#   bfla, mass_assign, auth_bypass, info_disclosure, prototype_pollution,
+#   graphql_introspection, deserialization, jwt_attack, oauth_abuse
+# ─────────────────────────────────────────────────────────────────────
+PARAM_INJECTION_MATRIX: list[tuple[re.Pattern[str], set[str]]] = [
+    # search/query — refletivo + concatenado em SQL
+    (re.compile(r"^(?:q|s|qs|search|query|keyword|keywords|kw|term|find|lookup)$", re.I),
+     {"sqli", "xss", "lfi", "ssti", "rce"}),
+    # numeric identifiers — SQLi, IDOR, BOLA, mass-assign. The id-family
+    # almost ALWAYS deserves an IDOR/BOLA probe even when SQLi is the
+    # first instinct: many APIs sanitize SQL but forget ownership checks.
+    (re.compile(r"^(?:id|uid|pid|sid|cid|tid|user_?id|account_?id|order_?id|item_?id|product_?id|page|p|num|number)$", re.I),
+     {"sqli", "idor", "bola", "mass_assign"}),
+    # name/title/desc — stored XSS, SSTI, CSV-injection
+    (re.compile(r"^(?:name|title|first_?name|last_?name|description|desc|bio|nickname|displayname|comment|note|body|content|label|subject|msg|message)$", re.I),
+     {"xss", "ssti", "csv_injection", "sqli"}),
+    # auth fields — SQLi + NoSQL + type juggling + BOLA when login enumerates
+    (re.compile(r"^(?:user|username|login|email|mail|account|signin|userid)$", re.I),
+     {"auth_bypass", "sqli", "xss", "idor"}),
+    (re.compile(r"^(?:pass|pwd|password|passwd|pin|secret)$", re.I),
+     {"auth_bypass", "type_juggle"}),
+    # URL-bearing params — SSRF + open redirect + CRLF
+    (re.compile(r"^(?:url|uri|link|src|source|target|redirect|redir|next|continue|return|returnto|return_?to|callback|cb|image|img|img_?url|webhook|api|feed|rss|site|destination|dest)$", re.I),
+     {"ssrf", "redirect", "crlf"}),
+    # file/path — LFI + RFI + path traversal + IDOR on file-by-id endpoints
+    (re.compile(r"^(?:file|filename|path|page|template|lang|doc|view|show|read|load|include|require|resource|content_?path|src_?path|attachment|attachment_?id)$", re.I),
+     {"lfi", "rfi", "ssrf", "idor"}),
+    # command-execution params
+    (re.compile(r"^(?:cmd|exec|run|command|action|task|do|fn|fun|func|callback|ping|host|ip|domain|server|address)$", re.I),
+     {"rce", "command_injection", "ssti"}),
+    # template-bearing — SSTI
+    (re.compile(r"^(?:template|tpl|tmpl|view|render|skin|theme|design|layout)$", re.I),
+     {"ssti", "lfi"}),
+    # XML/SOAP/data — XXE + deserialization
+    (re.compile(r"^(?:xml|soap|data|payload|body|envelope|request_?body|serialized|object)$", re.I),
+     {"xxe", "deserialization", "rce", "ssti"}),
+    # admin/role/privilege — mass-assignment + BFLA
+    (re.compile(r"^(?:role|is_?admin|admin|priv|privilege|access_?level|permission|superuser|root|tenant_?id|org_?id|owner_?id|company_?id|workspace_?id)$", re.I),
+     {"mass_assign", "bfla", "idor", "bola"}),
+    # CSRF-like tokens (likely bypassable when missing/forgable)
+    (re.compile(r"^(?:csrf|csrf_?token|_token|xsrf|antiforgery|state|nonce)$", re.I),
+     {"csrf"}),
+    # JSONP / callback patterns
+    (re.compile(r"^(?:callback|jsonp|json_?callback|cb|on_?success)$", re.I),
+     {"xss", "ssrf"}),
+    # JWT / OAuth tokens — alg=none, weak HMAC, kid injection
+    (re.compile(r"^(?:token|jwt|access_?token|id_?token|refresh_?token|bearer|auth_?token)$", re.I),
+     {"jwt_attack", "oauth_abuse", "auth_bypass"}),
+    # GraphQL introspection / batched queries
+    (re.compile(r"^(?:query|gql|graphql|operation|operationName)$", re.I),
+     {"graphql_introspection", "sqli", "ssti"}),
+    # JS-side polluted attribute prototype assignment
+    (re.compile(r"^(?:__proto__|constructor|prototype)$", re.I),
+     {"prototype_pollution"}),
+    # debug / test / hidden — info disclosure intent
+    (re.compile(r"^(?:debug|test|dev|verbose|trace|profile|env|environment|mode|stage)$", re.I),
+     {"info_disclosure", "rce"}),
+]
+
+# Hidden parameters to probe even when not observed in the code-analyzer
+# output. These are universally worth a probe in any application.
+HIDDEN_PARAM_PROBES = (
+    "debug", "test", "dev", "admin", "is_admin", "role",
+    "source", "show_source", "verbose", "trace",
+    "_method", "_action", "callback", "jsonp",
+)
+
+# Header injection matrix — every request should test these, especially
+# in EXPLOITATION stage where auth/access-control bugs hide.
+HEADER_INJECTION_MATRIX: dict[str, str] = {
+    "X-Forwarded-For":          "127.0.0.1",
+    "X-Forwarded-Host":         "evil.example.com",
+    "X-Original-URL":           "/admin",
+    "X-Rewrite-URL":            "/admin",
+    "X-HTTP-Method-Override":   "PUT",
+    "X-Method-Override":        "DELETE",
+    "X-Custom-IP-Authorization": "127.0.0.1",
+    "Host":                     "evil.example.com",
+    "Referer":                  "https://attacker.example/",
+    "User-Agent":               "() { :; }; echo SHELLSHOCK",
+}
+
+VERB_TAMPERING_PROBES = ("OPTIONS", "PUT", "DELETE", "PATCH", "TRACE")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FAMILY → RECIPE: skill_id, tool, extra_args, signal_expected, confidence
+# Every entry maps an injection family to the concrete test recipe.
+# ─────────────────────────────────────────────────────────────────────
+FAMILY_RECIPES: dict[str, dict[str, Any]] = {
+    "sqli": {
+        "skill": "vuln-injection", "tool": "sqlmap",
+        "extra_args": {"sqlmap": ["--batch", "--level=5", "--risk=3", "--random-agent"]},
+        "signal": "sqlmap loga 'injectable' OU WAITFOR/SLEEP latency >5s OU @@version visivel",
+        "confidence": 0.85,
+    },
+    "xss": {
+        "skill": "vuln-injection", "tool": "dalfox",
+        "extra_args": {"dalfox": ["--silence", "--skip-bav", "--skip-mining-dom", "--no-spinner"]},
+        "signal": "payload literal aparece no body OU dalfox loga POC verificado",
+        "confidence": 0.75,
+    },
+    "lfi": {
+        "skill": "vuln-injection", "tool": "wapiti",
+        "extra_args": {"wapiti": ["-m", "file", "-f", "json"]},
+        "signal": "/etc/passwd content OU php://filter base64 source disclosure",
+        "confidence": 0.75,
+    },
+    "rfi": {
+        "skill": "vuln-injection", "tool": "wapiti",
+        "extra_args": {"wapiti": ["-m", "file", "-f", "json"]},
+        "signal": "Resposta contem conteudo de http://attacker controlado",
+        "confidence": 0.65,
+    },
+    "ssrf": {
+        "skill": "vuln-ssrf-redirect", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Body retorna instance-id (AWS metadata) OR callback OOB no interactsh",
+        "confidence": 0.78,
+    },
+    "redirect": {
+        "skill": "vuln-ssrf-redirect", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Location: para dominio externo do atacante (//evil, /\\evil)",
+        "confidence": 0.72,
+    },
+    "crlf": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Header injetado %0d%0aX-Test:1 aparece na resposta (curl -D -)",
+        "confidence": 0.68,
+    },
+    "xxe": {
+        "skill": "vuln-injection", "tool": "wapiti",
+        "extra_args": {"wapiti": ["-m", "xxe", "-f", "json"]},
+        "signal": "/etc/passwd content OR OOB DTD callback",
+        "confidence": 0.70,
+    },
+    "ssti": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "{{7*'7'}} renderiza 49 (Twig) ou 7777777 (Jinja)",
+        "confidence": 0.68,
+    },
+    "rce": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Saida de id/uname no body OR pingback OOB",
+        "confidence": 0.72,
+    },
+    "command_injection": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "id/uname output OR pingback (;,|,&&,||,$(),`)",
+        "confidence": 0.72,
+    },
+    "csrf": {
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Request sem token aceita OR token sem binding a sessao",
+        "confidence": 0.65,
+    },
+    "csv_injection": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Field '=cmd|...' aparece literal no CSV exportado",
+        "confidence": 0.60,
+    },
+    "type_juggle": {
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "password como {\"$ne\":null} OU boolean true permite login",
+        "confidence": 0.72,
+    },
+    "idor": {
+        "skill": "vuln-idor-access-control", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Trocando id por outro retorna dados de outro usuario (200 + dados alheios)",
+        "confidence": 0.80,
+    },
+    "bola": {
+        # Broken Object Level Authorization — OWASP API#1. Same as IDOR
+        # but specifically on REST/GraphQL object endpoints.
+        "skill": "vuln-idor-access-control", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "GET /api/objects/{other_user_id} retorna 200 sem ownership check",
+        "confidence": 0.80,
+    },
+    "bfla": {
+        # Broken Function Level Authorization — OWASP API#5.
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Endpoint /admin/* acessivel para usuario nao-admin OR role escala",
+        "confidence": 0.75,
+    },
+    "mass_assign": {
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "POST com extra field 'role:admin' aceita e persiste no perfil",
+        "confidence": 0.72,
+    },
+    "auth_bypass": {
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Login com ' OR 1=1-- ou X-Forwarded-For:127.0.0.1 obtem sessao",
+        "confidence": 0.75,
+    },
+    "info_disclosure": {
+        "skill": "vuln-information-disclosure", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "?debug=1 retorna stacktrace, OR /.git/config = 200, OR /web.config visivel",
+        "confidence": 0.65,
+    },
+    "prototype_pollution": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "POST {\"__proto__\":{\"polluted\":1}} reflete em outro endpoint",
+        "confidence": 0.55,
+    },
+    "graphql_introspection": {
+        "skill": "vuln-api-graphql", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Query __schema retorna types/queries/mutations OU batch query causa DoS",
+        "confidence": 0.78,
+    },
+    "deserialization": {
+        "skill": "vuln-injection", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "Java serialized blob (rO0AB) ou PHP O: encontrado em request body",
+        "confidence": 0.60,
+    },
+    "jwt_attack": {
+        "skill": "vuln-auth-bypass", "tool": "jwt_tool",
+        "extra_args": {},
+        "signal": "JWT alg=none ou HS256 secret quebrado por wordlist",
+        "confidence": 0.75,
+    },
+    "oauth_abuse": {
+        "skill": "vuln-auth-bypass", "tool": "curl-headers",
+        "extra_args": {},
+        "signal": "redirect_uri aceita dominio attacker OU state ausente",
+        "confidence": 0.70,
+    },
+}
+
+
+def _families_for_param(param_name: str) -> set[str]:
+    """Return ALL families that should be tested against this param name."""
+    name = str(param_name or "").strip()
+    if not name:
+        return set()
+    families: set[str] = set()
+    for pat, fams in PARAM_INJECTION_MATRIX:
+        if pat.search(name):
+            families.update(fams)
+    return families
+
 
 def _iter_evidence_blobs(findings: Iterable[dict[str, Any]]) -> Iterable[tuple[dict[str, Any], str]]:
     """Yield (finding, blob) pairs. Blob is a concatenation of textual surfaces."""
@@ -146,117 +412,341 @@ def extract_pentest_hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
         seen_ids.add(hid)
         hypotheses.append(h)
 
-    # ── H1: SQLi by stack — ASP.NET/MSSQL or PHP/MySQL ────────────────────
+    def _push_matrix(*, target: str, param: str, families: set[str], rationale_extra: str = "",
+                     confidence_boost: float = 0.0) -> None:
+        """Generate a hypothesis per family for the given (target, param)."""
+        for fam in families:
+            recipe = FAMILY_RECIPES.get(fam)
+            if not recipe:
+                continue
+            base_conf = float(recipe.get("confidence") or 0.7)
+            conf = min(0.99, max(0.05, base_conf + confidence_boost))
+            _push({
+                "family": fam,
+                "target": target,
+                "target_param": param,
+                "rationale": (
+                    f"Param '{param}' compativel com familia '{fam}'. {rationale_extra}".strip()
+                ),
+                "evidence_signals": [param] if param else [],
+                "suggested_skill": recipe.get("skill"),
+                "suggested_tool": recipe.get("tool"),
+                "suggested_extra_args": dict(recipe.get("extra_args") or {}),
+                "signal_expected": recipe.get("signal", ""),
+                "confidence": round(conf, 2),
+            })
+
+    # ── H1: PARAM × INJECTION-FAMILY MATRIX ───────────────────────────────
+    # For every URL param + every form input, generate one hypothesis per
+    # family the matrix says is applicable. This replaces the old single-
+    # family-per-param rules — the same param can be vulnerable to many.
+    sqli_stack_args: dict[str, list[str]] = {}
+    stack_boost = 0.0
+    rationale_stack = ""
     if _stack_contains(tech_stack, "asp.net", "iis", "mssql"):
-        for url in urls:
-            for p in _params_in_url(url):
-                if p.lower() in SQLI_PARAM_HINTS:
-                    _push({
-                        "family": "sqli",
-                        "target": url,
-                        "target_param": p,
-                        "rationale": (
-                            f"Stack ASP.NET/IIS/MSSQL detectado + parametro '{p}' na URL. "
-                            f"Endpoints ASP classicos concatenam input em SQL."
-                        ),
-                        "evidence_signals": sorted(tech_stack & {"asp.net", "iis", "mssql"}),
-                        "suggested_skill": "vuln-injection",
-                        "suggested_tool": "sqlmap",
-                        "suggested_extra_args": {
-                            "sqlmap": ["--dbms=mssql", "--batch", "--level=5", "--risk=3", "--random-agent"],
-                            "wapiti": ["-m", "sql,blindsql", "-f", "json"],
-                        },
-                        "signal_expected": "WAITFOR DELAY '0:0:10' resulta em latency >10s OU body retorna @@version OR sqlmap loga 'injectable'",
-                        "confidence": 0.92,
-                    })
-    if _stack_contains(tech_stack, "php", "mysql", "mariadb"):
-        for url in urls:
-            for p in _params_in_url(url):
-                if p.lower() in SQLI_PARAM_HINTS:
-                    _push({
-                        "family": "sqli",
-                        "target": url,
-                        "target_param": p,
-                        "rationale": f"Stack PHP/MySQL + param '{p}' (classico SQLi vector).",
-                        "evidence_signals": sorted(tech_stack & {"php", "mysql", "mariadb"}),
-                        "suggested_skill": "vuln-injection",
-                        "suggested_tool": "sqlmap",
-                        "suggested_extra_args": {
-                            "sqlmap": ["--dbms=mysql", "--batch", "--level=5", "--risk=3"],
-                        },
-                        "signal_expected": "SLEEP(10) latency, error msg 'You have an error in your SQL syntax'",
-                        "confidence": 0.88,
-                    })
+        sqli_stack_args = {
+            "sqlmap": ["--dbms=mssql", "--batch", "--level=5", "--risk=3", "--random-agent"],
+            "wapiti": ["-m", "sql,blindsql", "-f", "json"],
+        }
+        stack_boost = 0.10
+        rationale_stack = "Stack ASP.NET/IIS/MSSQL detectado — payloads MSSQL prioritarios."
+    elif _stack_contains(tech_stack, "php", "mysql", "mariadb"):
+        sqli_stack_args = {"sqlmap": ["--dbms=mysql", "--batch", "--level=5", "--risk=3"]}
+        stack_boost = 0.08
+        rationale_stack = "Stack PHP/MySQL — payloads MySQL prioritarios."
 
-    # ── H2: XSS reflected (parametros tipicos) ────────────────────────────
+    # URL query params
     for url in urls:
         for p in _params_in_url(url):
-            if p.lower() in XSS_REFLECTED_HINTS:
+            families = _families_for_param(p)
+            if not families:
+                # Even unknown-name params get a minimal probe set: SQLi+XSS+SSRF
+                families = {"sqli", "xss"}
+            _push_matrix(
+                target=url, param=p, families=families,
+                rationale_extra=rationale_stack,
+                confidence_boost=stack_boost,
+            )
+            # Tech-stack-specific override for sqlmap extra_args
+            if "sqli" in families and sqli_stack_args:
                 _push({
-                    "family": "xss",
+                    "family": "sqli",
                     "target": url,
                     "target_param": p,
-                    "rationale": f"Parametro '{p}' tipicamente refletido em paginas (search/comment/name).",
-                    "evidence_signals": [p.lower()],
+                    "rationale": f"Stack-aware SQLi probe on '{p}'. {rationale_stack}",
+                    "evidence_signals": sorted(tech_stack & {"asp.net", "iis", "mssql", "php", "mysql", "mariadb"}),
                     "suggested_skill": "vuln-injection",
-                    "suggested_tool": "dalfox",
-                    "suggested_extra_args": {
-                        "dalfox": ["--silence", "--skip-bav", "--skip-mining-dom", "--no-spinner"],
-                    },
-                    "signal_expected": "Payload literal aparece no body OU dalfox loga POC verificado",
-                    "confidence": 0.75,
+                    "suggested_tool": "sqlmap",
+                    "suggested_extra_args": dict(sqli_stack_args),
+                    "signal_expected": "WAITFOR DELAY/SLEEP latency >5s OU @@version visivel OU sqlmap 'injectable'",
+                    "confidence": round(min(0.99, 0.85 + stack_boost), 2),
+                    "id": _h_id("sqli-stack", url, p),
                 })
 
-    # ── H3: SSRF + open redirect + CRLF (?url, ?next, ?redirect) ──────────
-    for url in urls:
-        for p in _params_in_url(url):
-            if p.lower() in SSRF_PARAM_HINTS:
-                _push({
-                    "family": "ssrf",
-                    "target": url,
-                    "target_param": p,
-                    "rationale": f"Param '{p}' tipicamente carrega URL alvo (vetor SSRF/redirect/CRLF).",
-                    "evidence_signals": [p.lower()],
-                    "suggested_skill": "vuln-ssrf-redirect",
-                    "suggested_tool": "curl-headers",
-                    "suggested_extra_args": {},
-                    "signal_expected": "Resposta contem instance-id (AWS metadata) OR Location: para dominio externo OR header injetado (CRLF)",
-                    "confidence": 0.82,
-                })
+    # Form inputs (from code-analyzer findings)
+    # Each finding produced by code_analyzer.convert_to_findings carries
+    # details.form_inputs when applicable.
+    seen_form_params: set[tuple[str, str]] = set()
+    for finding, _ in evidence_blobs:
+        details = finding.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        form_inputs = details.get("form_inputs") or []
+        action_url = str(details.get("url") or details.get("asset") or "")
+        if not action_url or not isinstance(form_inputs, list):
+            continue
+        for inp in form_inputs:
+            if not isinstance(inp, dict):
+                continue
+            name = str(inp.get("name") or "").strip()
+            input_type = str(inp.get("type") or "text").lower()
+            if not name or input_type in {"submit", "button", "image", "reset", "hidden"}:
+                # hidden inputs aren't user-controlled in the classic
+                # sense but ASP.NET ViewState is — we still surface them
+                # via Mass-assign probes (see H4 below).
+                if input_type == "hidden":
+                    continue
+                continue
+            if (action_url, name) in seen_form_params:
+                continue
+            seen_form_params.add((action_url, name))
+            families = _families_for_param(name)
+            if not families:
+                families = {"sqli", "xss"}
+            _push_matrix(
+                target=action_url, param=name, families=families,
+                rationale_extra=f"Form input no <form action={action_url}>. {rationale_stack}",
+                confidence_boost=stack_boost,
+            )
 
-    # ── H4: LFI / path traversal ──────────────────────────────────────────
-    for url in urls:
-        for p in _params_in_url(url):
-            if p.lower() in LFI_PARAM_HINTS:
-                _push({
-                    "family": "lfi",
-                    "target": url,
-                    "target_param": p,
-                    "rationale": f"Param '{p}' classico de file inclusion.",
-                    "evidence_signals": [p.lower()],
-                    "suggested_skill": "vuln-injection",
-                    "suggested_tool": "wapiti",
-                    "suggested_extra_args": {"wapiti": ["-m", "file", "-f", "json"]},
-                    "signal_expected": "/etc/passwd contents OR base64 source via php://filter",
-                    "confidence": 0.78,
-                })
+    # ── H2: HIDDEN PARAM PROBES — universal admin/debug/role probes ───────
+    # Pensamento de pentest: mesmo sem evidencia, vale testar parametros
+    # universais que app codes esquecem em prod (?debug=1, ?admin=1, etc).
+    if urls:
+        base_target = urls[0]
+        for hp in HIDDEN_PARAM_PROBES:
+            _push({
+                "family": "info_disclosure",
+                "target": base_target,
+                "target_param": hp,
+                "rationale": (
+                    f"Hidden param probe universal: '{hp}' frequentemente exposto em prod "
+                    f"(debug stacktraces, admin bypass, role escalation)."
+                ),
+                "evidence_signals": ["hidden_param_probe"],
+                "suggested_skill": "vuln-information-disclosure",
+                "suggested_tool": "curl-headers",
+                "suggested_extra_args": {},
+                "signal_expected": (
+                    f"GET {base_target}?{hp}=1 retorna stacktrace OR resposta diferente da baseline"
+                ),
+                "confidence": 0.45,
+                "id": _h_id("hidden", base_target, hp),
+            })
 
-    # ── H5: Command injection (cmd/host/ping params) ──────────────────────
+    # ── H3: HEADER INJECTION MATRIX — toda iteracao injecta esses ─────────
+    # X-Forwarded-For/Host, X-Original-URL, X-HTTP-Method-Override, etc.
+    if urls:
+        base_target = urls[0]
+        for header_name, header_val in HEADER_INJECTION_MATRIX.items():
+            # Map header to family for the right skill/tool
+            if header_name.lower() in {"x-http-method-override", "x-method-override"}:
+                fam = "auth_bypass"
+            elif header_name.lower() == "user-agent":
+                fam = "rce"  # Shellshock
+            elif header_name.lower() in {"host", "x-forwarded-host"}:
+                fam = "info_disclosure"  # cache poison / pwd reset poison
+            elif header_name.lower() == "x-forwarded-for":
+                fam = "auth_bypass"
+            elif header_name.lower() in {"x-original-url", "x-rewrite-url"}:
+                fam = "auth_bypass"
+            elif header_name.lower() == "referer":
+                fam = "xss"
+            else:
+                fam = "info_disclosure"
+            recipe = FAMILY_RECIPES.get(fam, FAMILY_RECIPES["info_disclosure"])
+            _push({
+                "family": fam,
+                "target": base_target,
+                "target_param": f"header:{header_name}",
+                "rationale": (
+                    f"Header matrix: '{header_name}' frequentemente refletido sem sanitizar "
+                    f"(cache poison, auth bypass, Shellshock dependendo do valor)."
+                ),
+                "evidence_signals": ["header_matrix"],
+                "suggested_skill": recipe.get("skill"),
+                "suggested_tool": recipe.get("tool"),
+                "suggested_extra_args": dict(recipe.get("extra_args") or {}),
+                "signal_expected": f"Resposta diferente da baseline quando {header_name}={header_val}",
+                "confidence": 0.50,
+                "id": _h_id("header", base_target, header_name),
+            })
+
+    # ── H4: VERB TAMPERING MATRIX — OPTIONS/PUT/DELETE/PATCH/TRACE ────────
+    for url in urls[:5]:
+        for verb in VERB_TAMPERING_PROBES:
+            _push({
+                "family": "auth_bypass",
+                "target": url,
+                "target_param": f"verb:{verb}",
+                "rationale": (
+                    f"Verb tampering: testar {verb} em {url}. Endpoints que aceitam apenas "
+                    f"GET frequentemente caem com PUT/DELETE/PATCH sem checar autorizacao."
+                ),
+                "evidence_signals": ["verb_tampering"],
+                "suggested_skill": "vuln-auth-bypass",
+                "suggested_tool": "curl-headers",
+                "suggested_extra_args": {},
+                "signal_expected": f"Status 200/204 em {verb} {url} (deveria ser 405)",
+                "confidence": 0.55,
+                "id": _h_id("verb", url, verb),
+            })
+
+    # ── H5: IDOR / BOLA SEQUENTIAL PROBE ──────────────────────────────────
+    # Para todo URL com param numerico (id/uid/pid/...), gerar uma hipotese
+    # de IDOR sequencial (id=1, id=2, ..., id=999) procurando dados de
+    # outro usuario. BOLA = mesmo conceito em REST/GraphQL.
     for url in urls:
         for p in _params_in_url(url):
-            if p.lower() in CMD_PARAM_HINTS:
-                _push({
-                    "family": "rce",
-                    "target": url,
-                    "target_param": p,
-                    "rationale": f"Param '{p}' tipicamente passado a system() (ping/cmd/exec).",
-                    "evidence_signals": [p.lower()],
-                    "suggested_skill": "vuln-injection",
-                    "suggested_tool": "curl-headers",
-                    "suggested_extra_args": {},
-                    "signal_expected": "uid output OR pingback OOB via interactsh",
-                    "confidence": 0.80,
-                })
+            if not p:
+                continue
+            if not re.match(r"^(?:id|uid|pid|sid|cid|tid|user_?id|account_?id|order_?id|item_?id|product_?id|num)$", p, re.I):
+                continue
+            try:
+                from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+                parsed = urlparse(url)
+                q = parse_qs(parsed.query)
+                original_val = (q.get(p) or [""])[0]
+            except Exception:
+                original_val = ""
+            _push({
+                "family": "idor",
+                "target": url,
+                "target_param": p,
+                "rationale": (
+                    f"Param '{p}' numerico em {url} (original='{original_val}'). "
+                    f"Testar IDOR/BOLA: trocar para id de outro usuario/objeto, checar se "
+                    f"resposta retorna dados sem ownership-check."
+                ),
+                "evidence_signals": ["numeric_id_param", p],
+                "suggested_skill": "vuln-idor-access-control",
+                "suggested_tool": "curl-headers",
+                "suggested_extra_args": {},
+                "signal_expected": (
+                    f"GET com {p}=1, {p}=2, {p}=999 retorna dados distintos sem 401/403 "
+                    f"(IDOR confirmado). Tambem testar {p}=-1, {p}=0, {p}=00000."
+                ),
+                "confidence": 0.78,
+                "id": _h_id("idor-seq", url, p),
+            })
+
+    # ── H6: MASS-ASSIGN PROBE — sempre que ha form POST ───────────────────
+    for finding, _ in evidence_blobs:
+        details = finding.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("form_method") or "").upper() not in {"POST", "PUT", "PATCH"}:
+            continue
+        action_url = str(details.get("url") or "")
+        if not action_url:
+            continue
+        _push({
+            "family": "mass_assign",
+            "target": action_url,
+            "target_param": "body",
+            "rationale": (
+                f"Form {str(details.get('form_method')).upper()} para {action_url}. "
+                f"Testar mass-assignment: adicionar campos 'role=admin', 'isAdmin=true', "
+                f"'is_verified=true', 'tenant_id=victim' ao body legitimo."
+            ),
+            "evidence_signals": ["form_post"],
+            "suggested_skill": "vuln-auth-bypass",
+            "suggested_tool": "curl-headers",
+            "suggested_extra_args": {},
+            "signal_expected": (
+                "Campo malicioso ('role':'admin') persiste no perfil/objeto retornado"
+            ),
+            "confidence": 0.62,
+            "id": _h_id("mass-assign", action_url, "body"),
+        })
+
+    # ── H7: CSRF — sempre que ha form sem token visivel ──────────────────
+    for finding, _ in evidence_blobs:
+        details = finding.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("form_method") or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            continue
+        inputs = details.get("form_inputs") or []
+        if not isinstance(inputs, list):
+            continue
+        has_token = any(
+            re.search(r"csrf|xsrf|antiforgery|_token", str(i.get("name") or ""), re.I)
+            for i in inputs if isinstance(i, dict)
+        )
+        action_url = str(details.get("url") or "")
+        if has_token or not action_url:
+            continue
+        _push({
+            "family": "csrf",
+            "target": action_url,
+            "target_param": "form",
+            "rationale": (
+                f"Form mutante ({details.get('form_method')}) em {action_url} SEM CSRF token "
+                "visivel nos inputs. Confirma CSRF se mudanca de state aceita sem token/SameSite."
+            ),
+            "evidence_signals": ["form_no_token"],
+            "suggested_skill": "vuln-auth-bypass",
+            "suggested_tool": "curl-headers",
+            "suggested_extra_args": {},
+            "signal_expected": "Request cross-origin sem token muda estado (200 + persistido)",
+            "confidence": 0.55,
+            "id": _h_id("csrf", action_url, "form"),
+        })
+
+    # ── H8: AJAX endpoint exploration — GraphQL/REST sem param visivel ───
+    for finding, _ in evidence_blobs:
+        details = finding.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("kind") or "") != "ajax_endpoint":
+            continue
+        ep = str(details.get("url") or "")
+        if not ep:
+            continue
+        # GraphQL detection
+        if "graphql" in ep.lower():
+            _push({
+                "family": "graphql_introspection",
+                "target": ep,
+                "target_param": "query",
+                "rationale": f"Endpoint GraphQL detectado: {ep}. Testar introspection + batched query DoS.",
+                "evidence_signals": ["graphql_endpoint"],
+                "suggested_skill": "vuln-api-graphql",
+                "suggested_tool": "curl-headers",
+                "suggested_extra_args": {},
+                "signal_expected": "POST {query:'__schema{types{name}}'} retorna schema completo",
+                "confidence": 0.82,
+                "id": _h_id("graphql", ep, "query"),
+            })
+        # REST endpoint - probe BOLA (force-browse by id)
+        if re.search(r"/api/.*/(users?|accounts?|orders?|items?|files?|documents?|messages?)(/|$)", ep, re.I):
+            _push({
+                "family": "bola",
+                "target": ep,
+                "target_param": "path-segment",
+                "rationale": (
+                    f"Endpoint REST object-based: {ep}. Testar BOLA — appendar /{{id}} de outro "
+                    "usuario e checar se retorna dados sem ownership check."
+                ),
+                "evidence_signals": ["rest_object_endpoint"],
+                "suggested_skill": "vuln-idor-access-control",
+                "suggested_tool": "curl-headers",
+                "suggested_extra_args": {},
+                "signal_expected": "GET {ep}/<other-user-id> retorna 200 com dados sem 403",
+                "confidence": 0.72,
+                "id": _h_id("bola", ep, ""),
+            })
 
     # ── H6: CORS misconfig (evidencia em header) ──────────────────────────
     if "access-control-allow-origin" in haystack and "access-control-allow-credentials" in haystack:
