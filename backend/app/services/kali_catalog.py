@@ -95,6 +95,17 @@ def _profile_binary_candidates(profile: dict[str, Any], tool_name: str) -> set[s
 
 def _tool_availability(tool_name: str, profiles_payload: dict[str, Any], tools_payload: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_tool_name(tool_name)
+    # Backend-local virtual tools: declared in TOOL_TO_PROFILE with a sentinel
+    # profile id (e.g. "code_analyzer_backend") but executed inside the backend
+    # itself. They are always "available" — no Kali round-trip needed.
+    if normalized == "code-analyzer":
+        return {
+            "available": True,
+            "status": "backend_local",
+            "profile": "code_analyzer_backend",
+            "executable": "code-analyzer",
+            "binary_candidates": ["code-analyzer"],
+        }
     profile_id = TOOL_TO_PROFILE.get(normalized)
     if not profiles_payload.get("reachable") or not tools_payload.get("reachable"):
         return {

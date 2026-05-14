@@ -29,6 +29,7 @@ def _group_config(
 CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "scope_validation": [],
     "reconnaissance": [
+        "code-analyzer",
         "subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx",
         "naabu", "nmap", "masscan", "httpx", "whatweb", "wafw00f", "curl-headers",
         "sslscan", "testssl", "katana", "hakrawler", "gau", "waybackurls",

@@ -92,9 +92,12 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "recon-web-crawl",
         "category": "reconnaissance",
-        "description": "Crawling web, extração de JavaScript, endpoints e parâmetros.",
-        "triggers": ["crawl", "js", "endpoint", "param", "fuzz", "katana", "gau", "wayback"],
-        "playbook": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider", "ffuf-params", "wfuzz"],
+        "description": "Crawling web, extração de JavaScript, endpoints e parâmetros. Inclui code-analyzer que faz GET no alvo, baixa JS referenciado e extrai forms/endpoints/env vars/secrets.",
+        "triggers": ["crawl", "js", "endpoint", "param", "fuzz", "katana", "gau", "wayback", "code-analyzer"],
+        # `code-analyzer` runs first by convention: it produces structured
+        # endpoints + forms that downstream tools (katana, arjun) can
+        # consume, and forms hypotheses for the EXPLOITATION stage.
+        "playbook": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider", "ffuf-params", "wfuzz"],
         "phases": ["P03", "P04"],
     },
     # ── CATEGORY 2: TECHNOLOGIES ─────────────────────────────────────────────
@@ -109,7 +112,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
             "asp.net", "iis", "apache", "nginx", "tomcat", "openresty", "lighttpd",
             "x-aspnet-version", "x-powered-by", "server:",
         ],
-        "playbook": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
+        "playbook": ["code-analyzer", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
         "phases": ["P05", "P06"],
     },
     {

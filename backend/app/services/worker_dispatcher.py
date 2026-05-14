@@ -37,8 +37,30 @@ def execute_tool_with_workers(
     playbook: str | None = None,
     extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Single-path tool execution: always via the Kali runner."""
-    if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
+    """Single-path tool execution: via the Kali runner OR backend-local
+    services. The `code-analyzer` tool is intentionally backend-local so it
+    can fetch HTML/JS and produce structured findings without paying the
+    Kali round-trip cost. It carries `findings_extracted` so the workflow's
+    parser merges them directly.
+    """
+    norm_tool = str(tool_name or "").strip().lower()
+    if norm_tool == "code-analyzer":
+        from app.services.code_analyzer import run_as_tool
+
+        result = run_as_tool(target)
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("technique", (technique or {}).get("name") or technique or {})
+            result.setdefault("evidence_required", evidence_required or [])
+            result.setdefault("constraints", constraints or [])
+            result.setdefault("playbook", playbook or "")
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend Code Analyzer")
+        result.setdefault("worker_group", "asset_discovery")
+        return result
+
+    if norm_tool not in TOOL_TO_PROFILE:
         return {
             "tool": tool_name,
             "target": target,

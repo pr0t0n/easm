@@ -419,11 +419,17 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         if skipped_markers and any(marker in combined_lower for marker in skipped_markers):
             status = "skipped"
 
+        # Cap raised to 500K for stdout (was 100K) because verbose scanners
+        # like nikto/nuclei can emit >150K of useful output where the
+        # critical `+` finding lines are at the *start*, not the end.
+        # Truncating the head silently dropped 12+ findings/scan. The
+        # parsers read all lines and only retain matches, so larger
+        # buffers are safe; stderr stays at 20K (mostly progress/errors).
         _set_job_fields(
             job_id,
             status=status,
             return_code=return_code,
-            stdout=stdout[-100_000:] if stdout else "",
+            stdout=stdout[-500_000:] if stdout else "",
             stderr=stderr[-20_000:] if stderr else "",
             parsed=parsed,
         )

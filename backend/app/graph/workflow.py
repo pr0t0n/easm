@@ -1353,6 +1353,12 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
 
         tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
+        # Backend-local tools (code-analyzer) ship findings inside the dict
+        # directly — bypass the regex parsers since the analyzer already
+        # produced structured items via convert_to_findings().
+        extracted_local = list(result.get("findings_extracted") or [])
+        if extracted_local:
+            tool_specific_findings = list(tool_specific_findings or []) + extracted_local
         if tool_specific_findings:
             all_findings.extend(tool_specific_findings)
             _append_observation(
