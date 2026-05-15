@@ -401,6 +401,48 @@ def extract_pentest_hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
     evidence_blobs = list(_iter_evidence_blobs(findings))
     haystack = "\n".join(blob for _, blob in evidence_blobs).lower()
 
+    # ── Observed probe signals (from code-analyzer differential probing) ──
+    # Map (url, param) -> set of observed signals. A hypothesis whose family
+    # matches an OBSERVED signal gets its confidence raised to near-certain
+    # — this is the difference between "param name looks injectable" and
+    # "param actually returned a SQL error / reflected the canary".
+    observed_signals: dict[tuple[str, str], set[str]] = {}
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        details = f.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("kind") or "") != "probe_signal":
+            continue
+        url = str(details.get("url") or "").strip()
+        param = str(details.get("param") or "").strip()
+        sigs = details.get("probe_signals") or []
+        if url and param and isinstance(sigs, list):
+            observed_signals.setdefault((url, param), set()).update(str(s) for s in sigs)
+
+    # Probe signal → injection family it confirms.
+    _SIGNAL_TO_FAMILY = {
+        "sql_error": "sqli", "bool_diff": "sqli", "time_anomaly": "sqli",
+        "stacktrace": "sqli", "canary_reflected": "xss",
+        "traversal_passwd": "lfi", "ssti_math_eval": "ssti",
+    }
+
+    def _observed_boost(target: str, param: str, family: str) -> float:
+        """Returns a confidence boost when the differential probe OBSERVED
+        a signal that confirms this family on this exact endpoint+param."""
+        sigs = observed_signals.get((target, param)) or set()
+        if not sigs:
+            # Try matching by URL ignoring the query string.
+            for (u, p), s in observed_signals.items():
+                if p == param and u.split("?")[0] == target.split("?")[0]:
+                    sigs = s
+                    break
+        if not sigs:
+            return 0.0
+        confirmed = {_SIGNAL_TO_FAMILY.get(sig) for sig in sigs}
+        return 0.25 if family in confirmed else 0.0
+
     hypotheses: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
@@ -420,20 +462,26 @@ def extract_pentest_hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
             if not recipe:
                 continue
             base_conf = float(recipe.get("confidence") or 0.7)
-            conf = min(0.99, max(0.05, base_conf + confidence_boost))
+            obs_boost = _observed_boost(target, param, fam)
+            conf = min(0.99, max(0.05, base_conf + confidence_boost + obs_boost))
+            rationale = f"Param '{param}' compativel com familia '{fam}'. {rationale_extra}".strip()
+            if obs_boost > 0:
+                rationale += (
+                    " [PROBE CONFIRMOU: o probing diferencial observou sinal "
+                    f"de '{fam}' neste endpoint+param — confianca elevada]"
+                )
             _push({
                 "family": fam,
                 "target": target,
                 "target_param": param,
-                "rationale": (
-                    f"Param '{param}' compativel com familia '{fam}'. {rationale_extra}".strip()
-                ),
+                "rationale": rationale,
                 "evidence_signals": [param] if param else [],
                 "suggested_skill": recipe.get("skill"),
                 "suggested_tool": recipe.get("tool"),
                 "suggested_extra_args": dict(recipe.get("extra_args") or {}),
                 "signal_expected": recipe.get("signal", ""),
                 "confidence": round(conf, 2),
+                "probe_confirmed": obs_boost > 0,
             })
 
     # ── H1: PARAM × INJECTION-FAMILY MATRIX ───────────────────────────────

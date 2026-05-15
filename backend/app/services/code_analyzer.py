@@ -30,7 +30,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -242,6 +242,435 @@ def _extract_env_refs(text: str) -> list[dict[str, str]]:
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────
+# DEEP RECON — well-known paths, differential probing, fingerprint→CVE,
+# authenticated recon. The user explicitly wants maximum depth: runtime
+# and request noise are acceptable.
+# ─────────────────────────────────────────────────────────────────────
+
+# Well-known paths probed on every scan (item 5). High value, low cost.
+_WELL_KNOWN_PATHS: list[tuple[str, str]] = [
+    ("/robots.txt",                  "robots"),
+    ("/sitemap.xml",                 "sitemap"),
+    ("/sitemap_index.xml",           "sitemap"),
+    ("/.well-known/security.txt",    "security_txt"),
+    ("/.git/config",                 "git_exposure"),
+    ("/.git/HEAD",                   "git_exposure"),
+    ("/.svn/entries",                "svn_exposure"),
+    ("/.env",                        "env_exposure"),
+    ("/.DS_Store",                   "dsstore_exposure"),
+    ("/web.config",                  "webconfig_exposure"),
+    ("/phpinfo.php",                 "phpinfo_exposure"),
+    ("/server-status",               "apache_status"),
+    ("/.htaccess",                   "htaccess_exposure"),
+    ("/crossdomain.xml",             "crossdomain"),
+    ("/clientaccesspolicy.xml",      "silverlight_policy"),
+    ("/backup.zip",                  "backup_exposure"),
+    ("/backup.sql",                  "backup_exposure"),
+    ("/.well-known/openid-configuration", "oidc_config"),
+    ("/swagger.json",                "swagger"),
+    ("/swagger/v1/swagger.json",     "swagger"),
+    ("/openapi.json",                "openapi"),
+    ("/api/swagger.json",            "swagger"),
+    ("/actuator",                    "spring_actuator"),
+    ("/actuator/env",                "spring_actuator"),
+    ("/trace.axd",                   "aspnet_trace"),
+    ("/elmah.axd",                   "aspnet_elmah"),
+]
+
+# Differential-probe payloads (item 1). Benign, read-only — each probe is
+# a single GET. The diff between baseline and probe responses is the
+# evidence that turns "param exists" into "param is vulnerable to X".
+_DIFF_PROBES: dict[str, list[str]] = {
+    "sqli_quote":       ["'", "\"", "')", "';"],
+    "sqli_bool_true":   [" AND 1=1", "' AND '1'='1", " OR 1=1"],
+    "sqli_bool_false":  [" AND 1=2", "' AND '1'='2"],
+    "sqli_numeric":     ["99999999", "-1", "0"],
+    "xss_reflect":      ["sk0xCANARY<x>", "\"sk0xCANARY"],
+    "lfi_traversal":    ["../../../../etc/passwd", "....//....//etc/passwd"],
+    "ssti_math":        ["{{7*7}}", "${7*7}"],
+    "path_append":      ["/", "%2e%2e%2f"],
+}
+
+# SQL error signatures — presence in a probe response = strong SQLi signal.
+_SQL_ERROR_SIGNS = re.compile(
+    r"(SQL syntax|mysql_fetch|ORA-\d{5}|Microsoft SQL|ODBC SQL|"
+    r"PostgreSQL.*ERROR|SQLite/JDBC|Unclosed quotation mark|"
+    r"quoted string not properly terminated|System\.Data\.SqlClient|"
+    r"Incorrect syntax near|Warning: mysqli|SQLSTATE\[)",
+    re.IGNORECASE,
+)
+# Generic stack-trace / verbose-error signatures.
+_STACKTRACE_SIGNS = re.compile(
+    r"(Traceback \(most recent call last\)|Exception in thread|"
+    r"at [a-zA-Z0-9_.]+\([A-Za-z0-9_]+\.java:\d+\)|"
+    r"\.aspx\.cs:line \d+|Server Error in '/' Application|"
+    r"<b>Fatal error</b>|<b>Warning</b>|on line <b>\d+)",
+    re.IGNORECASE,
+)
+
+# Version → CVE-family hints (item 3). Drives targeted nuclei templates.
+_VERSION_CVE_HINTS: list[tuple[re.Pattern[str], str, list[str]]] = [
+    (re.compile(r"Microsoft-IIS/([6-8])\.", re.I), "iis-legacy",
+     ["iis", "aspx", "tilde-enum", "shortname"]),
+    (re.compile(r"Apache/2\.(2|4)\.", re.I), "apache",
+     ["apache", "cve", "exposures"]),
+    (re.compile(r"nginx/1\.[0-9]\.", re.I), "nginx-old",
+     ["nginx", "cve"]),
+    (re.compile(r"PHP/[45]\.", re.I), "php-eol",
+     ["php", "cve", "exposures"]),
+    (re.compile(r"X-AspNet-Version:\s*[12]\.", re.I), "aspnet-legacy",
+     ["aspx", "iis", "cve"]),
+    (re.compile(r"OpenSSL/(0|1\.0)\.", re.I), "openssl-eol",
+     ["ssl", "cve", "heartbleed"]),
+    (re.compile(r"jQuery v?[12]\.", re.I), "jquery-old",
+     ["xss", "javascript", "cve"]),
+    (re.compile(r"WordPress ([0-5])\.", re.I), "wordpress",
+     ["wordpress", "wp-plugin", "cve"]),
+]
+
+
+def _http_request(
+    method: str,
+    url: str,
+    *,
+    timeout: int = 20,
+    data: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    allow_redirects: bool = True,
+) -> tuple[bytes, dict[str, str], int, float, dict[str, str]]:
+    """Generic request (GET/POST). Returns (body, headers, status,
+    elapsed_seconds, response_cookies). Never raises."""
+    import time as _t
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ScriptKiddo-CodeAnalyzer/1.0)",
+        "Accept": "text/html,application/xhtml+xml,application/xml,*/*",
+    }
+    if headers:
+        base_headers.update(headers)
+    started = _t.perf_counter()
+    try:
+        resp = requests.request(
+            method.upper(), url,
+            timeout=timeout, allow_redirects=allow_redirects, verify=False,
+            headers=base_headers, data=data, cookies=cookies, stream=True,
+        )
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in resp.iter_content(chunk_size=16_384):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= MAX_HTML_BYTES:
+                break
+        body = b"".join(chunks)
+        elapsed = _t.perf_counter() - started
+        resp_cookies = {c.name: c.value for c in resp.cookies}
+        return body, dict(resp.headers), resp.status_code, elapsed, resp_cookies
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("code_analyzer %s failed url=%s err=%s", method, url, exc)
+        return b"", {}, 0, _t.perf_counter() - started, {}
+
+
+def _probe_well_known(base: str, *, timeout: int = 15) -> dict[str, Any]:
+    """Item 5 — fetch well-known paths. Returns discovered extra URLs +
+    exposure findings (.git, .env, web.config, sitemap entries, etc.)."""
+    import html as _html
+    discovered: set[str] = set()
+    exposures: list[dict[str, Any]] = []
+    for path, kind in _WELL_KNOWN_PATHS:
+        url = urljoin(base, path)
+        body, headers, status, _elapsed, _ck = _http_request("GET", url, timeout=timeout)
+        if status == 0 or status >= 400:
+            continue
+        text = body.decode("utf-8", errors="replace")
+        ctype = str(headers.get("Content-Type", "")).lower()
+        # robots.txt → extract Disallow/Allow paths
+        if kind == "robots" and status == 200:
+            for m in re.finditer(r"(?im)^\s*(?:Dis)?Allow:\s*(\S+)", text):
+                p = m.group(1).strip()
+                if p and p != "/":
+                    discovered.add(urljoin(base, p))
+            for m in re.finditer(r"(?im)^\s*Sitemap:\s*(\S+)", text):
+                discovered.add(m.group(1).strip())
+            exposures.append({"kind": "robots", "url": url, "status": status,
+                              "evidence": text[:600], "severity": "info"})
+        # sitemap.xml → extract <loc>
+        elif kind == "sitemap" and status == 200:
+            for m in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", text, re.IGNORECASE):
+                discovered.add(_html.unescape(m.group(1).strip()))
+            exposures.append({"kind": "sitemap", "url": url, "status": status,
+                              "evidence": f"{text.count('<loc>')} URLs", "severity": "info"})
+        # high-severity exposures
+        elif kind in {"git_exposure", "svn_exposure", "env_exposure",
+                      "webconfig_exposure", "backup_exposure", "aspnet_trace",
+                      "aspnet_elmah", "spring_actuator", "htaccess_exposure"}:
+            # Only flag when content actually looks like the sensitive file,
+            # not a SPA catch-all 200.
+            looks_real = (
+                ("git_exposure" == kind and ("[core]" in text or text.startswith("ref:")))
+                or ("env_exposure" == kind and re.search(r"(?im)^[A-Z_]+=", text))
+                or ("webconfig_exposure" == kind and "<configuration" in text.lower())
+                or ("svn_exposure" == kind and text.strip()[:3].isdigit())
+                or ("backup_exposure" == kind and ("application/zip" in ctype or "application/sql" in ctype or "PK\x03\x04" in text[:8]))
+                or ("aspnet_trace" == kind and "Request Details" in text)
+                or ("aspnet_elmah" == kind and ("Error Log" in text or "elmah" in text.lower()))
+                or ("spring_actuator" == kind and ("\"profiles\"" in text or "\"_links\"" in text))
+                or ("htaccess_exposure" == kind and ("RewriteRule" in text or "<Files" in text))
+            )
+            if looks_real:
+                exposures.append({
+                    "kind": kind, "url": url, "status": status,
+                    "evidence": text[:600], "severity": "high",
+                })
+        elif kind in {"swagger", "openapi"} and status == 200 and ("\"paths\"" in text or "\"swagger\"" in text or "\"openapi\"" in text):
+            # API spec → extract every documented path
+            for m in re.finditer(r'"(/[A-Za-z0-9_\-./{}]+)"\s*:\s*\{', text):
+                discovered.add(urljoin(base, m.group(1)))
+            exposures.append({"kind": "api_spec", "url": url, "status": status,
+                              "evidence": text[:600], "severity": "medium"})
+        elif kind in {"security_txt", "crossdomain", "silverlight_policy",
+                      "oidc_config", "phpinfo_exposure", "apache_status",
+                      "dsstore_exposure"} and status == 200:
+            sev = "high" if kind in {"phpinfo_exposure", "apache_status"} else "info"
+            exposures.append({"kind": kind, "url": url, "status": status,
+                              "evidence": text[:400], "severity": sev})
+    return {"discovered_urls": sorted(discovered)[:200], "exposures": exposures}
+
+
+def _differential_probe(endpoint: str, *, timeout: int = 12) -> dict[str, Any]:
+    """Item 1 — send benign read-only probes to each parameter of an
+    endpoint and diff the responses against the baseline.
+
+    The diff (status change, body-size delta, response-time delta, SQL
+    error / stacktrace / canary reflection) is the OBSERVED evidence that
+    lets the hypothesis engine raise confidence from "param name matches"
+    to "param behaves vulnerably".
+
+    Returns {param: {signals...}} where signals include:
+      sql_error, stacktrace, canary_reflected, bool_diff, time_anomaly,
+      traversal_passwd, ssti_math_eval.
+    """
+    try:
+        parsed = urlparse(endpoint)
+        params = parse_qs(parsed.query)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not params:
+        return {}
+
+    def _build(param: str, value: str) -> str:
+        new_q = {k: v[:] for k, v in params.items()}
+        new_q[param] = [value]
+        flat = "&".join(f"{k}={requests.utils.quote(str(vv), safe='')}"
+                         for k, vals in new_q.items() for vv in vals)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", flat, ""))
+
+    # Baseline
+    b_body, _bh, b_status, b_time, _bc = _http_request("GET", endpoint, timeout=timeout)
+    baseline_text = b_body.decode("utf-8", errors="replace")
+    baseline_len = len(baseline_text)
+
+    out: dict[str, Any] = {}
+    for param in params.keys():
+        signals: dict[str, Any] = {
+            "sql_error": False, "stacktrace": False, "canary_reflected": False,
+            "bool_diff": False, "time_anomaly": False, "traversal_passwd": False,
+            "ssti_math_eval": False, "status_changes": [], "len_deltas": [],
+        }
+        # SQLi quote probe
+        for payload in _DIFF_PROBES["sqli_quote"]:
+            body, _h, status, _t, _c = _http_request("GET", _build(param, payload), timeout=timeout)
+            text = body.decode("utf-8", errors="replace")
+            if _SQL_ERROR_SIGNS.search(text):
+                signals["sql_error"] = True
+            if _STACKTRACE_SIGNS.search(text):
+                signals["stacktrace"] = True
+            if status and status != b_status:
+                signals["status_changes"].append(f"quote:{b_status}->{status}")
+        # Boolean differential (true vs false should differ)
+        true_body, _h1, _s1, _t1, _c1 = _http_request(
+            "GET", _build(param, "1" + _DIFF_PROBES["sqli_bool_true"][0]), timeout=timeout)
+        false_body, _h2, _s2, _t2, _c2 = _http_request(
+            "GET", _build(param, "1" + _DIFF_PROBES["sqli_bool_false"][0]), timeout=timeout)
+        tlen, flen = len(true_body), len(false_body)
+        if abs(tlen - flen) > max(40, int(0.05 * max(tlen, flen, 1))):
+            signals["bool_diff"] = True
+            signals["len_deltas"].append(f"bool:{tlen}vs{flen}")
+        # Time-based probe (best-effort — no real sleep payload, just measure)
+        _tb, _th, _ts, t_time, _tc = _http_request(
+            "GET", _build(param, "1' AND 1=1"), timeout=timeout)
+        if t_time > max(5.0, b_time * 4 + 2):
+            signals["time_anomaly"] = True
+        # XSS canary
+        for payload in _DIFF_PROBES["xss_reflect"]:
+            body, _h, _s, _t, _c = _http_request("GET", _build(param, payload), timeout=timeout)
+            if "sk0xCANARY" in body.decode("utf-8", errors="replace"):
+                signals["canary_reflected"] = True
+                break
+        # LFI traversal
+        for payload in _DIFF_PROBES["lfi_traversal"]:
+            body, _h, _s, _t, _c = _http_request("GET", _build(param, payload), timeout=timeout)
+            text = body.decode("utf-8", errors="replace")
+            if "root:x:0:0:" in text or re.search(r"\[(extensions|fonts|mci)\]", text):
+                signals["traversal_passwd"] = True
+                break
+        # SSTI math
+        for payload in _DIFF_PROBES["ssti_math"]:
+            body, _h, _s, _t, _c = _http_request("GET", _build(param, payload), timeout=timeout)
+            if "49" in body.decode("utf-8", errors="replace")[:baseline_len + 4000] and "{{7*7}}" not in body.decode("utf-8", errors="replace"):
+                signals["ssti_math_eval"] = True
+                break
+        # Keep only params that produced at least one positive signal OR
+        # always keep so the hypothesis engine can see "probed, clean".
+        signals["any_signal"] = any(
+            signals[k] for k in
+            ("sql_error", "stacktrace", "canary_reflected", "bool_diff",
+             "time_anomaly", "traversal_passwd", "ssti_math_eval")
+        )
+        out[param] = signals
+    return out
+
+
+def _fingerprint_deep(headers: dict[str, str], body: str) -> dict[str, Any]:
+    """Item 3 — extract precise version strings and map to CVE families
+    so the supervisor can run targeted nuclei templates."""
+    blob_parts = [f"{k}: {v}" for k, v in (headers or {}).items()]
+    blob_parts.append(body[:8000])
+    blob = "\n".join(blob_parts)
+    versions: list[str] = []
+    cve_families: list[str] = []
+    nuclei_tags: set[str] = set()
+    for pat, family, tags in _VERSION_CVE_HINTS:
+        m = pat.search(blob)
+        if m:
+            versions.append(m.group(0).strip())
+            cve_families.append(family)
+            nuclei_tags.update(tags)
+    # generator meta
+    gen = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\']+)', body, re.I)
+    if gen:
+        versions.append(f"generator:{gen.group(1).strip()}")
+    return {
+        "versions": list(dict.fromkeys(versions))[:20],
+        "cve_families": list(dict.fromkeys(cve_families))[:12],
+        "nuclei_tags": sorted(nuclei_tags)[:20],
+    }
+
+
+def _authenticated_recon(
+    base: str,
+    forms: list[dict[str, Any]],
+    *,
+    timeout: int = 20,
+) -> dict[str, Any]:
+    """Item 4 — find a signup/register form, create a throwaway account,
+    log in, and report the session cookie so the caller can re-crawl
+    authenticated. Best-effort: never raises, returns {} on failure.
+
+    Heuristic form detection: a form with both a username-ish and a
+    password-ish input. Signup forms often have a second password field
+    or an email field.
+    """
+    import uuid as _uuid
+
+    def _classify_inputs(form: dict[str, Any]) -> dict[str, str]:
+        roles: dict[str, str] = {}
+        for inp in form.get("inputs") or []:
+            name = str(inp.get("name") or "")
+            low = name.lower()
+            itype = str(inp.get("type") or "text").lower()
+            if itype == "password" or "pass" in low or "pwd" in low:
+                roles.setdefault("password", name)
+                if "password" in roles and name != roles["password"]:
+                    roles.setdefault("password_confirm", name)
+            elif "email" in low or "mail" in low:
+                roles.setdefault("email", name)
+            elif itype in {"text", ""} and ("user" in low or "login" in low or "name" in low) and not low.startswith("__"):
+                roles.setdefault("username", name)
+        return roles
+
+    cred_user = f"sk_{_uuid.uuid4().hex[:10]}"
+    cred_pass = f"Sk0x!{_uuid.uuid4().hex[:8]}A"
+    cred_email = f"{cred_user}@example.com"
+
+    signup_form = None
+    login_form = None
+    for form in forms:
+        roles = _classify_inputs(form)
+        action = str(form.get("resolved_action") or "").lower()
+        if "password" in roles and "username" in roles:
+            if "signup" in action or "register" in action or "password_confirm" in roles or "email" in roles:
+                signup_form = (form, roles)
+            else:
+                login_form = login_form or (form, roles)
+
+    result: dict[str, Any] = {
+        "attempted": False, "registered": False, "logged_in": False,
+        "session_cookies": {}, "credentials": {}, "notes": [],
+    }
+
+    # ── Register ─────────────────────────────────────────────────────────
+    if signup_form:
+        result["attempted"] = True
+        form, roles = signup_form
+        action = form.get("resolved_action") or base
+        payload: dict[str, str] = {}
+        for inp in form.get("inputs") or []:
+            name = str(inp.get("name") or "")
+            if not name:
+                continue
+            payload[name] = str(inp.get("value") or "")
+        if roles.get("username"):
+            payload[roles["username"]] = cred_user
+        if roles.get("password"):
+            payload[roles["password"]] = cred_pass
+        if roles.get("password_confirm"):
+            payload[roles["password_confirm"]] = cred_pass
+        if roles.get("email"):
+            payload[roles["email"]] = cred_email
+        body, _h, status, _t, cookies = _http_request(
+            "POST", action, timeout=timeout, data=payload)
+        text = body.decode("utf-8", errors="replace").lower()
+        if status in (200, 302, 303) and not re.search(r"(already exists|invalid|error)", text):
+            result["registered"] = True
+            result["notes"].append(f"signup POST {action} status={status}")
+            if cookies:
+                result["session_cookies"].update(cookies)
+
+    # ── Login ────────────────────────────────────────────────────────────
+    target_login = login_form or signup_form
+    if target_login:
+        result["attempted"] = True
+        form, roles = target_login
+        action = form.get("resolved_action") or base
+        payload = {}
+        for inp in form.get("inputs") or []:
+            name = str(inp.get("name") or "")
+            if not name:
+                continue
+            payload[name] = str(inp.get("value") or "")
+        if roles.get("username"):
+            payload[roles["username"]] = cred_user
+        if roles.get("password"):
+            payload[roles["password"]] = cred_pass
+        body, _h, status, _t, cookies = _http_request(
+            "POST", action, timeout=timeout, data=payload,
+            cookies=result["session_cookies"] or None)
+        text = body.decode("utf-8", errors="replace").lower()
+        if cookies:
+            result["session_cookies"].update(cookies)
+        if status in (200, 302, 303) and result["session_cookies"] and not re.search(r"(invalid|incorrect|failed)", text):
+            result["logged_in"] = True
+            result["notes"].append(f"login POST {action} status={status}")
+
+    if result["registered"] or result["logged_in"]:
+        result["credentials"] = {"username": cred_user, "password": cred_pass, "email": cred_email}
+    return result
+
+
 def _parse_html_page(page_url: str, body: str) -> dict[str, Any]:
     """Parse a single HTML page — forms, hrefs, scripts, meta, comments."""
     import html as _html
@@ -302,6 +731,8 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
     raw, headers, status = _http_get(url, timeout=timeout)
     body = raw.decode("utf-8", errors="replace")
     root_host = _host_of(url)
+    _pb = urlparse(url)
+    base = urlunparse((_pb.scheme or "http", _pb.netloc, "/", "", "", ""))
 
     # ── Parse root page ──────────────────────────────────────────────────
     root = _parse_html_page(url, body)
@@ -392,7 +823,40 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         if ra and _host_of(ra) == root_host and not _is_garbage_url(ra):
             same_host.add(ra)
 
-    endpoints_list = sorted(same_host)[:250]
+    # ── Item 5: well-known paths + sitemap/robots → more endpoints ──────
+    well_known = _probe_well_known(base, timeout=min(15, timeout))
+    for wk_url in well_known.get("discovered_urls") or []:
+        if _host_of(wk_url) == root_host and not _is_garbage_url(wk_url):
+            wk_path = wk_url.lower().split("?")[0]
+            if not wk_path.endswith(_STATIC_EXT):
+                same_host.add(wk_url)
+
+    # ── Item 4: authenticated recon — register/login then re-crawl ──────
+    auth_recon = _authenticated_recon(base, forms, timeout=min(20, timeout))
+    if auth_recon.get("session_cookies"):
+        # Re-crawl a few key pages WITH the session cookie; authenticated
+        # views expose endpoints anonymous crawl can't reach.
+        sess = auth_recon["session_cookies"]
+        auth_pages = sorted(same_host)[:8]
+        auth_found: set[str] = set()
+        for page_url in auth_pages:
+            praw, _ph, pstatus, _pt, _pc = _http_request(
+                "GET", page_url, timeout=min(15, timeout), cookies=sess)
+            if not praw or pstatus >= 400:
+                continue
+            pbody = praw[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
+            parsed_pg = _parse_html_page(page_url, pbody)
+            for f in parsed_pg["forms"]:
+                forms.append(f)
+            for h in parsed_pg["hrefs"]:
+                if _host_of(h) == root_host and not _is_garbage_url(h):
+                    hp = h.lower().split("?")[0]
+                    if not hp.endswith(_STATIC_EXT):
+                        auth_found.add(h)
+        same_host.update(auth_found)
+        auth_recon["authenticated_endpoints_found"] = sorted(auth_found)[:60]
+
+    endpoints_list = sorted(same_host)[:300]
     external_list = sorted(external)[:60]
 
     # ── AJAX/API-pattern endpoints (same-host only) ──────────────────────
@@ -401,6 +865,22 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         if re.search(r"/(api|graphql|rest|v\d+|services|webhook|callback|auth|login|logout|register|signup|reset|me|user|account|admin|data|search|export|import|upload|download|file|comment)s?\b", ep, re.IGNORECASE)
         or "?" in ep  # any param-bearing URL is a test target
     })[:80]
+
+    # ── Item 1: differential probing on every param-bearing endpoint ────
+    # Benign read-only probes; the response diff is the evidence that
+    # turns "param exists" into "param behaves vulnerably".
+    probe_signals: dict[str, dict[str, Any]] = {}
+    param_endpoints = [ep for ep in endpoints_list if "?" in ep][:40]
+    for ep in param_endpoints:
+        sigs = _differential_probe(ep, timeout=min(12, timeout))
+        # Keep only params with at least one positive signal to bound size,
+        # but record the endpoint even when clean so the engine knows it
+        # was probed.
+        if sigs:
+            probe_signals[ep] = sigs
+
+    # ── Item 3: deep fingerprint → CVE families / nuclei tags ───────────
+    fingerprint = _fingerprint_deep(headers, body)
 
     # Dedupe secrets.
     seen_sigs: set[str] = set()
@@ -427,7 +907,7 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
             "access-control-allow-credentials", "set-cookie", "location",
         }},
         "cookies": cookies,
-        "forms": forms[:40],
+        "forms": forms[:60],
         "meta": meta_tags,
         "html_comments": html_comments[:25],
         "scripts": script_sources,
@@ -438,6 +918,11 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         "pages_crawled": pages_crawled,
         "env_refs": env_refs[:60],
         "secrets": secrets_unique[:40],
+        # ── deep-recon outputs ──
+        "well_known": well_known,
+        "probe_signals": probe_signals,
+        "fingerprint": fingerprint,
+        "auth_recon": auth_recon,
         "elapsed_ms": elapsed_ms,
     }
 
@@ -519,6 +1004,96 @@ def convert_to_findings(analysis: dict[str, Any], scan_target: str, step_name: s
                 **base_details,
                 "evidence": "; ".join(str(p.get('url')) for p in ok_pages[:15]),
                 "kind": "crawl_summary",
+            },
+        })
+
+    # 3c) Well-known path exposures (.git/.env/web.config/sitemap/robots).
+    for exp in (analysis.get("well_known") or {}).get("exposures") or []:
+        sev = str(exp.get("severity") or "info")
+        kind = str(exp.get("kind") or "exposure")
+        findings.append({
+            "title": f"Well-known path: {kind} ({exp.get('url')})",
+            "severity": sev,
+            "risk_score": 8 if sev == "high" else (5 if sev == "medium" else 2),
+            "source_worker": "code_analyzer",
+            "details": {
+                **base_details,
+                "evidence": str(exp.get("evidence") or "")[:600],
+                "url": exp.get("url"),
+                "kind": f"well_known:{kind}",
+                "http_status": exp.get("status"),
+                "validation_status": "hypothesis" if sev == "high" else "unverified",
+            },
+        })
+
+    # 3d) Differential-probe signals — the OBSERVED vulnerability evidence.
+    # Each positive signal becomes a finding the hypothesis engine reads to
+    # raise confidence from "param name matches" to "param behaves vuln".
+    for ep, params in (analysis.get("probe_signals") or {}).items():
+        for param, sig in (params or {}).items():
+            if not isinstance(sig, dict) or not sig.get("any_signal"):
+                continue
+            hits = [k for k in (
+                "sql_error", "stacktrace", "canary_reflected", "bool_diff",
+                "time_anomaly", "traversal_passwd", "ssti_math_eval",
+            ) if sig.get(k)]
+            sev = "high" if any(h in hits for h in ("sql_error", "traversal_passwd", "ssti_math_eval")) else "medium"
+            findings.append({
+                "title": f"Probe diferencial: {ep}?{param} -> {', '.join(hits)}",
+                "severity": sev,
+                "risk_score": 8 if sev == "high" else 6,
+                "source_worker": "code_analyzer",
+                "details": {
+                    **base_details,
+                    "evidence": f"endpoint={ep} param={param} signals={hits} "
+                                f"status_changes={sig.get('status_changes')} "
+                                f"len_deltas={sig.get('len_deltas')}",
+                    "url": ep,
+                    "param": param,
+                    "kind": "probe_signal",
+                    "probe_signals": hits,
+                    "validation_status": "hypothesis",
+                    "confidence": 80,
+                },
+            })
+
+    # 3e) Deep fingerprint → CVE families (drives targeted nuclei templates).
+    fp = analysis.get("fingerprint") or {}
+    if fp.get("versions") or fp.get("cve_families"):
+        findings.append({
+            "title": f"Fingerprint profundo: {', '.join(fp.get('versions') or [])[:6]}",
+            "severity": "info",
+            "risk_score": 3,
+            "source_worker": "code_analyzer",
+            "details": {
+                **base_details,
+                "evidence": (
+                    f"versions={fp.get('versions')} "
+                    f"cve_families={fp.get('cve_families')} "
+                    f"nuclei_tags={fp.get('nuclei_tags')}"
+                ),
+                "kind": "fingerprint_deep",
+                "cve_families": fp.get("cve_families"),
+                "nuclei_tags": fp.get("nuclei_tags"),
+            },
+        })
+
+    # 3f) Authenticated recon outcome.
+    auth = analysis.get("auth_recon") or {}
+    if auth.get("attempted"):
+        findings.append({
+            "title": (
+                f"Recon autenticado: registered={auth.get('registered')} "
+                f"logged_in={auth.get('logged_in')}"
+            ),
+            "severity": "info",
+            "risk_score": 2,
+            "source_worker": "code_analyzer",
+            "details": {
+                **base_details,
+                "evidence": "; ".join(auth.get("notes") or []),
+                "kind": "auth_recon",
+                "authenticated_endpoints": auth.get("authenticated_endpoints_found") or [],
             },
         })
 
