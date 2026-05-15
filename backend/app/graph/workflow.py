@@ -1532,7 +1532,11 @@ def initial_state(
         discovered_ports=[],
         max_skills=5,
     )
-    max_iterations = 18
+    # Exhaustive sweep: each stage runs EVERY applicable tool before
+    # advancing (recon ~6 batches, vuln-analysis ~3, exploitation ~4),
+    # plus governance/executive. 18 was too tight and forced premature
+    # finalize while RECON still had subdomain-enum pending.
+    max_iterations = 45
     mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
     return {
         "trace_id": trace_id,

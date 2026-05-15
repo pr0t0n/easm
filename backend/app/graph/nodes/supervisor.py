@@ -739,139 +739,139 @@ def _distinct_executed_tools(state: AgentState) -> set[str]:
 
 
 def _coverage_gap_tactic_for_stage(state: AgentState) -> dict[str, Any] | None:
-    """Create a concrete tactic when kill-chain coverage is missing.
+    """Exhaustive kill-chain coverage tactic.
 
-    This is deliberately small and deterministic: it prevents the supervisor
-    from satisfying itself with one generic scanner when a pentest stage still
-    lacks mandatory evidence, especially P04 parameter discovery and the
-    nuclei+nikto web vulnerability audit.
+    The user requirement: read the WHOLE skill library, see which tools
+    apply to the current stage, and run ALL of them — not stop after one
+    or two. This function therefore sweeps EVERY tool of EVERY skill the
+    current kill-chain stage allows, and keeps emitting tactics until all
+    of them have been attempted.
+
+    Algorithm:
+      1. Build the stage tool universe = union of playbooks of every
+         skill in STAGE_ALLOWED_SKILLS[stage].
+      2. Subtract tools already executed this scan -> pending tools.
+      3. If nothing pending -> return None (stage fully swept; the
+         supervisor may advance).
+      4. Otherwise pick the stage-allowed skill that covers the MOST
+         pending tools and emit a tactic locked to it with allowed_tools
+         = every pending tool that skill can run.
+
+    While this returns a tactic the supervisor stays on the stage — it
+    cannot drift to governance/executive with the stage half-covered.
     """
+    from app.graph.kill_chain import STAGE_ALLOWED_SKILLS, stage_allows_skill
+    from app.graph.mission import SKILL_CATALOG
+    from app.services.kali_executor import TOOL_TO_PROFILE
+
     stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
     completed_ids = _completed_pentest_tactic_ids(state)
     distinct_tools = _distinct_executed_tools(state)
+    runtime = dict(state.get("tool_runtime") or {})
 
-    if stage == "RECONNAISSANCE":
-        p04_tools = ["arjun", "paramspider", "ffuf-params", "wfuzz"]
-        p04_done = [tool for tool in p04_tools if tool in distinct_tools]
-        if len(p04_done) < 2:
-            missing = [tool for tool in p04_tools if tool not in distinct_tools]
-            tactic_id = f"coverage:recon:p04-parameter-discovery:{len(p04_done)}"
-            if tactic_id in completed_ids:
-                return None
-            tactic = {
-                "tactic_id": tactic_id,
-                "skill_id": "recon-web-crawl",
-                "capability": "asset_discovery",
-                "objective": "Executar P04 Parameter Discovery com pelo menos duas fontes de parametros.",
-                "hypothesis": (
-                    "Parametro escondido alimenta validacao de SQLi/XSS/SSRF; "
-                    "combinar arjun, paramspider, ffuf-params e wfuzz antes de explorar."
-                ),
-                "allowed_tools": list(dict.fromkeys([*missing, *p04_tools])),
-                "preferred_tool": missing[0] if missing else p04_tools[0],
-                "extra_args": {},
-                "strategy_source": "kill_chain_coverage_gap",
-                "strategy_score": 120,
-                "learning_techniques": [],
-                "evidence_required": ["parameter", "form field", "query key"],
-                "constraints": ["baixa taxa de requisicoes", "registrar wordlist/fonte usada"],
-                "phase_refs": ["P04"],
-                "targets": [str(state.get("target") or "").strip()],
-                "reason": f"P04 incompleto: {len(p04_done)}/2 ferramentas de descoberta de parametros executadas.",
-                "lock_skill": True,
-            }
-            state["pending_pentest_tactic"] = tactic
-            _append_action(state, "coverage_gap_tactic", {"stage": stage, "tactic_id": tactic_id, "missing": missing})
-            return tactic
+    allowed_skill_ids = STAGE_ALLOWED_SKILLS.get(stage, set())
+    if not allowed_skill_ids:
+        return None
 
-    if stage == "VULNERABILITY_ANALYSIS":
-        required = ["nuclei", "nikto"]
-        missing = [tool for tool in required if tool not in distinct_tools]
-        if missing:
-            tactic_id = f"coverage:vulnerability-analysis:nuclei-nikto:{len(required) - len(missing)}"
-            if tactic_id in completed_ids:
-                return None
-            allowed = list(dict.fromkeys([*missing, *required, "nmap-http-enum", "curl-headers"]))
-            tactic = {
-                "tactic_id": tactic_id,
-                "skill_id": "vuln-nuclei-cve",
-                "capability": "risk_assessment",
-                "objective": "Executar analise web minima com nuclei e nikto antes de validar exploracao.",
-                "hypothesis": (
-                    "Nuclei cobre CVE/template; nikto cobre misconfiguration IIS/ASP.NET, TRACE, headers "
-                    "e disclosure que templates genericos podem perder."
-                ),
-                "allowed_tools": allowed,
-                "preferred_tool": missing[0],
-                "extra_args": {},
-                "strategy_source": "kill_chain_coverage_gap",
-                "strategy_score": 130,
-                "learning_techniques": [],
-                "evidence_required": ["template id", "server misconfiguration", "HTTP method/header evidence"],
-                "constraints": ["sem exploit destrutivo", "validar apenas sinais observaveis"],
-                "phase_refs": ["P11", "P05"],
-                "targets": [str(state.get("target") or "").strip()],
-                "reason": f"Analise de vulnerabilidade incompleta: faltando {', '.join(missing)}.",
-                "lock_skill": True,
-            }
-            state["pending_pentest_tactic"] = tactic
-            _append_action(state, "coverage_gap_tactic", {"stage": stage, "tactic_id": tactic_id, "missing": missing})
-            return tactic
-
-    if stage == "EXPLOITATION":
-        # Minimum exploitation contract: an injection scanner AND the cheap
-        # curl validators AND a content/param fuzz tool. Without this, a
-        # single SQLi hypothesis would close the stage ("rodou sqlmap e
-        # ficou satisfeito") while XSS/LFI/auth/SSRF go untested.
-        groups = [
-            ("injection-scanner", ["sqlmap", "dalfox", "wapiti"]),
-            ("curl-validator", ["curl-headers"]),
-            ("content-fuzz", ["ffuf", "ffuf-params", "wfuzz", "gobuster", "feroxbuster"]),
+    # skill_id -> playbook (only Kali-dispatchable tools), and skill -> capability
+    _CAT_TO_CAP = {
+        "reconnaissance": "asset_discovery", "technologies": "asset_discovery",
+        "protocols": "risk_assessment", "osint": "threat_intel",
+        "code": "threat_intel", "vulnerabilities": "risk_assessment",
+        "tooling": "risk_assessment", "orchestration": "asset_discovery",
+    }
+    skill_tools: dict[str, list[str]] = {}
+    skill_capability: dict[str, str] = {}
+    skill_desc: dict[str, str] = {}
+    for skill in SKILL_CATALOG:
+        sid = str(skill.get("id") or "")
+        if sid not in allowed_skill_ids:
+            continue
+        playbook = [
+            str(t).strip().lower()
+            for t in (skill.get("playbook") or [])
+            if str(t).strip().lower() in TOOL_TO_PROFILE
         ]
-        missing_groups = [
-            (name, tools) for name, tools in groups
-            if not any(t in distinct_tools for t in tools)
-        ]
-        if missing_groups:
-            missing_names = ",".join(name for name, _ in missing_groups)
-            done = len(groups) - len(missing_groups)
-            tactic_id = f"coverage:exploitation:injection-battery:{done}"
-            if tactic_id in completed_ids:
-                return None
-            # Propose the first tool of each missing group + the rest as
-            # fallback. vuln-injection skill owns sqlmap/dalfox/wapiti/ffuf.
-            proposed: list[str] = []
-            for _, tools in missing_groups:
-                proposed.extend(tools)
-            allowed = list(dict.fromkeys([*proposed, "sqlmap", "dalfox", "wapiti", "curl-headers", "ffuf-params"]))
-            tactic = {
-                "tactic_id": tactic_id,
-                "skill_id": "vuln-injection",
-                "capability": "risk_assessment",
-                "objective": "Garantir bateria minima de exploracao: injection scanner + curl validators + content fuzz.",
-                "hypothesis": (
-                    "Uma unica ferramenta de SQLi nao cobre XSS/LFI/SSRF/auth. A bateria minima "
-                    "combina sqlmap/dalfox/wapiti, curl-headers e fuzz de parametros."
-                ),
-                "allowed_tools": allowed,
-                "preferred_tool": proposed[0] if proposed else "sqlmap",
-                "extra_args": {},
-                "strategy_source": "kill_chain_coverage_gap",
-                "strategy_score": 125,
-                "learning_techniques": [],
-                "evidence_required": ["injection signal", "reflected payload", "auth bypass evidence"],
-                "constraints": ["read-only probes", "sem exploit destrutivo"],
-                "phase_refs": ["P12", "P14", "P15"],
-                "targets": [str(state.get("target") or "").strip()],
-                "reason": f"Exploracao incompleta: grupos faltando = {missing_names}.",
-                "lock_skill": True,
-            }
-            state["pending_pentest_tactic"] = tactic
-            _append_action(state, "coverage_gap_tactic", {"stage": stage, "tactic_id": tactic_id, "missing": missing_names})
-            return tactic
+        if not playbook:
+            continue
+        skill_tools[sid] = playbook
+        skill_capability[sid] = _CAT_TO_CAP.get(str(skill.get("category") or "").lower(), "risk_assessment")
+        skill_desc[sid] = str(skill.get("description") or "")
 
-    return None
+    # Stage tool universe minus already-attempted (executed OR runtime attempt).
+    def _attempted(tool: str) -> bool:
+        if tool in distinct_tools:
+            return True
+        meta = runtime.get(tool, {})
+        return int(meta.get("attempts", 0) or 0) >= 1
 
+    universe: set[str] = set()
+    for tools in skill_tools.values():
+        universe.update(tools)
+    pending = sorted(t for t in universe if not _attempted(t))
+    if not pending:
+        return None  # stage fully swept
+
+    # Pick the skill covering the MOST pending tools.
+    best_skill = ""
+    best_cover: list[str] = []
+    for sid, tools in skill_tools.items():
+        if not stage_allows_skill(stage, sid):
+            continue
+        cover = [t for t in tools if t in pending]
+        if len(cover) > len(best_cover):
+            best_cover = cover
+            best_skill = sid
+    if not best_skill or not best_cover:
+        return None
+
+    capability = skill_capability.get(best_skill, "asset_discovery")
+    # tactic_id encodes how many pending tools remain so a fresh id fires
+    # each iteration as the sweep progresses (never marked "completed" in a
+    # way that would stop the sweep prematurely).
+    tactic_id = f"coverage:{stage.lower()}:{best_skill}:remaining-{len(pending)}"
+    if tactic_id in completed_ids:
+        # Same remaining-count tactic already done — nudge the id so the
+        # sweep continues on the next-best skill instead of stalling.
+        alt = [sid for sid in skill_tools if sid != best_skill and any(t in pending for t in skill_tools[sid])]
+        if not alt:
+            return None
+        best_skill = alt[0]
+        best_cover = [t for t in skill_tools[best_skill] if t in pending]
+        capability = skill_capability.get(best_skill, "asset_discovery")
+        tactic_id = f"coverage:{stage.lower()}:{best_skill}:alt-{len(pending)}"
+
+    tactic = {
+        "tactic_id": tactic_id,
+        "skill_id": best_skill,
+        "capability": capability,
+        "objective": (
+            f"Cobertura exaustiva da stage {stage}: executar TODAS as ferramentas "
+            f"pendentes da skill '{best_skill}'."
+        ),
+        "hypothesis": skill_desc.get(best_skill, "")[:300],
+        "allowed_tools": list(dict.fromkeys(best_cover)),
+        "preferred_tool": best_cover[0],
+        "extra_args": {},
+        "strategy_source": "kill_chain_coverage_gap",
+        "strategy_score": 140,
+        "learning_techniques": [],
+        "evidence_required": [],
+        "constraints": ["read-only probes"],
+        "phase_refs": [],
+        "targets": [str(state.get("target") or "").strip()],
+        "reason": (
+            f"Stage {stage} incompleta: {len(pending)} ferramentas pendentes no universo "
+            f"da stage. Skill '{best_skill}' cobre {len(best_cover)}: {', '.join(best_cover[:8])}."
+        ),
+        "lock_skill": True,
+    }
+    state["pending_pentest_tactic"] = tactic
+    _append_action(state, "coverage_gap_tactic", {
+        "stage": stage, "tactic_id": tactic_id, "skill": best_skill,
+        "covers": best_cover, "pending_total": len(pending),
+    })
+    return tactic
 
 def _ensure_pentest_strategy(state: AgentState) -> dict[str, Any]:
     strategy = dict(state.get("pentest_strategy") or {})
