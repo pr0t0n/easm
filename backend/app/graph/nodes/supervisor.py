@@ -919,11 +919,44 @@ def _ensure_pentest_strategy(state: AgentState) -> dict[str, Any]:
 
 
 def _next_pentest_tactic(state: AgentState) -> dict[str, Any] | None:
-    from app.graph.kill_chain import stage_allows_skill
+    from app.graph.kill_chain import stage_allows_skill, next_kill_chain_stage, KILL_CHAIN_STAGES
 
-    coverage_gap = _coverage_gap_tactic_for_stage(state)
-    if coverage_gap:
-        return coverage_gap
+    # ── DEFINITIVE kill-chain ordering ───────────────────────────────────
+    # The pentest MUST walk RECONNAISSANCE → VULNERABILITY_ANALYSIS →
+    # EXPLOITATION before any reporting — you cannot exploit/bypass what
+    # you have not first FOUND. The coverage tactic sweeps every tool of
+    # the current stage; when that stage is fully swept we advance to the
+    # next stage IN-PLACE and retry. So the coverage tactic keeps
+    # returning work until ACTIONS_ON_OBJECTIVES — it is impossible for
+    # the supervisor to finalize (governance/executive) with
+    # vulnerability-analysis or exploitation skipped.
+    for _hop in range(len(KILL_CHAIN_STAGES) + 1):
+        coverage_gap = _coverage_gap_tactic_for_stage(state)
+        if coverage_gap:
+            return coverage_gap
+        cur = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+        nxt = next_kill_chain_stage(cur)
+        if nxt == cur:
+            break  # terminal stage — nothing left to sweep
+        state["kill_chain_stage"] = nxt
+        _append_note(
+            state,
+            f"Kill-chain: stage '{cur}' totalmente varrida (todas as ferramentas "
+            f"tentadas) → avancando para '{nxt}'.",
+            phase="kill-chain-gate",
+        )
+        try:
+            from app.graph.tracer import emit_trace as _emit_trace
+            _sid = state.get("scan_id")
+            if _sid:
+                _emit_trace(
+                    scan_id=int(_sid), iteration=int(state.get("loop_iteration", 0)),
+                    event_type="stage_advanced", from_node="supervisor", to_node="supervisor",
+                    status="success",
+                    payload={"new_stage": nxt, "reason": "coverage_exhausted"},
+                )
+        except Exception:
+            pass
 
     strategy = _ensure_pentest_strategy(state)
     completed_ids = _completed_pentest_tactic_ids(state)
@@ -1197,7 +1230,14 @@ def supervisor_node(state: AgentState) -> AgentState:
         )
 
     next_tactic: dict[str, Any] | None = None
-    if not state.get("objective_met") and remaining > 2:
+    # Kill-chain has absolute priority: while the pentest has not walked
+    # RECON → VULN_ANALYSIS → EXPLOITATION (i.e. stage != terminal), the
+    # supervisor MUST keep pursuing pentest work — objective_met cannot
+    # short-circuit it. You cannot finalize a report on exploitation that
+    # was never reached. Only `remaining <= 2` (hard iteration budget)
+    # forces finalize.
+    _kc_terminal = str(state.get("kill_chain_stage") or "").upper() in {"ACTIONS_ON_OBJECTIVES"}
+    if remaining > 2 and (not _kc_terminal or not state.get("objective_met")):
         next_tactic = _next_pentest_tactic(state)
 
     if next_tactic:
