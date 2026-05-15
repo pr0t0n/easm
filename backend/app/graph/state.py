@@ -120,6 +120,10 @@ class AgentState(TypedDict):
     # Default initial value is "RECONNAISSANCE"; only advances when stage-exit
     # criteria are satisfied (see app.graph.kill_chain.advance_kill_chain_stage).
     kill_chain_stage: str
+    # Deterministic pentest phase walker: index into PENTEST_PHASES (0=P01..21=P22).
+    # The supervisor walks P01→P22 in strict order; each phase executes ALL its
+    # tools before the index advances. This is the authoritative pentest contract.
+    pentest_phase_index: int
     # Hypothesis-driven execution: every tactic must be backed by at least
     # one hypothesis derived from recon evidence. Refreshed by the workflow
     # after each tool run via app.services.hypothesis_engine.

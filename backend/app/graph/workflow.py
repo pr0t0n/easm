@@ -243,6 +243,7 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["current_node"] = current_node
                 sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
                 sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
+                sd["pentest_phase_index"] = int(state.get("pentest_phase_index", 0) or 0)
                 sd["pentest_hypotheses"] = list(state.get("pentest_hypotheses") or [])[:30]
                 job.state_data = sd
                 # Persist tech_stack to its dedicated column too (queryable by GIN index).
@@ -1635,6 +1636,7 @@ def initial_state(
         "detected_tech_stack": [],
         "tech_stack_signature": "",
         "kill_chain_stage": "RECONNAISSANCE",
+        "pentest_phase_index": 0,
         "pentest_hypotheses": [],
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},

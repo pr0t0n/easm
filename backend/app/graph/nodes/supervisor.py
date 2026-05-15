@@ -918,8 +918,133 @@ def _ensure_pentest_strategy(state: AgentState) -> dict[str, Any]:
     return strategy
 
 
+# Phase id → kill_chain_stage label (UI/trace coherence only; the phase
+# walker bypasses the stage gate — the phase IS the authority).
+_PHASE_TO_KC_STAGE: dict[str, str] = {
+    **{f"P{n:02d}": "RECONNAISSANCE" for n in range(1, 11)},
+    "P11": "VULNERABILITY_ANALYSIS",
+    **{f"P{n:02d}": "EXPLOITATION" for n in range(12, 21)},
+    "P21": "VULNERABILITY_ANALYSIS",
+    "P22": "EXPLOITATION",
+}
+
+
+def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
+    """DETERMINISTIC P01→P22 walker — THE authoritative pentest contract.
+
+    Walks PENTEST_PHASES in strict order. For the current phase it runs
+    EVERY installed tool the library defines for that phase; the phase
+    index only advances when every tool of the phase has been attempted
+    (success OR failure — a failing tool must not stall the chain).
+
+    No phase is skipped. No randomness. P01, then P02, ... then P22.
+    Returns None only when all 22 phases are done.
+    """
+    from app.graph.mission import PENTEST_PHASES, SKILL_CATALOG
+    from app.services.tool_catalog import is_tool_installed
+
+    distinct = _distinct_executed_tools(state)
+    runtime = dict(state.get("tool_runtime") or {})
+
+    def _attempted(tool: str) -> bool:
+        if tool in distinct:
+            return True
+        return int((runtime.get(tool) or {}).get("attempts", 0) or 0) >= 1
+
+    # phase id → first catalog skill that declares the phase
+    phase_skill: dict[str, str] = {}
+    for sk in SKILL_CATALOG:
+        for ph in (sk.get("phases") or []):
+            phase_skill.setdefault(str(ph), str(sk.get("id") or ""))
+    node_default_skill = {
+        "asset_discovery": "recon-web-crawl",
+        "threat_intel": "osint-exposure-intel",
+        "risk_assessment": "vuln-nuclei-cve",
+    }
+
+    idx = int(state.get("pentest_phase_index", 0) or 0)
+    total = len(PENTEST_PHASES)
+    while idx < total:
+        phase = PENTEST_PHASES[idx]
+        ph_id = str(phase.get("id") or f"P{idx + 1:02d}")
+        node = str(phase.get("node") or "asset_discovery")
+        all_tools = [str(t) for t in (phase.get("tools") or [])]
+        installed = [t for t in all_tools if is_tool_installed(t)]
+        not_installed = [t for t in all_tools if t not in installed]
+        pending = [t for t in installed if not _attempted(t)]
+
+        if not installed:
+            state.setdefault("logs_terminais", []).append(
+                f"[phase-walker] {ph_id} {phase.get('title')}: nenhuma ferramenta com "
+                f"profile Kali ({all_tools}) — fase pulada."
+            )
+            idx += 1
+            continue
+        if not pending:
+            state.setdefault("logs_terminais", []).append(
+                f"[phase-walker] {ph_id} {phase.get('title')}: COMPLETA "
+                f"({len(installed)} ferramentas tentadas)."
+            )
+            idx += 1
+            continue
+
+        # ── Build the tactic for THIS phase ──────────────────────────────
+        state["pentest_phase_index"] = idx
+        state["kill_chain_stage"] = _PHASE_TO_KC_STAGE.get(ph_id, "RECONNAISSANCE")
+        skill_id = phase_skill.get(ph_id) or node_default_skill.get(node, "recon-web-crawl")
+        tactic = {
+            "tactic_id": f"phase:{ph_id}:remaining-{len(pending)}",
+            "skill_id": skill_id,
+            "capability": node,
+            "objective": (
+                f"{ph_id} {phase.get('title')}: validar a biblioteca e EXECUTAR "
+                f"todas as {len(installed)} ferramentas da fase, em ordem."
+            ),
+            "hypothesis": (
+                f"Fase {ph_id} do pentest sequencial. Biblioteca define ferramentas="
+                f"{installed}. Tecnica/comando vem do skill_runtime."
+            ),
+            "allowed_tools": pending,
+            "preferred_tool": pending[0],
+            "extra_args": {},
+            "strategy_source": "phase_walker",
+            "strategy_score": 200,
+            "learning_techniques": [],
+            "evidence_required": [],
+            "constraints": [],
+            "phase_refs": [ph_id],
+            "targets": [],
+            "reason": (
+                f"Phase walker deterministico {ph_id} ({phase.get('title')}): "
+                f"{len(pending)} pendente(s) de {len(installed)} — {', '.join(pending[:12])}"
+                + (f" | sem profile: {', '.join(not_installed)}" if not_installed else "")
+            ),
+            "lock_skill": True,
+            "bypass_stage_gate": True,
+        }
+        state["pending_pentest_tactic"] = tactic
+        _append_action(state, "phase_walker_tactic", {
+            "phase": ph_id, "title": phase.get("title"), "node": node,
+            "pending": pending, "installed": len(installed),
+            "not_installed": not_installed,
+        })
+        return tactic
+
+    # All 22 phases walked.
+    state["pentest_phase_index"] = total
+    return None
+
+
 def _next_pentest_tactic(state: AgentState) -> dict[str, Any] | None:
     from app.graph.kill_chain import stage_allows_skill, next_kill_chain_stage, KILL_CHAIN_STAGES
+
+    # ── PRIORITY 0: deterministic P01→P22 phase walker ───────────────────
+    # The phase walker IS the pentest contract. While any of the 22 phases
+    # still has an unrun tool it returns a tactic — the supervisor cannot
+    # skip a phase, cannot go random, cannot finalize early.
+    phase_tactic = _phase_walker_tactic(state)
+    if phase_tactic:
+        return phase_tactic
 
     # ── DEFINITIVE kill-chain ordering ───────────────────────────────────
     # The pentest MUST walk RECONNAISSANCE → VULNERABILITY_ANALYSIS →
@@ -1373,16 +1498,22 @@ def supervisor_node(state: AgentState) -> AgentState:
         # 2. Tech-stack auto-lock.
         # 3. Remaining strategy queue.
         # 4. Heuristic skill selection.
+        # Phase walker (strategy_source=phase_walker) and kill-chain coverage
+        # both OUTRANK the isolated hypothesis. The phase walker is the
+        # deterministic P01→P22 contract — when it produced next_tactic we
+        # dispatch it directly, bypassing the stage gate and hypothesis.
         coverage_tactic = (
             next_tactic
-            if next_tactic and str(next_tactic.get("strategy_source") or "") == "kill_chain_coverage_gap"
+            if next_tactic and str(next_tactic.get("strategy_source") or "") in
+            {"kill_chain_coverage_gap", "phase_walker"}
             else None
         )
         if coverage_tactic and str(coverage_tactic.get("capability") or "") == next_node:
             chosen_skill = _selected_skill_from_tactic(coverage_tactic)
             state.setdefault("logs_terminais", []).append(
-                f"[supervisor] cobertura obrigatoria vence hipotese isolada: "
-                f"tactic={coverage_tactic.get('tactic_id')} skill={coverage_tactic.get('skill_id')}"
+                f"[supervisor] {coverage_tactic.get('strategy_source')} dispatch: "
+                f"tactic={coverage_tactic.get('tactic_id')} skill={coverage_tactic.get('skill_id')} "
+                f"tools={coverage_tactic.get('allowed_tools')}"
             )
         else:
             hypothesis_tactic = _hypothesis_driven_tactic(state, capability=next_node)
