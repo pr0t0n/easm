@@ -44,6 +44,30 @@ def _normalize_tool(name: str | None) -> str:
     return str(name or "").strip().lower()
 
 
+def _phase_attempts_from_state(state: dict[str, Any]) -> dict[str, dict[str, set[str]]]:
+    """Parse workflow run ids in the phase-walker format.
+
+    The DB table intentionally deduplicates by scan/tool/target, while the
+    deterministic pentest walker records phase-scoped ids in state_data as:
+    `{phase_id}|{target}|{tool}`. The phase monitor must use this phase-scoped
+    evidence; otherwise a phase can look "skipped" just because the graph node
+    name was not visited directly.
+    """
+    attempts: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for raw in list(state.get("executed_tool_runs") or []):
+        parts = str(raw or "").strip().lower().split("|")
+        if len(parts) < 3:
+            continue
+        phase_id = parts[0].upper()
+        if not phase_id.startswith("P"):
+            continue
+        tool = _normalize_tool(parts[-1])
+        target = "|".join(parts[1:-1]).strip().lower()
+        if phase_id and tool:
+            attempts[phase_id][tool].add(target)
+    return attempts
+
+
 def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     """Cross-references state_data, executed_tool_runs, findings, scan_logs.
 
@@ -84,8 +108,10 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "total_seconds": 0.0,
         }
     )
+    run_status_by_tool_target: dict[tuple[str, str], str] = {}
     for r in runs:
         key = _normalize_tool(r.tool_name)
+        target_key = str(r.target or "").strip().lower()
         stats = tool_stats[key]
         stats["tool"] = key
         stats["attempts"] += 1
@@ -97,6 +123,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         else:
             stats["failed"] += 1
         stats["last_status"] = r.status
+        run_status_by_tool_target[(key, target_key)] = str(r.status or "unknown")
         if r.error_message:
             stats["last_error"] = (r.error_message or "")[:300]
         if r.execution_time_seconds:
@@ -132,10 +159,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         def is_tool_installed(_t: str) -> bool:  # type: ignore
             return True
 
-    # Phases (22) — status derived from node completion + tools attempted
+    # Phases (22) — status derived from phase-scoped tool attempts first.
     expected_tools = _expected_tools_by_phase()
+    phase_attempts = _phase_attempts_from_state(state)
+    try:
+        pentest_phase_index = int(state.get("pentest_phase_index", 0) or 0)
+    except Exception:
+        pentest_phase_index = 0
     phases: list[dict[str, Any]] = []
-    for phase in PENTEST_PHASES:
+    for phase_idx, phase in enumerate(PENTEST_PHASES):
         pid = phase["id"]
         node = phase["node"]
         node_done = node in completed_caps
@@ -143,33 +175,64 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         tools_expected = [_normalize_tool(t) for t in phase.get("tools", [])]
         tools_installed = [t for t in tools_expected if is_tool_installed(t)]
         tools_uninstalled = [t for t in tools_expected if not is_tool_installed(t)]
-        tools_used = [t for t in tools_expected if tool_stats.get(t, {}).get("attempts", 0) > 0]
-        tools_success = [t for t in tools_used if tool_stats.get(t, {}).get("success", 0) > 0]
+        phase_tool_targets = phase_attempts.get(str(pid).upper(), {})
+        tools_used = [t for t in tools_expected if t in phase_tool_targets]
+
+        def _phase_tool_counts(tool: str) -> dict[str, int]:
+            counts = {"success": 0, "failed": 0, "skipped": 0, "unknown": 0}
+            targets = phase_tool_targets.get(tool, set())
+            for target in targets:
+                status = run_status_by_tool_target.get((tool, str(target or "").lower()))
+                if status == "success":
+                    counts["success"] += 1
+                elif status == "skipped":
+                    counts["skipped"] += 1
+                elif status:
+                    counts["failed"] += 1
+                else:
+                    counts["unknown"] += 1
+            # Older scans may not have phase-scoped DB rows. In that case, the
+            # state run id still proves the phase attempted the tool.
+            if targets and sum(counts.values()) == counts["unknown"]:
+                global_last = str(tool_stats.get(tool, {}).get("last_status") or "").lower()
+                if global_last == "success":
+                    counts["success"] += 1
+                elif global_last == "skipped":
+                    counts["skipped"] += 1
+                elif global_last:
+                    counts["failed"] += 1
+            return counts
+
+        tools_success = [t for t in tools_used if _phase_tool_counts(t)["success"] > 0]
         tools_failed = [
             t for t in tools_used
-            if tool_stats.get(t, {}).get("failed", 0) > 0
-            and tool_stats.get(t, {}).get("success", 0) == 0
-            and tool_stats.get(t, {}).get("skipped", 0) == 0
+            if _phase_tool_counts(t)["failed"] > 0 and _phase_tool_counts(t)["success"] == 0
         ]
         tools_skipped = [
             t for t in tools_used
-            if tool_stats.get(t, {}).get("skipped", 0) > 0
-            and tool_stats.get(t, {}).get("success", 0) == 0
-            and tool_stats.get(t, {}).get("failed", 0) == 0
+            if _phase_tool_counts(t)["skipped"] > 0
+            and _phase_tool_counts(t)["success"] == 0
+            and _phase_tool_counts(t)["failed"] == 0
         ]
         # Distinguish "missing because unavailable in Kali" vs "ready but skipped".
-        tools_missing_uninstalled = [t for t in tools_uninstalled if tool_stats.get(t, {}).get("attempts", 0) == 0]
-        tools_missing_unused = [t for t in tools_installed if tool_stats.get(t, {}).get("attempts", 0) == 0]
+        tools_missing_uninstalled = [t for t in tools_uninstalled if t not in tools_used]
+        tools_missing_unused = [t for t in tools_installed if t not in tools_used]
         tools_missing = tools_missing_uninstalled + tools_missing_unused
+        phase_started = bool(tools_used) or phase_idx < pentest_phase_index
+        effective_node_visited = node_visited or phase_started
 
-        if not node_visited:
-            status_label = "skipped"
+        if not tools_installed:
+            status_label = "no_tools_installed"
+        elif not effective_node_visited:
+            status_label = "pending"
         elif tools_missing_unused and tools_success:
             # Some tools ran but other Kali-ready tools weren't tried.
             status_label = "partial_coverage"
         elif tools_success and not tools_missing_unused:
             status_label = "executed"
-        elif tools_skipped and not tools_failed:
+        elif tools_failed:
+            status_label = "attempted_failed"
+        elif tools_skipped:
             status_label = "node_visited_no_tools"
         elif tools_used:
             status_label = "attempted_failed"
@@ -186,8 +249,10 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "title": phase["title"],
             "node": node,
             "status": status_label,
-            "node_visited": node_visited,
+            "node_visited": effective_node_visited,
             "node_completed": node_done,
+            "phase_started": phase_started,
+            "phase_index": phase_idx,
             "tools_expected": tools_expected,
             "tools_installed": tools_installed,
             "tools_uninstalled": tools_uninstalled,

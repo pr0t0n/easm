@@ -1597,7 +1597,30 @@ def _source_group_from_details(details: dict) -> str:
         return "osint"
     if node in {"vuln", "fuzzing", "api", "code_js"} or worker in {"analise_vulnerabilidade", "vuln"}:
         return "vuln"
-    if tool in {"nikto", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
+    if tool in {
+        "nikto",
+        "nuclei",
+        "nmap-vulscan",
+        "nmap-http-enum",
+        "nmap-ssl-vuln",
+        "nmap-smb-vuln",
+        "nmap-ssh-audit",
+        "vulscan",
+        "sslscan",
+        "testssl",
+        "shcheck",
+        "curl-headers",
+        "wafw00f",
+        "sqlmap",
+        "dalfox",
+        "wapiti",
+        "wpscan",
+        "hydra",
+        "medusa",
+        "jwt_tool",
+        "ffuf-post",
+        "ffuf-values",
+    }:
         return "vuln"
     return "other"
 
@@ -1608,6 +1631,18 @@ def _is_vulnerability_row(row: dict) -> bool:
     if source_group == "vuln":
         return True
     if severity in {"critical", "high", "medium"}:
+        return True
+    category = str(row.get("category") or "").strip()
+    if source_group != "osint" and category in {
+        "Application Security",
+        "Software Patching",
+        "Web Encryption",
+        "Network Filtering",
+        "Authentication",
+        "Authorization",
+        "Data Exposure",
+        "System Hosting",
+    }:
         return True
     return False
 
@@ -3022,6 +3057,8 @@ def list_findings_paginated(
     severity: str | None = None,
     status_filter: str = "all",
     target: str | None = None,
+    scan_id: int | None = Query(default=None, ge=1),
+    sort: str = Query(default="severity"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=50000),
     db: Session = Depends(get_db),
@@ -3030,20 +3067,60 @@ def list_findings_paginated(
     query = _authorized_finding_query(db, current_user)
 
     if severity:
-        query = query.filter(Finding.severity == severity.lower())
+        severity_values = [
+            item.strip().lower()
+            for item in re.split(r"[,;\s]+", severity)
+            if item.strip().lower() in {"critical", "high", "medium", "low", "info"}
+        ]
+        if severity_values:
+            query = query.filter(Finding.severity.in_(severity_values))
     if target:
         query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        query = query.filter(Finding.scan_job_id == scan_id)
 
     lifecycle_query = _authorized_finding_query(db, current_user)
     if target:
         lifecycle_query = lifecycle_query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        lifecycle_query = lifecycle_query.filter(Finding.scan_job_id == scan_id)
     lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).all()
     lifecycle_status = _build_finding_lifecycle_status_map(lifecycle_rows)
 
-    rows = query.order_by(Finding.created_at.desc()).all()
+    rows = query.all()
     normalized_status = status_filter.strip().lower()
     if normalized_status in {"open", "closed", "false_positive"}:
         rows = [finding for finding in rows if lifecycle_status.get(finding.id, "open") == normalized_status]
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+    def _created_ts(finding: Finding) -> float:
+        try:
+            return float(finding.created_at.timestamp()) if finding.created_at else 0.0
+        except Exception:
+            return 0.0
+
+    normalized_sort = str(sort or "severity").strip().lower()
+    if normalized_sort == "date_asc":
+        rows.sort(key=lambda finding: _created_ts(finding))
+    elif normalized_sort == "date_desc":
+        rows.sort(key=lambda finding: -_created_ts(finding))
+    elif normalized_sort == "scan_asc":
+        rows.sort(key=lambda finding: (int(finding.scan_job_id or 0), -_created_ts(finding)))
+    elif normalized_sort == "scan_desc":
+        rows.sort(key=lambda finding: (-int(finding.scan_job_id or 0), -_created_ts(finding)))
+    elif normalized_sort == "target":
+        rows.sort(key=lambda finding: (str(finding.scan_job.target_query if finding.scan_job else "").lower(), -_created_ts(finding)))
+    elif normalized_sort == "tool":
+        rows.sort(key=lambda finding: (str(finding.tool or "").lower(), severity_rank.get(str(finding.severity or "info").lower(), 9), -_created_ts(finding)))
+    else:
+        rows.sort(
+            key=lambda finding: (
+                severity_rank.get(str(finding.severity or "info").lower(), 9),
+                -float(finding.risk_score or 0),
+                -_created_ts(finding),
+            )
+        )
 
     total = len(rows)
     rows = rows[offset:offset + limit]
@@ -3083,6 +3160,8 @@ def list_findings_paginated(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "sort": normalized_sort,
+        "scan_id": scan_id,
     }
 
 
@@ -3371,25 +3450,35 @@ def scan_report(
         target_value = technical.get("full_url") or _sanitize_text(details.get("url") or details.get("target") or job.target_query)
         report_id = f"F-{finding.id}"
         signature = _finding_signature(normalized_title, sev, target_value)
+        source_context = {
+            **details,
+            "tool": finding.tool or details.get("tool"),
+        }
         vulnerability_rows.append(
             {
                 "index": len(vulnerability_rows) + 1,
                 "signature": signature,
-            "id": report_id,
+                "id": report_id,
+                "finding_id": finding.id,
+                "scan_job_id": finding.scan_job_id,
                 "cve": _sanitize_text(finding.cve or ""),
                 "target": target_value,
                 "full_url": technical.get("full_url") or target_value,
-            "endpoint": technical.get("endpoint") or "/",
-            "http_method": technical.get("http_method") or "GET",
-            "parameter": technical.get("parameter") or "-",
+                "endpoint": technical.get("endpoint") or "/",
+                "http_method": technical.get("http_method") or "GET",
+                "parameter": technical.get("parameter") or "-",
                 "name": normalized_title,
                 "problem": normalized_title,
                 "service": _sanitize_text(technical.get("service") or "-"),
                 "version": _sanitize_text(technical.get("version") or ""),
                 "cvss": details.get("cvss_score") or details.get("cvss") or finding.risk_score or "-",
+                "risk_score": finding.risk_score,
+                "confidence_score": finding.confidence_score,
                 "risk_text": _risk_text(sev, finding.confidence_score),
                 "severity": sev,
                 "category": category,
+                "created_at": finding.created_at.isoformat() if finding.created_at else None,
+                "latest_seen_at": finding.created_at.isoformat() if finding.created_at else None,
                 "header_name": _sanitize_text(details.get("header_name") or ""),
                 "header_issue": _sanitize_text(details.get("header_issue") or ""),
                 "owasp": _sanitize_text(framework_ctx.get("owasp") or "-"),
@@ -3441,7 +3530,7 @@ def scan_report(
                 "technical_context": _sanitize_text(
                     f"step={technical.get('step') or '-'}; node={technical.get('node') or '-'}; tool={technical.get('tool') or '-'}; asset={technical.get('asset') or '-'}; porta={technical.get('port') or '-'}; servico={technical.get('service') or '-'}"
                 ),
-                "source_group": _source_group_from_details(details),
+                "source_group": _source_group_from_details(source_context),
                 "is_false_positive": bool(finding.is_false_positive),
             }
         )
@@ -3487,6 +3576,8 @@ def scan_report(
 
     open_rows = [row for row in vulnerability_rows if not row["is_false_positive"]]
     open_vulnerability_table = [row for row in open_rows if _is_vulnerability_row(row)]
+    if not open_vulnerability_table and open_rows:
+        open_vulnerability_table = list(open_rows)
     open_recon_table = [row for row in open_rows if str(row.get("source_group") or "") == "recon"]
     open_osint_table = [row for row in open_rows if str(row.get("source_group") or "") == "osint"]
 

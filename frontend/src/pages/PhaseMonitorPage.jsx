@@ -9,7 +9,8 @@ const STATUS_STYLES = {
   no_tools_installed:             { className: "ds-badge",                   label: "Sem tools" },
   node_completed_no_phase_tools:  { className: "ds-badge ds-badge--high",    label: "Node OK / sem tools" },
   node_visited_no_tools:          { className: "ds-badge ds-badge--info",    label: "Visitou / sem tools" },
-  skipped:                        { className: "ds-badge",                   label: "Pulou" },
+  pending:                        { className: "ds-badge",                   label: "Pendente" },
+  skipped:                        { className: "ds-badge",                   label: "Ignorada" },
 };
 
 const SEVERITY_COLORS = {

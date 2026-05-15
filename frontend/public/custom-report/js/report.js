@@ -141,6 +141,49 @@ function applyUiFilters(rows) {
   });
 }
 
+function normalizeFindingForReport(finding) {
+  const details = finding && typeof finding.details === 'object' && finding.details ? finding.details : {};
+  const target = details.full_url || details.url || details.target || details.asset || details.endpoint || '-';
+  return {
+    id: finding?.id ? `F-${finding.id}` : '-',
+    finding_id: finding?.id,
+    scan_job_id: finding?.scan_job_id,
+    name: finding?.title || details.title || 'Achado sem descrição',
+    problem: finding?.title || details.title || 'Achado sem descrição',
+    severity: finding?.severity || 'info',
+    cve: finding?.cve || details.cve || '',
+    cvss: finding?.cvss || finding?.risk_score || details.cvss || details.cvss_score || '-',
+    risk_score: finding?.risk_score || details.risk_score || 0,
+    confidence_score: finding?.confidence_score || details.confidence_score || 0,
+    target,
+    target_summary: target,
+    full_url: target,
+    endpoint: details.endpoint || details.path || '/',
+    parameter: details.parameter || details.param || '-',
+    category: details.category || 'Application Security',
+    tool: details.tool || finding?.tool || '-',
+    step: details.step || '-',
+    node: details.node || '-',
+    evidence: details.evidence || details.output || details.stdout || details.reason || details.description || '-',
+    payload: details.payload || details.request || details.command || '-',
+    recommendation: finding?.recommendation || details.recommendation || 'Ver documentação do achado.',
+    recommendation_structured: details.recommendation_structured || {},
+    recommendation_llm: details.recommendation_llm || {},
+    created_at: finding?.created_at || details.created_at || null,
+    latest_seen_at: finding?.created_at || details.latest_seen_at || null,
+    affected_count: 1,
+    affected_assets: target && target !== '-' ? [target] : [],
+  };
+}
+
+function vulnerabilityRowsFromReport(report) {
+  const v2 = (report?.state_data || {}).report_v2 || {};
+  const table = Array.isArray(v2.vulnerability_table) ? v2.vulnerability_table : [];
+  if (table.length > 0) return table;
+  const findings = Array.isArray(report?.findings) ? report.findings : [];
+  return findings.map(normalizeFindingForReport);
+}
+
 function renderScopeSummary(report) {
   const box = document.getElementById('scopeSummaryBar');
   if (!box) return;
@@ -1236,9 +1279,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderLLMRisk(report);
     renderOperationalImprovements(report);
     const v2 = (report?.state_data || {}).report_v2 || {};
-    allVulns = Array.isArray(v2.vulnerability_table)
-      ? v2.vulnerability_table
-      : (Array.isArray(report?.findings) ? report.findings : []);
+    allVulns = vulnerabilityRowsFromReport(report);
     const summaryOverride = filteredSummaryFromRows(applyUiFilters(allVulns));
     setText('kpiCritical', summaryOverride.critical);
     setText('kpiHigh', summaryOverride.high);

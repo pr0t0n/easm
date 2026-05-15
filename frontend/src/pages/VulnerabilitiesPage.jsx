@@ -9,8 +9,6 @@ const SEV_STYLE = {
   info: "ds-badge ds-badge--info",
 };
 
-const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-
 const sanitizeText = (value) => {
   if (value == null) return "";
   return String(value)
@@ -23,12 +21,15 @@ const sanitizeText = (value) => {
 export default function VulnerabilitiesPage() {
   const [rows, setRows] = useState([]);
   const [targets, setTargets] = useState([]);
+  const [scans, setScans] = useState([]);
   const [page, setPage] = useState({ total: 0, limit: 50, offset: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [severitiesFilter, setSeveritiesFilter] = useState(["critical", "high", "medium", "low", "info"]);
   const [statusFilter, setStatusFilter] = useState("open");
   const [targetQuery, setTargetQuery] = useState("");
+  const [scanFilter, setScanFilter] = useState("");
+  const [sortMode, setSortMode] = useState("severity");
 
   const loadTargets = async () => {
     try {
@@ -39,12 +40,22 @@ export default function VulnerabilitiesPage() {
     }
   };
 
+  const loadScans = async () => {
+    try {
+      const { data } = await client.get("/api/scans", { params: { limit: 300 } });
+      setScans(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("Falha ao carregar scans:", err);
+    }
+  };
+
   const load = async () => {
     setLoading(true);
     setError("");
     try {
       const params = {
         status_filter: statusFilter,
+        sort: sortMode,
         limit: page.limit,
         offset: page.offset,
       };
@@ -52,13 +63,10 @@ export default function VulnerabilitiesPage() {
         params.severity = severitiesFilter.join(",");
       }
       if (targetQuery.trim()) params.target = targetQuery.trim();
+      if (scanFilter) params.scan_id = scanFilter;
 
       const { data } = await client.get("/api/findings/page", { params });
-      const items = (data?.items || []).sort((a, b) => {
-        const sevA = String(a.severity || "low").toLowerCase();
-        const sevB = String(b.severity || "low").toLowerCase();
-        return (SEV_ORDER[sevA] ?? 99) - (SEV_ORDER[sevB] ?? 99);
-      });
+      const items = Array.isArray(data?.items) ? data.items : [];
       setRows(items);
       setPage((prev) => ({
         ...prev,
@@ -73,15 +81,16 @@ export default function VulnerabilitiesPage() {
 
   useEffect(() => {
     loadTargets();
+    loadScans();
   }, []);
 
   useEffect(() => {
     setPage((p) => ({ ...p, offset: 0 }));
-  }, [severitiesFilter, statusFilter, targetQuery]);
+  }, [severitiesFilter, statusFilter, targetQuery, scanFilter, sortMode]);
 
   useEffect(() => {
     load();
-  }, [severitiesFilter, statusFilter, page.offset, targetQuery]);
+  }, [severitiesFilter, statusFilter, page.offset, targetQuery, scanFilter, sortMode]);
 
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
@@ -109,7 +118,7 @@ export default function VulnerabilitiesPage() {
         <h2 className="text-xl font-semibold">Vulnerabilities</h2>
         <p className="mt-1 text-sm text-slate-300">Base real de findings coletados pelos scans.</p>
 
-        <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <div className="mt-3 grid gap-2 md:grid-cols-4">
           <select
             className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
             value={targetQuery}
@@ -122,11 +131,32 @@ export default function VulnerabilitiesPage() {
               </option>
             ))}
           </select>
+          <select
+            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
+            value={scanFilter}
+            onChange={(e) => setScanFilter(e.target.value)}
+          >
+            <option value="">Todos os scans</option>
+            {scans.map((scan) => (
+              <option key={scan.id} value={scan.id}>
+                #{scan.id} · {String(scan.target_query || "(sem alvo)").slice(0, 48)} · {scan.status}
+              </option>
+            ))}
+          </select>
           <select className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="open">Abertas</option>
             <option value="closed">Fechadas</option>
             <option value="false_positive">Falsos positivos</option>
             <option value="all">Todas</option>
+          </select>
+          <select className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+            <option value="severity">Ordenar por risco</option>
+            <option value="date_desc">Mais recentes</option>
+            <option value="date_asc">Mais antigas</option>
+            <option value="scan_desc">Scan mais novo</option>
+            <option value="scan_asc">Scan mais antigo</option>
+            <option value="target">Alvo</option>
+            <option value="tool">Ferramenta</option>
           </select>
         </div>
 
@@ -215,6 +245,7 @@ export default function VulnerabilitiesPage() {
             <thead>
               <tr className="border-b border-slate-700 text-xs uppercase text-slate-400">
                 <th className="px-3 py-2">ID</th>
+                <th className="px-3 py-2">Scan</th>
                 <th className="px-3 py-2">Vulnerabilidade</th>
                 <th className="px-3 py-2">CVE</th>
                 <th className="px-3 py-2">CVSS</th>
@@ -238,6 +269,7 @@ export default function VulnerabilitiesPage() {
                 return (
                   <tr key={item.id} className="border-b border-slate-800 hover:bg-slate-800/50">
                     <td className="px-3 py-2 text-slate-400">{item.id}</td>
+                    <td className="px-3 py-2 text-cyan-300">#{item.scan_job_id || "-"}</td>
                     <td className="max-w-xs truncate px-3 py-2 font-medium">{sanitizeText(item.title)}</td>
                     <td className="px-3 py-2 text-blue-300">{item.cve || "-"}</td>
                     <td className="px-3 py-2 text-amber-300">{item.cvss != null ? Number(item.cvss).toFixed(1) : "-"}</td>
