@@ -1,6 +1,6 @@
-# ScriptKidd.o - Plataforma de Análise de Vulnerabilidade Automatizada
+# ScriptKidd.o - Plataforma de Pentest Defensivo e Visibilidade de Ambiente
 
-ScriptKidd.o e uma plataforma de analise de vulnerabilidade automatizada orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
+ScriptKidd.o e uma plataforma de pentest defensivo orientada por agentes, criada para aumentar a visibilidade de ambientes autorizados e apoiar a protecao do ambiente. Ela nao deve se comportar como um scanner generico de vulnerabilidades: o backend orquestra hipoteses, skills, tecnicas, ferramentas e evidencias com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
 
 Este README descreve o fluxo real de operacao da plataforma: o que acontece quando um scan nasce, como as ferramentas sao escolhidas e executadas, onde cada dado e persistido, como a UI enxerga o progresso e como investigar falhas.
 
@@ -64,7 +64,9 @@ Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *
 
 ## Principios Operacionais
 
+- Premissa do produto: ScriptKidd.o e uma ferramenta de pentest defensivo para visibilidade e protecao de ambientes, nao apenas uma analise automatizada de vulnerabilidades.
 - Uso defensivo e autorizado: scans devem ser executados somente contra alvos sob escopo aprovado.
+- Pensamento de pentest: cada scan deve escolher skills, formular hipoteses, executar tecnicas, correlacionar conhecimento RAG/MCP e adaptar o plano conforme as evidencias.
 - Execucao centralizada: workers nao executam ferramentas ofensivas localmente; todos chamam o `kali_runner`.
 - Evidencia primeiro: achados criticos e altos precisam de evidencia tecnica, impacto e reprodutibilidade para serem promovidos.
 - Visibilidade continua: progresso, logs, jobs, ferramentas usadas, findings, ratings e workers ficam expostos via API e frontend.

@@ -780,7 +780,14 @@ def extract_pentest_hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
             })
 
     # ── H8: WordPress (wpscan) ────────────────────────────────────────────
-    if "wordpress" in tech_stack or "wp-content" in haystack or "wp-admin" in haystack:
+    # Do not trust the bare "wordpress" tag by itself: failed wpscan output
+    # and generic catalog text can poison the tech stack. Require concrete
+    # WordPress artefacts before spending cycles on CMS testing.
+    wordpress_evidence = any(
+        signal in haystack
+        for signal in ("wp-content", "wp-admin", "wp-includes", "wp-json", "wp-login.php", "x-pingback")
+    )
+    if wordpress_evidence:
         for url in urls[:3]:
             _push({
                 "family": "cms",

@@ -283,6 +283,107 @@ def stage_allows_skill(stage: str, skill_id: str) -> bool:
     return skill_key in STAGE_ALLOWED_SKILLS.get(stage_key, set())
 
 
+def pending_mandatory_tools(state: dict) -> list[str]:
+    """Returns the tools still needed to satisfy the current stage's
+    mandatory coverage contract. Empty list = coverage met.
+
+    The supervisor uses this to build a mandatory-coverage tactic that
+    OUTRANKS isolated hypotheses — kill-chain mandatory coverage is the
+    minimum pentest contract and an isolated hypothesis must not be
+    allowed to short-circuit it ("ran one tool and was satisfied").
+
+    For every unsatisfied `mandatory_tools_all_of` group, ALL tools of
+    the group are returned as candidates (the supervisor picks whichever
+    its skills can run). For `min_tools_by_group`, only the still-missing
+    tools are returned.
+    """
+    current = str(state.get("kill_chain_stage") or "").strip().upper() or KILL_CHAIN_STAGES[0]
+    if current not in KILL_CHAIN_STAGES:
+        current = KILL_CHAIN_STAGES[0]
+    criteria = STAGE_EXIT_CRITERIA.get(current, {})
+    if not criteria:
+        return []
+
+    executed_runs = list(state.get("executed_tool_runs") or [])
+    distinct_tools = {str(run).lower().split("|")[-1] for run in executed_runs if "|" in str(run)}
+    distinct_tools.discard("")
+
+    pending: list[str] = []
+
+    for group in (criteria.get("mandatory_tools_any_of") or []):
+        normalized = [str(t).strip().lower() for t in group if str(t).strip()]
+        if not _mandatory_group_applies_to_state(current, normalized, state):
+            continue
+        if not any(t in distinct_tools for t in normalized):
+            pending.extend(normalized)
+
+    for group in (criteria.get("mandatory_tools_all_of") or []):
+        normalized = [str(t).strip().lower() for t in group if str(t).strip()]
+        if not _mandatory_group_applies_to_state(current, normalized, state):
+            continue
+        if not any(t in distinct_tools for t in normalized):
+            pending.extend(normalized)
+
+    for group_spec in (criteria.get("min_tools_by_group") or []):
+        tools = [str(t).strip().lower() for t in (group_spec.get("tools") or []) if str(t).strip()]
+        required = int(group_spec.get("count", 0) or 0)
+        if not tools or required <= 0:
+            continue
+        have = [t for t in tools if t in distinct_tools]
+        if len(have) < required:
+            pending.extend(t for t in tools if t not in distinct_tools)
+
+    # Dedupe preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in pending:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+_WEB_URL_OPTIONAL_RECON_GROUPS: tuple[set[str], ...] = (
+    {"subfinder", "amass", "sublist3r", "assetfinder", "findomain"},
+    {"dnsx", "dnsrecon-brt", "dnsenum"},
+    {"naabu", "nmap", "masscan"},
+)
+
+
+def _state_targets_web_url(state: dict) -> bool:
+    """True when the operator scoped a concrete web app URL.
+
+    For URL-scoped app pentests, subdomain/DNS/port-discovery groups are useful
+    enrichment, but they must not block progression to parameter validation.
+    The HTTP fingerprint, crawl/archive and P04 groups remain mandatory.
+    """
+    target = str(state.get("target") or "").strip().lower()
+    if target.startswith(("http://", "https://")):
+        return True
+    for asset in list(state.get("lista_ativos") or []):
+        value = str(asset or "").strip().lower()
+        if value.startswith(("http://", "https://")):
+            return True
+    return False
+
+
+def _mandatory_group_applies_to_state(stage: str, group: list[str], state: dict) -> bool:
+    if str(stage or "").strip().upper() != "RECONNAISSANCE":
+        return True
+    if not _state_targets_web_url(state):
+        return True
+
+    group_tools = {
+        str(tool).strip().lower()
+        for tool in list(group or [])
+        if str(tool).strip()
+    }
+    if not group_tools:
+        return False
+
+    return not any(group_tools.issubset(optional_group) for optional_group in _WEB_URL_OPTIONAL_RECON_GROUPS)
+
+
 def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
     """Inspect state and decide if the current stage can advance.
 
@@ -303,7 +404,7 @@ def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
     lista_ativos = list(state.get("lista_ativos") or [])
 
     # Count distinct tools executed (run_id contains "|tool" suffix)
-    distinct_tools = {run.split("|")[-1] for run in executed_runs if "|" in run}
+    distinct_tools = {str(run).lower().split("|")[-1] for run in executed_runs if "|" in str(run)}
     distinct_tools.discard("")
 
     min_tool_runs = int(criteria.get("tool_runs", 0))
@@ -312,13 +413,19 @@ def advance_kill_chain_stage(state: dict) -> tuple[str, bool, str]:
 
     # mandatory_tools_any_of: each inner group requires at least one match.
     for group in (criteria.get("mandatory_tools_any_of") or []):
-        if not any(t in distinct_tools for t in group):
+        normalized_group = [str(t).strip().lower() for t in group if str(t).strip()]
+        if not _mandatory_group_applies_to_state(current, normalized_group, state):
+            continue
+        if not any(t in distinct_tools for t in normalized_group):
             return current, False, f"missing_any_of:{','.join(group[:6])}"
 
     # mandatory_tools_all_of: each inner group requires at least one match
     # — same semantics as any_of but iterating over multiple groups.
     for group in (criteria.get("mandatory_tools_all_of") or []):
-        if not any(t in distinct_tools for t in group):
+        normalized_group = [str(t).strip().lower() for t in group if str(t).strip()]
+        if not _mandatory_group_applies_to_state(current, normalized_group, state):
+            continue
+        if not any(t in distinct_tools for t in normalized_group):
             return current, False, f"missing_group:{','.join(group[:6])}"
 
     for group_spec in (criteria.get("min_tools_by_group") or []):

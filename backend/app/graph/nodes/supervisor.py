@@ -292,7 +292,14 @@ def _stack_evidence_strict(state: AgentState) -> dict[str, bool]:
         blob += " " + str(f.get("title") or "")
     blob_l = blob.lower()
     return {
-        "wordpress": ("wp-content" in blob_l) or ("wp-admin" in blob_l) or ("wp-includes" in blob_l) or ("wpscan" in blob_l) or ("x-pingback" in blob_l),
+        "wordpress": (
+            ("wp-content" in blob_l)
+            or ("wp-admin" in blob_l)
+            or ("wp-includes" in blob_l)
+            or ("wp-json" in blob_l)
+            or ("wp-login.php" in blob_l)
+            or ("x-pingback" in blob_l)
+        ),
         "php":       ("phpsessid" in blob_l) or ("x-powered-by: php" in blob_l) or (".php" in blob_l) or ("php/" in blob_l),
         "mysql":     ("you have an error in your sql syntax" in blob_l) or ("mariadb" in blob_l) or ("mysql" in blob_l) or ("phpmyadmin" in blob_l),
         "asp.net":   ("x-aspnet-version" in blob_l) or ("asp.net_sessionid" in blob_l) or ("aspsessionid" in blob_l) or (".aspx" in blob_l) or (".asp" in blob_l) or ("microsoft-iis" in blob_l),
@@ -811,6 +818,58 @@ def _coverage_gap_tactic_for_stage(state: AgentState) -> dict[str, Any] | None:
             _append_action(state, "coverage_gap_tactic", {"stage": stage, "tactic_id": tactic_id, "missing": missing})
             return tactic
 
+    if stage == "EXPLOITATION":
+        # Minimum exploitation contract: an injection scanner AND the cheap
+        # curl validators AND a content/param fuzz tool. Without this, a
+        # single SQLi hypothesis would close the stage ("rodou sqlmap e
+        # ficou satisfeito") while XSS/LFI/auth/SSRF go untested.
+        groups = [
+            ("injection-scanner", ["sqlmap", "dalfox", "wapiti"]),
+            ("curl-validator", ["curl-headers"]),
+            ("content-fuzz", ["ffuf", "ffuf-params", "wfuzz", "gobuster", "feroxbuster"]),
+        ]
+        missing_groups = [
+            (name, tools) for name, tools in groups
+            if not any(t in distinct_tools for t in tools)
+        ]
+        if missing_groups:
+            missing_names = ",".join(name for name, _ in missing_groups)
+            done = len(groups) - len(missing_groups)
+            tactic_id = f"coverage:exploitation:injection-battery:{done}"
+            if tactic_id in completed_ids:
+                return None
+            # Propose the first tool of each missing group + the rest as
+            # fallback. vuln-injection skill owns sqlmap/dalfox/wapiti/ffuf.
+            proposed: list[str] = []
+            for _, tools in missing_groups:
+                proposed.extend(tools)
+            allowed = list(dict.fromkeys([*proposed, "sqlmap", "dalfox", "wapiti", "curl-headers", "ffuf-params"]))
+            tactic = {
+                "tactic_id": tactic_id,
+                "skill_id": "vuln-injection",
+                "capability": "risk_assessment",
+                "objective": "Garantir bateria minima de exploracao: injection scanner + curl validators + content fuzz.",
+                "hypothesis": (
+                    "Uma unica ferramenta de SQLi nao cobre XSS/LFI/SSRF/auth. A bateria minima "
+                    "combina sqlmap/dalfox/wapiti, curl-headers e fuzz de parametros."
+                ),
+                "allowed_tools": allowed,
+                "preferred_tool": proposed[0] if proposed else "sqlmap",
+                "extra_args": {},
+                "strategy_source": "kill_chain_coverage_gap",
+                "strategy_score": 125,
+                "learning_techniques": [],
+                "evidence_required": ["injection signal", "reflected payload", "auth bypass evidence"],
+                "constraints": ["read-only probes", "sem exploit destrutivo"],
+                "phase_refs": ["P12", "P14", "P15"],
+                "targets": [str(state.get("target") or "").strip()],
+                "reason": f"Exploracao incompleta: grupos faltando = {missing_names}.",
+                "lock_skill": True,
+            }
+            state["pending_pentest_tactic"] = tactic
+            _append_action(state, "coverage_gap_tactic", {"stage": stage, "tactic_id": tactic_id, "missing": missing_names})
+            return tactic
+
     return None
 
 
@@ -1198,6 +1257,27 @@ def supervisor_node(state: AgentState) -> AgentState:
             next_node = "END"
             termination_reason = termination_reason or "full_cycle_completed"
 
+    # ── Kill-chain stage → capability safety net ─────────────────────────
+    # The coverage tactics normally route next_node per stage, but when they
+    # are exhausted the linear fallback (asset_discovery→threat_intel→...)
+    # ignores the stage. If we are already in VULN_ANALYSIS/EXPLOITATION the
+    # vuln tools (nuclei, nmap-vulscan, sqlmap, dalfox) live in
+    # risk_assessment — never let the supervisor regress to asset_discovery
+    # once the kill-chain has advanced past recon.
+    _kc_stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+    if (
+        _kc_stage in {"VULNERABILITY_ANALYSIS", "EXPLOITATION"}
+        and next_node in {"asset_discovery", "threat_intel"}
+        and "risk_assessment" not in completed
+    ):
+        _append_note(
+            state,
+            f"Kill-chain stage={_kc_stage}: roteando capability {next_node}→risk_assessment "
+            "(ferramentas de vuln/exploit vivem em risk_assessment).",
+            phase="kill-chain-gate",
+        )
+        next_node = "risk_assessment"
+
     if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
         _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
         next_node = "threat_intel"
@@ -1239,27 +1319,49 @@ def supervisor_node(state: AgentState) -> AgentState:
     state["capability_context"] = {}
     if next_node in TOOL_CAPABILITY_NODES:
         state["pending_capability_node"] = next_node
-        # ── Hypothesis-driven tactic takes precedence over everything else.
-        # If recon produced a hypothesis whose suggested_skill is allowed in
-        # the current stage AND capability, we lock to it. No hypothesis ->
-        # fall through to tech-stack auto-lock -> queue -> heuristic.
-        hypothesis_tactic = _hypothesis_driven_tactic(state, capability=next_node)
-        if hypothesis_tactic:
-            chosen_skill = _selected_skill_from_tactic(hypothesis_tactic)
+        # ── Tactic-selection priority ─────────────────────────────────────
+        # 0. Kill-chain MANDATORY COVERAGE — the minimum pentest contract.
+        #    A coverage-gap tactic (strategy_source=kill_chain_coverage_gap)
+        #    means a stage still lacks mandatory evidence (P04 parameter
+        #    discovery, nuclei+nikto web audit, etc). This MUST beat an
+        #    isolated hypothesis — otherwise a single high-confidence
+        #    hypothesis short-circuits the sweep ("rodou uma ferramenta e
+        #    ficou satisfeito"). Coverage represents breadth; the
+        #    hypothesis represents depth — breadth-first until the contract
+        #    is met.
+        # 1. Hypothesis-driven tactic (depth) — once coverage is satisfied.
+        # 2. Tech-stack auto-lock.
+        # 3. Remaining strategy queue.
+        # 4. Heuristic skill selection.
+        coverage_tactic = (
+            next_tactic
+            if next_tactic and str(next_tactic.get("strategy_source") or "") == "kill_chain_coverage_gap"
+            else None
+        )
+        if coverage_tactic and str(coverage_tactic.get("capability") or "") == next_node:
+            chosen_skill = _selected_skill_from_tactic(coverage_tactic)
+            state.setdefault("logs_terminais", []).append(
+                f"[supervisor] cobertura obrigatoria vence hipotese isolada: "
+                f"tactic={coverage_tactic.get('tactic_id')} skill={coverage_tactic.get('skill_id')}"
+            )
         else:
-            auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
-            if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
-                chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
-            elif next_tactic:
-                chosen_skill = _selected_skill_from_tactic(next_tactic)
+            hypothesis_tactic = _hypothesis_driven_tactic(state, capability=next_node)
+            if hypothesis_tactic:
+                chosen_skill = _selected_skill_from_tactic(hypothesis_tactic)
             else:
-                chosen_skill = _select_skill_for_capability(
-                    capability=next_node,
-                    active_skills=list(state.get("active_skills") or []),
-                    scan_mode=str(state.get("scan_mode") or "unit"),
-                    tech_stack=list(state.get("detected_tech_stack") or []),
-                    kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
-                )
+                auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
+                if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
+                    chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+                elif next_tactic:
+                    chosen_skill = _selected_skill_from_tactic(next_tactic)
+                else:
+                    chosen_skill = _select_skill_for_capability(
+                        capability=next_node,
+                        active_skills=list(state.get("active_skills") or []),
+                        scan_mode=str(state.get("scan_mode") or "unit"),
+                        tech_stack=list(state.get("detected_tech_stack") or []),
+                        kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+                    )
         if chosen_skill:
             state["selected_skill"] = chosen_skill
             if chosen_skill.get("tactic_id"):

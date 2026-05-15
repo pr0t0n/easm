@@ -70,15 +70,73 @@ _ENV_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 # URL extraction regex — works on HTML and JS source.
 _URL_LITERAL = re.compile(r'[\"\']((?:https?:)?//[^\s\"\'<>)]+|/[A-Za-z0-9_\-./?&=%:#]+)[\"\']')
 _API_PATH_LITERAL = re.compile(r'[\"\'](/(?:api|graphql|v\d+|rest|services|admin|user|auth|login|logout|register|reset|account|me|data|search|query|export|import|upload|download|file|files|backup|config|settings|webhook|callback)[A-Za-z0-9_\-./?&=%:#]*)[\"\']', re.IGNORECASE)
+# <a href> / <link href> / <area href> / form action — the REAL site map.
+# Used to discover navigable pages (login.aspx, Comments.aspx?id=, etc.)
+_HREF_RE = re.compile(r'<(?:a|link|area)\b[^>]*\bhref=[\"\']([^\"\'#]+)[\"\']', re.IGNORECASE)
+_FORM_ACTION_RE = re.compile(r'<form\b[^>]*\baction=[\"\']([^\"\']+)[\"\']', re.IGNORECASE)
 
 # Tags we care about during HTML pass — keep simple, no full DOM parser.
 _FORM_RE   = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
-_INPUT_RE  = re.compile(r"<input\b([^>]*)>", re.IGNORECASE)
+_INPUT_RE  = re.compile(r"<(?:input|textarea|select)\b([^>]*)>", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(r'<script\b[^>]*\bsrc=[\"\']([^\"\']+)[\"\']', re.IGNORECASE)
 _INLINE_SCRIPT_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 _META_RE   = re.compile(r'<meta\b[^>]*\b(?:name|property)=[\"\']([^\"\']+)[\"\'][^>]*\bcontent=[\"\']([^\"\']+)[\"\']', re.IGNORECASE)
 _COMMENT_RE = re.compile(r"<!--(.*?)-->", re.DOTALL)
 _ATTR_RE   = re.compile(r'\b([a-zA-Z_-]+)\s*=\s*[\"\']([^\"\']*)[\"\']')
+
+# Depth-1 crawl budget — number of same-host pages to fetch beyond root.
+MAX_CRAWL_PAGES = 14
+# Static asset extensions that are NOT injectable endpoints — skip crawl.
+_STATIC_EXT = (
+    ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".map", ".pdf", ".zip", ".mp4",
+    ".webp", ".avif",
+)
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _is_garbage_url(url: str) -> bool:
+    """Reject things the URL-literal regex mis-captures as endpoints:
+    XML-schema namespaces, ASP.NET __VIEWSTATE base64 blobs pasted into a
+    path, data: URIs, and absurdly long opaque path segments.
+    """
+    low = url.lower()
+    if "schemas." in low or "/intellisense/" in low or "w3.org" in low:
+        return True
+    if low.startswith(("data:", "javascript:", "mailto:", "tel:")):
+        return True
+    try:
+        path = urlparse(url).path or ""
+    except Exception:  # noqa: BLE001
+        path = url
+    # Any path SEGMENT >60 chars that is mostly base64 alphabet is almost
+    # always an ASP.NET __VIEWSTATE blob mis-captured as a route. Check
+    # every segment (not just the last) — VIEWSTATE blobs contain `/`.
+    for seg in path.split("/"):
+        seg = seg.strip()
+        if len(seg) > 60 and "." not in seg:
+            b64ish = sum(1 for c in seg if c.isalnum() or c in "+/=")
+            if b64ish / max(1, len(seg)) > 0.92:
+                return True
+    return False
+
+
+def _is_crawlable(url: str, root_host: str) -> bool:
+    """True when url is a same-host HTML page worth fetching in the crawl."""
+    if _is_garbage_url(url):
+        return False
+    if _host_of(url) != root_host:
+        return False
+    low = url.lower().split("?")[0].split("#")[0]
+    if low.endswith(_STATIC_EXT):
+        return False
+    return url.startswith(("http://", "https://"))
 
 
 def _http_get(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> tuple[bytes, dict[str, str], int]:
@@ -138,17 +196,18 @@ def _absolutise(base: str, link: str) -> str:
 
 
 def _extract_urls(text: str, base: str) -> set[str]:
+    import html as _html
     found: set[str] = set()
     for m in _URL_LITERAL.finditer(text):
-        link = m.group(1)
+        link = _html.unescape(m.group(1))  # decode &amp; -> &
         if link.startswith("//"):
             link = "https:" + link
         absu = _absolutise(base, link)
-        if absu.startswith(("http://", "https://")):
+        if absu.startswith(("http://", "https://")) and not _is_garbage_url(absu):
             found.add(absu)
     for m in _API_PATH_LITERAL.finditer(text):
-        absu = _absolutise(base, m.group(1))
-        if absu.startswith(("http://", "https://")):
+        absu = _absolutise(base, _html.unescape(m.group(1)))
+        if absu.startswith(("http://", "https://")) and not _is_garbage_url(absu):
             found.add(absu)
     return found
 
@@ -183,13 +242,58 @@ def _extract_env_refs(text: str) -> list[dict[str, str]]:
     return out
 
 
-def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """Fetch target HTML + referenced JS, extract structured intel.
+def _parse_html_page(page_url: str, body: str) -> dict[str, Any]:
+    """Parse a single HTML page — forms, hrefs, scripts, meta, comments."""
+    import html as _html
+    forms: list[dict[str, Any]] = []
+    for m in _FORM_RE.finditer(body):
+        form = _parse_form(m.group(1), m.group(2))
+        # HTML-unescape the action so query separators are real `&`, not
+        # `&amp;` — otherwise urlparse/parse_qs sees param "amp;NewsAd".
+        raw_action = _html.unescape(form.get("action", "") or "")
+        form["action"] = raw_action
+        form["resolved_action"] = _absolutise(page_url, raw_action or page_url)
+        form["found_on"] = page_url
+        forms.append(form)
 
-    Returns a dict with:
-        target, http_status, headers, cookies, forms, scripts,
-        endpoints, env_refs, secrets, meta, comments, ajax_endpoints,
-        elapsed_ms
+    # <a href> / <link> / <area> / form action — the navigable site map.
+    import html as _html
+    hrefs: set[str] = set()
+    for href in _HREF_RE.findall(body):
+        absu = _absolutise(page_url, _html.unescape(href.strip()))
+        if absu.startswith(("http://", "https://")) and not _is_garbage_url(absu):
+            hrefs.add(absu)
+    for action in _FORM_ACTION_RE.findall(body):
+        absu = _absolutise(page_url, _html.unescape(action.strip()))
+        if absu.startswith(("http://", "https://")) and not _is_garbage_url(absu):
+            hrefs.add(absu)
+
+    script_sources = [_absolutise(page_url, src) for src in _SCRIPT_SRC_RE.findall(body)]
+    inline_scripts = _INLINE_SCRIPT_RE.findall(body)
+    meta_tags = {name: content for name, content in _META_RE.findall(body)}
+    html_comments = [c.strip()[:400] for c in _COMMENT_RE.findall(body) if c.strip()]
+    return {
+        "forms": forms,
+        "hrefs": hrefs,
+        "scripts": script_sources,
+        "inline_scripts": inline_scripts,
+        "meta": meta_tags,
+        "comments": html_comments,
+    }
+
+
+def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """Fetch target HTML, crawl same-host links depth-1, fetch referenced
+    JS, extract structured intel.
+
+    The crawl is the key improvement: a single GET on the root only sees
+    the landing page. Real ASP.NET/PHP apps expose login.aspx,
+    Comments.aspx?id=, Signup.aspx etc. as <a href> links — we follow
+    them so the hypothesis engine gets the actual injectable endpoints.
+
+    Returns a dict with: target, http_status, headers, cookies, forms,
+    scripts, endpoints (same-host only), external_links, ajax_endpoints,
+    pages_crawled, env_refs, secrets, meta, comments, elapsed_ms.
     Safe to call on any URL — never raises.
     """
     import time as _time
@@ -197,30 +301,53 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
 
     raw, headers, status = _http_get(url, timeout=timeout)
     body = raw.decode("utf-8", errors="replace")
+    root_host = _host_of(url)
 
-    parsed_base = urlparse(url)
-    base = urlunparse((parsed_base.scheme or "http", parsed_base.netloc, "/", "", "", ""))
+    # ── Parse root page ──────────────────────────────────────────────────
+    root = _parse_html_page(url, body)
+    forms: list[dict[str, Any]] = list(root["forms"])
+    all_hrefs: set[str] = set(root["hrefs"])
+    script_sources: list[str] = list(root["scripts"])
+    inline_scripts: list[str] = list(root["inline_scripts"])
+    meta_tags: dict[str, str] = dict(root["meta"])
+    html_comments: list[str] = list(root["comments"])
 
-    # ── Forms ────────────────────────────────────────────────────────────
-    forms: list[dict[str, Any]] = []
-    for m in _FORM_RE.finditer(body):
-        form = _parse_form(m.group(1), m.group(2))
-        form["resolved_action"] = _absolutise(url, form.get("action", "") or url)
-        forms.append(form)
-
-    # ── Scripts ──────────────────────────────────────────────────────────
-    script_sources = [_absolutise(url, src) for src in _SCRIPT_SRC_RE.findall(body)][:MAX_JS_PER_TARGET]
-    inline_scripts = _INLINE_SCRIPT_RE.findall(body)
-
-    # ── HTML-level extractions ───────────────────────────────────────────
-    meta_tags = {name: content for name, content in _META_RE.findall(body)}
-    html_comments = [c.strip()[:400] for c in _COMMENT_RE.findall(body) if c.strip()]
-
-    endpoints = _extract_urls(body, url)
+    endpoints: set[str] = _extract_urls(body, url)
     secrets = _extract_secrets(body)
     env_refs = _extract_env_refs(body)
 
-    # ── Fetch each referenced JS, extract more endpoints/env/secrets ────
+    # ── Depth-1 crawl of same-host pages ────────────────────────────────
+    # Pick crawlable same-host HTML pages from the root's hrefs, fetch each,
+    # merge its forms/hrefs/scripts. This is what surfaces login.aspx,
+    # Comments.aspx?id=, etc. that a root-only GET would miss.
+    crawl_queue = sorted(
+        {h for h in all_hrefs if _is_crawlable(h, root_host)},
+        key=lambda u: (len(urlparse(u).query) == 0, u),  # param-bearing first
+    )[:MAX_CRAWL_PAGES]
+    pages_crawled: list[dict[str, Any]] = [{"url": url, "status": status}]
+    for page_url in crawl_queue:
+        praw, _ph, pstatus = _http_get(page_url, timeout=min(15, timeout))
+        pages_crawled.append({"url": page_url, "status": pstatus})
+        if not praw or pstatus >= 400:
+            continue
+        pbody = praw[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
+        parsed = _parse_html_page(page_url, pbody)
+        forms.extend(parsed["forms"])
+        all_hrefs.update(parsed["hrefs"])
+        script_sources.extend(parsed["scripts"])
+        inline_scripts.extend(parsed["inline_scripts"])
+        for cmt in parsed["comments"]:
+            if cmt not in html_comments:
+                html_comments.append(cmt)
+        endpoints.update(_extract_urls(pbody, page_url))
+        secrets.extend(_extract_secrets(pbody))
+        env_refs.extend(_extract_env_refs(pbody))
+
+    # All discovered hrefs ARE endpoints (the real site map).
+    endpoints.update(all_hrefs)
+
+    # ── Fetch referenced JS, extract more endpoints/env/secrets ─────────
+    script_sources = list(dict.fromkeys(script_sources))[:MAX_JS_PER_TARGET]
     js_scanned: list[dict[str, Any]] = []
     for src in script_sources:
         if not src.startswith(("http://", "https://")):
@@ -231,35 +358,51 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
             continue
         jbody = jraw[:MAX_JS_BYTES].decode("utf-8", errors="replace")
         more_eps = _extract_urls(jbody, src)
-        more_secrets = _extract_secrets(jbody)
-        more_envs = _extract_env_refs(jbody)
         endpoints.update(more_eps)
-        secrets.extend(more_secrets)
-        env_refs.extend(more_envs)
+        secrets.extend(_extract_secrets(jbody))
+        env_refs.extend(_extract_env_refs(jbody))
         js_scanned.append({
-            "src": src,
-            "status": jstatus,
-            "bytes": len(jraw),
+            "src": src, "status": jstatus, "bytes": len(jraw),
             "endpoints": len(more_eps),
-            "secrets": len(more_secrets),
-            "env_refs": len(more_envs),
         })
 
-    # Also scan inline scripts.
-    for inline in inline_scripts[:10]:
+    for inline in inline_scripts[:15]:
         endpoints.update(_extract_urls(inline, url))
         secrets.extend(_extract_secrets(inline))
         env_refs.extend(_extract_env_refs(inline))
 
-    # ── AJAX endpoints subset — endpoints that look like APIs ───────────
-    ajax_endpoints = sorted({
-        ep for ep in endpoints
-        if re.search(r"/(api|graphql|rest|v\d+|services|webhook|callback|auth|login|register|reset|me|user|admin|data|search|export|upload|file)\b", ep, re.IGNORECASE)
-    })[:60]
+    # ── Classify endpoints: same-host (injectable) vs external links ────
+    same_host: set[str] = set()
+    external: set[str] = set()
+    for ep in endpoints:
+        if _is_garbage_url(ep):
+            continue
+        # Skip static assets (.css/.js/.png/...) — not injectable endpoints.
+        ep_path = ep.lower().split("?")[0].split("#")[0]
+        if ep_path.endswith(_STATIC_EXT):
+            continue
+        if _host_of(ep) == root_host:
+            same_host.add(ep)
+        else:
+            external.add(ep)
 
-    # Dedupe + cap.
-    endpoints_list = sorted(endpoints)[:200]
-    # Dedupe secrets (string match).
+    # Form actions are always injectable endpoints.
+    for f in forms:
+        ra = f.get("resolved_action")
+        if ra and _host_of(ra) == root_host and not _is_garbage_url(ra):
+            same_host.add(ra)
+
+    endpoints_list = sorted(same_host)[:250]
+    external_list = sorted(external)[:60]
+
+    # ── AJAX/API-pattern endpoints (same-host only) ──────────────────────
+    ajax_endpoints = sorted({
+        ep for ep in same_host
+        if re.search(r"/(api|graphql|rest|v\d+|services|webhook|callback|auth|login|logout|register|signup|reset|me|user|account|admin|data|search|export|import|upload|download|file|comment)s?\b", ep, re.IGNORECASE)
+        or "?" in ep  # any param-bearing URL is a test target
+    })[:80]
+
+    # Dedupe secrets.
     seen_sigs: set[str] = set()
     secrets_unique: list[dict[str, str]] = []
     for s in secrets:
@@ -269,13 +412,11 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         seen_sigs.add(sig)
         secrets_unique.append(s)
 
-    # Cookies from Set-Cookie header(s).
     cookies_raw = headers.get("Set-Cookie", "") or headers.get("set-cookie", "")
     cookies: list[str] = [c.strip() for c in cookies_raw.split(",") if c.strip()] if cookies_raw else []
-
     elapsed_ms = int((_time.perf_counter() - started) * 1000)
 
-    result = {
+    return {
         "target": url,
         "http_status": status,
         "headers": {k: v for k, v in headers.items() if k.lower() in {
@@ -286,18 +427,19 @@ def analyze(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
             "access-control-allow-credentials", "set-cookie", "location",
         }},
         "cookies": cookies,
-        "forms": forms,
+        "forms": forms[:40],
         "meta": meta_tags,
         "html_comments": html_comments[:25],
         "scripts": script_sources,
         "js_scanned": js_scanned,
         "endpoints": endpoints_list,
+        "external_links": external_list,
         "ajax_endpoints": ajax_endpoints,
+        "pages_crawled": pages_crawled,
         "env_refs": env_refs[:60],
         "secrets": secrets_unique[:40],
         "elapsed_ms": elapsed_ms,
     }
-    return result
 
 
 def convert_to_findings(analysis: dict[str, Any], scan_target: str, step_name: str) -> list[dict[str, Any]]:
@@ -343,14 +485,41 @@ def convert_to_findings(analysis: dict[str, Any], scan_target: str, step_name: s
             },
         })
 
-    # 3) Endpoints (especially AJAX/API)
-    for ep in (analysis.get("ajax_endpoints") or [])[:30]:
+    # 3) Endpoints — emit a finding for EVERY same-host endpoint so the
+    # hypothesis engine sees them. Param-bearing endpoints (?id=, ?q=) get
+    # `kind=param_endpoint` so the injection matrix fires per parameter.
+    emitted_eps: set[str] = set()
+    for ep in (analysis.get("endpoints") or [])[:120]:
+        if ep in emitted_eps:
+            continue
+        emitted_eps.add(ep)
+        has_params = "?" in ep
+        is_ajax = ep in set(analysis.get("ajax_endpoints") or [])
+        kind = "param_endpoint" if has_params else ("ajax_endpoint" if is_ajax else "page_endpoint")
         findings.append({
-            "title": f"Endpoint API descoberto: {ep}",
+            "title": f"Endpoint descoberto ({kind}): {ep}",
             "severity": "info",
             "risk_score": 2,
             "source_worker": "code_analyzer",
-            "details": {**base_details, "evidence": ep, "url": ep, "kind": "ajax_endpoint"},
+            "details": {**base_details, "evidence": ep, "url": ep, "kind": kind},
+        })
+
+    # 3b) Crawl summary so the operator sees how deep the analyzer went.
+    pages = analysis.get("pages_crawled") or []
+    if pages:
+        ok_pages = [p for p in pages if isinstance(p, dict) and int(p.get("status") or 0) < 400]
+        findings.append({
+            "title": f"Code-analyzer crawl: {len(ok_pages)}/{len(pages)} paginas, "
+                     f"{len(analysis.get('endpoints') or [])} endpoints, "
+                     f"{len(analysis.get('forms') or [])} forms",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "code_analyzer",
+            "details": {
+                **base_details,
+                "evidence": "; ".join(str(p.get('url')) for p in ok_pages[:15]),
+                "kind": "crawl_summary",
+            },
         })
 
     # 4) Env refs (REACT_APP_*, NEXT_PUBLIC_*, etc.)

@@ -3276,6 +3276,206 @@ EXEMPLO COMPLETO:
             {"name": "HTTP Parameter Pollution", "phase": "P12", "tool": "curl-headers"},
         ],
     },
+    # ─────────────────────────────────────────────────────────────────────
+    # Walkthrough absorption: tutorial0/testphp_vulns
+    # Source repo maps concrete vulnweb findings. We store them as reusable
+    # pentest patterns, not as target-only facts.
+    # ─────────────────────────────────────────────────────────────────────
+    {
+        "title": "Vulnweb Walkthrough - Sensitive Files and Directory Index Pattern",
+        "vulnerability_type": "Information Disclosure",
+        "source_kind": "walkthrough_repository",
+        "source_urls": ["https://github.com/tutorial0/testphp_vulns"],
+        "summary": "Walkthrough-derived pattern for Acunetix/vulnweb-style apps: enumerate backup archives, IDE metadata, admin folders, htaccess, crossdomain.xml, CVS paths, phpinfo, DB helper scripts and directory indexes.",
+        "steps_to_reproduce": """
+AREA: sensitive files + directory index.
+
+Probe these path families on every PHP/ASP.NET training-style or legacy app:
+  /index.zip
+  /.idea/workspace.xml
+  /admin/
+  /Mod_Rewrite_Shop/.htaccess
+  /crossdomain.xml
+  /CVS/Root
+  /secured/phpinfo.php
+  /_mmServerScripts/mysql.php
+  /Flash/
+  /CVS/
+  /.idea/
+
+Execution:
+  1) Run ffuf/dirsearch/feroxbuster with extensions: zip, bak, old, config, xml, php, aspx, ashx.
+  2) Run nikto and nuclei exposure/misconfig templates.
+  3) Confirm interesting hits with curl-headers and preserve status, headers, body title and path.
+  4) If directory index is present, enumerate file names only; do not download bulk content unless explicitly needed for proof.
+
+Evidence:
+  - 200/301/403 on sensitive path
+  - directory index title/listing
+  - phpinfo/config content
+  - internal path, email, local IP or source metadata
+""",
+        "impact": "Exposed source archives, IDE metadata, phpinfo, CVS and admin paths accelerate exploitation by revealing parameters, credentials, internal IPs, framework versions and hidden routes.",
+        "remediation": "Remove backup/source archives and IDE folders from web root. Disable directory listing. Block VCS/metadata paths. Restrict admin/phpinfo/helper scripts by auth and network ACL.",
+        "learned_mission": "In P15, always run sensitive-path enumeration before declaring web recon complete. For vulnweb-like targets, explicit probes for /index.zip, /.idea/, /CVS/, /admin/, /crossdomain.xml and phpinfo-style paths are mandatory.",
+        "learned_prompt": "Use ffuf/dirsearch/feroxbuster plus nikto/nuclei to probe backup archives, IDE metadata, VCS folders, admin dirs, phpinfo and crossdomain.xml. Confirm with curl-headers and preserve evidence.",
+        "affected_phases": ["P05", "P11", "P15"],
+        "affected_skills": ["vuln-information-disclosure", "vuln-directory-enum", "tech-http-fingerprint"],
+        "recommended_tools": ["ffuf", "ffuf-files", "dirsearch", "feroxbuster", "nikto", "nuclei", "curl-headers"],
+        "learned_techniques": [
+            {"name": "Sensitive backup archive probe", "phase": "P15", "tool": "ffuf-files"},
+            {"name": "IDE metadata exposure probe", "phase": "P15", "tool": "ffuf"},
+            {"name": "Directory index validation", "phase": "P15", "tool": "curl-headers"},
+            {"name": "Nikto web server disclosure audit", "phase": "P11", "tool": "nikto"},
+            {"name": "Nuclei exposure templates", "phase": "P11", "tool": "nuclei"},
+        ],
+    },
+    {
+        "title": "Vulnweb Walkthrough - Parameter to Vulnerability Matrix",
+        "vulnerability_type": "Methodology",
+        "source_kind": "walkthrough_repository",
+        "source_urls": ["https://github.com/tutorial0/testphp_vulns"],
+        "summary": "Concrete parameter matrix from testphp_vulns: searchFor/name/uuname/uname/cat/artist/pic/id/file map to XSS, SQLi, auth bypass, file include and SSRF. Use it as a cross-stack parameter heuristic for PHP and ASP.NET targets.",
+        "steps_to_reproduce": """
+AREA: parameter discovery + exploit hypothesis.
+
+Parameter matrix learned from the walkthrough:
+  searchFor  -> reflected XSS, SQLi-style search probe
+  name       -> stored/reflected XSS in guestbook/comment forms
+  uuname     -> registration/user creation SQLi + XSS
+  uname      -> login/userinfo blind SQLi + auth bypass
+  cat        -> SQLi + reflected XSS
+  artist     -> SQLi + reflected XSS
+  pic        -> SQLi / file lookup abuse
+  id         -> SQLi, IDOR/BOLA, route rewrite details
+  file       -> LFI/RFI/SSRF
+
+Execution:
+  1) P04 must discover parameters with at least two tools: arjun + paramspider or ffuf-params.
+  2) For each parameter, generate more than one hypothesis. Do not stop after the first family.
+  3) For SQLi: run sqlmap plus wapiti when target has forms/query params.
+  4) For XSS: run dalfox plus wapiti/nuclei where reflection or forms exist.
+  5) For auth/user fields: run curl login probes and sqlmap when POST target is known.
+  6) For file/path fields: test LFI and SSRF families.
+
+Evidence:
+  - tool result with parameter name
+  - request/response delta
+  - DBMS/error/time signal
+  - reflected canary or confirmed scanner proof
+""",
+        "impact": "A single parameter often has multiple bug classes. Treating cat/artist/id/search/user fields as one scanner pass misses SQLi, XSS, auth bypass and IDOR chains.",
+        "remediation": "Centralize input validation and parameterized queries. Context-encode output. Authorize object access server-side. Restrict file fetch/include parameters to allowlisted values.",
+        "learned_mission": "For every discovered parameter, generate a vulnerability matrix. Specifically prioritize searchFor/name/uuname/uname/cat/artist/pic/id/file and their ASP.NET equivalents such as search, q, id, file, image.",
+        "learned_prompt": "When target exposes forms or query strings, map each param to multiple families: SQLi, XSS, IDOR, LFI, SSRF, auth bypass. Use at least two tools per family where available.",
+        "affected_phases": ["P04", "P12", "P13", "P14", "P16", "P19"],
+        "affected_skills": [
+            "recon-web-crawl", "vuln-injection", "vuln-api-graphql",
+            "vuln-ssrf-redirect", "vuln-auth-bypass", "vuln-idor-access-control",
+        ],
+        "recommended_tools": ["arjun", "paramspider", "ffuf-params", "sqlmap", "wapiti", "dalfox", "nuclei", "curl-headers"],
+        "learned_techniques": [
+            {"name": "P04 parameter discovery with two tools", "phase": "P04", "tool": "arjun"},
+            {"name": "Wayback parameter mining", "phase": "P04", "tool": "paramspider"},
+            {"name": "SQLi on catalog/search/id params", "phase": "P12", "tool": "sqlmap"},
+            {"name": "XSS on search/name/catalog params", "phase": "P12", "tool": "dalfox"},
+            {"name": "Auth SQLi on uname/uuname fields", "phase": "P14", "tool": "curl-headers"},
+            {"name": "IDOR/BOLA on id params", "phase": "P19", "tool": "nuclei"},
+        ],
+    },
+    {
+        "title": "Vulnweb Walkthrough - LFI, php filter and SSRF via file parameter",
+        "vulnerability_type": "File Include / SSRF",
+        "source_kind": "walkthrough_repository",
+        "source_urls": ["https://github.com/tutorial0/testphp_vulns"],
+        "summary": "Walkthrough-derived file-parameter pattern: showimage/file-like endpoints can reveal local source through php://filter and may proxy internal resources through http://127.0.0.1 style SSRF.",
+        "steps_to_reproduce": """
+AREA: file include, source disclosure, SSRF.
+
+Parameter targets:
+  file, path, image, img, pic, show, page, template, include, download
+
+LFI/source disclosure probes:
+  ?file=showimage.php
+  ?file=php://filter/convert.base64-encode/resource=showimage.php
+  ?file=../web.config
+  ?file=../../../../etc/passwd
+
+SSRF probes:
+  ?file=http://127.0.0.1:22
+  ?file=http://localhost/
+  ?file=http://169.254.169.254/latest/meta-data/
+
+Execution:
+  1) Use code-analyzer/katana to find file-like parameters.
+  2) Use curl-headers for deterministic probes and response diff.
+  3) Use nuclei/wapiti for LFI/SSRF templates.
+  4) On PHP, try php://filter source disclosure. On IIS/ASP.NET, try web.config and local handler/source patterns.
+
+Evidence:
+  - base64 PHP/source-like response
+  - local file marker
+  - internal service banner/error
+  - blocked SSRF attempt with distinct network error
+""",
+        "impact": "File include can expose source code, credentials and configuration. SSRF can reach local services or cloud metadata and expand impact beyond the public web surface.",
+        "remediation": "Use opaque file IDs mapped server-side. Reject URL schemes and traversal. Disable PHP wrappers where possible. Block loopback/metadata egress from web servers.",
+        "learned_mission": "Every file/image/path parameter must branch into both LFI and SSRF hypotheses. Use php://filter on PHP targets and web.config/IIS probes on ASP.NET targets.",
+        "learned_prompt": "For file-like params, test php://filter, traversal, web.config and loopback URL fetch. Use curl-headers + nuclei/wapiti and record response deltas.",
+        "affected_phases": ["P04", "P12", "P13"],
+        "affected_skills": ["vuln-injection", "vuln-ssrf-redirect", "vuln-information-disclosure"],
+        "recommended_tools": ["curl-headers", "nuclei", "wapiti", "katana", "arjun"],
+        "learned_techniques": [
+            {"name": "php filter source disclosure", "phase": "P12", "tool": "curl-headers"},
+            {"name": "Traversal/web.config probe", "phase": "P12", "tool": "curl-headers"},
+            {"name": "SSRF via file parameter", "phase": "P13", "tool": "nuclei"},
+            {"name": "Wapiti LFI module", "phase": "P12", "tool": "wapiti"},
+        ],
+    },
+    {
+        "title": "Vulnweb Walkthrough - Weak Credentials and Login Baseline",
+        "vulnerability_type": "Authentication Bypass",
+        "source_kind": "walkthrough_repository",
+        "source_urls": ["https://github.com/tutorial0/testphp_vulns"],
+        "summary": "Walkthrough-derived auth baseline: test/default credentials such as test/test must be part of a controlled login checklist, along with SQLi auth bypass probes on user/password fields.",
+        "steps_to_reproduce": """
+AREA: login baseline and weak credentials.
+
+Controlled baseline credential pairs:
+  test:test
+  admin:admin
+  admin:password
+  administrator:administrator
+  guest:guest
+
+Execution:
+  1) Discover login/userinfo/register forms with code-analyzer and katana.
+  2) Try low-volume default credentials only when login form exists and scope allows auth testing.
+  3) Test auth SQLi on username/password fields:
+     username=' OR '1'='1
+     username=admin'--
+  4) Compare status, redirect, cookie set, body length and error messages.
+  5) Keep attempts bounded and logged; do not run volumetric brute force without operator-provided lists.
+
+Evidence:
+  - login success with weak credential
+  - session cookie issued
+  - auth bypass redirect/status delta
+  - SQL error/time delta on auth field
+""",
+        "impact": "Weak/default credentials and SQLi in auth forms can lead to account takeover and privileged access with minimal effort.",
+        "remediation": "Remove default accounts, enforce strong passwords, rate-limit login attempts, monitor failed login patterns and parameterize auth queries.",
+        "learned_mission": "Every discovered login/register/userinfo form receives a bounded auth baseline: weak credential check, SQLi auth bypass check and response-delta comparison.",
+        "learned_prompt": "If code-analyzer finds login fields, try bounded defaults like test/test and SQLi auth payloads via curl. Escalate to hydra only with explicit wordlists.",
+        "affected_phases": ["P12", "P14"],
+        "affected_skills": ["vuln-auth-bypass", "vuln-injection"],
+        "recommended_tools": ["curl-headers", "sqlmap", "hydra"],
+        "learned_techniques": [
+            {"name": "Default credential baseline", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Auth SQLi form probe", "phase": "P14", "tool": "curl-headers"},
+            {"name": "Bounded hydra auth validation", "phase": "P14", "tool": "hydra"},
+        ],
+    },
 ]
 
 

@@ -53,7 +53,7 @@ _TECH_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("golang", re.compile(r"\bgolang\b|server:\s*go-?http", re.I)),
     ("python", re.compile(r"\bpython/\d|gunicorn|uvicorn|fastapi", re.I)),
     # ── CMS ────────────────────────────────────────────────────────────────
-    ("wordpress", re.compile(r"\bwordpress\b|wp-content|wp-admin|wp-includes|wpscan", re.I)),
+    ("wordpress", re.compile(r"wp-content|wp-admin|wp-includes|wp-json|wp-login\.php|x-pingback", re.I)),
     ("joomla", re.compile(r"\bjoomla\b|joomla!|/components/com_", re.I)),
     ("drupal", re.compile(r"\bdrupal\b|drupal/\d|x-drupal-cache|drupal\.settings", re.I)),
     ("magento", re.compile(r"\bmagento\b|mage/cookies|magento_storeconfig", re.I)),
