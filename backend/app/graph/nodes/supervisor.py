@@ -943,13 +943,17 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
     from app.graph.mission import PENTEST_PHASES, SKILL_CATALOG
     from app.services.tool_catalog import is_tool_installed
 
-    distinct = _distinct_executed_tools(state)
-    runtime = dict(state.get("tool_runtime") or {})
+    # Per-phase attempt check: a tool is "done" for a phase ONLY when it
+    # ran UNDER THAT PHASE. The same tool runs again in later phases for
+    # different views (httpx P02 port-probe vs P05 header fingerprint;
+    # nuclei across P09/P11/P13/P16/P19; nmap in P02 and P18). The run id
+    # format is `{phase_id}|{target}|{tool}`.
+    executed_runs = [str(r).lower() for r in (state.get("executed_tool_runs") or [])]
 
-    def _attempted(tool: str) -> bool:
-        if tool in distinct:
-            return True
-        return int((runtime.get(tool) or {}).get("attempts", 0) or 0) >= 1
+    def _attempted_in_phase(ph_id: str, tool: str) -> bool:
+        prefix = f"{ph_id.lower()}|"
+        suffix = f"|{tool.lower()}"
+        return any(r.startswith(prefix) and r.endswith(suffix) for r in executed_runs)
 
     # phase id → first catalog skill that declares the phase
     phase_skill: dict[str, str] = {}
@@ -971,7 +975,7 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
         all_tools = [str(t) for t in (phase.get("tools") or [])]
         installed = [t for t in all_tools if is_tool_installed(t)]
         not_installed = [t for t in all_tools if t not in installed]
-        pending = [t for t in installed if not _attempted(t)]
+        pending = [t for t in installed if not _attempted_in_phase(ph_id, t)]
 
         if not installed:
             state.setdefault("logs_terminais", []).append(
