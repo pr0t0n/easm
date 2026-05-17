@@ -618,6 +618,21 @@ td {
   flex-shrink: 0;
 }
 
+/* Sidebar item icon (Lucide-style inline SVG) */
+.sb-ico {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--sidebar-group-label);
+  transition: color 160ms ease;
+}
+.sb-ico svg { width: 16px; height: 16px; }
+.sb-item:hover .sb-ico { color: var(--sidebar-text); }
+.sb-item.active .sb-ico { color: #ffffff; }
+
 .sb-item:hover {
   background: var(--sidebar-hover-bg);
   color: var(--sidebar-hover-text);
