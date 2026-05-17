@@ -23,38 +23,26 @@ export default function OperationsCenterPage() {
   );
 
   return (
-    <main className="flex flex-col gap-0">
-      <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
-        <div className="mx-auto max-w-7xl">
-          <h1 className="section-title">Centro Operacional</h1>
-          <p className="mt-2 text-sm text-slate-400">
-            Monitoramento de fases, agentes, jobs, workers, logs e evolução ofensiva em uma única área.
-          </p>
-        </div>
+    <main className="dpage">
+      <div className="page-intro">
+        <h2>Centro Operacional.</h2>
+        <div className="sub">fases, agentes, jobs, workers, logs e evolução ofensiva em uma única área</div>
       </div>
 
-      <div className="flex-1 px-8 py-8">
-        <div className="mx-auto max-w-7xl space-y-6">
-          <div className="panel flex flex-wrap gap-2 p-2">
-            {modules.map((module) => (
-              <button
-                key={module.id}
-                type="button"
-                onClick={() => setActiveModule(module.id)}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition md:text-sm ${
-                  activeModule === module.id
-                    ? "bg-blue-600 text-white"
-                    : "border border-slate-700 bg-slate-900/40 text-slate-300 hover:bg-slate-800"
-                }`}
-              >
-                {module.label}
-              </button>
-            ))}
-          </div>
-
-          <ActiveComponent />
-        </div>
+      <div className="t-tools" style={{ marginBottom: 18 }}>
+        {modules.map((module) => (
+          <button
+            key={module.id}
+            type="button"
+            onClick={() => setActiveModule(module.id)}
+            className={`filter${activeModule === module.id ? " active" : ""}`}
+          >
+            {module.label}
+          </button>
+        ))}
       </div>
+
+      <ActiveComponent />
     </main>
   );
 }
