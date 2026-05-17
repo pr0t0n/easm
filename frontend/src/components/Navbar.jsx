@@ -4,7 +4,7 @@ import client from "../api/client";
 import { authStore } from "../store/auth";
 
 const PAGE_META = {
-  "/":               { eyebrow: "ScriptKidd.o · Vulnerability Dashboard", title: "Visão Consolidada de Risco e Maturidade", sub: "Análise contínua de vulnerabilidades" },
+  "/":               { eyebrow: "Overview · Dashboard", title: "Postura de risco, em tempo real.", sub: "Pipeline LangGraph · Kali Runner · análise contínua de vulnerabilidades" },
   "/targets":        { eyebrow: "Vulnerability Ops · Targets", title: "Alvos Autorizados",       sub: "Inventário de domínios e ativos sob escopo" },
   "/scan":           { eyebrow: "Vulnerability Ops · Scans",   title: "Scans e Agendamentos",    sub: "Execução unitária e recorrente em uma única operação" },
   "/phase-monitor":  { eyebrow: "Vulnerability Ops · Phases",  title: "Monitor de Fases",        sub: "Cobertura de tools por fase do pipeline 22-step" },
