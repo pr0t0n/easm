@@ -186,7 +186,7 @@ export default function WorkersPage() {
   );
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
+    <main className="dpage space-y-4">
       {/* Header */}
       <section className="panel p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -253,10 +253,11 @@ export default function WorkersPage() {
             </p>
             {loading && !pipeline && <p className="text-sm text-slate-400">Carregando pipeline…</p>}
 
-            {/* Cards horizontais com setas */}
-            <div className="flex flex-wrap items-start gap-2 xl:flex-nowrap">
+            {/* Cards do pipeline — sempre quebram em múltiplas linhas para que
+                o fluxo inteiro seja visível, sem overflow horizontal. */}
+            <div className="flex flex-wrap items-start gap-2">
               {agents.map((agent, idx) => (
-                <div key={agent.id} className="flex shrink-0 items-start gap-2 xl:contents">
+                <div key={agent.id} className="flex items-start gap-2">
                   <AgentCard
                     agent={agent}
                     expanded={expandedAgent === agent.id}
@@ -268,14 +269,12 @@ export default function WorkersPage() {
               ))}
               {/* END node */}
               {agents.length > 0 && (
-                <>
+                <div className="flex items-start gap-2">
                   <Arrow />
-                  <div className="hidden shrink-0 items-start xl:flex">
-                    <div className="flex h-10 items-center rounded-xl border border-slate-700 bg-slate-900/50 px-3">
-                      <span className="text-xs font-bold uppercase tracking-widest text-slate-500">END</span>
-                    </div>
+                  <div className="flex h-10 items-center rounded-xl border border-slate-700 bg-slate-900/50 px-3">
+                    <span className="text-xs font-bold uppercase tracking-widest text-slate-500">END</span>
                   </div>
-                </>
+                </div>
               )}
             </div>
           </section>

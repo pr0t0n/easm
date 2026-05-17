@@ -64,7 +64,7 @@ export default function ConfigurationPage() {
 
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
+    <main className="dpage space-y-4">
       <section className="panel p-4">
         <div className="flex flex-wrap gap-2">
           <button onClick={() => setActiveTab("runtime")} className={`rounded-lg px-3 py-1 text-sm ${activeTab === "runtime" ? "bg-blue-700 text-white" : "border border-slate-700 bg-slate-800 text-slate-300"}`}>Runtime</button>
