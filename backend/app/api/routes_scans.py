@@ -43,6 +43,7 @@ from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
 from app.workers.worker_groups import get_worker_groups
 from app.services.adversary_technique_catalog import ADVERSARY_TECHNIQUE_CATALOG
+from app.services.tool_context_registry import dashboard_bas_variables
 
 
 router = APIRouter(prefix="/api", tags=["scans"])
@@ -5533,6 +5534,7 @@ def dashboard_insights(
             ],
         },
     }
+    bas_command_center["variables"] = dashboard_bas_variables(bas_command_center)
 
     return {
         "stats": {

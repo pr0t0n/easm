@@ -20,11 +20,14 @@ MISSION_ITEMS = [
 PENTEST_PHASES = [
     # Phase 1 – Recon
     {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",
-     "tools": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"]},
+     "tools": [
+         "subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain",
+         "assetfinder", "alterx", "shuffledns", "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+     ]},
     {"id": "P02", "title": "Port & Service Scan", "node": "asset_discovery",
      "tools": ["naabu", "nmap", "masscan", "httpx"]},
     {"id": "P03", "title": "Web Crawling & JS Extraction", "node": "asset_discovery",
-     "tools": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper"]},
+     "tools": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider"]},
     {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
      "tools": ["arjun", "paramspider", "ffuf-params", "ffuf-values", "wfuzz"]},
     # Phase 2 – Tech Fingerprint
@@ -34,7 +37,7 @@ PENTEST_PHASES = [
      "tools": ["wafw00f", "curl-headers"]},
     # Phase 3 – OSINT
     {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks", "metagoofil"]},
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
     {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
      "tools": ["theHarvester"]},
     {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
@@ -43,13 +46,16 @@ PENTEST_PHASES = [
      "tools": ["nuclei", "shodan-cli", "trufflehog"]},
     # Phase 4 – Vulnerability Assessment
     {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
-     "tools": ["nuclei", "nmap-vulscan"]},
+     "tools": [
+         "nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+         "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
+     ]},
     {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
      "tools": ["sqlmap", "dalfox", "wapiti", "nikto"]},
     {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
      "tools": ["nuclei", "interactsh-client"]},
     {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
-     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec", "impacket", "evilwinrm"]},
+     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"]},
     {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
      "tools": ["ffuf", "ffuf-files", "ffuf-params", "gobuster", "feroxbuster", "dirsearch", "wfuzz"]},
     {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
@@ -66,7 +72,7 @@ PENTEST_PHASES = [
     {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
      "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
     {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
-     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks", "eslint", "jshint", "ast-grep"]},
+     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks"]},
 ]
 
 
@@ -286,7 +292,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Identificação de hashing fraco (MD5/SHA1), encoding como criptografia (Base64/ROT13/z85), e cifras quebradas em cookies/JWT/cupons.",
         "triggers": ["md5", "rainbow", "base64 cookie", "rot13", "z85", "broken hash", "weak cipher", "encoding misuse", "jwt none"],
-        "playbook": ["jwt_tool", "burp-cli", "trufflehog", "hashcat"],
+        "playbook": ["jwt_tool", "trufflehog", "gitleaks"],
         "phases": ["P11", "P14", "P22"],
     },
     {

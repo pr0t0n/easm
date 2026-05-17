@@ -317,7 +317,7 @@ def _score_skill(
         if _skill_matches_learning(skill, item)
     ]
     if learning_skill_matches:
-        score += min(36, 18 * len(learning_skill_matches))
+        score += min(72, 48 * len(learning_skill_matches))
         matched_by.append("learning_skill:" + ",".join(learning_skill_matches[:4]))
 
     category_hints = GROUP_CATEGORY_HINTS.get(group_key, set())
@@ -368,6 +368,36 @@ def _relevant_techniques(
     return relevant[:8]
 
 
+def _worker_rule_context(worker_group: str, phase: str | None, candidate_tools: list[str]) -> dict[str, Any]:
+    try:
+        from app.workers.worker_groups import get_sub_agent_rules, get_worker_rules
+
+        rules = get_worker_rules(worker_group)
+        sub_agents = get_sub_agent_rules(worker_group, phase=phase, tools=candidate_tools)
+    except Exception:
+        return {
+            "worker_group": worker_group,
+            "global": {},
+            "rules": [],
+            "sub_agents": [],
+            "selected_sub_agents": [],
+            "mcp_required": True,
+            "reanalysis_required": False,
+        }
+
+    global_rules = dict(rules.get("global") or {})
+    return {
+        "worker_group": rules.get("worker_group") or worker_group,
+        "global": global_rules,
+        "rules": list(rules.get("rules") or []),
+        "sub_agents": list(rules.get("sub_agents") or []),
+        "selected_sub_agents": sub_agents,
+        "mcp_required": True,
+        "reanalysis_required": bool(sub_agents) or str(worker_group or "").lower() in {"asset_discovery", "recon", "reconnaissance"},
+        "reanalysis_triggers": list(global_rules.get("reanalysis_triggers") or []),
+    }
+
+
 def resolve_skill_invocation(
     *,
     worker_group: str,
@@ -389,6 +419,7 @@ def resolve_skill_invocation(
     active_ids = {str(item.get("id") or "") for item in active if str(item.get("id") or "").strip()}
     learning = _extract_learning(playbook)
     phase_scope = _phase_tokens(worker_group, phase)
+    worker_rules = _worker_rule_context(worker_group, phase, tools)
 
     scored: list[tuple[int, int, dict[str, Any], list[str]]] = []
     catalog_order = {str(skill.get("id") or ""): idx for idx, skill in enumerate(SKILL_CATALOG)}
@@ -419,6 +450,8 @@ def resolve_skill_invocation(
             "candidate_tools": tools,
             "recommended_tools": [],
             "techniques": [],
+            "worker_rules": worker_rules,
+            "sub_agent_plan": [],
             "confidence": 0.0,
         }
 
@@ -450,6 +483,8 @@ def resolve_skill_invocation(
         "recommended_tools": recommended,
         "learned_recommended_tools": list(dict.fromkeys(learned_preferred))[:20],
         "techniques": techniques,
+        "worker_rules": worker_rules,
+        "sub_agent_plan": list(worker_rules.get("selected_sub_agents") or []),
         "matched_by": matched_by,
         "score": score,
         "confidence": confidence,
@@ -498,6 +533,8 @@ def build_skill_guided_fallback_decision(
         "fallback_reason": _clean_text(reason)[:300],
         "selected_technique": selected,
         "execution_context": dict(execution_context),
+        "worker_rules": dict(skill_invocation.get("worker_rules") or {}),
+        "sub_agent_plan": list(skill_invocation.get("sub_agent_plan") or []),
         "signals_to_validate": _clean_list(selected.get("evidence_signals") or (playbook or {}).get("evidence_signals"))[:8],
         "confidence": max(float(skill_invocation.get("confidence") or 0.55), 0.55),
         "preferred_tools": preferred,

@@ -270,6 +270,76 @@ def _hypothesis_driven_tactic(state: AgentState, *, capability: str) -> dict[str
     return None
 
 
+def _recon_recommendation_tactic(state: AgentState, *, capability: str) -> dict[str, Any] | None:
+    """Materialise Phase-1 skill recommendations into Phase-2 BAS work."""
+    if capability != "risk_assessment":
+        return None
+    try:
+        from app.graph.kill_chain import stage_allows_skill
+    except Exception:
+        return None
+
+    stage = str(state.get("kill_chain_stage") or "RECONNAISSANCE").upper()
+    completed_ids = _completed_pentest_tactic_ids(state)
+    recommendations = [
+        dict(item)
+        for item in list(state.get("recon_skill_recommendations") or (state.get("recon_graph") or {}).get("skill_recommendations") or [])
+        if isinstance(item, dict)
+    ]
+    for rec in sorted(recommendations, key=lambda item: -float(item.get("confidence") or 0)):
+        skill_id = str(rec.get("skill_id") or "")
+        if not skill_id or not stage_allows_skill(stage, skill_id):
+            continue
+        tools = [str(tool) for tool in list(rec.get("preferred_tools") or []) if str(tool or "").strip()]
+        if not tools:
+            continue
+        import hashlib
+        seed = f"{skill_id}|{rec.get('target')}|{','.join(tools[:3])}"
+        tactic_id = f"recon-recommendation:{skill_id}:{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+        if tactic_id in completed_ids:
+            continue
+        tactic = {
+            "tactic_id": tactic_id,
+            "skill_id": skill_id,
+            "capability": capability,
+            "objective": f"Validar skill recomendada pelo RECON: {skill_id}",
+            "hypothesis": str(rec.get("reason") or ""),
+            "allowed_tools": tools,
+            "preferred_tool": tools[0],
+            "extra_args": {},
+            "strategy_source": "recon_skill_recommendation",
+            "strategy_score": int(round(float(rec.get("confidence") or 0) * 100)),
+            "learning_techniques": [],
+            "evidence_required": list(rec.get("required_evidence") or []),
+            "constraints": ["non-destructive proof", "use MCP/Kali skill_context"],
+            "phase_refs": ["recon_graph"],
+            "targets": [str(rec.get("target") or state.get("target") or "")],
+            "reason": (
+                f"RECON recomendou {skill_id}: {rec.get('reason')}; "
+                f"evidence_inputs={rec.get('evidence_inputs')}"
+            ),
+            "control_objectives": [
+                "validate_attack_path",
+                "measure_detection_visibility",
+                "produce_detection_proof_pack",
+            ],
+            "expected_telemetry": [
+                "web request logs",
+                "WAF/IDS alert if payload is detected",
+                "application error/security events",
+            ],
+        }
+        state["pending_pentest_tactic"] = dict(tactic)
+        _append_action(state, "recon_recommendation_tactic", {
+            "skill_id": skill_id,
+            "confidence": rec.get("confidence"),
+            "tools": tools[:4],
+            "target": rec.get("target"),
+        })
+        return tactic
+    return None
+
+
 def _stack_evidence_strict(state: AgentState) -> dict[str, bool]:
     """Returns {tag: True/False} where True means the actual evidence
     blob from recon findings contains a high-confidence keyword for the
@@ -654,7 +724,7 @@ def _select_tool_batch_for_iteration(state: AgentState, group: str, tools: list[
         if int(meta.get("success", 0) or 0) >= 1:
             skipped_already_done.append(t)
             continue
-        if int(meta.get("attempts", 0) or 0) >= 1 and int(meta.get("success", 0) or 0) == 0:
+        if int(meta.get("attempts", 0) or 0) >= 2 and int(meta.get("success", 0) or 0) == 0:
             skipped_already_done.append(t)
             continue
         selected.append(t)
@@ -676,6 +746,8 @@ def _update_tool_runtime_metrics(state: AgentState, tool: str, status: str) -> N
     current["attempts"] = int(current.get("attempts", 0)) + 1
     if status == "executed":
         current["success"] = int(current.get("success", 0)) + 1
+    elif status == "skipped":
+        current["skipped"] = int(current.get("skipped", 0)) + 1
     else:
         current["failures"] = int(current.get("failures", 0)) + 1
     runtime[tool] = current
@@ -950,10 +1022,22 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
     # format is `{phase_id}|{target}|{tool}`.
     executed_runs = [str(r).lower() for r in (state.get("executed_tool_runs") or [])]
 
+    runtime = dict(state.get("tool_runtime") or {})
+
     def _attempted_in_phase(ph_id: str, tool: str) -> bool:
         prefix = f"{ph_id.lower()}|"
         suffix = f"|{tool.lower()}"
         return any(r.startswith(prefix) and r.endswith(suffix) for r in executed_runs)
+
+    def _phase_tool_done(ph_id: str, tool: str) -> bool:
+        meta = dict(runtime.get(tool) or runtime.get(tool.lower()) or {})
+        if int(meta.get("success", 0) or 0) >= 1:
+            return True
+        if int(meta.get("skipped", 0) or 0) >= 1:
+            return True
+        if not _attempted_in_phase(ph_id, tool):
+            return False
+        return int(meta.get("attempts", 0) or 0) >= 2
 
     # phase id → first catalog skill that declares the phase
     phase_skill: dict[str, str] = {}
@@ -975,7 +1059,7 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
         all_tools = [str(t) for t in (phase.get("tools") or [])]
         installed = [t for t in all_tools if is_tool_installed(t)]
         not_installed = [t for t in all_tools if t not in installed]
-        pending = [t for t in installed if not _attempted_in_phase(ph_id, t)]
+        pending = [t for t in installed if not _phase_tool_done(ph_id, t)]
 
         if not installed:
             state.setdefault("logs_terminais", []).append(
@@ -1528,19 +1612,27 @@ def supervisor_node(state: AgentState) -> AgentState:
             if hypothesis_tactic:
                 chosen_skill = _selected_skill_from_tactic(hypothesis_tactic)
             else:
-                auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
-                if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
-                    chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+                recon_tactic = _recon_recommendation_tactic(state, capability=next_node)
+                if recon_tactic:
+                    chosen_skill = _selected_skill_from_tactic(recon_tactic)
                 elif next_tactic:
-                    chosen_skill = _selected_skill_from_tactic(next_tactic)
+                    auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
+                    if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
+                        chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+                    else:
+                        chosen_skill = _selected_skill_from_tactic(next_tactic)
                 else:
-                    chosen_skill = _select_skill_for_capability(
-                        capability=next_node,
-                        active_skills=list(state.get("active_skills") or []),
-                        scan_mode=str(state.get("scan_mode") or "unit"),
-                        tech_stack=list(state.get("detected_tech_stack") or []),
-                        kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
-                    )
+                    auto_locked_tactic = _auto_lock_tactic_from_tech_stack(state)
+                    if auto_locked_tactic and str(auto_locked_tactic.get("capability") or "") == next_node:
+                        chosen_skill = _selected_skill_from_tactic(auto_locked_tactic)
+                    else:
+                        chosen_skill = _select_skill_for_capability(
+                            capability=next_node,
+                            active_skills=list(state.get("active_skills") or []),
+                            scan_mode=str(state.get("scan_mode") or "unit"),
+                            tech_stack=list(state.get("detected_tech_stack") or []),
+                            kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+                        )
         if chosen_skill:
             state["selected_skill"] = chosen_skill
             if chosen_skill.get("tactic_id"):

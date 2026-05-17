@@ -339,6 +339,8 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "matched_by": list(dict.fromkeys(["supervisor_selected_skill", *list(runtime_invocation.get("matched_by") or [])])),
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
+                "worker_rules": dict(runtime_invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(runtime_invocation.get("sub_agent_plan") or []),
                 "confidence": runtime_invocation.get("confidence", 0.9),
                 "playbook_title": playbook.get("title"),
                 "created_at": datetime.utcnow().isoformat(),
@@ -360,6 +362,8 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
                 "learned_recommended_tools": list(runtime_invocation.get("learned_recommended_tools") or []),
+                "worker_rules": dict(runtime_invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(runtime_invocation.get("sub_agent_plan") or []),
                 "matched_by": invocation_record["matched_by"],
                 "score": runtime_invocation.get("score", 90),
                 "confidence": invocation_record["confidence"],
@@ -420,6 +424,8 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "matched_by": list(invocation.get("matched_by") or []),
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
+                "worker_rules": dict(invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(invocation.get("sub_agent_plan") or []),
                 "confidence": invocation.get("confidence", 0.7),
                 "playbook_title": playbook.get("title"),
                 "created_at": datetime.utcnow().isoformat(),
@@ -534,6 +540,8 @@ def skill_planner_node(state: AgentState) -> AgentState:
         "detection_proof_pack": dict(invocation.get("detection_proof_pack") or selected_technique.get("detection_proof_pack") or {}),
         "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
         "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
+        "worker_rules": dict(contract.get("worker_rules") or invocation.get("worker_rules") or {}),
+        "sub_agent_plan": list(contract.get("sub_agent_plan") or invocation.get("sub_agent_plan") or []),
         "evidence_required": list(selected_technique.get("evidence_signals") or []),
         "constraints": list(selected_technique.get("safe_validation_steps") or []),
         "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
@@ -694,6 +702,8 @@ def tool_selector_node(state: AgentState) -> AgentState:
         "detection_proof_pack": dict(plan.get("detection_proof_pack") or technique.get("detection_proof_pack") or {}),
         "evidence_required": evidence_required,
         "constraints": constraints,
+        "worker_rules": dict(plan.get("worker_rules") or contract.get("worker_rules") or invocation.get("worker_rules") or {}),
+        "sub_agent_plan": list(plan.get("sub_agent_plan") or contract.get("sub_agent_plan") or invocation.get("sub_agent_plan") or []),
         "playbook_title": plan.get("playbook_title") or contract.get("playbook_title") or gate.get("playbook_title"),
         "decision_source": "skill_selector",
     }
@@ -822,10 +832,21 @@ def _apply_tool_execution_findings(
         _target_host,
         _register_discovered_assets,
         _persist_discovered_assets_to_db,
+        _refresh_recon_graph,
         MAX_DISCOVERED_ASSETS,
     )
 
     current = _step_name(state)
+    _refresh_recon_graph(
+        state,
+        capability=capability,
+        target=target,
+        tools=tools,
+        findings=findings,
+        ports=ports,
+        assets=assets,
+        port_evidence=port_evidence,
+    )
     if findings:
         state["vulnerabilidades_encontradas"].extend(findings)
 
@@ -1093,8 +1114,19 @@ def tool_executor_node(state: AgentState) -> AgentState:
     # The detector reads ALL findings, so even when this cycle ran a vuln
     # tool we update the fingerprint with anything new the workers produced.
     try:
-        from app.graph.workflow import _refresh_tech_stack
+        from app.graph.workflow import _refresh_recon_graph, _refresh_tech_stack
         stack_changed = _refresh_tech_stack(state)
+        for executed in all_results:
+            _refresh_recon_graph(
+                state,
+                capability=capability,
+                target=str(executed.get("target") or state.get("target") or ""),
+                tools=[str(tool) for tool in list(executed.get("tools") or [])],
+                findings=[],
+                ports=[],
+                assets=[],
+                port_evidence={},
+            )
         if stack_changed:
             # Force supervisor to re-evaluate active_skills next iteration.
             state["pending_skill_refresh"] = True

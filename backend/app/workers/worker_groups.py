@@ -144,6 +144,243 @@ CYBER_AUTOAGENT_TOOL_CATALOG: dict[str, list[str]] = {
 }
 
 
+GLOBAL_WORKER_RULES: dict[str, Any] = {
+    "mcp_execution": [
+        "Always execute offensive tools through MCP -> Kali when the profile is available.",
+        "Pass skill_context with skill_id, technique, evidence_required, constraints and worker_rules.",
+        "When a Kali-installed tool fails, mark command_fix_required with the exact command instead of tool_unavailable.",
+    ],
+    "evidence": [
+        "Persist command, return_code, stdout/stderr preview and artifact paths for every attempt.",
+        "Promote high/critical findings only with reproducible proof, request/response or equivalent artifact.",
+        "Keep unsupported hypotheses in validation_backlog for re-analysis.",
+    ],
+    "reanalysis_triggers": [
+        "new_asset_discovered",
+        "new_port_or_service_discovered",
+        "new_url_or_parameter_discovered",
+        "tech_stack_changed",
+        "evidence_backlog_created",
+        "command_fix_required",
+    ],
+}
+
+
+WORKER_RULES_BY_GROUP: dict[str, dict[str, Any]] = {
+    "scope_validation": {
+        "rules": [
+            "Normalize target before any tool dispatch.",
+            "Block targets outside explicit authorization scope.",
+            "Produce a skip reason instead of executing when scope is ambiguous.",
+        ],
+        "sub_agents": [],
+    },
+    "reconnaissance": {
+        "rules": [
+            "Run RECON as coordinated sub-agents, not as a single generic scanner.",
+            "Start with passive and low-noise tools, then branch into active DNS, port, web, parameter and TLS checks.",
+            "Every discovered asset, live URL, open port, parameter and technology must feed a re-analysis queue.",
+            "Do not terminate RECON while Kali-ready tools for the active RECON phase remain unattempted or command_fix_required is open.",
+        ],
+        "sub_agents": [
+            {
+                "id": "recon.subdomain",
+                "name": "Subdomain Enumeration Sub-Agent",
+                "phases": ["P01"],
+                "tools": ["subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain", "assetfinder", "alterx", "shuffledns", "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum"],
+                "rules": [
+                    "Use passive sources first, then active brute/alteration when authorized.",
+                    "Deduplicate hostnames and send new in-scope hosts to pending_asset_scans.",
+                    "Re-run DNS validation when subdomain tools discover new candidates.",
+                ],
+                "reanalyze_when": ["new_subdomain", "wildcard_dns_detected", "dns_zone_transfer_signal"],
+            },
+            {
+                "id": "recon.port_service",
+                "name": "Port And Service Sub-Agent",
+                "phases": ["P02"],
+                "tools": ["naabu", "nmap", "masscan"],
+                "rules": [
+                    "Use fast discovery before deep service/version detection.",
+                    "Every open port must include service evidence and command used.",
+                    "Feed HTTP/HTTPS services into the web crawl and fingerprint sub-agents.",
+                ],
+                "reanalyze_when": ["new_open_port", "service_version_changed"],
+            },
+            {
+                "id": "recon.web_crawl",
+                "name": "Web Crawl And Endpoint Sub-Agent",
+                "phases": ["P03"],
+                "tools": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider"],
+                "rules": [
+                    "Extract URLs, forms, JS references, API paths and candidate secrets.",
+                    "Prioritize endpoints with parameters, auth flows, admin paths and API routes for later validation.",
+                    "Feed discovered paths and JS hints into parameter discovery and risk assessment.",
+                ],
+                "reanalyze_when": ["new_url", "new_form", "new_js_endpoint", "new_api_route"],
+            },
+            {
+                "id": "recon.parameter",
+                "name": "Parameter Discovery Sub-Agent",
+                "phases": ["P04", "P15", "P16"],
+                "tools": ["arjun", "paramspider", "ffuf-params", "ffuf-values", "wfuzz"],
+                "rules": [
+                    "Discover parameter names before injection or IDOR validation.",
+                    "Record parameter source, method and endpoint.",
+                    "Escalate parameterized URLs to risk_assessment with evidence signals.",
+                ],
+                "reanalyze_when": ["new_parameter", "new_parameterized_url", "unexpected_status_or_length"],
+            },
+            {
+                "id": "recon.fingerprint_tls_waf",
+                "name": "Fingerprint TLS WAF Sub-Agent",
+                "phases": ["P05", "P06", "P18"],
+                "tools": ["httpx", "whatweb", "curl-headers", "wafw00f", "sslscan", "testssl", "nikto"],
+                "rules": [
+                    "Fingerprint technologies, security headers, WAF and TLS before active validation.",
+                    "When stack changes, force skill refresh and re-score attack hypotheses.",
+                    "Use WAF/TLS/header results to suppress false positives and tune later validation.",
+                ],
+                "reanalyze_when": ["tech_stack_changed", "waf_detected", "weak_tls_signal", "missing_security_header"],
+            },
+        ],
+    },
+    "weaponization": {
+        "rules": [
+            "Correlate recon outputs with CVE, takeover, leak and secret hypotheses.",
+            "Do not promote CVE hypotheses without asset/version/template evidence.",
+            "Send strong hypotheses to risk_assessment with expected telemetry.",
+        ],
+        "sub_agents": [
+            {
+                "id": "weaponization.cve_osint",
+                "name": "CVE OSINT Sub-Agent",
+                "phases": ["P07", "P08", "P09", "P10", "P11", "P21"],
+                "tools": CANONICAL_GROUP_TOOLS["weaponization"],
+                "rules": ["Correlate templates and OSINT to in-scope assets only."],
+                "reanalyze_when": ["new_technology", "new_cve_signal", "new_secret_signal"],
+            }
+        ],
+    },
+    "delivery": {
+        "rules": [
+            "Use controlled fuzzing only against authorized live URLs.",
+            "Record wordlist/profile and anomaly basis.",
+            "Send newly discovered paths/params back to RECON re-analysis and risk assessment.",
+        ],
+        "sub_agents": [
+            {
+                "id": "delivery.discovery_fuzzing",
+                "name": "Discovery Fuzzing Sub-Agent",
+                "phases": ["P04", "P15", "P16"],
+                "tools": CANONICAL_GROUP_TOOLS["delivery"],
+                "rules": ["Throttle requests and keep profile/wordlist evidence."],
+                "reanalyze_when": ["new_path", "new_file", "new_param", "interesting_response_delta"],
+            }
+        ],
+    },
+    "exploitation": {
+        "rules": [
+            "Validate one hypothesis at a time with minimal safe payloads.",
+            "High/critical findings require repro steps and technical evidence.",
+            "If evidence is weak, return to evidence_adjudication or risk_assessment instead of promoting.",
+        ],
+        "sub_agents": [
+            {
+                "id": "exploitation.web_validation",
+                "name": "Web Validation Sub-Agent",
+                "phases": ["P11", "P12", "P13", "P16", "P17", "P19", "P20"],
+                "tools": CANONICAL_GROUP_TOOLS["exploitation"],
+                "rules": ["Prefer proof-safe validation and keep payload/request/response evidence."],
+                "reanalyze_when": ["new_parameter", "new_endpoint", "weak_evidence", "command_fix_required"],
+            }
+        ],
+    },
+    "installation": {
+        "rules": [
+            "Only run auth/JWT/credential checks with explicit preconditions.",
+            "Skip with explanation when required env/userlists/protocol are missing.",
+            "Never run volumetric authentication attacks.",
+        ],
+        "sub_agents": [],
+    },
+    "command_control": {
+        "rules": [
+            "Use controlled OOB/listener validation only.",
+            "Never maintain persistence or execute destructive callbacks.",
+            "Record timestamps and callback identifiers for defensive detection testing.",
+        ],
+        "sub_agents": [],
+    },
+    "actions_on_objectives": {
+        "rules": [
+            "Mask secrets and avoid exfiltration.",
+            "Correlate SAST/dependency/secrets with exploitability and remediation.",
+            "Use repository/package evidence instead of broad claims.",
+        ],
+        "sub_agents": [],
+    },
+    "reporting": {
+        "rules": [
+            "Merge executive, technical, scope, evidence, review and remediation into one report.",
+            "Separate verified findings from hypotheses and command-fix work.",
+            "Surface BAS control efficacy, attack efficacy, tool utilization and learning progress.",
+        ],
+        "sub_agents": [],
+    },
+}
+
+
+def _canonical_group_name(group_name: str) -> str:
+    normalized = str(group_name or "").strip().lower()
+    aliases = {
+        "recon": "reconnaissance",
+        "reconhecimento": "reconnaissance",
+        "asset_discovery": "reconnaissance",
+        "osint": "weaponization",
+        "threat_intel": "weaponization",
+        "vuln": "exploitation",
+        "analise_vulnerabilidade": "exploitation",
+        "risk_assessment": "exploitation",
+        "adversarial_hypothesis": "exploitation",
+        "evidence_adjudication": "reporting",
+        "governance": "reporting",
+        "executive_analyst": "reporting",
+        "exploit": "installation",
+        "api": "delivery",
+        "code": "actions_on_objectives",
+    }
+    return aliases.get(normalized, normalized or "reconnaissance")
+
+
+def get_worker_rules(group_name: str) -> dict[str, Any]:
+    canonical = _canonical_group_name(group_name)
+    specific = WORKER_RULES_BY_GROUP.get(canonical) or WORKER_RULES_BY_GROUP["reconnaissance"]
+    return {
+        "worker_group": canonical,
+        "global": dict(GLOBAL_WORKER_RULES),
+        "rules": list(specific.get("rules") or []),
+        "sub_agents": [dict(item) for item in list(specific.get("sub_agents") or [])],
+    }
+
+
+def get_sub_agent_rules(group_name: str, *, phase: str | None = None, tools: list[str] | None = None) -> list[dict[str, Any]]:
+    rules = get_worker_rules(group_name)
+    phase_key = str(phase or "").strip().upper()
+    tool_set = {str(tool).strip().lower() for tool in list(tools or []) if str(tool or "").strip()}
+    selected: list[dict[str, Any]] = []
+    for sub_agent in list(rules.get("sub_agents") or []):
+        phases = {str(item).strip().upper() for item in list(sub_agent.get("phases") or [])}
+        sub_tools = {str(item).strip().lower() for item in list(sub_agent.get("tools") or [])}
+        phase_match = bool(phase_key and phase_key in phases)
+        tool_match = bool(tool_set and tool_set.intersection(sub_tools))
+        if not phase_key and not tool_set:
+            selected.append(dict(sub_agent))
+        elif phase_match or tool_match:
+            selected.append(dict(sub_agent))
+    return selected
+
+
 def get_canonical_group_tools() -> dict[str, list[str]]:
     tools_by_group = {group: list(tools) for group, tools in CANONICAL_GROUP_TOOLS.items()}
     aliases = {
@@ -214,6 +451,8 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "phases": list(group_data.get("phases") or []),
             "evidence_focus": list(group_data.get("evidence_focus") or []),
             "decision_rules": list(group_data.get("decision_rules") or []),
+            "worker_rules": get_worker_rules(group_key),
+            "sub_agent_rules": get_sub_agent_rules(group_key, tools=list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(group_key, []))),
             "tools": list(group_data.get("tools") or CANONICAL_GROUP_TOOLS.get(group_key, [])),
             "contract": contract,
             "skill_context": {
@@ -222,10 +461,14 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
                 "knowledge_sources": ["accepted_learning", "repo_tests", "mcp_rag"],
                 "execution_path": "mcp_to_kali",
                 "pre_execution_step": "run skill_selector and skill_planner before selecting/dispatching tool",
+                "rules_required": True,
+                "sub_agent_planning_required": group_key == "reconnaissance",
             },
             "operational_sequence": [
                 "skill_selector",
                 "skill_planner",
+                "load_worker_rules",
+                "select_sub_agent_rules",
                 "retrieve_skill_memory",
                 "select_learning_guided_technique",
                 "dispatch_tool_via_mcp",

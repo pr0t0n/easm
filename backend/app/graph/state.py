@@ -128,3 +128,11 @@ class AgentState(TypedDict):
     # one hypothesis derived from recon evidence. Refreshed by the workflow
     # after each tool run via app.services.hypothesis_engine.
     pentest_hypotheses: list[dict[str, Any]]
+    # Phase 1 contract: structured RECON evidence graph. Phase 2 consumes
+    # recon_skill_recommendations; Phase 3 consumes the same graph through
+    # hypothesis_engine for adaptive pathing.
+    recon_graph: dict[str, Any]
+    recon_skill_recommendations: list[dict[str, Any]]
+    recon_reanalyze_queue: list[dict[str, Any]]
+    recon_coverage: dict[str, Any]
+    recon_coverage_gaps: list[str]

@@ -264,12 +264,16 @@ def build_worker_knowledge_context(
         "playbook_title": (playbook or {}).get("title"),
         "knowledge_items": knowledge_items,
         "worker_mission": profile.get("mission"),
+        "worker_rules": dict(profile.get("worker_rules") or {}),
+        "sub_agent_rules": list(profile.get("sub_agent_rules") or []),
     }
     return {
         "sync_status": sync_status,
         "query": query,
         "knowledge_items": knowledge_items,
         "recommended_tools": recommended_tools,
+        "worker_rules": dict(profile.get("worker_rules") or {}),
+        "sub_agent_rules": list(profile.get("sub_agent_rules") or []),
         "prompt_context": prompt_context,
         "playbook": playbook,
     }

@@ -390,10 +390,26 @@ def extract_pentest_hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
     so the supervisor can dedupe without losing context.
     """
     findings = list(state.get("vulnerabilidades_encontradas") or [])
+    recon_graph = dict(state.get("recon_graph") or {})
     tech_stack = {str(t).strip().lower() for t in (state.get("detected_tech_stack") or []) if str(t).strip()}
+    tech_stack.update(str(t).strip().lower() for t in list(recon_graph.get("technologies") or []) if str(t).strip())
     target = str(state.get("target") or "")
     urls = list(state.get("lista_ativos") or [])
     urls.extend(_extract_urls_from_findings(findings))
+    for row in list(recon_graph.get("web_targets") or []) + list(recon_graph.get("endpoints") or []):
+        if isinstance(row, dict) and row.get("url"):
+            urls.append(str(row.get("url") or ""))
+    for row in list(recon_graph.get("parameters") or []):
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        param = str(row.get("name") or "").strip()
+        if url and param:
+            separator = "&" if "?" in url else "?"
+            if param not in _params_in_url(url):
+                urls.append(f"{url}{separator}{param}=1")
+            else:
+                urls.append(url)
     if target:
         urls.append(target)
     urls = sorted({u.strip() for u in urls if u.strip()})

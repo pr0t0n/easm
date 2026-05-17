@@ -34,6 +34,8 @@ def execute_tool_with_workers(
     technique: dict[str, Any] | None = None,
     evidence_required: list[str] | None = None,
     constraints: list[str] | None = None,
+    worker_rules: dict[str, Any] | None = None,
+    sub_agent_plan: list[dict[str, Any]] | None = None,
     playbook: str | None = None,
     extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -54,6 +56,8 @@ def execute_tool_with_workers(
             result.setdefault("technique", (technique or {}).get("name") or technique or {})
             result.setdefault("evidence_required", evidence_required or [])
             result.setdefault("constraints", constraints or [])
+            result.setdefault("worker_rules", worker_rules or {})
+            result.setdefault("sub_agent_plan", sub_agent_plan or [])
             result.setdefault("playbook", playbook or "")
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", "Backend Code Analyzer")
@@ -98,6 +102,8 @@ def execute_tool_with_workers(
                 "technique": technique or {},
                 "evidence_required": evidence_required or [],
                 "constraints": constraints or [],
+                "worker_rules": worker_rules or {},
+                "sub_agent_plan": sub_agent_plan or [],
                 "playbook": playbook or "",
                 "extra_args": list(extra_args or []),
             },
@@ -115,6 +121,8 @@ def execute_tool_with_workers(
                 "technique": technique or {},
                 "evidence_required": evidence_required or [],
                 "constraints": constraints or [],
+                "worker_rules": worker_rules or {},
+                "sub_agent_plan": sub_agent_plan or [],
                 "playbook": playbook or "",
             },
             extra_args=list(extra_args or []),
@@ -125,6 +133,8 @@ def execute_tool_with_workers(
         result.setdefault("technique", (technique or {}).get("name") or technique or {})
         result.setdefault("evidence_required", evidence_required or [])
         result.setdefault("constraints", constraints or [])
+        result.setdefault("worker_rules", worker_rules or {})
+        result.setdefault("sub_agent_plan", sub_agent_plan or [])
         result.setdefault("playbook", playbook or "")
     try:
         agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
@@ -145,6 +155,8 @@ def execute_tool_with_workers(
                 "tools": list(agent.get("tools") or []),
                 "evidence_focus": list(agent.get("evidence_focus") or []),
                 "decision_rules": list(agent.get("decision_rules") or []),
+                "worker_rules": dict(agent.get("worker_rules") or {}),
+                "sub_agent_rules": list(agent.get("sub_agent_rules") or []),
             },
         )
     except Exception:

@@ -20,6 +20,17 @@ CAPABILITY_NODES = [
     "executive_analyst",
 ]
 
+CAPABILITY_ALIASES: dict[str, set[str]] = {
+    "strategic_planning": {"strategic_planning", "supervisor", "skill_planner"},
+    "asset_discovery": {"asset_discovery"},
+    "threat_intel": {"threat_intel"},
+    "adversarial_hypothesis": {"adversarial_hypothesis", "skill_selector", "skill_planner", "tool_selector"},
+    "risk_assessment": {"risk_assessment"},
+    "evidence_adjudication": {"evidence_adjudication", "evidence_gate"},
+    "governance": {"governance"},
+    "executive_analyst": {"executive_analyst"},
+}
+
 
 def _node_for_phase(phase_id: str) -> str:
     for p in PENTEST_PHASES:
@@ -42,6 +53,21 @@ def _expected_tools_by_node() -> dict[str, set[str]]:
 
 def _normalize_tool(name: str | None) -> str:
     return str(name or "").strip().lower()
+
+
+def _extract_command_from_error(error_message: str | None) -> str:
+    text = str(error_message or "")
+    if not text:
+        return ""
+    marker = "command="
+    if marker not in text:
+        return ""
+    command = text.split(marker, 1)[1]
+    for delimiter in ["\n\nreturn_code=", "\n\nstdout:", "\n\nstderr:", "\n\nDica:", "\nreturn_code="]:
+        if delimiter in command:
+            command = command.split(delimiter, 1)[0]
+            break
+    return command.strip()[:800]
 
 
 def _phase_attempts_from_state(state: dict[str, Any]) -> dict[str, dict[str, set[str]]]:
@@ -105,6 +131,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "targets": set(),
             "last_status": None,
             "last_error": None,
+            "last_command": None,
             "total_seconds": 0.0,
         }
     )
@@ -126,6 +153,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         run_status_by_tool_target[(key, target_key)] = str(r.status or "unknown")
         if r.error_message:
             stats["last_error"] = (r.error_message or "")[:300]
+            command = _extract_command_from_error(r.error_message)
+            if command:
+                stats["last_command"] = command
         if r.execution_time_seconds:
             stats["total_seconds"] += float(r.execution_time_seconds or 0.0)
 
@@ -162,6 +192,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     # Phases (22) — status derived from phase-scoped tool attempts first.
     expected_tools = _expected_tools_by_phase()
     phase_attempts = _phase_attempts_from_state(state)
+    phase_used_tools_set = {
+        tool
+        for by_tool in phase_attempts.values()
+        for tool, targets in by_tool.items()
+        if targets
+    }
     try:
         pentest_phase_index = int(state.get("pentest_phase_index", 0) or 0)
     except Exception:
@@ -270,9 +306,31 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     # Capability summary (9 missions equivalent — actually 8 graph nodes + supervisor)
     capabilities: list[dict[str, Any]] = []
     expected_node_tools = _expected_tools_by_node()
+    phase_started_by_node: dict[str, bool] = defaultdict(bool)
+    phase_complete_by_node: dict[str, bool] = defaultdict(bool)
+    for row in phases:
+        row_node = str(row.get("node") or "")
+        if row.get("phase_started"):
+            phase_started_by_node[row_node] = True
+        row_installed = list(row.get("tools_installed") or [])
+        row_missing_unused = list(row.get("tools_missing_unused") or [])
+        if row_installed and not row_missing_unused:
+            phase_complete_by_node[row_node] = True
+
+    def _cap_aliases(cap: str) -> set[str]:
+        return CAPABILITY_ALIASES.get(cap, {cap})
+
+    def _cap_visited(cap: str) -> bool:
+        aliases = _cap_aliases(cap)
+        return bool(aliases.intersection(set(node_history)) or aliases.intersection(set(completed_caps)) or phase_started_by_node.get(cap))
+
+    def _cap_done(cap: str) -> bool:
+        aliases = _cap_aliases(cap)
+        return bool(aliases.intersection(set(completed_caps)) or phase_complete_by_node.get(cap))
+
     for cap in CAPABILITY_NODES:
-        cap_done = cap in completed_caps
-        cap_visited = cap in node_history
+        cap_done = _cap_done(cap)
+        cap_visited = _cap_visited(cap)
         # Tools that ran during this node based on phases of node
         node_expected = list(expected_node_tools.get(cap, []))
         node_attempted = [t for t in node_expected if tool_stats.get(t, {}).get("attempts", 0) > 0]
@@ -301,6 +359,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "total_seconds": round(v["total_seconds"], 2),
             "last_status": v["last_status"],
             "last_error": v["last_error"],
+            "last_command": v["last_command"],
             "findings_generated": findings_by_tool.get(k, 0),
         })
 
@@ -319,7 +378,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     expected_all_tools = sorted({t for tools in expected_tools.values() for t in tools})
     installed_expected = sorted({t for t in expected_all_tools if is_tool_installed(t)})
     uninstalled_expected = sorted({t for t in expected_all_tools if not is_tool_installed(t)})
-    used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0}
+    used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0} | phase_used_tools_set
     installed_unused = [t for t in installed_expected if t not in used_tools_set]
 
     if installed_unused:
@@ -354,24 +413,52 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         validation_summary["critical"].append(issue)
 
     # 2. Capability completion: all 8 nodes should execute
-    skipped_caps = [c for c in CAPABILITY_NODES if c not in completed_caps]
+    skipped_caps = [c for c in CAPABILITY_NODES if not _cap_done(c)]
     if skipped_caps:
         issue = f"INCOMPLETE CAPABILITIES: {', '.join(skipped_caps)}. "
         issue += "Graph traversal did not visit all capability nodes."
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
-    # 3. Tool failures: tools that failed all attempts must retry
-    failed_only = [k for k, v in tool_stats.items() if v["attempts"] > 0 and v["success"] == 0 and v["skipped"] == 0]
-    if failed_only:
-        issue = f"TOOL FAILURES (all attempts): {', '.join(sorted(failed_only)[:5])}. "
-        issue += "These must be retried or skipped with explanation."
+    # 3. Installed-tool failures are command/profile correction work.
+    # If Kali has the binary/profile, the platform should not label the tool
+    # as unavailable. A failed run usually means the profile command, target
+    # normalization, required env, scheme, args or parser needs correction.
+    runtime = dict(state.get("tool_runtime") or {})
+    command_fix_required: list[dict[str, Any]] = []
+    for k, v in tool_stats.items():
+        runtime_meta = dict(runtime.get(k) or {})
+        attempts = max(int(v["attempts"] or 0), int(runtime_meta.get("attempts", 0) or 0))
+        success = max(int(v["success"] or 0), int(runtime_meta.get("success", 0) or 0))
+        skipped = max(int(v["skipped"] or 0), int(runtime_meta.get("skipped", 0) or 0))
+        failures = max(int(v["failed"] or 0), int(runtime_meta.get("failures", 0) or 0))
+        if attempts > 0 and success == 0 and skipped == 0 and failures >= attempts and is_tool_installed(k):
+            command_fix_required.append(
+                {
+                    "tool": k,
+                    "attempts": attempts,
+                    "last_status": v.get("last_status"),
+                    "last_command": v.get("last_command") or "(command not captured)",
+                    "last_error": v.get("last_error") or "",
+                }
+            )
+    if command_fix_required:
+        preview = []
+        for item in sorted(command_fix_required, key=lambda row: row["tool"])[:5]:
+            preview.append(
+                f"{item['tool']} command=`{item['last_command']}`"
+            )
+        issue = (
+            f"COMMAND FIX REQUIRED ({len(command_fix_required)}): "
+            f"{'; '.join(preview)}. "
+            "A ferramenta existe no Kali; revise/altere o profile/comando de execução, args, env ou target normalization."
+        )
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
     # 4. Node history validation: should visit asset_discovery, risk_assessment, evidence_adjudication
     critical_nodes = ["asset_discovery", "risk_assessment", "evidence_adjudication"]
-    missing_critical = [n for n in critical_nodes if n not in node_history]
+    missing_critical = [n for n in critical_nodes if not _cap_visited(n)]
     if missing_critical:
         issue = f"CRITICAL NODES NOT VISITED: {', '.join(missing_critical)}. "
         issue += "Graph did not traverse essential analysis nodes."
@@ -431,8 +518,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "capabilities": capabilities,
         "phases": phases,
         "tool_inventory": tool_inventory,
+        "command_fix_required": sorted(command_fix_required, key=lambda row: row["tool"]),
         "issues": issues,
         "validation_summary": validation_summary,
         "installation_report": installation,
         "kill_chain": kill_chain,
+        "recon_graph": dict(state.get("recon_graph") or {}),
+        "recon_skill_recommendations": list(state.get("recon_skill_recommendations") or (state.get("recon_graph") or {}).get("skill_recommendations") or []),
+        "recon_reanalyze_queue": list(state.get("recon_reanalyze_queue") or (state.get("recon_graph") or {}).get("reanalyze_queue") or []),
+        "recon_coverage": dict(state.get("recon_coverage") or (state.get("recon_graph") or {}).get("coverage") or {}),
+        "recon_coverage_gaps": list(state.get("recon_coverage_gaps") or (state.get("recon_graph") or {}).get("coverage_gaps") or []),
     }

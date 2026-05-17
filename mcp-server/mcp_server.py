@@ -129,6 +129,90 @@ def _score_document(query_tokens: set[str], record: dict[str, Any]) -> float:
     return round((coverage * 0.7) + (precision * 0.3), 4)
 
 
+def _profile_context_hints(profile_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    tool = str(spec.get("tool") or profile_name).strip()
+    category = str(spec.get("category") or "").strip().lower()
+    phase = str(spec.get("phase") or "").strip()
+    description = str(spec.get("description") or "")
+    command = [str(item) for item in list(spec.get("command") or spec.get("cmd") or [])]
+    text = " ".join([tool, category, phase, description, " ".join(command)]).lower()
+
+    capabilities: list[str] = []
+    if any(token in text for token in ["subdomain", "dns", "port", "crawl", "fingerprint", "http", "tls", "waf", "recon"]):
+        capabilities.append("asset_discovery")
+    if any(token in text for token in ["osint", "shodan", "harvester", "breach", "leak", "secret", "git"]):
+        capabilities.append("threat_intel")
+    if any(token in text for token in ["vuln", "cve", "xss", "sqli", "sql", "ssrf", "nikto", "nuclei", "scan"]):
+        capabilities.append("risk_assessment")
+    if not capabilities:
+        capabilities.append("risk_assessment" if category in {"vuln", "exploit"} else "asset_discovery")
+
+    target_types: list[str] = []
+    if "{url}" in command or " url" in text or "http" in text:
+        target_types.append("url")
+    if "{host}" in command or "{host_ip}" in command or "domain" in text or "subdomain" in text:
+        target_types.append("host_or_domain")
+    if "filesystem" in text or "git" in text or category == "code":
+        target_types.append("code_or_filesystem")
+    if not target_types:
+        target_types.append("host_or_domain")
+
+    evidence_outputs: list[str] = []
+    if any(token in text for token in ["json", "jsonl"]):
+        evidence_outputs.append("structured_json")
+    if any(token in text for token in ["cve", "vuln", "finding", "xss", "sqli"]):
+        evidence_outputs.append("security_findings")
+    if any(token in text for token in ["subdomain", "url", "endpoint", "port", "service"]):
+        evidence_outputs.append("surface_inventory")
+    if not evidence_outputs:
+        evidence_outputs.append("raw_tool_output")
+
+    return {
+        "capabilities": list(dict.fromkeys(capabilities)),
+        "target_types": list(dict.fromkeys(target_types)),
+        "evidence_outputs": list(dict.fromkeys(evidence_outputs)),
+        "requires_scheme": list(spec.get("requires_scheme") or []),
+        "requires_env": list(spec.get("requires_env") or []),
+        "parser": spec.get("parser"),
+        "safe_execution": {
+            "destructive_actions_allowed": False,
+            "data_extraction_allowed": False,
+            "operator_approval_required": bool(category in {"exploit"} or tool in {"hydra", "medusa", "crackmapexec"}),
+        },
+    }
+
+
+def _mcp_tool_descriptor(profile_name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    context = _profile_context_hints(profile_name, spec)
+    tool = spec.get("tool") or profile_name
+    return {
+        "name": profile_name,
+        "description": spec.get("description") or f"Kali profile {profile_name}",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "scan_id": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "extra_args": {"type": "array", "items": {"type": "string"}},
+                "skill_context": {"type": "object"},
+            },
+            "required": ["target"],
+        },
+        "metadata": {
+            "tool": tool,
+            "category": spec.get("category"),
+            "phase": spec.get("phase"),
+            "timeout": spec.get("timeout"),
+            "execution_path": "mcp_to_kali",
+            "context": context,
+            "capabilities": context["capabilities"],
+            "target_types": context["target_types"],
+            "evidence_outputs": context["evidence_outputs"],
+        },
+    }
+
+
 async def _refresh_kali_catalog() -> None:
     global kali_profiles, tool_aliases
     if kali_client is None:
@@ -250,27 +334,7 @@ async def list_mcp_tools() -> dict[str, Any]:
         await _refresh_kali_catalog()
     return {
         "tools": [
-            {
-                "name": profile_name,
-                "description": spec.get("description") or f"Kali profile {profile_name}",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string"},
-                        "scan_id": {"type": "string"},
-                        "timeout": {"type": "integer"},
-                        "extra_args": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["target"],
-                },
-                "metadata": {
-                    "tool": spec.get("tool") or profile_name,
-                    "category": spec.get("category"),
-                    "phase": spec.get("phase"),
-                    "timeout": spec.get("timeout"),
-                    "execution_path": "mcp_to_kali",
-                },
-            }
+            _mcp_tool_descriptor(profile_name, spec)
             for profile_name, spec in sorted(kali_profiles.items())
         ]
     }

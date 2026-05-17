@@ -245,6 +245,11 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
                 sd["pentest_phase_index"] = int(state.get("pentest_phase_index", 0) or 0)
                 sd["pentest_hypotheses"] = list(state.get("pentest_hypotheses") or [])[:30]
+                sd["recon_graph"] = dict(state.get("recon_graph") or {})
+                sd["recon_skill_recommendations"] = list(state.get("recon_skill_recommendations") or [])[:20]
+                sd["recon_reanalyze_queue"] = list(state.get("recon_reanalyze_queue") or [])[:50]
+                sd["recon_coverage"] = dict(state.get("recon_coverage") or {})
+                sd["recon_coverage_gaps"] = list(state.get("recon_coverage_gaps") or [])
                 job.state_data = sd
                 # Persist tech_stack to its dedicated column too (queryable by GIN index).
                 try:
@@ -303,6 +308,34 @@ def _refresh_tech_stack(state: AgentState) -> bool:
         )
         return True
     return False
+
+
+def _refresh_recon_graph(
+    state: AgentState,
+    *,
+    capability: str,
+    target: str,
+    tools: list[str],
+    findings: list[dict[str, Any]],
+    ports: list[int],
+    assets: list[str],
+    port_evidence: dict[int, dict[str, Any]],
+) -> None:
+    try:
+        from app.services.recon_graph_service import update_recon_graph
+
+        update_recon_graph(
+            state,
+            capability=capability,
+            target=target,
+            tools=tools,
+            findings=findings,
+            ports=ports,
+            assets=assets,
+            port_evidence=port_evidence,
+        )
+    except Exception as exc:
+        logger.warning("recon graph refresh failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1183,11 +1216,18 @@ def _run_tools_and_collect(
     runs_so_far = state.get("executed_tool_runs", []) or []
     for tool in tools:
         run_key = f"{_phase_id}|{scan_target}|{tool}".lower()
+        runtime_meta = dict((state.get("tool_runtime") or {}).get(tool) or (state.get("tool_runtime") or {}).get(str(tool).lower()) or {})
+        tool_done = int(runtime_meta.get("success", 0) or 0) >= 1 or int(runtime_meta.get("skipped", 0) or 0) >= 1
+        retry_exhausted = int(runtime_meta.get("attempts", 0) or 0) >= 2
         if run_key in (r.lower() for r in runs_so_far):
+            if tool_done or retry_exhausted:
+                state["logs_terminais"].append(
+                    f"{log_prefix}: tool={tool} skipped=already_executed_in_{_phase_id}"
+                )
+                continue
             state["logs_terminais"].append(
-                f"{log_prefix}: tool={tool} skipped=already_executed_in_{_phase_id}"
+                f"{log_prefix}: tool={tool} retrying_after_failure_in_{_phase_id}"
             )
-            continue
         pending_tools.append(tool)
 
     if not pending_tools:
@@ -1228,6 +1268,8 @@ def _run_tools_and_collect(
                 technique=dict(skill_context.get("technique") or {}),
                 evidence_required=list(skill_context.get("evidence_required") or []),
                 constraints=list(skill_context.get("constraints") or []),
+                worker_rules=dict(skill_context.get("worker_rules") or {}),
+                sub_agent_plan=list(skill_context.get("sub_agent_plan") or []),
                 playbook=str(skill_context.get("playbook_title") or ""),
                 extra_args=tool_args,
             )
@@ -1641,6 +1683,11 @@ def initial_state(
         "kill_chain_stage": "RECONNAISSANCE",
         "pentest_phase_index": 0,
         "pentest_hypotheses": [],
+        "recon_graph": {},
+        "recon_skill_recommendations": [],
+        "recon_reanalyze_queue": [],
+        "recon_coverage": {},
+        "recon_coverage_gaps": [],
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},
