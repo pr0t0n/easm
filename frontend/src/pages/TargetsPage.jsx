@@ -1,22 +1,32 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 
-const RISK_COLOR = {
-  critical: "text-red-300 border-red-500/30 bg-red-500/10",
-  high: "text-orange-300 border-orange-500/30 bg-orange-500/10",
-  medium: "text-yellow-800 border-yellow-500/40 bg-yellow-100",
-  low: "text-emerald-300 border-emerald-500/30 bg-emerald-500/10",
+const SEV_CLASS = {
+  critical: "b-critical",
+  high: "b-high",
+  medium: "b-medium",
+  low: "b-low",
+  info: "b-info",
 };
 
-const STATUS_BADGE = {
-  completed: "border-emerald-500 bg-emerald-900/40 text-emerald-300",
-  running: "border-blue-500 bg-blue-900/40 text-blue-300",
-  retrying: "border-amber-500 bg-amber-900/40 text-amber-300",
-  queued: "border-slate-600 bg-slate-700 text-slate-300",
-  failed: "border-rose-500 bg-rose-900/40 text-rose-300",
-  blocked: "border-rose-500 bg-rose-900/40 text-rose-300",
+const STATUS_DOT = {
+  completed: "ok",
+  running: "run",
+  retrying: "warn",
+  queued: "idle",
+  failed: "crit",
+  blocked: "crit",
 };
+
+function gradeFromSeverity(sev) {
+  const s = String(sev || "").toLowerCase();
+  if (s === "critical") return "F";
+  if (s === "high") return "D";
+  if (s === "medium") return "C";
+  if (s === "low") return "B";
+  return "A";
+}
 
 export default function TargetsPage() {
   const [rows, setRows] = useState([]);
@@ -35,9 +45,9 @@ export default function TargetsPage() {
   const [wsConnected, setWsConnected] = useState(false);
 
   const fmtDateTime = (value) => {
-    if (!value) return "-";
+    if (!value) return "—";
     const dt = new Date(value);
-    if (Number.isNaN(dt.getTime())) return "-";
+    if (Number.isNaN(dt.getTime())) return "—";
     return dt.toLocaleString("pt-BR");
   };
 
@@ -124,6 +134,15 @@ export default function TargetsPage() {
     return target.includes(query.trim().toLowerCase());
   });
 
+  const totals = rows.reduce(
+    (acc, r) => ({
+      scans: acc.scans + Number(r.scans || 0),
+      findings: acc.findings + Number(r.findings_total || 0),
+      open: acc.open + Number(r.findings_open || 0),
+    }),
+    { scans: 0, findings: 0, open: 0 }
+  );
+
   const authorizeAndCreateScan = async (targetName) => {
     if (!authorizationAccepted[targetName]) {
       setStatusMessage("Confirme a autorização antes de executar o scan.");
@@ -149,12 +168,11 @@ export default function TargetsPage() {
         access_group_id: null,
       });
 
-      setStatusMessage(`Scan para ${targetName} iniciado com sucesso!`);
+      setStatusMessage(`Scan para ${targetName} iniciado com sucesso.`);
       setAuthorizationAccepted({ ...authorizationAccepted, [targetName]: false });
       setExpandedTarget(null);
       setSelectedScanId(null);
-      
-      // Recarregar targets após criação
+
       setTimeout(() => {
         const reload = async () => {
           try {
@@ -171,158 +189,201 @@ export default function TargetsPage() {
   };
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
-      <section className="panel p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-xl font-semibold">Targets</h2>
-            <p className="mt-1 text-sm text-slate-300">Inventario real de alvos a partir dos scans executados.</p>
-          </div>
-          <input
-            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 sm:w-80"
-            placeholder="Buscar target"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+    <main className="dpage">
+      {/* KPI strip */}
+      <section className="grid-4" style={{ marginBottom: 22 }}>
+        <div className="kpi">
+          <div className="k">Alvos no escopo</div>
+          <div className="v">{rows.length}</div>
+          <div className="hint">inventário a partir dos scans executados</div>
+        </div>
+        <div className="kpi">
+          <div className="k">Findings abertos</div>
+          <div className="v" style={{ color: "var(--brand-500)" }}>{totals.open}</div>
+          <div className="hint">aguardando triagem ou correção</div>
+        </div>
+        <div className="kpi">
+          <div className="k">Total de findings</div>
+          <div className="v">{totals.findings}</div>
+          <div className="hint">consolidado em todos os alvos</div>
+        </div>
+        <div className="kpi">
+          <div className="k">Scans executados</div>
+          <div className="v">{totals.scans}</div>
+          <div className="hint">recon · vuln · OSINT</div>
         </div>
       </section>
 
-      {error && <section className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">{error}</section>}
-
-      {statusMessage && <section className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">{statusMessage}</section>}
-
-      <section className="panel p-5">
-        {loading && <p className="text-sm text-slate-400">Carregando targets...</p>}
-        {!loading && filtered.length === 0 && <p className="text-sm text-slate-500">Nenhum target encontrado.</p>}
-
-        <div className="space-y-2">
-          {filtered.map((item) => {
-            const targetScans = scans
-              .filter((scan) => String(scan.target_query || "") === String(item.target || ""))
-              .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-
-            return (
-            <div key={item.target} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="flex-1">
-                  <p className="font-mono text-sm font-semibold">{item.target}</p>
-                  <p className="text-xs text-slate-400">
-                    ultimo scan: {item.last_scan_at ? new Date(item.last_scan_at).toLocaleString("pt-BR") : "-"}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold uppercase ${STATUS_BADGE[item.last_status] || "border-slate-300 bg-slate-200 text-slate-900"}`}>
-                    {item.last_status}
-                  </span>
-                  <span className={`rounded-md border px-2 py-0.5 text-xs uppercase ${RISK_COLOR[item.highest_severity] || RISK_COLOR.low}`}>
-                    risco {item.highest_severity}
-                  </span>
-                  <button
-                    onClick={() => {
-                      const willExpand = expandedTarget !== item.target;
-                      setExpandedTarget(willExpand ? item.target : null);
-                      setSelectedScanId(null);
-                    }}
-                    className="rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-500"
-                  >
-                    ▶ Scan
-                  </button>
-                </div>
-              </div>
-              <div className="mt-2 grid gap-2 text-xs text-slate-300 sm:grid-cols-4">
-                <p>scans: <span className="font-semibold text-white">{item.scans}</span></p>
-                <p>findings: <span className="font-semibold text-white">{item.findings_total}</span></p>
-                <p>abertos: <span className="font-semibold text-amber-300">{item.findings_open}</span></p>
-                <p>modo ultimo scan: <span className="font-semibold text-white">{item.last_mode}</span></p>
-              </div>
-
-              {expandedTarget === item.target && (
-                <div className="mt-4 border-t border-slate-700 pt-4">
-                  <div className="mb-4">
-                    <h4 className="text-sm font-semibold text-slate-200">Scans deste target</h4>
-                    <p className="mt-1 text-xs text-slate-400">Clique em um scan para acompanhar o log em tempo real.</p>
-                    <div className="mt-2 space-y-2">
-                      {targetScans.length === 0 && (
-                        <p className="text-xs text-slate-500">Nenhum scan encontrado para este target.</p>
-                      )}
-                      {targetScans.slice(0, 8).map((scan) => {
-                        const isSelected = selectedScanId === scan.id;
-                        return (
-                          <button
-                            key={scan.id}
-                            onClick={() => setSelectedScanId(scan.id)}
-                            className={`w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
-                              isSelected
-                                ? "border-cyan-500/60 bg-cyan-500/10"
-                                : "border-slate-700 bg-slate-900/50 hover:bg-slate-800/70"
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-semibold text-slate-100">Scan #{scan.id}</span>
-                              <span className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase ${STATUS_BADGE[scan.status] || "border-slate-300 bg-slate-200 text-slate-900"}`}>
-                                {scan.status}
-                              </span>
-                            </div>
-                            <div className="mt-1 text-[11px] text-slate-400">
-                              criado em {fmtDateTime(scan.created_at)} | modo {scan.mode || "-"}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {selectedScanId && (
-                    <div className="mb-4 space-y-2 rounded-xl border border-slate-700 bg-slate-900/40 p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                        <p className="text-slate-300">
-                          Acompanhando scan <span className="font-semibold text-cyan-300">#{selectedScanId}</span>
-                        </p>
-                        <p className="text-slate-400">
-                          WS: <span className={wsConnected ? "text-emerald-300" : "text-rose-300"}>{wsConnected ? "conectado" : "desconectado"}</span>
-                        </p>
-                      </div>
-                      <div className="text-xs text-slate-400">
-                        status atual: <span className="font-semibold text-slate-200">{scanStatus?.status || "-"}</span>
-                        {scanStatus?.current_step ? ` | etapa: ${scanStatus.current_step}` : ""}
-                      </div>
-                      <LogTerminal logs={logs} />
-                    </div>
-                  )}
-
-                  <div className="space-y-3">
-                    <select
-                      className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-                      value={scanMode}
-                      onChange={(e) => setScanMode(e.target.value)}
-                    >
-                      <option value="single">Unitario</option>
-                      <option value="scheduled">Agendado</option>
-                    </select>
-                    <label className="flex items-start gap-3 rounded-lg border border-slate-700 bg-slate-800/50 p-3 text-xs text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={authorizationAccepted[item.target] || false}
-                        onChange={(e) => setAuthorizationAccepted({ ...authorizationAccepted, [item.target]: e.target.checked })}
-                        className="mt-1"
-                      />
-                      <span>
-                        Autorizo a execução de scan neste target e confirmo que possuo permissão formal para isso.
-                      </span>
-                    </label>
-                    <button
-                      onClick={() => authorizeAndCreateScan(item.target)}
-                      disabled={!authorizationAccepted[item.target] || submitting}
-                      className="w-full rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 hover:bg-green-500"
-                    >
-                      {submitting ? "Iniciando..." : "Iniciar Scan"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )})}
+      {error && <div className="err-box" style={{ marginBottom: 16 }}>{error}</div>}
+      {statusMessage && (
+        <div
+          style={{
+            marginBottom: 16, padding: "12px 16px", borderRadius: 10, fontSize: 13,
+            border: "1px solid var(--sev-medium-border)", background: "var(--sev-medium-bg)", color: "var(--sev-medium-text)",
+          }}
+        >
+          {statusMessage}
         </div>
+      )}
+
+      {/* Targets table */}
+      <section className="t-wrap">
+        <div className="t-head">
+          <div>
+            <h3>Alvos monitorados</h3>
+            <div className="sub">cada linha é um asset autorizado · recon contínuo, vuln e OSINT</div>
+          </div>
+          <div className="t-tools">
+            <div className="search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+              <input placeholder="Buscar host, IP, tag…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            </div>
+            <button className="filter active">Todos · {filtered.length}</button>
+          </div>
+        </div>
+
+        {loading && (
+          <div className="state"><div><div className="spin" /><p className="st-title">Carregando alvos…</p></div></div>
+        )}
+        {!loading && filtered.length === 0 && <div className="empty">Nenhum target encontrado.</div>}
+
+        {!loading && filtered.length > 0 && (
+          <table className="t">
+            <thead>
+              <tr>
+                <th>Host / Asset</th>
+                <th>Rating</th>
+                <th>Status</th>
+                <th>Risco</th>
+                <th>Scans</th>
+                <th>Findings</th>
+                <th>Abertos</th>
+                <th>Último scan</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((item) => {
+                const targetScans = scans
+                  .filter((scan) => String(scan.target_query || "") === String(item.target || ""))
+                  .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+                const grade = gradeFromSeverity(item.highest_severity);
+                const isExpanded = expandedTarget === item.target;
+
+                return (
+                  <Fragment key={item.target}>
+                    <tr>
+                      <td>
+                        <div style={{ fontFamily: "var(--font-mono)", fontWeight: 600, color: "var(--ink)" }}>{item.target}</div>
+                        <div className="mono-sm muted" style={{ marginTop: 2 }}>modo {item.last_mode || "—"}</div>
+                      </td>
+                      <td>
+                        <span className={`grade-pill grade-${grade}`}>{grade}</span>
+                      </td>
+                      <td>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                          <span className={`dot-state ${STATUS_DOT[item.last_status] || "idle"}`} />
+                          <span className="mono-sm">{item.last_status || "—"}</span>
+                        </span>
+                      </td>
+                      <td><span className={`b ${SEV_CLASS[item.highest_severity] || "b-low"}`}>{item.highest_severity || "low"}</span></td>
+                      <td className="mono">{item.scans}</td>
+                      <td className="mono">{item.findings_total}</td>
+                      <td className="mono" style={{ color: "var(--brand-700)", fontWeight: 600 }}>{item.findings_open}</td>
+                      <td className="mono-sm muted">{fmtDateTime(item.last_scan_at)}</td>
+                      <td>
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={() => {
+                            setExpandedTarget(isExpanded ? null : item.target);
+                            setSelectedScanId(null);
+                          }}
+                        >
+                          {isExpanded ? "Fechar" : "Scan"}
+                        </button>
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr>
+                        <td colSpan={9} style={{ background: "var(--surface-soft)" }}>
+                          <div style={{ display: "grid", gap: 16, gridTemplateColumns: "1fr 1fr" }}>
+                            <div>
+                              <h4 style={{ fontFamily: "var(--font-display)", fontSize: 13, fontWeight: 600, margin: "0 0 8px" }}>Scans deste target</h4>
+                              {targetScans.length === 0 && <p className="mono-sm muted">Nenhum scan encontrado para este target.</p>}
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {targetScans.slice(0, 8).map((scan) => (
+                                  <button
+                                    key={scan.id}
+                                    onClick={() => setSelectedScanId(scan.id)}
+                                    style={{
+                                      textAlign: "left", padding: "8px 12px", borderRadius: 7, cursor: "pointer",
+                                      border: `1px solid ${selectedScanId === scan.id ? "var(--brand-500)" : "var(--line)"}`,
+                                      background: selectedScanId === scan.id ? "rgba(233,99,99,0.06)" : "var(--surface)",
+                                    }}
+                                  >
+                                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                                      <b>Scan #{scan.id}</b>
+                                      <span className={`dot-state ${STATUS_DOT[scan.status] || "idle"}`} />
+                                    </div>
+                                    <div className="mono-sm muted" style={{ marginTop: 3 }}>{fmtDateTime(scan.created_at)} · modo {scan.mode || "—"}</div>
+                                  </button>
+                                ))}
+                              </div>
+
+                              {selectedScanId && (
+                                <div style={{ marginTop: 12 }}>
+                                  <div className="mono-sm muted" style={{ marginBottom: 6 }}>
+                                    Scan #{selectedScanId} · WS{" "}
+                                    <span style={{ color: wsConnected ? "var(--sev-low-text)" : "var(--sev-critical-text)" }}>
+                                      {wsConnected ? "conectado" : "desconectado"}
+                                    </span>
+                                    {scanStatus?.status ? ` · ${scanStatus.status}` : ""}
+                                  </div>
+                                  <LogTerminal logs={logs} />
+                                </div>
+                              )}
+                            </div>
+
+                            <div>
+                              <h4 style={{ fontFamily: "var(--font-display)", fontSize: 13, fontWeight: 600, margin: "0 0 8px" }}>Novo scan</h4>
+                              <select
+                                className="w-full"
+                                value={scanMode}
+                                onChange={(e) => setScanMode(e.target.value)}
+                                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13, marginBottom: 10 }}
+                              >
+                                <option value="single">Unitário</option>
+                                <option value="scheduled">Agendado</option>
+                              </select>
+                              <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ink-soft)", padding: "10px 12px", border: "1px solid var(--line)", borderRadius: 8, background: "var(--surface)", marginBottom: 10 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={authorizationAccepted[item.target] || false}
+                                  onChange={(e) => setAuthorizationAccepted({ ...authorizationAccepted, [item.target]: e.target.checked })}
+                                  style={{ marginTop: 2 }}
+                                />
+                                <span>Autorizo a execução de scan neste target e confirmo que possuo permissão formal para isso.</span>
+                              </label>
+                              <button
+                                className="btn btn-primary"
+                                style={{ width: "100%", justifyContent: "center" }}
+                                onClick={() => authorizeAndCreateScan(item.target)}
+                                disabled={!authorizationAccepted[item.target] || submitting}
+                              >
+                                {submitting ? "Iniciando…" : "Iniciar scan"}
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </section>
     </main>
   );
