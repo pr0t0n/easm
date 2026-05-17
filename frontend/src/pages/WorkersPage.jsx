@@ -361,26 +361,6 @@ export default function WorkersPage() {
       {/* ── TAB: WORKERS AO VIVO ────────────────────────────────────────── */}
       {activeTab === "workers" && (
         <>
-          {/* Contadores por fase */}
-          {health?.summary?.phase_counts && (
-            <section className="panel p-4">
-              <div className="grid gap-2 text-sm md:grid-cols-3 xl:grid-cols-5">
-                {[
-                  { key: "reconhecimento",          label: "AssetDiscovery", palette: AGENT_PALETTE.cyan },
-                  { key: "analise_vulnerabilidade",  label: "RiskAssessment", palette: AGENT_PALETTE.amber },
-                  { key: "osint",                    label: "ThreatIntel",    palette: AGENT_PALETTE.violet },
-                  { key: "governance",               label: "Governance",     palette: AGENT_PALETTE.emerald },
-                  { key: "executive_analyst",        label: "Executive",      palette: AGENT_PALETTE.rose },
-                ].map(({ key, label, palette }) => (
-                  <div key={key} className={`rounded-lg border ${palette.border} ${palette.bg} px-3 py-2`}>
-                    <p className={`text-xs ${palette.text}`}>{label}</p>
-                    <p className="text-xl font-semibold text-slate-100">{health.summary.phase_counts[key] || 0}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
           <section className="panel p-5">
             <h3 className="mb-3 text-base font-semibold text-slate-100">Instâncias de Workers</h3>
             {loading && <p className="text-sm text-slate-400">Carregando…</p>}
