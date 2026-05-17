@@ -60,36 +60,31 @@ export default function Navbar() {
     return { color: "#2d52e6", label: "Kali standby", bg: "rgba(75,115,255,0.1)" };
   })();
 
+  const crumbs = String(meta.eyebrow || "").split(/\s*[·/]\s*/).filter(Boolean);
+
   return (
     <header className="app-hdr">
       <div>
-        <span
+        <div
           style={{
-            display: "inline-flex",
+            display: "flex",
             alignItems: "center",
-            gap: 6,
-            padding: "3px 10px",
-            borderRadius: 999,
-            background: "var(--brand-50)",
-            border: "1px solid rgba(233,99,99,0.25)",
-            color: "var(--brand-700)",
-            fontSize: 10,
-            fontWeight: 700,
+            gap: 10,
+            fontSize: 10.5,
+            fontWeight: 600,
             letterSpacing: "0.18em",
             textTransform: "uppercase",
+            color: "var(--ink-muted)",
           }}
         >
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 999,
-              background: "var(--brand-500)",
-              display: "inline-block",
-            }}
-          />
-          {meta.eyebrow}
-        </span>
+          <span style={{ width: 24, height: 1, background: "var(--brand-500)", display: "inline-block" }} />
+          {crumbs.map((crumb, i) => (
+            <span key={crumb} style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              {i > 0 && <span style={{ color: "var(--line-strong)" }}>/</span>}
+              <span>{crumb}</span>
+            </span>
+          ))}
+        </div>
         <h1 className="app-hdr-title" style={{ marginTop: 8 }}>{meta.title}</h1>
         <div className="app-hdr-sub">{meta.sub}</div>
       </div>
