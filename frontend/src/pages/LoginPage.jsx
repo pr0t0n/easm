@@ -2,12 +2,12 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import client from "../api/client";
 import { authStore } from "../store/auth";
+import "../styles/login.css";
 
 function normalizeApiError(err) {
   const detail = err?.response?.data?.detail;
 
   if (!detail) return "Falha ao autenticar.";
-
   if (typeof detail === "string") return detail;
 
   if (Array.isArray(detail)) {
@@ -24,7 +24,6 @@ function normalizeApiError(err) {
         return "entrada invalida";
       })
       .filter(Boolean);
-
     return messages.length ? messages.join(" | ") : "Falha ao autenticar.";
   }
 
@@ -32,9 +31,29 @@ function normalizeApiError(err) {
     if (typeof detail.msg === "string") return detail.msg;
     return JSON.stringify(detail);
   }
-
   return "Falha ao autenticar.";
 }
+
+const IconMail = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <rect width="20" height="16" x="2" y="4" rx="2" />
+    <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+  </svg>
+);
+
+const IconLock = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </svg>
+);
+
+const IconArrowRight = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 12h14" />
+    <path d="m12 5 7 7-7 7" />
+  </svg>
+);
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -64,98 +83,132 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="relative min-h-screen overflow-hidden px-4 py-8" style={{ background: "var(--bg-app-gradient)" }}>
-      <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-7xl items-center gap-8 lg:grid-cols-[1.2fr_0.8fr]">
-        <section className="rounded-2xl border p-8 lg:p-10" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "0 1px 2px rgba(28,28,28,0.04), 0 4px 12px rgba(28,28,28,0.04)" }}>
-          <div className="inline-flex items-center gap-2 rounded-full border px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em]" style={{ background: "rgba(233,99,99,0.08)", borderColor: "rgba(233,99,99,0.3)", color: "var(--brand-700)" }}>
-            <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--brand-500)", display: "inline-block" }} />
-            ScriptKidd.o
+    <div className="login-stage">
+
+      {/* ===================== LEFT — PITCH ===================== */}
+      <aside className="pitch">
+        <div className="brand">
+          <span className="mk" />
+          <div>
+            <b>ScriptKidd<span className="ext">.o</span></b>
+            <span className="tag">Vulnerability analysis</span>
           </div>
-          <h1 className="mt-6 max-w-3xl font-display text-4xl font-semibold leading-tight lg:text-6xl" style={{ color: "var(--text-primary)" }}>
-            Análise de vulnerabilidade com leitura executiva, operação governada e evidência acionável.
-          </h1>
-          <p className="mt-5 max-w-2xl text-base leading-7 lg:text-lg" style={{ color: "var(--text-secondary)" }}>
-            O ScriptKidd.o identifica vulnerabilidades em domínios, subdomínios, portas, tecnologias publicadas, APIs e fluxos autenticados. A plataforma cruza recon, execução Kali, aprendizado aceito e trilha de evidência para transformar hipótese em achado reproduzível.
+        </div>
+
+        <div className="headline">
+          <div className="eb">Console operacional · v2.4</div>
+          <h1>Sua superfície,<br /><em>observada continuamente.</em></h1>
+          <p>
+            Recon, OSINT e vuln scanning orquestrados em agentes governados —
+            com trilha auditável de ponta a ponta. Apenas escopo autorizado.
           </p>
 
-          <div className="mt-8 grid gap-3 md:grid-cols-3">
-            {[
-              ["Descoberta", "Mapeamento de dominios, subdominios, portas, endpoints e exposicoes externas."],
-              ["Prioridade", "Ranking de achados por severidade, FAIR, AGE e contexto do ambiente."],
-              ["Governanca", "Gate de autorizacao, policy por cliente, auditoria e trilha supervisor-worker."],
-            ].map(([t, d]) => (
-              <div key={t} className="rounded-xl border p-4" style={{ borderColor: "var(--border)", background: "var(--bg-muted)" }}>
-                <p className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--text-tertiary)" }}>{t}</p>
-                <p className="mt-2 text-sm" style={{ color: "var(--text-primary)" }}>{d}</p>
-              </div>
-            ))}
+          <div className="console" aria-hidden="true">
+            <div className="ch">
+              <span className="dot"><i /><i /><i /></span>
+              <span>scan · pipeline langgraph · kali runner</span>
+            </div>
+            <div className="body">
+              <span className="ln"><span className="pmt">$</span> recon --scope authorized-targets</span>
+              <span className="ln"><span className="key">[amass]</span> subdomínios <span className="ok">✓</span></span>
+              <span className="ln"><span className="key">[nmap]</span> portas e serviços <span className="ok">✓</span></span>
+              <span className="ln"><span className="key">[osint]</span> exposições <span className="warn">!</span></span>
+              <span className="ln" style={{ marginTop: 6 }}><span className="pmt">$</span> vuln --priority crit</span>
+              <span className="ln"><span className="key">nuclei</span> <span className="crit">cve</span> rce · api</span>
+              <span className="ln"><span className="key">sqlmap</span> <span className="warn">idor</span> · auth</span>
+              <span className="ln"><span className="pmt">$</span> <span className="cur">fair --weight crown</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div className="foot">
+          <span>ScriptKidd.o · console</span>
+          <span>console seguro · TLS 1.3</span>
+        </div>
+      </aside>
+
+      {/* ===================== RIGHT — FORM ===================== */}
+      <main className="form-pane">
+        <form className="form" onSubmit={submit}>
+          <div className="s-eb">Acesso restrito</div>
+          <h2>Bem-vindo de volta.</h2>
+          <div className="h-sub">Faça login para acessar seus alvos, scans e findings.</div>
+
+          <div className="row">
+            <label>Email corporativo</label>
+            <div className="input-wrap">
+              <span className="ico"><IconMail /></span>
+              <input
+                type="email"
+                required
+                placeholder="alice@megacorp.com"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
           </div>
 
-          <div className="mt-8 grid gap-3 rounded-xl border p-5 md:grid-cols-3" style={{ borderColor: "var(--border)", background: "var(--bg-muted)" }}>
-            {[
-              ["O que o ScriptKidd.o encontra", "Falhas exploráveis, frameworks vulneráveis, parâmetros sensíveis, endpoints esquecidos e evidências reproduzíveis."],
-              ["Fontes de evidencia", "Recon DNS, HTTP probing, tecnologia web, scanners especializados e enriquecimento externo."],
-              ["Saida executiva", "Dashboard consolidado, scans em andamento, top tecnologias e plano de correcao priorizado."],
-            ].map(([t, d]) => (
-              <div key={t}>
-                <p className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--text-tertiary)" }}>{t}</p>
-                <p className="mt-2 text-sm" style={{ color: "var(--text-primary)" }}>{d}</p>
-              </div>
-            ))}
+          <div className="row">
+            <label>
+              Senha
+              <a href="#" className="helper" onClick={(e) => e.preventDefault()}>esqueci a senha</a>
+            </label>
+            <div className="input-wrap">
+              <span className="ico"><IconLock /></span>
+              <input
+                type="password"
+                required
+                placeholder="••••••••"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
           </div>
-        </section>
 
-        <section className="relative overflow-hidden rounded-2xl border p-6 lg:p-8" style={{ background: "#ffffff", borderColor: "var(--border)", boxShadow: "var(--shadow-elevate)" }}>
-          <div className="absolute inset-x-0 top-0 h-1" style={{ background: "linear-gradient(90deg,#e96363,#ff66f4,#4b73ff)" }} />
-          <p className="ds-eyebrow">Acesso corporativo</p>
-          <h2 className="mt-3 font-display text-3xl font-semibold" style={{ color: "var(--ink)" }}>Entrar na operação</h2>
-          <p className="mt-2 text-sm leading-6" style={{ color: "var(--ink-soft)" }}>
-            Acompanhe execuções, postura de risco e status das integrações em um painel único. O cadastro de usuários é realizado exclusivamente por administradores.
-          </p>
+          <div className="between">
+            <label className="remember">
+              <input type="checkbox" defaultChecked />
+              Lembrar deste dispositivo
+            </label>
+            <span className="twofa">2FA · TOTP</span>
+          </div>
 
-          <form onSubmit={submit} className="mt-6 space-y-3">
-            <input
-              type="email"
-              required
-              className="w-full rounded-xl px-4 py-3 outline-none"
-              placeholder="email corporativo"
-              onChange={(e) => setEmail(e.target.value)}
-              style={{ border: "1px solid var(--border)" }}
-            />
-            <input
-              type="password"
-              required
-              className="w-full rounded-xl px-4 py-3 outline-none"
-              placeholder="senha"
-              onChange={(e) => setPassword(e.target.value)}
-              style={{ border: "1px solid var(--border)" }}
-            />
+          <button type="submit" className="submit" disabled={submitting}>
+            {submitting ? "Processando…" : "Entrar no console"}
+            {!submitting && <IconArrowRight />}
+          </button>
 
-            {error && (
-              <div className="rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "rgba(214,69,69,0.3)", background: "rgba(214,69,69,0.08)", color: "#b03333" }}>
-                {error}
-              </div>
-            )}
+          {error && <div className="login-err">{error}</div>}
 
-            <button
-              disabled={submitting}
-              className="w-full rounded-xl px-4 py-3 font-semibold text-white disabled:opacity-50"
-              style={{ background: "var(--primary)", border: "1px solid var(--primary)", boxShadow: "var(--shadow-cta)" }}
-              onMouseEnter={(e) => { if (!submitting) { e.currentTarget.style.background = "var(--primary-hover)"; e.currentTarget.style.boxShadow = "var(--shadow-cta-hover)"; } }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--primary)"; e.currentTarget.style.boxShadow = "var(--shadow-cta)"; }}
-            >
-              {submitting ? "Processando..." : "Entrar"}
+          <div className="divider">ou continue com</div>
+
+          <div className="sso">
+            <button type="button" title="SSO indisponível" onClick={() => setError("SSO corporativo não está habilitado neste ambiente.")}>
+              <span className="sw" style={{ background: "linear-gradient(135deg,#007dc1,#003a6b)" }} />
+              Okta SSO
             </button>
-          </form>
-
-          <div className="mt-6 rounded-xl border p-4 text-sm" style={{ borderColor: "var(--border)", background: "var(--bg-muted)", color: "var(--text-secondary)" }}>
-            <p className="font-semibold" style={{ color: "var(--text-primary)" }}>Fluxo recomendado</p>
-            <p className="mt-2">1. Configure credenciais externas e ferramentas.</p>
-            <p>2. Defina grupos, política e alvos autorizados.</p>
-            <p>3. Execute scans com trilha de auditoria e acompanhamento em tempo real.</p>
+            <button type="button" title="SSO indisponível" onClick={() => setError("SSO corporativo não está habilitado neste ambiente.")}>
+              <span className="sw" style={{ background: "linear-gradient(135deg,#0078d4,#004b8d)" }} />
+              Azure AD
+            </button>
           </div>
-        </section>
-      </div>
-    </main>
+
+          <div className="audit-notice">
+            <span className="pulse" />
+            Todas as ações nesta sessão são auditadas
+          </div>
+
+          <div className="legal">
+            Ao fazer login você concorda com os{" "}
+            <a href="#" onClick={(e) => e.preventDefault()}>termos de uso</a> e a{" "}
+            <a href="#" onClick={(e) => e.preventDefault()}>política de retenção</a>.
+            O cadastro de usuários é feito exclusivamente por administradores.
+          </div>
+        </form>
+      </main>
+
+    </div>
   );
 }
