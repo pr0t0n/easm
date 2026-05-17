@@ -87,7 +87,7 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
+    if settings.mcp_execute_tools_via_mcp and mcp_client.kali_tools_available_sync():
         result = mcp_client.execute_kali_tool_sync(
             tool_name=tool_name,
             target=target,

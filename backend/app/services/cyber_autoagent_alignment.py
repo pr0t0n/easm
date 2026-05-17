@@ -72,26 +72,28 @@ CYBER_AUTOAGENT_RUBRIC = {
 TOOL_SELECTION_SUPERVISOR_CONTRACT = """
 Você é o Supervisor de Orquestração de uma plataforma de segurança ofensiva controlada.
 
-Sua função é transformar um playbook de vulnerabilidade estruturado em uma decisão de execução clara e determinística para seleção de ferramenta.
+Sua função é transformar um playbook de vulnerabilidade estruturado + uma técnica adversária BAS em uma decisão de execução clara e determinística para seleção de ferramenta.
 
 Você NÃO executa testes.
 Você NÃO escolhe ferramenta diretamente.
-Você PREPARA o contexto para o Tool Selection Engine.
+Você PREPARA o contexto para o Tool Selection Engine e para validação posterior de detecção.
 
 ENTRADA:
 
 1. PLAYBOOK_APRENDIDO (JSON estruturado)
 2. EXECUTION_CONTEXT (estado atual do scan)
 3. TOOL_CATALOG (lista de ferramentas disponíveis)
+4. ADVERSARY_TECHNIQUE_CATALOG (técnicas BAS disponíveis)
 
 OBJETIVO:
 
-Selecionar UMA técnica do playbook e preparar o contexto completo para execução segura.
+Selecionar UMA técnica adversária BAS e UMA técnica do playbook, preparando o contexto completo para execução segura e validação de controle.
 
 REGRAS:
 
 1. Seleção de técnica:
-- Escolher a técnica mais relevante para a fase atual
+- Escolher primeiro a técnica adversária BAS mais relevante para a fase atual e objetivo defensivo
+- Escolher a técnica do playbook que melhor implementa essa técnica adversária
 - Priorizar técnicas com maior evidência potencial
 - Evitar técnicas de alto risco se não necessário
 
@@ -99,19 +101,30 @@ REGRAS:
 - phase atual
 - skill necessária
 - objetivo da execução
+- objetivo defensivo / controle a validar
+- telemetria esperada
 
 3. NÃO ambíguo:
-- Nunca retornar múltiplas técnicas
+- Nunca retornar múltiplas técnicas adversárias
+- Nunca retornar múltiplas técnicas de playbook
 - Nunca deixar fase/skill indefinida
 
 4. Segurança:
 - Se não houver escopo autorizado, bloquear execução
 - Se risco > permitido, ajustar ou bloquear
+- Se a técnica adversária requer aprovação e ela não existir, retornar needs_review
+- Ações destrutivas, persistência, credential dumping e exfiltração real são proibidas por padrão
 
 SAÍDA OBRIGATÓRIA (JSON):
 
 {
   "execution_decision": "proceed | block | needs_review",
+  "selected_adversary_technique": {
+    "id": "string",
+    "name": "string",
+    "control_objective": "string",
+    "expected_telemetry": ["string"]
+  },
   "selected_technique": {
     "name": "string",
     "objective": "string",
@@ -126,6 +139,7 @@ SAÍDA OBRIGATÓRIA (JSON):
     "max_risk_allowed": "low | medium | high"
   },
   "signals_to_validate": ["string"],
+  "detection_signals_to_validate": ["string"],
   "constraints": [
     "string"
   ],
@@ -136,7 +150,7 @@ SAÍDA OBRIGATÓRIA (JSON):
 REGRAS FINAIS:
 - JSON puro
 - Sem texto fora do JSON
-- Não inventar técnica
+- Não inventar técnica adversária nem técnica de playbook
 - Não deixar campos vazios
 """.strip()
 
@@ -180,6 +194,16 @@ Out-of-scope actions MUST be skipped and logged.
 
 ## ACCEPTED VULNERABILITY LEARNING (reviewed by operator)
 {accepted_vulnerability_learning}
+
+## ADVERSARY TECHNIQUE CATALOG (BAS / PURPLE TEAM CONTRACT)
+{adversary_technique_catalog}
+
+Use this catalog as the primary intent layer:
+- Select adversary_technique first, then map it to skill and tool.
+- Every action should carry a control objective and expected telemetry.
+- Offensive proof answers "was the behavior reproducible?"
+- Defensive proof answers "did controls detect it, how fast, and with useful context?"
+- Default outcome without defensive evidence is detection_status="unknown", not "detected".
 
 ## LEARNED PLAYBOOK → TOOL SELECTION ENGINE CONTRACT
 When an accepted learning playbook is relevant, apply this contract before any worker receives a tool task:
@@ -264,6 +288,13 @@ def build_supervisor_prompt_contract(
         accepted_vulnerability_learning = "(accepted vulnerability learning unavailable)"
 
     try:
+        from app.services.adversary_technique_catalog import render_adversary_technique_catalog_for_prompt
+
+        adversary_technique_catalog = render_adversary_technique_catalog_for_prompt(limit=12)
+    except Exception:
+        adversary_technique_catalog = "(adversary technique catalog unavailable)"
+
+    try:
         from app.workers.worker_groups import get_worker_agent_profiles
 
         canonical_groups = {
@@ -297,6 +328,7 @@ def build_supervisor_prompt_contract(
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
         worker_missions=worker_missions,
         accepted_vulnerability_learning=accepted_vulnerability_learning,
+        adversary_technique_catalog=adversary_technique_catalog,
         tool_selection_supervisor_contract=TOOL_SELECTION_SUPERVISOR_CONTRACT,
         tool_catalog=tool_catalog,
         termination_policy=CYBER_AUTOAGENT_PROMPT_PRINCIPLES["termination_policy"],
@@ -314,6 +346,7 @@ def build_supervisor_prompt_contract(
         "system_prompt": prompt.strip(),
         "worker_missions": worker_missions,
         "accepted_vulnerability_learning": accepted_vulnerability_learning,
+        "adversary_technique_catalog": adversary_technique_catalog,
         "tool_selection_supervisor_contract": TOOL_SELECTION_SUPERVISOR_CONTRACT,
         "active_skills": skills,
         "skills_summary": [

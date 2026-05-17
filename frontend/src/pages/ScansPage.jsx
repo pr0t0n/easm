@@ -3,7 +3,7 @@ import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 import MissionProgress from "../components/MissionProgress";
 
-export default function ScansPage() {
+export default function ScansPage({ embedded = false }) {
   const [target, setTarget] = useState("");
   const [mode, setMode] = useState("single");
   const [accessGroupId, setAccessGroupId] = useState("");
@@ -13,6 +13,7 @@ export default function ScansPage() {
   const [logs, setLogs] = useState([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [scanStatus, setScanStatus] = useState(null);
+  const [basSummary, setBasSummary] = useState(null);
   const [authStatus, setAuthStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selectedScans, setSelectedScans] = useState(new Set());
@@ -57,6 +58,19 @@ export default function ScansPage() {
     setScanStatus(data);
   };
 
+  const loadBasSummary = async (scanId) => {
+    try {
+      const { data } = await client.get(`/api/scans/${scanId}/report`, {
+        params: { prioritized_limit: 1, prioritized_offset: 0 },
+        _skipToast: true,
+      });
+      const bas = data?.state_data?.report_v2?.bas_detection_validation || {};
+      setBasSummary(bas.summary || null);
+    } catch {
+      setBasSummary(null);
+    }
+  };
+
   useEffect(() => {
     loadScans();
     client.get("/api/access-groups").then((res) => setGroups(res.data));
@@ -71,8 +85,10 @@ export default function ScansPage() {
 
   useEffect(() => {
     if (!selected) return;
+    setBasSummary(null);
     loadLogs(selected.id);
     loadScanStatus(selected.id);
+    loadBasSummary(selected.id);
     const wsBase = getWsBaseUrl();
     const token = localStorage.getItem("token") || "";
     const ws = new WebSocket(`${wsBase}/ws/scans/${selected.id}/logs?token=${encodeURIComponent(token)}`);
@@ -312,17 +328,19 @@ export default function ScansPage() {
     }
   };
 
+  const Shell = embedded ? "div" : "main";
+
   return (
-    <main className="flex flex-col gap-0">
+    <Shell className={embedded ? "flex flex-col gap-0" : "flex flex-col gap-0"}>
       {/* Top Banner */}
-      <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
+      {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
         <div className="mx-auto max-w-7xl">
           <h1 className="section-title">Scans de Superfície</h1>
           <p className="mt-2 text-sm text-slate-400">Gerenciamento de execuções de varredura e coleta de inteligência sobre ativos</p>
         </div>
-      </div>
+      </div>}
 
-      <div className="flex-1 px-8 py-8">
+      <div className={embedded ? "flex-1" : "flex-1 px-8 py-8"}>
         <div className="mx-auto max-w-7xl">
           <div className="grid gap-6 lg:grid-cols-3">
             {/* Main Content */}
@@ -345,14 +363,20 @@ export default function ScansPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-medium text-slate-400 mb-2">Modo de Execução</label>
-                      <select
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                        value={mode}
-                        onChange={(e) => setMode(e.target.value)}
-                      >
-                        <option value="single">Unitário</option>
-                        <option value="scheduled">Agendado</option>
-                      </select>
+                      {embedded ? (
+                        <div className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-200">
+                          Unitário
+                        </div>
+                      ) : (
+                        <select
+                          className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                          value={mode}
+                          onChange={(e) => setMode(e.target.value)}
+                        >
+                          <option value="single">Unitário</option>
+                          <option value="scheduled">Agendado</option>
+                        </select>
+                      )}
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
@@ -676,6 +700,29 @@ export default function ScansPage() {
                         </div>
                       </div>
                     )}
+                    <div className="pt-3 border-t border-slate-800">
+                      <p className="text-slate-400 mb-2">BAS / Validação de Controles</p>
+                      {basSummary ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="rounded-lg border border-cyan-900/60 bg-cyan-950/20 p-2">
+                            <p className="text-slate-500">Técnicas</p>
+                            <p className="mt-1 font-mono text-lg text-cyan-200">{basSummary.techniques_exercised || 0}</p>
+                          </div>
+                          <div className="rounded-lg border border-sky-900/60 bg-sky-950/20 p-2">
+                            <p className="text-slate-500">Evidência pendente</p>
+                            <p className="mt-1 font-mono text-lg text-sky-200">{basSummary.pending_defensive_evidence || 0}</p>
+                          </div>
+                          <div className="col-span-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2">
+                            <p className="text-slate-500">Fontes esperadas</p>
+                            <p className="mt-1 text-slate-200">
+                              {(basSummary.expected_telemetry_sources || []).join(", ") || "Aguardando execução BAS"}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-slate-500">Sem resumo BAS disponível para este scan.</p>
+                      )}
+                    </div>
                   </div>
                 </section>
               )}
@@ -683,6 +730,6 @@ export default function ScansPage() {
           </div>
         </div>
       </div>
-    </main>
+    </Shell>
   );
 }

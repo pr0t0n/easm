@@ -34,7 +34,7 @@ def main() -> int:
                 "supervisor_node",
                 "completed_capabilities",
                 "objective_met",
-                "evidence_adjudication",
+                "evidence_gate",
             ],
         ),
         contains_all(
@@ -43,6 +43,18 @@ def main() -> int:
                 "CYBER_AUTOAGENT_PROMPT_PRINCIPLES",
                 "evaluate_execution_quality",
                 "build_supervisor_prompt_contract",
+                "ADVERSARY TECHNIQUE CATALOG",
+                "selected_adversary_technique",
+            ],
+        ),
+        contains_all(
+            root / "backend/app/services/adversary_technique_catalog.py",
+            [
+                "ADVERSARY_TECHNIQUE_CATALOG",
+                "expected_telemetry",
+                "control_objectives",
+                "detection_proof_pack_template",
+                "match_adversary_techniques",
             ],
         ),
         contains_all(

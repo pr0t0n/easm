@@ -17,7 +17,7 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
-    ScanAuditLog,
+    ScanAuditLog, AgentTraceEvent,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -1908,6 +1908,264 @@ def _consolidate_vulnerability_table(rows: list[dict]) -> list[dict]:
     return result
 
 
+def _flatten_expected_telemetry(expected_telemetry: Any) -> list[dict[str, Any]]:
+    if not isinstance(expected_telemetry, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in expected_telemetry:
+        if not isinstance(item, dict):
+            continue
+        source = _sanitize_text(item.get("source") or "")
+        signals = item.get("signals") if isinstance(item.get("signals"), list) else []
+        out.append(
+            {
+                "source": source,
+                "signals": [_sanitize_text(str(signal)) for signal in signals if _sanitize_text(str(signal))],
+            }
+        )
+    return out
+
+
+def _bas_detection_status_rank(status_value: str) -> int:
+    return {
+        "detected": 4,
+        "partial": 3,
+        "missed": 2,
+        "unknown": 1,
+    }.get(str(status_value or "unknown").strip().lower(), 1)
+
+
+def _merge_bas_detection_pack(current: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    if not current:
+        return dict(candidate)
+    current_status = str(current.get("detection_status") or "unknown").lower()
+    candidate_status = str(candidate.get("detection_status") or "unknown").lower()
+    if _bas_detection_status_rank(candidate_status) > _bas_detection_status_rank(current_status):
+        merged = {**current, **candidate}
+    else:
+        merged = {**candidate, **current}
+    for key in ["telemetry_observed", "expected_telemetry", "defensive_success_criteria"]:
+        values: list[Any] = []
+        for value in [current.get(key), candidate.get(key)]:
+            if isinstance(value, list):
+                values.extend(value)
+        if values:
+            # Dedupe complex values by JSON shape.
+            seen: set[str] = set()
+            unique: list[Any] = []
+            for value in values:
+                marker = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+                if marker not in seen:
+                    seen.add(marker)
+                    unique.append(value)
+            merged[key] = unique
+    return merged
+
+
+def _build_bas_detection_validation_report(
+    *,
+    job: ScanJob,
+    trace_events: list[AgentTraceEvent],
+    vulnerability_rows: list[dict],
+) -> dict[str, Any]:
+    """Build BAS/Purple Team report data from agent traces.
+
+    This is intentionally conservative: without defensive telemetry connectors,
+    detection_status remains "unknown". The report should show the expected
+    control contract and the missing proof instead of implying detection.
+    """
+    techniques_by_id: dict[str, dict[str, Any]] = {}
+    uncatalogued_events = 0
+
+    for event in trace_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        technique = payload.get("adversary_technique")
+        if not isinstance(technique, dict) or not str(technique.get("id") or "").strip():
+            uncatalogued_events += 1
+            continue
+
+        technique_id = _sanitize_text(technique.get("id") or "")
+        record = techniques_by_id.setdefault(
+            technique_id,
+            {
+                "technique_id": technique_id,
+                "name": _sanitize_text(technique.get("name") or technique_id),
+                "description": _sanitize_multiline_text(technique.get("description") or ""),
+                "kill_chain_stage": _sanitize_text(technique.get("kill_chain_stage") or ""),
+                "framework_refs": technique.get("framework_refs") if isinstance(technique.get("framework_refs"), dict) else {},
+                "app_phases": list(technique.get("app_phases") or []),
+                "skills": set(),
+                "tools": set(),
+                "candidate_tools": set(str(tool) for tool in list(technique.get("candidate_tools") or []) if str(tool or "").strip()),
+                "capabilities": set(),
+                "iterations": set(),
+                "events": [],
+                "control_objectives": [],
+                "expected_telemetry": [],
+                "safe_execution": technique.get("safe_execution") if isinstance(technique.get("safe_execution"), dict) else {},
+                "detection_proof_pack": {},
+                "affected_findings": [],
+            },
+        )
+
+        if event.skill_id:
+            record["skills"].add(str(event.skill_id))
+        if event.tool_name:
+            record["tools"].add(str(event.tool_name))
+        if event.capability:
+            record["capabilities"].add(str(event.capability))
+        record["iterations"].add(int(event.iteration or 0))
+        for tool in list(payload.get("selected_tools_all") or payload.get("tools") or []):
+            if str(tool or "").strip():
+                record["tools"].add(str(tool).strip())
+        for item in list(payload.get("control_objectives") or technique.get("control_objectives") or []):
+            text_value = _sanitize_multiline_text(str(item))
+            if text_value and text_value not in record["control_objectives"]:
+                record["control_objectives"].append(text_value)
+        for item in _flatten_expected_telemetry(payload.get("expected_telemetry") or technique.get("expected_telemetry")):
+            marker = json.dumps(item, ensure_ascii=True, sort_keys=True)
+            existing = {json.dumps(x, ensure_ascii=True, sort_keys=True) for x in record["expected_telemetry"]}
+            if marker not in existing:
+                record["expected_telemetry"].append(item)
+        proof_pack = payload.get("detection_proof_pack")
+        if isinstance(proof_pack, dict):
+            record["detection_proof_pack"] = _merge_bas_detection_pack(record.get("detection_proof_pack") or {}, proof_pack)
+        record["events"].append(
+            {
+                "event_id": event.id,
+                "event_type": _sanitize_text(event.event_type or ""),
+                "status": _sanitize_text(event.status or ""),
+                "from_node": _sanitize_text(event.from_node or ""),
+                "to_node": _sanitize_text(event.to_node or ""),
+                "skill_id": _sanitize_text(event.skill_id or ""),
+                "tool_name": _sanitize_text(event.tool_name or ""),
+                "capability": _sanitize_text(event.capability or ""),
+                "iteration": int(event.iteration or 0),
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+            }
+        )
+
+    for record in techniques_by_id.values():
+        candidate_tools = {str(tool).strip().lower() for tool in record.get("candidate_tools") or set()}
+        affected: list[dict[str, Any]] = []
+        for row in vulnerability_rows:
+            row_tool = str(row.get("tool") or "").strip().lower()
+            if row_tool and row_tool in candidate_tools:
+                affected.append(
+                    {
+                        "id": row.get("id"),
+                        "finding_id": row.get("finding_id"),
+                        "name": row.get("name"),
+                        "severity": row.get("severity"),
+                        "target": row.get("target"),
+                        "tool": row.get("tool"),
+                        "validation_status": row.get("validation_status"),
+                    }
+                )
+        record["affected_findings"] = affected[:25]
+
+    technique_rows: list[dict[str, Any]] = []
+    status_counts = {"detected": 0, "partial": 0, "missed": 0, "unknown": 0}
+    for record in techniques_by_id.values():
+        proof_pack = dict(record.get("detection_proof_pack") or {})
+        detection_status = str(proof_pack.get("detection_status") or "unknown").strip().lower()
+        if detection_status not in status_counts:
+            detection_status = "unknown"
+        status_counts[detection_status] += 1
+        expected_sources = [
+            item.get("source")
+            for item in list(record.get("expected_telemetry") or [])
+            if isinstance(item, dict) and item.get("source")
+        ]
+        technique_rows.append(
+            {
+                "technique_id": record["technique_id"],
+                "name": record["name"],
+                "description": record["description"],
+                "kill_chain_stage": record["kill_chain_stage"],
+                "framework_refs": record["framework_refs"],
+                "app_phases": record["app_phases"],
+                "skills": sorted(record["skills"]),
+                "tools": sorted(record["tools"]),
+                "candidate_tools": sorted(record["candidate_tools"]),
+                "capabilities": sorted(record["capabilities"]),
+                "iterations": sorted(record["iterations"]),
+                "control_objectives": record["control_objectives"],
+                "expected_telemetry": record["expected_telemetry"],
+                "expected_sources": list(dict.fromkeys(expected_sources)),
+                "detection_status": detection_status,
+                "detection_proof_pack": {
+                    "technique_id": proof_pack.get("technique_id") or record["technique_id"],
+                    "detection_status": detection_status,
+                    "correlation_id": _sanitize_text(proof_pack.get("correlation_id") or ""),
+                    "alert_id": _sanitize_text(proof_pack.get("alert_id") or ""),
+                    "alert_source": _sanitize_text(proof_pack.get("alert_source") or ""),
+                    "detection_latency_seconds": proof_pack.get("detection_latency_seconds"),
+                    "rule_name": _sanitize_text(proof_pack.get("rule_name") or ""),
+                    "telemetry_observed": proof_pack.get("telemetry_observed") if isinstance(proof_pack.get("telemetry_observed"), list) else [],
+                    "control_gap": _sanitize_multiline_text(
+                        proof_pack.get("control_gap")
+                        or ("Aguardando integração/evidência defensiva para confirmar detecção." if detection_status == "unknown" else "")
+                    ),
+                    "defensive_success_criteria": proof_pack.get("defensive_success_criteria") if isinstance(proof_pack.get("defensive_success_criteria"), list) else [],
+                },
+                "safe_execution": record["safe_execution"],
+                "affected_findings": record["affected_findings"],
+                "events": record["events"][:25],
+                "event_count": len(record["events"]),
+            }
+        )
+
+    technique_rows.sort(
+        key=lambda item: (
+            str(item.get("kill_chain_stage") or ""),
+            str(item.get("technique_id") or ""),
+        )
+    )
+
+    techniques_exercised = len(technique_rows)
+    detection_ready = status_counts["detected"] + status_counts["partial"] + status_counts["missed"]
+    telemetry_sources = sorted(
+        {
+            source
+            for row in technique_rows
+            for source in list(row.get("expected_sources") or [])
+            if str(source or "").strip()
+        }
+    )
+    return {
+        "enabled": True,
+        "mode": "BAS / Purple Team Detection Validation",
+        "trace_id": (job.state_data or {}).get("trace_id") or f"scan-{job.id}",
+        "summary": {
+            "techniques_exercised": techniques_exercised,
+            "events_with_bas_context": sum(int(row.get("event_count") or 0) for row in technique_rows),
+            "events_without_bas_context": uncatalogued_events,
+            "detection_ready_techniques": detection_ready,
+            "pending_defensive_evidence": status_counts["unknown"],
+            "status_counts": status_counts,
+            "expected_telemetry_sources": telemetry_sources,
+            "coverage_note": (
+                "Status defensivo permanece unknown até que conectores SIEM/WAF/EDR/CSPM "
+                "ou evidência manual preencham detection_proof_pack."
+            ),
+        },
+        "techniques": technique_rows,
+        "control_matrix": [
+            {
+                "technique_id": row.get("technique_id"),
+                "technique": row.get("name"),
+                "stage": row.get("kill_chain_stage"),
+                "controls": row.get("control_objectives") or [],
+                "expected_sources": row.get("expected_sources") or [],
+                "detection_status": row.get("detection_status"),
+                "control_gap": (row.get("detection_proof_pack") or {}).get("control_gap") or "",
+            }
+            for row in technique_rows
+        ],
+    }
+
+
 @router.post("/scans", response_model=ScanResponse)
 def create_scan(
     payload: ScanCreate,
@@ -3382,6 +3640,12 @@ def scan_report(
         findings = [f for f in findings if _matches_selected_targets(_resolve_finding_target_tokens(f))]
 
     scan_logs = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).order_by(ScanLog.created_at.asc()).all()
+    trace_events = (
+        db.query(AgentTraceEvent)
+        .filter(AgentTraceEvent.scan_id == scan_id)
+        .order_by(AgentTraceEvent.id.asc())
+        .all()
+    )
     previous_scan = (
         db.query(ScanJob)
         .filter(
@@ -3454,6 +3718,8 @@ def scan_report(
             **details,
             "tool": finding.tool or details.get("tool"),
         }
+        adversary_technique_details = details.get("adversary_technique") if isinstance(details.get("adversary_technique"), dict) else {}
+        detection_proof_pack_details = details.get("detection_proof_pack") if isinstance(details.get("detection_proof_pack"), dict) else {}
         vulnerability_rows.append(
             {
                 "index": len(vulnerability_rows) + 1,
@@ -3504,6 +3770,13 @@ def scan_report(
                 "proof_pack_required": bool(details.get("proof_pack_required")),
                 "validation_status": _sanitize_text(details.get("validation_status") or ""),
                 "technical_evidence_expected": _sanitize_multiline_text(details.get("technical_evidence_expected") or ""),
+                "adversary_technique": adversary_technique_details,
+                "adversary_technique_id": _sanitize_text(adversary_technique_details.get("id") or details.get("adversary_technique_id") or ""),
+                "adversary_technique_name": _sanitize_text(adversary_technique_details.get("name") or details.get("adversary_technique_name") or ""),
+                "control_objectives": details.get("control_objectives") if isinstance(details.get("control_objectives"), list) else [],
+                "expected_telemetry": _flatten_expected_telemetry(details.get("expected_telemetry")),
+                "detection_status": _sanitize_text(detection_proof_pack_details.get("detection_status") or details.get("detection_status") or "unknown"),
+                "detection_proof_pack": detection_proof_pack_details,
                 "recommendation_required": _sanitize_multiline_text(str(recommendation_ctx.get("required_fix") or "")),
                 "recommendation_controls": recommendation_ctx.get("controls") or [],
                 "recommendation_validation": recommendation_ctx.get("validations") or [],
@@ -3704,6 +3977,11 @@ def scan_report(
     # o relatório exibido (PDF/web): cada vulnerabilidade aparece uma vez, com
     # a lista de alvos afetados em affected_assets / target_summary.
     consolidated_vulnerability_table = _consolidate_vulnerability_table(open_vulnerability_table)
+    bas_detection_validation = _build_bas_detection_validation_report(
+        job=job,
+        trace_events=trace_events,
+        vulnerability_rows=open_vulnerability_table,
+    )
 
     detailed_recommendations = [
         {
@@ -3912,6 +4190,8 @@ def scan_report(
                 "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
                 "vulnerability_analysis_evidence": vulnerability_evidence,
+                "bas_detection_validation": bas_detection_validation,
+                "bas_control_matrix": bas_detection_validation.get("control_matrix") or [],
                 "vulnerability_table": consolidated_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
@@ -4019,6 +4299,10 @@ def scan_report_csv(
             "error",
             "evidence",
             "payload",
+            "adversary_technique_id",
+            "adversary_technique_name",
+            "detection_status",
+            "expected_telemetry_sources",
             "step",
             "node",
             "recommendation",
@@ -4049,6 +4333,14 @@ def scan_report_csv(
                 row.get("error") or "",
                 row.get("evidence") or "",
                 row.get("payload") or "",
+                row.get("adversary_technique_id") or "",
+                row.get("adversary_technique_name") or "",
+                row.get("detection_status") or "",
+                "; ".join(
+                    str(item.get("source") or "")
+                    for item in list(row.get("expected_telemetry") or [])
+                    if isinstance(item, dict) and item.get("source")
+                ),
                 row.get("step") or "",
                 row.get("node") or "",
                 row.get("recommendation") or "",

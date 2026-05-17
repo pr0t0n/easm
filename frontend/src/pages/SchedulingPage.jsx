@@ -13,7 +13,7 @@ const emptyForm = {
   enabled: true,
 };
 
-export default function SchedulingPage() {
+export default function SchedulingPage({ embedded = false }) {
   const [form, setForm] = useState(emptyForm);
   const [schedules, setSchedules] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -93,8 +93,11 @@ export default function SchedulingPage() {
     }
   };
 
+  const Shell = embedded ? "div" : "main";
+  const shellClassName = embedded ? "space-y-4" : "mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10";
+
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
+    <Shell className={shellClassName}>
       <section className="panel p-5">
         <h2 className="text-xl font-semibold">Agendamento</h2>
         <p className="mt-1 text-sm text-slate-300">Informe alvos separados por ; e configure recorrencia.</p>
@@ -260,6 +263,6 @@ export default function SchedulingPage() {
           ))}
         </div>
       </section>
-    </main>
+    </Shell>
   );
 }

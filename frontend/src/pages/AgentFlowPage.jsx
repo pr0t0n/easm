@@ -63,6 +63,10 @@ function nodeFromActor(actor) {
 function summarizePayload(payload) {
   if (!payload || typeof payload !== "object") return "";
   const parts = [];
+  const basTechnique = payload.adversary_technique && typeof payload.adversary_technique === "object" ? payload.adversary_technique : null;
+  const detectionPack = payload.detection_proof_pack && typeof payload.detection_proof_pack === "object" ? payload.detection_proof_pack : null;
+  if (basTechnique?.id || basTechnique?.name) parts.push(`BAS: ${basTechnique.id || basTechnique.name}`);
+  if (detectionPack?.detection_status) parts.push(`Detecção: ${detectionPack.detection_status}`);
   if (payload.skill_id) parts.push(`Skill: ${payload.skill_id}`);
   if (payload.selected_tool) parts.push(`Ferramenta: ${payload.selected_tool}`);
   if (payload.objective) parts.push(`Objetivo: ${payload.objective}`);
@@ -80,6 +84,14 @@ function summarizePayload(payload) {
   }
   if (Array.isArray(payload.allowed_tools) && payload.allowed_tools.length) {
     parts.push(`Permitidas: ${payload.allowed_tools.slice(0, 6).join(", ")}`);
+  }
+  if (Array.isArray(payload.expected_telemetry) && payload.expected_telemetry.length) {
+    const sources = payload.expected_telemetry
+      .map((item) => item?.source)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(", ");
+    if (sources) parts.push(`Telemetria esperada: ${sources}`);
   }
   if (Array.isArray(payload.tools) && payload.tools.length) {
     parts.push(`Ferramentas: ${payload.tools.slice(0, 6).join(", ")}`);
@@ -280,6 +292,10 @@ function ConversationItem({ item, selected, onSelect }) {
 
 function WhyPanel({ payload }) {
   if (!payload || typeof payload !== "object") return null;
+  const basTechnique = payload.adversary_technique && typeof payload.adversary_technique === "object" ? payload.adversary_technique : null;
+  const controlObjectives = Array.isArray(payload.control_objectives) ? payload.control_objectives : [];
+  const expectedTelemetry = Array.isArray(payload.expected_telemetry) ? payload.expected_telemetry : [];
+  const detectionPack = payload.detection_proof_pack && typeof payload.detection_proof_pack === "object" ? payload.detection_proof_pack : null;
   const techStack = Array.isArray(payload.tech_stack) ? payload.tech_stack : [];
   const matchedBy = Array.isArray(payload.matched_by) ? payload.matched_by : [];
   const allowedTools = Array.isArray(payload.allowed_tools) ? payload.allowed_tools : [];
@@ -287,7 +303,7 @@ function WhyPanel({ payload }) {
   const extraArgs = payload.extra_args && typeof payload.extra_args === "object" ? payload.extra_args : null;
   const hasContent =
     techStack.length || matchedBy.length || payload.reason || payload.score !== undefined ||
-    payload.skill_id || payload.selected_tool || extraArgs;
+    payload.skill_id || payload.selected_tool || extraArgs || basTechnique || controlObjectives.length || expectedTelemetry.length || detectionPack;
   if (!hasContent) return null;
 
   return (
@@ -299,6 +315,33 @@ function WhyPanel({ payload }) {
         )}
         {payload.selected_tool && (
           <div><span className="text-slate-500">Ferramenta →</span> <span className="font-mono text-emerald-200">{payload.selected_tool}</span></div>
+        )}
+        {basTechnique && (
+          <div className="border border-sky-800/60 bg-sky-950/30 p-2">
+            <div><span className="text-slate-500">Técnica BAS →</span> <span className="font-mono text-sky-200">{basTechnique.id || "-"}</span></div>
+            <div className="mt-1 text-slate-300">{basTechnique.name || basTechnique.description || "Técnica adversária controlada"}</div>
+            <div className="mt-1 text-[11px] text-slate-500">stage={basTechnique.kill_chain_stage || "-"} | detecção={detectionPack?.detection_status || "unknown"}</div>
+          </div>
+        )}
+        {controlObjectives.length > 0 && (
+          <div>
+            <div className="text-slate-500">Objetivos de controle:</div>
+            <ul className="mt-1 ml-3 list-disc space-y-0.5 text-[11px] text-slate-300">
+              {controlObjectives.slice(0, 5).map((m, idx) => <li key={idx}>{m}</li>)}
+            </ul>
+          </div>
+        )}
+        {expectedTelemetry.length > 0 && (
+          <div>
+            <div className="text-slate-500">Telemetria esperada:</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {expectedTelemetry.slice(0, 6).map((item, idx) => (
+                <span key={idx} className="border border-sky-700/60 bg-sky-950/40 px-2 py-[2px] font-mono text-[11px] text-sky-200">
+                  {item?.source || "source"}{Array.isArray(item?.signals) && item.signals.length ? `: ${item.signals.slice(0, 3).join(", ")}` : ""}
+                </span>
+              ))}
+            </div>
+          </div>
         )}
         {techStack.length > 0 && (
           <div>
@@ -468,6 +511,39 @@ export default function AgentFlowPage() {
     const totalUses = skillUsage.reduce((acc, s) => acc + s.uses, 0);
     return { distinct: skillUsage.length, totalUses };
   }, [skillUsage]);
+
+  const basUsage = useMemo(() => {
+    const map = new Map();
+    for (const ev of traceEvents) {
+      const payload = ev.payload && typeof ev.payload === "object" ? ev.payload : {};
+      const technique = payload.adversary_technique && typeof payload.adversary_technique === "object" ? payload.adversary_technique : null;
+      if (!technique?.id) continue;
+      const pack = payload.detection_proof_pack && typeof payload.detection_proof_pack === "object" ? payload.detection_proof_pack : {};
+      const entry = map.get(technique.id) || {
+        id: technique.id,
+        name: technique.name || technique.id,
+        stage: technique.kill_chain_stage || "",
+        events: 0,
+        skills: new Set(),
+        tools: new Set(),
+        sources: new Set(),
+        status: pack.detection_status || "unknown",
+      };
+      entry.events += 1;
+      if (ev.skill_id) entry.skills.add(ev.skill_id);
+      if (ev.tool_name) entry.tools.add(ev.tool_name);
+      for (const tool of payload.selected_tools_all || payload.tools || []) if (tool) entry.tools.add(String(tool));
+      for (const item of payload.expected_telemetry || technique.expected_telemetry || []) if (item?.source) entry.sources.add(item.source);
+      if (pack.detection_status && entry.status === "unknown") entry.status = pack.detection_status;
+      map.set(technique.id, entry);
+    }
+    return [...map.values()].map((entry) => ({
+      ...entry,
+      skills: [...entry.skills],
+      tools: [...entry.tools],
+      sources: [...entry.sources],
+    })).sort((a, b) => b.events - a.events);
+  }, [traceEvents]);
 
   useEffect(() => {
     client.get("/api/scans?limit=30").then((r) => {
@@ -668,7 +744,7 @@ export default function AgentFlowPage() {
           <Metric label="trace events" value={traceEvents.length} accent="text-sky-300" />
           <Metric label="scan logs" value={logEvents.length} accent="text-emerald-300" />
           <Metric label="skill scores" value={scores.length} accent="text-violet-300" />
-          <Metric label="last actor" value={activeItem?.actor || "--"} accent="text-amber-200" />
+          <Metric label="bas techniques" value={basUsage.length} accent="text-cyan-200" />
           <div className="col-span-2">
             <PayloadPanel item={activeItem} />
           </div>
@@ -695,6 +771,41 @@ export default function AgentFlowPage() {
                 />
               ))}
             </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-12">
+          <div className="border border-sky-800/60 bg-sky-950/15">
+            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-sky-800/60 p-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-sky-300">bas / purple team</div>
+                <div className="text-sm text-slate-300">Técnicas adversárias exercitadas, controles esperados e fontes de telemetria a validar.</div>
+              </div>
+              <div className="font-mono text-xs text-slate-300">
+                técnicas: <span className="text-cyan-200">{basUsage.length}</span>
+              </div>
+            </div>
+            {basUsage.length === 0 ? (
+              <div className="p-6 text-sm text-slate-500">Nenhuma técnica BAS registrada nos traces deste scan.</div>
+            ) : (
+              <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
+                {basUsage.map((row) => (
+                  <div key={row.id} className="border border-sky-900/70 bg-slate-950/70 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-mono text-xs text-cyan-200">{row.id}</div>
+                        <div className="mt-1 text-sm font-semibold text-white">{row.name}</div>
+                      </div>
+                      <span className="border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] uppercase text-slate-300">{row.status}</span>
+                    </div>
+                    <div className="mt-2 text-[11px] text-slate-500">stage={row.stage || "-"} | events={row.events}</div>
+                    <div className="mt-2 text-xs text-slate-300">skills: {row.skills.join(", ") || "-"}</div>
+                    <div className="mt-1 text-xs text-slate-300">tools: {row.tools.join(", ") || "-"}</div>
+                    <div className="mt-1 text-xs text-sky-200">telemetria: {row.sources.join(", ") || "pendente"}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

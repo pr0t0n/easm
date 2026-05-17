@@ -5,7 +5,7 @@
 const query = new URLSearchParams(window.location.search);
 const SCAN_ID = Number(query.get('scan_id') || query.get('id') || 1);
 const INCLUDE_TARGETS = String(query.get('include_targets') || '').trim();
-const PERSONA_MODE = String(query.get('persona') || 'technical').trim().toLowerCase();
+const PERSONA_MODE = String(query.get('persona') || 'complete').trim().toLowerCase();
 const OUTPUT_MODE = String(query.get('output_mode') || 'visual').trim().toLowerCase();
 const SEVERITY_MIN = String(query.get('severity_min') || 'all').trim().toLowerCase();
 const PERIOD_DAYS = String(query.get('period_days') || 'all').trim().toLowerCase();
@@ -166,6 +166,13 @@ function normalizeFindingForReport(finding) {
     node: details.node || '-',
     evidence: details.evidence || details.output || details.stdout || details.reason || details.description || '-',
     payload: details.payload || details.request || details.command || '-',
+    adversary_technique: details.adversary_technique || {},
+    adversary_technique_id: details.adversary_technique_id || details.adversary_technique?.id || '',
+    adversary_technique_name: details.adversary_technique_name || details.adversary_technique?.name || '',
+    control_objectives: Array.isArray(details.control_objectives) ? details.control_objectives : [],
+    expected_telemetry: Array.isArray(details.expected_telemetry) ? details.expected_telemetry : [],
+    detection_status: details.detection_status || details.detection_proof_pack?.detection_status || 'unknown',
+    detection_proof_pack: details.detection_proof_pack || {},
     recommendation: finding?.recommendation || details.recommendation || 'Ver documentação do achado.',
     recommendation_structured: details.recommendation_structured || {},
     recommendation_llm: details.recommendation_llm || {},
@@ -193,12 +200,12 @@ function renderScopeSummary(report) {
     ? v2.filters.include_targets
     : (INCLUDE_TARGETS ? INCLUDE_TARGETS.split(',').map((v) => v.trim()).filter(Boolean) : []);
 
-  const personaLabel = PERSONA_MODE === 'technical' ? 'Técnico' : PERSONA_MODE === 'compliance' ? 'Compliance' : 'Executivo';
+  const personaLabel = PERSONA_MODE === 'complete' ? 'Único completo' : PERSONA_MODE === 'technical' ? 'Técnico' : PERSONA_MODE === 'compliance' ? 'Compliance' : 'Executivo';
   const outputLabel = OUTPUT_MODE === 'pdf_exec' ? 'PDF Executivo' : OUTPUT_MODE === 'pdf_tech' ? 'PDF Técnico' : 'Interativo';
 
   box.innerHTML = `
     <div><strong>Escopo ativo</strong></div>
-    <div>Persona: ${esc(personaLabel)} | Saída: ${esc(outputLabel)} | Severidade mínima: ${esc(SEVERITY_MIN)}</div>
+    <div>Relatório: ${esc(personaLabel)} | Saída: ${esc(outputLabel)} | Severidade: ${esc(SEVERITY_MIN === 'all' ? 'todas' : SEVERITY_MIN)}</div>
     <div>Janela temporal: ${PERIOD_DAYS === 'all' ? 'histórico completo' : `últimos ${esc(PERIOD_DAYS)} dias`} | Scan base: #${esc(report?.scan_id || SCAN_ID)}</div>
     <div>Alvos incluídos: ${includeTargets.length ? esc(includeTargets.join(', ')) : 'todos os alvos do scan'}</div>
   `;
@@ -291,6 +298,10 @@ function applyPersonaView() {
   };
 
   document.body.setAttribute('data-persona', PERSONA_MODE);
+
+  if (PERSONA_MODE === 'complete') {
+    return;
+  }
 
   if (PERSONA_MODE === 'executive') {
     hide('page-assets', true);
@@ -732,6 +743,17 @@ function renderVulnCard(vuln, index) {
   const validation = Array.isArray(vuln?.recommendation_validation) && vuln.recommendation_validation.length
     ? vuln.recommendation_validation.join(' | ')
     : '-';
+  const basTechnique = vuln.adversary_technique && typeof vuln.adversary_technique === 'object' ? vuln.adversary_technique : {};
+  const basId = vuln.adversary_technique_id || basTechnique.id || '';
+  const basName = vuln.adversary_technique_name || basTechnique.name || '';
+  const basControls = Array.isArray(vuln.control_objectives) ? vuln.control_objectives.filter(Boolean) : [];
+  const basTelemetry = Array.isArray(vuln.expected_telemetry) ? vuln.expected_telemetry.filter(Boolean) : [];
+  const detectionStatus = vuln.detection_status || vuln.detection_proof_pack?.detection_status || 'unknown';
+  const telemetryText = basTelemetry.map((item) => {
+    const source = item && typeof item === 'object' ? item.source : '';
+    const signals = item && typeof item === 'object' && Array.isArray(item.signals) ? item.signals.slice(0, 3).join(', ') : '';
+    return source ? `${source}${signals ? ` (${signals})` : ''}` : '';
+  }).filter(Boolean).join(' | ');
 
   // Bloco de alvos afetados — exibido quando há mais de 1 ativo afetado
   const affectedBlock = affectedCount > 1 ? `
@@ -787,6 +809,14 @@ function renderVulnCard(vuln, index) {
       <div class="vuln-evidence-box" style="border-left-color:#a47700">
         <div class="vuln-detail-label" style="color:#a47700"><i class="fas fa-terminal"></i> Payload</div>
         <div class="vuln-code" style="color:#1c1c1c">${esc(truncate(payload, 500))}</div>
+      </div>` : ''}
+      ${basId || basName || basControls.length || basTelemetry.length ? `
+      <div class="vuln-rec-box" style="border-left-color:#0ea5e9">
+        <div class="vuln-detail-label" style="color:#0284c7"><i class="fas fa-crosshairs"></i> BAS / Validação de Controle</div>
+        <div class="vuln-detail-value"><strong>${esc(basId || '-')}</strong>${basName ? ` — ${esc(basName)}` : ''}</div>
+        <div class="vuln-detail-value" style="margin-top:6px">Status de detecção: <strong>${esc(detectionStatus)}</strong></div>
+        ${basControls.length ? `<div class="vuln-detail-value" style="margin-top:8px">${basControls.slice(0, 4).map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
+        ${telemetryText ? `<div class="vuln-detail-value" style="margin-top:8px">Telemetria esperada: ${esc(telemetryText)}</div>` : ''}
       </div>` : ''}
       ${cve && (cveSummary || cveActions.length) ? `
       <div class="vuln-rec-box" style="border-left-color:#fb7185">
@@ -1116,6 +1146,39 @@ function renderOperationalImprovements(report) {
   const toolExecSummary = toolExec.summary || {};
   const evidence = v2.vulnerability_analysis_evidence || {};
   const evidenceSummary = evidence.summary || {};
+  const bas = v2.bas_detection_validation || {};
+  const basSummary = bas.summary || {};
+  const basStatus = basSummary.status_counts || {};
+
+  setText('basTechniques', Number(basSummary.techniques_exercised || 0));
+  setText('basPending', Number(basSummary.pending_defensive_evidence || 0));
+  setText('basSources', Number((basSummary.expected_telemetry_sources || []).length || 0));
+  setText('basDetected', `${Number(basStatus.detected || 0)}/${Number(basStatus.partial || 0)}`);
+
+  const basMatrixContainer = document.getElementById('basControlMatrix');
+  if (basMatrixContainer) {
+    const rows = Array.isArray(bas.control_matrix) ? bas.control_matrix : [];
+    if (!rows.length) {
+      basMatrixContainer.innerHTML = '<div class="section-intro">Nenhuma técnica BAS registrada nos traces deste scan.</div>';
+    } else {
+      basMatrixContainer.innerHTML = rows.slice(0, 8).map((row) => {
+        const sources = Array.isArray(row.expected_sources) ? row.expected_sources : [];
+        const controls = Array.isArray(row.controls) ? row.controls : [];
+        const status = String(row.detection_status || 'unknown');
+        return `
+          <div class="llm-risk-row">
+            <div class="llm-risk-row-top">
+              <strong>${esc(row.technique || row.technique_id || '-')}</strong>
+              <span class="llm-risk-sev">${esc(status)}</span>
+            </div>
+            <div class="llm-risk-reason">stage=${esc(row.stage || '-')} | fontes esperadas=${esc(sources.join(', ') || '-')}</div>
+            <div class="llm-risk-reason">${esc(controls[0] || 'Controle esperado não informado.')}</div>
+            ${row.control_gap ? `<div class="llm-risk-reason">gap=${esc(row.control_gap)}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+  }
 
   setText('opsRequestedTools', Number(toolExecSummary.requested_count || (toolExec.requested_tools || []).length || 0));
   setText('opsAttemptedTools', Number(toolExecSummary.attempted_count || 0));

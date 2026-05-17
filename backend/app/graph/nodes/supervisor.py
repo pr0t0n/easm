@@ -1129,6 +1129,10 @@ def _selected_skill_from_tactic(tactic: dict[str, Any]) -> dict[str, Any]:
         "strategy_score": tactic.get("strategy_score"),
         "learning_guided": bool(tactic.get("learning_techniques")),
         "learning_techniques": list(tactic.get("learning_techniques") or []),
+        "adversary_technique": dict(tactic.get("adversary_technique") or {}),
+        "control_objectives": list(tactic.get("control_objectives") or []),
+        "expected_telemetry": list(tactic.get("expected_telemetry") or []),
+        "detection_proof_pack": dict(tactic.get("detection_proof_pack") or {}),
         "evidence_required": list(tactic.get("evidence_required") or []),
         "constraints": list(tactic.get("constraints") or []),
         "phase_refs": list(tactic.get("phase_refs") or []),
@@ -1547,6 +1551,9 @@ def supervisor_node(state: AgentState) -> AgentState:
                     "tactic_id": chosen_skill.get("tactic_id"),
                     "hypothesis": chosen_skill.get("hypothesis"),
                     "strategy_source": chosen_skill.get("strategy_source"),
+                    "adversary_technique": dict(chosen_skill.get("adversary_technique") or {}),
+                    "control_objectives": list(chosen_skill.get("control_objectives") or []),
+                    "expected_telemetry": list(chosen_skill.get("expected_telemetry") or []),
                 }
             state["logs_terminais"].append(
                 f"Supervisor: skill={chosen_skill['skill_id']} "
@@ -1580,6 +1587,10 @@ def supervisor_node(state: AgentState) -> AgentState:
                                 if chosen_skill.get("learning_techniques")
                                 else {}
                             ).get("name", ""),
+                            "adversary_technique": dict(chosen_skill.get("adversary_technique") or {}),
+                            "control_objectives": list(chosen_skill.get("control_objectives") or [])[:5],
+                            "expected_telemetry": list(chosen_skill.get("expected_telemetry") or [])[:5],
+                            "detection_proof_pack": dict(chosen_skill.get("detection_proof_pack") or {}),
                             "evidence_required": list(chosen_skill.get("evidence_required") or [])[:6],
                             "targets": list(chosen_skill.get("targets") or [])[:3],
                             "allowed_tools": chosen_skill.get("allowed_tools", [])[:4],

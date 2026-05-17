@@ -223,6 +223,10 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 if isinstance(item, dict)
             ]
             tactic_extra_args = dict(supervisor_selected.get("extra_args") or {})
+            adversary_technique = dict(supervisor_selected.get("adversary_technique") or {})
+            control_objectives = list(supervisor_selected.get("control_objectives") or [])
+            expected_telemetry = list(supervisor_selected.get("expected_telemetry") or [])
+            detection_proof_pack = dict(supervisor_selected.get("detection_proof_pack") or {})
             if selected_techniques:
                 # If techniques came from accepted learning we still want the
                 # tactic-level extra_args to ride along when the technique
@@ -230,6 +234,12 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 if tactic_extra_args:
                     for tech in selected_techniques:
                         tech.setdefault("extra_args", dict(tactic_extra_args))
+                if adversary_technique:
+                    for tech in selected_techniques:
+                        tech.setdefault("adversary_technique", dict(adversary_technique))
+                        tech.setdefault("control_objectives", list(control_objectives))
+                        tech.setdefault("expected_telemetry", list(expected_telemetry))
+                        tech.setdefault("detection_proof_pack", dict(detection_proof_pack))
                 playbook = {
                     "title": "Supervisor pentest tactic playbook",
                     "vulnerability_type": str(supervisor_selected.get("skill_id") or group),
@@ -247,6 +257,15 @@ def skill_selector_node(state: AgentState) -> AgentState:
                     for tech in techniques:
                         if isinstance(tech, dict):
                             tech.setdefault("extra_args", dict(tactic_extra_args))
+                    playbook["techniques"] = techniques
+                if adversary_technique and isinstance(playbook, dict):
+                    techniques = list(playbook.get("techniques") or [])
+                    for tech in techniques:
+                        if isinstance(tech, dict):
+                            tech.setdefault("adversary_technique", dict(adversary_technique))
+                            tech.setdefault("control_objectives", list(control_objectives))
+                            tech.setdefault("expected_telemetry", list(expected_telemetry))
+                            tech.setdefault("detection_proof_pack", dict(detection_proof_pack))
                     playbook["techniques"] = techniques
             runtime_invocation: dict[str, Any] = {}
             try:
@@ -312,6 +331,10 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "tactic_id": supervisor_selected.get("tactic_id"),
                 "hypothesis": supervisor_selected.get("hypothesis"),
                 "strategy_source": supervisor_selected.get("strategy_source"),
+                "adversary_technique": adversary_technique,
+                "control_objectives": control_objectives,
+                "expected_telemetry": expected_telemetry,
+                "detection_proof_pack": detection_proof_pack,
                 "source": runtime_invocation.get("source") or "supervisor_selected",
                 "matched_by": list(dict.fromkeys(["supervisor_selected_skill", *list(runtime_invocation.get("matched_by") or [])])),
                 "candidate_tools": candidate_tools,
@@ -346,6 +369,10 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "tactic_id": supervisor_selected.get("tactic_id"),
                 "hypothesis": supervisor_selected.get("hypothesis"),
                 "strategy_source": supervisor_selected.get("strategy_source"),
+                "adversary_technique": adversary_technique,
+                "control_objectives": control_objectives,
+                "expected_telemetry": expected_telemetry,
+                "detection_proof_pack": detection_proof_pack,
             }
             _append_action(state, "skill_invoked", invocation_record)
             state["skill_selector_ready"] = True
@@ -501,6 +528,10 @@ def skill_planner_node(state: AgentState) -> AgentState:
         "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
         "skill_contract": contract,
         "technique": selected_technique,
+        "adversary_technique": dict(invocation.get("adversary_technique") or selected_technique.get("adversary_technique") or {}),
+        "control_objectives": list(invocation.get("control_objectives") or selected_technique.get("control_objectives") or []),
+        "expected_telemetry": list(invocation.get("expected_telemetry") or selected_technique.get("expected_telemetry") or []),
+        "detection_proof_pack": dict(invocation.get("detection_proof_pack") or selected_technique.get("detection_proof_pack") or {}),
         "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
         "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
         "evidence_required": list(selected_technique.get("evidence_signals") or []),
@@ -657,6 +688,10 @@ def tool_selector_node(state: AgentState) -> AgentState:
         "skill_invocation_id": plan.get("skill_invocation_id") or contract.get("invocation_id") or invocation.get("invocation_id"),
         "skill_contract": contract,
         "technique": technique,
+        "adversary_technique": dict(plan.get("adversary_technique") or technique.get("adversary_technique") or {}),
+        "control_objectives": list(plan.get("control_objectives") or technique.get("control_objectives") or []),
+        "expected_telemetry": list(plan.get("expected_telemetry") or technique.get("expected_telemetry") or []),
+        "detection_proof_pack": dict(plan.get("detection_proof_pack") or technique.get("detection_proof_pack") or {}),
         "evidence_required": evidence_required,
         "constraints": constraints,
         "playbook_title": plan.get("playbook_title") or contract.get("playbook_title") or gate.get("playbook_title"),
@@ -687,6 +722,10 @@ def tool_selector_node(state: AgentState) -> AgentState:
                     "capability": capability,
                     "technique": _technique_full.get("name", ""),
                     "technique_objective": _technique_full.get("objective", ""),
+                    "adversary_technique": dict(selection.get("adversary_technique") or {}),
+                    "control_objectives": list(selection.get("control_objectives") or [])[:5],
+                    "expected_telemetry": list(selection.get("expected_telemetry") or [])[:5],
+                    "detection_proof_pack": dict(selection.get("detection_proof_pack") or {}),
                     "extra_args": dict(_extra_args_by_tool) if isinstance(_extra_args_by_tool, dict) else {},
                     "evidence_required": evidence_required[:6],
                     "playbook_title": selection.get("playbook_title"),

@@ -1,5 +1,4 @@
-// ReportsPage: extração de relatórios por scan ou por alvo/subdomínio.
-// Para visualização de evolução temporal → /evolucao
+// ReportsPage: relatório único por scan ou por alvo/subdomínio.
 import { useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
 
@@ -29,18 +28,6 @@ function splitTargets(raw) {
     .filter(Boolean);
 }
 
-const PERSONA_LABEL = {
-  executive: "Executivo",
-  technical: "Técnico",
-  compliance: "Compliance",
-};
-
-const OUTPUT_LABEL = {
-  visual: "Interativo",
-  pdf_exec: "PDF Executivo",
-  pdf_tech: "PDF Técnico",
-};
-
 const controlLabel = {
   display: "grid",
   gap: 4,
@@ -67,11 +54,6 @@ const reportCard = {
 
 export default function ReportsPage() {
   const apiUrl = useMemo(() => resolveApiBaseUrl(), []);
-  const [wizardStep, setWizardStep] = useState(1);
-  const [persona, setPersona] = useState("technical");
-  const [outputMode, setOutputMode] = useState("visual");
-  const [severityMin, setSeverityMin] = useState("all");
-  const [periodDays, setPeriodDays] = useState("all");
   const [compareScanId, setCompareScanId] = useState("");
   const [mode, setMode] = useState("scan");
   const [scans, setScans] = useState([]);
@@ -164,10 +146,10 @@ export default function ReportsPage() {
     const params = new URLSearchParams({
       scan_id: scanId,
       api_url: apiUrl,
-      persona,
-      output_mode: outputMode,
-      severity_min: severityMin,
-      period_days: periodDays,
+      persona: "complete",
+      output_mode: "visual",
+      severity_min: "all",
+      period_days: "all",
     });
     if (effectiveIncludeTargets.length > 0) {
       params.set("include_targets", effectiveIncludeTargets.join(","));
@@ -176,19 +158,13 @@ export default function ReportsPage() {
       params.set("compare_scan_id", String(compareScanId));
     }
     return `/custom-report/index.html?${params.toString()}`;
-  }, [scanId, apiUrl, effectiveIncludeTargets, persona, outputMode, severityMin, periodDays, compareScanId]);
+  }, [scanId, apiUrl, effectiveIncludeTargets, compareScanId]);
 
   const scopeReady = useMemo(() => {
     if (!scanId) return false;
     if (mode === "target" && !targetInput.trim()) return false;
     return true;
   }, [scanId, mode, targetInput]);
-
-  const stepTitle = useMemo(() => {
-    if (wizardStep === 1) return "Defina objetivo e formato";
-    if (wizardStep === 2) return "Escolha escopo e alvo";
-    return "Revise e gere o relatório";
-  }, [wizardStep]);
 
   const openNewTab = () => reportUrl && window.open(reportUrl, "_blank", "noopener,noreferrer");
   const printReport = () => {
@@ -202,65 +178,15 @@ export default function ReportsPage() {
     <div style={{ padding: 16, display: "grid", gap: 12, background: "var(--bg-main)", color: "var(--ink)" }}>
       <div style={{ ...reportCard, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            {[1, 2, 3].map((step) => (
-              <button
-                key={step}
-                type="button"
-                onClick={() => setWizardStep(step)}
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  border: `1px solid ${wizardStep === step ? "var(--brand-500)" : "var(--line)"}`,
-                  background: wizardStep === step ? "var(--brand-500)" : "#ffffff",
-                  color: wizardStep === step ? "#ffffff" : "var(--ink-soft)",
-                  fontSize: 12,
-                  cursor: "pointer",
-                }}
-              >
-                {step}. {step === 1 ? "Objetivo" : step === 2 ? "Escopo" : "Revisão"}
-              </button>
-            ))}
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>Relatório Único de Segurança</div>
+            <div style={{ marginTop: 3, color: "var(--ink-muted)", fontSize: 13 }}>
+              Executivo, técnico, escopo, revisão, BAS/Purple Team, evidências, recomendações e evolução em uma única visão.
+            </div>
           </div>
-          <div style={{ color: "var(--ink-muted)", fontSize: 12 }}>{stepTitle}</div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
-          <label style={controlLabel}>
-            Persona
-            <select value={persona} onChange={(e) => setPersona(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
-              <option value="executive">Executivo</option>
-              <option value="technical">Técnico</option>
-              <option value="compliance">Compliance</option>
-            </select>
-          </label>
-          <label style={controlLabel}>
-            Formato de saída
-            <select value={outputMode} onChange={(e) => setOutputMode(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
-              <option value="visual">Interativo</option>
-              <option value="pdf_exec">PDF Executivo</option>
-              <option value="pdf_tech">PDF Técnico</option>
-            </select>
-          </label>
-          <label style={controlLabel}>
-            Severidade mínima
-            <select value={severityMin} onChange={(e) => setSeverityMin(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
-              <option value="all">Todas</option>
-              <option value="critical">Crítica+</option>
-              <option value="high">Alta+</option>
-              <option value="medium">Média+</option>
-              <option value="low">Baixa+</option>
-            </select>
-          </label>
-          <label style={controlLabel}>
-            Janela temporal
-            <select value={periodDays} onChange={(e) => setPeriodDays(e.target.value)} style={{ ...controlInput, fontSize: 12 }}>
-              <option value="all">Histórico completo</option>
-              <option value="7">Últimos 7 dias</option>
-              <option value="30">Últimos 30 dias</option>
-              <option value="90">Últimos 90 dias</option>
-            </select>
-          </label>
+          <div style={{ color: "var(--ink-muted)", fontSize: 12, textAlign: "right" }}>
+            Modo completo · histórico completo · todas as severidades
+          </div>
         </div>
       </div>
 
@@ -353,30 +279,14 @@ export default function ReportsPage() {
         </label>
 
         <div style={{ flex: 1 }} />
-        <button
-          type="button"
-          onClick={() => setWizardStep((prev) => Math.max(1, prev - 1))}
-          disabled={wizardStep === 1}
-          className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Voltar
-        </button>
-        <button
-          type="button"
-          onClick={() => setWizardStep((prev) => Math.min(3, prev + 1))}
-          disabled={wizardStep === 3}
-          className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Avançar
-        </button>
-        <button type="button" onClick={openNewTab} disabled={!reportUrl || !scopeReady || wizardStep < 3} className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Abrir em nova aba</button>
-        <button type="button" onClick={printReport} disabled={!reportUrl || !scopeReady || wizardStep < 3} className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50">Imprimir / PDF</button>
+        <button type="button" onClick={openNewTab} disabled={!reportUrl || !scopeReady} className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Abrir em nova aba</button>
+        <button type="button" onClick={printReport} disabled={!reportUrl || !scopeReady} className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50">Imprimir / PDF</button>
       </div>
 
       <div style={{ position: "sticky", top: 8, zIndex: 4, background: "rgba(255,255,255,0.94)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px", display: "grid", gap: 3, fontSize: 12, color: "var(--ink-muted)", boxShadow: "var(--shadow-card)", backdropFilter: "blur(8px)" }}>
         <div style={{ color: "var(--ink)", fontWeight: 600 }}>Resumo do escopo</div>
-        <div>Persona: {PERSONA_LABEL[persona] || persona} | Saída: {OUTPUT_LABEL[outputMode] || outputMode}</div>
-        <div>Modo: {mode === "scan" ? "Por scan" : "Por alvo"} | Severidade mínima: {severityMin} | Janela: {periodDays === "all" ? "completa" : `${periodDays} dias`}</div>
+        <div>Relatório: único e completo | Saída: interativa / imprimível</div>
+        <div>Modo: {mode === "scan" ? "Por scan" : "Por alvo"} | Severidade: todas | Janela: histórico completo</div>
         <div>Scan base: {scanId ? `#${scanId}` : "não selecionado"} {compareScanId ? `| comparação: #${compareScanId}` : "| sem comparação"}</div>
         <div>Alvos incluídos: {effectiveIncludeTargets.length > 0 ? effectiveIncludeTargets.join(", ") : "todos do scan"}</div>
       </div>

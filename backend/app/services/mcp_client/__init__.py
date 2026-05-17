@@ -79,6 +79,26 @@ class MCPClient:
             logger.warning("MCP sync health check failed: %s", exc)
             return False
 
+    def kali_tools_available_sync(self) -> bool:
+        """True only when MCP can actually proxy tool execution to Kali.
+
+        RAG can be healthy without Kali being connected, so execution callers
+        must not rely on the generic MCP health status.
+        """
+        try:
+            with self._sync_client() as client:
+                response = client.get("/health")
+                response.raise_for_status()
+                payload = response.json()
+                if not bool(payload.get("kali_connected")):
+                    return False
+                if int(payload.get("kali_profiles_loaded") or 0) <= 0:
+                    return False
+                return str(payload.get("status") or "").lower() == "healthy"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP Kali tool availability check failed: %s", exc)
+            return False
+
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def query_knowledge(
         self,

@@ -15,27 +15,21 @@ export default function Sidebar() {
       title: "Vulnerability Ops",
       items: [
         { to: "/targets", label: "Targets", adminOnly: false },
-        { to: "/scan", label: "Scans", adminOnly: true },
-        { to: "/phase-monitor", label: "Phase Monitor", adminOnly: true },
-        { to: "/agendamento", label: "Schedules", adminOnly: true },
+        { to: "/scan", label: "Scans e Agendamentos", adminOnly: true },
+        { to: "/operacional", label: "Centro Operacional", adminOnly: true },
       ],
     },
     {
       title: "Security",
       items: [
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
-        { to: "/evolucao", label: "Attack Evolution", adminOnly: false },
         { to: "/aprendizado", label: "Aprendizado", adminOnly: true },
-        { to: "/agent-flow", label: "Fluxo de Agentes", adminOnly: true },
-        { to: "/relatorios", label: "Relatórios", adminOnly: false },
+        { to: "/relatorios", label: "Relatório Único", adminOnly: false },
       ],
     },
     {
       title: "Management",
       items: [
-        { to: "/workers", label: "Workers", adminOnly: true },
-        { to: "/jobs", label: "Jobs Registry", adminOnly: true },
-        { to: "/worker-logs", label: "Worker Logs", adminOnly: true },
         { to: "/configuracao", label: "Settings", adminOnly: true },
       ],
     },

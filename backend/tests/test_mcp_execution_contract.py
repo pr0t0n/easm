@@ -4,6 +4,54 @@ from app.services.mcp_client import MCPClient
 from app.services.vulnerability_learning_service import build_runtime_learning_playbook
 
 
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return dict(self.payload)
+
+
+class _FakeSyncClient:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def get(self, _path: str) -> _FakeResponse:
+        return _FakeResponse(self.payload)
+
+
+def test_mcp_rag_health_is_not_enough_for_kali_tool_execution(monkeypatch) -> None:
+    client = MCPClient(base_url="http://mcp.test")
+    monkeypatch.setattr(
+        client,
+        "_sync_client",
+        lambda: _FakeSyncClient({"status": "healthy", "kali_connected": False, "kali_profiles_loaded": 0}),
+    )
+
+    assert client.health_check_sync() is True
+    assert client.kali_tools_available_sync() is False
+
+
+def test_mcp_kali_tool_execution_requires_loaded_profiles(monkeypatch) -> None:
+    client = MCPClient(base_url="http://mcp.test")
+    monkeypatch.setattr(
+        client,
+        "_sync_client",
+        lambda: _FakeSyncClient({"status": "healthy", "kali_connected": True, "kali_profiles_loaded": 12}),
+    )
+
+    assert client.kali_tools_available_sync() is True
+
+
 def test_mcp_execution_normalizes_localhost_and_legacy_status(monkeypatch) -> None:
     client = MCPClient(base_url="http://mcp.test")
     captured: dict[str, object] = {}

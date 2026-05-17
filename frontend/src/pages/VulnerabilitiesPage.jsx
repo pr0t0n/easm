@@ -18,6 +18,19 @@ const sanitizeText = (value) => {
     .trim();
 };
 
+function extractBas(item) {
+  const details = item?.details && typeof item.details === "object" ? item.details : {};
+  const technique = details.adversary_technique && typeof details.adversary_technique === "object" ? details.adversary_technique : {};
+  const pack = details.detection_proof_pack && typeof details.detection_proof_pack === "object" ? details.detection_proof_pack : {};
+  const expected = Array.isArray(details.expected_telemetry) ? details.expected_telemetry : [];
+  return {
+    id: sanitizeText(technique.id || details.adversary_technique_id || ""),
+    name: sanitizeText(technique.name || details.adversary_technique_name || ""),
+    status: sanitizeText(pack.detection_status || details.detection_status || "unknown"),
+    sources: expected.map((item) => sanitizeText(item?.source || "")).filter(Boolean),
+  };
+}
+
 export default function VulnerabilitiesPage() {
   const [rows, setRows] = useState([]);
   const [targets, setTargets] = useState([]);
@@ -254,6 +267,8 @@ export default function VulnerabilitiesPage() {
                 <th className="px-3 py-2">Alvo</th>
                 <th className="px-3 py-2">Dominio</th>
                 <th className="px-3 py-2">Ferramenta</th>
+                <th className="px-3 py-2">BAS</th>
+                <th className="px-3 py-2">Detecção</th>
                 <th className="px-3 py-2">Recomendacao</th>
               </tr>
             </thead>
@@ -266,6 +281,7 @@ export default function VulnerabilitiesPage() {
                 } catch {
                   recSummary = item.recommendation || "";
                 }
+                const bas = extractBas(item);
                 return (
                   <tr key={item.id} className="border-b border-slate-800 hover:bg-slate-800/50">
                     <td className="px-3 py-2 text-slate-400">{item.id}</td>
@@ -287,6 +303,26 @@ export default function VulnerabilitiesPage() {
                     <td className="max-w-[140px] truncate px-3 py-2 text-slate-300">{item.target_query || "-"}</td>
                     <td className="max-w-[140px] truncate px-3 py-2 text-slate-300">{item.domain || item.details?.asset || "-"}</td>
                     <td className="px-3 py-2 text-purple-300">{item.tool || item.details?.tool || "-"}</td>
+                    <td className="px-3 py-2">
+                      {bas.id || bas.name ? (
+                        <div>
+                          <div className="font-mono text-xs text-cyan-200">{bas.id || "-"}</div>
+                          <div className="max-w-[220px] truncate text-[11px] text-slate-400" title={bas.name}>{bas.name || "-"}</div>
+                        </div>
+                      ) : (
+                        <span className="text-slate-600">-</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className="rounded-md border border-sky-700/60 bg-sky-950/40 px-2 py-0.5 text-[11px] uppercase text-sky-200">
+                        {bas.status}
+                      </span>
+                      {bas.sources.length > 0 && (
+                        <div className="mt-1 max-w-[180px] truncate text-[10px] text-slate-500" title={bas.sources.join(", ")}>
+                          {bas.sources.join(", ")}
+                        </div>
+                      )}
+                    </td>
                     <td className="max-w-[200px] truncate px-3 py-2 text-slate-400" title={recSummary}>
                       {recSummary ? recSummary.slice(0, 80) + (recSummary.length > 80 ? "..." : "") : "-"}
                     </td>

@@ -31,7 +31,7 @@ def run_tool_execution(
 ) -> dict[str, Any]:
     """Shim: tools prefer MCP -> Kali, falling back to direct Kali runner."""
     scan_id = legacy_kwargs.get("scan_id")
-    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
+    if settings.mcp_execute_tools_via_mcp and mcp_client.kali_tools_available_sync():
         result = mcp_client.execute_kali_tool_sync(
             tool_name=tool_name,
             target=target,
