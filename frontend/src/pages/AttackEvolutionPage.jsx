@@ -313,7 +313,7 @@ export default function AttackEvolutionPage() {
   }, [persona, targetFilter, severity, periodDays]);
 
   return (
-    <div style={{ padding: 16, display: "grid", gap: 16 }}>
+    <div className="dpage" style={{ display: "grid", gap: 16 }}>
       <div style={{ ...panelStyle, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[1, 2, 3].map((step) => (

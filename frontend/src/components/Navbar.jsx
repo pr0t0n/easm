@@ -17,7 +17,6 @@ const PAGE_META = {
   "/workers":        { eyebrow: "Management · Workers",      title: "Workers",                   sub: "Heartbeats e capacidade dos agentes especializados" },
   "/jobs":           { eyebrow: "Management · Jobs Registry", title: "Jobs Registry",            sub: "Trilha de tarefas Celery por scan" },
   "/worker-logs":    { eyebrow: "Management · Logs",         title: "Worker Logs",               sub: "Streaming de logs operacionais por worker" },
-  "/configuracao":   { eyebrow: "Management · Settings",     title: "Configuração",              sub: "Integrações, policies e parâmetros do produto" },
   "/usuarios":       { eyebrow: "Admin · Users",             title: "Usuários",                  sub: "Identidades, grupos e permissões" },
   "/conta":          { eyebrow: "Admin · Account",           title: "Minha Conta",               sub: "Dados de perfil e preferências" },
 };

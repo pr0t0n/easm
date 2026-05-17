@@ -13,6 +13,12 @@ const emptyForm = {
   enabled: true,
 };
 
+const fieldStyle = {
+  width: "100%", padding: "9px 12px", borderRadius: 8,
+  border: "1px solid var(--line)", background: "var(--canvas)",
+  fontSize: 13, color: "var(--ink)",
+};
+
 export default function SchedulingPage({ embedded = false }) {
   const [form, setForm] = useState(emptyForm);
   const [schedules, setSchedules] = useState([]);
@@ -86,7 +92,7 @@ export default function SchedulingPage({ embedded = false }) {
         validated_domains: data.validated_domains || [],
       });
       await loadSchedules();
-      toastSuccess(`✓ Execucao iniciada com sucesso\n${data.batches_created || count} jobs criados para ${data.total_targets || 0} alvo(s)`);
+      toastSuccess(`Execução iniciada · ${data.batches_created || count} jobs para ${data.total_targets || 0} alvo(s)`);
     } catch (error) {
       const detail = error?.response?.data?.detail;
       toastError(typeof detail === "string" ? detail : "Falha ao executar agendamento agora.");
@@ -94,174 +100,120 @@ export default function SchedulingPage({ embedded = false }) {
   };
 
   const Shell = embedded ? "div" : "main";
-  const shellClassName = embedded ? "space-y-4" : "mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10";
+  const shellClassName = embedded ? "space-y-4" : "dpage space-y-4";
 
   return (
     <Shell className={shellClassName}>
-      <section className="panel p-5">
-        <h2 className="text-xl font-semibold">Agendamento</h2>
-        <p className="mt-1 text-sm text-slate-300">Informe alvos separados por ; e configure recorrencia.</p>
+      {!embedded && (
+        <div className="page-intro">
+          <h2>Agendamentos.</h2>
+          <div className="sub">janelas e cadência de scans recorrentes</div>
+        </div>
+      )}
+
+      <section className="card">
+        <div className="card-h">
+          <div>
+            <h3>{editingId ? "Editar agendamento" : "Novo agendamento"}</h3>
+            <div className="sub">informe alvos separados por ; e configure a recorrência</div>
+          </div>
+        </div>
 
         {executionInfo && (
-          <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4">
-            <h3 className="font-semibold text-emerald-300">Ultima Execucao</h3>
-            <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-              <div>
-                <p className="text-slate-400">Total de alvos</p>
-                <p className="text-lg font-semibold text-white">{executionInfo.total_targets}</p>
-              </div>
-              <div>
-                <p className="text-slate-400">Tamanho do lote</p>
-                <p className="text-lg font-semibold text-white">{executionInfo.batch_size}</p>
-              </div>
-              <div>
-                <p className="text-slate-400">Lotes criados</p>
-                <p className="text-lg font-semibold text-white">{executionInfo.batches_created}</p>
-              </div>
-              <div>
-                <p className="text-slate-400">Scans (IDs)</p>
-                <p className="text-sm text-slate-200">{executionInfo.created_scans.join(", ") || "-"}</p>
-              </div>
-              <div className="md:col-span-2">
-                <p className="text-slate-400">Dominios validados (schedule)</p>
-                <p className="text-sm text-slate-200 break-all">{(executionInfo.validated_domains || []).join("; ") || "-"}</p>
-              </div>
+          <div style={{ marginBottom: 16, padding: "14px 16px", borderRadius: 10, border: "1px solid var(--sev-low-border)", background: "var(--sev-low-bg)" }}>
+            <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--sev-low-text)" }}>Última execução</h4>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 10 }}>
+              <div><div className="mono-sm muted">alvos</div><div style={{ fontWeight: 700, color: "var(--ink)" }}>{executionInfo.total_targets}</div></div>
+              <div><div className="mono-sm muted">lote</div><div style={{ fontWeight: 700, color: "var(--ink)" }}>{executionInfo.batch_size}</div></div>
+              <div><div className="mono-sm muted">jobs criados</div><div style={{ fontWeight: 700, color: "var(--ink)" }}>{executionInfo.batches_created}</div></div>
             </div>
-            <p className="mt-3 text-xs text-slate-400">
-              <strong>Como funciona:</strong> Com {executionInfo.total_targets} alvo(s) e lotes de {executionInfo.batch_size} alvos, foram criados {executionInfo.batches_created} job(s) de scans distribuidos entre os workers unificados (recon, vuln, osint). Cada job processa seu lote em paralelo com escalamento automatico de CPU.
-            </p>
+            <div className="mono-sm muted" style={{ marginTop: 8 }}>scans: {executionInfo.created_scans.join(", ") || "—"}</div>
           </div>
         )}
 
-        <form onSubmit={submit} className="mt-4 grid gap-3 md:grid-cols-2">
+        <form onSubmit={submit} style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr" }}>
           <textarea
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
+            style={{ ...fieldStyle, gridColumn: "1 / -1", fontFamily: "var(--font-mono)" }}
             rows={3}
             placeholder="alvo1.com; alvo2.com; api.alvo3.com"
             value={form.targets_text}
             onChange={(e) => setForm({ ...form, targets_text: e.target.value })}
           />
-
-          <div className="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-slate-700 shadow-sm">
-            <p className="font-semibold text-slate-800">Execucao do Agendamento com Batching Inteligente</p>
-            <p className="mt-1 leading-relaxed text-slate-700">
-              O agendamento executa scans nos alvos informados em lotes de ~25 alvos. Cada lote gera um ScanJob distribuido para o pool unificado de workers (recon, vuln, osint) com autoscalagem dinamica baseada em CPU. Exemplo: 100 alvos → 4 jobs em paralelo.
-            </p>
-          </div>
-
-          <select
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 md:col-span-2"
-            value={form.access_group_id}
-            onChange={(e) => setForm({ ...form, access_group_id: e.target.value ? Number(e.target.value) : "" })}
-          >
+          <select style={{ ...fieldStyle, gridColumn: "1 / -1" }} value={form.access_group_id}
+            onChange={(e) => setForm({ ...form, access_group_id: e.target.value ? Number(e.target.value) : "" })}>
             <option value="">Sem grupo</option>
-            {groups.map((g) => (
-              <option key={g.id} value={g.id}>{g.name}</option>
-            ))}
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
-
-          <select
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            value={form.scan_type}
-            onChange={(e) => setForm({ ...form, scan_type: e.target.value })}
-          >
+          <select style={fieldStyle} value={form.scan_type} onChange={(e) => setForm({ ...form, scan_type: e.target.value })}>
             <option value="full">Full</option>
             <option value="recon">Recon</option>
             <option value="quick">Quick</option>
           </select>
-
-          <select
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            value={form.frequency}
-            onChange={(e) => setForm({ ...form, frequency: e.target.value })}
-          >
-            <option value="daily">Diario</option>
+          <select style={fieldStyle} value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })}>
+            <option value="daily">Diário</option>
             <option value="weekly">Semanal</option>
             <option value="monthly">Mensal</option>
             <option value="every_3_hours">A cada 3 horas</option>
             <option value="every_6_hours">A cada 6 horas</option>
             <option value="every_12_hours">A cada 12 horas</option>
           </select>
-
-          <input
-            type="time"
-            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-            value={form.run_time}
-            onChange={(e) => setForm({ ...form, run_time: e.target.value })}
-          />
-
+          <input type="time" style={fieldStyle} value={form.run_time} onChange={(e) => setForm({ ...form, run_time: e.target.value })} />
           {form.frequency === "weekly" && (
-            <select
-              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-              value={form.day_of_week}
-              onChange={(e) => setForm({ ...form, day_of_week: e.target.value })}
-            >
+            <select style={fieldStyle} value={form.day_of_week} onChange={(e) => setForm({ ...form, day_of_week: e.target.value })}>
               <option value="monday">Segunda</option>
-              <option value="tuesday">Terca</option>
+              <option value="tuesday">Terça</option>
               <option value="wednesday">Quarta</option>
               <option value="thursday">Quinta</option>
               <option value="friday">Sexta</option>
-              <option value="saturday">Sabado</option>
+              <option value="saturday">Sábado</option>
               <option value="sunday">Domingo</option>
             </select>
           )}
-
           {form.frequency === "monthly" && (
-            <input
-              type="number"
-              min={1}
-              max={31}
-              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-              value={form.day_of_month}
-              onChange={(e) => setForm({ ...form, day_of_month: Number(e.target.value) })}
-            />
+            <input type="number" min={1} max={31} style={fieldStyle} value={form.day_of_month}
+              onChange={(e) => setForm({ ...form, day_of_month: Number(e.target.value) })} />
           )}
-
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
-            />
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--ink-soft)" }}>
+            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
             Habilitado
           </label>
-
-          <button className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">
-            {editingId ? "Salvar Edicao" : "Criar Agendamento"}
-          </button>
+          <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+            <button className="btn btn-primary" type="submit">{editingId ? "Salvar edição" : "Criar agendamento"}</button>
+            {editingId && (
+              <button className="btn btn-ghost" type="button" onClick={() => { setEditingId(null); setForm(emptyForm); }}>
+                Cancelar
+              </button>
+            )}
+          </div>
         </form>
       </section>
 
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Agendamentos Ativos</h3>
-        <div className="mt-3 space-y-2">
-          {schedules.map((row) => (
-            <div key={row.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <p className="font-medium">#{row.id} | {row.scan_type} | {row.frequency}</p>
-              <p className="text-xs text-slate-300">
-                dominios: {(row.targets || []).join("; ") || row.targets_text || "-"}
-              </p>
-              <p className="text-xs text-slate-400">
-                Horario: {row.run_time} {row.day_of_week ? `| Dia semana: ${row.day_of_week}` : ""}
-                {row.day_of_month ? ` | Dia mes: ${row.day_of_month}` : ""}
-              </p>
-              {row.frequency === "every_3_hours" && (
-                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 3 horas (âncora: {row.run_time})</p>
-              )}
-              {row.frequency === "every_6_hours" && (
-                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 6 horas (âncora: {row.run_time})</p>
-              )}
-              {row.frequency === "every_12_hours" && (
-                <p className="text-xs text-amber-300">Recorrencia: executa no minuto {row.run_time.split(":")[1]} a cada 12 horas (âncora: {row.run_time})</p>
-              )}
-              <div className="mt-2 flex gap-2">
-                <button onClick={() => editRow(row)} className="rounded-lg bg-blue-500/15 px-2 py-1 text-xs text-blue-300">Editar</button>
-                <button onClick={() => runNow(row.id)} className="rounded-lg bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">Executar Agora</button>
-                <button onClick={() => deleteRow(row.id)} className="rounded-lg bg-rose-500/20 px-2 py-1 text-xs text-rose-300">Excluir</button>
+      <section className="t-wrap">
+        <div className="t-head"><div><h3>Agendamentos ativos</h3><div className="sub">{schedules.length} schedules</div></div></div>
+        {schedules.length === 0 && <div className="empty">Nenhum agendamento configurado.</div>}
+        {schedules.map((row) => (
+          <div key={row.id} style={{ padding: "14px 22px", borderBottom: "1px solid var(--line-soft)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <span className="mono" style={{ fontWeight: 600 }}>
+                #{row.id} · {row.scan_type} · {row.frequency}
+                {!row.enabled && <span className="b b-neutral" style={{ marginLeft: 8 }}>desativado</span>}
+              </span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="btn btn-ghost" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => editRow(row)}>Editar</button>
+                <button className="btn btn-primary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => runNow(row.id)}>Executar agora</button>
+                <button className="btn btn-danger" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => deleteRow(row.id)}>Excluir</button>
               </div>
             </div>
-          ))}
-        </div>
+            <div className="mono-sm muted" style={{ marginTop: 5 }}>
+              domínios: {(row.targets || []).join("; ") || row.targets_text || "—"}
+            </div>
+            <div className="mono-sm muted" style={{ marginTop: 3 }}>
+              horário {row.run_time}
+              {row.day_of_week ? ` · dia ${row.day_of_week}` : ""}
+              {row.day_of_month ? ` · dia ${row.day_of_month}` : ""}
+            </div>
+          </div>
+        ))}
       </section>
     </Shell>
   );

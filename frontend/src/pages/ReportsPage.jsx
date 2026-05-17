@@ -175,7 +175,7 @@ export default function ReportsPage() {
   const selectedScan = scans.find((s) => String(s.id) === String(selectedId));
 
   return (
-    <div style={{ padding: 16, display: "grid", gap: 12, background: "var(--bg-main)", color: "var(--ink)" }}>
+    <div className="dpage" style={{ display: "grid", gap: 12 }}>
       <div style={{ ...reportCard, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div>

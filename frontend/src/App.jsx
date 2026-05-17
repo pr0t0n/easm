@@ -5,8 +5,8 @@ import Sidebar from "./components/Sidebar";
 import Navbar from "./components/Navbar";
 import ToastCenter from "./components/ToastCenter";
 import AccountPage from "./pages/AccountPage";
-import ConfigurationPage from "./pages/ConfigurationPage";
 import DashboardPage from "./pages/DashboardPage";
+import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
 import AttackEvolutionPage from "./pages/AttackEvolutionPage";
 import ReportsPage from "./pages/ReportsPage";
@@ -25,7 +25,8 @@ import AgentFlowPage from "./pages/AgentFlowPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
-  if (!authStore.token) return <Navigate to="/login" replace />;
+  // Sem sessão → cai na página índice (landing), não direto no login.
+  if (!authStore.token) return <Navigate to="/welcome" replace />;
   return children;
 }
 
@@ -66,6 +67,7 @@ export default function App() {
     <>
       <ToastCenter />
       <Routes>
+        <Route path="/welcome" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route
           path="/*"
@@ -82,7 +84,6 @@ export default function App() {
                     <Route path="/targets" element={<TargetsPage />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
-                    <Route path="/configuracao" element={<AdminOnly><ConfigurationPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />

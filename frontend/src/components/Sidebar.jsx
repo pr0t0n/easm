@@ -28,12 +28,6 @@ export default function Sidebar() {
       ],
     },
     {
-      title: "Management",
-      items: [
-        { to: "/configuracao", label: "Settings", adminOnly: true },
-      ],
-    },
-    {
       title: "Admin",
       items: [
         { to: "/usuarios", label: "Users", adminOnly: true },

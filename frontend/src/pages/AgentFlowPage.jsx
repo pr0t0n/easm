@@ -673,7 +673,7 @@ export default function AgentFlowPage() {
   const selectedScan = scans.find((scan) => String(scan.id) === String(scanId));
 
   return (
-    <div className="min-h-screen bg-[#05070d] p-5 text-slate-100">
+    <div className="dpage" style={{ minHeight: "100vh" }}>
       <style>{`
         @keyframes flow-scan { 0% { transform: translateX(-100%); opacity: .2; } 50% { opacity: .8; } 100% { transform: translateX(100%); opacity: .2; } }
         .agent-flow-scanline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(56,189,248,.18), transparent); animation: flow-scan 3.2s linear infinite; pointer-events: none; }
