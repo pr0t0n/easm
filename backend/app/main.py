@@ -1,6 +1,11 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.api.routes_auth import router as auth_router
 from app.api.routes_management import router as management_router
@@ -31,6 +36,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Garante que erros 500 carreguem cabeçalhos CORS.
+
+    O CORSMiddleware fica fora do ServerErrorMiddleware do Starlette, então uma
+    exceção não tratada retorna sem ``Access-Control-Allow-Origin`` — e o
+    navegador mascara o 500 real como "erro de CORS". Aqui adicionamos os
+    cabeçalhos manualmente para que o frontend veja o erro verdadeiro.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    headers: dict[str, str] = {}
+    origin = request.headers.get("origin")
+    if origin and origin in _cors_origins():
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Vary"] = "Origin"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Erro interno do servidor"},
+        headers=headers,
+    )
 
 
 @app.on_event("startup")

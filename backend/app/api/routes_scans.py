@@ -17,7 +17,7 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
-    ScanAuditLog, AgentTraceEvent, VulnerabilityLearning,
+    ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -2557,11 +2557,18 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         synchronize_session=False,
     )
 
-    # 3) ExecutedToolRun referencia scan_jobs sem cascade ORM; remover explicitamente.
+    # 3) ExecutedToolRun, traces e scores referenciam scan_jobs sem cascade ORM;
+    #    remover explicitamente para evitar ForeignKeyViolation no DELETE do scan.
     db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id).delete(
         synchronize_session=False,
     )
     db.query(ScanAuditLog).filter(ScanAuditLog.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(SkillScore).filter(SkillScore.scan_id == scan_id).delete(
         synchronize_session=False,
     )
 
