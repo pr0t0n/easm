@@ -104,6 +104,16 @@ function formatFactorEvidence(name, evidence) {
 
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
 
+const EMPTY_BAS = {
+  summary: {},
+  attack_detection_funnel: [],
+  detection: { counts: {}, telemetry_sources: [] },
+  tools: [],
+  agent_flow: [],
+  workers: { total: 0, active: 0, stale: 0, by_mode: {}, by_status: {}, rows: [] },
+  learning: { total: 0, accepted: 0, pending: 0, rejected: 0, recent: [] },
+};
+
 function StatCard({ label, value, sub, color = "text-white" }) {
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
@@ -111,6 +121,54 @@ function StatCard({ label, value, sub, color = "text-white" }) {
       <p className={`mt-1 text-3xl font-bold font-display ${color}`}>{value}</p>
       {sub && <p className="mt-1 text-xs text-slate-500">{sub}</p>}
     </div>
+  );
+}
+
+function BasMetric({ label, value, suffix = "", sub, tone = "blue" }) {
+  const tones = {
+    blue: { border: "rgba(45,82,230,0.22)", bg: "rgba(45,82,230,0.08)", ink: "var(--brand-700)" },
+    green: { border: "rgba(34,145,96,0.22)", bg: "rgba(34,145,96,0.08)", ink: "var(--sev-low-text)" },
+    amber: { border: "rgba(212,165,0,0.26)", bg: "rgba(254,200,0,0.10)", ink: "var(--sev-medium-text)" },
+    red: { border: "rgba(214,69,69,0.24)", bg: "rgba(214,69,69,0.08)", ink: "var(--sev-critical-text)" },
+    slate: { border: "var(--line)", bg: "var(--surface-soft)", ink: "var(--ink)" },
+  };
+  const selected = tones[tone] || tones.blue;
+  return (
+    <div
+      className="rounded-xl border p-4"
+      style={{ background: selected.bg, borderColor: selected.border, color: selected.ink }}
+    >
+      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] opacity-80">{label}</p>
+      <p className="mt-2 text-3xl font-black tabular-nums">
+        {value}{suffix}
+      </p>
+      {sub && <p className="mt-1 text-xs opacity-75">{sub}</p>}
+    </div>
+  );
+}
+
+function ProgressLine({ value, tone = "bg-blue-500" }) {
+  const pct = Math.max(0, Math.min(100, Number(value || 0)));
+  const toneMap = {
+    blue: "var(--brand-500)",
+    green: "var(--sev-low-solid)",
+    amber: "var(--sev-medium-solid)",
+    red: "var(--sev-critical-solid)",
+  };
+  return (
+    <div className="h-2 overflow-hidden rounded-full" style={{ background: "var(--bg-muted)" }}>
+      <div className="h-full rounded-full" style={{ width: `${pct}%`, background: toneMap[tone] || tone }} />
+    </div>
+  );
+}
+
+function BasTableEmpty({ colSpan = 4 }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} className="px-3 py-4 text-sm text-slate-500">
+        Sem dados BAS suficientes para esta visão.
+      </td>
+    </tr>
   );
 }
 
@@ -219,6 +277,7 @@ export default function DashboardPage() {
   const [globalVasmMeta, setGlobalVasmMeta] = useState({ aggregationTargets: 1, scanCount: 0 });
   const [prioritizedActions, setPrioritizedActions] = useState([]);
   const [targetStatistics, setTargetStatistics] = useState([]);
+  const [basCommandCenter, setBasCommandCenter] = useState(EMPTY_BAS);
 
   const handleSearch = () => {
     setIsSearching(true);
@@ -302,6 +361,7 @@ export default function DashboardPage() {
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
+        setBasCommandCenter(dashboard.bas_command_center || EMPTY_BAS);
         setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
         setTargetStatistics(Array.isArray(dashboard.target_statistics) ? dashboard.target_statistics : []);
         const resolvedContinuous = dashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
@@ -486,6 +546,14 @@ export default function DashboardPage() {
   }
 
   const maxFindings = Math.max(...activity.map((a) => a.findings), 1);
+  const basSummary = basCommandCenter?.summary || {};
+  const basFunnel = Array.isArray(basCommandCenter?.attack_detection_funnel) ? basCommandCenter.attack_detection_funnel : [];
+  const maxFunnel = Math.max(...basFunnel.map((item) => Number(item.value || 0)), 1);
+  const basTelemetry = Array.isArray(basCommandCenter?.detection?.telemetry_sources) ? basCommandCenter.detection.telemetry_sources : [];
+  const basTools = Array.isArray(basCommandCenter?.tools) ? basCommandCenter.tools : [];
+  const basAgentFlow = Array.isArray(basCommandCenter?.agent_flow) ? basCommandCenter.agent_flow : [];
+  const basWorkers = basCommandCenter?.workers || EMPTY_BAS.workers;
+  const basLearning = basCommandCenter?.learning || EMPTY_BAS.learning;
 
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-5 pb-12">
@@ -610,10 +678,292 @@ export default function DashboardPage() {
         )}
       </section>
 
+      <section className="rounded-2xl border p-5" style={{ background: "var(--surface)", borderColor: "var(--line)", boxShadow: "var(--shadow-card)" }}>
+        <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--brand-700)" }}>BAS Command Center</p>
+            <h2 className="mt-1 font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>
+              Visão viva do ambiente, ataques simulados, detecção e aprendizagem
+            </h2>
+          </div>
+          <p className="max-w-2xl text-sm" style={{ color: "var(--ink-muted)" }}>
+            Consolida execução de scans, fluxo dos agentes, ferramentas Kali/MCP, telemetria esperada, gaps de controle, RAG e risco validado.
+          </p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+          <BasMetric
+            label="Resiliência BAS"
+            value={Number(basSummary.bas_resilience_index || 0).toFixed(1)}
+            suffix="%"
+            sub="Eficácia + ferramentas + aprendizagem"
+            tone={Number(basSummary.bas_resilience_index || 0) >= 70 ? "green" : "amber"}
+          />
+          <BasMetric
+            label="Eficácia do ataque"
+            value={Number(basSummary.attack_success_index || 0).toFixed(1)}
+            suffix="%"
+            sub={`${Number(basSummary.attack_success_count || 0)} evidências ofensivas`}
+            tone="blue"
+          />
+          <BasMetric
+            label="Controle detectou"
+            value={Number(basSummary.control_efficacy_index || 0).toFixed(1)}
+            suffix="%"
+            sub="Detectado + parcial ponderado"
+            tone={Number(basSummary.control_efficacy_index || 0) >= 70 ? "green" : "red"}
+          />
+          <BasMetric
+            label="Gaps de detecção"
+            value={Number(basSummary.detection_gap_count || 0)}
+            sub="Não detectado ou sem confirmação"
+            tone={Number(basSummary.detection_gap_count || 0) > 0 ? "red" : "green"}
+          />
+          <BasMetric
+            label="Ferramentas"
+            value={Number(basSummary.tool_efficiency_index || 0).toFixed(1)}
+            suffix="%"
+            sub={`${basTools.length} ferramentas observadas`}
+            tone="slate"
+          />
+          <BasMetric
+            label="Aprendizagem"
+            value={Number(basSummary.learning_coverage_percent || 0).toFixed(1)}
+            suffix="%"
+            sub={`${Number(basLearning.learned_techniques || 0)} técnicas aprendidas`}
+            tone="green"
+          />
+        </div>
+
+        <div className="mt-5 grid gap-4 xl:grid-cols-12">
+          <section className="rounded-xl border p-4 xl:col-span-5" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Funil Ataque x Detecção</h3>
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>Da técnica planejada ao gap confirmado</p>
+              </div>
+              <span className="rounded-md border px-2 py-1 text-xs" style={{ background: "rgba(45,82,230,0.08)", borderColor: "rgba(45,82,230,0.22)", color: "var(--brand-700)" }}>
+                {Number(basSummary.techniques_exercised || 0)} técnicas
+              </span>
+            </div>
+            <div className="space-y-3">
+              {basFunnel.length === 0 && <p className="text-sm text-slate-500">Sem funil BAS calculado.</p>}
+              {basFunnel.map((item) => {
+                const width = Math.round((Number(item.value || 0) / maxFunnel) * 100);
+                const isGap = String(item.label || "").toLowerCase().includes("gap");
+                return (
+                  <div key={`bas-funnel-${item.label}`}>
+                    <div className="mb-1 flex items-center justify-between text-xs">
+                      <span style={{ color: "var(--ink-soft)" }}>{item.label}</span>
+                      <span className="font-bold" style={{ color: isGap ? "var(--sev-critical-text)" : "var(--ink)" }}>{Number(item.value || 0)}</span>
+                    </div>
+                    <div className="h-3 overflow-hidden rounded-full" style={{ background: "var(--bg-muted)" }}>
+                      <div className="h-full rounded-full" style={{ width: `${width}%`, minWidth: Number(item.value || 0) > 0 ? "8px" : "0", background: isGap ? "var(--sev-critical-solid)" : "var(--brand-500)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-xl border p-4 xl:col-span-4" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Eficácia por Fonte de Telemetria</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Onde o controle está enxergando, parcializando ou falhando</p>
+            <div className="mt-4 overflow-x-auto rounded-lg border" style={{ borderColor: "var(--line)" }}>
+              <table className="min-w-full text-left text-xs">
+                <thead style={{ background: "var(--surface)", color: "var(--ink-muted)" }}>
+                  <tr>
+                    <th className="px-3 py-2">Fonte</th>
+                    <th className="px-3 py-2">Eventos</th>
+                    <th className="px-3 py-2">Eficácia</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {basTelemetry.length === 0 && <BasTableEmpty colSpan={3} />}
+                  {basTelemetry.map((row) => (
+                    <tr key={`telemetry-${row.source}`} className="border-t" style={{ borderColor: "var(--line)" }}>
+                      <td className="px-3 py-2 font-medium" style={{ color: "var(--ink)" }}>{row.source}</td>
+                      <td className="px-3 py-2" style={{ color: "var(--ink-soft)" }}>{row.total}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex min-w-[110px] items-center gap-2">
+                          <span className="w-10 text-right font-semibold" style={{ color: "var(--ink)" }}>{Number(row.effectiveness || 0).toFixed(0)}%</span>
+                          <div className="flex-1">
+                            <ProgressLine value={row.effectiveness} tone={Number(row.effectiveness || 0) >= 70 ? "green" : "amber"} />
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="rounded-xl border p-4 xl:col-span-3" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Aprendizagem e RAG</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Reuso de conhecimento em técnicas e skills</p>
+            <div className="mt-4 space-y-4">
+              <div>
+                <div className="mb-1 flex justify-between text-xs">
+                  <span style={{ color: "var(--ink-muted)" }}>Cobertura do catálogo</span>
+                  <span className="font-semibold" style={{ color: "var(--ink)" }}>{Number(basLearning.coverage_percent || 0).toFixed(1)}%</span>
+                </div>
+                <ProgressLine value={basLearning.coverage_percent} tone="green" />
+              </div>
+              <div>
+                <div className="mb-1 flex justify-between text-xs">
+                  <span style={{ color: "var(--ink-muted)" }}>Utilização em traces</span>
+                  <span className="font-semibold" style={{ color: "var(--ink)" }}>{Number(basLearning.utilization_percent || 0).toFixed(1)}%</span>
+                </div>
+                <ProgressLine value={basLearning.utilization_percent} tone="blue" />
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-lg border p-2" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <p style={{ color: "var(--ink-muted)" }}>Aceitos</p>
+                  <p className="text-lg font-bold" style={{ color: "var(--sev-low-text)" }}>{Number(basLearning.accepted || 0)}</p>
+                </div>
+                <div className="rounded-lg border p-2" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <p style={{ color: "var(--ink-muted)" }}>Revisão</p>
+                  <p className="text-lg font-bold" style={{ color: "var(--sev-medium-text)" }}>{Number(basLearning.pending || 0)}</p>
+                </div>
+                <div className="rounded-lg border p-2" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <p style={{ color: "var(--ink-muted)" }}>RAG hits</p>
+                  <p className="text-lg font-bold" style={{ color: "var(--brand-700)" }}>{Number(basLearning.rag_trace_hits || 0)}</p>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-12">
+          <section className="rounded-xl border p-4 xl:col-span-5" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Utilização de Ferramentas</h3>
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>Eficiência, falhas e achados por ferramenta</p>
+              </div>
+              <span className="text-xs" style={{ color: "var(--ink-muted)" }}>{basTools.length} linhas</span>
+            </div>
+            <div className="overflow-x-auto rounded-lg border" style={{ borderColor: "var(--line)" }}>
+              <table className="min-w-full text-left text-xs">
+                <thead style={{ background: "var(--surface)", color: "var(--ink-muted)" }}>
+                  <tr>
+                    <th className="px-3 py-2">Ferramenta</th>
+                    <th className="px-3 py-2">Exec.</th>
+                    <th className="px-3 py-2">Sucesso</th>
+                    <th className="px-3 py-2">Achados</th>
+                    <th className="px-3 py-2">Tempo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {basTools.length === 0 && <BasTableEmpty colSpan={5} />}
+                  {basTools.map((tool) => (
+                    <tr key={`bas-tool-${tool.tool}`} className="border-t" style={{ borderColor: "var(--line)" }}>
+                      <td className="px-3 py-2 font-mono" style={{ color: "var(--brand-700)" }}>{tool.tool}</td>
+                      <td className="px-3 py-2" style={{ color: "var(--ink-soft)" }}>{tool.attempts}</td>
+                      <td className="px-3 py-2 font-semibold" style={{ color: "var(--ink)" }}>{Number(tool.success_rate || 0).toFixed(0)}%</td>
+                      <td className="px-3 py-2" style={{ color: "var(--ink-soft)" }}>{tool.findings}</td>
+                      <td className="px-3 py-2" style={{ color: "var(--ink-muted)" }}>{Number(tool.avg_duration_seconds || 0).toFixed(1)}s</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="rounded-xl border p-4 xl:col-span-4" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Fluxo de Agentes</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Eventos, sucesso e latência por fase/capability</p>
+            <div className="mt-3 space-y-3">
+              {basAgentFlow.length === 0 && <p className="text-sm text-slate-500">Sem traces de agentes no escopo.</p>}
+              {basAgentFlow.slice(0, 6).map((flow) => (
+                <div key={`flow-${flow.stage}`} className="rounded-lg border p-3" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate font-semibold" style={{ color: "var(--ink)" }}>{flow.stage}</span>
+                    <span style={{ color: "var(--ink-muted)" }}>{flow.events} eventos</span>
+                  </div>
+                  <div className="mt-2 flex items-center gap-3">
+                    <div className="flex-1">
+                      <ProgressLine value={flow.success_rate} tone={Number(flow.success_rate || 0) >= 80 ? "green" : "amber"} />
+                    </div>
+                    <span className="w-12 text-right text-xs font-bold" style={{ color: "var(--ink)" }}>{Number(flow.success_rate || 0).toFixed(0)}%</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-xl border p-4 xl:col-span-3" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Workers</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Saúde da execução distribuída</p>
+            <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="rounded-lg border p-2" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                <p style={{ color: "var(--ink-muted)" }}>Total</p>
+                <p className="text-lg font-bold" style={{ color: "var(--ink)" }}>{Number(basWorkers.total || 0)}</p>
+              </div>
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-2">
+                <p className="text-emerald-200/70">Ativos</p>
+                <p className="text-lg font-bold text-emerald-200">{Number(basWorkers.active || 0)}</p>
+              </div>
+              <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-2">
+                <p style={{ color: "var(--sev-critical-text)", opacity: 0.75 }}>Stale</p>
+                <p className="text-lg font-bold" style={{ color: "var(--sev-critical-text)" }}>{Number(basWorkers.stale || 0)}</p>
+              </div>
+            </div>
+            <div className="mt-4 space-y-2">
+              {(basWorkers.rows || []).slice(0, 5).map((worker) => (
+                <div key={`worker-${worker.name}`} className="flex items-center justify-between rounded-lg border px-3 py-2 text-xs" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold" style={{ color: "var(--ink)" }}>{worker.name}</p>
+                    <p style={{ color: "var(--ink-muted)" }}>{worker.mode} · {worker.last_task_name || "sem tarefa"}</p>
+                  </div>
+                  <span className="rounded-md border px-2 py-1" style={{ borderColor: "var(--line)", color: "var(--ink-soft)" }}>{worker.status}</span>
+                </div>
+              ))}
+              {(basWorkers.rows || []).length === 0 && <p className="text-sm text-slate-500">Sem workers registrados.</p>}
+            </div>
+          </section>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-3">
+          <section className="rounded-xl border p-4" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Risco Validado por BAS</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Achados críticos/altos com evidência operacional</p>
+            <div className="mt-4 flex items-end justify-between">
+              <div>
+                <p className="text-4xl font-black" style={{ color: "var(--sev-critical-text)" }}>{Number(basSummary.validated_risk_findings || 0)}</p>
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>riscos críticos/altos</p>
+              </div>
+              <div className="text-right">
+                <p className="text-2xl font-bold" style={{ color: "var(--ink)" }}>{Number(basSummary.open_findings || 0)}</p>
+                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>achados abertos</p>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-xl border p-4 lg:col-span-2" style={{ background: "var(--surface-soft)", borderColor: "var(--line)" }}>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Top Vulnerabilidades e Controles</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Priorização rápida para engenharia de detecção e correção</p>
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {(topVulns || []).slice(0, 6).map((vuln) => (
+                <div key={`bas-vuln-${vuln.title}-${vuln.severity}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold" style={{ color: "var(--ink)" }}>{vuln.title}</p>
+                    <p style={{ color: "var(--ink-muted)" }}>{vuln.severity}</p>
+                  </div>
+                  <span className="rounded-md border px-2 py-1 font-bold" style={{ borderColor: "var(--line)", color: "var(--ink)" }}>{vuln.count}</span>
+                </div>
+              ))}
+              {(topVulns || []).length === 0 && <p className="text-sm text-slate-500">Sem vulnerabilidades recorrentes no escopo.</p>}
+            </div>
+          </section>
+        </div>
+      </section>
+
       <section className="ds-panel p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>ScriptKidd.o Vulnerability Dashboard</h2>
-          <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--brand-700)" }}>Visão consolidada de risco e maturidade</p>
+          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>Risco, Rating e Maturidade</h2>
+          <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--brand-700)" }}>Camada executiva após evidências BAS</p>
         </div>
 
         <div className="grid gap-4 xl:grid-cols-12">
