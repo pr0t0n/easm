@@ -14,7 +14,7 @@ RUN printf 'deb http://kali.download/kali kali-rolling main contrib non-free non
 # Core: Python runtime, build deps, networking primitives, Go (for ProjectDiscovery tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq dnsutils openssl \
-      python3 python3-pip python3-venv \
+      python3 python3-pip python3-venv python3-setuptools \
       pipx \
       build-essential pkg-config libssl-dev libpcap-dev \
       golang-go ruby ruby-dev \
@@ -83,6 +83,7 @@ RUN set -eux; \
 # package. Clone it and expose a stable wrapper command expected by profiles.
 RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && \
     pip install --break-system-packages --no-cache-dir -r /opt/jwt_tool/requirements.txt && \
+    pip install --break-system-packages --no-cache-dir ratelimit && \
     printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool && \
     chmod +x /usr/local/bin/jwt_tool
 

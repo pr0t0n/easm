@@ -125,7 +125,8 @@ theharvester_passive:
   category: osint
   phase: WEAPONIZATION_SIMULATION
   description: "Email/host gathering from public sources."
-  cmd: ["theHarvester", "-d", "{host}", "-b", "duckduckgo,crtsh,hackertarget,bing,otx", "-l", "200"]
+  target_type: domain
+  cmd: ["theHarvester", "-d", "{{domain}}", "-b", "duckduckgo,crtsh,hackertarget,otx,yahoo", "-l", "200", "-f", "{{out}}/theharvester"]
   timeout: 300
   parser: raw
 

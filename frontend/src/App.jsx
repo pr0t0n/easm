@@ -1,9 +1,10 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import client from "./api/client";
 import Sidebar from "./components/Sidebar";
 import Navbar from "./components/Navbar";
 import ToastCenter from "./components/ToastCenter";
+import ErrorBoundary from "./components/ErrorBoundary";
 import AccountPage from "./pages/AccountPage";
 import DashboardPage from "./pages/DashboardPage";
 import LandingPage from "./pages/LandingPage";
@@ -34,6 +35,13 @@ function AdminOnly({ children }) {
   const me = authStore.me;
   if (!me?.is_admin) return <Navigate to="/" replace />;
   return children;
+}
+
+// Error boundary que reinicia a cada mudança de rota — uma página com
+// erro de render mostra um fallback isolado em vez de derrubar o app.
+function RoutedBoundary({ children }) {
+  const { pathname } = useLocation();
+  return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>;
 }
 
 export default function App() {
@@ -77,6 +85,7 @@ export default function App() {
                 <Sidebar />
                 <div className="main-column">
                   <Navbar />
+                  <RoutedBoundary>
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<ReportsPage />} />
@@ -95,6 +104,7 @@ export default function App() {
                     <Route path="/agent-flow" element={<AdminOnly><AgentFlowPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
+                  </RoutedBoundary>
                 </div>
               </div>
             </Protected>

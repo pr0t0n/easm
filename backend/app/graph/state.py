@@ -74,6 +74,7 @@ class AgentState(TypedDict):
     confidence_state: dict[str, Any]        # Confiança por hipótese/fase
     evidence_contract: dict[str, Any]       # Regras de promoção de achados
     completed_capabilities: list[str]       # Capacidades já executadas no ciclo atual
+    capability_ledger: dict[str, Any]       # Registro explícito de capacidades exercidas
     loop_iteration: int                      # Iteração atual do supervisor
     max_iterations: int                      # Orçamento máximo de iterações
     objective_met: bool                      # Flag de término de operação

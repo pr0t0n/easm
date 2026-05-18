@@ -141,6 +141,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
     from app.graph.nodes.supervisor import (
         _refresh_active_skills,
         _append_action,
+        _mark_capability_runtime,
         _build_skill_playbook_for_context,
         _invoke_skill_for_context,
     )
@@ -379,6 +380,16 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "detection_proof_pack": detection_proof_pack,
             }
             _append_action(state, "skill_invoked", invocation_record)
+            _mark_capability_runtime(
+                state,
+                "adversarial_hypothesis",
+                "skill_selector",
+                {
+                    "skill_id": invocation_record["skill_id"],
+                    "recommended_tools": guided_tools[:8],
+                    "source": invocation_record["source"],
+                },
+            )
             state["skill_selector_ready"] = True
             state["skill_selector_gate"] = {
                 "group": group,
@@ -450,6 +461,16 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "reason": "inferred from accepted learning + skill catalog",
             }
             _append_action(state, "skill_invoked", invocation_record)
+            _mark_capability_runtime(
+                state,
+                "adversarial_hypothesis",
+                "skill_selector",
+                {
+                    "skill_id": inferred_skill_id,
+                    "recommended_tools": guided_tools[:8],
+                    "source": invocation_record["source"],
+                },
+            )
             state["skill_selector_ready"] = ready
             state["skill_selector_gate"] = {
                 "group": group,
@@ -510,7 +531,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
 def skill_planner_node(state: AgentState) -> AgentState:
     """Turn the selected skill into an executable plan contract."""
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _append_action
+    from app.graph.nodes.supervisor import _append_action, _mark_capability_runtime
 
     started_at = _metric_start()
     _sync_step_to_db(state, "Skill Planner")
@@ -549,6 +570,25 @@ def skill_planner_node(state: AgentState) -> AgentState:
     }
     state["skill_plan_contract"] = plan
     _append_action(state, "skill_planned", plan)
+    _mark_capability_runtime(
+        state,
+        "strategic_planning",
+        "skill_planner",
+        {
+            "capability": capability,
+            "skill_id": plan.get("skill_id"),
+            "candidate_tools": list(plan.get("candidate_tools") or [])[:8],
+        },
+    )
+    _mark_capability_runtime(
+        state,
+        "adversarial_hypothesis",
+        "skill_planner",
+        {
+            "technique": selected_technique.get("name"),
+            "evidence_required": list(plan.get("evidence_required") or [])[:8],
+        },
+    )
     state["logs_terminais"].append(
         f"[SKILL] planned capability={capability} skill={plan.get('skill_id')} "
         f"technique={selected_technique.get('name') or '-'}"
@@ -571,7 +611,7 @@ def _technique_for_selected_tool(invocation: dict[str, Any], selected_tool: str)
 def tool_selector_node(state: AgentState) -> AgentState:
     """Select exactly the tool(s) authorized by the current skill contract."""
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _append_action
+    from app.graph.nodes.supervisor import _append_action, _mark_capability_runtime
 
     started_at = _metric_start()
     _sync_step_to_db(state, "Tool Selector")
@@ -709,6 +749,16 @@ def tool_selector_node(state: AgentState) -> AgentState:
     }
     state["tool_selection_contract"] = selection
     _append_action(state, "tool_selected", selection)
+    _mark_capability_runtime(
+        state,
+        "adversarial_hypothesis",
+        "tool_selector",
+        {
+            "skill_id": selection.get("skill_id"),
+            "selected_tools": selected_tools[:8],
+            "candidate_tools": candidate_tools[:8],
+        },
+    )
 
     try:
         from app.graph.tracer import emit_trace as _emit_trace
@@ -949,6 +999,7 @@ def tool_executor_node(state: AgentState) -> AgentState:
         _append_error,
         _append_observation,
         _complete_delegation_task,
+        _mark_capability_runtime,
     )
 
     started_at = _metric_start()
@@ -1009,6 +1060,13 @@ def tool_executor_node(state: AgentState) -> AgentState:
         if capability in TOOL_CAPABILITY_NODES and capability not in completed:
             completed.append(capability)
         state["completed_capabilities"] = completed
+        if capability in TOOL_CAPABILITY_NODES:
+            _mark_capability_runtime(
+                state,
+                capability,
+                "tool_executor",
+                {"blocked": True, "reason": reason},
+            )
         state["pending_capability_node"] = ""
         state["proxima_ferramenta"] = "evidence_gate"
         state["routing_next_node"] = "evidence_gate"
@@ -1137,6 +1195,17 @@ def tool_executor_node(state: AgentState) -> AgentState:
     if capability in TOOL_CAPABILITY_NODES and capability not in completed:
         completed.append(capability)
     state["completed_capabilities"] = completed
+    if capability in TOOL_CAPABILITY_NODES:
+        _mark_capability_runtime(
+            state,
+            capability,
+            "tool_executor",
+            {
+                "tools": selected_tools[:12],
+                "targets_executed": len(all_results),
+                "findings_added": _findings_delta_post,
+            },
+        )
     if capability == "risk_assessment" and state.get("validation_backlog"):
         state["validation_backlog"] = []
     _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
@@ -1221,6 +1290,7 @@ def _evaluate_evidence_gate(state: AgentState) -> AgentState:
         _append_todo,
         _append_note,
         _complete_delegation_task,
+        _mark_capability_runtime,
     )
 
     state["routing_next_node"] = "governance"
@@ -1298,6 +1368,16 @@ def _evaluate_evidence_gate(state: AgentState) -> AgentState:
             phase="evidence-gate",
         )
     _complete_delegation_task(state, "evidence_gate", f"promoted={promoted}; backlog={len(backlog)}")
+    _mark_capability_runtime(
+        state,
+        "evidence_adjudication",
+        "evidence_gate",
+        {
+            "findings_total": len(adjudicated),
+            "promoted": promoted,
+            "backlog": len(backlog),
+        },
+    )
     state["logs_terminais"].append(
         f"EvidenceGate: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
     )

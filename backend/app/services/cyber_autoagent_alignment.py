@@ -228,19 +228,20 @@ specific phases and MUST attempt every applicable installed tool exactly once
 per scan, not just one tool per iteration. Skipping a phase requires a logged
 reason (e.g. "out of scope", "prerequisite missing"). Specifically:
 
-- asset_discovery owns P01-P06: subdomain enum (subfinder/amass/dnsx/massdns/
-  shuffledns/assetfinder/alterx), port/service (naabu/nmap/httpx),
+- asset_discovery owns P01-P06: subdomain enum (subfinder/amass/amass-brute/
+  amass-intel/sublist3r/findomain/dnsx/dnsrecon/dnsenum/shuffledns/
+  assetfinder/alterx), port/service (naabu/nmap/httpx),
   crawl+JS (katana/hakrawler/gau/waybackurls/gospider),
   param discovery (arjun/paramspider/ffuf), HTTP/TLS fingerprint
   (whatweb/sslscan/wafw00f/curl-headers).
-- threat_intel owns P07-P10 + P21: OSINT (shodan-cli/theHarvester/h8mail/
-  metagoofil), email posture (theHarvester), takeover (subjack/nuclei),
+- threat_intel owns P07-P10 + P21: OSINT (shodan-cli/theHarvester/h8mail),
+  email posture (theHarvester), takeover (subjack/nuclei),
   cloud exposure (nuclei/shodan-cli/trufflehog), secrets (trufflehog/gitleaks).
 - risk_assessment owns P11-P20 + P22: CVE scan (nuclei/nmap-vulscan),
   injection (sqlmap/dalfox/wapiti/nikto), SSRF (nuclei/interactsh-client),
   auth bypass (hydra/jwt_tool), dir enum (ffuf/gobuster/feroxbuster/dirsearch),
   API (nuclei/arjun/wapiti), TLS (sslscan/testssl), CMS (wpscan),
-  deps (retire/trivy/eslint/semgrep).
+  deps (retire/trivy/semgrep/bandit/gitleaks).
 - governance + executive_analyst do NOT run tools — they aggregate evidence.
 
 After your first full sweep, the `phase_monitor` summary is checked: any phase

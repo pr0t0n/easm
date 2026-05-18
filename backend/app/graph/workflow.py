@@ -49,7 +49,6 @@ from app.graph.tool_parsers import (
     _extract_amass_findings,
     _extract_sublist3r_findings,
     _extract_dnsenum_findings,
-    _extract_massdns_findings,
     _extract_subjack_findings,
     _extract_ffuf_findings,
     _extract_gobuster_findings,
@@ -110,10 +109,10 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("findomain", "findomain"),
     ("assetfinder", "assetfinder"),
     ("amass", "amass"),
-    ("massdns", "massdns"),
     ("shuffledns", "shuffledns"),
-    ("chaos", "chaos"),
     ("dnsx", "dnsx"),
+    ("dnsrecon", "dnsrecon-brt"),
+    ("dnsenum", "dnsenum"),
     ("hakrawler", "hakrawler"),
     ("gau", "gau"),
     ("waybackurls", "waybackurls"),
@@ -122,7 +121,6 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("shodan", "shodan-cli"),
     ("theharvester", "theHarvester"),
     ("h8mail", "h8mail"),
-    ("metagoofil", "metagoofil"),
     # Serviços
     ("nmap", "nmap"),
     ("naabu", "naabu"),
@@ -147,8 +145,6 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("gitleaks", "gitleaks"),
     ("trufflehog", "trufflehog"),
     ("retire", "retire"),
-    ("eslint", "eslint"),
-    ("jshint", "jshint"),
     # WAF
     ("wafw00f", "wafw00f"),
     # Vuln Web
@@ -241,6 +237,7 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["mission_items"] = mission_items
                 sd["node_history"] = snapshot_node_history
                 sd["current_node"] = current_node
+                sd["capability_ledger"] = dict(state.get("capability_ledger") or {})
                 sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
                 sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
                 sd["pentest_phase_index"] = int(state.get("pentest_phase_index", 0) or 0)
@@ -1638,6 +1635,7 @@ def initial_state(
             "status_values": ["hypothesis", "unverified", "verified"],
         },
         "completed_capabilities": [],
+        "capability_ledger": {},
         "loop_iteration": 0,
         "max_iterations": max_iterations,
         "objective_met": False,

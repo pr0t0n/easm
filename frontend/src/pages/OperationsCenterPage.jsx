@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import ErrorBoundary from "../components/ErrorBoundary";
 import AgentFlowPage from "./AgentFlowPage";
 import AttackEvolutionPage from "./AttackEvolutionPage";
 import JobsRegistryPage from "./JobsRegistryPage";
@@ -42,7 +43,9 @@ export default function OperationsCenterPage() {
         ))}
       </div>
 
-      <ActiveComponent />
+      <ErrorBoundary key={activeModule}>
+        <ActiveComponent />
+      </ErrorBoundary>
     </main>
   );
 }

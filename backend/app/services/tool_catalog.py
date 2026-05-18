@@ -479,7 +479,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "retire": {
         "category": "code", "phase": "P22",
         "description": "JS dependency CVE scanner (jQuery, Angular, Vue legacy).",
-        "when_to_use": "After JS extraction (katana/js-snooper) on live targets.",
+        "when_to_use": "After JS extraction (code-analyzer/katana/hakrawler) on live targets.",
         "inputs": "JS file/URL", "outputs": "vulnerable libs",
         "prerequisites": "JS files or live URL",
     },

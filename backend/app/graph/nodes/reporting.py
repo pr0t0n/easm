@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def governance_node(state: AgentState) -> AgentState:
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _complete_delegation_task
+    from app.graph.nodes.supervisor import _complete_delegation_task, _mark_capability_runtime
     from app.services.risk_service import (
         build_fair_decomposition,
         compute_easm_rating,
@@ -64,6 +64,16 @@ def governance_node(state: AgentState) -> AgentState:
         f"n_assets={n_assets} total_ra={easm_rating['total_ra']}"
     )
     _complete_delegation_task(state, "governance", f"score={easm_rating.get('score', 0)}")
+    _mark_capability_runtime(
+        state,
+        "governance",
+        "governance",
+        {
+            "score": easm_rating.get("score", 0),
+            "grade": easm_rating.get("grade", "F"),
+            "n_assets": n_assets,
+        },
+    )
     # mission_index já foi incrementado pelos agentes paralelos (threat_intel + risk_assessment)
     _metric_end(state, "governance", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado
@@ -73,7 +83,7 @@ def governance_node(state: AgentState) -> AgentState:
 
 def executive_analyst_node(state: AgentState) -> AgentState:
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _complete_delegation_task
+    from app.graph.nodes.supervisor import _complete_delegation_task, _mark_capability_runtime
 
     state["routing_next_node"] = "END"
     started_at = _metric_start()
@@ -129,6 +139,12 @@ def executive_analyst_node(state: AgentState) -> AgentState:
 
     state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
     _complete_delegation_task(state, "executive_analyst", "executive_summary_generated")
+    _mark_capability_runtime(
+        state,
+        "executive_analyst",
+        "executive_analyst",
+        {"narrative_length": len(state.get("executive_summary", ""))},
+    )
     state["mission_index"] += 1
     _metric_end(state, "executive_analyst", started_at)
     # Sincronizar novamente apos _metric_end para garantir node_history atualizado

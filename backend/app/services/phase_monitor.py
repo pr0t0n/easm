@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.graph.mission import PENTEST_PHASES, MISSION_ITEMS
 from app.models.models import ScanJob, ExecutedToolRun, Finding
+from app.services.capability_runtime import CAPABILITY_CONTRACT, infer_capability_ledger
 
 
 CAPABILITY_NODES = [
@@ -101,6 +102,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     Flags mandatory gaps and missing tool executions for supervisor review.
     """
     state = dict(scan.state_data or {})
+    capability_ledger = infer_capability_ledger(state)
     completed_caps: list[str] = list(state.get("completed_capabilities") or [])
     node_history: list[str] = list(state.get("node_history") or [])
     autonomy_obs: list[dict] = list(state.get("autonomy_observations") or [])
@@ -321,10 +323,16 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         return CAPABILITY_ALIASES.get(cap, {cap})
 
     def _cap_visited(cap: str) -> bool:
+        ledger_row = dict(capability_ledger.get(cap) or {})
+        if ledger_row.get("visited") or ledger_row.get("completed"):
+            return True
         aliases = _cap_aliases(cap)
         return bool(aliases.intersection(set(node_history)) or aliases.intersection(set(completed_caps)) or phase_started_by_node.get(cap))
 
     def _cap_done(cap: str) -> bool:
+        ledger_row = dict(capability_ledger.get(cap) or {})
+        if ledger_row.get("completed"):
+            return True
         aliases = _cap_aliases(cap)
         return bool(aliases.intersection(set(completed_caps)) or phase_complete_by_node.get(cap))
 
@@ -337,9 +345,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         node_success = [t for t in node_expected if tool_stats.get(t, {}).get("success", 0) > 0]
         capabilities.append({
             "id": cap,
-            "label": cap.replace("_", " ").title(),
+            "label": CAPABILITY_CONTRACT.get(cap, {}).get("label") or cap.replace("_", " ").title(),
+            "definition": CAPABILITY_CONTRACT.get(cap, {}).get("definition") or "",
             "completed": cap_done,
             "visited": cap_visited,
+            "runtime_evidence": dict(capability_ledger.get(cap) or {}),
+            "required_evidence": list(CAPABILITY_CONTRACT.get(cap, {}).get("required_evidence") or []),
             "tools_expected": node_expected,
             "tools_attempted": node_attempted,
             "tools_success": node_success,
@@ -380,8 +391,19 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     uninstalled_expected = sorted({t for t in expected_all_tools if not is_tool_installed(t)})
     used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0} | phase_used_tools_set
     installed_unused = [t for t in installed_expected if t not in used_tools_set]
+    has_tool_execution_evidence = bool(used_tools_set or tool_stats or phase_used_tools_set)
+    scan_status = str(scan.status or "").strip().lower()
+    scan_is_terminal = scan_status in {"completed", "failed", "error", "cancelled", "canceled"}
+    validation_is_active = has_tool_execution_evidence
+    if scan_is_terminal and not has_tool_execution_evidence:
+        issue = (
+            "NO KALI TOOL EXECUTION RECORDED: scan reached a terminal state without tool attempts. "
+            "This indicates orchestration/worker dispatch did not start; tool coverage lists are suppressed until execution evidence exists."
+        )
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
 
-    if installed_unused:
+    if installed_unused and validation_is_active:
         issue = (
             f"KALI TOOLS NOT EXECUTED ({len(installed_unused)}): "
             f"{', '.join(installed_unused[:8])}{'…' if len(installed_unused) > 8 else ''}. "
@@ -389,8 +411,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif installed_unused:
+        issue = (
+            f"KALI TOOL EXECUTION PENDING: {len(installed_unused)} Kali-ready tool(s) aguardam execução. "
+            "Coverage will be evaluated after the agent records the first tool attempt."
+        )
+        validation_summary["info"].append(issue)
 
-    if uninstalled_expected:
+    if uninstalled_expected and validation_is_active:
         issue = (
             f"KALI TOOLS NOT AVAILABLE ({len(uninstalled_expected)}): "
             f"{', '.join(uninstalled_expected[:8])}{'…' if len(uninstalled_expected) > 8 else ''}. "
@@ -398,12 +426,18 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["warning"].append(issue)
+    elif uninstalled_expected:
+        issue = (
+            f"KALI TOOL AVAILABILITY PENDING: {len(uninstalled_expected)} expected tool(s) have no ready Kali profile yet. "
+            "This is informational until the scan starts executing tools."
+        )
+        validation_summary["info"].append(issue)
 
     coverage_ratio_installed = (
         len(used_tools_set & set(installed_expected)) / max(1, len(installed_expected))
     )
     coverage_ratio = coverage_ratio_installed
-    if coverage_ratio_installed < 0.7:
+    if coverage_ratio_installed < 0.7 and validation_is_active:
         issue = (
             f"Coverage of Kali-ready tools low: {coverage_ratio_installed:.0%} "
             f"({len(used_tools_set & set(installed_expected))}/{len(installed_expected)}). "
@@ -411,14 +445,39 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif not validation_is_active:
+        validation_summary["info"].append(
+            f"Coverage pending: 0/{len(installed_expected)} Kali-ready tool(s) attempted so far."
+        )
 
     # 2. Capability completion: all 8 nodes should execute
     skipped_caps = [c for c in CAPABILITY_NODES if not _cap_done(c)]
-    if skipped_caps:
-        issue = f"INCOMPLETE CAPABILITIES: {', '.join(skipped_caps)}. "
-        issue += "Graph traversal did not visit all capability nodes."
+    capability_gaps = [
+        {
+            "id": cap,
+            "label": CAPABILITY_CONTRACT.get(cap, {}).get("label") or cap.replace("_", " ").title(),
+            "definition": CAPABILITY_CONTRACT.get(cap, {}).get("definition") or "",
+            "required_evidence": list(CAPABILITY_CONTRACT.get(cap, {}).get("required_evidence") or []),
+            "runtime_evidence": dict(capability_ledger.get(cap) or {}),
+        }
+        for cap in skipped_caps
+    ]
+    if skipped_caps and validation_is_active:
+        previews = []
+        for item in capability_gaps[:5]:
+            required = ", ".join(item["required_evidence"][:3]) or "runtime evidence"
+            previews.append(f"{item['id']} requires [{required}]")
+        issue = (
+            f"INCOMPLETE CAPABILITIES ({len(skipped_caps)}): {', '.join(skipped_caps)}. "
+            "Graph traversal did not produce the required capability evidence. "
+            f"Missing evidence examples: {'; '.join(previews)}."
+        )
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif skipped_caps:
+        validation_summary["info"].append(
+            f"CAPABILITY TRAVERSAL PENDING: {', '.join(skipped_caps)}."
+        )
 
     # 3. Installed-tool failures are command/profile correction work.
     # If Kali has the binary/profile, the platform should not label the tool
@@ -459,11 +518,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     # 4. Node history validation: should visit asset_discovery, risk_assessment, evidence_adjudication
     critical_nodes = ["asset_discovery", "risk_assessment", "evidence_adjudication"]
     missing_critical = [n for n in critical_nodes if not _cap_visited(n)]
-    if missing_critical:
+    if missing_critical and validation_is_active:
         issue = f"CRITICAL NODES NOT VISITED: {', '.join(missing_critical)}. "
         issue += "Graph did not traverse essential analysis nodes."
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif missing_critical:
+        validation_summary["info"].append(
+            f"CRITICAL NODE TRAVERSAL PENDING: {', '.join(missing_critical)}."
+        )
 
     # 5. Findings validation: high-severity findings should have strong evidence
     high_severity = [f for f in findings if (f.severity or "").lower() in {"critical", "high"}]
@@ -513,9 +576,11 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         },
         "severity_counts": dict(severity_counts),
         "completed_capabilities": completed_caps,
+        "capability_ledger": capability_ledger,
         "node_history": node_history,
         "missions": MISSION_ITEMS,
         "capabilities": capabilities,
+        "capability_gaps": capability_gaps,
         "phases": phases,
         "tool_inventory": tool_inventory,
         "command_fix_required": sorted(command_fix_required, key=lambda row: row["tool"]),

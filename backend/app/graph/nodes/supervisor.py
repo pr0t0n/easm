@@ -526,6 +526,15 @@ def _complete_delegation_task(state: AgentState, node: str, summary: str) -> Non
         state["delegation_log"] = delegation_log
 
 
+def _mark_capability_runtime(state: AgentState, capability: str, source: str, evidence: dict[str, Any] | None = None, status: str = "completed") -> None:
+    try:
+        from app.services.capability_runtime import mark_capability
+
+        mark_capability(state, capability, source=source, status=status, evidence=evidence or {})
+    except Exception:
+        pass
+
+
 def _update_execution_guardrails(state: AgentState) -> None:
     ctrl = dict(state.get("execution_control") or {})
     max_iterations = int(state.get("max_iterations", 12))
@@ -1392,6 +1401,16 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     started_at = _metric_start()
     _sync_step_to_db(state, "0. Supervisor")
+    _mark_capability_runtime(
+        state,
+        "strategic_planning",
+        "supervisor",
+        {
+            "loop_iteration": int(state.get("loop_iteration", 0)) + 1,
+            "kill_chain_stage": str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+            "pending_tactics": len((state.get("pentest_strategy") or {}).get("queue") or []),
+        },
+    )
 
     # Kill switch: proteção contra loops infinitos
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
@@ -1742,6 +1761,17 @@ def supervisor_node(state: AgentState) -> AgentState:
             "pending_validation": len(pending_validation),
         },
     )
+    if state.get("selected_skill") or state.get("pentest_hypotheses") or state.get("recon_skill_recommendations"):
+        _mark_capability_runtime(
+            state,
+            "adversarial_hypothesis",
+            "supervisor",
+            {
+                "selected_skill": (state.get("selected_skill") or {}).get("skill_id"),
+                "hypotheses": len(state.get("pentest_hypotheses") or []),
+                "recon_recommendations": len(state.get("recon_skill_recommendations") or []),
+            },
+        )
 
     _metric_end(state, "supervisor", started_at)
     _sync_step_to_db(state, "0. Supervisor")
