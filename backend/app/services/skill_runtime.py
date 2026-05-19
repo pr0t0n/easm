@@ -1,10 +1,207 @@
 from __future__ import annotations
 
+import os
+import re
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from app.graph.mission import SKILL_CATALOG
+
+# ---------------------------------------------------------------------------
+# Skills markdown loader — loads structured skill objects from skills/*.md
+# ---------------------------------------------------------------------------
+
+_SKILLS_ROOT = Path(__file__).parent.parent.parent.parent / "skills"
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _parse_inline_list(raw_val: str) -> list[str] | None:
+    """Parse YAML inline list syntax like ["P01", "P02"] or [naabu, nmap]."""
+    stripped = raw_val.strip()
+    if not (stripped.startswith("[") and stripped.endswith("]")):
+        return None
+    inner = stripped[1:-1].strip()
+    if not inner:
+        return []
+    items = [item.strip().strip('"').strip("'") for item in inner.split(",")]
+    return [item for item in items if item]
+
+
+def _parse_yaml_frontmatter(text: str) -> dict[str, Any]:
+    """Parse YAML frontmatter without requiring PyYAML (simple scalar/list parser)."""
+    result: dict[str, Any] = {}
+    lines = text.strip().splitlines()
+    i = 0
+    current_key: str | None = None
+    list_indent: int | None = None
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # List item under current key
+        if current_key and stripped.startswith("- ") and list_indent is not None:
+            if isinstance(result[current_key], list):
+                result[current_key].append(stripped[2:].strip().strip('"').strip("'"))
+            i += 1
+            continue
+
+        # Key: value line
+        if ":" in line and not stripped.startswith("-"):
+            colon = line.index(":")
+            key = line[:colon].strip()
+            raw_val = line[colon + 1:].strip()
+            list_indent = None
+
+            if not raw_val:
+                # Next lines may be list items
+                result[key] = []
+                current_key = key
+                list_indent = len(line) - len(line.lstrip())
+            elif raw_val.lower() in ("true", "yes"):
+                result[key] = True
+                current_key = None
+            elif raw_val.lower() in ("false", "no"):
+                result[key] = False
+                current_key = None
+            else:
+                # Try inline list syntax ["a", "b"]
+                inline = _parse_inline_list(raw_val)
+                if inline is not None:
+                    result[key] = inline
+                    current_key = None
+                else:
+                    # Try int
+                    try:
+                        result[key] = int(raw_val)
+                    except ValueError:
+                        result[key] = raw_val.strip('"').strip("'")
+                    current_key = None
+        i += 1
+
+    return result
+
+
+def _load_skill_file(path: Path) -> dict[str, Any] | None:
+    """Load a single skill .md file and return a structured skill dict."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    m = _FRONTMATTER_RE.match(content)
+    if not m:
+        return None
+
+    try:
+        meta = _parse_yaml_frontmatter(m.group(1))
+    except Exception:
+        return None
+
+    skill_id = str(meta.get("skill_id") or "").strip()
+    if not skill_id:
+        return None
+
+    # Normalize phase_ids to list of strings
+    phase_ids = meta.get("phase_ids")
+    if isinstance(phase_ids, str):
+        phase_ids = [phase_ids]
+    elif not isinstance(phase_ids, list):
+        phase_ids = []
+
+    required_tools = meta.get("required_tools")
+    if isinstance(required_tools, str):
+        required_tools = [required_tools]
+    elif not isinstance(required_tools, list):
+        required_tools = []
+
+    optional_tools = meta.get("optional_tools")
+    if isinstance(optional_tools, str):
+        optional_tools = [optional_tools]
+    elif not isinstance(optional_tools, list):
+        optional_tools = []
+
+    fallback_tools = meta.get("fallback_tools")
+    if isinstance(fallback_tools, str):
+        fallback_tools = [fallback_tools]
+    elif not isinstance(fallback_tools, list):
+        fallback_tools = []
+
+    evidence_required = meta.get("evidence_required")
+    if isinstance(evidence_required, str):
+        evidence_required = [evidence_required]
+    elif not isinstance(evidence_required, list):
+        evidence_required = []
+
+    attack_chain_opportunities = meta.get("attack_chain_opportunities")
+    if isinstance(attack_chain_opportunities, str):
+        attack_chain_opportunities = [attack_chain_opportunities]
+    elif not isinstance(attack_chain_opportunities, list):
+        attack_chain_opportunities = []
+
+    exit_criteria = meta.get("exit_criteria") or {}
+    if not isinstance(exit_criteria, dict):
+        exit_criteria = {}
+
+    retry_policy = meta.get("retry_policy") or {}
+    if not isinstance(retry_policy, dict):
+        retry_policy = {}
+
+    return {
+        "skill_id": skill_id,
+        "name": str(meta.get("name") or skill_id),
+        "version": str(meta.get("version") or "1.0.0"),
+        "category": str(meta.get("category") or ""),
+        "phase_ids": phase_ids,
+        "supported_target_types": meta.get("supported_target_types") if isinstance(meta.get("supported_target_types"), list) else [],
+        "risk_level": str(meta.get("risk_level") or "medium"),
+        "noise_level": str(meta.get("noise_level") or "medium"),
+        "requires_authorization": bool(meta.get("requires_authorization", True)),
+        "required_tools": required_tools,
+        "optional_tools": optional_tools,
+        "fallback_tools": fallback_tools,
+        "evidence_required": evidence_required,
+        "exit_criteria": exit_criteria,
+        "retry_policy": retry_policy,
+        "attack_chain_opportunities": attack_chain_opportunities,
+        "source_file": str(path),
+        # Legacy compat fields
+        "id": skill_id,
+        "playbook": required_tools + optional_tools,
+        "phases": phase_ids,
+        "description": str(meta.get("name") or skill_id),
+        "triggers": attack_chain_opportunities,
+    }
+
+
+@lru_cache(maxsize=1)
+def load_all_md_skills() -> dict[str, dict[str, Any]]:
+    """Scan skills/ directory and return all skills keyed by skill_id."""
+    result: dict[str, dict[str, Any]] = {}
+    if not _SKILLS_ROOT.is_dir():
+        return result
+    for md_file in sorted(_SKILLS_ROOT.rglob("*.md")):
+        skill = _load_skill_file(md_file)
+        if skill:
+            result[skill["skill_id"]] = skill
+    return result
+
+
+def resolve_skill_for_phase(phase_id: str) -> list[dict[str, Any]]:
+    """Return all .md skills that declare the given phase_id (e.g. 'P01')."""
+    skills = load_all_md_skills()
+    return [
+        skill for skill in skills.values()
+        if phase_id.upper() in [p.upper() for p in skill.get("phase_ids") or []]
+    ]
+
+
+def get_skill_by_id(skill_id: str) -> dict[str, Any] | None:
+    """Look up a skill by its skill_id from the .md library."""
+    return load_all_md_skills().get(skill_id)
 
 
 PHASE_ALIASES_BY_GROUP: dict[str, list[str]] = {
@@ -337,10 +534,31 @@ def resolve_skill_invocation(
     selected_id = str(selected_skill.get("id") or worker_group)
     techniques = _relevant_techniques(selected_skill, learning, tools, phase_scope)
 
+    # Enrich with .md skill data when available for the current phase
+    md_skills = resolve_skill_for_phase(phase or "")
+    md_skill: dict[str, Any] | None = None
+    if md_skills:
+        # Prefer the .md skill whose required_tools overlap most with candidate_tools
+        candidate_set_lower = {t.lower() for t in tools}
+        best_overlap = -1
+        for ms in md_skills:
+            overlap = len({t.lower() for t in ms.get("required_tools") or []} & candidate_set_lower)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                md_skill = ms
+    if md_skill is None and md_skills:
+        md_skill = md_skills[0]
+
     learned_preferred: list[str] = []
     for technique in techniques:
         learned_preferred.extend(_clean_list(technique.get("recommended_kali_tools") or technique.get("tools")))
     learned_preferred.extend(_clean_list(learning.get("tools")))
+
+    # If .md skill found, its required_tools take priority in recommendations
+    if md_skill:
+        md_required = _clean_list(md_skill.get("required_tools"))
+        md_optional = _clean_list(md_skill.get("optional_tools"))
+        learned_preferred = md_required + md_optional + learned_preferred
 
     preferred_source = list(dict.fromkeys(learned_preferred))
     if not preferred_source:
@@ -348,7 +566,7 @@ def resolve_skill_invocation(
     recommended = _ordered_intersection(preferred_source, tools)
 
     confidence = round(max(0.35, min(0.98, score / 45.0)), 2)
-    return {
+    result: dict[str, Any] = {
         "called": True,
         "invocation_id": f"skill-{uuid4().hex[:12]}",
         "skill_id": selected_id,
@@ -367,6 +585,20 @@ def resolve_skill_invocation(
         "playbook_title": (playbook or {}).get("title"),
         "created_at": datetime.utcnow().isoformat(),
     }
+
+    # Attach structured .md skill contract when found
+    if md_skill:
+        result["md_skill"] = md_skill
+        result["md_skill_id"] = md_skill["skill_id"]
+        result["evidence_required"] = md_skill.get("evidence_required") or []
+        result["exit_criteria"] = md_skill.get("exit_criteria") or {}
+        result["retry_policy"] = md_skill.get("retry_policy") or {}
+        result["attack_chain_opportunities"] = md_skill.get("attack_chain_opportunities") or []
+        result["risk_level"] = md_skill.get("risk_level") or "medium"
+        result["noise_level"] = md_skill.get("noise_level") or "medium"
+        result["source"] = "md_skill_library+skill_catalog"
+
+    return result
 
 
 def build_skill_guided_fallback_decision(

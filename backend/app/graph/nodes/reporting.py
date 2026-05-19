@@ -128,6 +128,10 @@ def executive_analyst_node(state: AgentState) -> AgentState:
         state["executive_summary"] = _fallback_executive_summary(easm_rating, fair_decomp, target)
 
     state["logs_terminais"].append(f"ExecutiveAnalyst: narrative_length={len(state.get('executive_summary', ''))}")
+
+    # Append phase execution journey to executive summary
+    _attach_phase_journey_to_state(state)
+
     _complete_delegation_task(state, "executive_analyst", "executive_summary_generated")
     state["mission_index"] += 1
     _metric_end(state, "executive_analyst", started_at)
@@ -152,3 +156,151 @@ def _fallback_executive_summary(easm_rating: dict, fair_decomp: dict, target: st
         f"Ação imediata: priorizar remediação dos findings críticos/altos — a penalidade AGE "
         f"aumenta logaritmicamente a cada dia sem correção, amplificando o risco de exploração."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase Journey Report — appended to executive_summary and saved in state
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_phase_journey_report(state: AgentState) -> str:
+    """Build a structured offensive campaign journey from phase_ledger state.
+
+    Returns a text block suitable for inclusion in the executive summary or
+    stored separately in the report. Never raises — returns empty string on error.
+    """
+    try:
+        from app.graph.mission import PENTEST_PHASES
+    except ImportError:
+        return ""
+
+    phase_ledger = dict(state.get("phase_ledger") or {})
+    attack_paths = list(state.get("attack_paths") or [])
+    active_hypotheses = list(state.get("active_hypotheses") or [])
+    validated_chains = list(state.get("validated_chains") or [])
+    target = str(state.get("target") or "unknown")
+
+    lines: list[str] = [
+        "",
+        "═══════════════════════════════════════════════════════",
+        "  OFFENSIVE CAMPAIGN JOURNEY — PHASE EXECUTION REPORT",
+        "═══════════════════════════════════════════════════════",
+        f"  Target: {target}",
+        f"  Phases in plan: {len(PENTEST_PHASES)}",
+        "",
+        "  ── PHASE EXECUTION LEDGER ──────────────────────────",
+    ]
+
+    completed_count = 0
+    partial_count = 0
+    skipped_count = 0
+    blocked_count = 0
+
+    for phase in PENTEST_PHASES:
+        phase_id = str(phase.get("id") or "")
+        phase_title = str(phase.get("title") or phase_id)
+        entry = dict(phase_ledger.get(phase_id) or {})
+        status = str(entry.get("status") or "not_started")
+        tools_attempted = list(entry.get("tools_attempted") or [])
+        tools_succeeded = list(entry.get("tools_succeeded") or [])
+        evidence_ids = list(entry.get("evidence_ids") or [])
+        skill_ctx = dict(entry.get("skill_context") or {})
+        skill_id = str(skill_ctx.get("skill_id") or "—")
+        skip_reason = str(entry.get("skip_reason") or "")
+        validation_result = dict(entry.get("validation_result") or {})
+        can_advance = bool(validation_result.get("can_advance", False))
+
+        status_icon = {
+            "completed": "✓",
+            "partial": "~",
+            "skipped": "⊘",
+            "blocked": "✗",
+            "failed": "✗",
+            "not_started": "·",
+            "pending": "·",
+        }.get(status, "?")
+
+        if status == "completed":
+            completed_count += 1
+        elif status == "partial":
+            partial_count += 1
+        elif status in ("skipped",):
+            skipped_count += 1
+        elif status in ("blocked", "failed"):
+            blocked_count += 1
+
+        line = (
+            f"  [{status_icon}] {phase_id} {phase_title[:40]:<40} "
+            f"status={status:<10} "
+            f"tools={len(tools_attempted)}/{len(tools_succeeded)} "
+            f"evidence={len(evidence_ids)}"
+        )
+        if skill_id != "—":
+            line += f"  skill={skill_id}"
+        if skip_reason:
+            line += f"  ({skip_reason[:50]})"
+        lines.append(line)
+
+    lines += [
+        "",
+        f"  Summary: completed={completed_count} partial={partial_count} "
+        f"skipped={skipped_count} blocked={blocked_count}",
+    ]
+
+    # Attack chains
+    if validated_chains:
+        lines += ["", "  ── VALIDATED ATTACK CHAINS ────────────────────────"]
+        for chain in validated_chains[:5]:
+            chain_name = str(chain.get("name") or chain.get("chain_id") or "unknown")
+            cvss = chain.get("cvss_estimate") or "N/A"
+            confidence = chain.get("confidence") or 0
+            lines.append(
+                f"  ► {chain_name} "
+                f"cvss={cvss} confidence={confidence:.0%}"
+            )
+
+    # Attack paths
+    if attack_paths:
+        lines += ["", "  ── ATTACK PATHS ────────────────────────────────────"]
+        for path in attack_paths[:5]:
+            if isinstance(path, dict):
+                path_desc = str(path.get("description") or path.get("signal") or str(path))
+            else:
+                path_desc = str(path)
+            lines.append(f"  → {path_desc[:100]}")
+
+    # Hypotheses summary
+    if active_hypotheses:
+        open_h = [h for h in active_hypotheses if str(h.get("status") or "open") == "open"]
+        validated_h = [h for h in active_hypotheses if str(h.get("status") or "") == "validated"]
+        lines += [
+            "",
+            f"  ── HYPOTHESES: total={len(active_hypotheses)} "
+            f"open={len(open_h)} validated={len(validated_h)} ──",
+        ]
+        for h in validated_h[:3]:
+            lines.append(f"  ✓ [validated] {str(h.get('statement') or h.get('hypothesis') or '')[:80]}")
+        for h in open_h[:3]:
+            lines.append(f"  · [open]      {str(h.get('statement') or h.get('hypothesis') or '')[:80]}")
+
+    lines += [
+        "",
+        "═══════════════════════════════════════════════════════",
+        "",
+    ]
+
+    return "\n".join(lines)
+
+
+def _attach_phase_journey_to_state(state: AgentState) -> None:
+    """Build phase journey report and attach it to executive_summary and logs."""
+    try:
+        journey = build_phase_journey_report(state)
+        if not journey:
+            return
+        current_summary = str(state.get("executive_summary") or "")
+        state["executive_summary"] = current_summary + "\n" + journey
+        state["logs_terminais"].append(
+            f"PhaseJourney: appended {len(journey)} chars to executive_summary"
+        )
+    except Exception as exc:
+        logger.warning("reporting: failed to build phase journey: %s", exc)

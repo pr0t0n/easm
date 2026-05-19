@@ -475,6 +475,101 @@ def _select_skill_for_capability(
     }
 
 
+def _log_offensive_context(state: AgentState, next_node: str) -> None:
+    """Logs the current offensive campaign state alongside the routing decision."""
+    campaign = dict(state.get("campaign") or {})
+    current_stage = str(campaign.get("current_stage") or "initial_access")
+    active_hypotheses = list(state.get("active_hypotheses") or [])
+    validated_chains = list(state.get("validated_chains") or [])
+    noise_profile = str(state.get("noise_profile") or "balanced")
+    phase_promotions = list(campaign.get("phase_promotions") or [])
+    offensive_pq = list(state.get("offensive_priority_queue") or [])
+    pentest_phase_id = str(state.get("current_pentest_phase_id") or "")
+
+    state["logs_terminais"].append(
+        "Supervisor[offensive]: "
+        f"stage={current_stage} "
+        f"noise={noise_profile} "
+        f"hypotheses={len(active_hypotheses)} "
+        f"chains={len(validated_chains)} "
+        f"promotions={len(phase_promotions)} "
+        f"priority_queue={len(offensive_pq)} "
+        f"pentest_phase={pentest_phase_id} "
+        f"routing_to={next_node}"
+    )
+
+    # Surface confirmed exploit chains as critical observations
+    confirmed_chains = [c for c in validated_chains if c.get("is_fully_validated")]
+    for chain in confirmed_chains[:3]:
+        state["logs_terminais"].append(
+            f"Supervisor[EXPLOIT_CHAIN_CONFIRMED]: {chain.get('name')} "
+            f"cvss={chain.get('cvss_estimate')} "
+            f"tags={chain.get('matched_tags')}"
+        )
+        _append_observation(
+            state,
+            f"CONFIRMED exploit chain: {chain.get('name')} — CVSS {chain.get('cvss_estimate')}. "
+            f"{chain.get('recommendation', '')}",
+            source="offensive_reasoning",
+        )
+
+    # Log promoted phases if they affected routing
+    if offensive_pq:
+        promoted_ids = [str(p.get("phase_id") or p.get("phase") or "") for p in offensive_pq[:3]]
+        state["logs_terminais"].append(
+            f"Supervisor[offensive]: priority_phases={promoted_ids} (offensive signal promotion)"
+        )
+
+
+def _validate_and_advance_phase(state: AgentState) -> None:
+    """Validate the current pentest phase exit criteria and advance phase index if met.
+
+    Called after each capability node completes. Never raises — logs silently on error.
+    """
+    try:
+        from app.graph.workflow import validate_phase_exit_criteria, finalize_phase_in_ledger
+        from app.services.skill_runtime import get_skill_by_id
+    except ImportError:
+        return
+
+    phase_id = str(state.get("current_pentest_phase_id") or "").strip()
+    if not phase_id:
+        return
+
+    phase_ledger = dict(state.get("phase_ledger") or {})
+    entry = dict(phase_ledger.get(phase_id) or {})
+    entry_status = str(entry.get("status") or "pending")
+    if entry_status in ("completed", "skipped"):
+        return
+
+    # Retrieve skill contract for this phase if available
+    skill_id = str((entry.get("skill_context") or {}).get("skill_id") or "")
+    skill_contract: dict[str, Any] | None = None
+    if skill_id:
+        skill_contract = get_skill_by_id(skill_id)
+
+    can_advance, status, reason = validate_phase_exit_criteria(state, phase_id)
+    finalize_phase_in_ledger(state, phase_id, can_advance=can_advance, status=status, reason=reason)
+
+    state["logs_terminais"].append(
+        f"PhaseValidator[{phase_id}]: status={status} can_advance={can_advance} reason={reason[:120]}"
+    )
+
+    if can_advance and status in ("completed", "skipped", "partial"):
+        from app.graph.workflow import route_next_required_phase
+        next_phase = route_next_required_phase(state)
+        if next_phase:
+            state["current_pentest_phase_id"] = next_phase
+            state["logs_terminais"].append(
+                f"PhaseAdvance: {phase_id} → {next_phase} (can_advance={can_advance})"
+            )
+        else:
+            state["logs_terminais"].append(
+                f"PhaseAdvance: {phase_id} → all phases exhausted, setting objective_met"
+            )
+            state["objective_met"] = True
+
+
 def supervisor_node(state: AgentState) -> AgentState:
     """Single decision-maker: roteia capacidades dinamicamente por confiança e evidência."""
     from time import perf_counter
@@ -508,6 +603,12 @@ def supervisor_node(state: AgentState) -> AgentState:
             state["completed_capabilities"] = completed
         # always close any pending delegation task for the node we just left
         _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
+
+    # ── Phase ledger validation after each capability node ───────────────────
+    # When a capability node just ran, validate the current pentest phase and
+    # advance pentest_phase_index when exit criteria are met.
+    if last_node in TOOL_CAPABILITY_NODES | capability_nodes:
+        _validate_and_advance_phase(state)
 
     confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))
     high_signals = _count_high_signal_findings(state)
@@ -609,6 +710,9 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
 
+    # ── Avaliação do relatório do agente (ciclo anterior) ────────────────────
+    _evaluate_agent_report(state, next_node)
+
     # ── Skill selection: supervisor commits to a skill before the pipeline ─────
     # Always clear the previous iteration's selected_skill to avoid stale state.
     state["selected_skill"] = {}
@@ -631,6 +735,10 @@ def supervisor_node(state: AgentState) -> AgentState:
             state["logs_terminais"].append(
                 f"Supervisor: capability={next_node} sem skills ativas; pipeline seguirá sem selected_skill"
             )
+
+        # ── Emite ActivityDemand explícita para o agente ──────────────────────
+        _emit_activity_demand(state, next_node)
+
     elif next_node != "END":
         state["pending_capability_node"] = ""
 
@@ -639,6 +747,15 @@ def supervisor_node(state: AgentState) -> AgentState:
     state["routing_next_node"] = END if route_node == "END" else route_node
     state["termination_reason"] = termination_reason
     state["proxima_ferramenta"] = route_node
+
+    # Offensive context — read after all routing decisions are made
+    _campaign = dict(state.get("campaign") or {})
+    _current_stage = str(_campaign.get("current_stage") or "initial_access")
+    _noise_profile = str(state.get("noise_profile") or "balanced")
+    _n_hypotheses = len(list(state.get("active_hypotheses") or []))
+    _n_chains = len(list(state.get("validated_chains") or []))
+    _pentest_phase_id = str(state.get("current_pentest_phase_id") or "")
+
     state["logs_terminais"].append(
         "Supervisor: "
         f"iter={state['loop_iteration']}/{max_iterations} "
@@ -646,8 +763,14 @@ def supervisor_node(state: AgentState) -> AgentState:
         f"high_signals={high_signals} "
         f"skills={len(state.get('active_skills') or [])} "
         f"pending_validation={len(pending_validation)} "
+        f"stage={_current_stage} "
+        f"noise={_noise_profile} "
+        f"hypotheses={_n_hypotheses} "
+        f"chains={_n_chains} "
+        f"pentest_phase={_pentest_phase_id} "
         f"next={next_node}"
     )
+    _log_offensive_context(state, next_node)
     _append_action(
         state,
         "supervisor_route",
@@ -656,9 +779,158 @@ def supervisor_node(state: AgentState) -> AgentState:
             "confidence": confidence,
             "high_signals": high_signals,
             "pending_validation": len(pending_validation),
+            "activity_demand": dict(state.get("current_activity_demand") or {}),
+            "offensive_stage": _current_stage,
+            "noise_profile": _noise_profile,
+            "active_hypotheses": _n_hypotheses,
+            "validated_chains": _n_chains,
+            "pentest_phase_id": _pentest_phase_id,
         },
     )
 
     _metric_end(state, "supervisor", started_at)
     _sync_step_to_db(state, "0. Supervisor")
     return state
+
+
+# ── Helpers do ciclo supervisor ↔ agente ──────────────────────────────────────
+
+
+def _emit_activity_demand(state: AgentState, capability: str) -> None:
+    """Cria e persiste a demanda de atividade que o supervisor envia ao agente."""
+    from app.services.skill_library_service import get_activity_demand_for_capability, create_agent_activity_log
+    from app.db.session import SessionLocal
+
+    iteration = int(state.get("loop_iteration", 0))
+    target = str(state.get("target") or "")
+    done_types = list(state.get("completed_activity_types") or [])
+
+    demand = get_activity_demand_for_capability(
+        capability=capability,
+        iteration=iteration,
+        target=target,
+        already_done=done_types,
+    )
+    state["current_activity_demand"] = demand
+
+    # Persiste no banco para visibilidade na UI
+    scan_id = state.get("scan_id")
+    if scan_id:
+        try:
+            db = SessionLocal()
+            log_id = create_agent_activity_log(db, scan_id, iteration, demand)
+            state["current_activity_log_id"] = log_id
+            db.close()
+        except Exception as exc:
+            state["logs_terminais"].append(f"[Supervisor] falha ao criar activity_log: {exc}")
+
+    state["logs_terminais"].append(
+        f"[Supervisor→Agente] Demanda emitida: activity_type={demand['activity_type']} "
+        f"capability={capability} phases={demand.get('kill_chain_phases')} "
+        f"objetivo='{demand['objective'][:80]}'"
+    )
+
+
+def _evaluate_agent_report(state: AgentState, next_node: str) -> None:
+    """Avalia o relatório do agente recebido após execução e persiste a avaliação."""
+    from datetime import datetime as _dt
+    from app.services.skill_library_service import update_agent_activity_log
+    from app.db.session import SessionLocal
+
+    report = dict(state.get("agent_report") or {})
+    if not report or not report.get("activity_id"):
+        return
+
+    # Já avaliado nesta iteração?
+    evaluations = list(state.get("supervisor_evaluations") or [])
+    if any(e.get("activity_id") == report.get("activity_id") for e in evaluations):
+        return
+
+    quality_score = float(report.get("quality_score", 0.0))
+    findings_count = int(report.get("findings_count", 0))
+    tool_used = str(report.get("tool_used") or "")
+    operation_performed = str(report.get("operation_performed") or "")
+
+    # Critério de aprovação: qualidade ≥ 0.5 ou pelo menos 1 finding, e operação realizada
+    approved = (quality_score >= 0.5 or findings_count >= 1) and bool(operation_performed)
+
+    reason = (
+        f"quality_score={quality_score:.2f} findings={findings_count} tool={tool_used}"
+    )
+    if approved:
+        next_phase = _determine_next_kill_chain_phase(state, report)
+        quality_assessment = "Atividade satisfatória — dados coletados e operação realizada."
+    else:
+        next_phase = str(state.get("current_phase") or "")
+        quality_assessment = (
+            "Atividade insatisfatória — sem dados coletados ou operação não realizada."
+        )
+
+    evaluation = {
+        "activity_id": report.get("activity_id"),
+        "activity_type": report.get("activity_type", ""),
+        "capability": report.get("capability", ""),
+        "tool_used": tool_used,
+        "approved": approved,
+        "reason": reason,
+        "quality_assessment": quality_assessment,
+        "next_phase": next_phase,
+        "evaluated_at": _dt.utcnow().isoformat(),
+        "iteration": int(state.get("loop_iteration", 0)),
+    }
+    evaluations.append(evaluation)
+    state["supervisor_evaluations"] = evaluations
+
+    # Registra activity_type como concluído
+    if approved:
+        done = list(state.get("completed_activity_types") or [])
+        atype = str(report.get("activity_type") or "")
+        if atype and atype not in done:
+            done.append(atype)
+            state["completed_activity_types"] = done
+        _update_kill_chain_progress(state, report, approved=True)
+
+    # Persiste avaliação no banco
+    log_id = state.get("current_activity_log_id")
+    scan_id = state.get("scan_id")
+    if log_id and scan_id:
+        try:
+            db = SessionLocal()
+            update_agent_activity_log(
+                db,
+                log_id,
+                supervisor_evaluation=evaluation,
+                approved=approved,
+                status="approved" if approved else "rejected",
+            )
+            db.close()
+        except Exception as exc:
+            state["logs_terminais"].append(f"[Supervisor] falha ao atualizar activity_log: {exc}")
+
+    _append_action(state, "supervisor_evaluated_report", evaluation)
+    state["logs_terminais"].append(
+        f"[Supervisor←Agente] Avaliação: activity={report.get('activity_type')} "
+        f"approved={approved} {quality_assessment}"
+    )
+
+
+def _determine_next_kill_chain_phase(state: AgentState, report: dict) -> str:
+    phases = list(report.get("kill_chain_phases") or [])
+    return phases[0] if phases else str(state.get("current_phase") or "")
+
+
+def _update_kill_chain_progress(state: AgentState, report: dict, approved: bool) -> None:
+    progress = dict(state.get("kill_chain_progress") or {})
+    phases = list(report.get("kill_chain_phases") or [])
+    atype = str(report.get("activity_type") or "")
+
+    for phase in phases:
+        entry = dict(progress.get(phase) or {})
+        acts = list(entry.get("approved_activities") or [])
+        if atype and atype not in acts:
+            acts.append(atype)
+        entry["approved_activities"] = acts
+        entry["status"] = "approved" if approved else "pending"
+        progress[phase] = entry
+
+    state["kill_chain_progress"] = progress
