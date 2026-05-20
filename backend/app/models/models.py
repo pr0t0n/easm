@@ -481,3 +481,47 @@ class AgentActivityLog(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     scan_job = relationship("ScanJob")
+
+
+class AgentTraceEvent(Base):
+    """Low-level graph transition events emitted by the agent graph tracer."""
+    __tablename__ = "agent_trace_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    from_node: Mapped[str] = mapped_column(String(120), default="")
+    to_node: Mapped[str] = mapped_column(String(120), default="")
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    capability: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    scan_job = relationship("ScanJob", foreign_keys=[scan_id])
+
+
+class SkillScore(Base):
+    """Efficiency and productivity metrics computed per skill execution."""
+    __tablename__ = "skill_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    skill_id: Mapped[str] = mapped_column(String(120), index=True)
+    capability: Mapped[str] = mapped_column(String(60), default="")
+    library_hits: Mapped[int] = mapped_column(Integer, default=0)
+    tool_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    tool_successes: Mapped[int] = mapped_column(Integer, default=0)
+    tool_failures: Mapped[int] = mapped_column(Integer, default=0)
+    findings_raw: Mapped[int] = mapped_column(Integer, default=0)
+    findings_promoted: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    efficiency_score: Mapped[float] = mapped_column(Float, default=0.0)
+    productivity_score: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    scan_job = relationship("ScanJob", foreign_keys=[scan_id])

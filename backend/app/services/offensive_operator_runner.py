@@ -7,6 +7,7 @@ Validator output.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import requests
@@ -23,6 +24,12 @@ from app.services.offensive_operator_core import (
     create_operation_event,
     create_offensive_state,
 )
+
+
+def _parse_targets_from_query(target_query: str) -> list[str]:
+    raw = str(target_query or "")
+    tokens = [token.strip() for token in re.split(r"[;,\n]", raw) if str(token or "").strip()]
+    return tokens
 
 
 def _scope_from_job(job: ScanJob, target: str) -> Scope:
@@ -87,71 +94,79 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
 
 def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> dict[str, Any]:
     """Run deterministic Skill-based P01-P22 campaign and persist every phase."""
-    target = str(job.target_query or "").replace(",", ";").split(";")[0].strip()
+    targets = _parse_targets_from_query(str(job.target_query or ""))
+    if not targets:
+        targets = [""]
     execution_mode = str((job.state_data or {}).get("execution_mode") or "controlled_pentest")
-    scope = _scope_from_job(job, target)
-    offensive_state = dict((job.state_data or {}).get("offensive_state") or create_offensive_state(target, campaign_id=f"scan-{job.id}"))
+    offensive_state = dict((job.state_data or {}).get("offensive_state") or create_offensive_state(targets[0], campaign_id=f"scan-{job.id}"))
     phase_ledgers: list[dict[str, Any]] = list((job.state_data or {}).get("phase_ledger_v2") or [])
-    completed = {ledger.get("phase_id") for ledger in phase_ledgers if ledger.get("status") in {"completed", "partial", "skipped_with_justification"}}
     events: list[dict[str, Any]] = list((job.state_data or {}).get("operation_events") or [])
     mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
     runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
 
-    for phase_id in PHASE_ORDER:
-        if phase_id in completed:
+    for target in targets:
+        if not target:
             continue
-        job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']}"
-        state = dict(job.state_data or {})
-        state.update(
-            {
-                "execution_mode": execution_mode,
-                "current_pentest_phase_id": phase_id,
-                "offensive_state": offensive_state,
-                "phase_ledger_v2": phase_ledgers,
-                "operation_events": events,
-            }
-        )
-        job.state_data = state
-        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"phase_started {phase_id}"))
-        db.commit()
+        scope = _scope_from_job(job, target)
+        offensive_state["target"] = target
+        offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
 
-        events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
-        result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
-        offensive_state = result["offensive_state"]
-        phase_ledgers.append(result["phase_ledger"])
-        events.append(
-            create_operation_event(
-                "phase_completed" if result["validator_decision"].get("can_advance") else "phase_blocked",
-                offensive_state["campaign_id"],
-                str(job.id),
-                phase_id,
-                skill_id=(result.get("skill_plan") or {}).get("selected_skills", [""])[0] if result.get("skill_plan") else "",
-                status=result["phase_ledger"].get("status", ""),
-                details={"reason": result["validator_decision"].get("reason")},
+        for phase_id in PHASE_ORDER:
+            job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({target})"
+            state = dict(job.state_data or {})
+            state.update(
+                {
+                    "execution_mode": execution_mode,
+                    "current_pentest_phase_id": phase_id,
+                    "offensive_state": offensive_state,
+                    "phase_ledger_v2": phase_ledgers,
+                    "operation_events": events,
+                }
             )
-        )
-        state = dict(job.state_data or {})
-        state.update(
-            {
-                "offensive_operator_enabled": True,
-                "execution_mode": execution_mode,
-                "current_pentest_phase_id": phase_id,
-                "offensive_state": offensive_state,
-                "phase_ledger_v2": phase_ledgers,
-                "operation_events": events,
-                "last_skill_plan": result.get("skill_plan"),
-                "last_tool_plan": result.get("tool_plan"),
-                "last_mcp_results": result.get("mcp_results"),
-                "last_evidence": result.get("evidence"),
-            }
-        )
-        job.state_data = state
-        db.commit()
-        if result["phase_ledger"].get("status") == "blocked":
-            break
+            job.state_data = state
+            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"phase_started {phase_id} target={target}"))
+            db.commit()
+
+            events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
+            result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+            offensive_state = result["offensive_state"]
+            phase_ledger = result["phase_ledger"]
+            phase_ledger["target"] = target
+            phase_ledgers.append(phase_ledger)
+            events.append(
+                create_operation_event(
+                    "phase_completed" if result["validator_decision"].get("can_advance") else "phase_blocked",
+                    offensive_state["campaign_id"],
+                    str(job.id),
+                    phase_id,
+                    skill_id=(result.get("skill_plan") or {}).get("selected_skills", [""])[0] if result.get("skill_plan") else "",
+                    status=result["phase_ledger"].get("status", ""),
+                    details={"reason": result["validator_decision"].get("reason")},
+                )
+            )
+            state = dict(job.state_data or {})
+            state.update(
+                {
+                    "offensive_operator_enabled": True,
+                    "execution_mode": execution_mode,
+                    "current_pentest_phase_id": phase_id,
+                    "offensive_state": offensive_state,
+                    "phase_ledger_v2": phase_ledgers,
+                    "operation_events": events,
+                    "last_skill_plan": result.get("skill_plan"),
+                    "last_tool_plan": result.get("tool_plan"),
+                    "last_mcp_results": result.get("mcp_results"),
+                    "last_evidence": result.get("evidence"),
+                }
+            )
+            job.state_data = state
+            db.commit()
+            if result["phase_ledger"].get("status") == "blocked":
+                break
 
     campaign = {
-        "target": target,
+        "target": targets[0] if targets else "",
+        "targets": targets,
         "execution_mode": execution_mode,
         "phase_ledger": phase_ledgers,
         "offensive_state": offensive_state,
