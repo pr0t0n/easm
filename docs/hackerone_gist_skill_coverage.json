@@ -1,0 +1,680 @@
+{
+  "generated_at": "2026-05-20T19:21:13.600754+00:00",
+  "source_url": "https://gist.githubusercontent.com/iamsarvagyaa/2b7b03b1dbd964efd18a506e5b82d7e6/raw/b39e12a8ea8d42ba851ec4bffb1e7a311ab5f25f/h1reports",
+  "requested_limit": "all",
+  "manifest_report_urls": 10994,
+  "fetched_ok": 86,
+  "fetch_failed": 10908,
+  "failure_counts": {
+    "HTTP Error 429": 10884,
+    "HTTP Error 404": 24
+  },
+  "failed_samples": [
+    {
+      "ok": false,
+      "report_id": "977697",
+      "url": "https://hackerone.com/reports/977697.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1103258",
+      "url": "https://hackerone.com/reports/1103258.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1004136",
+      "url": "https://hackerone.com/reports/1004136.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1003468",
+      "url": "https://hackerone.com/reports/1003468.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1000567",
+      "url": "https://hackerone.com/reports/1000567.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1194301",
+      "url": "https://hackerone.com/reports/1194301.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "580268",
+      "url": "https://hackerone.com/reports/580268.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "100200",
+      "url": "https://hackerone.com/reports/100200.json",
+      "error": "HTTP Error 404: Not Found"
+    },
+    {
+      "ok": false,
+      "report_id": "1167753",
+      "url": "https://hackerone.com/reports/1167753.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "964582",
+      "url": "https://hackerone.com/reports/964582.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1158824",
+      "url": "https://hackerone.com/reports/1158824.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1004007",
+      "url": "https://hackerone.com/reports/1004007.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1001218",
+      "url": "https://hackerone.com/reports/1001218.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1005374",
+      "url": "https://hackerone.com/reports/1005374.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "100550",
+      "url": "https://hackerone.com/reports/100550.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1159398",
+      "url": "https://hackerone.com/reports/1159398.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1005020",
+      "url": "https://hackerone.com/reports/1005020.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1198434",
+      "url": "https://hackerone.com/reports/1198434.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1000363",
+      "url": "https://hackerone.com/reports/1000363.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1250306",
+      "url": "https://hackerone.com/reports/1250306.json",
+      "error": "HTTP Error 429: Too Many Requests"
+    }
+  ],
+  "weakness_counts": {
+    "unknown": 16,
+    "Cross-Site Request Forgery (CSRF)": 7,
+    "Cross-site Scripting (XSS) - Generic": 6,
+    "Improper Access Control - Generic": 5,
+    "Cross-site Scripting (XSS) - Reflected": 5,
+    "Privilege Escalation": 5,
+    "Information Disclosure": 4,
+    "Uncontrolled Resource Consumption": 4,
+    "Violation of Secure Design Principles": 4,
+    "Open Redirect": 4,
+    "Cross-site Scripting (XSS) - Stored": 3,
+    "Code Injection": 3,
+    "Memory Corruption - Generic": 3,
+    "Business Logic Errors": 2,
+    "Improper Authentication - Generic": 2,
+    "Command Injection - Generic": 2,
+    "Buffer Over-read": 1,
+    "Misconfiguration": 1,
+    "Session Fixation": 1,
+    "Privacy Violation": 1,
+    "SQL Injection": 1,
+    "OS Command Injection": 1,
+    "Information Exposure Through Directory Listing": 1,
+    "Deserialization of Untrusted Data": 1,
+    "XML Entity Expansion": 1,
+    "Unrestricted Upload of File with Dangerous Type": 1,
+    "Improper Input Validation": 1
+  },
+  "skill_counts": {
+    "skill.vuln.information_disclosure": 11,
+    "unmapped": 10,
+    "skill.idor_object_authorization": 9,
+    "skill.vuln.xss": 9,
+    "skill.vuln.business_logic": 9,
+    "skill.stored_xss_testing": 6,
+    "skill.vuln.csrf": 6,
+    "skill.vuln.component_memory_corruption": 5,
+    "skill.vuln.command_injection": 5,
+    "skill.vuln.resource_consumption": 4,
+    "skill.vuln.open_redirect": 4,
+    "skill.vuln.auth_bypass": 3,
+    "skill.vuln.xxe": 2,
+    "skill.vuln.ssrf": 1,
+    "skill.vuln.cors_misconfiguration": 1,
+    "skill.vuln.sqli": 1
+  },
+  "steps_to_reproduce_by_skill": {
+    "skill.stored_xss_testing": {
+      "with_steps": 4,
+      "without_steps": 2
+    },
+    "skill.vuln.component_memory_corruption": {
+      "without_steps": 5
+    },
+    "skill.idor_object_authorization": {
+      "without_steps": 5,
+      "with_steps": 4
+    },
+    "skill.vuln.information_disclosure": {
+      "with_steps": 3,
+      "without_steps": 8
+    },
+    "skill.vuln.csrf": {
+      "with_steps": 3,
+      "without_steps": 3
+    },
+    "skill.vuln.xss": {
+      "with_steps": 2,
+      "without_steps": 7
+    },
+    "skill.vuln.xxe": {
+      "without_steps": 1,
+      "with_steps": 1
+    },
+    "skill.vuln.business_logic": {
+      "without_steps": 5,
+      "with_steps": 4
+    },
+    "skill.vuln.auth_bypass": {
+      "with_steps": 2,
+      "without_steps": 1
+    },
+    "unmapped": {
+      "without_steps": 7,
+      "with_steps": 3
+    },
+    "skill.vuln.ssrf": {
+      "without_steps": 1
+    },
+    "skill.vuln.cors_misconfiguration": {
+      "with_steps": 1
+    },
+    "skill.vuln.command_injection": {
+      "without_steps": 5
+    },
+    "skill.vuln.resource_consumption": {
+      "without_steps": 3,
+      "with_steps": 1
+    },
+    "skill.vuln.sqli": {
+      "with_steps": 1
+    },
+    "skill.vuln.open_redirect": {
+      "without_steps": 3,
+      "with_steps": 1
+    }
+  },
+  "unmapped_examples": [
+    {
+      "report_id": "103990",
+      "title": "Null pointer dereference in phar_get_fp_offset()",
+      "vulnerability_type": "unknown",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "1050656",
+      "title": "Bypass Tracking Blocker Protection Using Slashes Without Protocol On The Image Source.",
+      "vulnerability_type": "unknown",
+      "has_steps_to_reproduce": true
+    },
+    {
+      "report_id": "185833",
+      "title": "Incomplete or No Cache-control and Pragma HTTP Header Set",
+      "vulnerability_type": "unknown",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "185907",
+      "title": "unchecked unserialize usage in WordPress-Functionality-Plugin-Skeleton/functionality-plugin-skeleton.php",
+      "vulnerability_type": "unknown",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "260648",
+      "title": "CSP script-src includes \"unsafe-inline\"",
+      "vulnerability_type": "unknown",
+      "has_steps_to_reproduce": false
+    }
+  ],
+  "examples_by_skill": {
+    "skill.stored_xss_testing": [
+      {
+        "report_id": "1106238",
+        "title": "Stored XSS via Mermaid Prototype Pollution vulnerability",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Stored",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "1261148",
+        "title": "Stored-XSS in merge requests",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Reflected",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "121275",
+        "title": "Multiple Stored XSS on Sanbox.veris.in through Veris Frontdesk Android App",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Generic",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "152416",
+        "title": "Lazy Load stored XSS",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "583710",
+        "title": "BUG XSS IN \"ADD IMAGES\"",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Stored",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.component_memory_corruption": [
+      {
+        "report_id": "964583",
+        "title": "CVE-2017-13041 The ICMPv6 parser in tcpdump before 4.9.2 has a buffer over-read in print-icmp6.c:icmp6_nodeinfo_print().",
+        "vulnerability_type": "Buffer Over-read",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "104022",
+        "title": "hotshot pack_string Heap Buffer Overflow",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "152232",
+        "title": "NULL Pointer Dereference in exif_process_user_comment",
+        "vulnerability_type": "Memory Corruption - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "152281",
+        "title": "Use After Free/Double Free in Garbage Collection",
+        "vulnerability_type": "Memory Corruption - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "237125",
+        "title": "no string size restriction on team name",
+        "vulnerability_type": "Memory Corruption - Generic",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.idor_object_authorization": [
+      {
+        "report_id": "1193321",
+        "title": "Scoped apptokens can be changed by that very apptoken",
+        "vulnerability_type": "Improper Access Control - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "120291",
+        "title": "Critical IDOR - Set anyone's Terminal Data remotely",
+        "vulnerability_type": "Privilege Escalation",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "120312",
+        "title": "Critical IDOR - Can select any Parent while creating new Venue",
+        "vulnerability_type": "Privilege Escalation",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "43280",
+        "title": "HTTPS is not enforced for objects stored by HackerOne on Amazon S3",
+        "vulnerability_type": "Violation of Secure Design Principles",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "447488",
+        "title": "Corrupted Authorization header can cause logs not to be ingested properly in ████████",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.information_disclosure": [
+      {
+        "report_id": "1241849",
+        "title": "Information Disclosure .htaccess accesible for public",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "1142918",
+        "title": "Leak arbitrary file under nextcloud android client privacy directory",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "1203842",
+        "title": "DNS Leaks when using any VPN Browser extension with Brave Shield enabled",
+        "vulnerability_type": "Information Disclosure",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1044285",
+        "title": "Removing parts of URL from jQuery request exposes links for download of Paid Digital Assets of the most recent Order placed by anyone on the store!",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1211094",
+        "title": "F5 BIG-IP Cookie  potentially reveal BigIP pool name, backend's IP address and port, routed domain.",
+        "vulnerability_type": "Information Disclosure",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.csrf": [
+      {
+        "report_id": "170552",
+        "title": "Slack integration setup lacks CSRF protection",
+        "vulnerability_type": "Cross-Site Request Forgery (CSRF)",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "151827",
+        "title": "The contribution save option seem to be vulnerable to CSRF",
+        "vulnerability_type": "Cross-Site Request Forgery (CSRF)",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "149589",
+        "title": "CSRF to add admin [wordpress]",
+        "vulnerability_type": "Cross-Site Request Forgery (CSRF)",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "323852",
+        "title": "Firmware download/install vulnerable to CSRF",
+        "vulnerability_type": "Cross-Site Request Forgery (CSRF)",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "416978",
+        "title": "H1514 CSRF in Domain transfer allows adding your domain to other user's account",
+        "vulnerability_type": "Cross-Site Request Forgery (CSRF)",
+        "has_steps_to_reproduce": true
+      }
+    ],
+    "skill.vuln.xss": [
+      {
+        "report_id": "104917",
+        "title": "Cross-Site Scripting Reflected On Main Domain",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Generic",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "1052856",
+        "title": "Reflected XSS в /video",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Reflected",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1196945",
+        "title": "Reflected XSS at [████████]",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Reflected",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "120683",
+        "title": "XSS Vulnerability in developer.gm.com",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "183835",
+        "title": "Reflected XSS vulnerability on a DoD website",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Generic",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.xxe": [
+      {
+        "report_id": "104620",
+        "title": "XXE in OAuth2 Applications gallery profile App logo",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "509315",
+        "title": "c3p0 may be exploited by a Billion Laughs Attack when loading XML configuration",
+        "vulnerability_type": "XML Entity Expansion",
+        "has_steps_to_reproduce": true
+      }
+    ],
+    "skill.vuln.business_logic": [
+      {
+        "report_id": "1047124",
+        "title": "No rate limit in email subscription",
+        "vulnerability_type": "Business Logic Errors",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "257119",
+        "title": "Impersonation of Wakatime user using Invitation functionality.",
+        "vulnerability_type": "Violation of Secure Design Principles",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "263733",
+        "title": "Email Spoofing - SPF record set to Neutral",
+        "vulnerability_type": "Violation of Secure Design Principles",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "30975",
+        "title": "Improper Verification of email address while saving Account Settings",
+        "vulnerability_type": "Violation of Secure Design Principles",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "403602",
+        "title": "Attachments may be hijacked via AppCache+CookieBombing trick (bc3_production_blobs bucket)",
+        "vulnerability_type": "Business Logic Errors",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.auth_bypass": [
+      {
+        "report_id": "1043480",
+        "title": "Remote hacker can download all the files of master branch in public projects where everything is members only.",
+        "vulnerability_type": "Improper Authentication - Generic",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "249798",
+        "title": "Intercom chat session information persists after logout",
+        "vulnerability_type": "Session Fixation",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "8996",
+        "title": "No Bruteforce Protection",
+        "vulnerability_type": "Improper Authentication - Generic",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "unmapped": [
+      {
+        "report_id": "103990",
+        "title": "Null pointer dereference in phar_get_fp_offset()",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1050656",
+        "title": "Bypass Tracking Blocker Protection Using Slashes Without Protocol On The Image Source.",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "185833",
+        "title": "Incomplete or No Cache-control and Pragma HTTP Header Set",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "185907",
+        "title": "unchecked unserialize usage in WordPress-Functionality-Plugin-Skeleton/functionality-plugin-skeleton.php",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "260648",
+        "title": "CSP script-src includes \"unsafe-inline\"",
+        "vulnerability_type": "unknown",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.ssrf": [
+      {
+        "report_id": "120219",
+        "title": "SSRF issue",
+        "vulnerability_type": "Command Injection - Generic",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.cors_misconfiguration": [
+      {
+        "report_id": "1194280",
+        "title": "CORS Misconfiguration",
+        "vulnerability_type": "Misconfiguration",
+        "has_steps_to_reproduce": true
+      }
+    ],
+    "skill.vuln.command_injection": [
+      {
+        "report_id": "152399",
+        "title": "php curl ext size_t overflow lead to heap corruption",
+        "vulnerability_type": "Code Injection",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "152278",
+        "title": "Stack-based buffer overflow vulnerability in php_stream_zip_opener",
+        "vulnerability_type": "Code Injection",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "151516",
+        "title": "CSV Injection at Camptix Event Ticketing",
+        "vulnerability_type": "Command Injection - Generic",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "273449",
+        "title": "Authenticated RCE in ToughSwitch",
+        "vulnerability_type": "OS Command Injection",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "768322",
+        "title": "Remote Code Execution (Reverse Shell) - File Manager",
+        "vulnerability_type": "Code Injection",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.resource_consumption": [
+      {
+        "report_id": "183405",
+        "title": "Null target_class DoS",
+        "vulnerability_type": "Uncontrolled Resource Consumption",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "183231",
+        "title": "SIGSEGV on mruby mrb_str_modify() (Invalid memory access)",
+        "vulnerability_type": "Uncontrolled Resource Consumption",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "181828",
+        "title": "Segfault in mruby, mruby_engine and the parent MRI Ruby due to null pointer dereference",
+        "vulnerability_type": "Uncontrolled Resource Consumption",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "898614",
+        "title": "DRb denial of service vulnerability",
+        "vulnerability_type": "Uncontrolled Resource Consumption",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.sqli": [
+      {
+        "report_id": "272506",
+        "title": " SQL injections",
+        "vulnerability_type": "SQL Injection",
+        "has_steps_to_reproduce": true
+      }
+    ],
+    "skill.vuln.open_redirect": [
+      {
+        "report_id": "309058",
+        "title": "Open Redirect on the nl.wordpress.net",
+        "vulnerability_type": "Open Redirect",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "5199",
+        "title": "Improper Validation of the Referrer header leading to Open URL Redirection",
+        "vulnerability_type": "Open Redirect",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "541862",
+        "title": "Open redirect protection (https://www.pixiv.net/jump.php) is broken for novels",
+        "vulnerability_type": "Open Redirect",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "76738",
+        "title": "Open redirect filter bypass",
+        "vulnerability_type": "Open Redirect",
+        "has_steps_to_reproduce": false
+      }
+    ]
+  },
+  "coverage_gaps": [
+    "unknown",
+    "Misconfiguration",
+    "Deserialization of Untrusted Data",
+    "Unrestricted Upload of File with Dangerous Type"
+  ]
+}

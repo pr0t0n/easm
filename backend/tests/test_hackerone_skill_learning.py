@@ -67,6 +67,39 @@ def test_hackerone_report_builds_xss_skill_update_candidate():
     assert "<script>alert(1)</script>" in candidate["candidate_markdown"]
 
 
+def test_hackerone_manifest_expands_more_than_100_reports():
+    text = "\n".join(f"https://hackerone.com/reports/{100000 + i}" for i in range(150))
+
+    urls = learning._extract_hackerone_report_urls_from_text(text)
+
+    assert len(urls) == 150
+    assert urls[0] == "https://hackerone.com/reports/100000.json"
+    assert urls[-1] == "https://hackerone.com/reports/100149.json"
+
+
+def test_hackerone_learning_maps_common_gist_classes_to_real_skills():
+    cases = {
+        "Cross-Site Request Forgery (CSRF)": "skill.vuln.csrf",
+        "Open Redirect": "skill.vuln.open_redirect",
+        "Clickjacking misconfiguration": "skill.vuln.clickjacking",
+        "Path Traversal": "skill.vuln.path_traversal",
+        "OS Command Injection": "skill.vuln.command_injection",
+        "Information Disclosure": "skill.vuln.information_disclosure",
+        "Uncontrolled Resource Consumption": "skill.vuln.resource_consumption",
+        "Heap Overflow": "skill.vuln.component_memory_corruption",
+        "Double Free": "skill.vuln.component_memory_corruption",
+        "XML Entity Expansion": "skill.vuln.xxe",
+        "CORS bypass on API endpoint": "skill.vuln.cors_misconfiguration",
+        "Cleartext Storage of Sensitive Information": "skill.vuln.crypto_storage",
+        "Business Logic Errors": "skill.vuln.business_logic",
+        "Privilege Escalation": "skill.vuln.business_logic",
+    }
+
+    for vulnerability_type, skill_id in cases.items():
+        target = learning._skill_target_for_learning(vulnerability_type, vulnerability_type)
+        assert target["skill_id"] == skill_id
+
+
 def test_accepting_learning_promotes_candidate_into_skill(tmp_path, monkeypatch):
     skill = tmp_path / "skills" / "vulnerability_testing" / "xss.md"
     skill.parent.mkdir(parents=True)

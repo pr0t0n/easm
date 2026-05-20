@@ -1,0 +1,1387 @@
+{
+  "generated_at": "2026-05-20T19:39:50.236408+00:00",
+  "source_urls": [
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPWEBCACHE.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPINFODISCLOSURE.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPGRAPHQL.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAPI.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPACCOUNTTAKEOVER.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPCLICKJACKING.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPOPENREDIRECT.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSUBDOMAINTAKEOVER.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSSRF.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSQLI.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRCE.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPIDOR.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPCSRF.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXSS.md"
+  ],
+  "requested_limit": "all",
+  "manifest_report_urls": 5930,
+  "fetched_ok": 51,
+  "fetch_failed": 5879,
+  "source_counts": {
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXSS.md": 2246,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPCSRF.md": 410,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPINFODISCLOSURE.md": 335,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md": 295,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSSRF.md": 285,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSQLI.md": 285,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRCE.md": 283,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAPI.md": 268,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPOPENREDIRECT.md": 265,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSUBDOMAINTAKEOVER.md": 213,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPIDOR.md": 204,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPACCOUNTTAKEOVER.md": 200,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md": 194,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPCLICKJACKING.md": 131,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md": 100,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md": 74,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPGRAPHQL.md": 68,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md": 45,
+    "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPWEBCACHE.md": 29
+  },
+  "failure_counts": {
+    "HTTP Error 429": 5870,
+    "HTTP Error 404": 9
+  },
+  "failed_samples": [
+    {
+      "ok": false,
+      "report_id": "526325",
+      "url": "https://hackerone.com/reports/526325.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Stored XSS in Wiki pages",
+      "title": "Stored XSS in Wiki pages",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.stored_xss_testing",
+      "target_skill_path": "skills/vulnerability_testing/stored_xss_testing.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "737140",
+      "url": "https://hackerone.com/reports/737140.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Mass account takeovers using HTTP Request Smuggling on https://slackb.com/ to steal session cookies",
+      "title": "Mass account takeovers using HTTP Request Smuggling on https://slackb.com/ to steal session cookies",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.account_takeover",
+      "target_skill_path": "skills/vulnerability_testing/account_takeover.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "180074",
+      "url": "https://hackerone.com/reports/180074.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "BAD Code !",
+      "title": "BAD Code !",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "910300",
+      "url": "https://hackerone.com/reports/910300.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Email Confirmation Bypass in your-store.myshopify.com which leads to privilege escalation",
+      "title": "Email Confirmation Bypass in your-store.myshopify.com which leads to privilege escalation",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.business_logic",
+      "target_skill_path": "skills/vulnerability_testing/business_logic.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "821962",
+      "url": "https://hackerone.com/reports/821962.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "🐞 OS Command Injection at https://sea-web.gold.razer.com/lab/ws-lookup via IP parameter",
+      "title": "🐞 OS Command Injection at https://sea-web.gold.razer.com/lab/ws-lookup via IP parameter",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.command_injection",
+      "target_skill_path": "skills/vulnerability_testing/command_injection.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "446271",
+      "url": "https://hackerone.com/reports/446271.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "CRLF injection",
+      "title": "CRLF injection",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "396467",
+      "url": "https://hackerone.com/reports/396467.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Github Token Leaked publicly for https://github.sc-corp.net",
+      "title": "Github Token Leaked publicly for https://github.sc-corp.net",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.information_disclosure",
+      "target_skill_path": "skills/vulnerability_testing/information_disclosure.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1087489",
+      "url": "https://hackerone.com/reports/1087489.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Github access token exposure",
+      "title": "Github access token exposure",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.information_disclosure",
+      "target_skill_path": "skills/vulnerability_testing/information_disclosure.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "689314",
+      "url": "https://hackerone.com/reports/689314.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Project Template functionality can be used to copy private project data, such as repository, confidential issues, snippets, and merge requests",
+      "title": "Project Template functionality can be used to copy private project data, such as repository, confidential issues, snippets, and merge requests",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "2262382",
+      "url": "https://hackerone.com/reports/2262382.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Server Side Request Forgery (SSRF) via Analytics Reports",
+      "title": "Server Side Request Forgery (SSRF) via Analytics Reports",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.ssrf",
+      "target_skill_path": "skills/vulnerability_testing/ssrf.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "968082",
+      "url": "https://hackerone.com/reports/968082.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Cross-Site-Scripting on www.tiktok.com and m.tiktok.com leading to Data Exfiltration",
+      "title": "Cross-Site-Scripting on www.tiktok.com and m.tiktok.com leading to Data Exfiltration",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.xss",
+      "target_skill_path": "skills/vulnerability_testing/xss.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "591295",
+      "url": "https://hackerone.com/reports/591295.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Potential pre-auth RCE on Twitter VPN",
+      "title": "Potential pre-auth RCE on Twitter VPN",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.command_injection",
+      "target_skill_path": "skills/vulnerability_testing/command_injection.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "341876",
+      "url": "https://hackerone.com/reports/341876.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "SSRF in Exchange leads to ROOT access in all instances",
+      "title": "SSRF in Exchange leads to ROOT access in all instances",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.ssrf",
+      "target_skill_path": "skills/vulnerability_testing/ssrf.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "228648",
+      "url": "https://hackerone.com/reports/228648.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "WannaCrypt “Killswitch”",
+      "title": "WannaCrypt “Killswitch”",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "740989",
+      "url": "https://hackerone.com/reports/740989.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Shopify Stocky App OAuth Misconfiguration",
+      "title": "Shopify Stocky App OAuth Misconfiguration",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "684092",
+      "url": "https://hackerone.com/reports/684092.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Steal ALL collateral during liquidation by exploiting lack of validation in `flip.kick`",
+      "title": "Steal ALL collateral during liquidation by exploiting lack of validation in `flip.kick`",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "297478",
+      "url": "https://hackerone.com/reports/297478.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "SQL injection in https://labs.data.gov/dashboard/datagov/csv_to_json via User-agent",
+      "title": "SQL injection in https://labs.data.gov/dashboard/datagov/csv_to_json via User-agent",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.sqli",
+      "target_skill_path": "skills/vulnerability_testing/sqli.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "762510",
+      "url": "https://hackerone.com/reports/762510.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "How the Bug stole hacking",
+      "title": "How the Bug stole hacking",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "",
+      "target_skill_path": "",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "771666",
+      "url": "https://hackerone.com/reports/771666.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Stealing Zomato X-Access-Token: in Bulk using HTTP Request Smuggling on api.zomato.com",
+      "title": "Stealing Zomato X-Access-Token: in Bulk using HTTP Request Smuggling on api.zomato.com",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.account_takeover",
+      "target_skill_path": "skills/vulnerability_testing/account_takeover.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    },
+    {
+      "ok": false,
+      "report_id": "1010466",
+      "url": "https://hackerone.com/reports/1010466.json",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "manifest_title": "Blind XSS on image upload",
+      "title": "Blind XSS on image upload",
+      "vulnerability_type": "manifest_title_only",
+      "target_skill_id": "skill.vuln.xss",
+      "target_skill_path": "skills/vulnerability_testing/xss.md",
+      "has_steps_to_reproduce": false,
+      "body_length": 0,
+      "error": "HTTP Error 429: Too Many Requests"
+    }
+  ],
+  "weakness_counts": {
+    "Cross-site Scripting (XSS) - Generic": 7,
+    "Cross-site Scripting (XSS) - Stored": 6,
+    "unknown": 6,
+    "Open Redirect": 6,
+    "SQL Injection": 5,
+    "Improper Access Control - Generic": 4,
+    "Cross-site Scripting (XSS) - Reflected": 4,
+    "Information Disclosure": 3,
+    "OS Command Injection": 1,
+    "Command Injection - Generic": 1,
+    "Classic Buffer Overflow": 1,
+    "Insufficiently Protected Credentials": 1,
+    "Insecure Direct Object Reference (IDOR)": 1,
+    "Uncontrolled Resource Consumption": 1,
+    "Insufficient Session Expiration": 1,
+    "Deserialization of Untrusted Data": 1,
+    "Cross-Site Request Forgery (CSRF)": 1,
+    "Cross-site Scripting (XSS) - DOM": 1
+  },
+  "skill_counts": {
+    "skill.vuln.xss": 1737,
+    "skill.stored_xss_testing": 553,
+    "skill.vuln.csrf": 380,
+    "skill.vuln.api_security": 353,
+    "skill.vuln.command_injection": 301,
+    "skill.vuln.sqli": 298,
+    "skill.vuln.account_takeover": 284,
+    "skill.vuln.ssrf": 282,
+    "skill.vuln.information_disclosure": 247,
+    "skill.idor_object_authorization": 239,
+    "skill.vuln.subdomain_takeover": 217,
+    "unmapped": 216,
+    "skill.vuln.auth_bypass": 211,
+    "skill.vuln.open_redirect": 205,
+    "skill.vuln.clickjacking": 129,
+    "skill.vuln.graphql": 74,
+    "skill.vuln.race_condition": 71,
+    "skill.vuln.xxe": 44,
+    "skill.vuln.web_cache": 38,
+    "skill.vuln.business_logic": 15,
+    "skill.vuln.component_memory_corruption": 14,
+    "skill.vuln.path_traversal": 13,
+    "skill.vuln.resource_consumption": 6,
+    "skill.vuln.cors_misconfiguration": 2,
+    "skill.vuln.crypto_storage": 1
+  },
+  "steps_to_reproduce_by_skill": {
+    "skill.stored_xss_testing": {
+      "without_steps": 550,
+      "with_steps": 3
+    },
+    "skill.vuln.account_takeover": {
+      "without_steps": 284
+    },
+    "unmapped": {
+      "without_steps": 215,
+      "with_steps": 1
+    },
+    "skill.vuln.business_logic": {
+      "without_steps": 14,
+      "with_steps": 1
+    },
+    "skill.vuln.command_injection": {
+      "without_steps": 300,
+      "with_steps": 1
+    },
+    "skill.vuln.information_disclosure": {
+      "without_steps": 247
+    },
+    "skill.vuln.ssrf": {
+      "without_steps": 282
+    },
+    "skill.vuln.xss": {
+      "without_steps": 1734,
+      "with_steps": 3
+    },
+    "skill.vuln.sqli": {
+      "without_steps": 296,
+      "with_steps": 2
+    },
+    "skill.vuln.api_security": {
+      "without_steps": 350,
+      "with_steps": 3
+    },
+    "skill.vuln.subdomain_takeover": {
+      "without_steps": 217
+    },
+    "skill.vuln.web_cache": {
+      "without_steps": 38
+    },
+    "skill.idor_object_authorization": {
+      "with_steps": 1,
+      "without_steps": 238
+    },
+    "skill.vuln.graphql": {
+      "without_steps": 71,
+      "with_steps": 3
+    },
+    "skill.vuln.resource_consumption": {
+      "without_steps": 6
+    },
+    "skill.vuln.auth_bypass": {
+      "without_steps": 211
+    },
+    "skill.vuln.path_traversal": {
+      "without_steps": 13
+    },
+    "skill.vuln.component_memory_corruption": {
+      "without_steps": 14
+    },
+    "skill.vuln.csrf": {
+      "without_steps": 380
+    },
+    "skill.vuln.open_redirect": {
+      "without_steps": 201,
+      "with_steps": 4
+    },
+    "skill.vuln.crypto_storage": {
+      "without_steps": 1
+    },
+    "skill.vuln.clickjacking": {
+      "without_steps": 129
+    },
+    "skill.vuln.cors_misconfiguration": {
+      "without_steps": 2
+    },
+    "skill.vuln.race_condition": {
+      "without_steps": 71
+    },
+    "skill.vuln.xxe": {
+      "without_steps": 44
+    }
+  },
+  "unmapped_examples": [
+    {
+      "report_id": "180074",
+      "title": "BAD Code !",
+      "vulnerability_type": "manifest_title_only",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "446271",
+      "title": "CRLF injection",
+      "vulnerability_type": "manifest_title_only",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "689314",
+      "title": "Project Template functionality can be used to copy private project data, such as repository, confidential issues, snippets, and merge requests",
+      "vulnerability_type": "manifest_title_only",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "228648",
+      "title": "WannaCrypt “Killswitch”",
+      "vulnerability_type": "manifest_title_only",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "has_steps_to_reproduce": false
+    },
+    {
+      "report_id": "740989",
+      "title": "Shopify Stocky App OAuth Misconfiguration",
+      "vulnerability_type": "manifest_title_only",
+      "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+      "has_steps_to_reproduce": false
+    }
+  ],
+  "examples_by_skill": {
+    "skill.stored_xss_testing": [
+      {
+        "report_id": "526325",
+        "title": "Stored XSS in Wiki pages",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "510152",
+        "title": "Bypass for #488147 enables stored XSS on https://paypal.com/signin again",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "409850",
+        "title": "XSS in steam react chat client",
+        "vulnerability_type": "Cross-site Scripting (XSS) - Stored",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "484434",
+        "title": "Stored XSS on imgur profile",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "643908",
+        "title": "Stored XSS Vulnerability",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.account_takeover": [
+      {
+        "report_id": "737140",
+        "title": "Mass account takeovers using HTTP Request Smuggling on https://slackb.com/ to steal session cookies",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "771666",
+        "title": "Stealing Zomato X-Access-Token: in Bulk using HTTP Request Smuggling on api.zomato.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "740037",
+        "title": "Request smuggling on admin-official.line.me could lead to account takeover",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2293343",
+        "title": "Account Takeover via Password Reset without user interactions",
+        "vulnerability_type": "Improper Access Control - Generic",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "745324",
+        "title": "Account takeover via leaked session cookie",
+        "vulnerability_type": "Insufficiently Protected Credentials",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "unmapped": [
+      {
+        "report_id": "180074",
+        "title": "BAD Code !",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "446271",
+        "title": "CRLF injection",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "689314",
+        "title": "Project Template functionality can be used to copy private project data, such as repository, confidential issues, snippets, and merge requests",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "228648",
+        "title": "WannaCrypt “Killswitch”",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "740989",
+        "title": "Shopify Stocky App OAuth Misconfiguration",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.business_logic": [
+      {
+        "report_id": "910300",
+        "title": "Email Confirmation Bypass in your-store.myshopify.com which leads to privilege escalation",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "791775",
+        "title": "Email Confirmation Bypass in myshop.myshopify.com that Leads to Full Privilege Escalation to Any Shop Owner by Taking Advantage of the Shopify SSO",
+        "vulnerability_type": "unknown",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "544928",
+        "title": "Privilege Escalation From user to SYSTEM via unauthenticated command execution",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "3591764",
+        "title": "Business Logic Bypass Allows Setting “Read Access” Role Without Pro Plan Subscription",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "672487",
+        "title": "Business Logic Flaw - A non premium user can change/update retailers to get cashback on all the retailers associated with Curve",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.command_injection": [
+      {
+        "report_id": "821962",
+        "title": "🐞 OS Command Injection at https://sea-web.gold.razer.com/lab/ws-lookup via IP parameter",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "591295",
+        "title": "Potential pre-auth RCE on Twitter VPN",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "403417",
+        "title": "Remote Code Execution on www.semrush.com/my_reports on Logo upload",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "422944",
+        "title": "H1514 Remote Code Execution on kitcrm using bulk customer update of Priority Products",
+        "vulnerability_type": "Command Injection - Generic",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "470520",
+        "title": "RCE on Steam Client via buffer overflow in Server Info",
+        "vulnerability_type": "Classic Buffer Overflow",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": true
+      }
+    ],
+    "skill.vuln.information_disclosure": [
+      {
+        "report_id": "396467",
+        "title": "Github Token Leaked publicly for https://github.sc-corp.net",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1087489",
+        "title": "Github access token exposure",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "542340",
+        "title": "Sensitive user information disclosure at bonjour.uber.com/marketplace/_rpc via the 'userUuid' parameter",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "202781",
+        "title": "Chained Bugs to Leak Victim's Uber's FB Oauth Token",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2915647",
+        "title": "Netlify Authentication Token Exposed in Public Mozilla CI Logs",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.ssrf": [
+      {
+        "report_id": "2262382",
+        "title": "Server Side Request Forgery (SSRF) via Analytics Reports",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "341876",
+        "title": "SSRF in Exchange leads to ROOT access in all instances",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "885975",
+        "title": "My Expense Report resulted in a Server-Side Request Forgery (SSRF) on Lyft",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "530974",
+        "title": "Server-Side Request Forgery using Javascript allows to exfill data from Google Metadata",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "187520",
+        "title": "Wordpress 4.7 - CSRF -\\> HTTP SSRF any private ip:port and basic-auth",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.xss": [
+      {
+        "report_id": "968082",
+        "title": "Cross-Site-Scripting on www.tiktok.com and m.tiktok.com leading to Data Exfiltration",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1010466",
+        "title": "Blind XSS on image upload",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "146336",
+        "title": "XSS vulnerable parameter in a location hash",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "846338",
+        "title": "Reflected XSS on https://www.glassdoor.com/employers/sem-dual-lp/",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "631956",
+        "title": "Panorama UI XSS leads to Remote Code Execution via Kick/Disconnect Message",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.sqli": [
+      {
+        "report_id": "297478",
+        "title": "SQL injection in https://labs.data.gov/dashboard/datagov/csv_to_json via User-agent",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "811111",
+        "title": "SQL Injection in https://api-my.pay.razer.com/inviteFriend/getInviteHistoryLog",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "531051",
+        "title": "SQL Injection Extracts Starbucks Enterprise Accounting, Financial, Payroll Database",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "868436",
+        "title": "Time-Based SQL injection at city-mobil.ru",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "819738",
+        "title": "SQL injection at https://sea-web.gold.razer.com/ajax-get-status.php via txid parameter",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.api_security": [
+      {
+        "report_id": "716292",
+        "title": "JumpCloud API Key leaked via Open Github Repository.",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "455645",
+        "title": "Exposed Kubernetes API - RCE/Exposed Creds",
+        "vulnerability_type": "OS Command Injection",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "3000510",
+        "title": "The /reports/:id.json endpoint discloses potentially sensitive user attributes when reporter summary is present",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "127844",
+        "title": "Web Authentication Endpoint Credentials Brute-Force Vulnerability",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "838635",
+        "title": "Spring Actuator endpoints publicly available and broken authentication",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.subdomain_takeover": [
+      {
+        "report_id": "335330",
+        "title": "Subdomain Takeover to Authentication bypass",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "219205",
+        "title": "Authentication bypass on auth.uber.com via subdomain takeover of saostatic.uber.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "172137",
+        "title": "Authentication bypass on sso.ubnt.com via subdomain takeover of ping.ubnt.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1404612",
+        "title": "Multiple vulnerability leading to account takeover in TikTok SMB subdomain.",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPACCOUNTTAKEOVER.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "352869",
+        "title": "Subdomain Takeover Via Insecure CloudFront Distribution cdn.grab.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPSUBDOMAINTAKEOVER.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.web_cache": [
+      {
+        "report_id": "488147",
+        "title": "Stored XSS on https://paypal.com/signin via cache poisoning",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "622122",
+        "title": "DoS on PayPal via web cache poisoning",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "394016",
+        "title": "Web Cache Deception Attack (XSS)",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPWEBCACHE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1271944",
+        "title": "Shopify.com Web Cache Deception vulnerability leads to personal information and CSRF tokens leakage",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPWEBCACHE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2265400",
+        "title": "Web Cache Deception",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPWEBCACHE.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.idor_object_authorization": [
+      {
+        "report_id": "446585",
+        "title": "Exfiltrate and mutate repository and project data through injected templated service",
+        "vulnerability_type": "Improper Access Control - Generic",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": true
+      },
+      {
+        "report_id": "1819832",
+        "title": "Delete anyone's content spotlight remotely.",
+        "vulnerability_type": "Insecure Direct Object Reference (IDOR)",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "415081",
+        "title": "IDOR to add secondary users in www.paypal.com/businessmanage/users/api/v1/users",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2623715",
+        "title": "Sensitive data exposure: █████████ candidate resumes/CVs available to download with no authentication through BAC/IDOR/Improper Salesforce config",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "197114",
+        "title": "IDOR - Access to private video thumbnails even if video requires password authentication",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.graphql": [
+      {
+        "report_id": "792927",
+        "title": "Email address of any user can be queried on Report Invitation GraphQL type when username is known",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "489146",
+        "title": "Confidential data of users and limited metadata of programs and reports accessible via GraphQL",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "985124",
+        "title": "GraphQL Query leads to sensitive information disclosure",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPINFODISCLOSURE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "707433",
+        "title": "Disclosure of `payment_transactions` for programs via GraphQL query",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPGRAPHQL.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "978143",
+        "title": "Team object in GraphQL disclosed private_comment",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPGRAPHQL.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.resource_consumption": [
+      {
+        "report_id": "764434",
+        "title": "profile-picture name parameter with large value lead to DoS for other users and programs on the platform",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_100/TOP100UPVOTED.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "661722",
+        "title": "WEBrick::HTTPAuth::DigestAuth authentication is vulnerable to regular expression denial of service (ReDoS)",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "163307",
+        "title": "WordPress Authentication Denial of Service",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2271054",
+        "title": "DoS in bigdecimal's sqrt function due to miscalculation of loop iterations",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "670779",
+        "title": "Lodash \"difference\" (possibly others) Function Denial of Service Through Unvalidated Input",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.auth_bypass": [
+      {
+        "report_id": "270981",
+        "title": "Shopify admin authentication bypass using partners.shopify.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1709881",
+        "title": "Authentication Bypass Leads To  Complete Account TakeveOver on ██████████",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "126522",
+        "title": "Incorrect param parsing in Digits web authentication",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2286745",
+        "title": "Authentication Bypass on TikTok Seller Signup Process Allows Account Creation Without Phone Verification",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "3088290",
+        "title": "Middleware Authentication Bypass on IBM Portal",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.path_traversal": [
+      {
+        "report_id": "876295",
+        "title": "Misuse of an authentication cookie combined with a path traversal on app.starbucks.com permitted access to restricted data",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "622864",
+        "title": "https://█████████ Vulnerable to CVE-2018-0296 Cisco ASA Path Traversal Authentication Bypass",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "536130",
+        "title": "Path traversal, SSTI and RCE on a MailRu acquisition",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRCE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2995025",
+        "title": "Mozilla VPN Clients: RCE via file write and path traversal",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRCE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "411140",
+        "title": "Vanilla Forums AddonManager getSingleIndex Directory Traversal File Inclusion Remote Code Execution Vulnerability",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRCE.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.component_memory_corruption": [
+      {
+        "report_id": "2269989",
+        "title": "Authentication Bypass to (CVE-2023-2982)",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2401359",
+        "title": "CVE-2024-25128: Apache Airflow: Authentication Bypass when Legacy OpenID(2.0) is in use as AUTH_TYPE",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "866597",
+        "title": "Pre-auth buffer over-read in Dovecot NTLM implementation",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "120903",
+        "title": "putty pscp client-side post-auth stack buffer overwrite when processing remote file size",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "641240",
+        "title": "Basic Authentication Heap Overflow",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.csrf": [
+      {
+        "report_id": "998457",
+        "title": "Authentication token and CSRF token bypass",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1124540",
+        "title": "Login CSRF : Login Authentication Flaw on  https://liberapay.com/",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1267476",
+        "title": "Authentication CSRF resulting in unauthorized account access on Krisp app",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "229528",
+        "title": "Login CSRF : Login Authentication Flaw",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "473798",
+        "title": "Cross Site Request Forgery in auth in https://auth.ratelimited.me/",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.open_redirect": [
+      {
+        "report_id": "3419636",
+        "title": "Authentication Token Theft via Open Redirect in Callback URL Parameter",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "223326",
+        "title": "Open Redirect via \"next\" parameter in third-party authentication",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "390663",
+        "title": "Open redirect in switch account functionality",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "2957962",
+        "title": "Open redirect",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPOPENREDIRECT.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "753399",
+        "title": "Open redirect",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPOPENREDIRECT.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.crypto_storage": [
+      {
+        "report_id": "300104",
+        "title": "Cleartext protocol after bank authentication (yrityspalvelu.tapiola.fi)",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.clickjacking": [
+      {
+        "report_id": "318295",
+        "title": "clickjacking to Semrush auth login",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "1591504",
+        "title": "The software does not implement sufficient measures to prevent multiple failed authentication attempts within in a short time frame, making it more su",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPAUTH.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "594080",
+        "title": "Privilege escalation allows to use iframe functionality w/o upgrade",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "3480039",
+        "title": "WebSocket Logic Error: Control Frame (PING/PONG) Starvation causes Connection Drop (DoS) during large transfers",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPBUSINESSLOGIC.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "591432",
+        "title": "Twitter Periscope Clickjacking Vulnerability",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPCLICKJACKING.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.cors_misconfiguration": [
+      {
+        "report_id": "317391",
+        "title": "Exploiting Misconfigured CORS to Steal User Information",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPINFODISCLOSURE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "708886",
+        "title": "looch.tv CORS crossite user information and stream_key access",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPINFODISCLOSURE.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.race_condition": [
+      {
+        "report_id": "2110030",
+        "title": "Race Condition Enables Bypassing Verification Check",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "146845",
+        "title": "Race Conditions in Popular reports feature.",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "454949",
+        "title": "Race Condition in Flag Submission",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "381356",
+        "title": "Client-Side Race Condition using Marketo, allows sending user to data-protocol in Safari when form without onSuccess is submitted on www.hackerone.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "927384",
+        "title": "Race Condition when following a user",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPRACECONDITION.md",
+        "has_steps_to_reproduce": false
+      }
+    ],
+    "skill.vuln.xxe": [
+      {
+        "report_id": "500515",
+        "title": "XXE at ecjobs.starbucks.com.cn/retail/hxpublic_v6/hxdynamicpage6.aspx",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "486732",
+        "title": "Partial bypass of #483774 with Blind XXE on https://duckduckgo.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "483774",
+        "title": "XXE on https://duckduckgo.com",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "315837",
+        "title": "blind XXE in autodiscover parser",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+        "has_steps_to_reproduce": false
+      },
+      {
+        "report_id": "505947",
+        "title": "XXE on pulse.mail.ru",
+        "vulnerability_type": "manifest_title_only",
+        "source_url": "https://raw.githubusercontent.com/reddelexc/hackerone-reports/refs/heads/master/tops_by_bug_type/TOPXXE.md",
+        "has_steps_to_reproduce": false
+      }
+    ]
+  },
+  "coverage_gaps": [
+    "unmapped"
+  ]
+}
