@@ -23,10 +23,10 @@ optional_tools:
   - gau
   - waybackurls
   - theharvester
+  - shodan
   - gitleaks
   - trufflehog
   - semgrep
-  - shodan
 fallback_tools:
   - curl
 evidence_required:
@@ -555,6 +555,134 @@ except Exception as e:
 " 2>/dev/null
 ```
 
+## Phase K: Shodan OSINT
+
+**HOW to query Shodan for infrastructure intelligence:**
+```bash
+# Initialize Shodan CLI with API key from environment (injected by docker-compose)
+shodan init "$SHODAN_API_KEY" 2>/dev/null
+shodan info 2>/dev/null | head -3  # Confirm key is valid and show plan/credits
+
+# Resolve target IPs first (Shodan queries are IP or filter based)
+TARGET_IPS=$(dig +short "$HOST" | grep -oP '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+echo "[+] Resolved IPs for $HOST: $TARGET_IPS"
+```
+
+**HOW to get full host intelligence per IP:**
+```bash
+# Full Shodan host report — open ports, banners, vulns, ASN, org, geo
+for IP in $TARGET_IPS; do
+  echo "=== Shodan host: $IP ==="
+  shodan host "$IP" 2>/dev/null | tee "/tmp/shodan_${IP}.txt"
+  # Key sections in output:
+  #   Organization: who owns this IP block
+  #   OS: detected OS
+  #   Ports: all open ports Shodan last saw
+  #   Vulns: CVE IDs Shodan correlated (e.g. CVE-2021-44228)
+  #   Data: service banners per port (HTTP headers, SSH banner, FTP banner)
+done
+```
+
+**HOW to search Shodan by hostname and SSL certificate:**
+```bash
+# All Shodan-indexed hosts matching the domain (includes subdomains, CDN IPs)
+echo "=== Shodan search: hostname:$HOST ==="
+shodan search --fields ip_str,port,org,product,version "hostname:$HOST" 2>/dev/null \
+  | tee /tmp/shodan_hostname.txt | head -30
+
+# SSL certificate search — finds all hosts presenting certs for this domain
+# This exposes infrastructure hidden behind CDN (real origin IPs)
+echo "=== Shodan search: ssl.cert.subject.CN:$HOST ==="
+shodan search --fields ip_str,port,org,ssl.cert.subject.cn \
+  "ssl.cert.subject.CN:$HOST" 2>/dev/null \
+  | tee /tmp/shodan_ssl.txt | head -20
+
+# SAN-based search — finds wildcards and related certs
+echo "=== Shodan search: ssl.cert.subject.CN:*.$HOST ==="
+shodan search --fields ip_str,port,org,ssl.cert.subject.cn \
+  "ssl.cert.subject.CN:*.$HOST" 2>/dev/null | head -20
+
+# Count total results before downloading
+shodan count "hostname:$HOST" 2>/dev/null | xargs echo "[+] Total Shodan results for hostname:"
+```
+
+**HOW to enumerate org infrastructure and ASN:**
+```bash
+# Get ASN from resolved IP
+for IP in $TARGET_IPS; do
+  ASN_INFO=$(shodan host "$IP" 2>/dev/null | grep -iE "ASN:|Organization:" | head -2)
+  echo "IP $IP: $ASN_INFO"
+  
+  # Extract ASN number for broader infrastructure mapping
+  ASN=$(shodan host "$IP" 2>/dev/null | grep -oP 'AS\d+')
+  if [ -n "$ASN" ]; then
+    echo "=== All hosts in $ASN (sample: top 20) ==="
+    shodan search --fields ip_str,port,product,hostnames \
+      "asn:$ASN" --limit 100 2>/dev/null | head -20
+    shodan count "asn:$ASN" 2>/dev/null | xargs echo "[+] Total IPs in $ASN:"
+  fi
+done
+```
+
+**HOW to find exposed services and misconfigurations via Shodan:**
+```bash
+# Check for specific high-value exposed services on target IPs/org
+ORG=$(shodan host $(echo $TARGET_IPS | awk '{print $1}') 2>/dev/null | grep "Organization:" | cut -d: -f2- | xargs)
+
+if [ -n "$ORG" ]; then
+  # Exposed databases (immediate critical finding)
+  for DB_PORT in "3306" "5432" "27017" "6379" "9200" "9042"; do
+    COUNT=$(shodan count "org:\"$ORG\" port:$DB_PORT" 2>/dev/null)
+    [ "$COUNT" -gt 0 ] 2>/dev/null && \
+      echo "[!] EXPOSED DB port $DB_PORT in org \"$ORG\": $COUNT hosts"
+  done
+
+  # Exposed admin interfaces
+  for ADMIN in "8080" "8443" "9090" "9443" "4848" "15672" "5601"; do
+    COUNT=$(shodan count "org:\"$ORG\" port:$ADMIN" 2>/dev/null)
+    [ "$COUNT" -gt 0 ] 2>/dev/null && \
+      echo "[!] Admin port $ADMIN in org: $COUNT hosts"
+  done
+
+  # RDP / VNC exposed
+  shodan count "org:\"$ORG\" port:3389" 2>/dev/null | xargs echo "[!] RDP exposed:"
+  shodan count "org:\"$ORG\" port:5900" 2>/dev/null | xargs echo "[!] VNC exposed:"
+fi
+```
+
+**HOW to extract CVE intelligence from Shodan:**
+```bash
+# Shodan automatically correlates service banners to CVEs
+for IP in $TARGET_IPS; do
+  echo "=== CVEs for $IP ==="
+  shodan host "$IP" 2>/dev/null | grep -A2 "Vulns:" | head -10
+  # If CVEs appear: cross-reference with component_memory_corruption.md
+  # Example output: CVE-2021-44228 (Log4Shell), CVE-2022-22965 (Spring4Shell)
+done
+
+# Search specifically for known-vulnerable products on org IPs
+if [ -n "$ORG" ]; then
+  shodan search --fields ip_str,port,product,version \
+    "org:\"$ORG\" has_vuln:true" --limit 20 2>/dev/null | head -20
+fi
+```
+
+**HOW to discover real origin IPs behind CDN/WAF:**
+```bash
+# Many targets use Cloudflare/Akamai but Shodan indexes the REAL origin
+# Search for server header patterns that bypass CDN
+echo "=== Origin IP detection via Shodan SSL ==="
+shodan search --fields ip_str,port,org,ssl.cert.subject.cn,hostnames \
+  "ssl.cert.subject.CN:$HOST -org:Cloudflare -org:Fastly -org:Akamai" 2>/dev/null \
+  | head -10
+# Any result NOT in CDN ASN = potential real origin IP
+
+# Historical DNS via Shodan (shows past IPs before CDN migration)
+shodan search --fields ip_str,port,hostnames,timestamp \
+  "hostname:$HOST" 2>/dev/null | \
+  awk '{print $1}' | sort -u | head -20
+```
+
 # Tool Mapping
 
 | Tool | Purpose | Phase |
@@ -575,7 +703,8 @@ except Exception as e:
 | trufflehog | Secret detection in git/filesystem | H |
 | semgrep | SAST pattern scanning | I |
 | bandit | Python-specific SAST | I |
-| theharvester | Email/OSINT collection | J |
+| theharvester | Email/host OSINT (Google, LinkedIn, crtsh) | J |
+| shodan | Infrastructure OSINT: open ports, CVEs, origin IPs, ASN, exposed services | K |
 
 # Expected Evidence
 
@@ -590,6 +719,9 @@ except Exception as e:
 - `sast_findings`: semgrep/bandit result counts and categories (only if source accessible)
 - `osint_emails`: email addresses found via theHarvester (feed credential attack intelligence)
 - `cert_sans`: all Subject Alternative Names from TLS certificate (scope expansion)
+- `shodan_host_report`: open ports, banners, OS, org, geo and Shodan-correlated CVEs per IP
+- `shodan_origin_ips`: real origin IPs found behind CDN/WAF via SSL cert search
+- `shodan_exposed_services`: databases/admin panels/RDP/VNC open on org ASN
 
 # Validation Logic
 
@@ -603,6 +735,8 @@ except Exception as e:
 6. **Archives mined**: gau/waybackurls ran and output written.
 7. **JS analyzed**: at least one JS file downloaded and scanned for endpoints and secrets.
 8. **Secret scan ran**: gitleaks/trufflehog ran on any discovered code — even 0 findings is valid.
+9. **theHarvester ran**: email/host collection attempted — even 0 emails is valid.
+10. **Shodan queried**: `shodan host` ran on at least one resolved IP — confirms or expands Shodan-indexed surface.
 
 Status decisions:
 - `validated`: At least 3 of the 8 phases completed with evidence collected per phase.
@@ -633,6 +767,9 @@ Based on surface mapping output, drive the following vulnerability skill selecti
 | JWT in JS or headers | `jwt_oauth.md` |
 | Old API versions in archive | Regression test with `api_security.md` |
 | Emails found | Input to `account_takeover.md` credential stuffing path |
+| Shodan CVEs on IP | `component_memory_corruption.md` (verify and exploit) |
+| Shodan origin IP behind CDN | Re-test all skills directly on origin (bypasses WAF) |
+| Shodan: DB port open on org | `auth_bypass.md` (unauthenticated DB access) |
 | TLS 1.0/1.1 supported | `crypto_storage.md` (critical finding) |
 | Weak cipher suite | `crypto_storage.md` |
 | SAN reveals new subdomains | Re-run `subdomain_enumeration.md` with new scope |
@@ -668,6 +805,12 @@ Update `offensive_state`, `cross_phase_memory`, `hypothesis_engine`, `attack_pat
   "cross_phase_memory.js_api_routes": [],
   "cross_phase_memory.secrets_found": false,
   "cross_phase_memory.git_exposed": false,
+  "cross_phase_memory.shodan": {
+    "open_ports": [],
+    "cves_found": [],
+    "origin_ips_behind_cdn": [],
+    "exposed_services_org": []
+  },
   "active_hypotheses": [],
   "attack_paths": [],
   "phase_ledger.surface_mapping.status": "completed|partial|blocked",
@@ -680,7 +823,8 @@ Update `offensive_state`, `cross_phase_memory`, `hypothesis_engine`, `attack_pat
 ### 1.0.0
 - Source: manual-seed + profiles/reconnaissance.yaml audit
 - Change type: initial_skill
-- Added: Complete 10-phase surface mapping covering technology fingerprinting, WAF detection, security headers audit, TLS/certificate analysis, web crawling/spidering, archive URL mining, JavaScript endpoint extraction, secret scanning, SAST on exposed code, and OSINT collection.
-- Gap addressed: Existing recon skills (subdomain_enumeration, port_service_discovery, endpoint_discovery, parameter_discovery) do NOT cover tech fingerprinting, WAF detection, JS analysis, secret scanning, or SAST — this skill fills those critical gaps.
+- Added: Complete 11-phase surface mapping covering technology fingerprinting, WAF detection, security headers audit, TLS/certificate analysis, web crawling/spidering, archive URL mining, JavaScript endpoint extraction, secret scanning, SAST on exposed code, theHarvester OSINT (email/host collection), and Shodan OSINT (IP intelligence, CVEs, origin IP discovery, exposed service enumeration per ASN/org).
+- Gap addressed: Existing recon skills (subdomain_enumeration, port_service_discovery, endpoint_discovery, parameter_discovery) do NOT cover tech fingerprinting, WAF detection, JS analysis, secret scanning, SAST, or Shodan infrastructure intelligence — this skill fills those critical gaps.
+- Shodan requires SHODAN_API_KEY env variable (injected via docker-compose from host environment).
 - Approved by: human_review
 - Approved at: 2026-05-20T00:00:00Z
