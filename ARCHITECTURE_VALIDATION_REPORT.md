@@ -134,7 +134,7 @@ Cada Nó Capabilidade ↓
 - `backend/app/agents/__init__.py`
 - `backend/app/agents/agent_registry.py` (363 linhas)
 - `backend/app/agents/orchestrator.py` (134 linhas)
-- `test_architecture.py` (209 linhas)
+- `backend/tests/` (suíte automatizada versionada)
 
 ### Modificados
 - `frontend/src/index.css` (+65 linhas: dark mode)

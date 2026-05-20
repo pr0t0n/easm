@@ -198,7 +198,7 @@ def _build_worker_agent_profiles(mode: ScanMode) -> dict[str, dict[str, Any]]:
             "skill_context": {
                 "retrieval_required": True,
                 "selector_invocation_required": True,
-                "knowledge_sources": ["accepted_learning", "repo_tests", "mcp_rag"],
+                "knowledge_sources": ["accepted_learning", "mcp_rag"],
                 "execution_path": "mcp_to_kali",
                 "pre_execution_step": "run skill_selector and skill_planner before selecting/dispatching tool",
             },

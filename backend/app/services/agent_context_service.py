@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-from pathlib import Path
-from typing import Any
-
 from app.core.config import settings
 from app.services.mcp_client import mcp_client
 from app.services.vulnerability_learning_service import build_runtime_learning_playbook
@@ -13,90 +9,6 @@ from app.workers.worker_groups import get_worker_agent_profile
 
 
 logger = logging.getLogger(__name__)
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TEST_FILES = [
-    _REPO_ROOT / "backend/tests/test_tool_coverage_contract.py",
-    _REPO_ROOT / "backend/tests/test_worker_groups_consistency.py",
-    _REPO_ROOT / "backend/tests/test_risk_service.py",
-    _REPO_ROOT / "backend/tests/test_waf_false_positive_filter.py",
-    _REPO_ROOT / "backend/test_persistence.py",
-    _REPO_ROOT / "backend/test_login.py",
-]
-
-
-def _normalize_tokens(*values: Any) -> list[str]:
-    tokens: list[str] = []
-    for value in values:
-        raw = str(value or "").strip().lower()
-        if not raw:
-            continue
-        normalized = (
-            raw.replace("/", " ")
-            .replace("-", " ")
-            .replace("_", " ")
-            .replace(".", " ")
-            .replace(":", " ")
-        )
-        tokens.extend(part for part in normalized.split() if len(part) >= 3)
-    return list(dict.fromkeys(tokens))
-
-
-def _short_hash(value: str) -> str:
-    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
-
-
-def _read_test_knowledge(
-    *,
-    skill: str,
-    worker_group: str,
-    phase: str,
-    candidate_tools: list[str],
-    limit: int = 4,
-) -> list[dict[str, Any]]:
-    tokens = set(_normalize_tokens(skill, worker_group, phase, *candidate_tools))
-    out: list[dict[str, Any]] = []
-    for path in _TEST_FILES:
-        if not path.exists():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        lowered = text.lower()
-        matched = [token for token in tokens if token in lowered]
-        if not matched and len(out) >= max(1, limit):
-            continue
-        interesting_lines = [
-            line.strip()
-            for line in text.splitlines()
-            if any(token in line.lower() for token in matched[:6])
-        ][:6]
-        summary = "\n".join(interesting_lines) if interesting_lines else "\n".join(text.splitlines()[:12])
-        content = (
-            f"Test knowledge from {path.name}\n"
-            f"Matched tokens: {', '.join(matched[:8]) or 'baseline'}\n"
-            f"{summary[:1400]}"
-        ).strip()
-        out.append(
-            {
-                "document_id": f"test-{_short_hash(str(path))}",
-                "content": content,
-                "metadata": {
-                    "type": "test_signal",
-                    "source_kind": "repo_test",
-                    "path": str(path.relative_to(_REPO_ROOT)),
-                    "skill": skill or worker_group,
-                    "worker_group": worker_group,
-                    "phase": phase,
-                    "matched_tokens": matched[:8],
-                },
-                "source": "repo_tests",
-            }
-        )
-        if len(out) >= max(1, limit):
-            break
-    return out
 
 
 def _learning_documents(
@@ -163,15 +75,6 @@ def sync_worker_knowledge_to_mcp(
         phase=phase,
         candidate_tools=candidate_tools,
         limit=8,
-    )
-    docs.extend(
-        _read_test_knowledge(
-            skill=skill,
-            worker_group=worker_group,
-            phase=phase,
-            candidate_tools=candidate_tools,
-            limit=4,
-        )
     )
     if not docs:
         return {"enabled": True, "ingested": 0, "available": mcp_client.health_check_sync(), "playbook": playbook}

@@ -1,6 +1,8 @@
 # Local environment files
 .env
 .venv/
+.claude/
+.vscode/
 
 # Python caches
 **/__pycache__/
@@ -14,6 +16,7 @@ frontend/dist/
 asm-rules/
 backend/asm-rules/
 backend/nuclei-templates/
+mcp-server/knowledge_store.json
 
 # Temp files
 .DS_Store
