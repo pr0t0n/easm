@@ -19,6 +19,9 @@ backend/nuclei-templates/
 .DS_Store
 
 backend/burp/burpsuite_pro.jar
+backend/burp/*.jar
+backend/burp/*.json
+backend/burp-export/
 burp/
 backend/celerybeat-schedule
 
