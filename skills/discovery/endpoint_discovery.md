@@ -3,7 +3,8 @@ skill_id: "skill.discovery.endpoint_discovery"
 name: "Endpoint and Content Discovery"
 version: "1.0.0"
 category: "discovery"
-phase_ids: ["P03"]
+phase_ids: ["P03", "P05", "P08", "P09"]
+status: "approved"
 supported_target_types: ["domain", "subdomain", "url", "ip_address"]
 risk_level: "medium"
 noise_level: "high"
@@ -38,6 +39,14 @@ attack_chain_opportunities:
   - config_file_exposed
   - api_endpoint_found
   - upload_endpoint_found
+allowed_execution_modes:
+  - safe_validation
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+source_report_ids: []
 ---
 
 # Objective
@@ -105,6 +114,11 @@ Priority wordlists:
 Not injection-focused (content discovery). Key file/path targets:
 
 ```
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 # Admin panels
 /admin, /administrator, /wp-admin, /cpanel, /panel
 

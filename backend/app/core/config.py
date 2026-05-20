@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     mcp_execute_tools_via_mcp: bool = True
     mcp_default_top_k: int = 5
     mcp_request_timeout_seconds: int = 20
+    offensive_operator_enabled: bool = True
 
 
 settings = Settings()

@@ -3,7 +3,8 @@ skill_id: "skill.discovery.parameter_discovery"
 name: "Parameter and Input Discovery"
 version: "1.0.0"
 category: "discovery"
-phase_ids: ["P04"]
+phase_ids: ["P04", "P16"]
+status: "approved"
 supported_target_types: ["url", "subdomain", "domain"]
 risk_level: "medium"
 noise_level: "medium"
@@ -35,6 +36,14 @@ attack_chain_opportunities:
   - file_path_parameter_found
   - url_parameter_found
   - id_parameter_found
+allowed_execution_modes:
+  - safe_validation
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+source_report_ids: []
 ---
 
 # Objective
@@ -103,6 +112,11 @@ Arjun strategy:
 Not injection testing (parameter discovery only). Detection signals:
 
 ```
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 # Parameters that indicate dangerous processing:
 url, redirect, return, next, dest, destination, forward, target
 file, path, include, page, view, template, load

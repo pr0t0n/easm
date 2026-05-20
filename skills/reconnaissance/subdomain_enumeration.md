@@ -4,6 +4,7 @@ name: "Subdomain Enumeration"
 version: "1.0.0"
 category: "reconnaissance"
 phase_ids: ["P01"]
+status: "approved"
 supported_target_types: ["domain", "apex_domain"]
 risk_level: "low"
 noise_level: "low"
@@ -34,6 +35,15 @@ attack_chain_opportunities:
   - subdomain_takeover_candidate
   - expanded_attack_surface
   - internal_service_exposure
+allowed_execution_modes:
+  - passive_recon
+  - safe_validation
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+source_report_ids: []
 ---
 
 # Objective
@@ -118,6 +128,11 @@ Wordlists used by `shuffledns`:
   "expected_evidence": ["subdomain_list", "source_counts"]
 }
 ```
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 
 # Expected Evidence
 

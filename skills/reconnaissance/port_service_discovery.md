@@ -3,7 +3,8 @@ skill_id: "skill.recon.port_service_discovery"
 name: "Port and Service Discovery"
 version: "1.0.0"
 category: "reconnaissance"
-phase_ids: ["P02"]
+phase_ids: ["P02", "P06", "P07"]
+status: "approved"
 supported_target_types: ["domain", "subdomain", "ip_address", "cidr"]
 risk_level: "medium"
 noise_level: "medium"
@@ -33,6 +34,14 @@ attack_chain_opportunities:
   - open_port_service
   - admin_panel_found
   - credentials_found
+allowed_execution_modes:
+  - safe_validation
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+source_report_ids: []
 ---
 
 # Objective
@@ -113,6 +122,11 @@ Port ranges:
   "expected_evidence": ["open_ports", "host_port_pairs"]
 }
 ```
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 
 # Expected Evidence
 

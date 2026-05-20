@@ -3,7 +3,8 @@ skill_id: "skill.chain.exposed_git_to_credential_leak"
 name: "Exposed Git Repository to Credential Leak Chain"
 version: "1.0.0"
 category: "attack_chains"
-phase_ids: ["P03", "P14", "P15"]
+phase_ids: ["P03", "P14", "P15", "P18", "P20"]
+status: "approved"
 supported_target_types: ["url", "subdomain", "domain"]
 risk_level: "high"
 noise_level: "low"
@@ -34,6 +35,14 @@ attack_chain_opportunities:
   - api_key_found
   - aws_credentials_found
   - hardcoded_secrets_found
+allowed_execution_modes:
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+  human_review_required_for_credentials: true
+source_report_ids: []
 changelog:
   - version: "1.0.0"
     date: "2025-01-01"
@@ -43,6 +52,11 @@ changelog:
 ---
 
 # Objective
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 
 Execute the full attack chain from exposed `.git/` directory discovery to credential/secret extraction from source code. This is one of the highest-yield low-noise attack chains in web application security — a misconfigured web server exposing `.git/` allows complete source code reconstruction without authentication.
 

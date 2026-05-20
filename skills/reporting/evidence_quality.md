@@ -3,12 +3,13 @@ skill_id: "skill.reporting.evidence_quality"
 name: "Evidence Quality Assessment and Report Generation"
 version: "1.0.0"
 category: "reporting"
-phase_ids: ["P22"]
+phase_ids: ["P21", "P22"]
 supported_target_types: ["domain", "subdomain", "ip_address", "cidr"]
 risk_level: "low"
 noise_level: "none"
 requires_authorization: false
-required_tools: []
+required_tools:
+  - manual_review
 optional_tools: []
 fallback_tools: []
 evidence_required:
@@ -23,6 +24,16 @@ retry_policy:
   max_attempts: 1
   change_tool_on_retry: false
 attack_chain_opportunities: []
+allowed_execution_modes:
+  - learning_only
+  - passive_recon
+  - safe_validation
+  - controlled_pentest
+  - full_authorized_pentest
+safety_rules:
+  destructive_payloads_allowed: false
+  scope_guard_required: true
+source_report_ids: []
 changelog:
   - version: "1.0.0"
     date: "2025-01-01"
@@ -31,6 +42,11 @@ changelog:
 ---
 
 # Objective
+
+## Changelog
+
+### 1.0.0
+- Initial version created for the offensive operator skill library.
 
 Assess the quality of collected evidence across all executed phases (P01–P22) and generate the final offensive campaign narrative. The report covers: phases executed, skills used per phase, MCP tool executions, evidence strength per finding, hypotheses lifecycle, validated attack chains, and executive risk summary. This skill does NOT generate imaginary findings — it compiles and validates only what was observed.
 

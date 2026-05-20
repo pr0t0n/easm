@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
+from app.core.config import settings
 from app.graph.workflow import build_graph, initial_state
 from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat, ScanAuditLog
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -815,7 +816,17 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         )
         db.commit()
 
+        if settings.offensive_operator_enabled:
+            from app.services.offensive_operator_runner import run_offensive_operator_scan
+
+            result = run_offensive_operator_scan(db, job, scan_mode=scan_mode)
+            _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
+            db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message="Execucao offensive_operator finalizada"))
+            db.commit()
+            return {"ok": job.status == "completed", "scan_id": job.id, "offensive_operator": True, "result": result}
+
         stop_pulse = _start_scan_progress_pulse(scan_id=job.id, scan_mode=scan_mode, interval_seconds=20)
+
 
         shodan_api_key = str(
             (
