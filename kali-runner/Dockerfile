@@ -89,10 +89,18 @@ RUN set -eux; \
     rm -rf /root/.npm
 
 # ── Layer 5: Trivy (container/IaC/secret scanner — post_exploitation profile) ─
+# Trivy release naming: amd64→64bit, arm64→ARM64 (not the dpkg arch name directly)
 RUN TRIVY_VER=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest \
       | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/') && \
     ARCH=$(dpkg --print-architecture) && \
-    curl -sL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER}/trivy_${TRIVY_VER}_Linux-${ARCH^}.tar.gz" \
+    case "$ARCH" in \
+      amd64)   TRIVY_ARCH="64bit"  ;; \
+      arm64)   TRIVY_ARCH="ARM64"  ;; \
+      armhf)   TRIVY_ARCH="ARM"    ;; \
+      i386)    TRIVY_ARCH="32bit"  ;; \
+      *)       TRIVY_ARCH="$ARCH"  ;; \
+    esac && \
+    curl -sL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER}/trivy_${TRIVY_VER}_Linux-${TRIVY_ARCH}.tar.gz" \
       -o /tmp/trivy.tar.gz && \
     tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy && \
     rm /tmp/trivy.tar.gz && \
