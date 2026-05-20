@@ -37,7 +37,8 @@ PENTEST_PHASES = [
      "tools": ["wafw00f", "curl-headers"]},
     # Phase 3 – OSINT
     {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"],
+     "required_skill": "recon-surface-map"},
     {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
      "tools": ["theHarvester"]},
     {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
@@ -95,6 +96,47 @@ SKILL_CATALOG: list[dict[str, Any]] = [
             "dnsx",
         ],
         "phases": ["P01"],
+    },
+    {
+        "id": "recon-surface-map",
+        "category": "reconnaissance",
+        "description": (
+            "Mapeamento completo do ambiente antes de qualquer exploração: "
+            "(A) fingerprint de tecnologia (httpx tech-detect, whatweb, banner grabbing, CMS/framework/versão, CDN/hosting); "
+            "(B) detecção de WAF/CDN (wafw00f + probe manual); "
+            "(C) auditoria de headers HTTP de segurança (HSTS, CSP, X-Frame-Options, cookies); "
+            "(D) análise TLS/certificado (sslscan, testssl, SANs do certificado); "
+            "(E) crawling e spidering web (katana JS-aware, hakrawler, gospider); "
+            "(F) mineração de URLs arquivadas (gau, waybackurls — endpoints antigos, params históricos); "
+            "(G) análise de JavaScript (rotas de API ocultas, segredos hardcoded em bundles); "
+            "(H) secret scanning em .git/ exposto (gitleaks, trufflehog); "
+            "(I) SAST em código exposto (semgrep, bandit); "
+            "(J) OSINT theHarvester (emails, hosts, crt.sh); "
+            "(K) OSINT Shodan (IPs reais atrás de CDN, CVEs indexados, serviços expostos na org/ASN)."
+        ),
+        "triggers": [
+            "fingerprint", "whatweb", "tech", "technology", "stack", "framework", "cms",
+            "waf", "cloudflare", "akamai", "imperva", "wafw00f",
+            "header", "headers", "hsts", "csp", "x-frame-options", "security headers",
+            "tls", "ssl", "certificate", "cert", "san", "sslscan", "testssl",
+            "crawl", "spider", "katana", "hakrawler", "gospider", "js", "javascript",
+            "archive", "wayback", "gau", "waybackurls", "historical",
+            "secret", "hardcoded", "api key", "token", "gitleaks", "trufflehog",
+            "sast", "semgrep", "bandit", "code analysis",
+            "osint", "theharvester", "email", "shodan", "shodan-cli",
+            "origin ip", "real ip", "behind cdn", "asn", "infrastructure",
+            "surface", "surface mapping", "environment", "recon", "mapping",
+        ],
+        "playbook": [
+            "httpx", "whatweb", "curl-headers", "wafw00f",
+            "sslscan", "testssl",
+            "katana", "hakrawler", "gospider",
+            "gau", "waybackurls",
+            "trufflehog", "gitleaks",
+            "semgrep", "bandit",
+            "theHarvester", "shodan-cli",
+        ],
+        "phases": ["P03", "P04", "P05", "P06", "P07", "P18", "P21"],
     },
     {
         "id": "recon-port-service",
@@ -403,7 +445,7 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
     "P03": {
         "phase_id": "P03",
         "name": "Web Crawling & JS Extraction",
-        "required_skills": ["recon-web-crawl"],
+        "required_skills": ["recon-surface-map", "recon-web-crawl"],
         "required_tools": ["katana"],
         "optional_tools": ["hakrawler", "gau", "waybackurls", "gospider"],
         "minimum_evidence": {
@@ -451,9 +493,9 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
     "P05": {
         "phase_id": "P05",
         "name": "HTTP Security Headers & OWASP Top 10 Fingerprint",
-        "required_skills": ["tech-http-fingerprint"],
-        "required_tools": ["httpx"],
-        "optional_tools": ["whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
+        "required_skills": ["recon-surface-map", "tech-http-fingerprint"],
+        "required_tools": ["httpx", "whatweb"],
+        "optional_tools": ["nikto", "curl-headers", "sslscan", "wafw00f"],
         "minimum_evidence": {
             "type": "http_fingerprint",
             "description": "HTTP status, server headers, TLS version, and security headers recorded",
@@ -475,7 +517,7 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
     "P06": {
         "phase_id": "P06",
         "name": "WAF Detection & Evasion Profile",
-        "required_skills": ["waf-aware-validation"],
+        "required_skills": ["recon-surface-map", "waf-aware-validation"],
         "required_tools": ["wafw00f"],
         "optional_tools": ["curl-headers"],
         "minimum_evidence": {
@@ -499,9 +541,9 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
     "P07": {
         "phase_id": "P07",
         "name": "OSINT & Leak Intelligence",
-        "required_skills": ["osint-exposure-intel"],
-        "required_tools": ["theHarvester"],
-        "optional_tools": ["shodan-cli", "h8mail", "trufflehog", "gitleaks", "metagoofil"],
+        "required_skills": ["recon-surface-map", "osint-exposure-intel"],
+        "required_tools": ["shodan-cli", "theHarvester"],
+        "optional_tools": ["h8mail", "trufflehog", "gitleaks", "metagoofil"],
         "minimum_evidence": {
             "type": "osint_findings",
             "description": "At least one OSINT data point (email, IP, credential leak) collected",
@@ -835,7 +877,7 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
     "P21": {
         "phase_id": "P21",
         "name": "Secret & Credential Exposure",
-        "required_skills": ["code-secrets-sast"],
+        "required_skills": ["recon-surface-map", "code-secrets-sast"],
         "required_tools": ["trufflehog"],
         "optional_tools": ["gitleaks", "semgrep", "bandit"],
         "minimum_evidence": {
@@ -987,6 +1029,7 @@ def select_mission_skills(
     if not scored:
         defaults = [
             "recon-subdomain-enum",
+            "recon-surface-map",
             "recon-web-crawl",
             "vuln-directory-enum",
             "vuln-injection",

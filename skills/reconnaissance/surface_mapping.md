@@ -4,7 +4,7 @@ name: "Complete Surface Mapping & Environment Analysis"
 version: "1.0.0"
 status: "approved"
 category: "reconnaissance"
-phase_ids: ["P01", "P02", "P03", "P04"]
+phase_ids: ["P03", "P04", "P05", "P06", "P07", "P18", "P21"]
 supported_target_types: ["domain", "apex_domain", "subdomain", "url", "ip_address"]
 risk_level: "low"
 noise_level: "medium"
