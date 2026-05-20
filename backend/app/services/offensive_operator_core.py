@@ -727,6 +727,7 @@ class MCPToolExecutor:
                 "stderr_path": "",
                 "artifacts": [],
                 "exit_code": None,
+                "timeout": tool.get("timeout"),
                 "started_at": utc_now(),
                 "finished_at": "",
                 "error": None,
@@ -805,7 +806,13 @@ class PhaseValidator:
         hypotheses: list[dict[str, Any]] | None,
         offensive_state: dict[str, Any],
     ) -> dict[str, Any]:
-        required_tools = set(phase_contract.get("required_tools") or [])
+        required_tools = {
+            str(tool.get("tool_name") or "")
+            for tool in (skill_plan.get("tools") or [])
+            if tool.get("required")
+        }
+        if not required_tools:
+            required_tools = set(phase_contract.get("required_tools") or [])
         attempted = {result["tool_name"] for result in mcp_results}
         missing = sorted(required_tools - attempted)
         if missing:

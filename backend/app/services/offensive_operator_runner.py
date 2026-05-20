@@ -32,7 +32,7 @@ def _parse_targets_from_query(target_query: str) -> list[str]:
     return tokens
 
 
-def _scope_from_job(job: ScanJob, target: str) -> Scope:
+def _scope_from_job(job: ScanJob, target: str, execution_mode: str = "controlled_pentest") -> Scope:
     state = dict(job.state_data or {})
     raw_scope = state.get("scope") if isinstance(state.get("scope"), dict) else {}
     allowed_domains = list(raw_scope.get("allowed_domains") or [])
@@ -54,7 +54,10 @@ def _scope_from_job(job: ScanJob, target: str) -> Scope:
         disallowed_targets=list(raw_scope.get("disallowed_targets") or []),
         allowed_techniques=list(raw_scope.get("allowed_techniques") or []),
         disallowed_techniques=list(raw_scope.get("disallowed_techniques") or []),
-        max_noise_level=str(raw_scope.get("max_noise_level") or "medium"),
+        max_noise_level=str(
+            raw_scope.get("max_noise_level")
+            or ("high" if execution_mode in {"controlled_pentest", "full_authorized_pentest"} else "medium")
+        ),
         allow_authenticated_testing=bool(raw_scope.get("allow_authenticated_testing", True)),
         allow_post_exploitation=bool(raw_scope.get("allow_post_exploitation", False)),
         allow_credential_testing=bool(raw_scope.get("allow_credential_testing", False)),
@@ -73,6 +76,7 @@ def _mcp_available() -> bool:
 
 
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
+    tool_timeout = max(900, int(execution.get("timeout") or 0))
     request = {
         "mcp_request_id": execution.get("mcp_request_id"),
         "phase_id": execution["phase_id"],
@@ -80,13 +84,13 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
         "tool_name": execution["tool_name"],
         "profile": execution["profile"],
         "target": execution["target"],
-        "arguments": {"target": execution["target"], "timeout": 120},
+        "arguments": {"target": execution["target"]},
         "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
     }
     response = requests.post(
         f"{settings.mcp_server_url.rstrip('/')}/mcp/execute",
         json=request,
-        timeout=max(5, int(settings.mcp_request_timeout_seconds)),
+        timeout=max(30, int(settings.mcp_request_timeout_seconds), tool_timeout + 30),
     )
     response.raise_for_status()
     return response.json()
@@ -107,7 +111,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     for target in targets:
         if not target:
             continue
-        scope = _scope_from_job(job, target)
+        scope = _scope_from_job(job, target, execution_mode)
         offensive_state["target"] = target
         offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
 
