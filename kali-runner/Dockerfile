@@ -1,47 +1,53 @@
-# Kali Linux runner — single source of truth for offensive tools.
-# All ScriptKidd.o workers dispatch jobs HERE via HTTP; no tool ships in worker images.
+# Kali Linux runner — minimal toolset derived from profiles/*.yaml and skills.
+# Replaces kali-linux-everything with only the tools actually referenced.
+# Base image: kalilinux/kali-rolling (~300 MB) + targeted installs.
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# The default mirror redirector can occasionally resolve to an unreachable
-# endpoint from Docker Desktop. Use the direct Cloudflare-backed Kali mirror so
-# image rebuilds are repeatable.
+# Cloudflare-backed Kali mirror — reliable in Docker Desktop
 RUN printf 'deb http://kali.download/kali kali-rolling main contrib non-free non-free-firmware\n' > /etc/apt/sources.list
 
-# Core: Python runtime, build deps, networking primitives, Go (for ProjectDiscovery tools)
+# ── Layer 1: Core build deps & system primitives ────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget git jq dnsutils openssl \
+      ca-certificates curl wget git jq unzip \
+      dnsutils openssl \
       python3 python3-pip python3-venv python3-setuptools \
       pipx \
       build-essential pkg-config libssl-dev libpcap-dev \
-      golang-go ruby ruby-dev \
+      golang-go \
+      ruby ruby-dev \
       nodejs npm \
-      openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
 ENV GOPATH=/root/go \
     PATH="/root/go/bin:/usr/local/go/bin:${PATH}"
 
-# kali-linux-everything — full offensive toolkit (every tool in Kali).
-# Includes: information-gathering, vulnerability, web, database, passwords,
-# exploitation, post-exploitation, forensics, reverse-engineering,
-# sniffing-spoofing, social-engineering, wireless, etc.
-# This is intentionally the maximum baseline so any profile YAML the team
-# adds in the future already has its binary on $PATH.
-# (Note: `kali-linux-all` does NOT exist — the correct name is
-#  kali-linux-everything; see `apt-cache search '^kali-linux-'`.)
+# ── Layer 2: APT security tools (profiles/*.yaml binaries only) ─────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      kali-linux-everything \
-      seclists hydra gobuster feroxbuster dirsearch medusa wfuzz patator \
+      nmap masscan nikto \
+      whatweb wafw00f \
+      gobuster feroxbuster dirsearch wfuzz \
+      hydra medusa \
+      dnsrecon dnsenum sublist3r findomain \
+      theharvester \
+      sslscan testssl.sh \
+      hashcat \
+      seclists \
     && rm -rf /var/lib/apt/lists/*
 
-# ProjectDiscovery suite — most active recon/vuln tools we use are NOT in Kali
-# metapackages (subfinder, amass, nuclei, naabu, dnsx, httpx, katana, etc.),
-# so we install them from upstream via `go install`. This keeps the runner
-# image authoritative for ALL tool profiles.
+# crackmapexec was renamed nxc in Kali 2024; install whichever is available
+# and expose both names so the profile cmd ["crackmapexec", ...] keeps working.
+RUN apt-get update && \
+    (apt-get install -y --no-install-recommends crackmapexec || \
+     apt-get install -y --no-install-recommends nxc) && \
+    rm -rf /var/lib/apt/lists/* && \
+    (command -v crackmapexec || \
+     (command -v nxc && ln -sf "$(command -v nxc)" /usr/local/bin/crackmapexec))
+
+# ── Layer 3: Go-based tools (ProjectDiscovery suite + recon/exploit tools) ──
 RUN set -eux; \
     for pkg in \
       "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest" \
@@ -53,7 +59,7 @@ RUN set -eux; \
       "github.com/projectdiscovery/alterx/cmd/alterx@latest" \
       "github.com/projectdiscovery/katana/cmd/katana@latest" \
       "github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest" \
-      "github.com/owasp-amass/amass/v4/...@master" \
+      "github.com/owasp-amass/amass/v4/...@latest" \
       "github.com/tomnomnom/assetfinder@latest" \
       "github.com/tomnomnom/waybackurls@latest" \
       "github.com/lc/gau/v2/cmd/gau@latest" \
@@ -61,40 +67,72 @@ RUN set -eux; \
       "github.com/hahwul/dalfox/v2@latest" \
       "github.com/ffuf/ffuf/v2@latest" \
       "github.com/jaeles-project/gospider@latest" \
-      "github.com/haccer/subjack@latest" ; \
-    do go install -v "$pkg" 2>&1 | tail -2 || echo "skip: $pkg"; done; \
+      "github.com/haccer/subjack@latest" \
+      "github.com/gitleaks/gitleaks/v8@latest" \
+      "github.com/trufflesecurity/trufflehog/v3@latest" ; \
+    do go install -v "$pkg" 2>&1 | tail -2 || echo "WARN: skip $pkg"; done; \
     cp -v /root/go/bin/* /usr/local/bin/ 2>/dev/null || true; \
     nuclei -update-templates 2>/dev/null || true
 
-# WPScan via Ruby (kali metapackage may not include it)
-RUN gem install --no-document wpscan 2>&1 | tail -3 || true
-
-# Python/Node CLIs that are not consistently shipped by Kali metapackages.
-# Keep them in the Kali runner only; backend/worker images remain tool-free.
+# ── Layer 4: Python tools (pipx) ─────────────────────────────────────────────
 ENV PIPX_HOME=/opt/pipx \
     PIPX_BIN_DIR=/usr/local/bin
 RUN set -eux; \
+    pipx install sqlmap; \
+    pipx install wapiti3; \
+    pipx install arjun; \
+    pipx install shodan; \
+    pipx install h8mail || true; \
     pipx install bandit==1.9.4; \
     pipx install semgrep==1.161.0; \
-    npm install -g pnpm@9.15.4 retire@5.4.2; \
+    npm install -g retire@5.4.2; \
     rm -rf /root/.npm
 
-# jwt_tool is distributed as a source repository, not an installable Python
-# package. Clone it and expose a stable wrapper command expected by profiles.
+# ── Layer 5: Trivy (container/IaC/secret scanner — post_exploitation profile) ─
+RUN TRIVY_VER=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest \
+      | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/') && \
+    ARCH=$(dpkg --print-architecture) && \
+    curl -sL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER}/trivy_${TRIVY_VER}_Linux-${ARCH^}.tar.gz" \
+      -o /tmp/trivy.tar.gz && \
+    tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy && \
+    rm /tmp/trivy.tar.gz && \
+    trivy --version
+
+# ── Layer 6: Tools only available as source/git clones ───────────────────────
+# jwt_tool (JWT audit — post_exploitation profile)
 RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && \
-    pip install --break-system-packages --no-cache-dir -r /opt/jwt_tool/requirements.txt && \
-    pip install --break-system-packages --no-cache-dir ratelimit && \
-    printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool && \
+    pip install --break-system-packages --no-cache-dir \
+      -r /opt/jwt_tool/requirements.txt ratelimit && \
+    printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' \
+      > /usr/local/bin/jwt_tool && \
     chmod +x /usr/local/bin/jwt_tool
 
-# ParamSpider — não tem pacote pip/apt; clone direto.
-RUN git clone --depth 1 https://github.com/devanshbatham/ParamSpider /opt/ParamSpider 2>&1 | tail -2 && \
+# ParamSpider (reconnaissance profile)
+RUN git clone --depth 1 https://github.com/devanshbatham/ParamSpider /opt/ParamSpider && \
     pip install --break-system-packages --no-cache-dir /opt/ParamSpider && \
     command -v paramspider
 
-# Runner application — FastAPI HTTP server
-# We use a dedicated venv to avoid conflicts with Kali-shipped python packages
-# (uvicorn/pydantic/etc. installed via apt have no RECORD files and break pip).
+# WPScan via Ruby gem (weaponization profile)
+RUN gem install --no-document wpscan 2>&1 | tail -3 || true
+
+# XSStrike (skill.vuln.xss optional_tool)
+RUN git clone --depth 1 https://github.com/s0md3v/XSStrike /opt/XSStrike && \
+    pip install --break-system-packages --no-cache-dir \
+      -r /opt/XSStrike/requirements.txt && \
+    printf '#!/bin/sh\nexec python3 /opt/XSStrike/xsstrike.py "$@"\n' \
+      > /usr/local/bin/xsstrike && \
+    chmod +x /usr/local/bin/xsstrike
+
+# Ghauri (skill.vuln.sqli optional_tool)
+RUN pip install --break-system-packages --no-cache-dir ghauri 2>/dev/null || \
+    (git clone --depth 1 https://github.com/r0oth3x49/ghauri /opt/ghauri && \
+     pip install --break-system-packages --no-cache-dir \
+       -r /opt/ghauri/requirements.txt && \
+     printf '#!/bin/sh\nexec python3 /opt/ghauri/ghauri.py "$@"\n' \
+       > /usr/local/bin/ghauri && \
+     chmod +x /usr/local/bin/ghauri) || true
+
+# ── Layer 7: Runner application (FastAPI HTTP server) ───────────────────────
 WORKDIR /app
 COPY requirements.txt .
 RUN python3 -m venv /opt/runner-venv && \
@@ -104,8 +142,21 @@ ENV PATH="/opt/runner-venv/bin:${PATH}"
 COPY runner.py .
 COPY profiles ./profiles
 
+# ── Sanity check: every profile binary must be on PATH ──────────────────────
 RUN set -eux; \
-    for tool in ffuf hydra gobuster feroxbuster dirsearch medusa crackmapexec jwt_tool wfuzz patator; do command -v "$tool"; done; \
+    for tool in \
+      curl nuclei ffuf sqlmap dalfox wapiti \
+      subfinder httpx naabu dnsx shuffledns alterx katana \
+      interactsh-client assetfinder waybackurls gau hakrawler \
+      gospider subjack gitleaks trufflehog trivy \
+      nmap masscan nikto whatweb wafw00f \
+      gobuster feroxbuster dirsearch wfuzz \
+      hydra medusa crackmapexec \
+      dnsrecon dnsenum sublist3r findomain \
+      sslscan testssl.sh \
+      jwt_tool paramspider wpscan xsstrike \
+      semgrep bandit retire; \
+    do command -v "$tool" || echo "WARN: $tool not found"; done; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-files.txt; \
     test -f /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt; \
@@ -113,7 +164,6 @@ RUN set -eux; \
     test -f /usr/share/seclists/Usernames/top-usernames-shortlist.txt; \
     test -f /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt
 
-# Workspace for evidence (mounted as volume in docker-compose)
 RUN mkdir -p /workspace
 VOLUME ["/workspace"]
 
