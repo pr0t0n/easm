@@ -1,14 +1,13 @@
-"""Tool dispatcher — Kali runner is the ONLY execution path.
+"""Tool dispatcher — MCP is the mandatory offensive execution path.
 
-After the architecture refactor, every offensive tool runs inside the
-Kali container. Workers no longer carry tools themselves. This module
-exists only to (a) translate `tool_name → profile`, (b) post the job
-to `kali_runner`, (c) poll for the result, (d) shape it back into the
-dict structure the existing workflow code expects.
+After the architecture refactor, every offensive tool must pass through MCP,
+which then proxies the request to the Kali runner. Workers no longer carry
+tools themselves. This module exists only to shape legacy worker requests into
+the execution contract the current workflow expects.
 
-If the runner is unreachable, the call returns a structured `error`
-result so the workflow can flag it as `attempted_failed` instead of
-hanging. There is NO local fallback — that codepath has been removed.
+If MCP cannot proxy to Kali, the call returns a structured `mcp_unavailable`
+result so the phase validator can block or mark partial instead of creating a
+false success trail.
 """
 from __future__ import annotations
 
@@ -39,11 +38,14 @@ def execute_tool_with_workers(
     playbook: str | None = None,
     extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Single-path tool execution: via the Kali runner OR backend-local
-    services. The `code-analyzer` tool is intentionally backend-local so it
-    can fetch HTML/JS and produce structured findings without paying the
-    Kali round-trip cost. It carries `findings_extracted` so the workflow's
-    parser merges them directly.
+    """Single-path tool execution.
+
+    When MCP execution is enabled, every offensive tool must go through MCP.
+    If MCP cannot proxy to Kali, return a structured failure instead of
+    falling back to direct Kali execution and creating a false success trail.
+
+    The `code-analyzer` tool remains intentionally backend-local because it
+    does not execute external offensive tooling.
     """
     norm_tool = str(tool_name or "").strip().lower()
     if norm_tool == "code-analyzer":
@@ -91,20 +93,36 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
-        result = mcp_client.execute_kali_tool_sync(
-            tool_name=tool_name,
-            target=target,
-            scan_id=scan_id,
-            skill_context={
-                "skill_id": skill_id,
-                "skill_contract": skill_contract or {},
-                "technique": technique or {},
-                "evidence_required": evidence_required or [],
-                "constraints": constraints or [],
-                "playbook": playbook or "",
-            },
-        )
+    if settings.mcp_execute_tools_via_mcp:
+        if not mcp_client.kali_tools_available_sync():
+            result = {
+                "tool": tool_name,
+                "target": target,
+                "scan_mode": scan_mode,
+                "status": "error",
+                "error": "mcp_unavailable",
+                "dispatch_error": "mcp_unavailable",
+                "execution_path": "mcp_required",
+                "mcp_used": False,
+                "stdout": "",
+                "stderr": "",
+                "command": "",
+                "open_ports": [],
+            }
+        else:
+            result = mcp_client.execute_kali_tool_sync(
+                tool_name=tool_name,
+                target=target,
+                scan_id=scan_id,
+                skill_context={
+                    "skill_id": skill_id,
+                    "skill_contract": skill_contract or {},
+                    "technique": technique or {},
+                    "evidence_required": evidence_required or [],
+                    "constraints": constraints or [],
+                    "playbook": playbook or "",
+                },
+            )
     else:
         result = execute_via_kali(
             tool_name=tool_name,

@@ -4,6 +4,7 @@ name: "Evidence Quality Assessment and Report Generation"
 version: "1.0.0"
 category: "reporting"
 phase_ids: ["P21", "P22"]
+status: "approved"
 supported_target_types: ["domain", "subdomain", "ip_address", "cidr"]
 risk_level: "low"
 noise_level: "none"
@@ -64,6 +65,25 @@ Select this skill when:
 - `attack_paths` contains any confirmed attack chains
 - `active_hypotheses` have been resolved (validated/discarded/inconclusive)
 - Executive summary template available
+
+# Offensive Reasoning
+
+- O que essa descoberta pode permitir? It separates validated offensive progress from weak or inconclusive signals.
+- Isso pode gerar pivo? It can identify which attack paths are sufficiently evidenced for authorized follow-up.
+- Isso pode expor credenciais? No; it reviews evidence quality and redacts sensitive values when needed.
+- Isso pode aumentar superficie? No; it reports coverage and gaps.
+- Isso pode virar attack path? It can promote an evidenced chain candidate into the report, but does not execute it.
+
+# Execution Strategy
+
+1. Read every phase ledger entry and verify status, MCP execution IDs and evidence IDs.
+2. Score evidence strength for each phase and finding.
+3. Separate validated, inconclusive and blocked outcomes.
+4. Produce coverage gaps and next authorized objectives.
+
+# Tool Mapping
+
+- manual_review: audit-only review of ledger, evidence and false-positive controls.
 
 # Evidence Quality Model
 

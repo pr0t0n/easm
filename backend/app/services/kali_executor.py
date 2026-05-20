@@ -111,6 +111,9 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "trivy": "trivy_fs",
     "gitleaks": "gitleaks_secrets",
     "retire": "retire_js",
+    "manual_scope_review": "manual_scope_review",
+    "manual_review": "manual_review",
+    "report-builder": "report_builder",
 
     # Backend-local virtual tool (no Kali profile). Sentinel value is
     # checked by `worker_dispatcher.execute_tool_with_workers` to short-

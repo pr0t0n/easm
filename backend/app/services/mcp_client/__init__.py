@@ -40,8 +40,8 @@ class MCPClient:
     """HTTP client for the local MCP server.
 
     The backend uses MCP for two things:
-    1. RAG retrieval over accepted learnings + tests + worker knowledge
-    2. Optional tool execution proxy to the Kali runner
+    1. RAG retrieval over accepted learnings + Skill memory
+    2. Mandatory offensive tool execution proxy to the Kali runner
     """
 
     def __init__(self, base_url: str | None = None) -> None:

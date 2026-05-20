@@ -499,7 +499,7 @@ async def list_resources() -> dict[str, Any]:
             {
                 "uri": "easm://knowledge/worker-memory",
                 "name": "Worker Skill Memory",
-                "description": "Accepted learnings, tests and ingested worker knowledge",
+                "description": "Accepted learnings, Skill memory and ingested worker knowledge",
                 "mime_type": "application/json",
             },
             {

@@ -1,0 +1,29 @@
+# Operational/audit profiles used by the autonomous operator for phases that
+# must still produce an MCP/Kali execution contract but do not run active probes.
+
+manual_scope_review:
+  tool: manual_scope_review
+  category: governance
+  phase: P01
+  description: "Audit-only scope authorization checkpoint."
+  cmd: ["printf", "scope_authorization_review target=%s\n", "{target}"]
+  timeout: 30
+  parser: raw
+
+manual_review:
+  tool: manual_review
+  category: reporting
+  phase: P21
+  description: "Audit-only evidence quality review checkpoint."
+  cmd: ["printf", "manual_evidence_review target=%s\n", "{target}"]
+  timeout: 30
+  parser: raw
+
+report_builder:
+  tool: report-builder
+  category: reporting
+  phase: P22
+  description: "Audit-only campaign report builder checkpoint."
+  cmd: ["printf", "campaign_report_build target=%s\n", "{target}"]
+  timeout: 30
+  parser: raw

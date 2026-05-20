@@ -17,7 +17,7 @@ Date: 2026-05-20
 | `backend/app/graph/workflow.py` | `route_next_required_phase` | Supports offensive priority queue promotion ahead of sequential pending phase. | Can jump to a later phase based on findings. | New `offensive_operator_core.route_next_required_phase` is deterministic and does not promote. |
 | `backend/app/workers/agent_supervisor.py` | `execute_phase` | Marks/submits phase but does not execute Skill Runtime or MCP tool plans. | False progress risk: phase orchestration exists without actual execution. | New `offensive_operator_runner` calls `OffensiveSkillRuntime.run_phase` for each phase. |
 | `backend/app/services/tool_adapters.py` | `run_tool_execution` | If MCP was enabled but failed or returned error, code fell back to direct Kali runner. | MCP contract could be skipped while tools still ran, creating false success. | Removed fallback when MCP is mandatory; now returns `mcp_unavailable` and does not execute. |
-| `backend/app/services/worker_dispatcher.py` | `execute_tool_with_workers` | Better than the shim: blocks when MCP is unavailable, but legacy shim still bypassed. | Inconsistent execution semantics. | Shim aligned to mandatory MCP semantics. |
+| `backend/app/services/worker_dispatcher.py` | `execute_tool_with_workers` | Used `settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync()`; if health failed, it executed direct Kali runner in the `else` branch. | Worker execution could bypass MCP and create evidence without an MCP execution contract. | Mandatory MCP branch now checks `kali_tools_available_sync()` and returns `mcp_unavailable` instead of falling back. Direct Kali is allowed only when MCP execution is explicitly disabled. |
 | `backend/app/services/skill_runtime.py` | `_parse_yaml_frontmatter` / loader | Lightweight frontmatter parser loads Markdown Skills, but no quality gate or execution policy. | Skills can become text enrichment instead of operational contracts. | `offensive_operator_core.SkillRegistry` now enforces quality gate for runtime path. |
 | `backend/app/services/skill_rag_indexer.py` | `index_skills_to_knowledge_store` | Indexes Skills into MCP lexical store, but legacy graph can still operate from active skills/catalog. | RAG can become enrichment rather than Skill resolver. | `OffensiveSkillRuntime` retrieves skills with metadata filters before compiling tool plans. |
 | `mcp-server/mcp_server.py` | `/rag/query` | Returns generic `results` content objects. | Callers can consume text blobs instead of structured Skills. | `SkillRagIndex.retrieve` returns `retrieved_skills` objects in the runtime path. |
@@ -29,6 +29,10 @@ Date: 2026-05-20
 | `backend/app/services/offensive_reasoning.py` | `apply_offensive_reasoning` hook | Offensive state is updated from findings after tool batches. | State can be lost if no finding is emitted. | New runtime updates `offensive_state`, hypotheses and attack paths from evidence each phase. |
 | `backend/app/services/tool_catalog.py` | `TOOL_CATALOG` | Rich prompt catalog but not an enforcing selector. | Tool hallucination risk if LLM-selected names bypass catalog. | `ToolCatalog.require` blocks missing tools during Tool Plan compile. |
 | `skills/*` | Markdown Skills | Some Skills lacked runtime metadata (`allowed_execution_modes`, `safety_rules`, `## Changelog`) or phase coverage. | Quality gate would block real Skill execution. | Updated key Skills and phase coverage used by P01-P22 runtime. |
+| `skills/vulnerability_testing/idor_object_authorization.md` | frontmatter `phase_ids` | P19 had no approved Skill in controlled pentest mode. | P19 could not resolve Skill through RAG/registry and would block before execution planning. | Added P19 to the approved IDOR/access-control Skill because it covers post-exploitation boundary validation without credential or data-access escalation. |
+| `skills/reporting/evidence_quality.md` | quality gate sections | P21/P22 reporting Skill missed required operational sections. | Quality gate failed and reporting/evidence review phases lost approved Skill coverage. | Added approved status plus Offensive Reasoning, Execution Strategy and Tool Mapping sections. |
+| `skills/attack_chains/exposed_git_to_credential_leak.md` | `required_tools` | Required `git`, but no `git` Kali/MCP profile existed in the enforced catalog path. | Tool plan compilation could block on a non-profiled required tool. | Kept `curl` as required evidence-gathering tool, moved `git` to optional, and lowered minimum attempted tools to 1. |
+| `kali-runner/profiles/operational.yaml` | operational profiles | Contract phases referenced audit-only tools (`manual_scope_review`, `manual_review`, `report-builder`) with no runner profiles. | Tool catalog/profile enforcement could reject non-invasive governance/reporting phases. | Added low-risk raw-output profiles and mapped them in `TOOL_TO_PROFILE`. |
 
 ## Corrected Flow
 
@@ -37,3 +41,10 @@ Authorized scope -> `run_offensive_operator_scan` -> P01-P22 `PHASE_ORDER` -> `S
 ## Residual Legacy Surface
 
 The old LangGraph capability pipeline still exists for compatibility and can be re-enabled with `OFFENSIVE_OPERATOR_ENABLED=false`. It should be treated as legacy mode because it still has capability routing and finding-centric persistence.
+
+## Validation Notes
+
+- `SkillRegistry` validation: no failed Skills and no missing P01-P22 phase coverage for `controlled_pentest`.
+- Contract tests executed manually because local Python lacks `pytest`: `contract_tests_ok`.
+- Python syntax validation passed for changed backend services, MCP server and Kali runner.
+- `python3 -m pytest backend/tests/test_offensive_operator_integration_contract.py` could not run in this local interpreter because `pytest` is not installed.

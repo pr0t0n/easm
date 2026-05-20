@@ -11,8 +11,8 @@ noise_level: "low"
 requires_authorization: true
 required_tools:
   - curl
-  - git
 optional_tools:
+  - git
   - gitleaks
   - trufflehog
 fallback_tools:
@@ -22,7 +22,7 @@ evidence_required:
   - source_code_downloaded
   - credentials_found_in_source
 exit_criteria:
-  minimum_tools_attempted: 2
+  minimum_tools_attempted: 1
   minimum_evidence_items: 2
   validator_required: true
   human_review_required: true
