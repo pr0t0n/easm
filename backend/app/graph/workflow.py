@@ -58,7 +58,8 @@ from app.graph.tool_parsers import (
     _extract_katana_findings,
 )
 
-from app.graph.mission import build_autonomous_mission_contract, select_mission_skills
+from app.graph.mission import build_autonomous_mission_contract, select_mission_skills, PENTEST_PHASES, PHASE_CONTRACTS
+from app.graph.offensive_state import build_campaign, NOISE_PROFILES
 from app.services.risk_service import (
     build_fair_decomposition,
     compute_easm_rating,
@@ -1164,6 +1165,10 @@ def _run_tools_and_collect(
     for tool, result, exec_time in completions:
         run_id = f"{step_name}|{scan_target}|{tool}".lower()
         _sync_step_to_db(state, f"{step_name} · {tool}")
+        # Update phase_ledger for current pentest phase
+        current_phase_id = str(state.get("current_pentest_phase_id") or "")
+        if current_phase_id:
+            _update_phase_ledger_for_tool(state, current_phase_id, tool, result, exec_time)
         _append_action(
             state,
             "tool_start",
@@ -1324,8 +1329,466 @@ def _run_tools_and_collect(
     except Exception:
         pass
 
+    # ── Offensive Reasoning: evaluate findings through attacker lens ──────────
+    if all_findings:
+        _apply_offensive_reasoning_to_findings(state, all_findings, step_name, scan_target)
+
     _mark_step_metric(state, step_success)
     return all_findings, sorted(discovered_ports), sorted(discovered_assets), port_evidence
+
+
+def _apply_offensive_reasoning_to_findings(
+    state: AgentState,
+    findings: list[dict[str, Any]],
+    phase_id: str,
+    target: str,
+) -> None:
+    """Hook called after every tool batch execution.
+
+    Runs offensive reasoning on new findings, updates campaign state,
+    generates hypotheses, attack paths, post-exploitation tasks, and
+    adjusts noise profile and phase priorities.
+    """
+    try:
+        from app.services.offensive_reasoning import apply_offensive_reasoning, get_offensive_priority_phases
+        from app.services.exploit_chain import correlate_findings_to_chains
+
+        campaign = dict(state.get("campaign") or {})
+        if not campaign:
+            return  # Campaign not initialized — skip (will be initialized in initial_state)
+
+        # Apply offensive reasoning
+        updated_campaign = apply_offensive_reasoning(campaign, findings, phase_id, target)
+
+        # Run chain correlation
+        observations = list(updated_campaign.get("offensive_observations") or [])
+        fragments = list(updated_campaign.get("chaining_candidates") or [])
+        chain_result = correlate_findings_to_chains(observations, fragments)
+
+        # Update validated chains
+        existing_chain_ids = {c.get("chain_instance_id") for c in (state.get("validated_chains") or [])}
+        new_confirmed = [
+            c for c in (chain_result.get("confirmed") or [])
+            if c.get("chain_instance_id") not in existing_chain_ids
+        ]
+        if new_confirmed:
+            chains = list(state.get("validated_chains") or [])
+            chains.extend(new_confirmed)
+            state["validated_chains"] = chains
+            updated_campaign["validated_chains"] = chains
+            for chain in new_confirmed:
+                logger.info(
+                    "EXPLOIT_CHAIN confirmed chain=%s impact=%s cvss=%.1f",
+                    chain.get("name"), chain.get("impact"), float(chain.get("cvss_estimate") or 0),
+                )
+                from app.graph.nodes.supervisor import _append_observation
+                _append_observation(
+                    state,
+                    f"EXPLOIT_CHAIN_CONFIRMED: {chain['name']} (CVSS ~{chain.get('cvss_estimate')})",
+                    source=phase_id,
+                )
+
+        # Persist campaign state
+        state["campaign"] = updated_campaign
+        state["attack_paths"] = list(updated_campaign.get("attack_paths") or [])
+        state["active_hypotheses"] = list(updated_campaign.get("active_hypotheses") or [])
+        state["offensive_observations"] = list(updated_campaign.get("offensive_observations") or [])[-200:]
+        state["post_exploitation_queue"] = list(updated_campaign.get("post_exploitation_queue") or [])
+        state["chaining_candidates"] = list(updated_campaign.get("chaining_candidates") or [])
+
+        # Update noise profile on state
+        new_noise = str(updated_campaign.get("noise_profile") or "balanced")
+        if new_noise != state.get("noise_profile"):
+            state["noise_profile"] = new_noise
+            state["logs_terminais"].append(
+                f"[offensive_reasoning] noise_profile={new_noise} "
+                f"reason={updated_campaign.get('noise_profile_reason', '')}"
+            )
+
+        # Log offensive state advancement
+        stage = str(updated_campaign.get("current_stage") or "initial_access")
+        state["logs_terminais"].append(
+            f"[offensive_reasoning] phase={phase_id} "
+            f"stage={stage} "
+            f"hypotheses={len(state.get('active_hypotheses') or [])} "
+            f"paths={len(state.get('attack_paths') or [])} "
+            f"chains_confirmed={chain_result.get('chains_confirmed', 0)} "
+            f"promotions={len(updated_campaign.get('phase_promotions') or [])}"
+        )
+
+        # Update offensive_priority_queue from phase promotions
+        promotions = list(updated_campaign.get("phase_promotions") or [])
+        if promotions:
+            ledger = dict(state.get("phase_ledger") or {})
+            pending_phases = [
+                p["id"] for p in PENTEST_PHASES
+                if dict(ledger.get(p["id"]) or {}).get("status") not in ("completed", "skipped")
+            ]
+            prioritized = get_offensive_priority_phases(updated_campaign, pending_phases)
+            state["offensive_priority_queue"] = [
+                {"phase_id": pid, "reason": "offensive_promotion"}
+                for pid in prioritized[:10]
+            ]
+
+    except Exception:
+        logger.exception("Offensive reasoning hook failed — continuing without it")
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ledger helpers — deterministic P01–P22 pentest orchestration
+# ─────────────────────────────────────────────────────────────
+
+def _init_phase_ledger() -> dict[str, Any]:
+    """Returns a fresh phase_ledger with all 22 phases set to 'pending'."""
+    ledger: dict[str, Any] = {}
+    for phase in PENTEST_PHASES:
+        pid = str(phase["id"])
+        ledger[pid] = {
+            "phase_id": pid,
+            "name": phase.get("title", ""),
+            "status": "pending",
+            "started_at": None,
+            "completed_at": None,
+            "tools_attempted": [],
+            "tools_succeeded": [],
+            "tools_failed": [],
+            "tools_skipped": [],
+            "evidence_ids": [],
+            "evidence_persisted": False,
+            "parser_result": None,
+            "exit_criteria_met": False,
+            "can_advance": False,
+            "validation_result": {"status": "pending", "reason": "not started", "can_advance": False},
+            "retry_count": 0,
+            "skip_reason": None,
+            "mcp_status": "not_attempted",
+            "mcp_failures": [],
+            "skill_context": {},
+            "tool_execution_log": [],
+            "learning_feedback": {
+                "payloads_effective": [],
+                "tool_errors": [],
+                "next_phase_recommendations": [],
+            },
+        }
+    return ledger
+
+
+def _update_phase_ledger_for_tool(
+    state: AgentState,
+    phase_id: str,
+    tool: str,
+    result: dict[str, Any],
+    exec_time: float = 0.0,
+) -> None:
+    """Updates the phase_ledger entry for a tool execution result.
+
+    Called from _run_tools_and_collect after each tool completes.
+    Updates tool lists, evidence flags, and MCP status.
+    """
+    if not phase_id:
+        return
+
+    ledger = dict(state.get("phase_ledger") or {})
+    if phase_id not in ledger:
+        ledger[phase_id] = _init_phase_ledger().get(phase_id, {})
+
+    entry = dict(ledger[phase_id])
+
+    tool_lower = str(tool or "").strip().lower()
+    status = str(result.get("status") or "").strip()
+    dispatch_error = str(result.get("dispatch_error") or "").strip()
+    mcp_used = bool(result.get("mcp_used") or result.get("via_mcp"))
+
+    # Track MCP usage and failures
+    if dispatch_error and "mcp" in dispatch_error.lower():
+        mcp_failures = list(entry.get("mcp_failures") or [])
+        mcp_failures.append({
+            "tool": tool_lower,
+            "error": dispatch_error[:500],
+            "ts": datetime.utcnow().isoformat(),
+        })
+        entry["mcp_failures"] = mcp_failures
+        if str(entry.get("mcp_status") or "") != "unavailable":
+            entry["mcp_status"] = "unavailable"
+    elif mcp_used:
+        entry["mcp_status"] = "available"
+    elif entry.get("mcp_status") == "not_attempted":
+        entry["mcp_status"] = "direct"
+
+    # Track tool results
+    attempted = list(entry.get("tools_attempted") or [])
+    succeeded = list(entry.get("tools_succeeded") or [])
+    failed = list(entry.get("tools_failed") or [])
+    skipped_list = list(entry.get("tools_skipped") or [])
+
+    if tool_lower not in attempted:
+        attempted.append(tool_lower)
+
+    if status == "executed":
+        if tool_lower not in succeeded:
+            succeeded.append(tool_lower)
+        entry["evidence_persisted"] = True
+    elif status == "skipped":
+        if tool_lower not in skipped_list:
+            skipped_list.append(tool_lower)
+    else:
+        if tool_lower not in failed:
+            failed.append(tool_lower)
+
+    entry["tools_attempted"] = attempted
+    entry["tools_succeeded"] = succeeded
+    entry["tools_failed"] = failed
+    entry["tools_skipped"] = skipped_list
+
+    # Record in tool_execution_log
+    tool_log = list(entry.get("tool_execution_log") or [])
+    tool_log.append({
+        "tool": tool_lower,
+        "status": status,
+        "exit_code": result.get("return_code"),
+        "mcp_used": mcp_used,
+        "dispatch_error": dispatch_error[:200] if dispatch_error else None,
+        "exec_time_s": round(exec_time, 2),
+        "ts": datetime.utcnow().isoformat(),
+    })
+    entry["tool_execution_log"] = tool_log
+
+    # Set running status if pending
+    if entry.get("status") == "pending":
+        entry["status"] = "running"
+        entry["started_at"] = entry.get("started_at") or datetime.utcnow().isoformat()
+
+    # Register parser result if tool produced findings
+    findings = _extract_tool_output_findings(result, phase_id, str(state.get("target") or ""))
+    if findings and not entry.get("parser_result"):
+        entry["parser_result"] = {
+            "tool": tool_lower,
+            "findings_count": len(findings),
+            "ts": datetime.utcnow().isoformat(),
+        }
+
+    ledger[phase_id] = entry
+    state["phase_ledger"] = ledger
+
+
+def validate_phase_exit_criteria(
+    state: AgentState,
+    phase_id: str,
+) -> tuple[bool, str, str]:
+    """Check whether phase_id satisfies all exit criteria from its PHASE_CONTRACT.
+
+    Returns:
+        (can_advance: bool, status: str, reason: str)
+
+    Statuses:
+        completed   — all criteria met; supervisor may advance to next phase
+        partial     — tools attempted but not all criteria satisfied; may retry
+        failed      — required tools attempted and all failed; skip with reason
+        not_started — no tools attempted yet
+        skipped     — phase was explicitly skipped with a recorded reason
+        error       — contract not found for phase_id
+    """
+    contract = PHASE_CONTRACTS.get(phase_id)
+    if not contract:
+        return False, "error", f"No PHASE_CONTRACT found for {phase_id}"
+
+    ledger = dict(state.get("phase_ledger") or {})
+    entry = dict(ledger.get(phase_id) or {})
+
+    # Already finalized
+    entry_status = str(entry.get("status") or "pending")
+    if entry_status == "skipped":
+        skip_reason = str(entry.get("skip_reason") or "not recorded")
+        return True, "skipped", f"Phase {phase_id} skipped: {skip_reason}"
+    if entry_status == "completed":
+        return True, "completed", f"Phase {phase_id} already marked completed"
+
+    tools_attempted = list(entry.get("tools_attempted") or [])
+    tools_succeeded = list(entry.get("tools_succeeded") or [])
+    evidence_persisted = bool(entry.get("evidence_persisted"))
+    parser_result = entry.get("parser_result")
+    mcp_failures = list(entry.get("mcp_failures") or [])
+
+    required_tools = list(contract.get("required_tools") or [])
+    exit_c = dict(contract.get("exit_criteria") or {})
+    retry_policy = dict(contract.get("retry_policy") or {})
+
+    min_attempted = int(exit_c.get("min_required_tools_attempted", 1))
+    min_succeeded = int(exit_c.get("min_required_tools_succeeded", 1))
+    needs_evidence = bool(exit_c.get("evidence_persisted", True))
+    needs_parser = bool(exit_c.get("parser_result_registered", True))
+
+    req_attempted = [t for t in required_tools if t in tools_attempted]
+    req_succeeded = [t for t in required_tools if t in tools_succeeded]
+
+    # MCP architectural failure: MCP required but all tools failed via MCP
+    if mcp_failures and not tools_succeeded:
+        reason = (
+            f"Phase {phase_id}: MCP architectural failure — {len(mcp_failures)} MCP error(s). "
+            "Tools attempted but MCP was unavailable. Phase is PARTIAL. "
+            "Advance blocked until MCP is restored or phase explicitly skipped."
+        )
+        logger.error("PHASE_LEDGER [%s] mcp_architectural_failure errors=%d", phase_id, len(mcp_failures))
+        return False, "mcp_failure", reason
+
+    if not tools_attempted:
+        return False, "not_started", f"Phase {phase_id}: no tools attempted yet"
+
+    if len(req_attempted) < min_attempted:
+        reason = (
+            f"Phase {phase_id}: required tools not attempted "
+            f"({len(req_attempted)}/{min_attempted}). Required: {required_tools}"
+        )
+        return False, "partial", reason
+
+    if len(req_succeeded) < min_succeeded:
+        req_failed = [t for t in required_tools if t in entry.get("tools_failed", [])]
+        if req_failed and len(req_failed) >= len(required_tools):
+            reason = (
+                f"Phase {phase_id}: all required tools failed — {req_failed}. "
+                "Phase cannot complete. Mark as failed+skip or retry with optional tools."
+            )
+            return False, "failed", reason
+        reason = (
+            f"Phase {phase_id}: required tools succeeded {len(req_succeeded)}/{min_succeeded}. "
+            f"Failed: {req_failed}. Try optional tools."
+        )
+        return False, "partial", reason
+
+    if needs_evidence and not evidence_persisted:
+        return False, "partial", f"Phase {phase_id}: tool ran but evidence not persisted yet"
+
+    if needs_parser and not parser_result:
+        return False, "partial", f"Phase {phase_id}: parser/validator result not registered"
+
+    return True, "completed", (
+        f"Phase {phase_id}: all exit criteria met — "
+        f"tools_succeeded={tools_succeeded}, evidence_persisted={evidence_persisted}"
+    )
+
+
+def route_next_required_phase(state: AgentState) -> str | None:
+    """Returns the next phase_id to execute, or None if all phases done.
+
+    Normally follows sequential P01→P22 order. When the offensive_priority_queue
+    has promoted phases (based on high-impact findings), those are moved to the
+    front — but only if they are still pending in the ledger.
+    """
+    ledger = dict(state.get("phase_ledger") or {})
+    pending = [
+        str(phase["id"])
+        for phase in PENTEST_PHASES
+        if dict(ledger.get(str(phase["id"])) or {}).get("status") not in ("completed", "skipped")
+    ]
+
+    if not pending:
+        return None
+
+    # Check offensive priority queue for promoted phases
+    priority_queue = list(state.get("offensive_priority_queue") or [])
+    for item in priority_queue:
+        pid = str(item.get("phase_id") or "")
+        if pid in pending:
+            logger.info(
+                "OFFENSIVE_PRIORITY routing to promoted phase=%s reason=%s",
+                pid, item.get("reason", ""),
+            )
+            return pid
+
+    # Default: next sequential pending phase
+    return pending[0]
+
+
+def finalize_phase_in_ledger(
+    state: AgentState,
+    phase_id: str,
+    can_advance: bool,
+    status: str,
+    reason: str,
+) -> None:
+    """Writes the final validation result into phase_ledger and updates pentest_phase_index."""
+    ledger = dict(state.get("phase_ledger") or {})
+    entry = dict(ledger.get(phase_id) or {})
+
+    entry["status"] = status if not can_advance else "completed"
+    entry["exit_criteria_met"] = can_advance
+    entry["can_advance"] = can_advance
+    entry["validation_result"] = {
+        "status": status,
+        "reason": reason,
+        "can_advance": can_advance,
+        "ts": datetime.utcnow().isoformat(),
+    }
+    if can_advance and not entry.get("completed_at"):
+        entry["completed_at"] = datetime.utcnow().isoformat()
+
+    ledger[phase_id] = entry
+    state["phase_ledger"] = ledger
+
+    # Advance pentest_phase_index when phase is completed or skipped
+    if can_advance:
+        current_index = int(state.get("pentest_phase_index") or 0)
+        state["pentest_phase_index"] = current_index + 1
+        next_phase = route_next_required_phase(state)
+        state["current_pentest_phase_id"] = next_phase or ""
+        logger.info(
+            "PHASE_LEDGER [%s] finalized status=%s can_advance=%s next_phase=%s",
+            phase_id, entry["status"], can_advance, next_phase or "all_done",
+        )
+    else:
+        logger.warning(
+            "PHASE_LEDGER [%s] blocked status=%s reason=%s",
+            phase_id, status, reason[:120],
+        )
+
+    # Persist phase_ledger snapshot to DB
+    scan_id = state.get("scan_id")
+    if scan_id:
+        try:
+            from app.db.session import SessionLocal
+            from app.models.models import ScanJob
+            _db = SessionLocal()
+            try:
+                job = _db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if job:
+                    sd = dict(job.state_data or {})
+                    sd["phase_ledger"] = ledger
+                    sd["pentest_phase_index"] = int(state.get("pentest_phase_index") or 0)
+                    sd["current_pentest_phase_id"] = str(state.get("current_pentest_phase_id") or "")
+                    job.state_data = sd
+                    _db.commit()
+            finally:
+                _db.close()
+        except Exception:
+            logger.exception("Falha ao persistir phase_ledger no banco")
+
+
+def skip_phase_with_reason(
+    state: AgentState,
+    phase_id: str,
+    reason: str,
+) -> None:
+    """Marks a phase as skipped with a mandatory recorded reason.
+
+    Must only be called when the skip_condition from the contract is met.
+    """
+    ledger = dict(state.get("phase_ledger") or {})
+    entry = dict(ledger.get(phase_id) or {})
+    entry["status"] = "skipped"
+    entry["skip_reason"] = str(reason)
+    entry["can_advance"] = True
+    entry["completed_at"] = datetime.utcnow().isoformat()
+    entry["validation_result"] = {
+        "status": "skipped",
+        "reason": reason,
+        "can_advance": True,
+        "ts": datetime.utcnow().isoformat(),
+    }
+    ledger[phase_id] = entry
+    state["phase_ledger"] = ledger
+    logger.info("PHASE_LEDGER [%s] skipped reason=%s", phase_id, reason[:120])
+    finalize_phase_in_ledger(state, phase_id, can_advance=True, status="skipped", reason=reason)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1368,6 +1831,7 @@ from app.graph.nodes.skill_pipeline import (
     _targets_for_tool_pipeline,
     _apply_tool_execution_findings,
     tool_executor_node,
+    agent_reporter_node,
     evidence_gate_node,
     _evaluate_evidence_gate,
 )
@@ -1392,6 +1856,7 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_node("skill_planner", skill_planner_node)
     graph.add_node("tool_selector", tool_selector_node)
     graph.add_node("tool_executor", tool_executor_node)
+    graph.add_node("agent_reporter", agent_reporter_node)
     graph.add_node("evidence_gate", evidence_gate_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("governance",        governance_node)
@@ -1412,7 +1877,9 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_edge("skill_selector", "skill_planner")
     graph.add_edge("skill_planner", "tool_selector")
     graph.add_edge("tool_selector", "tool_executor")
-    graph.add_edge("tool_executor", "evidence_gate")
+    # agent_reporter compila o relatório após execução e pergunta ao supervisor
+    graph.add_edge("tool_executor", "agent_reporter")
+    graph.add_edge("agent_reporter", "evidence_gate")
     graph.add_edge("evidence_gate", "supervisor")
 
     for node_name in ["governance", "executive_analyst"]:
@@ -1540,4 +2007,28 @@ def initial_state(
         "fair_decomposition": {},
         "easm_rating": {},
         "executive_summary": "",
+        # Ciclo supervisor ↔ agente
+        "current_activity_demand": {},
+        "completed_activity_types": [],
+        "agent_report": {},
+        "supervisor_evaluations": [],
+        "kill_chain_progress": {},
+        "current_activity_log_id": None,
+        # ── Phased pentest execution (P01–P22) ──────────────────────────────
+        "pentest_phase_index": 0,
+        "current_pentest_phase_id": PENTEST_PHASES[0]["id"] if PENTEST_PHASES else "",
+        "phase_ledger": _init_phase_ledger(),
+        # ── Offensive Reasoning Model ────────────────────────────────────────
+        "campaign": build_campaign(
+            target=primary_target,
+            objective=f"Obtain unauthorized access and map full attack surface of {primary_target}",
+        ),
+        "attack_paths": [],
+        "active_hypotheses": [],
+        "validated_chains": [],
+        "offensive_observations": [],
+        "post_exploitation_queue": [],
+        "noise_profile": "balanced",
+        "offensive_priority_queue": [],
+        "chaining_candidates": [],
     }

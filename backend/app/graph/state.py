@@ -108,3 +108,38 @@ class AgentState(TypedDict):
     execution_control: dict[str, Any]
     tool_runtime: dict[str, dict[str, int]]
     validation_backlog: list[dict[str, Any]]
+    # ── Ciclo supervisor ↔ agente ────────────────────────────────────────────
+    current_activity_demand: dict[str, Any]      # Demanda emitida pelo supervisor ao agente
+    completed_activity_types: list[str]          # activity_types já aprovados neste scan
+    agent_report: dict[str, Any]                 # Relatório compilado pelo agente após execução
+    supervisor_evaluations: list[dict[str, Any]] # Histórico de avaliações do supervisor
+    kill_chain_progress: dict[str, Any]          # {phase: {status, approved_activities}}
+    current_activity_log_id: int | None          # ID do AgentActivityLog corrente
+    # ── Offensive Reasoning Model ────────────────────────────────────────────
+    campaign: dict[str, Any]                     # Active offensive campaign (id, stage, objectives, paths)
+    attack_paths: list[dict[str, Any]]           # Discovered attack paths (fragments → consolidated paths)
+    active_hypotheses: list[dict[str, Any]]      # Open attack hypotheses (statement, priority, test_phases)
+    validated_chains: list[dict[str, Any]]       # Confirmed exploit chains from exploit_chain engine
+    offensive_observations: list[dict[str, Any]] # Per-finding offensive observations (signals, questions)
+    post_exploitation_queue: list[dict[str, Any]]# Post-exploitation tasks (harvest, enum, lateral)
+    noise_profile: str                           # Current stealth/aggressive profile
+    offensive_priority_queue: list[dict[str, Any]]  # Priority-ordered next phases/actions
+    chaining_candidates: list[dict[str, Any]]    # Attack path fragments for chain detection
+    # ── Phased pentest execution (P01–P22) ──────────────────────────────────
+    pentest_phase_index: int                     # Index into PENTEST_PHASES (0-based); 0 = P01
+    current_pentest_phase_id: str                # Current phase ID e.g. "P04"
+    phase_ledger: dict[str, Any]                 # Per-phase execution record keyed by phase_id
+    # phase_ledger[phase_id] = {
+    #   status: pending|running|completed|partial|failed|skipped
+    #   started_at, completed_at
+    #   tools_attempted, tools_succeeded, tools_failed, tools_skipped
+    #   evidence_ids, evidence_persisted, parser_result
+    #   exit_criteria_met, can_advance
+    #   validation_result: {status, reason, can_advance}
+    #   retry_count, skip_reason
+    #   mcp_status: available|unavailable|not_attempted
+    #   mcp_failures: [{tool, error, ts}]
+    #   skill_context: {skill_id, technique, evidence_required}
+    #   tool_execution_log: [{tool, status, exit_code, evidence_id, ts, mcp_used}]
+    #   learning_feedback: {payloads_effective, tool_errors, next_phase_recommendations}
+    # }

@@ -416,3 +416,67 @@ class EASMAlertRule(Base):
     asset_filter: Mapped[dict] = mapped_column(JSONB, default=dict)  # {min_criticality: 70, types: [...]}
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Skill Library: catálogo de skills e ferramentas com scores para o agente
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class SkillLibrary(Base):
+    """Biblioteca de skills disponíveis para o agente por fase do Kill Chain."""
+    __tablename__ = "skill_library"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    skill_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    skill_category: Mapped[str] = mapped_column(String(80), index=True)
+    activity_types: Mapped[list] = mapped_column(JSONB, default=list)
+    kill_chain_phases: Mapped[list] = mapped_column(JSONB, default=list)
+    objective: Mapped[str] = mapped_column(Text, default="")
+    quality_criteria: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    tool_mappings = relationship("SkillToolMapping", back_populates="skill", cascade="all, delete-orphan")
+
+
+class SkillToolMapping(Base):
+    """Mapeamento de ferramentas por skill com score e guia de uso."""
+    __tablename__ = "skill_tool_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skill_library.id"), index=True)
+    tool_name: Mapped[str] = mapped_column(String(120), index=True)
+    score: Mapped[float] = mapped_column(Float, default=5.0)
+    usage_guide: Mapped[str] = mapped_column(Text, default="")
+    evidence_type: Mapped[str] = mapped_column(String(120), default="")
+    parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    skill = relationship("SkillLibrary", back_populates="tool_mappings")
+
+
+class AgentActivityLog(Base):
+    """Rastreia o ciclo completo supervisor→agente→supervisor por atividade."""
+    __tablename__ = "agent_activity_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=0, index=True)
+
+    activity_demand: Mapped[dict] = mapped_column(JSONB, default=dict)
+    skill_found: Mapped[dict] = mapped_column(JSONB, default=dict)
+    skill_lookup_source: Mapped[str] = mapped_column(String(60), default="library_db")
+    tool_selected: Mapped[str] = mapped_column(String(120), default="")
+    tool_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tool_usage_guide: Mapped[str] = mapped_column(Text, default="")
+    execution_result: Mapped[dict] = mapped_column(JSONB, default=dict)
+    agent_report: Mapped[dict] = mapped_column(JSONB, default=dict)
+    supervisor_evaluation: Mapped[dict] = mapped_column(JSONB, default=dict)
+    approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scan_job = relationship("ScanJob")

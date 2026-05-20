@@ -6,6 +6,7 @@ from app.api.routes_auth import router as auth_router
 from app.api.routes_management import router as management_router
 from app.api.routes_scans import router as scans_router
 from app.api.routes_ws import router as ws_router
+from app.api.routes_agent_flow import router as agent_flow_router
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.db.session import Base, engine
@@ -37,6 +38,7 @@ app.add_middleware(
 def on_startup():
     Base.metadata.create_all(bind=engine)
     seed_admin_user()
+    seed_skill_library_data()
 
 
 def seed_admin_user():
@@ -61,6 +63,15 @@ def seed_admin_user():
         db.close()
 
 
+def seed_skill_library_data():
+    from app.services.skill_library_service import seed_skill_library
+    db: Session = Session(bind=engine)
+    try:
+        seed_skill_library(db)
+    finally:
+        db.close()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -70,3 +81,4 @@ app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(management_router)
 app.include_router(ws_router)
+app.include_router(agent_flow_router)

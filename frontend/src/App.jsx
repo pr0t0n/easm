@@ -20,6 +20,7 @@ import JobsRegistryPage from "./pages/JobsRegistryPage";
 import LearningPage from "./pages/LearningPage";
 import WorkerLogsPage from "./pages/WorkerLogsPage";
 import PhaseMonitorPage from "./pages/PhaseMonitorPage";
+import AgentFlowPage from "./pages/AgentFlowPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -88,6 +89,7 @@ export default function App() {
                     <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
                     <Route path="/worker-logs" element={<AdminOnly><WorkerLogsPage /></AdminOnly>} />
+                    <Route path="/agent-flow" element={<AdminOnly><AgentFlowPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
                 </div>

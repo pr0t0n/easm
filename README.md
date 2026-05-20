@@ -2,7 +2,7 @@
 
 ScriptKidd.o e uma plataforma de analise de vulnerabilidade automatizada orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
 
-Este README descreve o fluxo real de operacao da plataforma: o que acontece quando um scan nasce, como as ferramentas sao escolhidas e executadas, onde cada dado e persistido, como a UI enxerga o progresso e como investigar falhas.
+O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → Skill Library → Tool Catalog → Execucao → Relatorio → Avaliacao**, onde cada atividade passa por aprovacao do supervisor antes de avançar na Kill Chain.
 
 ## Sumario rapido
 
@@ -13,54 +13,125 @@ Este README descreve o fluxo real de operacao da plataforma: o que acontece quan
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
-| Visibilidade | 5 paineis frontend + 8 endpoints REST de telemetria |
+| Skill Library | 17 skills catalogadas, 50+ ferramentas com score 0-10 e guia de uso |
+| Visibilidade | 6 paineis frontend + Agent Flow com ciclo supervisor-agente em tempo real |
 
-## Diagrama do fluxo (cerebro vs. maos)
+## Ciclo Supervisor - Agente (Fluxo Principal)
+
+O coração do sistema e o loop de comunicação entre o Supervisor e o Agente. Para cada atividade na Kill Chain:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CICLO SUPERVISOR ↔ AGENTE                           │
+│                                                                         │
+│  1. SUPERVISOR emite ActivityDemand                                     │
+│     {activity_type, skill_category, kill_chain_phase, objective,        │
+│      quality_criteria}                                                  │
+│              │                                                          │
+│              ▼                                                          │
+│  2. AGENTE consulta Skill Library (PostgreSQL: skill_library)           │
+│     "Qual skill cobre esta activity_type?"                              │
+│     → Skill encontrada: {skill_name, objective, quality_criteria}       │
+│              │                                                          │
+│              ▼                                                          │
+│  3. AGENTE consulta Tool Catalog (PostgreSQL: skill_tool_mappings)      │
+│     "Quais ferramentas tem a skill X, ranqueadas por score?"            │
+│     → Ferramentas: [{tool: "subfinder", score: 9.5}, ...]              │
+│     → Lê usage_guide da melhor ferramenta                               │
+│              │                                                          │
+│              ▼                                                          │
+│  4. AGENTE executa a ferramenta via Kali Runner                         │
+│     POST /jobs → polling → resultado                                    │
+│              │                                                          │
+│              ▼                                                          │
+│  5. AGENTE envia Relatório ao Supervisor                                │
+│     {data_collected, operation_performed, quality_score,                │
+│      findings_count, "Foi satisfatório para avançar?"}                  │
+│              │                                                          │
+│              ▼                                                          │
+│  6. SUPERVISOR avalia o relatório                                       │
+│     quality_score >= 0.5 ou findings >= 1 → APROVADO                   │
+│     → Atualiza kill_chain_progress                                      │
+│     → Demanda próxima atividade na Kill Chain                           │
+│     → Ou REJEITA e solicita nova tentativa                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Todo ciclo e persistido na tabela `agent_activity_logs` e visivel no painel **Agent Flow** da UI.
+
+## Diagrama do fluxo LangGraph
+
+```
+rag_enrichment
+      │
+      ▼
+supervisor ──────────────────────────────────────────► END
+   │  ▲                                        ▲
+   │  │ (evidence_gate retorna)                │
+   │  │                                        │
+   ▼  │                                        │
+skill_selector  ← consulta skill_library DB    │
+   │                                           │
+   ▼                                           │
+skill_planner                                  │
+   │                                           │
+   ▼                                           │
+tool_selector   ← consulta skill_tool_mappings DB (score)
+   │                                           │
+   ▼                                           │
+tool_executor   ← Kali Runner HTTP             │
+   │                                           │
+   ▼                                           │
+agent_reporter  ← compila relatório + pergunta supervisor
+   │                                           │
+   ▼                                           │
+evidence_gate   ── ──────────────────────────► supervisor
+                                               │
+                        governance ────────────┘
+                        executive_analyst ──────┘
+```
+
+## Diagrama de infraestrutura (cerebro vs. maos)
 
 ```
        usuario (browser)
               |
               v
        Frontend React 18                       http://localhost:5174
+       - Agent Flow: supervisor↔agente em tempo real
+       - Skill Library: 17 skills, 50+ ferramentas com scores
               |
               | JWT Bearer
               v
        Backend FastAPI                         http://localhost:8001
               |  POST /api/scans
-              |  GET  /api/scans/{id}/phase-monitor
-              |  GET  /api/kali-runner/health
+              |  GET  /api/agent-flow/scans/{id}
+              |  GET  /api/agent-flow/skill-library
               v
             Redis (broker Celery)
               |
-   +----------+----------+----------+----------+----------+----------+
-   |          |          |          |          |          |          |
-worker     worker     worker     worker     worker     worker     worker
-scope      recon      weapon     delivery   exploit    install    ...
-   |          |          |          |          |          |          |
-   +----------+----------+--POST----+----------+----------+----------+
+   +----------+----------+----------+----------+----------+
+   |          |          |          |          |          |
+worker     worker     worker     worker     worker     ...
+scope      recon      weapon     delivery   exploit
+   |          |          |          |          |
+   +----------+----------+--POST----+----------+
                             /jobs
                               |
                               v
                        Kali Runner FastAPI         http://kali_runner:8088
-                              |  POST /jobs
-                              |  GET  /jobs/{id}
-                              |  GET  /jobs/{id}/result
                               v
                        subprocess.run dentro do container Kali
-                              |
                               v
                        /workspace/{scan_id}/{tool}/{job_id}/
-                              command.txt
-                              stdout.txt
-                              stderr.txt
-                              exit_code.txt
-                              parsed.json
-                              |
                               v
-                       PostgreSQL: scan_jobs.state_data, executed_tool_runs, findings
+                       PostgreSQL:
+                         scan_jobs, findings, asset_activity_logs,
+                         skill_library, skill_tool_mappings,
+                         agent_activity_logs
 ```
 
-Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *qual* ferramenta usar; as **maos** (container Kali) executam. Backend e workers carregam apenas codigo Python; toda a superficie ofensiva vive em uma unica imagem Kali, mantida pelos kali-maintainers.
+Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *qual* ferramenta usar consultando a **Skill Library** e o **Tool Catalog** no banco; as **maos** (container Kali) executam. O agente reporta de volta ao supervisor que aprova ou rejeita antes de avançar na Kill Chain.
 
 ## Principios Operacionais
 

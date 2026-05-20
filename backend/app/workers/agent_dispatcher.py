@@ -1,4 +1,7 @@
-"""Agent dispatcher: executa agentes via Celery com fila, retry e rastreamento."""
+"""Agent dispatcher: executa agentes via Celery com fila, retry e rastreamento.
+
+Integrado com PHASE_CONTRACTS para validação determinística de fases P01–P22.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,9 +11,10 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.agents import AgentOrchestrator, get_agents_for_phase, validate_phase_completion
+from app.agents import AgentOrchestrator, get_agents_for_phase
+from app.agents import validate_phase_completion as _legacy_validate_phase_completion
 from app.db.session import SessionLocal
-from app.graph.mission import PENTEST_PHASES
+from app.graph.mission import PENTEST_PHASES, PHASE_CONTRACTS
 from app.models.models import ExecutedToolRun, ScanJob
 from app.workers.celery_app import celery
 
@@ -298,32 +302,122 @@ def record_tool_execution(
     queue="worker.unit.reconhecimento",
 )
 def validate_phase_completion(self, scan_id: int, phase_id: str) -> dict[str, Any]:
-    """Valida se uma fase foi completada com todas as ferramentas obrigatórias."""
+    """Valida fase contra PHASE_CONTRACT usando ferramentas obrigatórias e opcionais.
+
+    Usa PHASE_CONTRACTS para determinar:
+    - required_tools: pelo menos 1 deve ter sucedido
+    - optional_tools: coverage adicional
+    - exit_criteria: evidence_persisted, parser_result_registered
+    - mcp_failures: falha arquitetural registrada
+
+    Não avança se exit_criteria não forem atendidos.
+    """
     db = SessionLocal()
     try:
         scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not scan:
             return {"error": f"Scan {scan_id} not found"}
 
-        # Busca todas as ferramentas executadas para este scan
+        contract = PHASE_CONTRACTS.get(phase_id)
+        if not contract:
+            # Fallback: legacy validation for phases without contract
+            tool_runs = db.query(ExecutedToolRun).filter(
+                ExecutedToolRun.scan_job_id == scan_id
+            ).all()
+            executed_tools = {str(r.tool_name).lower() for r in tool_runs if r.status == "success"}
+            all_done, missing = _legacy_validate_phase_completion(phase_id, executed_tools)
+            return {
+                "phase_id": phase_id,
+                "scan_id": scan_id,
+                "contract_used": False,
+                "all_mandatory_executed": all_done,
+                "missing_tools": missing,
+                "validation_status": "complete" if all_done else "incomplete",
+            }
+
+        # Contract-driven validation
         tool_runs = db.query(ExecutedToolRun).filter(
             ExecutedToolRun.scan_job_id == scan_id
         ).all()
+        tools_succeeded = {str(r.tool_name or "").lower() for r in tool_runs if r.status == "success"}
+        tools_attempted = {str(r.tool_name or "").lower() for r in tool_runs}
+        tools_failed = tools_attempted - tools_succeeded
 
-        executed_tools = {str(run.tool_name).lower() for run in tool_runs if run.status == "success"}
+        required_tools = [t.lower() for t in (contract.get("required_tools") or [])]
+        optional_tools = [t.lower() for t in (contract.get("optional_tools") or [])]
+        exit_c = dict(contract.get("exit_criteria") or {})
+        min_succeeded = int(exit_c.get("min_required_tools_succeeded", 1))
 
-        # Valida a fase
-        from app.agents import validate_phase_completion as validate_tools
+        req_succeeded = [t for t in required_tools if t in tools_succeeded]
+        req_missing = [t for t in required_tools if t not in tools_attempted]
+        req_failed = [t for t in required_tools if t in tools_failed]
+        opt_succeeded = [t for t in optional_tools if t in tools_succeeded]
+        opt_missing = [t for t in optional_tools if t not in tools_attempted]
 
-        all_done, missing = validate_tools(phase_id, executed_tools)
+        # Load phase_ledger for MCP and evidence checks
+        state_data = dict(scan.state_data or {})
+        phase_ledger = dict(state_data.get("phase_ledger") or {})
+        entry = dict(phase_ledger.get(phase_id) or {})
+        mcp_failures = list(entry.get("mcp_failures") or [])
+        evidence_persisted = bool(
+            entry.get("evidence_persisted")
+            or any(r.status == "success" for r in tool_runs if r.tool_name and r.tool_name.lower() in required_tools)
+        )
+        parser_result = entry.get("parser_result")
+
+        # MCP architectural failure check
+        mcp_architectural_failure = bool(mcp_failures and not tools_succeeded)
+
+        # Determine completion
+        req_succeeded_count = len(req_succeeded)
+        all_done = (
+            req_succeeded_count >= min_succeeded
+            and evidence_persisted
+            and not mcp_architectural_failure
+        )
+
+        # Build skip recommendation when failed + max_retries exhausted
+        max_retries = int((contract.get("retry_policy") or {}).get("max_retries", 2))
+        skip_recommended = bool(
+            not all_done
+            and req_failed
+            and len(req_failed) >= len(required_tools)
+        )
+
+        logger.info(
+            "DISPATCHER validate_phase_completion [%s] all_done=%s "
+            "req_succeeded=%s req_missing=%s mcp_failures=%d",
+            phase_id, all_done, req_succeeded, req_missing, len(mcp_failures),
+        )
 
         return {
-            "phase": phase_id,
+            "phase_id": phase_id,
             "scan_id": scan_id,
+            "contract_used": True,
             "all_mandatory_executed": all_done,
-            "executed_tools_count": len(executed_tools),
-            "missing_tools": missing,
-            "validation_status": "complete" if all_done else "incomplete",
+            # Required tools breakdown
+            "required_tools": required_tools,
+            "required_tools_succeeded": req_succeeded,
+            "required_tools_missing": req_missing,
+            "required_tools_failed": req_failed,
+            # Optional tools breakdown
+            "optional_tools": optional_tools,
+            "optional_tools_succeeded": opt_succeeded,
+            "optional_tools_missing": opt_missing,
+            # Evidence and parser
+            "evidence_persisted": evidence_persisted,
+            "parser_result": parser_result,
+            # MCP status
+            "mcp_failures_count": len(mcp_failures),
+            "mcp_architectural_failure": mcp_architectural_failure,
+            # Overall
+            "validation_status": "complete" if all_done else (
+                "mcp_failure" if mcp_architectural_failure else "incomplete"
+            ),
+            "skip_recommended": skip_recommended,
+            "skip_reason": (
+                f"All required tools failed: {req_failed}" if skip_recommended else None
+            ),
         }
 
     finally:

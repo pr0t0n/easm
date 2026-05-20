@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,17 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     filters: dict[str, Any] | None = None
     skill: str | None = None
+
+
+class MCPExecutionRequest(BaseModel):
+    mcp_request_id: str | None = None
+    phase_id: str
+    skill_id: str
+    tool_name: str
+    profile: str
+    target: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    expected_evidence: list[str] = Field(default_factory=list)
 
 
 def _ensure_store_dir() -> None:
@@ -314,6 +327,75 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
     result.setdefault("dispatch_task_id", job_id)
     result.setdefault("execution_path", "mcp_to_kali")
     return result
+
+
+@app.post("/mcp/execute")
+async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
+    """Execute a traceable MCP contract and always return explicit status."""
+    mcp_request_id = request.mcp_request_id or f"mcp_{uuid.uuid4().hex[:12]}"
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    started = time.monotonic()
+    contract = {
+        "mcp_execution_id": f"mexec_{uuid.uuid4().hex[:12]}",
+        "mcp_request_id": mcp_request_id,
+        "phase_id": request.phase_id,
+        "skill_id": request.skill_id,
+        "tool_name": request.tool_name,
+        "profile": request.profile,
+        "target": request.target,
+        "status": "blocked",
+        "exit_code": None,
+        "stdout_path": "",
+        "stderr_path": "",
+        "artifact_paths": [],
+        "started_at": started_at,
+        "finished_at": "",
+        "duration_ms": 0,
+        "evidence_ids": [],
+        "error": None,
+    }
+    try:
+        if not request.expected_evidence:
+            contract.update(status="blocked", error="expected_evidence_required")
+            return contract
+        if kali_client is None:
+            contract.update(status="blocked", error="kali_runner_not_available")
+            return contract
+        profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
+        if profile_name not in kali_profiles:
+            await _refresh_kali_catalog()
+            profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
+        if profile_name not in kali_profiles:
+            contract.update(status="blocked", error=f"tool_or_profile_not_found:{request.tool_name}")
+            return contract
+        raw = await _run_kali_profile(
+            profile_name,
+            {
+                "target": request.target,
+                "scan_id": request.arguments.get("scan_id"),
+                "timeout": request.arguments.get("timeout"),
+            },
+        )
+        exit_code = raw.get("return_code", raw.get("exit_code"))
+        raw_status = raw.get("status")
+        contract.update(
+            status="success" if raw_status in {"done", "success"} and exit_code == 0 else "failed",
+            exit_code=exit_code,
+            stdout_path=raw.get("stdout_path") or raw.get("workdir") or "",
+            stderr_path=raw.get("stderr_path") or "",
+            artifact_paths=raw.get("artifact_paths") or [],
+            error=raw.get("error"),
+        )
+        return contract
+    except HTTPException as exc:
+        contract.update(status="timeout" if exc.status_code == 504 else "failed", error=str(exc.detail))
+        return contract
+    except Exception as exc:  # noqa: BLE001
+        contract.update(status="failed", error=str(exc))
+        return contract
+    finally:
+        contract["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        contract["duration_ms"] = int((time.monotonic() - started) * 1000)
 
 
 @app.post("/mcp/tools/{tool_name}/call")

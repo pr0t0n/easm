@@ -122,15 +122,57 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
 
 
+def _lookup_skill_from_library(state: AgentState, group: str) -> dict | None:
+    """Consulta a SkillLibrary no banco para a activity_demand atual.
+
+    Retorna um dict com skill info (nome, ferramentas ranqueadas, guia) ou None.
+    """
+    from app.services.skill_library_service import get_skill_for_activity
+    from app.db.session import SessionLocal
+
+    demand = dict(state.get("current_activity_demand") or {})
+    activity_type = str(demand.get("activity_type") or "").strip()
+    if not activity_type:
+        return None
+    try:
+        db = SessionLocal()
+        skill = get_skill_for_activity(db, activity_type, capability=group)
+        db.close()
+        return skill
+    except Exception as exc:
+        state["logs_terminais"].append(f"[SkillLibrary] lookup falhou: {exc}")
+    return None
+
+
+def _update_log_skill_found(state: AgentState, skill: dict, source: str) -> None:
+    """Persiste o resultado do lookup de skill no AgentActivityLog."""
+    from app.services.skill_library_service import update_agent_activity_log
+    from app.db.session import SessionLocal
+
+    log_id = state.get("current_activity_log_id")
+    if not log_id:
+        return
+    try:
+        db = SessionLocal()
+        update_agent_activity_log(
+            db,
+            log_id,
+            skill_found=skill,
+            skill_lookup_source=source,
+            status="skill_selected",
+        )
+        db.close()
+    except Exception as exc:
+        state["logs_terminais"].append(f"[SkillLibrary] log update falhou: {exc}")
+
+
 def skill_selector_node(state: AgentState) -> AgentState:
-    """Validate/enrich the supervisor's selected_skill and materialise the skill contract.
+    """Seleciona a skill para a atividade demandada pelo supervisor.
 
-    When the supervisor has already committed to a skill (state["selected_skill"] is
-    populated), this node uses that as the authoritative source — it never overrides
-    the supervisor's choice with active_skills[0] or an inferred skill.
-
-    When selected_skill is absent (e.g., unit tests calling this node directly), the
-    node falls back to the original scored-inference logic for backward compatibility.
+    Fluxo:
+    1. Consulta SkillLibrary DB pela activity_type da demanda atual.
+    2. Se encontrar, usa a skill da biblioteca como fonte de verdade.
+    3. Fallback: usa selected_skill do supervisor ou inferência por active_skills.
     """
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
     from app.graph.nodes.supervisor import (
@@ -149,6 +191,42 @@ def skill_selector_node(state: AgentState) -> AgentState:
         phase_label = str(state.get("current_phase") or group)
         candidate_tools = _candidate_tools_for_skill_bootstrap(state, group)
         skills = list(state.get("active_skills") or [])
+
+        # ── Lookup da Skill Library (fonte primária) ──────────────────────────
+        # O agente consulta o banco para encontrar a skill certa para a atividade
+        # demandada pelo supervisor, e obtém as ferramentas ranqueadas por score.
+        library_skill = _lookup_skill_from_library(state, group)
+        if library_skill:
+            lib_tools = [t["tool_name"] for t in (library_skill.get("tools") or []) if t.get("tool_name")]
+            lib_skill_name = str(library_skill.get("skill_name") or group)
+            # Ferramentas da biblioteca têm prioridade; as demais ficam como fallback
+            merged_tools = lib_tools + [t for t in candidate_tools if t not in lib_tools]
+            candidate_tools = merged_tools
+            _update_log_skill_found(state, library_skill, source="library_db")
+            state["logs_terminais"].append(
+                f"[SkillLibrary] skill encontrada: {lib_skill_name} "
+                f"tools_ranqueadas={lib_tools[:5]} "
+                f"source=library_db"
+            )
+            # Guarda guia da melhor ferramenta no estado para uso pelo tool_executor
+            best_tool_entry = library_skill.get("tools", [{}])[0] if library_skill.get("tools") else {}
+            state["skill_library_context"] = {
+                "skill_name": lib_skill_name,
+                "skill_id": lib_skill_name,
+                "ranked_tools": lib_tools,
+                "best_tool": best_tool_entry.get("tool_name", ""),
+                "best_tool_score": best_tool_entry.get("score", 0),
+                "best_tool_guide": best_tool_entry.get("usage_guide", ""),
+                "evidence_type": best_tool_entry.get("evidence_type", ""),
+                "objective": library_skill.get("objective", ""),
+                "quality_criteria": library_skill.get("quality_criteria", ""),
+            }
+        else:
+            state["logs_terminais"].append(
+                f"[SkillLibrary] skill não encontrada para activity_type="
+                f"{(state.get('current_activity_demand') or {}).get('activity_type', '')}; "
+                "usando inferência"
+            )
 
         supervisor_selected = dict(state.get("selected_skill") or {})
         supervisor_skill_id = str(supervisor_selected.get("skill_id") or "").strip()
@@ -389,6 +467,29 @@ def tool_selector_node(state: AgentState) -> AgentState:
         if str(tool or "").strip()
     ]
 
+    # ── Lookup de ferramentas ranqueadas pela SkillToolMapping (fonte primária) ─
+    # O agente vai ao banco para saber qual ferramenta usar para a skill escolhida
+    # e como usá-la corretamente (usage_guide).
+    lib_ctx = dict(state.get("skill_library_context") or {})
+    lib_ranked_tools = [str(t) for t in list(lib_ctx.get("ranked_tools") or []) if str(t or "").strip()]
+    lib_best_tool = str(lib_ctx.get("best_tool") or "").strip()
+    lib_best_guide = str(lib_ctx.get("best_tool_guide") or "").strip()
+    lib_best_score = float(lib_ctx.get("best_tool_score") or 0.0)
+
+    if lib_ranked_tools:
+        # Ferramentas do banco (ranqueadas por score) têm precedência
+        candidate_set = set(candidate_tools)
+        library_valid = [t for t in lib_ranked_tools if t in candidate_set] or lib_ranked_tools
+        recommended_tools = library_valid + [t for t in recommended_tools if t not in library_valid]
+        state["logs_terminais"].append(
+            f"[SkillToolMapping] ferramentas ranqueadas pelo banco: "
+            f"{lib_ranked_tools[:5]} best={lib_best_tool}(score={lib_best_score:.1f})"
+        )
+        if lib_best_guide:
+            state["logs_terminais"].append(
+                f"[SkillToolMapping] guia de uso de '{lib_best_tool}': {lib_best_guide[:120]}"
+            )
+
     try:
         from app.services.agent_context_service import build_worker_knowledge_context
 
@@ -470,8 +571,39 @@ def tool_selector_node(state: AgentState) -> AgentState:
             f"[selector] capability={capability} sem ferramenta selecionada pela skill"
         )
 
+    # Persiste ferramenta escolhida e score no AgentActivityLog
+    _persist_tool_selection_to_log(state, selected_tool, lib_best_score if selected_tool == lib_best_tool else 0.0, lib_best_guide if selected_tool == lib_best_tool else "")
+
     _metric_end(state, "tool_selector", started_at)
     return state
+
+
+def _persist_tool_selection_to_log(
+    state: AgentState,
+    tool_name: str,
+    score: float,
+    usage_guide: str,
+) -> None:
+    """Atualiza o AgentActivityLog com a ferramenta selecionada e seu score."""
+    from app.services.skill_library_service import update_agent_activity_log
+    from app.db.session import SessionLocal
+
+    log_id = state.get("current_activity_log_id")
+    if not log_id or not tool_name:
+        return
+    try:
+        db = SessionLocal()
+        update_agent_activity_log(
+            db,
+            log_id,
+            tool_selected=tool_name,
+            tool_score=score if score else None,
+            tool_usage_guide=usage_guide,
+            status="tool_selected",
+        )
+        db.close()
+    except Exception as exc:
+        state["logs_terminais"].append(f"[ToolSelector] log update falhou: {exc}")
 
 
 def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
@@ -854,4 +986,120 @@ def _evaluate_evidence_gate(state: AgentState) -> AgentState:
     state["mission_index"] += 1
     _metric_end(state, "evidence_gate", started_at)
     _sync_step_to_db(state, "Evidence Gate")
+    return state
+
+
+# ── Agent Reporter ─────────────────────────────────────────────────────────────
+
+
+def agent_reporter_node(state: AgentState) -> AgentState:
+    """Nó de relatório do agente.
+
+    Após a execução da ferramenta, o agente compila um relatório estruturado
+    com os dados coletados, operação realizada e score de qualidade,
+    e o envia ao supervisor perguntando se a atividade foi satisfatória.
+    O relatório é persistido no AgentActivityLog para visibilidade na UI.
+    """
+    from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
+    from app.graph.nodes.supervisor import _append_action
+
+    started_at = _metric_start()
+    _sync_step_to_db(state, "Agent Reporter")
+
+    demand = dict(state.get("current_activity_demand") or {})
+    selection = dict(state.get("tool_selection_contract") or {})
+    lib_ctx = dict(state.get("skill_library_context") or {})
+    results = list(state.get("tool_execution_results") or [])
+    findings = list(state.get("vulnerabilidades_encontradas") or [])
+
+    capability = str(selection.get("capability") or state.get("pending_capability_node") or "")
+    tool_used = str(selection.get("selected_tools", [""])[0] if selection.get("selected_tools") else "")
+    skill_used = str(selection.get("skill_id") or lib_ctx.get("skill_name") or "")
+
+    # Conta achados gerados nesta iteração (últimos da lista)
+    iteration_findings = [
+        f for f in findings
+        if str((f.get("details") or {}).get("node") or "") == capability
+    ]
+    findings_count = len(iteration_findings)
+
+    # Score de qualidade: baseado em execução bem-sucedida + achados
+    executed_ok = bool(results) and all(
+        not r.get("error") for r in results
+    )
+    has_findings = findings_count > 0
+    quality_score = 0.0
+    if executed_ok:
+        quality_score += 0.5
+    if has_findings:
+        quality_score += 0.3
+    if findings_count >= 3:
+        quality_score += 0.2
+
+    operation_summary = (
+        f"Executou '{tool_used}' para skill '{skill_used}' na fase '{capability}'. "
+        f"Encontrou {findings_count} achados."
+    )
+
+    report = {
+        "activity_id": demand.get("activity_id", ""),
+        "activity_type": demand.get("activity_type", ""),
+        "capability": capability,
+        "kill_chain_phases": demand.get("kill_chain_phases", []),
+        "skill_used": skill_used,
+        "tool_used": tool_used,
+        "tool_score": lib_ctx.get("best_tool_score", 0),
+        "findings_count": findings_count,
+        "quality_score": round(quality_score, 2),
+        "operation_performed": operation_summary,
+        "data_collected": [
+            {
+                "title": str(f.get("title", "")),
+                "severity": str(f.get("severity", "")),
+                "tool": str((f.get("details") or {}).get("tool", tool_used)),
+            }
+            for f in iteration_findings[:10]
+        ],
+        "question_to_supervisor": (
+            f"Atividade '{demand.get('activity_type', '')}' concluída. "
+            f"Qualidade: {quality_score:.0%}. "
+            f"{findings_count} achados coletados com '{tool_used}'. "
+            "Foi satisfatório para avançar na Kill Chain?"
+        ),
+        "reported_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "iteration": int(state.get("loop_iteration", 0)),
+    }
+    state["agent_report"] = report
+    _append_action(state, "agent_reported", report)
+
+    state["logs_terminais"].append(
+        f"[Agente→Supervisor] Relatório: activity={report['activity_type']} "
+        f"tool={tool_used} skill={skill_used} "
+        f"findings={findings_count} quality={quality_score:.0%} "
+        f"pergunta='{report['question_to_supervisor'][:80]}'"
+    )
+
+    # Persiste relatório no banco
+    log_id = state.get("current_activity_log_id")
+    if log_id:
+        try:
+            from app.services.skill_library_service import update_agent_activity_log
+            from app.db.session import SessionLocal
+            db = SessionLocal()
+            update_agent_activity_log(
+                db,
+                log_id,
+                agent_report=report,
+                execution_result={
+                    "results_count": len(results),
+                    "executed_ok": executed_ok,
+                    "tool": tool_used,
+                },
+                status="reported",
+            )
+            db.close()
+        except Exception as exc:
+            state["logs_terminais"].append(f"[AgentReporter] log update falhou: {exc}")
+
+    _metric_end(state, "agent_reporter", started_at)
     return state

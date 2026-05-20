@@ -64,35 +64,72 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
+    skill_ctx = {
+        "skill_id": skill_id,
+        "skill_contract": skill_contract or {},
+        "technique": technique or {},
+        "evidence_required": evidence_required or [],
+        "constraints": constraints or [],
+        "playbook": playbook or "",
+    }
+
+    if settings.mcp_execute_tools_via_mcp:
+        # MCP is the MANDATORY execution path when enabled.
+        # If MCP is unreachable, record an architectural failure for the phase
+        # and do NOT fall back to direct execution. This surfaces real gaps
+        # instead of hiding them behind a silent fallback.
+        mcp_healthy = False
+        try:
+            mcp_healthy = mcp_client.health_check_sync()
+        except Exception as hc_exc:
+            logger.error(
+                "MCP health check raised exception for tool=%s target=%s: %s",
+                tool_name, target, hc_exc,
+            )
+
+        if not mcp_healthy:
+            logger.error(
+                "MCP_ARCHITECTURAL_FAILURE: tool=%s target=%s — MCP is enabled but unreachable. "
+                "Phase will be marked partial/failed. No local fallback.",
+                tool_name, target,
+            )
+            return {
+                "tool": tool_name,
+                "target": target,
+                "scan_mode": scan_mode,
+                "status": "error",
+                "command": "",
+                "stdout": "",
+                "stderr": "",
+                "dispatch_error": (
+                    f"mcp_unavailable: MCP is configured as mandatory execution path "
+                    f"(settings.mcp_execute_tools_via_mcp=True) but health check failed. "
+                    f"Tool '{tool_name}' was NOT executed. "
+                    "This is an architectural failure — fix MCP connectivity or disable mcp_execute_tools_via_mcp."
+                ),
+                "mcp_used": False,
+                "mcp_failure": True,
+                "source_agent_id": "mcp_unavailable",
+                "source_agent_name": "MCP Runner (UNAVAILABLE)",
+                "open_ports": [],
+            }
+
         result = mcp_client.execute_kali_tool_sync(
             tool_name=tool_name,
             target=target,
             scan_id=scan_id,
-            skill_context={
-                "skill_id": skill_id,
-                "skill_contract": skill_contract or {},
-                "technique": technique or {},
-                "evidence_required": evidence_required or [],
-                "constraints": constraints or [],
-                "playbook": playbook or "",
-            },
+            skill_context=skill_ctx,
         )
+        result["mcp_used"] = True
     else:
         result = execute_via_kali(
             tool_name=tool_name,
             target=target,
             scan_id=scan_id,
             scan_mode=scan_mode,
-            skill_context={
-                "skill_id": skill_id,
-                "skill_contract": skill_contract or {},
-                "technique": technique or {},
-                "evidence_required": evidence_required or [],
-                "constraints": constraints or [],
-                "playbook": playbook or "",
-            },
+            skill_context=skill_ctx,
         )
+        result["mcp_used"] = False
     if skill_id:
         result.setdefault("skill_id", skill_id)
         result.setdefault("skill_contract", skill_contract or {})

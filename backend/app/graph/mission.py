@@ -284,6 +284,556 @@ SKILL_CATALOG: list[dict[str, Any]] = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE CONTRACTS — operational contract per pentest phase P01–P22
+#
+# Each contract defines:
+#   required_skills   — skill IDs from SKILL_CATALOG that MUST feed this phase
+#   required_tools    — tools where at least 1 must succeed for phase to complete
+#   optional_tools    — best-effort tools that improve coverage
+#   minimum_evidence  — what constitutes accepted evidence output
+#   exit_criteria     — conditions the Phase Validator checks before advancing
+#   retry_policy      — max retries, fallback behaviour, skip conditions
+#
+# A phase is COMPLETED only when all exit_criteria are satisfied.
+# A phase is PARTIAL when tools were attempted but exit criteria not fully met.
+# A phase is SKIPPED only when skip_condition is true AND reason is recorded.
+# The supervisor MUST NOT advance to the next phase if the current one is
+# neither completed nor skipped with a valid reason.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
+    "P01": {
+        "phase_id": "P01",
+        "name": "Subdomain Enumeration",
+        "required_skills": ["recon-subdomain-enum"],
+        "required_tools": ["subfinder"],
+        "optional_tools": ["amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"],
+        "minimum_evidence": {
+            "type": "subdomain_list",
+            "description": "At least one subdomain resolved or root domain confirmed live",
+            "fields_required": ["subdomain", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_tools_available_in_kali",
+            "skip_requires_reason": True,
+        },
+    },
+    "P02": {
+        "phase_id": "P02",
+        "name": "Port & Service Scan",
+        "required_skills": ["recon-port-service"],
+        "required_tools": ["naabu"],
+        "optional_tools": ["nmap", "masscan", "httpx"],
+        "minimum_evidence": {
+            "type": "port_list",
+            "description": "At least one open port discovered or confirmed that target has no open ports",
+            "fields_required": ["port", "protocol", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_tools_available_in_kali",
+            "skip_requires_reason": True,
+        },
+    },
+    "P03": {
+        "phase_id": "P03",
+        "name": "Web Crawling & JS Extraction",
+        "required_skills": ["recon-web-crawl"],
+        "required_tools": ["katana"],
+        "optional_tools": ["hakrawler", "gau", "waybackurls", "gospider"],
+        "minimum_evidence": {
+            "type": "url_list",
+            "description": "At least one URL, JS file, or endpoint discovered",
+            "fields_required": ["url", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_web_targets_found",
+            "skip_requires_reason": True,
+        },
+    },
+    "P04": {
+        "phase_id": "P04",
+        "name": "Parameter Discovery",
+        "required_skills": ["recon-web-crawl"],
+        "required_tools": ["arjun"],
+        "optional_tools": ["paramspider", "ffuf-params", "ffuf-values", "wfuzz"],
+        "minimum_evidence": {
+            "type": "parameter_list",
+            "description": "At least one parameter or form field discovered",
+            "fields_required": ["parameter", "endpoint", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_web_targets_found",
+            "skip_requires_reason": True,
+        },
+    },
+    "P05": {
+        "phase_id": "P05",
+        "name": "HTTP Security Headers & OWASP Top 10 Fingerprint",
+        "required_skills": ["tech-http-fingerprint"],
+        "required_tools": ["httpx"],
+        "optional_tools": ["whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
+        "minimum_evidence": {
+            "type": "http_fingerprint",
+            "description": "HTTP status, server headers, TLS version, and security headers recorded",
+            "fields_required": ["status_code", "server", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_http_service",
+            "skip_requires_reason": True,
+        },
+    },
+    "P06": {
+        "phase_id": "P06",
+        "name": "WAF Detection & Evasion Profile",
+        "required_skills": ["waf-aware-validation"],
+        "required_tools": ["wafw00f"],
+        "optional_tools": ["curl-headers"],
+        "minimum_evidence": {
+            "type": "waf_status",
+            "description": "WAF presence confirmed or denied; vendor recorded if present",
+            "fields_required": ["waf_detected", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "mark_waf_unknown",
+            "skip_condition": "no_http_service",
+            "skip_requires_reason": True,
+        },
+    },
+    "P07": {
+        "phase_id": "P07",
+        "name": "OSINT & Leak Intelligence",
+        "required_skills": ["osint-exposure-intel"],
+        "required_tools": ["theHarvester"],
+        "optional_tools": ["shodan-cli", "h8mail", "trufflehog", "gitleaks", "metagoofil"],
+        "minimum_evidence": {
+            "type": "osint_findings",
+            "description": "At least one OSINT data point (email, IP, credential leak) collected",
+            "fields_required": ["source_type", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "api_keys_unavailable",
+            "skip_requires_reason": True,
+        },
+    },
+    "P08": {
+        "phase_id": "P08",
+        "name": "Email Security Posture (SPF/DKIM/DMARC)",
+        "required_skills": ["osint-email-infra"],
+        "required_tools": ["theHarvester"],
+        "optional_tools": [],
+        "minimum_evidence": {
+            "type": "email_security",
+            "description": "SPF, DKIM, DMARC records queried and status recorded",
+            "fields_required": ["spf_status", "dmarc_status", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "mark_dns_lookup_failed",
+            "skip_condition": "not_domain_target",
+            "skip_requires_reason": True,
+        },
+    },
+    "P09": {
+        "phase_id": "P09",
+        "name": "Subdomain Takeover",
+        "required_skills": ["osint-subdomain-takeover"],
+        "required_tools": ["subjack"],
+        "optional_tools": ["nuclei"],
+        "minimum_evidence": {
+            "type": "takeover_check",
+            "description": "Each discovered subdomain checked for dangling CNAME; result recorded",
+            "fields_required": ["subdomain", "takeover_status", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_subdomains_discovered",
+            "skip_requires_reason": True,
+        },
+    },
+    "P10": {
+        "phase_id": "P10",
+        "name": "Cloud Asset Exposure (S3/GCP/Azure)",
+        "required_skills": ["osint-cloud-exposure"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["shodan-cli", "trufflehog"],
+        "minimum_evidence": {
+            "type": "cloud_exposure",
+            "description": "Cloud-related templates executed; open bucket or misconfigured resource recorded",
+            "fields_required": ["cloud_provider", "exposure_status", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_cloud_indicators",
+            "skip_requires_reason": True,
+        },
+    },
+    "P11": {
+        "phase_id": "P11",
+        "name": "Nuclei CVE & Misconfiguration Scan",
+        "required_skills": ["vuln-nuclei-cve"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["nmap-vulscan"],
+        "minimum_evidence": {
+            "type": "cve_scan_result",
+            "description": "Nuclei scan completed against all discovered endpoints; matched templates recorded",
+            "fields_required": ["template_id", "severity", "matched_at", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_web_targets",
+            "skip_requires_reason": True,
+        },
+    },
+    "P12": {
+        "phase_id": "P12",
+        "name": "Web Injection (SQLi/XSS/SSTI/XXE)",
+        "required_skills": ["vuln-injection"],
+        "required_tools": ["dalfox"],
+        "optional_tools": ["sqlmap", "wapiti", "nikto"],
+        "minimum_evidence": {
+            "type": "injection_scan_result",
+            "description": "At least one injection vector tested against parameterized endpoint; result recorded",
+            "fields_required": ["injection_type", "endpoint", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_parameterized_targets",
+            "skip_requires_reason": True,
+        },
+    },
+    "P13": {
+        "phase_id": "P13",
+        "name": "SSRF & Open Redirect",
+        "required_skills": ["vuln-ssrf-redirect"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["interactsh-client"],
+        "minimum_evidence": {
+            "type": "ssrf_scan_result",
+            "description": "SSRF and open redirect templates executed; interactions captured if any",
+            "fields_required": ["template_type", "endpoint", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_parameterized_targets",
+            "skip_requires_reason": True,
+        },
+    },
+    "P14": {
+        "phase_id": "P14",
+        "name": "Authentication Bypass & Brute Force",
+        "required_skills": ["vuln-auth-bypass"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["hydra", "medusa", "jwt_tool", "crackmapexec"],
+        "minimum_evidence": {
+            "type": "auth_test_result",
+            "description": "Authentication endpoints probed for bypass; credential test results recorded",
+            "fields_required": ["endpoint", "auth_method", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_auth_endpoints",
+            "skip_requires_reason": True,
+        },
+    },
+    "P15": {
+        "phase_id": "P15",
+        "name": "Directory & File Enumeration",
+        "required_skills": ["vuln-directory-enum"],
+        "required_tools": ["ffuf"],
+        "optional_tools": ["ffuf-files", "ffuf-params", "gobuster", "feroxbuster", "dirsearch", "wfuzz"],
+        "minimum_evidence": {
+            "type": "directory_enum_result",
+            "description": "Directory/file fuzzing completed; discovered paths and status codes recorded",
+            "fields_required": ["path", "status_code", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_web_targets",
+            "skip_requires_reason": True,
+        },
+    },
+    "P16": {
+        "phase_id": "P16",
+        "name": "API Security (REST/GraphQL/Rate Limit)",
+        "required_skills": ["vuln-api-graphql"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["arjun", "wapiti", "ffuf-params", "ffuf-post"],
+        "minimum_evidence": {
+            "type": "api_scan_result",
+            "description": "API endpoints tested for auth bypass, rate limiting, and injection; results recorded",
+            "fields_required": ["endpoint", "api_type", "test_result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_api_endpoints",
+            "skip_requires_reason": True,
+        },
+    },
+    "P17": {
+        "phase_id": "P17",
+        "name": "Upload & WebShell Bypass",
+        "required_skills": ["vuln-nuclei-cve"],
+        "required_tools": ["nuclei"],
+        "optional_tools": [],
+        "minimum_evidence": {
+            "type": "upload_test_result",
+            "description": "Upload endpoints probed; file upload bypass templates executed",
+            "fields_required": ["endpoint", "test_type", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "mark_no_upload_found",
+            "skip_condition": "no_upload_endpoints",
+            "skip_requires_reason": True,
+        },
+    },
+    "P18": {
+        "phase_id": "P18",
+        "name": "SSL/TLS Certificate, Protocol & Cipher Audit",
+        "required_skills": ["vuln-ssl-tls"],
+        "required_tools": ["sslscan"],
+        "optional_tools": ["testssl", "nmap", "curl-headers"],
+        "minimum_evidence": {
+            "type": "ssl_audit_result",
+            "description": "SSL/TLS protocol version, cipher suite, and certificate validity recorded",
+            "fields_required": ["protocol_version", "cipher_suite", "cert_valid", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 2,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_https_service",
+            "skip_requires_reason": True,
+        },
+    },
+    "P19": {
+        "phase_id": "P19",
+        "name": "IDOR & Access Control Flaws",
+        "required_skills": ["vuln-idor-access-control"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["katana", "arjun", "curl-headers"],
+        "minimum_evidence": {
+            "type": "idor_test_result",
+            "description": "Object reference endpoints probed for unauthorized access; results recorded",
+            "fields_required": ["endpoint", "object_id_type", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_object_endpoints",
+            "skip_requires_reason": True,
+        },
+    },
+    "P20": {
+        "phase_id": "P20",
+        "name": "CMS-Specific Scan (WP/Joomla/Drupal)",
+        "required_skills": ["tech-cms-fingerprint"],
+        "required_tools": ["nuclei"],
+        "optional_tools": ["wpscan", "nikto"],
+        "minimum_evidence": {
+            "type": "cms_scan_result",
+            "description": "CMS detection attempted; version and plugin scan completed if CMS found",
+            "fields_required": ["cms_detected", "cms_type", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_cms_detected",
+            "skip_requires_reason": True,
+        },
+    },
+    "P21": {
+        "phase_id": "P21",
+        "name": "Secret & Credential Exposure",
+        "required_skills": ["code-secrets-sast"],
+        "required_tools": ["trufflehog"],
+        "optional_tools": ["gitleaks", "semgrep", "bandit"],
+        "minimum_evidence": {
+            "type": "secrets_scan_result",
+            "description": "Public repositories and exposed JS/config files scanned for secrets",
+            "fields_required": ["secret_type", "location", "result", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_code_repository_access",
+            "skip_requires_reason": True,
+        },
+    },
+    "P22": {
+        "phase_id": "P22",
+        "name": "Dependency & Supply Chain Risk",
+        "required_skills": ["code-supply-chain-deps"],
+        "required_tools": ["trivy"],
+        "optional_tools": ["retire", "semgrep", "bandit", "gitleaks"],
+        "minimum_evidence": {
+            "type": "dependency_scan_result",
+            "description": "Dependencies scanned for known CVEs and supply chain risks; results recorded",
+            "fields_required": ["dependency", "cve", "risk_level", "source_tool"],
+        },
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": True,
+        },
+        "retry_policy": {
+            "max_retries": 1,
+            "on_failure": "try_optional_tools",
+            "skip_condition": "no_code_repository_access",
+            "skip_requires_reason": True,
+        },
+    },
+}
+
+
 def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
     return {
         "mode": "autonomous-supervisor",
