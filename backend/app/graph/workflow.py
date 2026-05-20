@@ -49,7 +49,6 @@ from app.graph.tool_parsers import (
     _extract_amass_findings,
     _extract_sublist3r_findings,
     _extract_dnsenum_findings,
-    _extract_massdns_findings,
     _extract_subjack_findings,
     _extract_ffuf_findings,
     _extract_gobuster_findings,
@@ -111,10 +110,10 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("findomain", "findomain"),
     ("assetfinder", "assetfinder"),
     ("amass", "amass"),
-    ("massdns", "massdns"),
     ("shuffledns", "shuffledns"),
-    ("chaos", "chaos"),
     ("dnsx", "dnsx"),
+    ("dnsrecon", "dnsrecon-brt"),
+    ("dnsenum", "dnsenum"),
     ("hakrawler", "hakrawler"),
     ("gau", "gau"),
     ("waybackurls", "waybackurls"),
@@ -123,7 +122,6 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("shodan", "shodan-cli"),
     ("theharvester", "theHarvester"),
     ("h8mail", "h8mail"),
-    ("metagoofil", "metagoofil"),
     # Serviços
     ("nmap", "nmap"),
     ("naabu", "naabu"),
@@ -148,8 +146,6 @@ STEP_TOOL_MAP: list[tuple[str, str]] = [
     ("gitleaks", "gitleaks"),
     ("trufflehog", "trufflehog"),
     ("retire", "retire"),
-    ("eslint", "eslint"),
-    ("jshint", "jshint"),
     # WAF
     ("wafw00f", "wafw00f"),
     # Vuln Web
@@ -242,12 +238,102 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["mission_items"] = mission_items
                 sd["node_history"] = snapshot_node_history
                 sd["current_node"] = current_node
+                sd["capability_ledger"] = dict(state.get("capability_ledger") or {})
+                sd["detected_tech_stack"] = list(state.get("detected_tech_stack") or [])
+                sd["kill_chain_stage"] = str(state.get("kill_chain_stage") or "RECONNAISSANCE")
+                sd["pentest_phase_index"] = int(state.get("pentest_phase_index", 0) or 0)
+                sd["pentest_hypotheses"] = list(state.get("pentest_hypotheses") or [])[:30]
+                sd["recon_graph"] = dict(state.get("recon_graph") or {})
+                sd["recon_skill_recommendations"] = list(state.get("recon_skill_recommendations") or [])[:20]
+                sd["recon_reanalyze_queue"] = list(state.get("recon_reanalyze_queue") or [])[:50]
+                sd["recon_coverage"] = dict(state.get("recon_coverage") or {})
+                sd["recon_coverage_gaps"] = list(state.get("recon_coverage_gaps") or [])
                 job.state_data = sd
+                # Persist tech_stack to its dedicated column too (queryable by GIN index).
+                try:
+                    job.tech_stack = list(state.get("detected_tech_stack") or [])
+                except Exception:
+                    pass
                 _db.commit()
         finally:
             _db.close()
     except Exception:
         logger.exception("Falha ao sincronizar step no banco")
+
+
+def _refresh_tech_stack(state: AgentState) -> bool:
+    """Re-detecta a fingerprint do ambiente e persiste no estado.
+
+    Retorna True quando a assinatura mudou em relacao a iteracao anterior,
+    sinalizando ao supervisor que deve reavaliar active_skills.
+    """
+    try:
+        from app.services.tech_stack_detector import detect_tech_stack, tech_stack_signature
+
+        stack = detect_tech_stack(
+            findings=list(state.get("vulnerabilidades_encontradas") or []),
+            target=str(state.get("target") or ""),
+        )
+    except Exception as exc:
+        logger.warning("tech_stack detection failed: %s", exc)
+        return False
+
+    signature = tech_stack_signature(stack)
+    previous = str(state.get("tech_stack_signature") or "")
+    state["detected_tech_stack"] = stack
+    state["tech_stack_signature"] = signature
+
+    # ── Hypothesis engine: always refresh after any state change in tech
+    # stack or findings. Idempotent: same evidence -> same hypothesis ids.
+    try:
+        from app.services.hypothesis_engine import extract_pentest_hypotheses
+        hypotheses = extract_pentest_hypotheses(dict(state))
+        prev_ids = {str(h.get("id") or "") for h in (state.get("pentest_hypotheses") or [])}
+        new_ids = {str(h.get("id") or "") for h in hypotheses}
+        state["pentest_hypotheses"] = hypotheses
+        added = new_ids - prev_ids
+        if added:
+            state.setdefault("logs_terminais", []).append(
+                f"[hypothesis-engine] +{len(added)} novas hipoteses "
+                f"(total={len(hypotheses)}, families={sorted({h.get('family') for h in hypotheses})})"
+            )
+    except Exception as exc:
+        logger.warning("hypothesis engine failed: %s", exc)
+
+    if signature != previous:
+        state.setdefault("logs_terminais", []).append(
+            f"[tech-stack] detectado={','.join(stack) or '-'} (mudanca de fingerprint)"
+        )
+        return True
+    return False
+
+
+def _refresh_recon_graph(
+    state: AgentState,
+    *,
+    capability: str,
+    target: str,
+    tools: list[str],
+    findings: list[dict[str, Any]],
+    ports: list[int],
+    assets: list[str],
+    port_evidence: dict[int, dict[str, Any]],
+) -> None:
+    try:
+        from app.services.recon_graph_service import update_recon_graph
+
+        update_recon_graph(
+            state,
+            capability=capability,
+            target=target,
+            tools=tools,
+            findings=findings,
+            ports=ports,
+            assets=assets,
+            port_evidence=port_evidence,
+        )
+    except Exception as exc:
+        logger.warning("recon graph refresh failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1110,18 +1196,36 @@ def _run_tools_and_collect(
     skill_context = dict(skill_context or {})
     skill_id = str(skill_context.get("skill_id") or "").strip()
 
-    # 1) Skip tools already executed (in-state or in-DB)
+    # 1) Skip tools already executed (in-state) — dedup key is
+    # `{phase_id}|{target}|{tool}`. The SAME tool legitimately runs in
+    # multiple pentest phases for DIFFERENT views (httpx in P02 port
+    # probe vs P05 header fingerprint; nuclei in P09/P11/P13/...; nmap in
+    # P02/P18). Deduping globally by `tool|target` wrongly skipped the
+    # tool in every later phase. The phase id scopes the dedup so the
+    # tool runs once PER PHASE, never 3x within one phase.
     pending_tools: list[str] = []
     scan_id = state.get("scan_id")
+    try:
+        from app.graph.mission import PENTEST_PHASES as _PP
+        _idx = int(state.get("pentest_phase_index", 0) or 0)
+        _phase_id = str(_PP[_idx]["id"]) if 0 <= _idx < len(_PP) else "P00"
+    except Exception:
+        _phase_id = "P00"
+    runs_so_far = state.get("executed_tool_runs", []) or []
     for tool in tools:
-        run_id = f"{step_name}|{scan_target}|{tool}".lower()
-        if run_id in state.get("executed_tool_runs", []):
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_executed_for_step")
-            continue
-        if scan_id and _has_tool_run_in_db(scan_id, tool, scan_target):
-            state["logs_terminais"].append(f"{log_prefix}: tool={tool} skipped=already_in_database")
-            state["executed_tool_runs"].append(run_id)
-            continue
+        run_key = f"{_phase_id}|{scan_target}|{tool}".lower()
+        runtime_meta = dict((state.get("tool_runtime") or {}).get(tool) or (state.get("tool_runtime") or {}).get(str(tool).lower()) or {})
+        tool_done = int(runtime_meta.get("success", 0) or 0) >= 1 or int(runtime_meta.get("skipped", 0) or 0) >= 1
+        retry_exhausted = int(runtime_meta.get("attempts", 0) or 0) >= 2
+        if run_key in (r.lower() for r in runs_so_far):
+            if tool_done or retry_exhausted:
+                state["logs_terminais"].append(
+                    f"{log_prefix}: tool={tool} skipped=already_executed_in_{_phase_id}"
+                )
+                continue
+            state["logs_terminais"].append(
+                f"{log_prefix}: tool={tool} retrying_after_failure_in_{_phase_id}"
+            )
         pending_tools.append(tool)
 
     if not pending_tools:
@@ -1132,8 +1236,25 @@ def _run_tools_and_collect(
         f"{log_prefix}: dispatching {len(pending_tools)} tools in parallel: {', '.join(pending_tools)}"
     )
 
+    # Per-tool extra_args derived from the selected technique. The supervisor
+    # may have populated tactic.extra_args (e.g. `--dbms=mssql` for sqlmap on
+    # ASP/MSSQL stacks) via the tech-stack auto-lock. We thread that down to
+    # the Kali runner so the materialised command reflects the strategy.
+    technique_extra_args_by_tool: dict[str, list[str]] = {}
+    raw_tech_args = (skill_context.get("technique") or {}).get("extra_args") or {}
+    if isinstance(raw_tech_args, dict):
+        for key, value in raw_tech_args.items():
+            if isinstance(value, list):
+                technique_extra_args_by_tool[str(key).strip().lower()] = [str(v) for v in value]
+    contract_extra_args = (skill_context.get("skill_contract") or {}).get("extra_args") or {}
+    if isinstance(contract_extra_args, dict):
+        for key, value in contract_extra_args.items():
+            if isinstance(value, list):
+                technique_extra_args_by_tool.setdefault(str(key).strip().lower(), [str(v) for v in value])
+
     def _dispatch_one(tool: str) -> tuple[str, dict, float]:
         exec_start = perf_counter()
+        tool_args = technique_extra_args_by_tool.get(str(tool).strip().lower(), [])
         try:
             r = execute_tool_with_workers(
                 tool,
@@ -1145,7 +1266,10 @@ def _run_tools_and_collect(
                 technique=dict(skill_context.get("technique") or {}),
                 evidence_required=list(skill_context.get("evidence_required") or []),
                 constraints=list(skill_context.get("constraints") or []),
+                worker_rules=dict(skill_context.get("worker_rules") or {}),
+                sub_agent_plan=list(skill_context.get("sub_agent_plan") or []),
                 playbook=str(skill_context.get("playbook_title") or ""),
+                extra_args=tool_args,
             )
         except Exception as exc:
             r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}
@@ -1163,7 +1287,10 @@ def _run_tools_and_collect(
 
     # 3) Serial post-processing — mutates state safely
     for tool, result, exec_time in completions:
-        run_id = f"{step_name}|{scan_target}|{tool}".lower()
+        # Phase-scoped run id — matches the dedup key above so the SAME
+        # tool can run once per phase (P02 httpx vs P05 httpx) but not
+        # twice within the same phase.
+        run_id = f"{_phase_id}|{scan_target}|{tool}".lower()
         _sync_step_to_db(state, f"{step_name} · {tool}")
         # Update phase_ledger for current pentest phase
         current_phase_id = str(state.get("current_pentest_phase_id") or "")
@@ -1285,6 +1412,12 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(f"{log_prefix}: tool={tool} stderr={stderr_preview}")
 
         tool_specific_findings = _extract_tool_output_findings(result, step_name, scan_target)
+        # Backend-local tools (code-analyzer) ship findings inside the dict
+        # directly — bypass the regex parsers since the analyzer already
+        # produced structured items via convert_to_findings().
+        extracted_local = list(result.get("findings_extracted") or [])
+        if extracted_local:
+            tool_specific_findings = list(tool_specific_findings or []) + extracted_local
         if tool_specific_findings:
             all_findings.extend(tool_specific_findings)
             _append_observation(
@@ -1909,7 +2042,11 @@ def initial_state(
         discovered_ports=[],
         max_skills=5,
     )
-    max_iterations = 18
+    # Exhaustive sweep: each stage runs EVERY applicable tool before
+    # advancing (recon ~6 batches, vuln-analysis ~3, exploitation ~4),
+    # plus governance/executive. 18 was too tight and forced premature
+    # finalize while RECON still had subdomain-enum pending.
+    max_iterations = 45
     mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
     return {
         "trace_id": trace_id,
@@ -1965,6 +2102,7 @@ def initial_state(
             "status_values": ["hypothesis", "unverified", "verified"],
         },
         "completed_capabilities": [],
+        "capability_ledger": {},
         "loop_iteration": 0,
         "max_iterations": max_iterations,
         "objective_met": False,
@@ -1987,6 +2125,9 @@ def initial_state(
         "capability_context": {},
         "tool_selection_contract": {},
         "tool_execution_results": [],
+        "pentest_strategy": {},
+        "pending_pentest_tactic": {},
+        "pentest_tactics_completed": [],
         "delegated_tasks": [],
         "delegation_log": [],
         "autonomy_notes": [],
@@ -2002,6 +2143,16 @@ def initial_state(
         },
         "tool_runtime": {},
         "validation_backlog": [],
+        "detected_tech_stack": [],
+        "tech_stack_signature": "",
+        "kill_chain_stage": "RECONNAISSANCE",
+        "pentest_phase_index": 0,
+        "pentest_hypotheses": [],
+        "recon_graph": {},
+        "recon_skill_recommendations": [],
+        "recon_reanalyze_queue": [],
+        "recon_coverage": {},
+        "recon_coverage_gaps": [],
         # Rating fields (preenchidos pelos agents 4 e 5)
         "asset_fingerprints": {},
         "fair_decomposition": {},

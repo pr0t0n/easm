@@ -112,23 +112,17 @@ export default function WorkerLogsPage() {
   const isRunning = scanInfo?.status === "running" || scanInfo?.status === "retrying";
 
   const tabBtn = (id, label, count) => (
-    <button
-      onClick={() => setActiveTab(id)}
-      className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-        activeTab === id
-          ? "bg-[#1A365D] text-white"
-          : "border border-slate-700 text-slate-400 hover:text-slate-200"
-      }`}
-    >
-      {label}
-      {count != null && (
-        <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300">{count}</span>
-      )}
+    <button onClick={() => setActiveTab(id)} className={`filter${activeTab === id ? " active" : ""}`}>
+      {label}{count != null && <span style={{ marginLeft: 6, opacity: 0.7 }}>· {count}</span>}
     </button>
   );
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
+    <main className="dpage space-y-4">
+      <div className="page-intro">
+        <h2>Worker Logs — execução detalhada.</h2>
+        <div className="sub">stdout/stderr por ferramenta por scan · verbosidade máxima</div>
+      </div>
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <section className="panel p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">

@@ -17,7 +17,7 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
-    ScanAuditLog,
+    ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -27,9 +27,11 @@ from app.services.policy_service import is_target_allowed
 from app.services.risk_service import (
     build_priority_reason,
     build_rating_timeline,
+    classify_detection_outcome,
     compute_age_metrics,
     compute_continuous_rating,
     compute_fair_metrics,
+    compute_framework_scores,
     get_methodology_changelog,
     compute_remediation_velocity,
     compute_posture_deviation,
@@ -40,6 +42,8 @@ from app.services.orchestrator import TemporalTracker
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_unit
 from app.workers.worker_groups import get_worker_groups
+from app.services.adversary_technique_catalog import ADVERSARY_TECHNIQUE_CATALOG
+from app.services.tool_context_registry import dashboard_bas_variables
 
 
 router = APIRouter(prefix="/api", tags=["scans"])
@@ -1597,7 +1601,30 @@ def _source_group_from_details(details: dict) -> str:
         return "osint"
     if node in {"vuln", "fuzzing", "api", "code_js"} or worker in {"analise_vulnerabilidade", "vuln"}:
         return "vuln"
-    if tool in {"nikto", "nmap-vulscan", "vulscan", "sslscan", "shcheck", "curl-headers", "wafw00f"}:
+    if tool in {
+        "nikto",
+        "nuclei",
+        "nmap-vulscan",
+        "nmap-http-enum",
+        "nmap-ssl-vuln",
+        "nmap-smb-vuln",
+        "nmap-ssh-audit",
+        "vulscan",
+        "sslscan",
+        "testssl",
+        "shcheck",
+        "curl-headers",
+        "wafw00f",
+        "sqlmap",
+        "dalfox",
+        "wapiti",
+        "wpscan",
+        "hydra",
+        "medusa",
+        "jwt_tool",
+        "ffuf-post",
+        "ffuf-values",
+    }:
         return "vuln"
     return "other"
 
@@ -1608,6 +1635,18 @@ def _is_vulnerability_row(row: dict) -> bool:
     if source_group == "vuln":
         return True
     if severity in {"critical", "high", "medium"}:
+        return True
+    category = str(row.get("category") or "").strip()
+    if source_group != "osint" and category in {
+        "Application Security",
+        "Software Patching",
+        "Web Encryption",
+        "Network Filtering",
+        "Authentication",
+        "Authorization",
+        "Data Exposure",
+        "System Hosting",
+    }:
         return True
     return False
 
@@ -1871,6 +1910,264 @@ def _consolidate_vulnerability_table(rows: list[dict]) -> list[dict]:
         result.append(merged)
 
     return result
+
+
+def _flatten_expected_telemetry(expected_telemetry: Any) -> list[dict[str, Any]]:
+    if not isinstance(expected_telemetry, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in expected_telemetry:
+        if not isinstance(item, dict):
+            continue
+        source = _sanitize_text(item.get("source") or "")
+        signals = item.get("signals") if isinstance(item.get("signals"), list) else []
+        out.append(
+            {
+                "source": source,
+                "signals": [_sanitize_text(str(signal)) for signal in signals if _sanitize_text(str(signal))],
+            }
+        )
+    return out
+
+
+def _bas_detection_status_rank(status_value: str) -> int:
+    return {
+        "detected": 4,
+        "partial": 3,
+        "missed": 2,
+        "unknown": 1,
+    }.get(str(status_value or "unknown").strip().lower(), 1)
+
+
+def _merge_bas_detection_pack(current: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    if not current:
+        return dict(candidate)
+    current_status = str(current.get("detection_status") or "unknown").lower()
+    candidate_status = str(candidate.get("detection_status") or "unknown").lower()
+    if _bas_detection_status_rank(candidate_status) > _bas_detection_status_rank(current_status):
+        merged = {**current, **candidate}
+    else:
+        merged = {**candidate, **current}
+    for key in ["telemetry_observed", "expected_telemetry", "defensive_success_criteria"]:
+        values: list[Any] = []
+        for value in [current.get(key), candidate.get(key)]:
+            if isinstance(value, list):
+                values.extend(value)
+        if values:
+            # Dedupe complex values by JSON shape.
+            seen: set[str] = set()
+            unique: list[Any] = []
+            for value in values:
+                marker = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+                if marker not in seen:
+                    seen.add(marker)
+                    unique.append(value)
+            merged[key] = unique
+    return merged
+
+
+def _build_bas_detection_validation_report(
+    *,
+    job: ScanJob,
+    trace_events: list[AgentTraceEvent],
+    vulnerability_rows: list[dict],
+) -> dict[str, Any]:
+    """Build BAS/Purple Team report data from agent traces.
+
+    This is intentionally conservative: without defensive telemetry connectors,
+    detection_status remains "unknown". The report should show the expected
+    control contract and the missing proof instead of implying detection.
+    """
+    techniques_by_id: dict[str, dict[str, Any]] = {}
+    uncatalogued_events = 0
+
+    for event in trace_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        technique = payload.get("adversary_technique")
+        if not isinstance(technique, dict) or not str(technique.get("id") or "").strip():
+            uncatalogued_events += 1
+            continue
+
+        technique_id = _sanitize_text(technique.get("id") or "")
+        record = techniques_by_id.setdefault(
+            technique_id,
+            {
+                "technique_id": technique_id,
+                "name": _sanitize_text(technique.get("name") or technique_id),
+                "description": _sanitize_multiline_text(technique.get("description") or ""),
+                "kill_chain_stage": _sanitize_text(technique.get("kill_chain_stage") or ""),
+                "framework_refs": technique.get("framework_refs") if isinstance(technique.get("framework_refs"), dict) else {},
+                "app_phases": list(technique.get("app_phases") or []),
+                "skills": set(),
+                "tools": set(),
+                "candidate_tools": set(str(tool) for tool in list(technique.get("candidate_tools") or []) if str(tool or "").strip()),
+                "capabilities": set(),
+                "iterations": set(),
+                "events": [],
+                "control_objectives": [],
+                "expected_telemetry": [],
+                "safe_execution": technique.get("safe_execution") if isinstance(technique.get("safe_execution"), dict) else {},
+                "detection_proof_pack": {},
+                "affected_findings": [],
+            },
+        )
+
+        if event.skill_id:
+            record["skills"].add(str(event.skill_id))
+        if event.tool_name:
+            record["tools"].add(str(event.tool_name))
+        if event.capability:
+            record["capabilities"].add(str(event.capability))
+        record["iterations"].add(int(event.iteration or 0))
+        for tool in list(payload.get("selected_tools_all") or payload.get("tools") or []):
+            if str(tool or "").strip():
+                record["tools"].add(str(tool).strip())
+        for item in list(payload.get("control_objectives") or technique.get("control_objectives") or []):
+            text_value = _sanitize_multiline_text(str(item))
+            if text_value and text_value not in record["control_objectives"]:
+                record["control_objectives"].append(text_value)
+        for item in _flatten_expected_telemetry(payload.get("expected_telemetry") or technique.get("expected_telemetry")):
+            marker = json.dumps(item, ensure_ascii=True, sort_keys=True)
+            existing = {json.dumps(x, ensure_ascii=True, sort_keys=True) for x in record["expected_telemetry"]}
+            if marker not in existing:
+                record["expected_telemetry"].append(item)
+        proof_pack = payload.get("detection_proof_pack")
+        if isinstance(proof_pack, dict):
+            record["detection_proof_pack"] = _merge_bas_detection_pack(record.get("detection_proof_pack") or {}, proof_pack)
+        record["events"].append(
+            {
+                "event_id": event.id,
+                "event_type": _sanitize_text(event.event_type or ""),
+                "status": _sanitize_text(event.status or ""),
+                "from_node": _sanitize_text(event.from_node or ""),
+                "to_node": _sanitize_text(event.to_node or ""),
+                "skill_id": _sanitize_text(event.skill_id or ""),
+                "tool_name": _sanitize_text(event.tool_name or ""),
+                "capability": _sanitize_text(event.capability or ""),
+                "iteration": int(event.iteration or 0),
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+            }
+        )
+
+    for record in techniques_by_id.values():
+        candidate_tools = {str(tool).strip().lower() for tool in record.get("candidate_tools") or set()}
+        affected: list[dict[str, Any]] = []
+        for row in vulnerability_rows:
+            row_tool = str(row.get("tool") or "").strip().lower()
+            if row_tool and row_tool in candidate_tools:
+                affected.append(
+                    {
+                        "id": row.get("id"),
+                        "finding_id": row.get("finding_id"),
+                        "name": row.get("name"),
+                        "severity": row.get("severity"),
+                        "target": row.get("target"),
+                        "tool": row.get("tool"),
+                        "validation_status": row.get("validation_status"),
+                    }
+                )
+        record["affected_findings"] = affected[:25]
+
+    technique_rows: list[dict[str, Any]] = []
+    status_counts = {"detected": 0, "partial": 0, "missed": 0, "unknown": 0}
+    for record in techniques_by_id.values():
+        proof_pack = dict(record.get("detection_proof_pack") or {})
+        detection_status = str(proof_pack.get("detection_status") or "unknown").strip().lower()
+        if detection_status not in status_counts:
+            detection_status = "unknown"
+        status_counts[detection_status] += 1
+        expected_sources = [
+            item.get("source")
+            for item in list(record.get("expected_telemetry") or [])
+            if isinstance(item, dict) and item.get("source")
+        ]
+        technique_rows.append(
+            {
+                "technique_id": record["technique_id"],
+                "name": record["name"],
+                "description": record["description"],
+                "kill_chain_stage": record["kill_chain_stage"],
+                "framework_refs": record["framework_refs"],
+                "app_phases": record["app_phases"],
+                "skills": sorted(record["skills"]),
+                "tools": sorted(record["tools"]),
+                "candidate_tools": sorted(record["candidate_tools"]),
+                "capabilities": sorted(record["capabilities"]),
+                "iterations": sorted(record["iterations"]),
+                "control_objectives": record["control_objectives"],
+                "expected_telemetry": record["expected_telemetry"],
+                "expected_sources": list(dict.fromkeys(expected_sources)),
+                "detection_status": detection_status,
+                "detection_proof_pack": {
+                    "technique_id": proof_pack.get("technique_id") or record["technique_id"],
+                    "detection_status": detection_status,
+                    "correlation_id": _sanitize_text(proof_pack.get("correlation_id") or ""),
+                    "alert_id": _sanitize_text(proof_pack.get("alert_id") or ""),
+                    "alert_source": _sanitize_text(proof_pack.get("alert_source") or ""),
+                    "detection_latency_seconds": proof_pack.get("detection_latency_seconds"),
+                    "rule_name": _sanitize_text(proof_pack.get("rule_name") or ""),
+                    "telemetry_observed": proof_pack.get("telemetry_observed") if isinstance(proof_pack.get("telemetry_observed"), list) else [],
+                    "control_gap": _sanitize_multiline_text(
+                        proof_pack.get("control_gap")
+                        or ("Aguardando integração/evidência defensiva para confirmar detecção." if detection_status == "unknown" else "")
+                    ),
+                    "defensive_success_criteria": proof_pack.get("defensive_success_criteria") if isinstance(proof_pack.get("defensive_success_criteria"), list) else [],
+                },
+                "safe_execution": record["safe_execution"],
+                "affected_findings": record["affected_findings"],
+                "events": record["events"][:25],
+                "event_count": len(record["events"]),
+            }
+        )
+
+    technique_rows.sort(
+        key=lambda item: (
+            str(item.get("kill_chain_stage") or ""),
+            str(item.get("technique_id") or ""),
+        )
+    )
+
+    techniques_exercised = len(technique_rows)
+    detection_ready = status_counts["detected"] + status_counts["partial"] + status_counts["missed"]
+    telemetry_sources = sorted(
+        {
+            source
+            for row in technique_rows
+            for source in list(row.get("expected_sources") or [])
+            if str(source or "").strip()
+        }
+    )
+    return {
+        "enabled": True,
+        "mode": "BAS / Purple Team Detection Validation",
+        "trace_id": (job.state_data or {}).get("trace_id") or f"scan-{job.id}",
+        "summary": {
+            "techniques_exercised": techniques_exercised,
+            "events_with_bas_context": sum(int(row.get("event_count") or 0) for row in technique_rows),
+            "events_without_bas_context": uncatalogued_events,
+            "detection_ready_techniques": detection_ready,
+            "pending_defensive_evidence": status_counts["unknown"],
+            "status_counts": status_counts,
+            "expected_telemetry_sources": telemetry_sources,
+            "coverage_note": (
+                "Status defensivo permanece unknown até que conectores SIEM/WAF/EDR/CSPM "
+                "ou evidência manual preencham detection_proof_pack."
+            ),
+        },
+        "techniques": technique_rows,
+        "control_matrix": [
+            {
+                "technique_id": row.get("technique_id"),
+                "technique": row.get("name"),
+                "stage": row.get("kill_chain_stage"),
+                "controls": row.get("control_objectives") or [],
+                "expected_sources": row.get("expected_sources") or [],
+                "detection_status": row.get("detection_status"),
+                "control_gap": (row.get("detection_proof_pack") or {}).get("control_gap") or "",
+            }
+            for row in technique_rows
+        ],
+    }
 
 
 @router.post("/scans", response_model=ScanResponse)
@@ -2261,11 +2558,18 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         synchronize_session=False,
     )
 
-    # 3) ExecutedToolRun referencia scan_jobs sem cascade ORM; remover explicitamente.
+    # 3) ExecutedToolRun, traces e scores referenciam scan_jobs sem cascade ORM;
+    #    remover explicitamente para evitar ForeignKeyViolation no DELETE do scan.
     db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == scan_id).delete(
         synchronize_session=False,
     )
     db.query(ScanAuditLog).filter(ScanAuditLog.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(SkillScore).filter(SkillScore.scan_id == scan_id).delete(
         synchronize_session=False,
     )
 
@@ -3022,6 +3326,8 @@ def list_findings_paginated(
     severity: str | None = None,
     status_filter: str = "all",
     target: str | None = None,
+    scan_id: int | None = Query(default=None, ge=1),
+    sort: str = Query(default="severity"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=50000),
     db: Session = Depends(get_db),
@@ -3030,20 +3336,60 @@ def list_findings_paginated(
     query = _authorized_finding_query(db, current_user)
 
     if severity:
-        query = query.filter(Finding.severity == severity.lower())
+        severity_values = [
+            item.strip().lower()
+            for item in re.split(r"[,;\s]+", severity)
+            if item.strip().lower() in {"critical", "high", "medium", "low", "info"}
+        ]
+        if severity_values:
+            query = query.filter(Finding.severity.in_(severity_values))
     if target:
         query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        query = query.filter(Finding.scan_job_id == scan_id)
 
     lifecycle_query = _authorized_finding_query(db, current_user)
     if target:
         lifecycle_query = lifecycle_query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        lifecycle_query = lifecycle_query.filter(Finding.scan_job_id == scan_id)
     lifecycle_rows = lifecycle_query.order_by(Finding.created_at.desc()).all()
     lifecycle_status = _build_finding_lifecycle_status_map(lifecycle_rows)
 
-    rows = query.order_by(Finding.created_at.desc()).all()
+    rows = query.all()
     normalized_status = status_filter.strip().lower()
     if normalized_status in {"open", "closed", "false_positive"}:
         rows = [finding for finding in rows if lifecycle_status.get(finding.id, "open") == normalized_status]
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+    def _created_ts(finding: Finding) -> float:
+        try:
+            return float(finding.created_at.timestamp()) if finding.created_at else 0.0
+        except Exception:
+            return 0.0
+
+    normalized_sort = str(sort or "severity").strip().lower()
+    if normalized_sort == "date_asc":
+        rows.sort(key=lambda finding: _created_ts(finding))
+    elif normalized_sort == "date_desc":
+        rows.sort(key=lambda finding: -_created_ts(finding))
+    elif normalized_sort == "scan_asc":
+        rows.sort(key=lambda finding: (int(finding.scan_job_id or 0), -_created_ts(finding)))
+    elif normalized_sort == "scan_desc":
+        rows.sort(key=lambda finding: (-int(finding.scan_job_id or 0), -_created_ts(finding)))
+    elif normalized_sort == "target":
+        rows.sort(key=lambda finding: (str(finding.scan_job.target_query if finding.scan_job else "").lower(), -_created_ts(finding)))
+    elif normalized_sort == "tool":
+        rows.sort(key=lambda finding: (str(finding.tool or "").lower(), severity_rank.get(str(finding.severity or "info").lower(), 9), -_created_ts(finding)))
+    else:
+        rows.sort(
+            key=lambda finding: (
+                severity_rank.get(str(finding.severity or "info").lower(), 9),
+                -float(finding.risk_score or 0),
+                -_created_ts(finding),
+            )
+        )
 
     total = len(rows)
     rows = rows[offset:offset + limit]
@@ -3083,6 +3429,8 @@ def list_findings_paginated(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "sort": normalized_sort,
+        "scan_id": scan_id,
     }
 
 
@@ -3303,6 +3651,12 @@ def scan_report(
         findings = [f for f in findings if _matches_selected_targets(_resolve_finding_target_tokens(f))]
 
     scan_logs = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).order_by(ScanLog.created_at.asc()).all()
+    trace_events = (
+        db.query(AgentTraceEvent)
+        .filter(AgentTraceEvent.scan_id == scan_id)
+        .order_by(AgentTraceEvent.id.asc())
+        .all()
+    )
     previous_scan = (
         db.query(ScanJob)
         .filter(
@@ -3371,25 +3725,37 @@ def scan_report(
         target_value = technical.get("full_url") or _sanitize_text(details.get("url") or details.get("target") or job.target_query)
         report_id = f"F-{finding.id}"
         signature = _finding_signature(normalized_title, sev, target_value)
+        source_context = {
+            **details,
+            "tool": finding.tool or details.get("tool"),
+        }
+        adversary_technique_details = details.get("adversary_technique") if isinstance(details.get("adversary_technique"), dict) else {}
+        detection_proof_pack_details = details.get("detection_proof_pack") if isinstance(details.get("detection_proof_pack"), dict) else {}
         vulnerability_rows.append(
             {
                 "index": len(vulnerability_rows) + 1,
                 "signature": signature,
-            "id": report_id,
+                "id": report_id,
+                "finding_id": finding.id,
+                "scan_job_id": finding.scan_job_id,
                 "cve": _sanitize_text(finding.cve or ""),
                 "target": target_value,
                 "full_url": technical.get("full_url") or target_value,
-            "endpoint": technical.get("endpoint") or "/",
-            "http_method": technical.get("http_method") or "GET",
-            "parameter": technical.get("parameter") or "-",
+                "endpoint": technical.get("endpoint") or "/",
+                "http_method": technical.get("http_method") or "GET",
+                "parameter": technical.get("parameter") or "-",
                 "name": normalized_title,
                 "problem": normalized_title,
                 "service": _sanitize_text(technical.get("service") or "-"),
                 "version": _sanitize_text(technical.get("version") or ""),
                 "cvss": details.get("cvss_score") or details.get("cvss") or finding.risk_score or "-",
+                "risk_score": finding.risk_score,
+                "confidence_score": finding.confidence_score,
                 "risk_text": _risk_text(sev, finding.confidence_score),
                 "severity": sev,
                 "category": category,
+                "created_at": finding.created_at.isoformat() if finding.created_at else None,
+                "latest_seen_at": finding.created_at.isoformat() if finding.created_at else None,
                 "header_name": _sanitize_text(details.get("header_name") or ""),
                 "header_issue": _sanitize_text(details.get("header_issue") or ""),
                 "owasp": _sanitize_text(framework_ctx.get("owasp") or "-"),
@@ -3415,6 +3781,13 @@ def scan_report(
                 "proof_pack_required": bool(details.get("proof_pack_required")),
                 "validation_status": _sanitize_text(details.get("validation_status") or ""),
                 "technical_evidence_expected": _sanitize_multiline_text(details.get("technical_evidence_expected") or ""),
+                "adversary_technique": adversary_technique_details,
+                "adversary_technique_id": _sanitize_text(adversary_technique_details.get("id") or details.get("adversary_technique_id") or ""),
+                "adversary_technique_name": _sanitize_text(adversary_technique_details.get("name") or details.get("adversary_technique_name") or ""),
+                "control_objectives": details.get("control_objectives") if isinstance(details.get("control_objectives"), list) else [],
+                "expected_telemetry": _flatten_expected_telemetry(details.get("expected_telemetry")),
+                "detection_status": _sanitize_text(detection_proof_pack_details.get("detection_status") or details.get("detection_status") or "unknown"),
+                "detection_proof_pack": detection_proof_pack_details,
                 "recommendation_required": _sanitize_multiline_text(str(recommendation_ctx.get("required_fix") or "")),
                 "recommendation_controls": recommendation_ctx.get("controls") or [],
                 "recommendation_validation": recommendation_ctx.get("validations") or [],
@@ -3441,7 +3814,7 @@ def scan_report(
                 "technical_context": _sanitize_text(
                     f"step={technical.get('step') or '-'}; node={technical.get('node') or '-'}; tool={technical.get('tool') or '-'}; asset={technical.get('asset') or '-'}; porta={technical.get('port') or '-'}; servico={technical.get('service') or '-'}"
                 ),
-                "source_group": _source_group_from_details(details),
+                "source_group": _source_group_from_details(source_context),
                 "is_false_positive": bool(finding.is_false_positive),
             }
         )
@@ -3487,6 +3860,8 @@ def scan_report(
 
     open_rows = [row for row in vulnerability_rows if not row["is_false_positive"]]
     open_vulnerability_table = [row for row in open_rows if _is_vulnerability_row(row)]
+    if not open_vulnerability_table and open_rows:
+        open_vulnerability_table = list(open_rows)
     open_recon_table = [row for row in open_rows if str(row.get("source_group") or "") == "recon"]
     open_osint_table = [row for row in open_rows if str(row.get("source_group") or "") == "osint"]
 
@@ -3613,6 +3988,11 @@ def scan_report(
     # o relatório exibido (PDF/web): cada vulnerabilidade aparece uma vez, com
     # a lista de alvos afetados em affected_assets / target_summary.
     consolidated_vulnerability_table = _consolidate_vulnerability_table(open_vulnerability_table)
+    bas_detection_validation = _build_bas_detection_validation_report(
+        job=job,
+        trace_events=trace_events,
+        vulnerability_rows=open_vulnerability_table,
+    )
 
     detailed_recommendations = [
         {
@@ -3821,6 +4201,8 @@ def scan_report(
                 "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
                 "vulnerability_analysis_evidence": vulnerability_evidence,
+                "bas_detection_validation": bas_detection_validation,
+                "bas_control_matrix": bas_detection_validation.get("control_matrix") or [],
                 "vulnerability_table": consolidated_vulnerability_table,
                 "recommendations": top_recommendations,
                 "recommendations_detailed": detailed_recommendations,
@@ -3928,6 +4310,10 @@ def scan_report_csv(
             "error",
             "evidence",
             "payload",
+            "adversary_technique_id",
+            "adversary_technique_name",
+            "detection_status",
+            "expected_telemetry_sources",
             "step",
             "node",
             "recommendation",
@@ -3958,6 +4344,14 @@ def scan_report_csv(
                 row.get("error") or "",
                 row.get("evidence") or "",
                 row.get("payload") or "",
+                row.get("adversary_technique_id") or "",
+                row.get("adversary_technique_name") or "",
+                row.get("detection_status") or "",
+                "; ".join(
+                    str(item.get("source") or "")
+                    for item in list(row.get("expected_telemetry") or [])
+                    if isinstance(item, dict) and item.get("source")
+                ),
                 row.get("step") or "",
                 row.get("node") or "",
                 row.get("recommendation") or "",
@@ -4706,13 +5100,441 @@ def dashboard_insights(
 
     paged_prioritized = prioritized_actions[prioritized_offset:prioritized_offset + prioritized_limit]
 
-    risk_points = (
-        int(effective_sev_count_vuln.get("critical", 0)) * 6
-        + int(effective_sev_count_vuln.get("high", 0)) * 4
-        + int(effective_sev_count_vuln.get("medium", 0)) * 2
-        + int(effective_sev_count_vuln.get("low", 0))
+    # Maturidade por framework derivada das evidências reais do scan (severidade,
+    # cabeçalhos, exposição, vulnerabilidades, WAF e remediação) — uma fórmula
+    # específica por framework em vez de um score sintético único.
+    framework_scores = compute_framework_scores(
+        severity_count=effective_sev_count,
+        security_header_findings=float(effective_security_header_findings or 0),
+        exposure_findings=float(effective_recon_findings or 0) + float(effective_osint_findings or 0),
+        vulnerability_findings=float(effective_vulnerability_findings or 0),
+        waf_findings=float(effective_waf_findings or 0),
+        findings_total=float(effective_total or 0),
+        findings_triaged=float(effective_mitigated or 0),
     )
-    base_framework_score = max(55, min(100, int(round(100.0 / (1.0 + (risk_points / 55.0))))))
+    scan_ids = [int(j.id) for j in jobs if j.id is not None]
+
+    trace_rows: list[AgentTraceEvent] = []
+    executed_runs: list[ExecutedToolRun] = []
+    if scan_ids:
+        trace_rows = (
+            db.query(AgentTraceEvent)
+            .filter(AgentTraceEvent.scan_id.in_(scan_ids))
+            .order_by(AgentTraceEvent.created_at.desc())
+            .limit(2000)
+            .all()
+        )
+        executed_runs = (
+            db.query(ExecutedToolRun)
+            .filter(ExecutedToolRun.scan_job_id.in_(scan_ids))
+            .order_by(ExecutedToolRun.created_at.desc())
+            .limit(2000)
+            .all()
+        )
+
+    worker_rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).limit(100).all()
+    if current_user.is_admin:
+        learning_rows = db.query(VulnerabilityLearning).order_by(VulnerabilityLearning.created_at.desc()).limit(500).all()
+    else:
+        learning_rows = (
+            db.query(VulnerabilityLearning)
+            .filter(VulnerabilityLearning.owner_id == current_user.id)
+            .order_by(VulnerabilityLearning.created_at.desc())
+            .limit(500)
+            .all()
+        )
+
+    def _as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def _as_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        return [value]
+
+    def _pct(part: float, whole: float) -> float:
+        return round((float(part) / max(float(whole), 1.0)) * 100.0, 1)
+
+    def _detection_status(payload: dict[str, Any]) -> str:
+        proof = _as_dict(payload.get("detection_proof_pack"))
+        raw = (
+            payload.get("detection_status")
+            or proof.get("detection_status")
+            or proof.get("status")
+            or payload.get("control_status")
+            or ""
+        )
+        value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if value in {"detected", "alerted", "blocked", "prevented", "logged", "success"}:
+            return "detected"
+        if value in {"partial", "partially_detected"}:
+            return "partial"
+        if value in {"not_detected", "undetected", "missed", "gap", "missing", "failed"}:
+            return "gap"
+        return "unknown"
+
+    def _technique_label(payload: dict[str, Any]) -> str:
+        technique = payload.get("adversary_technique") or payload.get("technique") or payload.get("mitre_attack")
+        if isinstance(technique, dict):
+            return str(technique.get("id") or technique.get("technique_id") or technique.get("name") or "").strip()
+        return str(technique or payload.get("technique_id") or payload.get("attack_technique") or "").strip()
+
+    def _telemetry_sources(payload: dict[str, Any]) -> list[str]:
+        sources: list[str] = []
+        for item in _as_list(payload.get("expected_telemetry")):
+            if isinstance(item, dict):
+                source = str(item.get("source") or item.get("log_source") or item.get("data_source") or "").strip()
+            else:
+                source = str(item or "").strip()
+            if source:
+                sources.append(source)
+        proof = _as_dict(payload.get("detection_proof_pack"))
+        for item in _as_list(proof.get("telemetry_sources") or proof.get("sources")):
+            source = str(item.get("source") if isinstance(item, dict) else item or "").strip()
+            if source:
+                sources.append(source)
+        return sorted(set(sources))
+
+    bas_payloads: list[dict[str, Any]] = []
+    technique_set: set[str] = set()
+    detection_counts = {"detected": 0, "partial": 0, "gap": 0, "unknown": 0}
+    telemetry_by_source: dict[str, dict[str, Any]] = {}
+
+    for event in trace_rows:
+        payload = _as_dict(event.payload)
+        if not payload:
+            continue
+        has_bas_context = bool(
+            _technique_label(payload)
+            or payload.get("expected_telemetry")
+            or payload.get("detection_proof_pack")
+            or payload.get("control_objectives")
+            or str(payload.get("strategy_source") or payload.get("source") or "").lower() in {"rag", "learning", "accepted_learning"}
+        )
+        if not has_bas_context:
+            continue
+        bas_payloads.append(payload)
+        technique = _technique_label(payload)
+        if technique:
+            technique_set.add(technique)
+        status = _detection_status(payload)
+        detection_counts[status] = int(detection_counts.get(status, 0)) + 1
+        for source in _telemetry_sources(payload):
+            row = telemetry_by_source.setdefault(source, {"source": source, "total": 0, "detected": 0, "partial": 0, "gap": 0, "unknown": 0})
+            row["total"] += 1
+            row[status] = int(row.get(status, 0)) + 1
+
+    for f in findings:
+        details = _as_dict(f.details)
+        nested = _as_dict(details.get("details"))
+        payload = {**nested, **details}
+        sev = str(f.severity or "").lower()
+        src_group = _source_group_from_details(details)
+        technique = _technique_label(payload)
+        is_offensive = src_group == "vuln" or sev in {"critical", "high", "medium"}
+        if not is_offensive and not technique and not payload.get("expected_telemetry") and not payload.get("detection_proof_pack"):
+            continue
+        target_query = str(f.scan_job.target_query or "").strip() if f.scan_job else ""
+        target_has_waf = bool(target_query) and target_query in waf_assets
+        # Fecha o detection_proof_pack que o scan emite apenas como template
+        # ("unknown") — deriva o status real a partir da evidência coletada.
+        detection = classify_detection_outcome(
+            details,
+            title=f.title or "",
+            severity=sev,
+            source_group=src_group,
+            target_has_waf=target_has_waf,
+            expected_telemetry=payload.get("expected_telemetry") or [],
+        )
+        status = detection["detection_status"]
+        enriched_payload = {
+            **payload,
+            "detection_status": status,
+            "detection_proof_pack": {**_as_dict(payload.get("detection_proof_pack")), **detection},
+        }
+        bas_payloads.append(enriched_payload)
+        if technique:
+            technique_set.add(technique)
+        detection_counts[status] = int(detection_counts.get(status, 0)) + 1
+        observed_sources = detection.get("telemetry_observed") or _telemetry_sources(enriched_payload)
+        for source in observed_sources:
+            row = telemetry_by_source.setdefault(source, {"source": source, "total": 0, "detected": 0, "partial": 0, "gap": 0, "unknown": 0})
+            row["total"] += 1
+            row[status] = int(row.get(status, 0)) + 1
+
+    capability_set = {
+        str(event.capability or "").strip()
+        for event in trace_rows
+        if str(event.capability or "").strip()
+    }
+    tool_execute_events = [
+        event for event in trace_rows
+        if str(event.event_type or "").lower() in {"tool_execute", "tool_result", "result_return", "tool_usage_found", "tool_select"}
+    ]
+    successful_trace_events = [
+        event for event in trace_rows
+        if str(event.status or "").lower() in {"success", "completed", "done"}
+    ]
+    failed_trace_events = [
+        event for event in trace_rows
+        if str(event.status or "").lower() in {"failed", "error", "timeout"}
+    ]
+    if not technique_set:
+        technique_set.update(capability_set)
+    if not bas_payloads and tool_execute_events:
+        bas_payloads = [
+            {
+                "capability": event.capability,
+                "tool": event.tool_name,
+                "event_type": event.event_type,
+                "status": event.status,
+            }
+            for event in tool_execute_events
+        ]
+
+    has_explicit_detection = bool(detection_counts.get("detected") or detection_counts.get("partial") or detection_counts.get("gap"))
+    if not has_explicit_detection and trace_rows:
+        detection_counts = {"detected": 0, "partial": 0, "gap": 0, "unknown": 0}
+        detection_counts["detected"] = len(successful_trace_events)
+        detection_counts["gap"] = len(failed_trace_events)
+        detection_counts["partial"] = len([
+            event for event in trace_rows
+            if str(event.status or "").lower() in {"pending", "running", "retrying"}
+        ])
+
+    if not telemetry_by_source and trace_rows:
+        for event in trace_rows:
+            source = str(event.capability or event.tool_name or event.event_type or "agent_flow").strip()
+            if not source:
+                continue
+            status = str(event.status or "").lower()
+            mapped_status = "detected" if status in {"success", "completed", "done"} else "gap" if status in {"failed", "error", "timeout"} else "partial"
+            row = telemetry_by_source.setdefault(source, {"source": source, "total": 0, "detected": 0, "partial": 0, "gap": 0, "unknown": 0})
+            row["total"] += 1
+            row[mapped_status] = int(row.get(mapped_status, 0)) + 1
+
+    total_detection_records = sum(detection_counts.values())
+    control_efficacy_index = _pct(detection_counts["detected"] + (detection_counts["partial"] * 0.5), total_detection_records)
+    attack_success_count = len([f for f in findings if _technique_label({**_as_dict(_as_dict(f.details).get("details")), **_as_dict(f.details)})])
+    if attack_success_count == 0:
+        attack_success_count = len([f for f in findings if not f.is_false_positive])
+    attack_attempts = max(len(technique_set), len(bas_payloads), len(executed_runs), len(findings), 0)
+    attack_success_index = min(100.0, _pct(attack_success_count, attack_attempts))
+
+    tool_findings: dict[str, int] = {}
+    for f in findings:
+        details = _as_dict(f.details)
+        tool_name = str(f.tool or details.get("tool") or _as_dict(details.get("details")).get("tool") or "").strip().lower()
+        if tool_name:
+            tool_findings[tool_name] = int(tool_findings.get(tool_name, 0)) + 1
+
+    tool_usage_map: dict[str, dict[str, Any]] = {}
+    for run in executed_runs:
+        name = str(run.tool_name or "unknown").strip().lower() or "unknown"
+        row = tool_usage_map.setdefault(name, {"tool": name, "attempts": 0, "successes": 0, "failures": 0, "skipped": 0, "duration_total": 0.0, "duration_count": 0, "findings": 0})
+        row["attempts"] += 1
+        status = str(run.status or "").lower()
+        if status in {"success", "completed", "done", "executed"}:
+            row["successes"] += 1
+        elif status in {"skipped", "cached"}:
+            row["skipped"] += 1
+        else:
+            row["failures"] += 1
+        if run.execution_time_seconds is not None:
+            row["duration_total"] += float(run.execution_time_seconds or 0.0)
+            row["duration_count"] += 1
+    for name, count in tool_findings.items():
+        row = tool_usage_map.setdefault(name, {"tool": name, "attempts": 0, "successes": 0, "failures": 0, "skipped": 0, "duration_total": 0.0, "duration_count": 0, "findings": 0})
+        row["findings"] = int(row.get("findings", 0)) + int(count)
+
+    tool_usage = []
+    for row in tool_usage_map.values():
+        attempts = int(row.get("attempts") or 0)
+        successes = int(row.get("successes") or 0)
+        duration_count = int(row.get("duration_count") or 0)
+        avg_duration = float(row.get("duration_total") or 0.0) / max(duration_count, 1)
+        tool_usage.append(
+            {
+                "tool": row["tool"],
+                "attempts": attempts,
+                "successes": successes,
+                "failures": int(row.get("failures") or 0),
+                "skipped": int(row.get("skipped") or 0),
+                "findings": int(row.get("findings") or 0),
+                "success_rate": _pct(successes, attempts),
+                "avg_duration_seconds": round(avg_duration, 1),
+            }
+        )
+    tool_usage.sort(key=lambda item: (item["attempts"], item["findings"]), reverse=True)
+    tool_efficiency = _pct(sum(item["successes"] for item in tool_usage), sum(item["attempts"] for item in tool_usage))
+
+    now_utc = datetime.now(timezone.utc)
+    worker_active = 0
+    worker_stale = 0
+    worker_modes: dict[str, int] = {}
+    worker_status: dict[str, int] = {}
+    worker_rows_payload = []
+    for worker in worker_rows:
+        last_seen = worker.last_seen_at
+        if last_seen and last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        age_seconds = (now_utc - last_seen).total_seconds() if last_seen else 999999
+        status = str(worker.status or "unknown").lower()
+        mode = str(worker.mode or "unit").lower()
+        if status in {"running", "busy", "active"}:
+            worker_active += 1
+        if age_seconds > 300:
+            worker_stale += 1
+        worker_modes[mode] = int(worker_modes.get(mode, 0)) + 1
+        worker_status[status] = int(worker_status.get(status, 0)) + 1
+        worker_rows_payload.append(
+            {
+                "name": worker.worker_name,
+                "mode": mode,
+                "status": status,
+                "current_scan_id": worker.current_scan_id,
+                "last_task_name": worker.last_task_name,
+                "last_seen_seconds": int(age_seconds),
+            }
+        )
+
+    flow_map: dict[str, dict[str, Any]] = {}
+    for event in trace_rows:
+        key = str(event.capability or event.event_type or f"{event.from_node}->{event.to_node}" or "agent").strip()
+        row = flow_map.setdefault(key, {"stage": key, "events": 0, "successes": 0, "failures": 0, "duration_total": 0.0, "duration_count": 0})
+        row["events"] += 1
+        status = str(event.status or "").lower()
+        if status in {"success", "completed", "done"}:
+            row["successes"] += 1
+        elif status in {"failed", "error", "timeout"}:
+            row["failures"] += 1
+        if event.duration_ms is not None:
+            row["duration_total"] += float(event.duration_ms or 0.0)
+            row["duration_count"] += 1
+
+    agent_flow = []
+    for row in flow_map.values():
+        duration_count = int(row.get("duration_count") or 0)
+        agent_flow.append(
+            {
+                "stage": row["stage"],
+                "events": int(row.get("events") or 0),
+                "success_rate": _pct(row.get("successes") or 0, row.get("events") or 0),
+                "failures": int(row.get("failures") or 0),
+                "avg_duration_ms": round(float(row.get("duration_total") or 0.0) / max(duration_count, 1), 1),
+            }
+        )
+    agent_flow.sort(key=lambda item: item["events"], reverse=True)
+
+    accepted_learning = [row for row in learning_rows if str(row.status or "").lower() in {"accepted", "approved", "active"}]
+    pending_learning = [row for row in learning_rows if str(row.status or "").lower() in {"pending", "pending_review", "review"}]
+    rejected_learning = [row for row in learning_rows if str(row.status or "").lower() in {"rejected", "discarded"}]
+    learned_techniques = sum(int(row.technique_count or len(row.learned_techniques or [])) for row in accepted_learning)
+    target_catalog_size = max(len(ADVERSARY_TECHNIQUE_CATALOG), learned_techniques + sum(int(row.technique_count or 0) for row in pending_learning), 1)
+    def _event_uses_rag(event: AgentTraceEvent) -> bool:
+        blob = json.dumps(_as_dict(event.payload), default=str).lower()
+        return (
+            "rag" in blob
+            or "accepted_learning" in blob
+            or "learning_guided" in blob
+            or str(event.skill_id or "").lower().startswith("learned")
+        )
+
+    rag_trace_hits = len([event for event in trace_rows if _event_uses_rag(event)])
+    # Utilização = % das decisões estratégicas (dispatch/seleção de ferramenta)
+    # que foram guiadas por RAG/aprendizado. Antes dividia por TODOS os eventos
+    # de trace (incluindo avanços de fase), o que diluía o indicador a ~0%.
+    strategy_decision_events = [
+        event for event in trace_rows
+        if str(event.event_type or "").lower() in {"supervisor_dispatch", "tool_select"}
+    ]
+    rag_guided_decisions = len([event for event in strategy_decision_events if _event_uses_rag(event)])
+    learning_coverage = _pct(learned_techniques, target_catalog_size)
+    learning_utilization = (
+        _pct(rag_guided_decisions, len(strategy_decision_events))
+        if strategy_decision_events
+        else _pct(rag_trace_hits, len(trace_rows))
+    )
+
+    telemetry_rows = []
+    for row in telemetry_by_source.values():
+        total_source = int(row.get("total") or 0)
+        telemetry_rows.append(
+            {
+                "source": row["source"],
+                "total": total_source,
+                "detected": int(row.get("detected") or 0),
+                "partial": int(row.get("partial") or 0),
+                "gap": int(row.get("gap") or 0),
+                "unknown": int(row.get("unknown") or 0),
+                "effectiveness": _pct(int(row.get("detected") or 0) + (int(row.get("partial") or 0) * 0.5), total_source),
+            }
+        )
+    telemetry_rows.sort(key=lambda item: (item["effectiveness"], item["total"]), reverse=True)
+
+    bas_command_center = {
+        "summary": {
+            "bas_resilience_index": round((control_efficacy_index * 0.45) + (tool_efficiency * 0.2) + (learning_coverage * 0.2) + (_pct(effective_mitigated, effective_total) * 0.15), 1),
+            "attack_success_index": attack_success_index,
+            "attack_success_count": attack_success_count,
+            "attack_attempts": attack_attempts,
+            "control_efficacy_index": control_efficacy_index,
+            "detection_gap_count": int(detection_counts.get("gap", 0) + detection_counts.get("unknown", 0)),
+            "tool_efficiency_index": tool_efficiency,
+            "learning_coverage_percent": learning_coverage,
+            "learning_utilization_percent": learning_utilization,
+            "techniques_exercised": len(technique_set),
+            "validated_risk_findings": int(effective_sev_count_vuln.get("critical", 0) + effective_sev_count_vuln.get("high", 0)),
+            "open_findings": int(effective_open_issues),
+        },
+        "attack_detection_funnel": [
+            {"label": "Tecnicas planejadas", "value": len(technique_set)},
+            {"label": "Payloads BAS", "value": len(bas_payloads)},
+            {"label": "Execucoes de ferramentas", "value": len(executed_runs)},
+            {"label": "Evidencias ofensivas", "value": attack_success_count},
+            {"label": "Telemetrias esperadas", "value": sum(item["total"] for item in telemetry_rows)},
+            {"label": "Deteccoes confirmadas", "value": int(detection_counts.get("detected", 0))},
+            {"label": "Gaps de deteccao", "value": int(detection_counts.get("gap", 0) + detection_counts.get("unknown", 0))},
+        ],
+        "detection": {
+            "counts": detection_counts,
+            "telemetry_sources": telemetry_rows[:10],
+        },
+        "tools": tool_usage[:12],
+        "agent_flow": agent_flow[:10],
+        "workers": {
+            "total": len(worker_rows),
+            "active": worker_active,
+            "stale": worker_stale,
+            "by_mode": worker_modes,
+            "by_status": worker_status,
+            "rows": worker_rows_payload[:10],
+        },
+        "learning": {
+            "total": len(learning_rows),
+            "accepted": len(accepted_learning),
+            "pending": len(pending_learning),
+            "rejected": len(rejected_learning),
+            "learned_techniques": learned_techniques,
+            "catalog_size": target_catalog_size,
+            "rag_trace_hits": rag_trace_hits,
+            "coverage_percent": learning_coverage,
+            "utilization_percent": learning_utilization,
+            "recent": [
+                {
+                    "title": row.title,
+                    "status": row.status,
+                    "technique_count": row.technique_count,
+                    "vulnerability_type": row.vulnerability_type,
+                    "created_at": row.created_at,
+                }
+                for row in learning_rows[:6]
+            ],
+        },
+    }
+    bas_command_center["variables"] = dashboard_bas_variables(bas_command_center)
 
     return {
         "stats": {
@@ -4739,12 +5561,7 @@ def dashboard_insights(
             "aggregation_mode": agg_mode,
             "aggregation_targets": len(scope_targets) if scope_targets else 1,
         },
-        "frameworks": {
-            "iso27001": {"score": base_framework_score},
-            "nist": {"score": max(55, min(100, base_framework_score + 3))},
-            "cis_v8": {"score": max(55, min(100, base_framework_score + 5))},
-            "pci": {"score": max(55, min(100, base_framework_score - 2))},
-        },
+        "frameworks": framework_scores,
         "recent_scans": recent_scans,
         "ongoing_scans": ongoing_scans,
         "top_vulns": top_vulns,
@@ -4805,6 +5622,7 @@ def dashboard_insights(
             )
         ),
         "vuln_tool_execution": vuln_tool_execution,
+        "bas_command_center": bas_command_center,
         "vulnerability_fallback": {
             "scan_id": latest_scan.id if latest_scan else None,
             "scan_target": latest_scan.target_query if latest_scan else "",

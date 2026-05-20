@@ -1,6 +1,6 @@
-# ScriptKidd.o - Plataforma de Análise de Vulnerabilidade Automatizada
+# ScriptKidd.o - Plataforma de Pentest Defensivo e Visibilidade de Ambiente
 
-ScriptKidd.o e uma plataforma de analise de vulnerabilidade automatizada orientada por agentes. O backend orquestra a missao com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
+ScriptKidd.o e uma plataforma de pentest defensivo orientada por agentes, criada para aumentar a visibilidade de ambientes autorizados e apoiar a protecao do ambiente. Ela nao deve se comportar como um scanner generico de vulnerabilidades: o backend orquestra hipoteses, skills, tecnicas, ferramentas e evidencias com LangGraph, distribui o trabalho em workers Celery por fases da Cyber Kill Chain e executa as ferramentas tecnicas exclusivamente dentro do container Kali, que funciona como repositorio central de ferramentas e evidencias.
 
 O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → Skill Library → Tool Catalog → Execucao → Relatorio → Avaliacao**, onde cada atividade passa por aprovacao do supervisor antes de avançar na Kill Chain.
 
@@ -13,85 +13,9 @@ O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → 
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
-| Skill Library | 17 skills catalogadas, 50+ ferramentas com score 0-10 e guia de uso |
-| Visibilidade | 6 paineis frontend + Agent Flow com ciclo supervisor-agente em tempo real |
+| Visibilidade | 5 paineis frontend + 8 endpoints REST de telemetria |
 
-## Ciclo Supervisor - Agente (Fluxo Principal)
-
-O coração do sistema e o loop de comunicação entre o Supervisor e o Agente. Para cada atividade na Kill Chain:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    CICLO SUPERVISOR ↔ AGENTE                           │
-│                                                                         │
-│  1. SUPERVISOR emite ActivityDemand                                     │
-│     {activity_type, skill_category, kill_chain_phase, objective,        │
-│      quality_criteria}                                                  │
-│              │                                                          │
-│              ▼                                                          │
-│  2. AGENTE consulta Skill Library (PostgreSQL: skill_library)           │
-│     "Qual skill cobre esta activity_type?"                              │
-│     → Skill encontrada: {skill_name, objective, quality_criteria}       │
-│              │                                                          │
-│              ▼                                                          │
-│  3. AGENTE consulta Tool Catalog (PostgreSQL: skill_tool_mappings)      │
-│     "Quais ferramentas tem a skill X, ranqueadas por score?"            │
-│     → Ferramentas: [{tool: "subfinder", score: 9.5}, ...]              │
-│     → Lê usage_guide da melhor ferramenta                               │
-│              │                                                          │
-│              ▼                                                          │
-│  4. AGENTE executa a ferramenta via Kali Runner                         │
-│     POST /jobs → polling → resultado                                    │
-│              │                                                          │
-│              ▼                                                          │
-│  5. AGENTE envia Relatório ao Supervisor                                │
-│     {data_collected, operation_performed, quality_score,                │
-│      findings_count, "Foi satisfatório para avançar?"}                  │
-│              │                                                          │
-│              ▼                                                          │
-│  6. SUPERVISOR avalia o relatório                                       │
-│     quality_score >= 0.5 ou findings >= 1 → APROVADO                   │
-│     → Atualiza kill_chain_progress                                      │
-│     → Demanda próxima atividade na Kill Chain                           │
-│     → Ou REJEITA e solicita nova tentativa                              │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-Todo ciclo e persistido na tabela `agent_activity_logs` e visivel no painel **Agent Flow** da UI.
-
-## Diagrama do fluxo LangGraph
-
-```
-rag_enrichment
-      │
-      ▼
-supervisor ──────────────────────────────────────────► END
-   │  ▲                                        ▲
-   │  │ (evidence_gate retorna)                │
-   │  │                                        │
-   ▼  │                                        │
-skill_selector  ← consulta skill_library DB    │
-   │                                           │
-   ▼                                           │
-skill_planner                                  │
-   │                                           │
-   ▼                                           │
-tool_selector   ← consulta skill_tool_mappings DB (score)
-   │                                           │
-   ▼                                           │
-tool_executor   ← Kali Runner HTTP             │
-   │                                           │
-   ▼                                           │
-agent_reporter  ← compila relatório + pergunta supervisor
-   │                                           │
-   ▼                                           │
-evidence_gate   ── ──────────────────────────► supervisor
-                                               │
-                        governance ────────────┘
-                        executive_analyst ──────┘
-```
-
-## Diagrama de infraestrutura (cerebro vs. maos)
+## Diagrama do fluxo (cerebro vs. maos)
 
 ```
        usuario (browser)
@@ -135,7 +59,9 @@ Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *
 
 ## Principios Operacionais
 
+- Premissa do produto: ScriptKidd.o e uma ferramenta de pentest defensivo para visibilidade e protecao de ambientes, nao apenas uma analise automatizada de vulnerabilidades.
 - Uso defensivo e autorizado: scans devem ser executados somente contra alvos sob escopo aprovado.
+- Pensamento de pentest: cada scan deve escolher skills, formular hipoteses, executar tecnicas, correlacionar conhecimento RAG/MCP e adaptar o plano conforme as evidencias.
 - Execucao centralizada: workers nao executam ferramentas ofensivas localmente; todos chamam o `kali_runner`.
 - Evidencia primeiro: achados criticos e altos precisam de evidencia tecnica, impacto e reprodutibilidade para serem promovidos.
 - Visibilidade continua: progresso, logs, jobs, ferramentas usadas, findings, ratings e workers ficam expostos via API e frontend.
@@ -626,6 +552,59 @@ Quando um agente identifica uma possível vulnerabilidade, os aprendizados aceit
 
 Esse enriquecimento é usado em `risk_assessment` e `evidence_adjudication`. Se um achado crítico/alto não tiver prova suficiente, ele entra em `validation_backlog` com o playbook aprendido para que o próximo ciclo priorize as ferramentas e passos corretos. O relatório preserva esses campos em `Finding.details`, permitindo mostrar não só o achado, mas também como ele foi reproduzido ou o que faltou para comprovação.
 
+## Base de Conhecimento de Bug Bounty
+
+Alem do aprendizado manual e por URL, a plataforma inclui uma base pre-carregada de 32 tecnicas extraidas de dois repositorios publicos de bug bounty:
+
+- **KingOfBugBountyTips** (github.com/KingOfBugbounty/KingOfBugBountyTips)
+- **AllAboutBugBounty** (github.com/daffainfo/AllAboutBugBounty)
+
+Todos os registros foram inseridos com `status="accepted"` e `source_kind="bug_bounty_repository"`, ou seja, passam imediatamente a influenciar o prompt do supervisor sem necessitar de revisao humana.
+
+Tecnicas cobertas:
+
+| Categoria | Fases |
+| --- | --- |
+| Subdomain Enumeration | P01 |
+| Port & Service Scan | P02 |
+| Web Crawling & JS Extraction | P03 |
+| Parameter & GET Fuzzing | P04 |
+| XSS (Reflected, Stored, DOM, Blind) | P04, P12 |
+| SQL Injection | P12 |
+| SSRF | P13 |
+| Open Redirect | P13 |
+| IDOR & Access Control | P19 |
+| JWT Attacks | P14 |
+| 2FA/MFA Bypass | P14 |
+| Directory & File Enumeration | P15 |
+| File Upload & WebShell Bypass | P17 |
+| OSINT & Google Dorks | P07 |
+| API Key & Secret Exposure | P07, P21 |
+| Subdomain Takeover | P09 |
+| CSRF | P12, P16 |
+| OAuth Security | P14 |
+| Host Header Injection | P12 |
+| LFI/RFI | P15 |
+| WordPress Scan | P20 |
+| Jenkins Exposure | P11 |
+| Mass Assignment & Business Logic | P16, P19 |
+| SSL/TLS & Certificate Audit | P18 |
+| API Security & POST Fuzzing | P16 |
+| Cloud Assets (S3, Firebase, Azure) | P10 |
+| CRLF Injection | P12 |
+| Nuclei Automation Pipeline | P11 |
+| Email Security (SPF/DMARC) | P08 |
+| Account Takeover | P14 |
+| Web Cache Poisoning | P12 |
+| SSTI | P12 |
+| Supply Chain & Dependencies | P22 |
+
+O script de ingestao e idempotente: `backend/scripts/seed_bugrepo_learnings.py`. Para reinserir apos limpeza:
+
+```bash
+docker exec scriptkiddo_backend python3 scripts/seed_bugrepo_learnings.py
+```
+
 ## Workers e Filas
 
 Os workers sao especializados por fase, mas todos chamam o mesmo executor Kali. Cada grupo tem contrato próprio em `backend/app/workers/worker_groups.py`:
@@ -706,6 +685,8 @@ Campos relevantes:
 | `AssetRatingHistory` | final do scan | rating temporal por asset | Attack Evolution, Trends |
 | `WorkerHeartbeat` | inicio/pulse de worker | worker online, scan atual, fase | Workers |
 | `ScanAuditLog` | autonomia/execucao | notas, acoes, observacoes, erros | `/api/scans/{id}/autonomy` |
+| `agent_trace_events` | `tracer.py` (emit_trace) | evento de fluxo: from_node, to_node, skill_id, tool_name, capability, status, duration_ms, payload | `/ws/scans/{id}/trace`, `/api/scans/{id}/trace` |
+| `skill_scores` | `tracer.py` (save_skill_score) | pontuacao por skill: library_hits, tool_attempts/successes/failures, findings, efficiency_score, productivity_score | `/api/scans/{id}/trace` |
 | Kali job JSON | `kali_runner` | status, comando, stdout/stderr, workdir | `/jobs/{id}`, volume `kali_workspace` |
 
 ## Telas e o que cada uma mostra
@@ -724,6 +705,66 @@ Campos relevantes:
 | Worker Logs | `/worker-logs` | logs administrativos agregados |
 | Settings | `/configuracao` | runtime, IA, workers e parametros operacionais |
 | Kali Catalog | `/workers` | profiles Kali, binario executavel, worker, skills e fases |
+| Fluxo de Agentes | `/agent-flow` | diagrama SVG Supervisor→Agente→Biblioteca/MCP→Kali, feed de eventos em tempo real via WebSocket e scores de skills por fase (admin only) |
+
+## Fluxo de Agentes (Agent Flow)
+
+A pagina `/agent-flow` (sidebar: Security → Fluxo de Agentes, visivel apenas para admin) exibe em tempo real a comunicacao interna do ciclo de decisao do LangGraph.
+
+### Diagrama SVG
+
+Quatro nos conectados por arestas animadas:
+
+```
+Supervisor (verde) ──► Agente (azul) ──► Biblioteca/MCP (roxo) ──► Kali (laranja)
+```
+
+Cada no acende quando um evento de trace passa por ele. As arestas iluminam conforme o evento percorre o caminho `from_node → to_node`.
+
+### Eventos de trace instrumentados
+
+| event_type | De | Para | Significado |
+| --- | --- | --- | --- |
+| `supervisor_dispatch` | supervisor | agent | supervisor selecionou uma skill |
+| `skill_lookup` | agent | library | agente consultou biblioteca MCP |
+| `skill_found` | library | agent | biblioteca retornou skill |
+| `tool_usage_lookup` | agent | library | agente consultou uso de ferramenta |
+| `tool_select` | agent | library | agente selecionou ferramenta |
+| `tool_usage_found` | library | agent | biblioteca confirmou ferramenta |
+| `tool_execute` | agent | kali | agente disparou ferramenta no Kali |
+| `result_return` | kali | agent | resultado retornou do Kali |
+
+### Skill Scores
+
+Apos cada skill executada, `tracer.save_skill_score()` persiste:
+
+| Campo | Descricao |
+| --- | --- |
+| `library_hits` | consultas respondidas pela biblioteca |
+| `tool_attempts` | tentativas de execucao no Kali |
+| `tool_successes` | execucoes com sucesso |
+| `tool_failures` | execucoes com falha |
+| `findings_raw` | achados brutos produzidos |
+| `findings_promoted` | achados promovidos com evidencia |
+| `efficiency_score` | sucessos / tentativas |
+| `productivity_score` | promovidos / tentativas |
+
+### Arquivos relevantes
+
+```text
+backend/app/graph/tracer.py            # emit_trace() e save_skill_score()
+backend/app/graph/nodes/supervisor.py  # emite supervisor_dispatch apos selecao de skill
+backend/app/graph/nodes/skill_pipeline.py # emite todos os eventos skill_* e tool_*
+backend/app/api/routes_ws.py           # WS /ws/scans/{id}/trace e REST /api/scans/{id}/trace
+frontend/src/pages/AgentFlowPage.jsx   # pagina React com SVG, feed de eventos e tabela de scores
+```
+
+### DB tables
+
+- `agent_trace_events`: scan_id, iteration, event_type, from_node, to_node, skill_id, tool_name, capability, status, duration_ms, payload (JSONB), created_at
+- `skill_scores`: scan_id, iteration, skill_id, capability, library_hits, tool_attempts, tool_successes, tool_failures, findings_raw, findings_promoted, duration_ms, efficiency_score, productivity_score, created_at
+
+Migration: `backend/app/migrations/versions/0011_agent_trace_events.py`
 
 ## Phase Monitor: como interpretar
 
@@ -812,6 +853,8 @@ docker compose --profile dev logs --tail 200 worker_recon worker_exploitation
 | `GET /api/dashboard/insights` | dados agregados do dashboard |
 | `GET /api/vulnerability-management/dashboard` | evolucao e gestao de vulnerabilidades |
 | `GET /api/scans/{id}/report` | relatorio tecnico/executivo |
+| `WS /ws/scans/{id}/trace` | stream em tempo real de eventos de trace do agente (poll 0.5s) |
+| `GET /api/scans/{id}/trace` | historico completo de eventos de trace e skill scores |
 
 ## Operacao Local
 

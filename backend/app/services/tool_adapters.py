@@ -36,24 +36,7 @@ def run_tool_execution(
     a tool run while the required MCP execution contract never existed.
     """
     scan_id = legacy_kwargs.get("scan_id")
-    if settings.mcp_execute_tools_via_mcp:
-        try:
-            mcp_healthy = mcp_client.health_check_sync()
-        except Exception:
-            mcp_healthy = False
-        if not mcp_healthy:
-            return {
-                "tool": tool_name,
-                "target": target,
-                "scan_mode": scan_mode,
-                "status": "error",
-                "command": "",
-                "stdout": "",
-                "stderr": "",
-                "dispatch_error": "mcp_unavailable: mandatory MCP execution path is unreachable; tool was not executed",
-                "mcp_used": False,
-                "mcp_failure": True,
-            }
+    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
         result = mcp_client.execute_kali_tool_sync(
             tool_name=tool_name,
             target=target,

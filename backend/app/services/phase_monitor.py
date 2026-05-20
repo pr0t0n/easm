@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.graph.mission import PENTEST_PHASES, MISSION_ITEMS, PHASE_CONTRACTS
 from app.models.models import ScanJob, ExecutedToolRun, Finding
+from app.services.capability_runtime import CAPABILITY_CONTRACT, infer_capability_ledger
 
 
 CAPABILITY_NODES = [
@@ -20,6 +21,17 @@ CAPABILITY_NODES = [
     "governance",
     "executive_analyst",
 ]
+
+CAPABILITY_ALIASES: dict[str, set[str]] = {
+    "strategic_planning": {"strategic_planning", "supervisor", "skill_planner"},
+    "asset_discovery": {"asset_discovery"},
+    "threat_intel": {"threat_intel"},
+    "adversarial_hypothesis": {"adversarial_hypothesis", "skill_selector", "skill_planner", "tool_selector"},
+    "risk_assessment": {"risk_assessment"},
+    "evidence_adjudication": {"evidence_adjudication", "evidence_gate"},
+    "governance": {"governance"},
+    "executive_analyst": {"executive_analyst"},
+}
 
 
 def _node_for_phase(phase_id: str) -> str:
@@ -45,245 +57,6 @@ def _normalize_tool(name: str | None) -> str:
     return str(name or "").strip().lower()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase Ledger helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _ledger_phase_status(entry: dict[str, Any]) -> str:
-    return str(entry.get("status") or "pending")
-
-
-def _ledger_tools_attempted(entry: dict[str, Any]) -> list[str]:
-    return list(entry.get("tools_attempted") or [])
-
-
-def _ledger_tools_succeeded(entry: dict[str, Any]) -> list[str]:
-    return list(entry.get("tools_succeeded") or [])
-
-
-def _ledger_tools_failed(entry: dict[str, Any]) -> list[str]:
-    return list(entry.get("tools_failed") or [])
-
-
-def _ledger_tools_skipped(entry: dict[str, Any]) -> list[str]:
-    return list(entry.get("tools_skipped") or [])
-
-
-def _build_phase_contracts_report(
-    phase_ledger: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Cross-reference each phase in PHASE_CONTRACTS against the phase_ledger.
-
-    Returns a list of rich per-phase reports that cover:
-    - required_tools: attempted / succeeded / missing
-    - optional_tools coverage
-    - exit criteria evaluation
-    - MCP status
-    - skip reason (when applicable)
-    - validation_result
-    - learning_feedback
-    """
-    reports: list[dict[str, Any]] = []
-    for phase in PENTEST_PHASES:
-        pid = str(phase["id"])
-        contract = PHASE_CONTRACTS.get(pid, {})
-        entry = dict(phase_ledger.get(pid) or {})
-
-        status = _ledger_phase_status(entry)
-        tools_attempted = _ledger_tools_attempted(entry)
-        tools_succeeded = _ledger_tools_succeeded(entry)
-        tools_failed = _ledger_tools_failed(entry)
-        tools_skipped = _ledger_tools_skipped(entry)
-
-        required_tools = list(contract.get("required_tools") or [])
-        optional_tools = list(contract.get("optional_tools") or [])
-        exit_criteria = dict(contract.get("exit_criteria") or {})
-
-        required_attempted = [t for t in required_tools if t in tools_attempted]
-        required_succeeded = [t for t in required_tools if t in tools_succeeded]
-        required_missing = [t for t in required_tools if t not in tools_attempted]
-        optional_attempted = [t for t in optional_tools if t in tools_attempted]
-        optional_succeeded = [t for t in optional_tools if t in tools_succeeded]
-
-        # Exit criteria evaluation
-        min_succeeded = int(exit_criteria.get("min_required_tools_succeeded", 1))
-        evidence_ok = bool(entry.get("evidence_persisted"))
-        parser_ok = bool(entry.get("parser_result"))
-        req_succeeded_count = len(required_succeeded)
-        exit_criteria_met = (
-            req_succeeded_count >= min_succeeded
-            and evidence_ok
-            and parser_ok
-        )
-
-        mcp_status = str(entry.get("mcp_status") or "not_attempted")
-        mcp_failures = list(entry.get("mcp_failures") or [])
-
-        validation_result = dict(entry.get("validation_result") or {})
-
-        report: dict[str, Any] = {
-            "phase_id": pid,
-            "name": phase.get("title", ""),
-            "node": phase.get("node", ""),
-            # Ledger status
-            "status": status,
-            "started_at": entry.get("started_at"),
-            "completed_at": entry.get("completed_at"),
-            "retry_count": int(entry.get("retry_count") or 0),
-            "skip_reason": entry.get("skip_reason"),
-            # Contract
-            "contract": {
-                "required_skills": list(contract.get("required_skills") or []),
-                "required_tools": required_tools,
-                "optional_tools": optional_tools,
-                "minimum_evidence": dict(contract.get("minimum_evidence") or {}),
-                "exit_criteria": exit_criteria,
-                "retry_policy": dict(contract.get("retry_policy") or {}),
-            },
-            # Tool execution
-            "tools_attempted": tools_attempted,
-            "tools_succeeded": tools_succeeded,
-            "tools_failed": tools_failed,
-            "tools_skipped": tools_skipped,
-            "required_tools_attempted": required_attempted,
-            "required_tools_succeeded": required_succeeded,
-            "required_tools_missing": required_missing,
-            "optional_tools_attempted": optional_attempted,
-            "optional_tools_succeeded": optional_succeeded,
-            # Evidence
-            "evidence_persisted": evidence_ok,
-            "parser_result": entry.get("parser_result"),
-            "evidence_ids": list(entry.get("evidence_ids") or []),
-            # Exit criteria evaluation
-            "exit_criteria_met": exit_criteria_met,
-            "can_advance": bool(entry.get("can_advance")),
-            "validation_result": validation_result,
-            # MCP
-            "mcp_status": mcp_status,
-            "mcp_failures": mcp_failures,
-            "mcp_failure_count": len(mcp_failures),
-            # Skill context
-            "skill_context": dict(entry.get("skill_context") or {}),
-            # Learning
-            "learning_feedback": dict(entry.get("learning_feedback") or {}),
-            # Tool execution log (last 20 entries)
-            "tool_execution_log": list(entry.get("tool_execution_log") or [])[-20:],
-        }
-        reports.append(report)
-    return reports
-
-
-def _build_pentest_journey_summary(phase_reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """High-level journey summary consumed by Report Builder."""
-    executed_phases = [r for r in phase_reports if r["status"] not in ("pending",)]
-    completed_phases = [r for r in phase_reports if r["status"] == "completed"]
-    partial_phases = [r for r in phase_reports if r["status"] in ("partial", "running", "failed")]
-    skipped_phases = [r for r in phase_reports if r["status"] == "skipped"]
-    pending_phases = [r for r in phase_reports if r["status"] == "pending"]
-
-    all_tools_attempted: set[str] = set()
-    all_tools_succeeded: set[str] = set()
-    gaps: list[dict[str, Any]] = []
-    mcp_failures_total = 0
-
-    for r in phase_reports:
-        all_tools_attempted.update(r.get("tools_attempted") or [])
-        all_tools_succeeded.update(r.get("tools_succeeded") or [])
-        mcp_failures_total += r.get("mcp_failure_count", 0)
-        if r.get("required_tools_missing"):
-            gaps.append({
-                "phase_id": r["phase_id"],
-                "name": r["name"],
-                "missing_required_tools": r["required_tools_missing"],
-                "reason": r.get("skip_reason") or "tool not attempted",
-            })
-
-    return {
-        "phases_total": len(phase_reports),
-        "phases_executed": len(executed_phases),
-        "phases_completed": len(completed_phases),
-        "phases_partial": len(partial_phases),
-        "phases_skipped": len(skipped_phases),
-        "phases_pending": len(pending_phases),
-        "phases_executed_ids": [r["phase_id"] for r in executed_phases],
-        "phases_completed_ids": [r["phase_id"] for r in completed_phases],
-        "phases_partial_ids": [r["phase_id"] for r in partial_phases],
-        "phases_skipped_ids": [r["phase_id"] for r in skipped_phases],
-        "tools_attempted_total": len(all_tools_attempted),
-        "tools_attempted_list": sorted(all_tools_attempted),
-        "tools_succeeded_total": len(all_tools_succeeded),
-        "tools_succeeded_list": sorted(all_tools_succeeded),
-        "tools_failed_list": sorted(all_tools_attempted - all_tools_succeeded),
-        "coverage_ratio": round(len(all_tools_succeeded) / max(1, len(all_tools_attempted)), 3),
-        "gaps": gaps,
-        "mcp_failures_total": mcp_failures_total,
-        "mcp_architectural_failure": mcp_failures_total > 0 and len(all_tools_succeeded) == 0,
-    }
-
-
-def _build_hypothesis_report(
-    phase_reports: list[dict[str, Any]],
-    findings: list[Any],
-) -> dict[str, Any]:
-    """Reports on hypotheses validated and not tested per phase."""
-    validated: list[dict[str, Any]] = []
-    not_tested: list[dict[str, Any]] = []
-
-    severity_findings = {
-        str(getattr(f, "title", "") or "").lower(): f
-        for f in findings
-    }
-
-    for r in phase_reports:
-        contract_evidence = dict((r.get("contract") or {}).get("minimum_evidence") or {})
-        evidence_type = str(contract_evidence.get("type") or "")
-
-        if r["status"] == "completed" and r.get("evidence_persisted"):
-            validated.append({
-                "phase_id": r["phase_id"],
-                "name": r["name"],
-                "hypothesis": f"Target exposed to {r['name']} attack surface",
-                "evidence_type": evidence_type,
-                "tools": r.get("tools_succeeded") or [],
-                "result": "tested_and_evidenced",
-            })
-        elif r["status"] == "skipped":
-            not_tested.append({
-                "phase_id": r["phase_id"],
-                "name": r["name"],
-                "hypothesis": f"Target exposed to {r['name']} attack surface",
-                "reason": r.get("skip_reason") or "explicitly skipped",
-                "result": "skipped",
-            })
-        elif r["status"] in ("pending",):
-            not_tested.append({
-                "phase_id": r["phase_id"],
-                "name": r["name"],
-                "hypothesis": f"Target exposed to {r['name']} attack surface",
-                "reason": "phase not reached in scan",
-                "result": "not_started",
-            })
-        elif r["status"] in ("partial", "failed"):
-            not_tested.append({
-                "phase_id": r["phase_id"],
-                "name": r["name"],
-                "hypothesis": f"Target exposed to {r['name']} attack surface",
-                "reason": str((r.get("validation_result") or {}).get("reason") or "partial execution"),
-                "result": r["status"],
-            })
-
-    return {
-        "hypotheses_validated": len(validated),
-        "hypotheses_not_tested": len(not_tested),
-        "validated": validated,
-        "not_tested": not_tested,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main build function
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     """Cross-references phase_ledger, state_data, executed_tool_runs, findings, scan_logs.
 
@@ -297,7 +70,6 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     - legacy capability/node coverage (backward compat)
     """
     state = dict(scan.state_data or {})
-    phase_ledger = dict(state.get("phase_ledger") or {})
     completed_caps: list[str] = list(state.get("completed_capabilities") or [])
     node_history: list[str] = list(state.get("node_history") or [])
     autonomy_obs: list[dict] = list(state.get("autonomy_observations") or [])
@@ -330,11 +102,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "targets": set(),
             "last_status": None,
             "last_error": None,
+            "last_command": None,
             "total_seconds": 0.0,
         }
     )
+    run_status_by_tool_target: dict[tuple[str, str], str] = {}
     for r in runs:
         key = _normalize_tool(r.tool_name)
+        target_key = str(r.target or "").strip().lower()
         stats = tool_stats[key]
         stats["tool"] = key
         stats["attempts"] += 1
@@ -346,8 +121,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         else:
             stats["failed"] += 1
         stats["last_status"] = r.status
+        run_status_by_tool_target[(key, target_key)] = str(r.status or "unknown")
         if r.error_message:
             stats["last_error"] = (r.error_message or "")[:300]
+            command = _extract_command_from_error(r.error_message)
+            if command:
+                stats["last_command"] = command
         if r.execution_time_seconds:
             stats["total_seconds"] += float(r.execution_time_seconds or 0.0)
 
@@ -367,14 +146,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         def is_tool_installed(_t: str) -> bool:  # type: ignore
             return True
 
-    # ── Phase contract reports (primary report — P01–P22) ────────────────────
-    phase_contract_reports = _build_phase_contracts_report(phase_ledger)
-    journey_summary = _build_pentest_journey_summary(phase_contract_reports)
-    hypothesis_report = _build_hypothesis_report(phase_contract_reports, findings)
-
-    # ── Legacy phase status (backward compat — enriched with ledger data) ────
+    # Phases (22) — status derived from node completion + tools attempted
     expected_tools = _expected_tools_by_phase()
-    legacy_phases: list[dict[str, Any]] = []
+    phases: list[dict[str, Any]] = []
     for phase in PENTEST_PHASES:
         pid = phase["id"]
         node = phase["node"]
@@ -385,33 +159,30 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         tools_uninstalled = [t for t in tools_expected if not is_tool_installed(t)]
         tools_used = [t for t in tools_expected if tool_stats.get(t, {}).get("attempts", 0) > 0]
         tools_success = [t for t in tools_used if tool_stats.get(t, {}).get("success", 0) > 0]
-        tools_failed_list = [
+        tools_failed = [
             t for t in tools_used
             if tool_stats.get(t, {}).get("failed", 0) > 0
             and tool_stats.get(t, {}).get("success", 0) == 0
+            and tool_stats.get(t, {}).get("skipped", 0) == 0
         ]
         tools_skipped = [
             t for t in tools_used
             if tool_stats.get(t, {}).get("skipped", 0) > 0
             and tool_stats.get(t, {}).get("success", 0) == 0
+            and tool_stats.get(t, {}).get("failed", 0) == 0
         ]
+        # Distinguish "missing because unavailable in Kali" vs "ready but skipped".
         tools_missing_uninstalled = [t for t in tools_uninstalled if tool_stats.get(t, {}).get("attempts", 0) == 0]
         tools_missing_unused = [t for t in tools_installed if tool_stats.get(t, {}).get("attempts", 0) == 0]
         tools_missing = tools_missing_uninstalled + tools_missing_unused
 
-        # Derive status from ledger first, then fall back to node history
-        ledger_entry = dict(phase_ledger.get(pid) or {})
-        ledger_status = _ledger_phase_status(ledger_entry)
-
-        if ledger_status in ("completed", "skipped", "partial", "failed", "running"):
-            status_label = ledger_status
-        elif not node_visited:
+        if not node_visited:
             status_label = "skipped"
         elif tools_missing_unused and tools_success:
             status_label = "partial_coverage"
         elif tools_success and not tools_missing_unused:
             status_label = "executed"
-        elif tools_skipped and not tools_failed_list:
+        elif tools_skipped and not tools_failed:
             status_label = "node_visited_no_tools"
         elif tools_used:
             status_label = "attempted_failed"
@@ -423,8 +194,10 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "title": phase["title"],
             "node": node,
             "status": status_label,
-            "node_visited": node_visited,
+            "node_visited": effective_node_visited,
             "node_completed": node_done,
+            "phase_started": phase_started,
+            "phase_index": phase_idx,
             "tools_expected": tools_expected,
             "tools_installed": tools_installed,
             "tools_uninstalled": tools_uninstalled,
@@ -449,27 +222,21 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     # ── Capability summary ────────────────────────────────────────────────────
     capabilities: list[dict[str, Any]] = []
     expected_node_tools = _expected_tools_by_node()
-    obs_by_node: dict[str, list[dict]] = defaultdict(list)
-    for ob in autonomy_obs:
-        src = str(ob.get("source") or "").lower()
-        node_key = src
-        for cap in CAPABILITY_NODES:
-            if cap.replace("_", "") in src.replace("_", ""):
-                node_key = cap
-                break
-        obs_by_node[node_key].append(ob)
-
     for cap in CAPABILITY_NODES:
         cap_done = cap in completed_caps
         cap_visited = cap in node_history
+        # Tools that ran during this node based on phases of node
         node_expected = list(expected_node_tools.get(cap, []))
         node_attempted = [t for t in node_expected if tool_stats.get(t, {}).get("attempts", 0) > 0]
         node_success = [t for t in node_expected if tool_stats.get(t, {}).get("success", 0) > 0]
         capabilities.append({
             "id": cap,
-            "label": cap.replace("_", " ").title(),
+            "label": CAPABILITY_CONTRACT.get(cap, {}).get("label") or cap.replace("_", " ").title(),
+            "definition": CAPABILITY_CONTRACT.get(cap, {}).get("definition") or "",
             "completed": cap_done,
             "visited": cap_visited,
+            "runtime_evidence": dict(capability_ledger.get(cap) or {}),
+            "required_evidence": list(CAPABILITY_CONTRACT.get(cap, {}).get("required_evidence") or []),
             "tools_expected": node_expected,
             "tools_attempted": node_attempted,
             "tools_success": node_success,
@@ -489,6 +256,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "total_seconds": round(v["total_seconds"], 2),
             "last_status": v["last_status"],
             "last_error": v["last_error"],
+            "last_command": v["last_command"],
             "findings_generated": findings_by_tool.get(k, 0),
         })
 
@@ -533,10 +301,21 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     expected_all_tools = sorted({t for tools in expected_tools.values() for t in tools})
     installed_expected = sorted({t for t in expected_all_tools if is_tool_installed(t)})
     uninstalled_expected = sorted({t for t in expected_all_tools if not is_tool_installed(t)})
-    used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0}
+    used_tools_set = {k for k, v in tool_stats.items() if v["attempts"] > 0} | phase_used_tools_set
     installed_unused = [t for t in installed_expected if t not in used_tools_set]
+    has_tool_execution_evidence = bool(used_tools_set or tool_stats or phase_used_tools_set)
+    scan_status = str(scan.status or "").strip().lower()
+    scan_is_terminal = scan_status in {"completed", "failed", "error", "cancelled", "canceled"}
+    validation_is_active = has_tool_execution_evidence
+    if scan_is_terminal and not has_tool_execution_evidence:
+        issue = (
+            "NO KALI TOOL EXECUTION RECORDED: scan reached a terminal state without tool attempts. "
+            "This indicates orchestration/worker dispatch did not start; tool coverage lists are suppressed until execution evidence exists."
+        )
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
 
-    if installed_unused:
+    if installed_unused and validation_is_active:
         issue = (
             f"KALI TOOLS NOT EXECUTED ({len(installed_unused)}): "
             f"{', '.join(installed_unused[:8])}{'…' if len(installed_unused) > 8 else ''}. "
@@ -544,8 +323,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif installed_unused:
+        issue = (
+            f"KALI TOOL EXECUTION PENDING: {len(installed_unused)} Kali-ready tool(s) aguardam execução. "
+            "Coverage will be evaluated after the agent records the first tool attempt."
+        )
+        validation_summary["info"].append(issue)
 
-    if uninstalled_expected:
+    if uninstalled_expected and validation_is_active:
         issue = (
             f"KALI TOOLS NOT AVAILABLE ({len(uninstalled_expected)}): "
             f"{', '.join(uninstalled_expected[:8])}{'…' if len(uninstalled_expected) > 8 else ''}. "
@@ -553,10 +338,17 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["warning"].append(issue)
+    elif uninstalled_expected:
+        issue = (
+            f"KALI TOOL AVAILABILITY PENDING: {len(uninstalled_expected)} expected tool(s) have no ready Kali profile yet. "
+            "This is informational until the scan starts executing tools."
+        )
+        validation_summary["info"].append(issue)
 
     coverage_ratio_installed = (
         len(used_tools_set & set(installed_expected)) / max(1, len(installed_expected))
     )
+    coverage_ratio = coverage_ratio_installed
     if coverage_ratio_installed < 0.7:
         issue = (
             f"Coverage of Kali-ready tools low: {coverage_ratio_installed:.0%} "
@@ -565,15 +357,37 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         issues.append(issue)
         validation_summary["critical"].append(issue)
+    elif not validation_is_active:
+        validation_summary["info"].append(
+            f"Coverage pending: 0/{len(installed_expected)} Kali-ready tool(s) attempted so far."
+        )
 
-    # 5. Capability completion
+    # 2. Capability completion: all 8 nodes should execute
     skipped_caps = [c for c in CAPABILITY_NODES if c not in completed_caps]
     if skipped_caps:
-        issue = f"INCOMPLETE CAPABILITIES: {', '.join(skipped_caps)}. Graph traversal did not visit all capability nodes."
+        issue = f"INCOMPLETE CAPABILITIES: {', '.join(skipped_caps)}. "
+        issue += "Graph traversal did not visit all capability nodes."
         issues.append(issue)
         validation_summary["critical"].append(issue)
 
-    # 6. High-severity findings without verified evidence
+    # 3. Tool failures: tools that failed all attempts must retry
+    failed_only = [k for k, v in tool_stats.items() if v["attempts"] > 0 and v["success"] == 0 and v["skipped"] == 0]
+    if failed_only:
+        issue = f"TOOL FAILURES (all attempts): {', '.join(sorted(failed_only)[:5])}. "
+        issue += "These must be retried or skipped with explanation."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 4. Node history validation: should visit asset_discovery, risk_assessment, evidence_adjudication
+    critical_nodes = ["asset_discovery", "risk_assessment", "evidence_adjudication"]
+    missing_critical = [n for n in critical_nodes if n not in node_history]
+    if missing_critical:
+        issue = f"CRITICAL NODES NOT VISITED: {', '.join(missing_critical)}. "
+        issue += "Graph did not traverse essential analysis nodes."
+        issues.append(issue)
+        validation_summary["critical"].append(issue)
+
+    # 5. Findings validation: high-severity findings should have strong evidence
     high_severity = [f for f in findings if (f.severity or "").lower() in {"critical", "high"}]
     weak_evidence = [
         f for f in high_severity
@@ -635,15 +449,19 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "severity_counts": dict(severity_counts),
         # ── Capability/node coverage (legacy backward compat) ──────────────
         "completed_capabilities": completed_caps,
+        "capability_ledger": capability_ledger,
         "node_history": node_history,
         "missions": MISSION_ITEMS,
         "capabilities": capabilities,
-        # Legacy phase list enriched with ledger data
-        "phases": legacy_phases,
+        "phases": phases,
         "tool_inventory": tool_inventory,
-        # ── Validation ────────────────────────────────────────────────────
         "issues": issues,
         "validation_summary": validation_summary,
         "installation_report": installation,
         "kill_chain": kill_chain,
+        "recon_graph": dict(state.get("recon_graph") or {}),
+        "recon_skill_recommendations": list(state.get("recon_skill_recommendations") or (state.get("recon_graph") or {}).get("skill_recommendations") or []),
+        "recon_reanalyze_queue": list(state.get("recon_reanalyze_queue") or (state.get("recon_graph") or {}).get("reanalyze_queue") or []),
+        "recon_coverage": dict(state.get("recon_coverage") or (state.get("recon_graph") or {}).get("coverage") or {}),
+        "recon_coverage_gaps": list(state.get("recon_coverage_gaps") or (state.get("recon_graph") or {}).get("coverage_gaps") or []),
     }

@@ -1,123 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
-
-const SEV_COLOR = {
-  critical: "ds-badge ds-badge--critical",
-  high: "ds-badge ds-badge--high",
-  medium: "ds-badge ds-badge--medium",
-  low: "ds-badge ds-badge--low",
-  info: "ds-badge ds-badge--info",
-};
-
-const STATUS_COLOR = {
-  completed: "text-[#1f8a59] font-semibold",
-  running: "text-[#fe7b02] font-semibold animate-pulse",
-  retrying: "text-[#a47700] font-semibold",
-  failed: "text-[#b03333] font-semibold",
-  queued: "text-[#2d52e6] font-semibold",
-  blocked: "text-[#6b6b6b] font-semibold",
-};
-
-const BAR_COLOR = {
-  "ISO 27001": "from-[#4b73ff] to-[#6b8aff]",
-  "NIST CSF": "from-[#ff66f4] to-[#ff8af4]",
-  "CIS v8":   "from-[#229160] to-[#39b079]",
-  PCI:        "from-[#fe7b02] to-[#ffa047]",
-};
-
-const RISK_DOT = {
-  critical: "bg-[#d64545]",
-  high:     "bg-[#fe7b02]",
-  medium:   "bg-[#d4a500]",
-  low:      "bg-[#229160]",
-};
-
-const FACTOR_VISUAL = {
-  "Exposição Técnica": {
-    icon: (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M4 7h16M4 12h10M4 17h7" />
-      </svg>
-    ),
-    accent: "text-[#b03333] border-[rgba(214,69,69,0.30)] bg-[rgba(214,69,69,0.10)]",
-  },
-  "Persistência Temporal (AGE)": {
-    icon: (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <circle cx="12" cy="12" r="8" />
-        <path d="M12 8v5l3 2" />
-      </svg>
-    ),
-    accent: "text-[#a47700] border-[rgba(254,200,0,0.40)] bg-[rgba(254,200,0,0.12)]",
-  },
-  "Impacto Econômico (FAIR)": {
-    icon: (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 3v18M16 7.5c0-1.9-1.8-3.5-4-3.5s-4 1.6-4 3.5 1.8 3.5 4 3.5 4 1.6 4 3.5-1.8 3.5-4 3.5-4-1.6-4-3.5" />
-      </svg>
-    ),
-    accent: "text-[#1f8a59] border-[rgba(34,145,96,0.30)] bg-[rgba(34,145,96,0.10)]",
-  },
-  "Resiliência Operacional": {
-    icon: (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z" />
-      </svg>
-    ),
-    accent: "text-[#2d52e6] border-[rgba(75,115,255,0.30)] bg-[rgba(75,115,255,0.10)]",
-  },
-};
-
-function formatFactorEvidence(name, evidence) {
-  const ev = evidence || {};
-  if (name === "Exposição Técnica") {
-    return [
-      `Críticas: ${Number(ev.critical || 0)}`,
-      `Altas: ${Number(ev.high || 0)}`,
-      `Médias: ${Number(ev.medium || 0)}`,
-      `Baixas: ${Number(ev.low || 0)}`,
-    ];
-  }
-  if (name === "Persistência Temporal (AGE)") {
-    return [
-      `Média ambiente: ${Number(ev.age_env_avg_days || 0)} dias`,
-      `Média mercado: ${Number(ev.age_market_avg_days || 0)} dias`,
-      `Recorrências: ${Number(ev.recurring_findings || 0)}`,
-    ];
-  }
-  if (name === "Impacto Econômico (FAIR)") {
-    return [
-      `FAIR médio: ${Number(ev.fair_avg_score || 0).toFixed(2)}`,
-      `ALE total: USD ${Number(ev.ale_total_usd || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}`,
-    ];
-  }
-  if (name === "Resiliência Operacional") {
-    return [
-      `Abertos: ${Number(ev.open || 0)}`,
-      `Novos: ${Number(ev.new || 0)}`,
-      `Corrigidos: ${Number(ev.corrected || 0)}`,
-    ];
-  }
-  return Object.entries(ev).map(([k, v]) => `${k}: ${v}`);
-}
-
+import "../styles/dashboard.css";
 
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
 
-function StatCard({ label, value, sub, color = "text-white" }) {
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-      <p className="text-xs uppercase tracking-widest text-slate-400">{label}</p>
-      <p className={`mt-1 text-3xl font-bold font-display ${color}`}>{value}</p>
-      {sub && <p className="mt-1 text-xs text-slate-500">{sub}</p>}
-    </div>
-  );
-}
+const EMPTY_BAS = {
+  summary: {},
+  attack_detection_funnel: [],
+  detection: { counts: {}, telemetry_sources: [] },
+  tools: [],
+  agent_flow: [],
+  workers: { total: 0, active: 0, stale: 0, by_mode: {}, by_status: {}, rows: [] },
+  learning: { total: 0, accepted: 0, pending: 0, rejected: 0, recent: [] },
+};
+
+const FRAMEWORK_CLASS = {
+  "ISO 27001": "iso",
+  "NIST CSF": "nist",
+  "CIS v8": "cis",
+  PCI: "pci",
+};
 
 function aggregationLabel(mode) {
   if (mode === "target") return "Visão por Alvo";
   if (mode === "group_avg") return "Média do Grupo";
-  return "Visão Global (média dos scanners)";
+  return "Visão Global · média dos scanners";
 }
 
 function gradeFromScore(score) {
@@ -127,6 +34,20 @@ function gradeFromScore(score) {
   if (s >= 70) return "C";
   if (s >= 60) return "D";
   return "F";
+}
+
+function ratingTone(score) {
+  const s = Number(score || 0);
+  if (s >= 80) return "t-green";
+  if (s >= 60) return "t-amber";
+  return "t-red";
+}
+
+function effColor(value) {
+  const v = Number(value || 0);
+  if (v >= 70) return "var(--sev-low-solid)";
+  if (v >= 45) return "var(--sev-medium-solid)";
+  return "var(--sev-critical-solid)";
 }
 
 function calculateGeneralHealthScore({ critical = 0, high = 0 }) {
@@ -158,35 +79,6 @@ function targetHost(value) {
   }
 }
 
-function RatingBadge({ letter, score, label }) {
-  const numeric = Number(score || 0);
-  const tone =
-    numeric >= 80
-      ? { color: "var(--sev-low-text)", bg: "var(--sev-low-bg)", border: "var(--sev-low-border)", fill: "var(--sev-low-solid)" }
-      : numeric >= 60
-        ? { color: "var(--sev-medium-text)", bg: "var(--sev-medium-bg)", border: "var(--sev-medium-border)", fill: "var(--sev-medium-solid)" }
-        : { color: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", border: "var(--sev-critical-border)", fill: "var(--sev-critical-solid)" };
-
-  return (
-    <div
-      className="rounded-2xl border p-6 min-h-[260px]"
-      style={{ background: tone.bg, borderColor: tone.border, color: tone.color, boxShadow: "var(--shadow-card)" }}
-    >
-      <p className="text-xs uppercase tracking-[0.2em] opacity-80">{label}</p>
-      <div className="mt-5 flex items-end justify-between gap-4">
-        <div>
-          <p className="text-8xl leading-none font-black">{letter || "F"}</p>
-          <p className="mt-2 text-base font-semibold opacity-90">Rating</p>
-        </div>
-        <p className="text-5xl font-black tabular-nums">{numeric.toFixed(1)}</p>
-      </div>
-      <div className="mt-5 h-3 overflow-hidden rounded-full" style={{ background: "rgba(28, 28, 28, 0.10)" }}>
-        <div className="h-full rounded-full" style={{ width: `${Math.max(0, Math.min(100, numeric))}%`, background: tone.fill }} />
-      </div>
-    </div>
-  );
-}
-
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -201,13 +93,13 @@ export default function DashboardPage() {
   const [vulnToolExecution, setVulnToolExecution] = useState({ scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
   const [continuousRating, setContinuousRating] = useState({ score: 0, grade: "F", factors: [] });
   const [ratingTimeline, setRatingTimeline] = useState([]);
-  
+
   // Vulnerability analysis enterprise metrics
   const [globalVulnerabilityRating, setGlobalVulnerabilityRating] = useState({ score: 0, grade: "F", pillars: [] });
   const [scopedVulnerabilityRating, setScopedVulnerabilityRating] = useState({ score: 0, grade: "F", pillars: [] });
   const [vulnerabilityTrends, setVulnerabilityTrends] = useState(null);
   const [vulnerabilityAlerts, setVulnerabilityAlerts] = useState([]);
-  
+
   // Filters
   const [groups, setGroups] = useState([]);
   const [selectedGroup, setSelectedGroup] = useState("");
@@ -215,15 +107,21 @@ export default function DashboardPage() {
   const [selectedTarget, setSelectedTarget] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  const hasScopedSelection = Boolean(selectedGroup || selectedTarget.trim());
   const [globalVasmMeta, setGlobalVasmMeta] = useState({ aggregationTargets: 1, scanCount: 0 });
   const [prioritizedActions, setPrioritizedActions] = useState([]);
   const [targetStatistics, setTargetStatistics] = useState([]);
+  const [basCommandCenter, setBasCommandCenter] = useState(EMPTY_BAS);
 
   const handleSearch = () => {
     setIsSearching(true);
     setSelectedGroup("");
     setSelectedTarget(searchInput);
+  };
+
+  const clearFilters = () => {
+    setSelectedTarget("");
+    setSearchInput("");
+    setSelectedGroup("");
   };
 
   // Carrega grupos disponíveis para o usuário
@@ -238,7 +136,6 @@ export default function DashboardPage() {
       setLoading(true);
       setError("");
       try {
-        // Monta query params com filtros
         const params = new URLSearchParams();
         if (selectedGroup) {
           params.append("access_group_id", selectedGroup);
@@ -250,8 +147,6 @@ export default function DashboardPage() {
         const { data } = await client.get(`/api/dashboard/insights?${params.toString()}`);
         const dashboard = data || {};
         let globalDashboard = dashboard;
-        // Keep group rating scoped to the selected group.
-        // Fetch global data only for target-only filtering.
         if (!selectedGroup && selectedTarget.trim()) {
           try {
             const { data: globalData } = await client.get("/api/dashboard/insights");
@@ -302,6 +197,7 @@ export default function DashboardPage() {
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
         setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
+        setBasCommandCenter(dashboard.bas_command_center || EMPTY_BAS);
         setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
         setTargetStatistics(Array.isArray(dashboard.target_statistics) ? dashboard.target_statistics : []);
         const resolvedContinuous = dashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
@@ -371,7 +267,6 @@ export default function DashboardPage() {
 
         const hasActiveFilter = Boolean(selectedGroup || selectedTarget.trim());
 
-        // Load vulnerability posture data
         try {
           if (hasActiveFilter) {
             setVulnerabilityAlerts([]);
@@ -382,10 +277,9 @@ export default function DashboardPage() {
             client.get("/api/dashboard/assets").catch(() => ({ data: [] })),
             client.get("/api/vulnerability-alerts").catch(() => ({ data: [] })),
           ]);
-          
+
           setVulnerabilityAlerts(alertsResp.data || []);
-          
-          // Get latest asset for trends
+
           if (assetsResp.data && assetsResp.data.length > 0) {
             const topAsset = assetsResp.data[0];
             try {
@@ -396,7 +290,6 @@ export default function DashboardPage() {
             }
           }
         } catch (e) {
-          // Vulnerability posture endpoints may not be available yet
           console.log("Vulnerability posture endpoints not available");
         }
       } catch (err) {
@@ -411,7 +304,6 @@ export default function DashboardPage() {
   }, [selectedTarget, selectedGroup]);
 
   const distributedRows = useMemo(() => {
-    // Use target_statistics from API if available, otherwise fall back to old method
     if (targetStatistics && targetStatistics.length > 0) {
       return targetStatistics.map((stat) => {
         const vulnCount = stat.vulnerabilities_total || 0;
@@ -428,7 +320,6 @@ export default function DashboardPage() {
       });
     }
 
-    // Fallback to old method if target_statistics not available
     const byTarget = new Map();
     for (const item of prioritizedActions) {
       const target = String(item?.target_query || "").trim();
@@ -436,7 +327,7 @@ export default function DashboardPage() {
       byTarget.set(target, (byTarget.get(target) || 0) + 1);
     }
 
-    const rows = [...byTarget.entries()]
+    return [...byTarget.entries()]
       .map(([target, vulnCount]) => {
         const host = targetHost(target);
         const subdomainCount = (domainOptions || []).filter((opt) => {
@@ -444,18 +335,10 @@ export default function DashboardPage() {
           return h && host && h !== host && h.endsWith(`.${host}`);
         }).length;
         const score = Math.max(0, 100 - vulnCount * 4 - subdomainCount * 2);
-        return {
-          target,
-          vulnCount,
-          subdomainCount,
-          score,
-          grade: gradeFromScore(score),
-        };
+        return { target, vulnCount, subdomainCount, score, grade: gradeFromScore(score) };
       })
       .sort((a, b) => b.vulnCount - a.vulnCount)
       .slice(0, 5);
-
-    return rows;
   }, [targetStatistics, prioritizedActions, domainOptions]);
 
   const distributedScore = distributedRows.length
@@ -465,355 +348,454 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-slate-950">
-        <div className="text-center">
-          <div className="mb-6 flex justify-center">
-            <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-700 border-t-blue-500" />
+      <main className="dash">
+        <div className="content" style={{ padding: "32px 40px 56px" }}>
+          <div className="dash-state">
+            <div>
+              <div className="spin" />
+              <p className="st-title">Aguardando análise do LLM…</p>
+              <p className="st-sub">Processando dados do dashboard</p>
+            </div>
           </div>
-          <p className="text-lg font-semibold text-slate-200">Aguardando análise do LLM...</p>
-          <p className="mt-2 text-sm text-slate-400">Processando dados do dashboard</p>
         </div>
-      </div>
+      </main>
     );
   }
 
   if (error) {
     return (
-      <main className="mx-auto mt-6 w-[95%] max-w-7xl">
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</div>
+      <main className="dash">
+        <div className="content" style={{ padding: "32px 40px 56px" }}>
+          <div className="dash-err">{error}</div>
+        </div>
       </main>
     );
   }
 
-  const maxFindings = Math.max(...activity.map((a) => a.findings), 1);
+  const basSummary = basCommandCenter?.summary || {};
+  const basFunnel = Array.isArray(basCommandCenter?.attack_detection_funnel) ? basCommandCenter.attack_detection_funnel : [];
+  const maxFunnel = Math.max(...basFunnel.map((item) => Number(item.value || 0)), 1);
+  const basTelemetry = Array.isArray(basCommandCenter?.detection?.telemetry_sources) ? basCommandCenter.detection.telemetry_sources : [];
+  const basTools = Array.isArray(basCommandCenter?.tools) ? basCommandCenter.tools : [];
+  const basAgentFlow = Array.isArray(basCommandCenter?.agent_flow) ? basCommandCenter.agent_flow : [];
+  const basWorkers = basCommandCenter?.workers || EMPTY_BAS.workers;
+  const basLearning = basCommandCenter?.learning || EMPTY_BAS.learning;
+
+  const resilience = Number(basSummary.bas_resilience_index || 0);
+  const controlEff = Number(basSummary.control_efficacy_index || 0);
+  const gapCount = Number(basSummary.detection_gap_count || 0);
+
+  const basMetrics = [
+    {
+      label: "Resiliência BAS",
+      value: resilience.toFixed(1),
+      unit: "%",
+      sub: "eficácia + ferramentas + aprendizagem",
+      tone: resilience >= 70 ? "tone-green" : "tone-amber",
+    },
+    {
+      label: "Eficácia do ataque",
+      value: Number(basSummary.attack_success_index || 0).toFixed(1),
+      unit: "%",
+      sub: `${Number(basSummary.attack_success_count || 0)} evidências ofensivas`,
+      tone: "tone-blue",
+    },
+    {
+      label: "Controle detectou",
+      value: controlEff.toFixed(1),
+      unit: "%",
+      sub: "detectado + parcial ponderado",
+      tone: controlEff >= 70 ? "tone-green" : "tone-red",
+    },
+    {
+      label: "Gaps de detecção",
+      value: String(gapCount),
+      unit: "",
+      sub: "não detectado ou sem confirmação",
+      tone: gapCount > 0 ? "tone-red" : "tone-green",
+    },
+    {
+      label: "Ferramentas",
+      value: Number(basSummary.tool_efficiency_index || 0).toFixed(1),
+      unit: "%",
+      sub: `${basTools.length} ferramentas observadas`,
+      tone: "tone-slate",
+    },
+    {
+      label: "Aprendizagem",
+      value: Number(basSummary.learning_coverage_percent || 0).toFixed(1),
+      unit: "%",
+      sub: `${Number(basLearning.learned_techniques || 0)} técnicas aprendidas`,
+      tone: "tone-green",
+    },
+  ];
+
+  const showEmptyScanNote = Boolean(selectedTarget) && stats && stats.scans === 0;
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-5 pb-12">
-      <section className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
-        <h2 className="text-sm font-semibold text-slate-200 mb-3">Filtros</h2>
-        <div className="grid gap-3 md:grid-cols-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2">Grupo / Cliente</label>
-            <select
-              value={selectedGroup}
-              onChange={(e) => {
-                setSelectedGroup(e.target.value);
-                setSelectedTarget("");
-                setSearchInput("");
-              }}
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Todos os grupos</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name}
-                </option>
-              ))}
-            </select>
+    <main className="dash">
+      <div className="content" style={{ padding: "32px 40px 56px" }}>
+
+        {/* ===== Filters ===== */}
+        <section className="filters">
+          <h2>Filtros</h2>
+          <div className="filters-grid">
+            <div className="ctrl">
+              <label>Grupo / Cliente</label>
+              <select
+                value={selectedGroup}
+                onChange={(e) => {
+                  setSelectedGroup(e.target.value);
+                  setSelectedTarget("");
+                  setSearchInput("");
+                }}
+              >
+                <option value="">Todos os grupos</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>{g.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="ctrl">
+              <label>Domínios</label>
+              <select
+                value={selectedTarget}
+                onChange={(e) => {
+                  const val = String(e.target.value || "");
+                  setSelectedGroup("");
+                  setSelectedTarget(val);
+                  setSearchInput(val);
+                }}
+              >
+                <option value="">Todos os domínios</option>
+                {domainOptions.map((domain) => (
+                  <option key={domain} value={domain}>{domain}</option>
+                ))}
+              </select>
+            </div>
+            <div className="ctrl">
+              <label>Domínio / Alvo</label>
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+                placeholder="Filtrar por domínio…"
+              />
+            </div>
+            <div className="actions">
+              <button className="btn btn-primary" onClick={handleSearch} disabled={loading || isSearching}>
+                {isSearching || loading ? "Buscando…" : "Buscar"}
+              </button>
+              <button className="btn btn-ghost" onClick={clearFilters}>Limpar</button>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2">Domínios</label>
-            <select
-              value={selectedTarget}
-              onChange={(e) => {
-                const val = String(e.target.value || "");
-                setSelectedGroup("");
-                setSelectedTarget(val);
-                setSearchInput(val);
-              }}
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Todos os domínios</option>
-              {domainOptions.map((domain) => (
-                <option key={domain} value={domain}>
-                  {domain}
-                </option>
-              ))}
-            </select>
-          </div>
-          
-          <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2">Domínio/Alvo</label>
-            <input
-              type="text"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleSearch();
-                }
-              }}
-              placeholder="Filtrar por domínio..."
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-blue-500 focus:outline-none"
-            />
+          {!!stats && (
+            <div className="agg-note">
+              <span><b>{aggregationLabel(stats.aggregation_mode)}</b></span>
+              <span><b>{Number(stats.aggregation_targets || 1)} alvo(s)</b> considerados</span>
+            </div>
+          )}
+
+          {showEmptyScanNote && (
+            <div className="scope-empty">
+              Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
+            </div>
+          )}
+        </section>
+
+        {/* ===== BAS Command Center ===== */}
+        <section className="bas">
+          <div className="bas-head">
+            <div>
+              <div className="eb">BAS Command Center</div>
+              <h2>Visão viva do ambiente, ataques simulados, <em>detecção</em> e aprendizagem.</h2>
+            </div>
+            <p>Consolida execução de scans, fluxo dos agentes, ferramentas Kali/MCP, telemetria esperada, gaps de controle, RAG e risco validado.</p>
           </div>
 
-          <div className="flex items-end gap-2">
-            <button
-              onClick={handleSearch}
-              disabled={loading || isSearching}
-              className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 px-3 py-2 text-sm font-medium text-white transition-colors"
-            >
-              {isSearching || loading ? "Buscando..." : "Buscar"}
-            </button>
-            <button
-              onClick={() => {
-                setSelectedTarget("");
-                setSearchInput("");
-                setSelectedGroup("");
-              }}
-              className="flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors"
-              style={{
-                background: "#ffffff",
-                borderColor: "var(--line)",
-                color: "var(--ink-soft)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = "var(--brand-500)";
-                e.currentTarget.style.color = "var(--ink)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = "var(--line)";
-                e.currentTarget.style.color = "var(--ink-soft)";
-              }}
-            >
-              Limpar Filtros
-            </button>
-          </div>
-        </div>
-        {(selectedGroup || selectedTarget) && (
-          <p className="mt-3 text-xs text-slate-400">
-            <span className="text-slate-300">Filtros ativos:</span>
-            {selectedGroup && ` | Grupo: "${groups.find((g) => String(g.id) === String(selectedGroup))?.name || selectedGroup}"`}
-            {selectedTarget && ` | Domínio: "${selectedTarget}"`}
-          </p>
-        )}
-
-        {!!stats && (
-          <div className="mt-3 flex items-center justify-between rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2">
-            <p className="text-xs font-semibold text-blue-200">
-              {aggregationLabel(stats.aggregation_mode)}
-            </p>
-            <p className="text-[11px] text-blue-100/80">
-              {Number(stats.aggregation_targets || 1)} alvo(s) considerados
-            </p>
-          </div>
-        )}
-
-        {selectedTarget && stats && stats.scans === 0 && (
-          <div className="mt-3 rounded-lg border border-slate-600 bg-slate-800/50 px-3 py-2">
-            <p className="text-xs text-slate-300">
-              ℹ️ Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
-            </p>
-          </div>
-        )}
-      </section>
-
-      <section className="ds-panel p-6">
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-display text-2xl font-extrabold tracking-tight" style={{ color: "var(--ink)" }}>ScriptKidd.o Vulnerability Dashboard</h2>
-          <p className="text-xs uppercase tracking-[0.2em]" style={{ color: "var(--brand-700)" }}>Visão consolidada de risco e maturidade</p>
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-12">
-          <div className="xl:col-span-4">
-            <RatingBadge
-              label="Rating Atual do Alvo"
-              letter={scopedVulnerabilityRating.grade}
-              score={scopedVulnerabilityRating.score}
-            />
-          </div>
-          <div className="xl:col-span-4">
-            <RatingBadge
-              label="Rating Atual do Grupo"
-              letter={globalVulnerabilityRating.grade}
-              score={globalVulnerabilityRating.score}
-            />
-          </div>
-          <div className="xl:col-span-4 rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)", boxShadow: "var(--shadow-card)" }}>
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--brand-700)" }}>Rating Distribuído</p>
-                <p className="text-xs" style={{ color: "var(--ink-muted)" }}>Top 5 alvos com maior volume de vulnerabilidades</p>
+          {/* 6 BAS metrics */}
+          <div className="bas-metrics">
+            {basMetrics.map((m) => (
+              <div key={m.label} className={`bas-m ${m.tone}`}>
+                <div className="lbl">{m.label}</div>
+                <div className="val">{m.value}{m.unit && <span className="u">{m.unit}</span>}</div>
+                <div className="sub">{m.sub}</div>
               </div>
-              <div className="text-right">
-                <p className="text-3xl font-black" style={{ color: "var(--ink)" }}>{distributedGrade} {Number(distributedScore || 0).toFixed(1)}</p>
+            ))}
+          </div>
+
+          {/* Row 1: Funnel · Telemetry · RAG */}
+          <div className="bas-grid-1">
+            <div className="bas-sect">
+              <div className="bas-sect-head">
+                <div>
+                  <h3>Funil ataque × detecção</h3>
+                  <div className="sh-sub">da técnica planejada ao gap confirmado</div>
+                </div>
+                <span className="sh-meta">{Number(basSummary.techniques_exercised || 0)} técnicas</span>
+              </div>
+              <div className="funnel">
+                {basFunnel.length === 0 && <div className="bas-empty">Sem funil BAS calculado.</div>}
+                {basFunnel.map((item) => {
+                  const value = Number(item.value || 0);
+                  const width = Math.round((value / maxFunnel) * 100);
+                  const isGap = String(item.label || "").toLowerCase().includes("gap");
+                  return (
+                    <div key={item.label} className={`funnel-row${isGap ? " gap" : ""}`}>
+                      <div className="top"><span>{item.label}</span><b>{value}</b></div>
+                      <div className="funnel-bar">
+                        <div style={{ width: `${width}%`, minWidth: value > 0 ? "8px" : 0 }} />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
-            <div className="overflow-x-auto rounded-xl border" style={{ borderColor: "var(--line)" }}>
-              <table className="min-w-full text-left text-xs">
-                <thead style={{ background: "var(--surface-soft)", color: "var(--ink-soft)" }}>
-                  <tr>
-                    <th className="px-3 py-2">Alvo</th>
-                    <th className="px-3 py-2">Vulnerabilidades</th>
-                    <th className="px-3 py-2">Rating</th>
-                  </tr>
+
+            <div className="bas-sect">
+              <h3>Eficácia por fonte de telemetria</h3>
+              <div className="sh-sub">onde o controle enxerga, parcializa ou falha</div>
+              <table className="basT">
+                <thead>
+                  <tr><th>Fonte</th><th style={{ width: 60 }}>Eventos</th><th style={{ width: 160 }}>Eficácia</th></tr>
+                </thead>
+                <tbody>
+                  {basTelemetry.length === 0 && (
+                    <tr><td colSpan={3} className="bas-empty">Sem dados BAS suficientes.</td></tr>
+                  )}
+                  {basTelemetry.map((row) => {
+                    const eff = Number(row.effectiveness || 0);
+                    return (
+                      <tr key={row.source}>
+                        <td><b>{row.source}</b></td>
+                        <td>{Number(row.total || 0).toLocaleString("pt-BR")}</td>
+                        <td>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontWeight: 600, width: 32, textAlign: "right" }}>{eff.toFixed(0)}%</span>
+                            <div className="progress-line"><div style={{ width: `${eff}%`, background: effColor(eff) }} /></div>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="bas-sect">
+              <h3>Aprendizagem e RAG</h3>
+              <div className="sh-sub">reuso de conhecimento em técnicas e skills</div>
+              <div className="rag-stat">
+                <div className="top"><span>Cobertura do catálogo</span><b>{Number(basLearning.coverage_percent || 0).toFixed(1)}%</b></div>
+                <div className="progress-line"><div style={{ width: `${Number(basLearning.coverage_percent || 0)}%`, background: "var(--sev-low-solid)" }} /></div>
+              </div>
+              <div className="rag-stat">
+                <div className="top"><span>Utilização em traces</span><b>{Number(basLearning.utilization_percent || 0).toFixed(1)}%</b></div>
+                <div className="progress-line"><div style={{ width: `${Number(basLearning.utilization_percent || 0)}%`, background: "var(--brand-500)" }} /></div>
+              </div>
+              <div className="rag-grid">
+                <div><div className="lbl">Aceitos</div><div className="vv" style={{ color: "var(--sev-low-text)" }}>{Number(basLearning.accepted || 0)}</div></div>
+                <div><div className="lbl">Revisão</div><div className="vv" style={{ color: "var(--sev-medium-text)" }}>{Number(basLearning.pending || 0)}</div></div>
+                <div><div className="lbl">RAG hits</div><div className="vv" style={{ color: "var(--brand-700)" }}>{Number(basLearning.rag_trace_hits || 0)}</div></div>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Tools · AgentFlow · Workers */}
+          <div className="bas-grid-2">
+            <div className="bas-sect">
+              <div className="bas-sect-head">
+                <div>
+                  <h3>Utilização de ferramentas</h3>
+                  <div className="sh-sub">eficiência, falhas e achados por ferramenta</div>
+                </div>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-muted)" }}>{basTools.length} linhas</span>
+              </div>
+              <table className="basT">
+                <thead>
+                  <tr><th>Ferramenta</th><th>Exec.</th><th>Sucesso</th><th>Achados</th><th>Tempo</th></tr>
+                </thead>
+                <tbody>
+                  {basTools.length === 0 && (
+                    <tr><td colSpan={5} className="bas-empty">Sem execuções de ferramentas no escopo.</td></tr>
+                  )}
+                  {basTools.map((tool) => (
+                    <tr key={tool.tool}>
+                      <td className="tool">{tool.tool}</td>
+                      <td>{Number(tool.attempts || 0).toLocaleString("pt-BR")}</td>
+                      <td><b>{Number(tool.success_rate || 0).toFixed(0)}%</b></td>
+                      <td>{Number(tool.findings || 0)}</td>
+                      <td>{Number(tool.avg_duration_seconds || 0).toFixed(1)}s</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="bas-sect">
+              <h3>Fluxo de agentes</h3>
+              <div className="sh-sub">eventos, sucesso e latência por fase / capability</div>
+              <div style={{ marginTop: 14 }}>
+                {basAgentFlow.length === 0 && <div className="bas-empty">Sem traces de agentes no escopo.</div>}
+                {basAgentFlow.slice(0, 6).map((flow) => {
+                  const rate = Number(flow.success_rate || 0);
+                  return (
+                    <div key={flow.stage} className="af-tile">
+                      <div className="top">
+                        <b>{flow.stage}</b>
+                        <span className="ev">{Number(flow.events || 0)} eventos</span>
+                      </div>
+                      <div className="bar-row">
+                        <div className="progress-line"><div style={{ width: `${rate}%`, background: rate >= 80 ? "var(--sev-low-solid)" : "var(--sev-medium-solid)" }} /></div>
+                        <span className="pct">{rate.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="bas-sect">
+              <h3>Workers</h3>
+              <div className="sh-sub">saúde da execução distribuída</div>
+              <div className="w-mini" style={{ marginTop: 14 }}>
+                <div><div className="lbl">Total</div><div className="vv">{Number(basWorkers.total || 0)}</div></div>
+                <div className="act"><div className="lbl">Ativos</div><div className="vv">{Number(basWorkers.active || 0)}</div></div>
+                <div className="stl"><div className="lbl">Stale</div><div className="vv">{Number(basWorkers.stale || 0)}</div></div>
+              </div>
+              <div className="w-list">
+                {(basWorkers.rows || []).length === 0 && <div className="bas-empty">Sem workers registrados.</div>}
+                {(basWorkers.rows || []).slice(0, 5).map((worker) => (
+                  <div key={worker.name} className="it">
+                    <div className="l">
+                      <b>{worker.name}</b>
+                      <span>{worker.mode} · {worker.last_task_name || "sem tarefa"}</span>
+                    </div>
+                    <span className="st">{worker.status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Validated risk + Top vulns */}
+          <div className="bas-grid-3">
+            <div className="bas-sect">
+              <h3>Risco validado por BAS</h3>
+              <div className="sh-sub">achados críticos / altos com evidência operacional</div>
+              <div className="vr-card">
+                <div>
+                  <div className="big">{Number(basSummary.validated_risk_findings || 0)}</div>
+                  <div className="big-sub">riscos críticos / altos</div>
+                </div>
+                <div className="small">
+                  <div className="v">{Number(basSummary.open_findings || 0)}</div>
+                  <div className="v-sub">achados abertos</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bas-sect">
+              <h3>Top vulnerabilidades e controles</h3>
+              <div className="sh-sub">priorização rápida para engenharia de detecção e correção</div>
+              <div className="tv-grid" style={{ marginTop: 14 }}>
+                {(topVulns || []).length === 0 && <div className="bas-empty">Sem vulnerabilidades recorrentes no escopo.</div>}
+                {(topVulns || []).slice(0, 6).map((vuln) => (
+                  <div key={`${vuln.title}-${vuln.severity}`} className="it">
+                    <div className="l">
+                      <b>{vuln.title}</b>
+                      <span>{vuln.severity}</span>
+                    </div>
+                    <span className="ct">{vuln.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ===== Risco, Rating e Maturidade ===== */}
+        <section className="rrm">
+          <div className="rrm-head">
+            <h2>Risco, Rating e Maturidade</h2>
+            <div className="eb">camada executiva após evidências BAS</div>
+          </div>
+
+          <div className="rrm-grid">
+            <div className={`rrm-rating ${ratingTone(scopedVulnerabilityRating.score)}`}>
+              <div className="lbl">Rating atual do alvo</div>
+              <div className="body">
+                <div>
+                  <div className="letter">{scopedVulnerabilityRating.grade || "F"}</div>
+                  <div className="sublabel">Rating</div>
+                </div>
+                <div className="score-num">{Number(scopedVulnerabilityRating.score || 0).toFixed(1)}</div>
+              </div>
+              <div className="bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(scopedVulnerabilityRating.score || 0)))}%` }} /></div>
+            </div>
+
+            <div className={`rrm-rating ${ratingTone(globalVulnerabilityRating.score)}`}>
+              <div className="lbl">Rating atual do grupo</div>
+              <div className="body">
+                <div>
+                  <div className="letter">{globalVulnerabilityRating.grade || "F"}</div>
+                  <div className="sublabel">Rating</div>
+                </div>
+                <div className="score-num">{Number(globalVulnerabilityRating.score || 0).toFixed(1)}</div>
+              </div>
+              <div className="bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(globalVulnerabilityRating.score || 0)))}%` }} /></div>
+            </div>
+
+            <div className="rrm-dist">
+              <div className="head-line">
+                <div>
+                  <h4>Rating distribuído</h4>
+                  <div className="top-sub">top 5 alvos · maior volume de vulnerabilidades</div>
+                </div>
+                <div className="agg">{distributedGrade} <span>{Number(distributedScore || 0).toFixed(1)}</span></div>
+              </div>
+              <table className="distT">
+                <thead>
+                  <tr><th>Alvo</th><th style={{ width: 80 }}>Vulns</th><th style={{ width: 70 }}>Rating</th></tr>
                 </thead>
                 <tbody>
                   {distributedRows.length === 0 && (
-                    <tr>
-                      <td className="px-3 py-3" style={{ color: "var(--ink-muted)" }} colSpan={3}>Sem dados suficientes para distribuição.</td>
-                    </tr>
+                    <tr><td colSpan={3} className="bas-empty">Sem dados suficientes para distribuição.</td></tr>
                   )}
                   {distributedRows.map((row) => (
-                    <tr key={`dist-${row.target}`} className="border-t" style={{ borderColor: "var(--line)" }}>
-                      <td className="px-3 py-2 font-mono" style={{ color: "var(--brand-700)" }}>{row.target}</td>
-                      <td className="px-3 py-2">{row.vulnCount}</td>
-                      <td className="px-3 py-2 font-semibold">{row.grade} {row.score.toFixed(1)}</td>
+                    <tr key={row.target}>
+                      <td className="hst">{row.target}</td>
+                      <td>{row.vulnCount}</td>
+                      <td><b>{row.grade} · {row.score.toFixed(0)}</b></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           </div>
-        </div>
 
-        <div className="mt-5 grid gap-4 lg:grid-cols-3">
-          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
-            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Maturidade por Framework</h3>
-            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Conformidade por framework de segurança</p>
-            <div className="mt-4 space-y-4">
-              {frameworks.map((info) => (
-                <div key={`secure-${info.name}`}>
-                  <div className="mb-1 flex items-center justify-between text-sm">
-                    <span className="font-medium" style={{ color: "var(--ink-soft)" }}>{info.name}</span>
-                    <span className="font-bold" style={{ color: "var(--brand-700)" }}>{info.score}%</span>
+          <div className="bas-sect frameworks">
+            <h3>Maturidade por framework</h3>
+            <div className="top-sub">conformidade por framework de segurança</div>
+            {frameworks.map((info) => {
+              const cls = FRAMEWORK_CLASS[info.name] || "iso";
+              const score = Number(info.score || 0);
+              return (
+                <div key={info.name} className={`fw-row ${cls}`}>
+                  <div className="top">
+                    <span className="nm">{info.name}</span>
+                    <span className="pc">{score.toFixed(0)}%</span>
                   </div>
-                  <div className="h-2 overflow-hidden rounded-full" style={{ background: "var(--bg-muted)" }}>
-                    <div
-                      className="h-2 rounded-full transition-all duration-700"
-                      style={{ width: `${info.score}%`, background: "var(--brand-500)" }}
-                    />
-                  </div>
+                  <div className="fbar"><div style={{ width: `${Math.max(0, Math.min(100, score))}%` }} /></div>
                 </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
-            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Faixas de Grade</h3>
-            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Domínio e Subdomínio</p>
-            <div className="mt-4 overflow-x-auto rounded-xl border" style={{ borderColor: "var(--line)" }}>
-              <table className="min-w-full text-left text-xs">
-                <thead style={{ background: "var(--surface-soft)", color: "var(--ink-soft)" }}>
-                  <tr>
-                    <th className="px-3 py-2">Grade</th>
-                    <th className="px-3 py-2">Mínimo</th>
-                    <th className="px-3 py-2">Máximo</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="border-t"><td className="px-3 py-2 font-semibold">A</td><td className="px-3 py-2">90</td><td className="px-3 py-2">100</td></tr>
-                  <tr className="border-t"><td className="px-3 py-2 font-semibold">B</td><td className="px-3 py-2">80</td><td className="px-3 py-2">89</td></tr>
-                  <tr className="border-t"><td className="px-3 py-2 font-semibold">C</td><td className="px-3 py-2">70</td><td className="px-3 py-2">79</td></tr>
-                  <tr className="border-t"><td className="px-3 py-2 font-semibold">D</td><td className="px-3 py-2">60</td><td className="px-3 py-2">69</td></tr>
-                  <tr className="border-t"><td className="px-3 py-2 font-semibold">F</td><td className="px-3 py-2">0</td><td className="px-3 py-2">59</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
-            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Atividade Operacional</h3>
-            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Atividade dos últimos 7 dias</p>
-            <div className="mt-4 flex h-40 items-end gap-2">
-              {activity.map((d) => (
-                <div key={`bitsight-${d.day}`} className="flex flex-1 flex-col items-center gap-1">
-                  <span className="text-[10px]" style={{ color: "var(--ink-muted)" }}>{d.findings}</span>
-                  <div
-                    className="w-full rounded-t-sm"
-                    style={{ height: `${Math.round((d.findings / maxFindings) * 100)}%`, minHeight: "4px", background: "var(--brand-500)" }}
-                  />
-                  <span className="text-[10px]" style={{ color: "var(--ink-muted)" }}>{d.day}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
-
-        <div className="mt-5">
-          <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--line)" }}>
-            <h3 className="text-sm font-semibold" style={{ color: "var(--ink)" }}>Risco Operacional</h3>
-            <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>Risco operacional por severidade</p>
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm">
-                <p className="text-xs uppercase text-red-300">Crítico</p>
-                <p className="mt-1 text-2xl font-bold text-red-200">{stats.critical || 0}</p>
-              </div>
-              <div className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3 text-sm">
-                <p className="text-xs uppercase text-orange-300">Alto</p>
-                <p className="mt-1 text-2xl font-bold text-orange-200">{stats.high || 0}</p>
-              </div>
-              <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm">
-                <p className="text-xs uppercase text-yellow-300">Médio</p>
-                <p className="mt-1 text-2xl font-bold text-yellow-200">{stats.medium || 0}</p>
-              </div>
-              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">
-                <p className="text-xs uppercase text-emerald-300">Baixo</p>
-                <p className="mt-1 text-2xl font-bold text-emerald-200">{stats.low || 0}</p>
-              </div>
-            </div>
-          </section>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="font-display text-lg font-semibold">Decomposição Formal do Rating</h2>
-          <p className="mt-1 text-xs text-slate-400">Fatores com peso, evidência e impacto na nota final.</p>
-          <div className="mt-3 space-y-3">
-            {(continuousRating?.factors || []).length === 0 && <p className="text-sm text-slate-500">Sem fatores calculados.</p>}
-            {(continuousRating?.factors || []).map((f) => (
-              <div key={f.id} className="rounded-xl border border-slate-700 bg-slate-800/40 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <span className={`inline-flex h-7 w-7 items-center justify-center rounded-lg border ${FACTOR_VISUAL[f.name]?.accent || "text-slate-300 border-slate-600 bg-slate-700/40"}`}>
-                      {FACTOR_VISUAL[f.name]?.icon || (
-                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <circle cx="12" cy="12" r="8" />
-                        </svg>
-                      )}
-                    </span>
-                    <p className="text-sm font-semibold text-slate-100">{f.name}</p>
-                  </div>
-                  <p className="rounded-md border border-slate-600 bg-slate-900/60 px-2 py-0.5 text-xs text-slate-300">
-                    peso {Math.round((Number(f.weight || 0) * 100))}%
-                  </p>
-                </div>
-
-                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                  <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1">
-                    <p className="text-slate-400">Score</p>
-                    <p className="font-semibold text-slate-100">{Number(f.score || 0).toFixed(2)}</p>
-                  </div>
-                  <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-2 py-1">
-                    <p className="text-slate-400">Impacto</p>
-                    <p className="font-semibold text-slate-100">{Number(f.impact_points || 0).toFixed(2)} pts</p>
-                  </div>
-                </div>
-
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-700/70">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400"
-                    style={{ width: `${Math.max(0, Math.min(100, Number(f.score || 0)))}%` }}
-                  />
-                </div>
-
-                <div className="mt-2 rounded-lg border border-slate-700/80 bg-slate-900/40 px-2 py-2 text-[11px] text-slate-300">
-                  <p className="mb-1 text-slate-400">Evidências</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {formatFactorEvidence(f.name, f.evidence).map((line) => (
-                      <span key={`${f.id}-${line}`} className="rounded-md border border-slate-600 bg-slate-800/60 px-2 py-0.5">
-                        {line}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
-      </section>
+        </section>
 
+      </div>
     </main>
   );
 }

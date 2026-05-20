@@ -42,6 +42,13 @@ TOOL_TO_PROFILE: dict[str, str] = {
     # Reconnaissance
     "subfinder": "subfinder_passive",
     "amass": "amass_enum",
+    "amass-brute": "amass_brute",
+    "amass-intel": "amass_intel",
+    "sublist3r": "sublist3r_basic",
+    "findomain": "findomain_passive",
+    "dnsrecon-brt": "dnsrecon_brute",
+    "dnsrecon-zt": "dnsrecon_zone_transfer",
+    "dnsenum": "dnsenum_basic",
     "assetfinder": "assetfinder_passive",
     "dnsx": "dnsx_resolve",
     "shuffledns": "shuffledns_brute",
@@ -66,6 +73,11 @@ TOOL_TO_PROFILE: dict[str, str] = {
     # Weaponization / Vuln Scanning
     "nuclei": "nuclei_cves",
     "nmap-vulscan": "nmap_vuln_scripts",
+    "nmap-http-enum": "nmap_http_enum",
+    "nmap-smb-vuln": "nmap_smb_vuln",
+    "nmap-dns-vuln": "nmap_dns_vuln",
+    "nmap-ssh-audit": "nmap_ssh_audit",
+    "nmap-ssl-vuln": "nmap_ssl_vuln",
     "nikto": "nikto_basic",
     "shodan-cli": "shodan_lookup",
     "theharvester": "theharvester_passive",
@@ -99,6 +111,11 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "trivy": "trivy_fs",
     "gitleaks": "gitleaks_secrets",
     "retire": "retire_js",
+
+    # Backend-local virtual tool (no Kali profile). Sentinel value is
+    # checked by `worker_dispatcher.execute_tool_with_workers` to short-
+    # circuit the dispatch into `app.services.code_analyzer.run_as_tool`.
+    "code-analyzer": "code_analyzer_backend",
 }
 
 
@@ -165,6 +182,7 @@ def execute_via_kali(
     poll_interval: float = 3.0,
     max_wait: int = 1800,
     skill_context: dict[str, Any] | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Dispatches `tool` to the Kali runner via HTTP and waits for completion.
 
@@ -192,6 +210,7 @@ def execute_via_kali(
                 "tool": tool_name,
                 "original_target": original_target if original_target != target else None,
                 "skill_context": dict(skill_context or {}),
+                "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
             },
             timeout=10,
         )

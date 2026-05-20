@@ -680,7 +680,7 @@ export default function LearningPage() {
   };
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
+    <main className="dpage space-y-4">
       <section className="panel p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>

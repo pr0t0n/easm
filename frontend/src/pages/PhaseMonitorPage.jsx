@@ -9,7 +9,8 @@ const STATUS_STYLES = {
   no_tools_installed:             { className: "ds-badge",                   label: "Sem tools" },
   node_completed_no_phase_tools:  { className: "ds-badge ds-badge--high",    label: "Node OK / sem tools" },
   node_visited_no_tools:          { className: "ds-badge ds-badge--info",    label: "Visitou / sem tools" },
-  skipped:                        { className: "ds-badge",                   label: "Pulou" },
+  pending:                        { className: "ds-badge",                   label: "Pendente" },
+  skipped:                        { className: "ds-badge",                   label: "Ignorada" },
 };
 
 const SEVERITY_COLORS = {
@@ -93,11 +94,10 @@ export default function PhaseMonitorPage() {
   }, [autoRefresh, scanId]);
 
   const filteredPhases = useMemo(() => {
-    if (!data) return [];
-    if (filter === "all") return data.phases;
-    if (filter === "issues") return data.phases.filter((p) => p.status !== "executed");
-    if (filter === "ok") return data.phases.filter((p) => p.status === "executed");
-    return data.phases;
+    const phases = Array.isArray(data?.phases) ? data.phases : [];
+    if (filter === "issues") return phases.filter((p) => p.status !== "executed");
+    if (filter === "ok") return phases.filter((p) => p.status === "executed");
+    return phases;
   }, [data, filter]);
 
   const groupedByNode = useMemo(() => {
@@ -110,10 +110,10 @@ export default function PhaseMonitorPage() {
   }, [filteredPhases]);
 
   return (
-    <div style={{ padding: "20px 24px", color: "#1c1c1c" }}>
-      <div style={{ marginBottom: 18 }}>
-        <h2 style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.02em", marginBottom: 4 }}>Phase Monitor</h2>
-        <p style={{ fontSize: 13, color: "#6b6b6b" }}>22-step vulnerability analysis pipeline · cobertura por fase, ferramentas usadas e pontos de falha.</p>
+    <div className="dpage">
+      <div className="page-intro">
+        <h2>Phase Monitor.</h2>
+        <div className="sub">pipeline de análise de vulnerabilidade de 22 passos · cobertura por fase, ferramentas e falhas</div>
       </div>
 
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
@@ -207,16 +207,21 @@ export default function PhaseMonitorPage() {
           )}
 
           {/* HEADER METRICS */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 18 }}>
-            <Metric label="Status" value={data.status} />
-            <Metric label="Progress" value={`${data.mission_progress}%`} />
-            <Metric label="Findings" value={data.metrics.findings_total} />
-            <Metric label="Tool runs" value={data.metrics.tool_runs_total} />
-            <Metric label="Tools success" value={`${data.metrics.tools_success}/${data.metrics.tools_attempted}`} accent />
-            <Metric label="Iterations" value={`${data.metrics.loop_iteration}/${data.metrics.max_iterations}`} />
-            <Metric label="Termination" value={data.termination_reason || "-"} />
-            <Metric label="Objective met" value={data.objective_met ? "yes" : "no"} />
-          </div>
+          {(() => {
+            const m = data.metrics || {};
+            return (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 18 }}>
+                <Metric label="Status" value={data.status ?? "—"} />
+                <Metric label="Progress" value={`${data.mission_progress ?? 0}%`} />
+                <Metric label="Findings" value={m.findings_total ?? 0} />
+                <Metric label="Tool runs" value={m.tool_runs_total ?? 0} />
+                <Metric label="Tools success" value={`${m.tools_success ?? 0}/${m.tools_attempted ?? 0}`} accent />
+                <Metric label="Iterations" value={`${m.loop_iteration ?? 0}/${m.max_iterations ?? 0}`} />
+                <Metric label="Termination" value={data.termination_reason || "-"} />
+                <Metric label="Objective met" value={data.objective_met ? "yes" : "no"} />
+              </div>
+            );
+          })()}
 
           {/* TOOL INSTALLATION REPORT */}
           {data.installation_report && (

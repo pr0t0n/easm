@@ -20,11 +20,14 @@ MISSION_ITEMS = [
 PENTEST_PHASES = [
     # Phase 1 – Recon
     {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",
-     "tools": ["subfinder", "amass", "massdns", "dnsx", "shuffledns", "assetfinder", "alterx"]},
+     "tools": [
+         "subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain",
+         "assetfinder", "alterx", "shuffledns", "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+     ]},
     {"id": "P02", "title": "Port & Service Scan", "node": "asset_discovery",
      "tools": ["naabu", "nmap", "masscan", "httpx"]},
     {"id": "P03", "title": "Web Crawling & JS Extraction", "node": "asset_discovery",
-     "tools": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "js-snooper", "jsniper"]},
+     "tools": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider"]},
     {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
      "tools": ["arjun", "paramspider", "ffuf-params", "ffuf-values", "wfuzz"]},
     # Phase 2 – Tech Fingerprint
@@ -34,7 +37,7 @@ PENTEST_PHASES = [
      "tools": ["wafw00f", "curl-headers"]},
     # Phase 3 – OSINT
     {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks", "metagoofil"]},
+     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"]},
     {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
      "tools": ["theHarvester"]},
     {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
@@ -43,13 +46,16 @@ PENTEST_PHASES = [
      "tools": ["nuclei", "shodan-cli", "trufflehog"]},
     # Phase 4 – Vulnerability Assessment
     {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
-     "tools": ["nuclei", "nmap-vulscan"]},
+     "tools": [
+         "nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+         "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
+     ]},
     {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
      "tools": ["sqlmap", "dalfox", "wapiti", "nikto"]},
     {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
      "tools": ["nuclei", "interactsh-client"]},
     {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
-     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec", "impacket", "evilwinrm"]},
+     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"]},
     {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
      "tools": ["ffuf", "ffuf-files", "ffuf-params", "gobuster", "feroxbuster", "dirsearch", "wfuzz"]},
     {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
@@ -66,7 +72,7 @@ PENTEST_PHASES = [
     {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
      "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
     {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
-     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks", "eslint", "jshint", "ast-grep"]},
+     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks"]},
 ]
 
 
@@ -76,25 +82,38 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "recon-subdomain-enum",
         "category": "reconnaissance",
-        "description": "Enumeração de subdomínios, validação DNS e expansão de superfície.",
-        "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder", "dnsx"],
-        "playbook": ["subfinder", "amass", "dnsx", "shuffledns", "assetfinder", "alterx"],
+        "description": "Enumeração de subdomínios via passive (subfinder/amass/sublist3r/findomain/assetfinder), active brute (amass-brute/shuffledns), DNS recon (dnsrecon/dnsenum), e validação DNS.",
+        "triggers": ["domain", "subdomain", "dns", "surface", "recon", "amass", "subfinder",
+                     "dnsx", "sublist3r", "findomain", "dnsrecon", "dnsenum", "axfr", "zone transfer"],
+        # Article ordering: passive first (fast, no noise) → DNS-level recon
+        # → active brute (heavier) → DNS records (dnsx). Multi-source dedupe
+        # happens downstream when findings are normalised into lista_ativos.
+        "playbook": [
+            "subfinder", "amass", "sublist3r", "findomain", "assetfinder",
+            "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+            "amass-brute", "amass-intel", "shuffledns", "alterx",
+            "dnsx",
+        ],
         "phases": ["P01"],
     },
     {
         "id": "recon-port-service",
         "category": "reconnaissance",
-        "description": "Enumeração de portas e fingerprint de serviços expostos.",
-        "triggers": ["port", "service", "banner", "naabu", "nmap", "masscan"],
-        "playbook": ["naabu", "nmap", "masscan", "httpx"],
+        "description": "Enumeração de portas + fingerprint de serviços. Pipeline article §8-§10: masscan/naabu (descoberta rápida) → nmap -sV -sC (versionamento) → httpx (alive check + tech detect).",
+        "triggers": ["port", "service", "banner", "naabu", "nmap", "masscan", "rustscan"],
+        # Pipeline order: fast port discovery → service version detect → HTTP probe
+        "playbook": ["naabu", "masscan", "nmap", "httpx"],
         "phases": ["P02"],
     },
     {
         "id": "recon-web-crawl",
         "category": "reconnaissance",
-        "description": "Crawling web, extração de JavaScript, endpoints e parâmetros.",
-        "triggers": ["crawl", "js", "endpoint", "param", "fuzz", "katana", "gau", "wayback"],
-        "playbook": ["katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider", "ffuf-params", "wfuzz"],
+        "description": "Crawling web, extração de JavaScript, endpoints e parâmetros. Inclui code-analyzer que faz GET no alvo, baixa JS referenciado e extrai forms/endpoints/env vars/secrets.",
+        "triggers": ["crawl", "js", "endpoint", "param", "fuzz", "katana", "gau", "wayback", "code-analyzer"],
+        # `code-analyzer` runs first by convention: it produces structured
+        # endpoints + forms that downstream tools (katana, arjun) can
+        # consume, and forms hypotheses for the EXPLOITATION stage.
+        "playbook": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider", "arjun", "paramspider", "ffuf-params", "wfuzz"],
         "phases": ["P03", "P04"],
     },
     # ── CATEGORY 2: TECHNOLOGIES ─────────────────────────────────────────────
@@ -102,8 +121,14 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "id": "tech-http-fingerprint",
         "category": "technologies",
         "description": "Fingerprint HTTP/TLS, headers de segurança, OWASP Top 10 security misconfiguration e detecção de WAF.",
-        "triggers": ["http", "https", "header", "headers", "owasp", "tls", "ssl", "whatweb", "nikto", "waf", "cloudflare"],
-        "playbook": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
+        "triggers": [
+            "http", "https", "header", "headers", "owasp", "tls", "ssl", "whatweb", "nikto", "waf",
+            "cloudflare", "akamai", "imperva", "sucuri",
+            # tech-stack tags from detected_tech_stack
+            "asp.net", "iis", "apache", "nginx", "tomcat", "openresty", "lighttpd",
+            "x-aspnet-version", "x-powered-by", "server:",
+        ],
+        "playbook": ["code-analyzer", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"],
         "phases": ["P05", "P06"],
     },
     {
@@ -117,8 +142,12 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "tech-cms-fingerprint",
         "category": "technologies",
-        "description": "Detecção e scan de CMS (WordPress, Joomla, Drupal).",
-        "triggers": ["cms", "wordpress", "wp", "joomla", "drupal", "wpscan"],
+        "description": "Detecção e scan de CMS (WordPress, Joomla, Drupal, Magento, Shopify, Sharepoint).",
+        "triggers": [
+            "cms", "wordpress", "wp", "joomla", "drupal", "wpscan",
+            "magento", "shopify", "ghost", "sharepoint",
+            "wp-content", "wp-admin", "wp-includes",
+        ],
         "playbook": ["whatweb", "wpscan", "nuclei"],
         "phases": ["P20"],
     },
@@ -126,9 +155,17 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "vuln-injection",
         "category": "vulnerabilities",
-        "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível.",
-        "triggers": ["sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox"],
-        "playbook": ["sqlmap", "dalfox", "wapiti", "nikto"],
+        "description": "Validação de injeções: SQLi, XSS, SSTI, XXE com evidência reproduzível, sensível ao stack detectado (ASP/MSSQL, PHP/MySQL, Node, etc).",
+        "triggers": [
+            "sqli", "xss", "ssti", "xxe", "injection", "sqlmap", "dalfox", "wapiti",
+            # back-end DB hints — quando aparecem na evidência, SQLi é a skill alvo
+            "mssql", "mysql", "mariadb", "postgresql", "postgres", "oracle", "mongodb",
+            # framework/lang que tipicamente concatena SQL/HTML cru
+            "asp.net", "asp", "aspx", "iis", "php", "node.js", "express", "rails", "django", "flask",
+            # parâmetros vulneráveis comuns que aparecem em evidência
+            "search=", "?id=", "?q=", "?query=", "?keyword=", "?category=", "?name=",
+        ],
+        "playbook": ["sqlmap", "dalfox", "wapiti", "nikto", "nuclei"],
         "phases": ["P12"],
     },
     {
@@ -143,7 +180,11 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "id": "vuln-auth-bypass",
         "category": "vulnerabilities",
         "description": "Bypass de autenticação, brute-force/fuzzing de credenciais, JWT/OAuth e MFA abuse.",
-        "triggers": ["auth", "bypass", "brute", "fuzz credentials", "jwt", "oauth", "token", "hydra", "medusa"],
+        "triggers": [
+            "auth", "bypass", "brute", "fuzz credentials", "jwt", "oauth", "token",
+            "hydra", "medusa", "login", "signin", "session", "aspnet_sessionid", "phpsessid",
+            "jsessionid", "csrf",
+        ],
         "playbook": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"],
         "phases": ["P14"],
     },
@@ -174,9 +215,17 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "vuln-nuclei-cve",
         "category": "vulnerabilities",
-        "description": "Scan de CVEs e misconfigurations com Nuclei.",
-        "triggers": ["cve", "nuclei", "misconfiguration", "exploit", "known"],
-        "playbook": ["nuclei", "nmap-vulscan"],
+        "description": "Scan de CVEs e misconfigurations: nuclei (templates YAML) + bateria NMAP NSE (vuln, http-enum, smb-vuln, ssh-audit, ssl-vuln, dns-vuln). nmap aqui não faz port scan — usa scripts NSE de vulnerabilidade.",
+        "triggers": ["cve", "nuclei", "misconfiguration", "exploit", "known",
+                     "ms17-010", "eternalblue", "heartbleed", "shellshock",
+                     "smb", "ssh weak", "ssl weak", "http-enum"],
+        # nmap dual-role: also belongs here as `nmap-vulscan` (NSE vuln category)
+        # plus targeted NSE batteries (http/smb/ssh/ssl/dns).
+        "playbook": [
+            "nuclei", "nikto",
+            "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
+            "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
+        ],
         "phases": ["P11"],
     },
     {
@@ -243,7 +292,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Identificação de hashing fraco (MD5/SHA1), encoding como criptografia (Base64/ROT13/z85), e cifras quebradas em cookies/JWT/cupons.",
         "triggers": ["md5", "rainbow", "base64 cookie", "rot13", "z85", "broken hash", "weak cipher", "encoding misuse", "jwt none"],
-        "playbook": ["jwt_tool", "burp-cli", "trufflehog", "hashcat"],
+        "playbook": ["jwt_tool", "trufflehog", "gitleaks"],
         "phases": ["P11", "P14", "P22"],
     },
     {
@@ -889,10 +938,18 @@ def _text_blob(
     findings: list[dict[str, Any]],
     target_type: str,
     discovered_ports: list[int],
+    detected_tech_stack: list[str] | None = None,
 ) -> str:
     chunks = [str(target or ""), str(target_type or "")]
     if discovered_ports:
         chunks.append("ports:" + ",".join(str(p) for p in discovered_ports[:12]))
+    # Tech-stack tags weigh in via duplication so they outweigh isolated noise.
+    # Repeating the stack tag 3x acts as a soft +3 score boost on any skill
+    # whose triggers include the tag.
+    for tag in (detected_tech_stack or []):
+        tag_str = str(tag or "").strip()
+        if tag_str:
+            chunks.extend([tag_str, tag_str, tag_str])
     for finding in findings[:40]:
         details = finding.get("details") or {}
         chunks.extend([
@@ -910,10 +967,12 @@ def select_mission_skills(
     target_type: str = "dominio",
     discovered_ports: list[int] | None = None,
     max_skills: int = 5,
+    detected_tech_stack: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     findings = list(findings or [])
     discovered_ports = list(discovered_ports or [])
-    blob = _text_blob(target, findings, target_type, discovered_ports)
+    detected_tech_stack = list(detected_tech_stack or [])
+    blob = _text_blob(target, findings, target_type, discovered_ports, detected_tech_stack)
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for skill in SKILL_CATALOG:
@@ -921,13 +980,20 @@ def select_mission_skills(
         if score > 0:
             scored.append((score, skill))
 
-    # Guaranteed baseline when no signals yet
+    # Guaranteed baseline when no signals yet. Keep this web-pentest oriented:
+    # early scans often have no findings yet, but the supervisor still needs
+    # exploit-relevant skills available so accepted learning can steer the
+    # first tool choices instead of falling back to a generic vuln scan.
     if not scored:
         defaults = [
             "recon-subdomain-enum",
-            "recon-port-service",
+            "recon-web-crawl",
+            "vuln-directory-enum",
+            "vuln-injection",
+            "vuln-api-graphql",
+            "vuln-ssrf-redirect",
+            "vuln-auth-bypass",
             "tech-http-fingerprint",
-            "vuln-nuclei-cve",
             "osint-exposure-intel",
         ]
         by_id = {item["id"]: item for item in SKILL_CATALOG}

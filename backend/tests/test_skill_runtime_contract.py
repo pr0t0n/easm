@@ -41,6 +41,8 @@ def test_skill_runtime_prefers_learning_skill_over_first_active_skill() -> None:
     assert invocation["called"] is True
     assert invocation["skill_id"] == "vuln-information-disclosure"
     assert invocation["recommended_tools"][0] == "katana"
+    assert invocation["worker_rules"]["worker_group"] == "reconnaissance"
+    assert any(item["id"] == "recon.web_crawl" for item in invocation["sub_agent_plan"])
     assert any(str(item).startswith("learning_skill:") for item in invocation["matched_by"])
 
 
@@ -99,16 +101,19 @@ def test_skill_pipeline_turns_learning_into_single_tool_contract(monkeypatch) ->
 
     selection = state["tool_selection_contract"]
     assert selection["decision_source"] == "skill_selector"
-    assert selection["selected_tools"] == ["katana"]
+    assert selection["selected_tools"][0] == "katana"
+    assert "httpx" in selection["selected_tools"]
     assert selection["skill_id"] == "vuln-information-disclosure"
     assert selection["evidence_required"] == ["score board"]
     assert state["current_skill"] == "vuln-information-disclosure"
     assert state["skill_invocations"][0]["skill_id"] == "vuln-information-disclosure"
-    assert [item["action"] for item in state["autonomy_actions"]] == [
-        "skill_invoked",
-        "skill_planned",
-        "tool_selected",
-    ]
+    assert state["skill_plan_contract"]["worker_rules"]["worker_group"] == "reconnaissance"
+    assert any(item["id"] == "recon.web_crawl" for item in state["tool_selection_contract"]["sub_agent_plan"])
+    actions = [item["action"] for item in state["autonomy_actions"]]
+    assert "skill_invoked" in actions
+    assert "skill_planned" in actions
+    assert "tool_selected" in actions
+    assert actions.index("skill_planned") < actions.index("tool_selected")
 
 
 def test_skill_selector_node_materializes_skill_contract(monkeypatch) -> None:
@@ -213,6 +218,8 @@ def test_tool_selector_does_not_keep_phase_fan_out(monkeypatch) -> None:
             "recommended_tools": ["sqlmap"],
             "evidence_required": ["sql error"],
             "constraints": ["safe batch mode"],
+            "worker_rules": {"worker_group": "exploitation", "rules": ["validate safely"]},
+            "sub_agent_plan": [{"id": "exploitation.web_validation"}],
             "playbook_title": "accepted learning",
         },
         "skill_selector_gate": {},
@@ -228,7 +235,7 @@ def test_tool_selector_does_not_keep_phase_fan_out(monkeypatch) -> None:
 
     tool_selector_node(state)
 
-    assert state["tool_selection_contract"]["selected_tools"] == ["sqlmap"]
+    assert state["tool_selection_contract"]["selected_tools"] == ["sqlmap", "dalfox"]
     assert state["tool_selection_contract"]["decision_source"] == "skill_selector"
 
 
@@ -276,6 +283,8 @@ def test_tool_execution_dispatch_receives_skill_contract(monkeypatch) -> None:
             "technique": {"name": "SQLi validation"},
             "evidence_required": ["sql error"],
             "constraints": ["safe batch mode"],
+            "worker_rules": {"worker_group": "exploitation", "rules": ["validate safely"]},
+            "sub_agent_plan": [{"id": "exploitation.web_validation"}],
             "playbook_title": "accepted learning",
         },
     )
@@ -285,3 +294,5 @@ def test_tool_execution_dispatch_receives_skill_contract(monkeypatch) -> None:
     assert captured["technique"] == {"name": "SQLi validation"}
     assert captured["evidence_required"] == ["sql error"]
     assert captured["constraints"] == ["safe batch mode"]
+    assert captured["worker_rules"] == {"worker_group": "exploitation", "rules": ["validate safely"]}
+    assert captured["sub_agent_plan"] == [{"id": "exploitation.web_validation"}]

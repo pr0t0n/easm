@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
 import re
 import shlex
 import socket
@@ -241,22 +242,35 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_command(profile: dict[str, Any], target: str, extra_args: list[str]) -> list[str]:
+def _render_template(value: str, context: dict[str, str]) -> str:
+    # Profiles may use either Python format placeholders ({host}) or the
+    # operator-facing contract placeholders ({{domain}}, {{url}}, {{out}}).
+    template = re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", r"{\1}", str(value))
+    return template.format(**context)
+
+
+def _build_command(
+    profile: dict[str, Any],
+    target: str,
+    extra_args: list[str],
+    workdir: Path | None = None,
+) -> list[str]:
     """Materialize the argv for a profile. Profile spec:
         tool: subfinder
         cmd:  ["subfinder", "-d", "{host}", "-silent"]
         timeout: 300
     """
-    raw = list(profile.get("cmd") or [])
+    raw_cmd = profile.get("cmd") or []
+    raw = shlex.split(raw_cmd) if isinstance(raw_cmd, str) else list(raw_cmd)
     if not raw:
         raise ValueError(f"profile {profile.get('source_file')} missing 'cmd'")
-    context = _target_context(target)
-    materialized = [str(part).format(**context) for part in raw]
+    context = _target_context(target, workdir=workdir)
+    materialized = [_render_template(str(part), context) for part in raw]
     materialized.extend(str(a) for a in (extra_args or []))
     return materialized
 
 
-def _target_context(target: str) -> dict[str, str]:
+def _target_context(target: str, workdir: Path | None = None) -> dict[str, str]:
     raw = str(target or "").strip()
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
     host = parsed.hostname or raw.replace("http://", "").replace("https://", "").split("/")[0]
@@ -267,10 +281,7 @@ def _target_context(target: str) -> dict[str, str]:
     query = parsed.query or ""
     url = urlunparse((scheme, netloc, path, "", query, ""))
     https_url = urlunparse(("https", netloc, path, "", query, ""))
-    try:
-        host_ip = socket.gethostbyname(host)
-    except OSError:
-        host_ip = host
+    host_ip = _resolve_host_ip(host)
     context = {
         "target": raw,
         "url": url,
@@ -278,9 +289,12 @@ def _target_context(target: str) -> dict[str, str]:
         "host": host,
         "host_ip": host_ip,
         "domain": host,
+        "subdomain": host,
         "netloc": netloc,
         "port": port,
         "scheme": scheme,
+        "path": raw,
+        "out": str(workdir or WORKSPACE),
         **{f"env_{key}": value for key, value in os.environ.items()},
     }
     for env_name in (
@@ -290,6 +304,7 @@ def _target_context(target: str) -> dict[str, str]:
         "SCAN_AUTH_USERLIST",
         "SCAN_AUTH_PASSLIST",
         "SCAN_AUTH_PROTOCOL",
+        "SCAN_JWT_TOKEN",
         "SCAN_FUZZ_PARAM",
         "SCAN_FUZZ_POST_DATA",
         "SCAN_FUZZ_CONTENT_TYPE",
@@ -300,10 +315,58 @@ def _target_context(target: str) -> dict[str, str]:
     return context
 
 
-def _materialize_template(template: str | None, target: str) -> str | None:
+def _resolve_host_ip(host: str) -> str:
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return host
+    for info in infos:
+        candidate = str(info[4][0])
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            continue
+    return host
+
+
+def _materialize_template(
+    template: str | None,
+    target: str,
+    workdir: Path | None = None,
+) -> str | None:
     if template is None:
         return None
-    return str(template).format(**_target_context(target))
+    return _render_template(str(template), _target_context(target, workdir=workdir))
+
+
+def _target_validation_error(profile: dict[str, Any], target: str) -> str:
+    target_type = str(profile.get("target_type") or "").strip().lower()
+    if target_type in {"resolved_ip", "ip"}:
+        context = _target_context(target)
+        host = context.get("host", "")
+        host_ip = context.get("host_ip", "")
+        try:
+            ipaddress.ip_address(host_ip)
+        except ValueError:
+            return f"target_type {target_type} requires a resolvable IP for host: {host}"
+        return ""
+    if target_type != "local_path":
+        return ""
+    raw = str(target or "").strip()
+    if not raw:
+        return "target_type local_path requires a non-empty directory path"
+    candidate = Path(raw).expanduser()
+    if not candidate.exists():
+        return f"target_type local_path requires an existing directory: {candidate}"
+    if not candidate.is_dir():
+        return f"target_type local_path requires a directory, got file: {candidate}"
+    return ""
 
 
 def _parse_output(profile: dict[str, Any], stdout: str) -> Any:
@@ -378,9 +441,21 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             )
             return
 
-        argv = _build_command(profile, req.target, req.extra_args)
+        target_error = _target_validation_error(profile, req.target)
+        if target_error:
+            _set_job_fields(
+                job_id,
+                status="skipped",
+                return_code=0,
+                command=f"{profile.get('tool') or req.profile} <target_validation>",
+                stdout="",
+                stderr=target_error,
+            )
+            return
+
+        argv = _build_command(profile, req.target, req.extra_args, workdir=workdir)
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
-        stdin_text = _materialize_template(profile.get("stdin_template"), req.target)
+        stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)
 
         _set_job_fields(job_id, command=command)
@@ -402,7 +477,17 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         (workdir / "exit_code.txt").write_text(str(return_code), encoding="utf-8")
         (workdir / "command.txt").write_text(command, encoding="utf-8")
 
-        parsed = _parse_output(profile, stdout)
+        parse_source = stdout
+        output_file_template = profile.get("output_file")
+        if output_file_template:
+            output_file = Path(str(_materialize_template(str(output_file_template), req.target, workdir=workdir)))
+            if output_file.exists() and output_file.is_file():
+                try:
+                    parse_source = output_file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    parse_source = stdout
+
+        parsed = _parse_output(profile, parse_source)
         if parsed is not None:
             try:
                 (workdir / "parsed.json").write_text(
@@ -419,11 +504,17 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         if skipped_markers and any(marker in combined_lower for marker in skipped_markers):
             status = "skipped"
 
+        # Cap raised to 500K for stdout (was 100K) because verbose scanners
+        # like nikto/nuclei can emit >150K of useful output where the
+        # critical `+` finding lines are at the *start*, not the end.
+        # Truncating the head silently dropped 12+ findings/scan. The
+        # parsers read all lines and only retain matches, so larger
+        # buffers are safe; stderr stays at 20K (mostly progress/errors).
         _set_job_fields(
             job_id,
             status=status,
             return_code=return_code,
-            stdout=stdout[-100_000:] if stdout else "",
+            stdout=stdout[-500_000:] if stdout else "",
             stderr=stderr[-20_000:] if stderr else "",
             parsed=parsed,
         )

@@ -14,6 +14,28 @@ from app.services.kali_executor import TOOL_TO_PROFILE, normalize_kali_result, n
 logger = logging.getLogger(__name__)
 
 
+_PROFILE_TIMEOUT_HINTS: dict[str, int] = {
+    # Long-running web validation profiles. The previous default was
+    # max(MCP_TIMEOUT*6, 120), which cut nikto/sqlmap/nuclei while the Kali
+    # runner kept working in the background. Keep the MCP wait aligned with
+    # the runner profile so the backend receives the real result.
+    "nuclei_cves": 900,
+    "nikto_basic": 900,
+    "sqlmap_basic": 600,
+    "dalfox_xss": 600,
+    "wapiti_scan": 1200,
+    "wpscan_basic": 900,
+    "nmap_vuln_scripts": 900,
+    "nmap_http_enum": 900,
+    "nmap_ssl_vuln": 600,
+    "nmap_smb_vuln": 600,
+    "ffuf_dirs": 600,
+    "ffuf_files": 600,
+    "ffuf_param_names": 600,
+    "wfuzz_param_names": 600,
+}
+
+
 class MCPClient:
     """HTTP client for the local MCP server.
 
@@ -55,6 +77,26 @@ class MCPClient:
                 return str(response.json().get("status") or "").lower() == "healthy"
         except Exception as exc:  # noqa: BLE001
             logger.warning("MCP sync health check failed: %s", exc)
+            return False
+
+    def kali_tools_available_sync(self) -> bool:
+        """True only when MCP can actually proxy tool execution to Kali.
+
+        RAG can be healthy without Kali being connected, so execution callers
+        must not rely on the generic MCP health status.
+        """
+        try:
+            with self._sync_client() as client:
+                response = client.get("/health")
+                response.raise_for_status()
+                payload = response.json()
+                if not bool(payload.get("kali_connected")):
+                    return False
+                if int(payload.get("kali_profiles_loaded") or 0) <= 0:
+                    return False
+                return str(payload.get("status") or "").lower() == "healthy"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP Kali tool availability check failed: %s", exc)
             return False
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
@@ -179,8 +221,9 @@ class MCPClient:
                 response.raise_for_status()
                 return dict(response.json())
         except Exception as exc:  # noqa: BLE001
-            logger.error("MCP tool call failed: %s", exc)
-            return {"status": "error", "error": str(exc), "tool": tool_name}
+            error = f"{type(exc).__name__}: {exc}"
+            logger.error("MCP tool call failed: %s", error)
+            return {"status": "error", "error": error, "tool": tool_name}
 
     def execute_kali_tool_sync(
         self,
@@ -190,6 +233,7 @@ class MCPClient:
         scan_id: int | str | None = None,
         timeout: int | None = None,
         skill_context: dict[str, Any] | None = None,
+        extra_args: list[str] | None = None,
     ) -> dict[str, Any]:
         requested = str(tool_name or "").strip()
         if not requested:
@@ -201,12 +245,26 @@ class MCPClient:
         tool_names = {str(item.get("name") or "") for item in mcp_tools}
         profile_name = TOOL_TO_PROFILE.get(requested.lower(), requested)
         selected_name = requested if requested in tool_names else profile_name
-        runner_timeout = int(timeout or max(self.timeout * 6, 120))
+
+        metadata_timeout = 0
+        for item in mcp_tools:
+            if str(item.get("name") or "") != selected_name:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            try:
+                metadata_timeout = int(metadata.get("timeout") or 0)
+            except (TypeError, ValueError):
+                metadata_timeout = 0
+            break
+
+        profile_timeout = metadata_timeout or _PROFILE_TIMEOUT_HINTS.get(profile_name, 0)
+        runner_timeout = int(timeout or profile_timeout or max(self.timeout * 6, 120))
         client_timeout = max(float(runner_timeout) + 15.0, self.timeout)
         payload: dict[str, Any] = {
             "target": normalized_target,
             "scan_id": scan_id or "mcp_scan",
             "timeout": runner_timeout,
+            "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
         }
         if skill_context:
             payload["skill_context"] = dict(skill_context)

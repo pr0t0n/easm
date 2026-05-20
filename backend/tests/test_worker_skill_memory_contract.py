@@ -15,7 +15,14 @@ def test_worker_profiles_require_skill_memory_step() -> None:
     assert "retrieve_skill_memory" in recon["operational_sequence"]
     assert recon["operational_sequence"].index("skill_selector") < recon["operational_sequence"].index("skill_planner")
     assert recon["operational_sequence"].index("skill_planner") < recon["operational_sequence"].index("retrieve_skill_memory")
+    assert "load_worker_rules" in recon["operational_sequence"]
+    assert "select_sub_agent_rules" in recon["operational_sequence"]
     assert recon["contract"]["tool_execution_path"] == "mcp_to_kali"
+    assert recon["skill_context"]["rules_required"] is True
+    assert recon["skill_context"]["sub_agent_planning_required"] is True
+    assert recon["worker_rules"]["worker_group"] == "reconnaissance"
+    assert any(item["id"] == "recon.subdomain" for item in recon["sub_agent_rules"])
+    assert any(item["id"] == "recon.web_crawl" for item in recon["sub_agent_rules"])
 
 
 def test_supervisor_prompt_embeds_skill_memory() -> None:

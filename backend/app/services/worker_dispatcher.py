@@ -34,10 +34,37 @@ def execute_tool_with_workers(
     technique: dict[str, Any] | None = None,
     evidence_required: list[str] | None = None,
     constraints: list[str] | None = None,
+    worker_rules: dict[str, Any] | None = None,
+    sub_agent_plan: list[dict[str, Any]] | None = None,
     playbook: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Single-path tool execution: always via the Kali runner."""
-    if str(tool_name or "").strip().lower() not in TOOL_TO_PROFILE:
+    """Single-path tool execution: via the Kali runner OR backend-local
+    services. The `code-analyzer` tool is intentionally backend-local so it
+    can fetch HTML/JS and produce structured findings without paying the
+    Kali round-trip cost. It carries `findings_extracted` so the workflow's
+    parser merges them directly.
+    """
+    norm_tool = str(tool_name or "").strip().lower()
+    if norm_tool == "code-analyzer":
+        from app.services.code_analyzer import run_as_tool
+
+        result = run_as_tool(target)
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("technique", (technique or {}).get("name") or technique or {})
+            result.setdefault("evidence_required", evidence_required or [])
+            result.setdefault("constraints", constraints or [])
+            result.setdefault("worker_rules", worker_rules or {})
+            result.setdefault("sub_agent_plan", sub_agent_plan or [])
+            result.setdefault("playbook", playbook or "")
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend Code Analyzer")
+        result.setdefault("worker_group", "asset_discovery")
+        return result
+
+    if norm_tool not in TOOL_TO_PROFILE:
         return {
             "tool": tool_name,
             "target": target,
@@ -64,78 +91,43 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
 
-    skill_ctx = {
-        "skill_id": skill_id,
-        "skill_contract": skill_contract or {},
-        "technique": technique or {},
-        "evidence_required": evidence_required or [],
-        "constraints": constraints or [],
-        "playbook": playbook or "",
-    }
-
-    if settings.mcp_execute_tools_via_mcp:
-        # MCP is the MANDATORY execution path when enabled.
-        # If MCP is unreachable, record an architectural failure for the phase
-        # and do NOT fall back to direct execution. This surfaces real gaps
-        # instead of hiding them behind a silent fallback.
-        mcp_healthy = False
-        try:
-            mcp_healthy = mcp_client.health_check_sync()
-        except Exception as hc_exc:
-            logger.error(
-                "MCP health check raised exception for tool=%s target=%s: %s",
-                tool_name, target, hc_exc,
-            )
-
-        if not mcp_healthy:
-            logger.error(
-                "MCP_ARCHITECTURAL_FAILURE: tool=%s target=%s — MCP is enabled but unreachable. "
-                "Phase will be marked partial/failed. No local fallback.",
-                tool_name, target,
-            )
-            return {
-                "tool": tool_name,
-                "target": target,
-                "scan_mode": scan_mode,
-                "status": "error",
-                "command": "",
-                "stdout": "",
-                "stderr": "",
-                "dispatch_error": (
-                    f"mcp_unavailable: MCP is configured as mandatory execution path "
-                    f"(settings.mcp_execute_tools_via_mcp=True) but health check failed. "
-                    f"Tool '{tool_name}' was NOT executed. "
-                    "This is an architectural failure — fix MCP connectivity or disable mcp_execute_tools_via_mcp."
-                ),
-                "mcp_used": False,
-                "mcp_failure": True,
-                "source_agent_id": "mcp_unavailable",
-                "source_agent_name": "MCP Runner (UNAVAILABLE)",
-                "open_ports": [],
-            }
-
+    if settings.mcp_execute_tools_via_mcp and mcp_client.health_check_sync():
         result = mcp_client.execute_kali_tool_sync(
             tool_name=tool_name,
             target=target,
             scan_id=scan_id,
-            skill_context=skill_ctx,
+            skill_context={
+                "skill_id": skill_id,
+                "skill_contract": skill_contract or {},
+                "technique": technique or {},
+                "evidence_required": evidence_required or [],
+                "constraints": constraints or [],
+                "playbook": playbook or "",
+            },
         )
-        result["mcp_used"] = True
     else:
         result = execute_via_kali(
             tool_name=tool_name,
             target=target,
             scan_id=scan_id,
             scan_mode=scan_mode,
-            skill_context=skill_ctx,
+            skill_context={
+                "skill_id": skill_id,
+                "skill_contract": skill_contract or {},
+                "technique": technique or {},
+                "evidence_required": evidence_required or [],
+                "constraints": constraints or [],
+                "playbook": playbook or "",
+            },
         )
-        result["mcp_used"] = False
     if skill_id:
         result.setdefault("skill_id", skill_id)
         result.setdefault("skill_contract", skill_contract or {})
         result.setdefault("technique", (technique or {}).get("name") or technique or {})
         result.setdefault("evidence_required", evidence_required or [])
         result.setdefault("constraints", constraints or [])
+        result.setdefault("worker_rules", worker_rules or {})
+        result.setdefault("sub_agent_plan", sub_agent_plan or [])
         result.setdefault("playbook", playbook or "")
     try:
         agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
@@ -156,6 +148,8 @@ def execute_tool_with_workers(
                 "tools": list(agent.get("tools") or []),
                 "evidence_focus": list(agent.get("evidence_focus") or []),
                 "decision_rules": list(agent.get("decision_rules") or []),
+                "worker_rules": dict(agent.get("worker_rules") or {}),
+                "sub_agent_rules": list(agent.get("sub_agent_rules") or []),
             },
         )
     except Exception:

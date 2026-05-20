@@ -16,6 +16,13 @@ from typing import Any
 # Rich tool catalog. Keep entries narrative — these go straight into the agent prompt.
 TOOL_CATALOG: dict[str, dict[str, Any]] = {
     # ── RECON / DNS ─────────────────────────────────────────────────────────
+    "code-analyzer": {
+        "category": "recon|code", "phase": "P03|P05",
+        "description": "Backend-local web/code analyzer that fetches HTML/JS and extracts endpoints, forms, env hints and candidate secrets.",
+        "when_to_use": "At the beginning of web recon to seed crawlers, parameter discovery and evidence hypotheses.",
+        "inputs": "URL", "outputs": "structured endpoints, forms, JS references and findings",
+        "prerequisites": "backend HTTP access to target",
+    },
     "subfinder": {
         "category": "recon", "phase": "P01",
         "description": "Passive subdomain enumeration via 30+ data sources (CT logs, DNS-DB).",
@@ -30,12 +37,33 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "domain", "outputs": "subdomain+IP graph",
         "prerequisites": "subfinder run first to seed",
     },
-    "massdns": {
+    "amass-brute": {
         "category": "recon", "phase": "P01",
-        "description": "High-throughput DNS resolver — validates which subdomains resolve.",
-        "when_to_use": "After subfinder/amass to filter live subdomains; pairs with shuffledns.",
-        "inputs": "subdomain list, resolvers.txt", "outputs": "live subdomains",
-        "prerequisites": "subdomain list",
+        "description": "Amass active brute-force enumeration with SecLists.",
+        "when_to_use": "After passive enum when active DNS guessing is authorized.",
+        "inputs": "domain", "outputs": "bruteforced subdomains",
+        "prerequisites": "authorized scope and DNS wordlist",
+    },
+    "amass-intel": {
+        "category": "recon", "phase": "P01",
+        "description": "Amass intel mode for WHOIS/reverse-WHOIS/ASN discovery.",
+        "when_to_use": "When related-domain, org ownership or ASN context may expand understanding.",
+        "inputs": "domain", "outputs": "related domains and intel records",
+        "prerequisites": "internet egress",
+    },
+    "sublist3r": {
+        "category": "recon", "phase": "P01",
+        "description": "Search-engine based passive subdomain enumeration.",
+        "when_to_use": "Second opinion to subfinder/amass for passive breadth.",
+        "inputs": "domain", "outputs": "subdomain list",
+        "prerequisites": "internet egress",
+    },
+    "findomain": {
+        "category": "recon", "phase": "P01",
+        "description": "Fast passive subdomain enumeration from CT logs and public datasets.",
+        "when_to_use": "Fast passive supplement for subdomain coverage.",
+        "inputs": "domain", "outputs": "subdomain list",
+        "prerequisites": "internet egress",
     },
     "dnsx": {
         "category": "recon", "phase": "P01",
@@ -43,6 +71,27 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "when_to_use": "Validate live records, detect wildcard DNS, fingerprint nameservers.",
         "inputs": "domain/subdomain list", "outputs": "DNS records JSON",
         "prerequisites": "none",
+    },
+    "dnsrecon-brt": {
+        "category": "recon", "phase": "P01",
+        "description": "DNSRecon brute-force profile for common subdomains.",
+        "when_to_use": "When active DNS brute force is authorized and passive sources are thin.",
+        "inputs": "domain, wordlist", "outputs": "candidate DNS records",
+        "prerequisites": "authorized scope and DNS wordlist",
+    },
+    "dnsrecon-zt": {
+        "category": "recon", "phase": "P01",
+        "description": "DNSRecon zone-transfer attempt.",
+        "when_to_use": "Quick check for AXFR exposure on authoritative DNS.",
+        "inputs": "domain", "outputs": "AXFR evidence",
+        "prerequisites": "authoritative DNS reachable",
+    },
+    "dnsenum": {
+        "category": "recon", "phase": "P01",
+        "description": "Multipurpose DNS enumeration: NS, MX, AXFR, brute and reverse hints.",
+        "when_to_use": "Early DNS reconnaissance to complement dnsx/dnsrecon.",
+        "inputs": "domain", "outputs": "DNS records and enumeration evidence",
+        "prerequisites": "internet egress",
     },
     "shuffledns": {
         "category": "recon", "phase": "P01",
@@ -267,13 +316,6 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "subdomain list", "outputs": "takeover candidates",
         "prerequisites": "subdomain list",
     },
-    "metagoofil": {
-        "category": "osint", "phase": "P07",
-        "description": "Metadata extractor from public docs (PDFs, DOC).",
-        "when_to_use": "Find usernames/software versions leaked in public files.",
-        "inputs": "domain, file types", "outputs": "metadata",
-        "prerequisites": "domain serves docs",
-    },
 
     # ── VULNERABILITY ASSESSMENT ────────────────────────────────────────────
     "nuclei": {
@@ -289,6 +331,41 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "when_to_use": "Network-level CVE matching from banner data.",
         "inputs": "host:port", "outputs": "CVE list",
         "prerequisites": "nmap service detection done",
+    },
+    "nmap-http-enum": {
+        "category": "vuln", "phase": "P11",
+        "description": "Nmap HTTP NSE battery for web enumeration and common HTTP vulnerabilities.",
+        "when_to_use": "When HTTP/HTTPS ports are exposed and targeted NSE evidence is needed.",
+        "inputs": "host", "outputs": "HTTP NSE findings",
+        "prerequisites": "HTTP service reachable",
+    },
+    "nmap-smb-vuln": {
+        "category": "vuln", "phase": "P11",
+        "description": "Nmap SMB vulnerability NSE battery for MS17-010, Samba and SMB exposure checks.",
+        "when_to_use": "Only when SMB ports are in scope/reachable.",
+        "inputs": "host", "outputs": "SMB NSE findings",
+        "prerequisites": "139/445 reachable and authorized",
+    },
+    "nmap-dns-vuln": {
+        "category": "vuln", "phase": "P11",
+        "description": "Nmap DNS NSE checks for recursion, cache snooping and DNS misconfiguration.",
+        "when_to_use": "When DNS service is exposed or authoritative DNS posture is in scope.",
+        "inputs": "host", "outputs": "DNS NSE findings",
+        "prerequisites": "DNS service reachable",
+    },
+    "nmap-ssh-audit": {
+        "category": "vuln", "phase": "P11",
+        "description": "Nmap SSH NSE checks for auth methods, host keys and weak algorithms.",
+        "when_to_use": "When SSH is exposed and protocol audit evidence is needed.",
+        "inputs": "host", "outputs": "SSH algorithm and auth evidence",
+        "prerequisites": "SSH service reachable",
+    },
+    "nmap-ssl-vuln": {
+        "category": "vuln", "phase": "P11|P18",
+        "description": "Nmap SSL/TLS NSE vulnerability battery.",
+        "when_to_use": "When HTTPS/TLS is reachable and Heartbleed/POODLE/DROWN-style checks are needed.",
+        "inputs": "host", "outputs": "TLS NSE findings",
+        "prerequisites": "TLS service reachable",
     },
     "nikto": {
         "category": "vuln", "phase": "P12",
@@ -369,20 +446,6 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "host, protocol, optional authorized credentials", "outputs": "service/auth findings",
         "prerequisites": "explicit authorization and reachable Windows protocol service",
     },
-    "impacket": {
-        "category": "exploit", "phase": "P14",
-        "description": "Suite for Windows protocols (psexec, smbexec, secretsdump, GetNPUsers).",
-        "when_to_use": "Post-credential pivoting and Kerberos abuse.",
-        "inputs": "creds, host", "outputs": "shells/secrets",
-        "prerequisites": "valid creds",
-    },
-    "evilwinrm": {
-        "category": "exploit", "phase": "P14",
-        "description": "Interactive WinRM shell with auto-loaders and pass-the-hash.",
-        "when_to_use": "Post-exploit shell on Windows when WinRM is exposed.",
-        "inputs": "host, creds", "outputs": "shell session",
-        "prerequisites": "WinRM 5985/5986 reachable",
-    },
 
     # ── CODE / SUPPLY-CHAIN ─────────────────────────────────────────────────
     "semgrep": {
@@ -416,7 +479,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "retire": {
         "category": "code", "phase": "P22",
         "description": "JS dependency CVE scanner (jQuery, Angular, Vue legacy).",
-        "when_to_use": "After JS extraction (katana/js-snooper) on live targets.",
+        "when_to_use": "After JS extraction (code-analyzer/katana/hakrawler) on live targets.",
         "inputs": "JS file/URL", "outputs": "vulnerable libs",
         "prerequisites": "JS files or live URL",
     },
@@ -426,41 +489,6 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "when_to_use": "Container images, K8s manifests, Terraform, lockfiles.",
         "inputs": "image/dir", "outputs": "findings JSON",
         "prerequisites": "image or repo path",
-    },
-    "eslint": {
-        "category": "code", "phase": "P22",
-        "description": "JavaScript/TS linter — security plugins available.",
-        "when_to_use": "JS/TS codebases.",
-        "inputs": "code dir", "outputs": "issues",
-        "prerequisites": "node_modules + config",
-    },
-    "jshint": {
-        "category": "code", "phase": "P22",
-        "description": "Legacy JS linter — quick pass for syntax/security smells.",
-        "when_to_use": "JS-only code.",
-        "inputs": "JS file/dir", "outputs": "issues",
-        "prerequisites": "JS code",
-    },
-    "ast-grep": {
-        "category": "code", "phase": "P22",
-        "description": "AST-aware structural code search for insecure patterns.",
-        "when_to_use": "Fast custom SAST rules across source trees and extracted JS.",
-        "inputs": "code dir, AST pattern", "outputs": "matched files + lines",
-        "prerequisites": "source code or extracted JS",
-    },
-    "js-snooper": {
-        "category": "recon|code", "phase": "P03",
-        "description": "JavaScript endpoint and secret discovery from bundles.",
-        "when_to_use": "After crawling live apps to inspect JS assets.",
-        "inputs": "JS URLs/files", "outputs": "endpoints, keys, interesting strings",
-        "prerequisites": "JS files from crawler",
-    },
-    "jsniper": {
-        "category": "recon|code", "phase": "P03",
-        "description": "JavaScript recon helper for endpoints and sensitive patterns.",
-        "when_to_use": "Complement js-snooper on large SPAs and static bundles.",
-        "inputs": "JS URLs/files", "outputs": "endpoints + candidate secrets",
-        "prerequisites": "JS files from crawler",
     },
 }
 

@@ -114,9 +114,14 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
     target = str(state.get("target") or "")
     if group == "asset_discovery":
         tools = _adapt_recon_tools_for_target(target, tools)
+        # When target_type=="site" we DO NOT prune passive subdomain enum.
+        # Even single-URL targets can have sibling subdomains discoverable
+        # via cert transparency / passive sources, and the user requested
+        # ALL recon tools per the article. Only skip heavy active brute
+        # (amass-brute, shuffledns) and tools that have no profile.
         if str(state.get("target_type") or "") == "site":
-            subdomain_expansion_tools = {"amass", "sublist3r", "massdns"}
-            tools = [t for t in tools if t not in subdomain_expansion_tools]
+            heavy_active_brute = {"amass-brute", "shuffledns"}
+            tools = [t for t in tools if t not in heavy_active_brute]
     elif group == "risk_assessment":
         tools = _adapt_vuln_tools_for_target(target, tools)
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
@@ -178,12 +183,38 @@ def skill_selector_node(state: AgentState) -> AgentState:
     from app.graph.nodes.supervisor import (
         _refresh_active_skills,
         _append_action,
+        _mark_capability_runtime,
         _build_skill_playbook_for_context,
         _invoke_skill_for_context,
     )
 
     started_at = _metric_start()
     _sync_step_to_db(state, "Skill Selector")
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        _trace_iter = int(state.get("loop_iteration", 0))
+        _trace_cap = str(state.get("pending_capability_node") or state.get("current_phase") or "")
+        if _trace_scan_id:
+            _supervisor_intent = dict(state.get("selected_skill") or {})
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=_trace_iter,
+                event_type="skill_lookup", from_node="agent", to_node="library",
+                skill_id=_supervisor_intent.get("skill_id") or None,
+                capability=_trace_cap, status="pending",
+                payload={
+                    "phase": _trace_cap,
+                    "supervisor_intent_skill": _supervisor_intent.get("skill_id"),
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "lock_skill": bool(_supervisor_intent.get("lock_skill")),
+                    "reason": _supervisor_intent.get("reason", ""),
+                    "tactic_id": _supervisor_intent.get("tactic_id", ""),
+                    "query": "Buscando skill compatível com tech_stack + capability + learning aceito",
+                },
+            )
+    except Exception:
+        pass
 
     try:
         _refresh_active_skills(state)
@@ -235,6 +266,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
             # ── Supervisor-driven path: use selected_skill as source of truth ──
             allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
             preferred_tool = str(supervisor_selected.get("preferred_tool") or "").strip().lower()
+            lock_skill = bool(supervisor_selected.get("lock_skill"))
             allowed_lower = {t.lower() for t in allowed_tools}
 
             # candidate_tools filtered to what the skill permits
@@ -264,59 +296,197 @@ def skill_selector_node(state: AgentState) -> AgentState:
                     "triggers": [],
                 }
 
+            selected_techniques = [
+                dict(item)
+                for item in list(supervisor_selected.get("learning_techniques") or [])
+                if isinstance(item, dict)
+            ]
+            tactic_extra_args = dict(supervisor_selected.get("extra_args") or {})
+            adversary_technique = dict(supervisor_selected.get("adversary_technique") or {})
+            control_objectives = list(supervisor_selected.get("control_objectives") or [])
+            expected_telemetry = list(supervisor_selected.get("expected_telemetry") or [])
+            detection_proof_pack = dict(supervisor_selected.get("detection_proof_pack") or {})
+            if selected_techniques:
+                # If techniques came from accepted learning we still want the
+                # tactic-level extra_args to ride along when the technique
+                # itself didn't carry any.
+                if tactic_extra_args:
+                    for tech in selected_techniques:
+                        tech.setdefault("extra_args", dict(tactic_extra_args))
+                if adversary_technique:
+                    for tech in selected_techniques:
+                        tech.setdefault("adversary_technique", dict(adversary_technique))
+                        tech.setdefault("control_objectives", list(control_objectives))
+                        tech.setdefault("expected_telemetry", list(expected_telemetry))
+                        tech.setdefault("detection_proof_pack", dict(detection_proof_pack))
+                playbook = {
+                    "title": "Supervisor pentest tactic playbook",
+                    "vulnerability_type": str(supervisor_selected.get("skill_id") or group),
+                    "summary": str(supervisor_selected.get("hypothesis") or ""),
+                    "learned_mission": str(supervisor_selected.get("objective") or ""),
+                    "techniques": selected_techniques,
+                    "evidence_signals": list(supervisor_selected.get("evidence_required") or []),
+                    "recommended_tools": allowed_tools,
+                    "sources": [],
+                }
+            else:
+                playbook = _build_skill_playbook_for_context(state, group, candidate_tools, phase_label, skill_obj)
+                if tactic_extra_args and isinstance(playbook, dict):
+                    techniques = list(playbook.get("techniques") or [])
+                    for tech in techniques:
+                        if isinstance(tech, dict):
+                            tech.setdefault("extra_args", dict(tactic_extra_args))
+                    playbook["techniques"] = techniques
+                if adversary_technique and isinstance(playbook, dict):
+                    techniques = list(playbook.get("techniques") or [])
+                    for tech in techniques:
+                        if isinstance(tech, dict):
+                            tech.setdefault("adversary_technique", dict(adversary_technique))
+                            tech.setdefault("control_objectives", list(control_objectives))
+                            tech.setdefault("expected_telemetry", list(expected_telemetry))
+                            tech.setdefault("detection_proof_pack", dict(detection_proof_pack))
+                    playbook["techniques"] = techniques
+            runtime_invocation: dict[str, Any] = {}
+            try:
+                from app.services.skill_runtime import resolve_skill_invocation
+
+                runtime_invocation = resolve_skill_invocation(
+                    worker_group=group,
+                    phase=phase_label,
+                    target=str(state.get("target") or ""),
+                    candidate_tools=candidate_tools,
+                    active_skills=[skill_obj, *skills],
+                    playbook=playbook,
+                    tech_stack=list(state.get("detected_tech_stack") or []),
+                )
+            except Exception as exc:
+                state["logs_terminais"].append(f"[SKILL] learning runtime unavailable: {exc}")
+
+            runtime_tools = [
+                str(tool).strip()
+                for tool in list(runtime_invocation.get("recommended_tools") or [])
+                if str(tool).strip()
+            ]
+            if runtime_tools and not lock_skill:
+                guided_tools = list(dict.fromkeys([*runtime_tools, *guided_tools]))
+            if runtime_invocation.get("called") and not lock_skill:
+                runtime_skill = dict(runtime_invocation.get("skill") or {})
+                supervisor_selected["skill_id"] = str(runtime_invocation.get("skill_id") or runtime_skill.get("id") or supervisor_skill_id)
+                supervisor_selected["objective"] = str(runtime_skill.get("description") or supervisor_selected.get("objective") or "")
+                supervisor_selected["reason"] = (
+                    "Supervisor intent refined by accepted learning: "
+                    f"source={runtime_invocation.get('source')}; "
+                    f"matched_by={','.join(list(runtime_invocation.get('matched_by') or [])[:5])}"
+                )
+                supervisor_skill_id = supervisor_selected["skill_id"]
+                skill_obj = runtime_skill or skill_obj
+            elif runtime_invocation.get("called"):
+                supervisor_selected["reason"] = (
+                    f"{supervisor_selected.get('reason') or ''} | "
+                    f"locked_pentest_tactic; learning_source={runtime_invocation.get('source')}; "
+                    f"matched_by={','.join(list(runtime_invocation.get('matched_by') or [])[:5])}"
+                ).strip(" |")
+                skill_obj = skill_obj or dict(runtime_invocation.get("skill") or {})
+            if lock_skill and allowed_tools:
+                guided_tools = allowed_tools
+            if runtime_tools:
+                supervisor_selected["allowed_tools"] = guided_tools
+                supervisor_selected["preferred_tool"] = guided_tools[0]
+            state["selected_skill"] = supervisor_selected
+
             invocation_id = f"skill-{uuid4().hex[:12]}"
+            resolved_skill_id = str(supervisor_skill_id if lock_skill else (runtime_invocation.get("skill_id") or supervisor_skill_id))
+            resolved_techniques = (
+                selected_techniques
+                if selected_techniques
+                else list(runtime_invocation.get("techniques") or [])
+            )
             invocation_record = {
                 "invocation_id": invocation_id,
-                "skill_id": supervisor_skill_id,
+                "skill_id": resolved_skill_id,
                 "worker_group": group,
                 "phase": phase_label,
                 "purpose": "skill_selector",
-                "source": "supervisor_selected",
-                "matched_by": ["supervisor_selected_skill"],
+                "tactic_id": supervisor_selected.get("tactic_id"),
+                "hypothesis": supervisor_selected.get("hypothesis"),
+                "strategy_source": supervisor_selected.get("strategy_source"),
+                "adversary_technique": adversary_technique,
+                "control_objectives": control_objectives,
+                "expected_telemetry": expected_telemetry,
+                "detection_proof_pack": detection_proof_pack,
+                "source": runtime_invocation.get("source") or "supervisor_selected",
+                "matched_by": list(dict.fromkeys(["supervisor_selected_skill", *list(runtime_invocation.get("matched_by") or [])])),
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
-                "confidence": 0.9,
-                "playbook_title": None,
+                "worker_rules": dict(runtime_invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(runtime_invocation.get("sub_agent_plan") or []),
+                "confidence": runtime_invocation.get("confidence", 0.9),
+                "playbook_title": playbook.get("title"),
                 "created_at": datetime.utcnow().isoformat(),
             }
             invocations = list(state.get("skill_invocations") or [])
             invocations.append(invocation_record)
             state["skill_invocations"] = invocations[-80:]
-            state["current_skill"] = supervisor_skill_id
-            state["active_skill"] = supervisor_skill_id
+            state["current_skill"] = invocation_record["skill_id"]
+            state["active_skill"] = invocation_record["skill_id"]
             state["skill_contract"] = invocation_record
             state["skill_invocation"] = {
                 "called": True,
                 "invocation_id": invocation_id,
-                "skill_id": supervisor_skill_id,
-                "skill": skill_obj,
+                "skill_id": invocation_record["skill_id"],
+                "skill": skill_obj if lock_skill else (runtime_invocation.get("skill") or skill_obj),
                 "worker_group": group,
                 "phase": phase_label,
                 "target": str(state.get("target") or ""),
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
-                "matched_by": ["supervisor_selected_skill"],
-                "score": 90,
-                "confidence": 0.9,
-                "techniques": [],
-                "source": "supervisor_selected",
+                "learned_recommended_tools": list(runtime_invocation.get("learned_recommended_tools") or []),
+                "worker_rules": dict(runtime_invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(runtime_invocation.get("sub_agent_plan") or []),
+                "matched_by": invocation_record["matched_by"],
+                "score": runtime_invocation.get("score", 90),
+                "confidence": invocation_record["confidence"],
+                "techniques": resolved_techniques,
+                "source": invocation_record["source"],
+                "playbook_title": playbook.get("title"),
+                "tactic_id": supervisor_selected.get("tactic_id"),
+                "hypothesis": supervisor_selected.get("hypothesis"),
+                "strategy_source": supervisor_selected.get("strategy_source"),
+                "adversary_technique": adversary_technique,
+                "control_objectives": control_objectives,
+                "expected_telemetry": expected_telemetry,
+                "detection_proof_pack": detection_proof_pack,
             }
             _append_action(state, "skill_invoked", invocation_record)
+            _mark_capability_runtime(
+                state,
+                "adversarial_hypothesis",
+                "skill_selector",
+                {
+                    "skill_id": invocation_record["skill_id"],
+                    "recommended_tools": guided_tools[:8],
+                    "source": invocation_record["source"],
+                },
+            )
             state["skill_selector_ready"] = True
             state["skill_selector_gate"] = {
                 "group": group,
                 "phase": phase_label,
                 "called": True,
-                "skill_id": supervisor_skill_id,
+                "skill_id": invocation_record["skill_id"],
                 "recommended_tools": guided_tools,
                 "candidate_tools": guided_tools,
                 "allowed_tools": allowed_tools,
                 "preferred_tool": preferred_tool,
-                "playbook_title": None,
+                "playbook_title": playbook.get("title"),
+                "tactic_id": supervisor_selected.get("tactic_id"),
+                "hypothesis": supervisor_selected.get("hypothesis"),
             }
             state["logs_terminais"].append(
-                f"[SKILL] selector supervisor-driven skill={supervisor_skill_id} "
-                f"group={group} allowed={allowed_tools[:4]} guided={guided_tools[:4]}"
+                f"[SKILL] selector supervisor-driven skill={invocation_record['skill_id']} "
+                f"group={group} source={invocation_record['source']} "
+                f"techniques={len(resolved_techniques or [])} "
+                f"allowed={allowed_tools[:4]} guided={guided_tools[:4]}"
             )
         else:
             # ── Inference path (no supervisor-selected skill) ─────────────────
@@ -343,6 +513,8 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "matched_by": list(invocation.get("matched_by") or []),
                 "candidate_tools": candidate_tools,
                 "recommended_tools": guided_tools,
+                "worker_rules": dict(invocation.get("worker_rules") or {}),
+                "sub_agent_plan": list(invocation.get("sub_agent_plan") or []),
                 "confidence": invocation.get("confidence", 0.7),
                 "playbook_title": playbook.get("title"),
                 "created_at": datetime.utcnow().isoformat(),
@@ -367,6 +539,16 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "reason": "inferred from accepted learning + skill catalog",
             }
             _append_action(state, "skill_invoked", invocation_record)
+            _mark_capability_runtime(
+                state,
+                "adversarial_hypothesis",
+                "skill_selector",
+                {
+                    "skill_id": inferred_skill_id,
+                    "recommended_tools": guided_tools[:8],
+                    "source": invocation_record["source"],
+                },
+            )
             state["skill_selector_ready"] = ready
             state["skill_selector_gate"] = {
                 "group": group,
@@ -388,6 +570,38 @@ def skill_selector_node(state: AgentState) -> AgentState:
         state["logs_terminais"].append(f"[SKILL] selector failed: {exc}")
         logger.warning("Skill selector failed: %s", exc)
 
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _skill_found_id = str(state.get("current_skill") or state.get("active_skill") or "")
+            _inv = dict(state.get("skill_invocation") or {})
+            _gate = dict(state.get("skill_selector_gate") or {})
+            _contract = dict(state.get("skill_contract") or {})
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="skill_found", from_node="library", to_node="agent",
+                skill_id=_skill_found_id or None,
+                capability=str(state.get("pending_capability_node") or state.get("current_phase") or ""),
+                status="success" if state.get("skill_selector_ready") else "failure",
+                payload={
+                    "skill_id": _skill_found_id,
+                    # ── PORQUE essa skill saiu como vencedora ──
+                    "score": _inv.get("score"),
+                    "matched_by": list(_inv.get("matched_by") or _contract.get("matched_by") or [])[:8],
+                    "source": _inv.get("source") or _contract.get("source"),
+                    "confidence": _inv.get("confidence") or _contract.get("confidence"),
+                    "recommended_tools": list(_gate.get("recommended_tools") or [])[:6],
+                    "allowed_tools": list(_gate.get("allowed_tools") or [])[:6],
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "techniques_count": len(_inv.get("techniques") or []),
+                    "first_technique": (list(_inv.get("techniques") or [{}])[0] if _inv.get("techniques") else {}).get("name", ""),
+                    "playbook_title": _gate.get("playbook_title") or _contract.get("playbook_title"),
+                },
+            )
+    except Exception:
+        pass
+
     _metric_end(state, "skill_selector", started_at)
     return state
 
@@ -395,7 +609,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
 def skill_planner_node(state: AgentState) -> AgentState:
     """Turn the selected skill into an executable plan contract."""
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _append_action
+    from app.graph.nodes.supervisor import _append_action, _mark_capability_runtime
 
     started_at = _metric_start()
     _sync_step_to_db(state, "Skill Planner")
@@ -419,8 +633,14 @@ def skill_planner_node(state: AgentState) -> AgentState:
         "skill_invocation_id": contract.get("invocation_id") or invocation.get("invocation_id"),
         "skill_contract": contract,
         "technique": selected_technique,
+        "adversary_technique": dict(invocation.get("adversary_technique") or selected_technique.get("adversary_technique") or {}),
+        "control_objectives": list(invocation.get("control_objectives") or selected_technique.get("control_objectives") or []),
+        "expected_telemetry": list(invocation.get("expected_telemetry") or selected_technique.get("expected_telemetry") or []),
+        "detection_proof_pack": dict(invocation.get("detection_proof_pack") or selected_technique.get("detection_proof_pack") or {}),
         "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
         "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
+        "worker_rules": dict(contract.get("worker_rules") or invocation.get("worker_rules") or {}),
+        "sub_agent_plan": list(contract.get("sub_agent_plan") or invocation.get("sub_agent_plan") or []),
         "evidence_required": list(selected_technique.get("evidence_signals") or []),
         "constraints": list(selected_technique.get("safe_validation_steps") or []),
         "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
@@ -428,6 +648,25 @@ def skill_planner_node(state: AgentState) -> AgentState:
     }
     state["skill_plan_contract"] = plan
     _append_action(state, "skill_planned", plan)
+    _mark_capability_runtime(
+        state,
+        "strategic_planning",
+        "skill_planner",
+        {
+            "capability": capability,
+            "skill_id": plan.get("skill_id"),
+            "candidate_tools": list(plan.get("candidate_tools") or [])[:8],
+        },
+    )
+    _mark_capability_runtime(
+        state,
+        "adversarial_hypothesis",
+        "skill_planner",
+        {
+            "technique": selected_technique.get("name"),
+            "evidence_required": list(plan.get("evidence_required") or [])[:8],
+        },
+    )
     state["logs_terminais"].append(
         f"[SKILL] planned capability={capability} skill={plan.get('skill_id')} "
         f"technique={selected_technique.get('name') or '-'}"
@@ -450,7 +689,7 @@ def _technique_for_selected_tool(invocation: dict[str, Any], selected_tool: str)
 def tool_selector_node(state: AgentState) -> AgentState:
     """Select exactly the tool(s) authorized by the current skill contract."""
     from app.graph.workflow import _metric_start, _metric_end, _sync_step_to_db
-    from app.graph.nodes.supervisor import _append_action
+    from app.graph.nodes.supervisor import _append_action, _mark_capability_runtime
 
     started_at = _metric_start()
     _sync_step_to_db(state, "Tool Selector")
@@ -489,6 +728,20 @@ def tool_selector_node(state: AgentState) -> AgentState:
             state["logs_terminais"].append(
                 f"[SkillToolMapping] guia de uso de '{lib_best_tool}': {lib_best_guide[:120]}"
             )
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_usage_lookup", from_node="agent", to_node="library",
+                skill_id=str(plan.get("skill_id") or "") or None,
+                capability=capability, status="pending",
+                payload={"capability": capability, "candidate_tools": candidate_tools[:4]},
+            )
+    except Exception:
+        pass
 
     try:
         from app.services.agent_context_service import build_worker_knowledge_context
@@ -540,8 +793,37 @@ def tool_selector_node(state: AgentState) -> AgentState:
         # NOTE: the old candidate_tools[0] fallback has been intentionally removed.
         # Without a skill contract there is no safe basis for choosing an arbitrary tool.
 
-    # Skill-first: one tool per supervisor cycle.
-    selected_tools = selected_tools[:1]
+    # Skill-first: regra do usuario = "no MINIMO 2" (sem cap maximo).
+    # Rodamos TODAS as ferramentas elegiveis ainda nao executadas no scan.
+    # O ThreadPoolExecutor em _run_tools_and_collect ja limita paralelismo
+    # a max_workers=6 e o dedup global em workflow.py protege contra
+    # repeticao. Sem cap = cobertura maxima por iteracao.
+    #
+    # Filtro: preferir tools que AINDA NAO RODARAM neste scan, ordenadas
+    # pela skill_runtime (heuristica que ja prioriza por sucesso/falha).
+    runtime = dict(state.get("tool_runtime") or {})
+    executed_runs = set(state.get("executed_tool_runs") or [])
+    def _already_done(t: str) -> bool:
+        if any(r.lower().endswith(f"|{str(t).lower()}") for r in executed_runs):
+            return True
+        meta = runtime.get(t, {})
+        return int(meta.get("attempts", 0) or 0) >= 1
+    not_yet_run = [t for t in selected_tools if not _already_done(t)]
+    if not_yet_run:
+        # Garantir minimo 2 quando o pool permite, sem cap maximo.
+        selected_tools = not_yet_run
+        if len(selected_tools) == 1 and len(candidate_tools) > 1:
+            # Apenas 1 sobrou no pool da skill — busca extras no candidate_tools
+            # para garantir o minimo de 2 (regra do usuario).
+            for extra in candidate_tools:
+                if extra not in selected_tools and not _already_done(extra):
+                    selected_tools.append(extra)
+                    if len(selected_tools) >= 2:
+                        break
+    else:
+        # Todas ja rodaram — manter 1 para o supervisor seguir; o dedup
+        # interno vai pular a execucao mas a iteracao avanca.
+        selected_tools = selected_tools[:1]
     selected_tool = selected_tools[0] if selected_tools else ""
     technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
     evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])
@@ -555,13 +837,80 @@ def tool_selector_node(state: AgentState) -> AgentState:
         "skill_invocation_id": plan.get("skill_invocation_id") or contract.get("invocation_id") or invocation.get("invocation_id"),
         "skill_contract": contract,
         "technique": technique,
+        "adversary_technique": dict(plan.get("adversary_technique") or technique.get("adversary_technique") or {}),
+        "control_objectives": list(plan.get("control_objectives") or technique.get("control_objectives") or []),
+        "expected_telemetry": list(plan.get("expected_telemetry") or technique.get("expected_telemetry") or []),
+        "detection_proof_pack": dict(plan.get("detection_proof_pack") or technique.get("detection_proof_pack") or {}),
         "evidence_required": evidence_required,
         "constraints": constraints,
+        "worker_rules": dict(plan.get("worker_rules") or contract.get("worker_rules") or invocation.get("worker_rules") or {}),
+        "sub_agent_plan": list(plan.get("sub_agent_plan") or contract.get("sub_agent_plan") or invocation.get("sub_agent_plan") or []),
         "playbook_title": plan.get("playbook_title") or contract.get("playbook_title") or gate.get("playbook_title"),
         "decision_source": "skill_selector",
     }
     state["tool_selection_contract"] = selection
     _append_action(state, "tool_selected", selection)
+    _mark_capability_runtime(
+        state,
+        "adversarial_hypothesis",
+        "tool_selector",
+        {
+            "skill_id": selection.get("skill_id"),
+            "selected_tools": selected_tools[:8],
+            "candidate_tools": candidate_tools[:8],
+        },
+    )
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id = state.get("scan_id")
+        if _trace_scan_id:
+            _technique_full = dict(selection.get("technique") or {})
+            _extra_args_by_tool = _technique_full.get("extra_args") or {}
+            _emit_trace(
+                scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_select", from_node="agent", to_node="kali",
+                skill_id=str(selection.get("skill_id") or "") or None,
+                tool_name=selected_tool or None,
+                capability=capability,
+                status="success" if selected_tool else "skipped",
+                payload={
+                    "selected_tool": selected_tool,
+                    "selected_tools_all": selected_tools,
+                    "candidate_tools": candidate_tools[:8],
+                    "allowed_tools_from_skill": list(supervisor_selected.get("allowed_tools") or [])[:8],
+                    "preferred_tool": preferred_tool,
+                    "capability": capability,
+                    "technique": _technique_full.get("name", ""),
+                    "technique_objective": _technique_full.get("objective", ""),
+                    "adversary_technique": dict(selection.get("adversary_technique") or {}),
+                    "control_objectives": list(selection.get("control_objectives") or [])[:5],
+                    "expected_telemetry": list(selection.get("expected_telemetry") or [])[:5],
+                    "detection_proof_pack": dict(selection.get("detection_proof_pack") or {}),
+                    "extra_args": dict(_extra_args_by_tool) if isinstance(_extra_args_by_tool, dict) else {},
+                    "evidence_required": evidence_required[:6],
+                    "playbook_title": selection.get("playbook_title"),
+                    "reason": (
+                        f"ferramenta '{selected_tool}' selecionada por estar em allowed_tools={list(supervisor_selected.get('allowed_tools') or [])[:4]} "
+                        f"da skill '{selection.get('skill_id')}'"
+                        if selected_tool else
+                        f"nenhuma ferramenta autorizada pela skill '{selection.get('skill_id')}'"
+                    ),
+                },
+            )
+            if selected_tool:
+                _emit_trace(
+                    scan_id=int(_trace_scan_id), iteration=int(state.get("loop_iteration", 0)),
+                    event_type="tool_usage_found", from_node="library", to_node="agent",
+                    skill_id=str(selection.get("skill_id") or "") or None,
+                    tool_name=selected_tool,
+                    capability=capability,
+                    status="success",
+                    payload={"tool": selected_tool, "technique": (selection.get("technique") or {}).get("name", "")},
+                )
+    except Exception:
+        pass
+
     if selected_tools:
         state["logs_terminais"].append(
             f"[selector] capability={capability} skill={selection.get('skill_id')} selected={','.join(selected_tools)}"
@@ -620,7 +969,11 @@ def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
         return [str(target) for target in list(context.get("targets") or []) if str(target or "").strip()]
 
     if capability == "threat_intel":
-        return _validate_osint_targets(_targets_for_deep_scan(state, limit=6))
+        osint_targets = _validate_osint_targets(_targets_for_deep_scan(state, limit=6))
+        if osint_targets:
+            return osint_targets
+        host = _target_host(str(state.get("target") or ""))
+        return [host or str(state.get("target") or "").strip()]
 
     if capability == "risk_assessment":
         limit = 10 if _is_local_target(state.get("target", "")) else 6
@@ -661,10 +1014,21 @@ def _apply_tool_execution_findings(
         _target_host,
         _register_discovered_assets,
         _persist_discovered_assets_to_db,
+        _refresh_recon_graph,
         MAX_DISCOVERED_ASSETS,
     )
 
     current = _step_name(state)
+    _refresh_recon_graph(
+        state,
+        capability=capability,
+        target=target,
+        tools=tools,
+        findings=findings,
+        ports=ports,
+        assets=assets,
+        port_evidence=port_evidence,
+    )
     if findings:
         state["vulnerabilidades_encontradas"].extend(findings)
 
@@ -767,6 +1131,7 @@ def tool_executor_node(state: AgentState) -> AgentState:
         _append_error,
         _append_observation,
         _complete_delegation_task,
+        _mark_capability_runtime,
     )
 
     started_at = _metric_start()
@@ -785,14 +1150,55 @@ def tool_executor_node(state: AgentState) -> AgentState:
     allowed_tools = list(supervisor_selected.get("allowed_tools") or [])
 
     # ── Pre-execution contract validation ────────────────────────────────────
+    def _mark_pentest_tactic(status: str, findings_added: int = 0, targets_executed: int = 0, reason: str = "") -> None:
+        tactic_id = str(
+            supervisor_selected.get("tactic_id")
+            or (state.get("capability_context") or {}).get("tactic_id")
+            or (state.get("skill_invocation") or {}).get("tactic_id")
+            or ""
+        ).strip()
+        if not tactic_id:
+            return
+        completed_tactics = [
+            dict(item)
+            for item in list(state.get("pentest_tactics_completed") or [])
+            if isinstance(item, dict)
+        ]
+        if any(str(item.get("tactic_id") or "") == tactic_id for item in completed_tactics):
+            state["pending_pentest_tactic"] = {}
+            return
+        completed_tactics.append(
+            {
+                "tactic_id": tactic_id,
+                "skill_id": skill_id,
+                "capability": capability,
+                "status": status,
+                "tools": selected_tools,
+                "findings_added": int(findings_added),
+                "targets_executed": int(targets_executed),
+                "reason": reason,
+                "completed_at": datetime.utcnow().isoformat(),
+            }
+        )
+        state["pentest_tactics_completed"] = completed_tactics[-40:]
+        state["pending_pentest_tactic"] = {}
+
     def _abort(reason: str) -> AgentState:
         state["logs_terminais"].append(f"[executor] BLOCKED: {reason}")
         _append_error(state, reason, source="tool_executor")
+        _mark_pentest_tactic("blocked", reason=reason)
         # Mark capability complete to prevent the supervisor from looping on it.
         completed = list(state.get("completed_capabilities") or [])
         if capability in TOOL_CAPABILITY_NODES and capability not in completed:
             completed.append(capability)
         state["completed_capabilities"] = completed
+        if capability in TOOL_CAPABILITY_NODES:
+            _mark_capability_runtime(
+                state,
+                capability,
+                "tool_executor",
+                {"blocked": True, "reason": reason},
+            )
         state["pending_capability_node"] = ""
         state["proxima_ferramenta"] = "evidence_gate"
         state["routing_next_node"] = "evidence_gate"
@@ -821,6 +1227,37 @@ def tool_executor_node(state: AgentState) -> AgentState:
     # ── Safe to execute ───────────────────────────────────────────────────────
     targets = _targets_for_tool_pipeline(state, capability)
     all_results: list[dict[str, Any]] = []
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace
+        _trace_scan_id_ex = state.get("scan_id")
+        if _trace_scan_id_ex and selected_tools:
+            _tech_for_emit = dict(selection.get("technique") or {})
+            _exec_extra_args = _tech_for_emit.get("extra_args") or {}
+            _emit_trace(
+                scan_id=int(_trace_scan_id_ex), iteration=int(state.get("loop_iteration", 0)),
+                event_type="tool_execute", from_node="agent", to_node="kali",
+                skill_id=skill_id or None,
+                tool_name=selected_tools[0] if selected_tools else None,
+                capability=capability, status="pending",
+                payload={
+                    "tools": selected_tools,
+                    "targets": [str(t) for t in targets[:3]],
+                    "extra_args": dict(_exec_extra_args) if isinstance(_exec_extra_args, dict) else {},
+                    "tech_stack": list(state.get("detected_tech_stack") or [])[:8],
+                    "skill_id": skill_id,
+                    "lock_skill": bool(supervisor_selected.get("lock_skill")),
+                    "reason": (
+                        f"executando {len(selected_tools)} ferramenta(s) da skill '{skill_id}' "
+                        f"com argumentos calibrados pelo tech_stack: "
+                        f"{','.join(state.get('detected_tech_stack') or []) or '-'}"
+                    ),
+                },
+            )
+    except Exception:
+        pass
+
+    _executor_findings_before = len(state.get("vulnerabilidades_encontradas") or [])
 
     if not selected_tools:
         state["logs_terminais"].append(f"[executor] capability={capability} sem tool selecionada; nada executado")
@@ -862,13 +1299,96 @@ def tool_executor_node(state: AgentState) -> AgentState:
         )
 
     state["tool_execution_results"] = list(state.get("tool_execution_results") or []) + all_results
+
+    # ── Tech-stack refresh after every execution that touched recon/vuln. ─
+    # The detector reads ALL findings, so even when this cycle ran a vuln
+    # tool we update the fingerprint with anything new the workers produced.
+    try:
+        from app.graph.workflow import _refresh_recon_graph, _refresh_tech_stack
+        stack_changed = _refresh_tech_stack(state)
+        for executed in all_results:
+            _refresh_recon_graph(
+                state,
+                capability=capability,
+                target=str(executed.get("target") or state.get("target") or ""),
+                tools=[str(tool) for tool in list(executed.get("tools") or [])],
+                findings=[],
+                ports=[],
+                assets=[],
+                port_evidence={},
+            )
+        if stack_changed:
+            # Force supervisor to re-evaluate active_skills next iteration.
+            state["pending_skill_refresh"] = True
+    except Exception:
+        pass
+
     completed = list(state.get("completed_capabilities") or [])
     if capability in TOOL_CAPABILITY_NODES and capability not in completed:
         completed.append(capability)
     state["completed_capabilities"] = completed
+    if capability in TOOL_CAPABILITY_NODES:
+        _mark_capability_runtime(
+            state,
+            capability,
+            "tool_executor",
+            {
+                "tools": selected_tools[:12],
+                "targets_executed": len(all_results),
+                "findings_added": _findings_delta_post,
+            },
+        )
     if capability == "risk_assessment" and state.get("validation_backlog"):
         state["validation_backlog"] = []
     _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
+    _findings_now_post = len(state.get("vulnerabilidades_encontradas") or [])
+    _findings_delta_post = max(0, _findings_now_post - _executor_findings_before)
+    _mark_pentest_tactic(
+        "success" if all_results else "skipped",
+        findings_added=_findings_delta_post,
+        targets_executed=len(all_results),
+        reason="executed" if all_results else "no_target_or_tool_execution",
+    )
+
+    try:
+        from app.graph.tracer import emit_trace as _emit_trace, save_skill_score as _save_score
+        _trace_scan_id_ex = state.get("scan_id")
+        if _trace_scan_id_ex:
+            _findings_delta = _findings_delta_post
+            _tool_runs = list(state.get("executed_tool_runs") or [])
+            _tool_ok = sum(1 for r in all_results if r.get("findings", 0) >= 0)
+            _elapsed = _findings_delta  # proxy
+            _emit_trace(
+                scan_id=int(_trace_scan_id_ex), iteration=int(state.get("loop_iteration", 0)),
+                event_type="result_return", from_node="agent", to_node="supervisor",
+                skill_id=skill_id or None,
+                tool_name=selected_tools[0] if selected_tools else None,
+                capability=capability,
+                status="success" if all_results else "skipped",
+                payload={
+                    "findings_added": _findings_delta,
+                    "targets_executed": len(all_results),
+                    "tools": selected_tools,
+                },
+            )
+            _save_score(
+                scan_id=int(_trace_scan_id_ex),
+                iteration=int(state.get("loop_iteration", 0)),
+                skill_id=skill_id or capability,
+                capability=capability,
+                library_hits=2,  # skill_lookup + tool_usage_lookup
+                tool_attempts=len(all_results),
+                tool_successes=_tool_ok,
+                tool_failures=max(0, len(all_results) - _tool_ok),
+                findings_raw=_findings_delta,
+                findings_promoted=sum(
+                    1 for f in (state.get("vulnerabilidades_encontradas") or [])[-_findings_delta:]
+                    if str(f.get("severity", "")).lower() in {"critical", "high"}
+                ),
+                duration_ms=float(state.get("tool_runtime", {}).get(selected_tools[0], {}).get("attempts", 0)) * 1000,
+            )
+    except Exception:
+        pass
     state["pending_capability_node"] = ""
     state["proxima_ferramenta"] = "evidence_gate"
     state["routing_next_node"] = "evidence_gate"
@@ -902,6 +1422,7 @@ def _evaluate_evidence_gate(state: AgentState) -> AgentState:
         _append_todo,
         _append_note,
         _complete_delegation_task,
+        _mark_capability_runtime,
     )
 
     state["routing_next_node"] = "governance"
@@ -979,6 +1500,16 @@ def _evaluate_evidence_gate(state: AgentState) -> AgentState:
             phase="evidence-gate",
         )
     _complete_delegation_task(state, "evidence_gate", f"promoted={promoted}; backlog={len(backlog)}")
+    _mark_capability_runtime(
+        state,
+        "evidence_adjudication",
+        "evidence_gate",
+        {
+            "findings_total": len(adjudicated),
+            "promoted": promoted,
+            "backlog": len(backlog),
+        },
+    )
     state["logs_terminais"].append(
         f"EvidenceGate: total={len(adjudicated)} promoted_confident={promoted} backlog={len(backlog)}"
     )

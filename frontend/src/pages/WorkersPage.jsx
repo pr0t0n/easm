@@ -173,72 +173,57 @@ export default function WorkersPage() {
   const agents = pipeline?.agents || [];
 
   const tabBtn = (id, label) => (
-    <button
-      onClick={() => setActiveTab(id)}
-      className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-        activeTab === id
-          ? "bg-[#1A365D] text-white"
-          : "border border-slate-700 text-slate-400 hover:text-slate-200"
-      }`}
-    >
+    <button onClick={() => setActiveTab(id)} className={`filter${activeTab === id ? " active" : ""}`}>
       {label}
     </button>
   );
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
+    <main className="dpage space-y-4">
       {/* Header */}
-      <section className="panel p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-slate-100">Worker Manager</h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Pipeline ScriptKidd.o · {agents.length} agentes · {pipeline?.total_mission_items || 0} missões catalogadas
-              {kaliCatalog ? ` · Kali ${kaliCatalog.profiled_tools_ready}/${kaliCatalog.profile_mappings_expected} profiles prontos` : ""}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {tabBtn("pipeline", "Pipeline")}
-            {tabBtn("workers", "Workers ao Vivo")}
-            {tabBtn("kali", "Kali Catalog")}
-            {tabBtn("missions", "Catálogo de Missões")}
-            {tabBtn("metrics", "Métricas")}
-            <button onClick={load} disabled={loading}
-              className="rounded-xl bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-60 hover:bg-blue-500">
-              {loading ? "…" : "Atualizar"}
-            </button>
+      <div className="page-intro" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 24, flexWrap: "wrap" }}>
+        <div>
+          <h2>Worker Manager.</h2>
+          <div className="sub">
+            pipeline ScriptKidd.o · {agents.length} agentes · {pipeline?.total_mission_items || 0} missões catalogadas
+            {kaliCatalog ? ` · Kali ${kaliCatalog.profiled_tools_ready}/${kaliCatalog.profile_mappings_expected} profiles` : ""}
           </div>
         </div>
-      </section>
+        <button className="btn btn-ghost" onClick={load} disabled={loading}>{loading ? "…" : "Atualizar"}</button>
+      </div>
 
-      {error && (
-        <section className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">{error}</section>
-      )}
+      <div className="t-tools" style={{ marginBottom: 4 }}>
+        {tabBtn("pipeline", "Pipeline")}
+        {tabBtn("workers", "Workers ao Vivo")}
+        {tabBtn("kali", "Kali Catalog")}
+        {tabBtn("missions", "Catálogo de Missões")}
+        {tabBtn("metrics", "Métricas")}
+      </div>
+
+      {error && <div className="err-box">{error}</div>}
 
       {/* ── TAB: PIPELINE ───────────────────────────────────────────────── */}
       {activeTab === "pipeline" && (
         <>
           {/* Resumo de saúde */}
           {health?.summary && (
-            <section className="panel p-4">
-              <div className="grid gap-2 text-sm md:grid-cols-4">
-                <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">
-                  <p className="text-xs text-slate-500">workers total</p>
-                  <p className="text-xl font-semibold text-slate-100">{health.summary.total_workers}</p>
-                </div>
-                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
-                  <p className="text-xs text-slate-500">online</p>
-                  <p className="text-xl font-semibold text-emerald-300">{health.summary.online_workers}</p>
-                </div>
-                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2">
-                  <p className="text-xs text-slate-500">offline</p>
-                  <p className="text-xl font-semibold text-rose-300">{health.summary.offline_workers}</p>
-                </div>
-                <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2">
-                  <p className="text-xs text-slate-500">celery inspect</p>
-                  <p className={`text-xl font-semibold ${health.summary.inspect_ok ? "text-emerald-300" : "text-amber-300"}`}>
-                    {health.summary.inspect_ok ? "ok" : "indisponível"}
-                  </p>
+            <section className="grid-4">
+              <div className="kpi">
+                <div className="k">Workers total</div>
+                <div className="v">{health.summary.total_workers}</div>
+              </div>
+              <div className="kpi">
+                <div className="k">Online</div>
+                <div className="v" style={{ color: "var(--sev-low-text)" }}>{health.summary.online_workers}</div>
+              </div>
+              <div className="kpi">
+                <div className="k">Offline</div>
+                <div className="v" style={{ color: "var(--sev-critical-text)" }}>{health.summary.offline_workers}</div>
+              </div>
+              <div className="kpi">
+                <div className="k">Celery inspect</div>
+                <div className="v" style={{ fontSize: 22, color: health.summary.inspect_ok ? "var(--sev-low-text)" : "var(--sev-medium-text)" }}>
+                  {health.summary.inspect_ok ? "OK" : "indisponível"}
                 </div>
               </div>
             </section>
@@ -253,10 +238,11 @@ export default function WorkersPage() {
             </p>
             {loading && !pipeline && <p className="text-sm text-slate-400">Carregando pipeline…</p>}
 
-            {/* Cards horizontais com setas */}
-            <div className="flex flex-wrap items-start gap-2 xl:flex-nowrap">
+            {/* Cards do pipeline — sempre quebram em múltiplas linhas para que
+                o fluxo inteiro seja visível, sem overflow horizontal. */}
+            <div className="flex flex-wrap items-start gap-2">
               {agents.map((agent, idx) => (
-                <div key={agent.id} className="flex shrink-0 items-start gap-2 xl:contents">
+                <div key={agent.id} className="flex items-start gap-2">
                   <AgentCard
                     agent={agent}
                     expanded={expandedAgent === agent.id}
@@ -268,14 +254,12 @@ export default function WorkersPage() {
               ))}
               {/* END node */}
               {agents.length > 0 && (
-                <>
+                <div className="flex items-start gap-2">
                   <Arrow />
-                  <div className="hidden shrink-0 items-start xl:flex">
-                    <div className="flex h-10 items-center rounded-xl border border-slate-700 bg-slate-900/50 px-3">
-                      <span className="text-xs font-bold uppercase tracking-widest text-slate-500">END</span>
-                    </div>
+                  <div className="flex h-10 items-center rounded-xl border border-slate-700 bg-slate-900/50 px-3">
+                    <span className="text-xs font-bold uppercase tracking-widest text-slate-500">END</span>
                   </div>
-                </>
+                </div>
               )}
             </div>
           </section>
@@ -377,26 +361,6 @@ export default function WorkersPage() {
       {/* ── TAB: WORKERS AO VIVO ────────────────────────────────────────── */}
       {activeTab === "workers" && (
         <>
-          {/* Contadores por fase */}
-          {health?.summary?.phase_counts && (
-            <section className="panel p-4">
-              <div className="grid gap-2 text-sm md:grid-cols-3 xl:grid-cols-5">
-                {[
-                  { key: "reconhecimento",          label: "AssetDiscovery", palette: AGENT_PALETTE.cyan },
-                  { key: "analise_vulnerabilidade",  label: "RiskAssessment", palette: AGENT_PALETTE.amber },
-                  { key: "osint",                    label: "ThreatIntel",    palette: AGENT_PALETTE.violet },
-                  { key: "governance",               label: "Governance",     palette: AGENT_PALETTE.emerald },
-                  { key: "executive_analyst",        label: "Executive",      palette: AGENT_PALETTE.rose },
-                ].map(({ key, label, palette }) => (
-                  <div key={key} className={`rounded-lg border ${palette.border} ${palette.bg} px-3 py-2`}>
-                    <p className={`text-xs ${palette.text}`}>{label}</p>
-                    <p className="text-xl font-semibold text-slate-100">{health.summary.phase_counts[key] || 0}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
           <section className="panel p-5">
             <h3 className="mb-3 text-base font-semibold text-slate-100">Instâncias de Workers</h3>
             {loading && <p className="text-sm text-slate-400">Carregando…</p>}

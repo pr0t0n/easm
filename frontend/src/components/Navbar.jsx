@@ -4,19 +4,19 @@ import client from "../api/client";
 import { authStore } from "../store/auth";
 
 const PAGE_META = {
-  "/":               { eyebrow: "ScriptKidd.o · Vulnerability Dashboard", title: "Visão Consolidada de Risco e Maturidade", sub: "Análise contínua de vulnerabilidades" },
+  "/":               { eyebrow: "Overview · Dashboard", title: "Postura de risco, em tempo real.", sub: "Pipeline LangGraph · Kali Runner · análise contínua de vulnerabilidades" },
   "/targets":        { eyebrow: "Vulnerability Ops · Targets", title: "Alvos Autorizados",       sub: "Inventário de domínios e ativos sob escopo" },
-  "/scan":           { eyebrow: "Vulnerability Ops · Scans",   title: "Execuções Ativas",        sub: "Pipelines automatizados de análise de vulnerabilidade em tempo real" },
+  "/scan":           { eyebrow: "Vulnerability Ops · Scans",   title: "Scans e Agendamentos",    sub: "Execução unitária e recorrente em uma única operação" },
   "/phase-monitor":  { eyebrow: "Vulnerability Ops · Phases",  title: "Monitor de Fases",        sub: "Cobertura de tools por fase do pipeline 22-step" },
   "/agendamento":    { eyebrow: "Vulnerability Ops · Schedules", title: "Agendamentos",          sub: "Janelas e cadência de scans recorrentes" },
+  "/operacional":    { eyebrow: "Operations · Runtime",       title: "Centro Operacional",       sub: "Fases, agentes, jobs, workers, logs e evolução de ataque" },
   "/vulnerabilidades": { eyebrow: "Security · Vulns",        title: "Vulnerabilidades",          sub: "Achados priorizados por severidade, FAIR e AGE" },
   "/evolucao":       { eyebrow: "Security · Evolution",      title: "Attack Evolution",          sub: "Trajetória da postura de segurança ao longo do tempo" },
   "/aprendizado":    { eyebrow: "Security · Learning",        title: "Aprendizado de Vulnerabilidades", sub: "Técnicas revisadas antes de entrar na missão dos agentes" },
-  "/relatorios":     { eyebrow: "Security · Reports",        title: "Relatórios",                sub: "Documentação executiva e técnica gerada por scan" },
+  "/relatorios":     { eyebrow: "Security · Report",         title: "Relatório Único",           sub: "Executivo, técnico, escopo, revisão, BAS e evidências em uma única visão" },
   "/workers":        { eyebrow: "Management · Workers",      title: "Workers",                   sub: "Heartbeats e capacidade dos agentes especializados" },
   "/jobs":           { eyebrow: "Management · Jobs Registry", title: "Jobs Registry",            sub: "Trilha de tarefas Celery por scan" },
   "/worker-logs":    { eyebrow: "Management · Logs",         title: "Worker Logs",               sub: "Streaming de logs operacionais por worker" },
-  "/configuracao":   { eyebrow: "Management · Settings",     title: "Configuração",              sub: "Integrações, policies e parâmetros do produto" },
   "/usuarios":       { eyebrow: "Admin · Users",             title: "Usuários",                  sub: "Identidades, grupos e permissões" },
   "/conta":          { eyebrow: "Admin · Account",           title: "Minha Conta",               sub: "Dados de perfil e preferências" },
 };
@@ -60,36 +60,31 @@ export default function Navbar() {
     return { color: "#2d52e6", label: "Kali standby", bg: "rgba(75,115,255,0.1)" };
   })();
 
+  const crumbs = String(meta.eyebrow || "").split(/\s*[·/]\s*/).filter(Boolean);
+
   return (
     <header className="app-hdr">
       <div>
-        <span
+        <div
           style={{
-            display: "inline-flex",
+            display: "flex",
             alignItems: "center",
-            gap: 6,
-            padding: "3px 10px",
-            borderRadius: 999,
-            background: "var(--brand-50)",
-            border: "1px solid rgba(233,99,99,0.25)",
-            color: "var(--brand-700)",
-            fontSize: 10,
-            fontWeight: 700,
+            gap: 10,
+            fontSize: 10.5,
+            fontWeight: 600,
             letterSpacing: "0.18em",
             textTransform: "uppercase",
+            color: "var(--ink-muted)",
           }}
         >
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 999,
-              background: "var(--brand-500)",
-              display: "inline-block",
-            }}
-          />
-          {meta.eyebrow}
-        </span>
+          <span style={{ width: 24, height: 1, background: "var(--brand-500)", display: "inline-block" }} />
+          {crumbs.map((crumb, i) => (
+            <span key={crumb} style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              {i > 0 && <span style={{ color: "var(--line-strong)" }}>/</span>}
+              <span>{crumb}</span>
+            </span>
+          ))}
+        </div>
         <h1 className="app-hdr-title" style={{ marginTop: 8 }}>{meta.title}</h1>
         <div className="app-hdr-sub">{meta.sub}</div>
       </div>
@@ -141,7 +136,7 @@ export default function Navbar() {
             e.currentTarget.style.color = "var(--ink-soft)";
           }}
         >
-          Ver relatório
+          Relatório único
         </Link>
         <Link
           to="/scan"
@@ -163,7 +158,7 @@ export default function Navbar() {
             e.currentTarget.style.boxShadow = "var(--shadow-cta)";
           }}
         >
-          + Novo Scan
+          + Scan
         </Link>
         {me?.email && (
           <div

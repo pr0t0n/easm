@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
+function basFromFinding(item) {
+  const details = item?.details && typeof item.details === "object" ? item.details : {};
+  const technique = details.adversary_technique && typeof details.adversary_technique === "object" ? details.adversary_technique : {};
+  const pack = details.detection_proof_pack && typeof details.detection_proof_pack === "object" ? details.detection_proof_pack : {};
+  return {
+    id: String(technique.id || details.adversary_technique_id || "").trim(),
+    status: String(pack.detection_status || details.detection_status || "unknown").trim().toLowerCase(),
+  };
+}
+
 export default function IssuesPage() {
   const [rows, setRows] = useState([]);
   const [page, setPage] = useState({ total: 0, limit: 100, offset: 0 });
@@ -33,13 +43,18 @@ export default function IssuesPage() {
     const map = new Map();
     for (const item of rows) {
       const key = item.target_query || "desconhecido";
-      const existing = map.get(key) || { target: key, total: 0, critical: 0, high: 0, medium: 0, low: 0 };
+      const existing = map.get(key) || { target: key, total: 0, critical: 0, high: 0, medium: 0, low: 0, bas: new Set(), basPending: 0 };
       existing.total += 1;
       const sev = String(item.severity || "low").toLowerCase();
       if (sev in existing) existing[sev] += 1;
+      const bas = basFromFinding(item);
+      if (bas.id) existing.bas.add(bas.id);
+      if (bas.id && bas.status === "unknown") existing.basPending += 1;
       map.set(key, existing);
     }
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
+    return Array.from(map.values())
+      .map((entry) => ({ ...entry, basCount: entry.bas.size }))
+      .sort((a, b) => b.total - a.total);
   }, [rows]);
 
   return (
@@ -81,11 +96,13 @@ export default function IssuesPage() {
                 <p className="font-mono text-sm font-semibold">{entry.target}</p>
                 <p className="text-sm">total: <span className="font-semibold text-white">{entry.total}</span></p>
               </div>
-              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-4">
+              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-6">
                 <p className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1">critical: {entry.critical}</p>
                 <p className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-1">high: {entry.high}</p>
                 <p className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-2 py-1">medium: {entry.medium}</p>
                 <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1">low: {entry.low}</p>
+                <p className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1">BAS: {entry.basCount}</p>
+                <p className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1">detecção pendente: {entry.basPending}</p>
               </div>
             </div>
           ))}

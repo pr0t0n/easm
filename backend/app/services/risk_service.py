@@ -970,3 +970,252 @@ def forecast_rating_30days(
         "confidence": confidence,
         "key_drivers": drivers,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Maturidade por framework (ISO 27001 / NIST CSF / CIS v8 / PCI DSS)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Cada framework reage de forma distinta às evidências do scan. Os pesos abaixo
+# refletem a sensibilidade do framework a cada domínio de controle:
+#   - sev_*       : pressão por severidade (PCI é o mais rígido com crítico/alto)
+#   - w_config    : cabeçalhos de segurança ausentes / má configuração
+#   - w_exposure  : superfície exposta (recon + OSINT)
+#   - w_vuln      : vulnerabilidades técnicas confirmadas
+#   - waf_credit  : crédito máximo por presença de WAF (controle compensatório)
+#   - remed_credit: crédito máximo pela taxa de remediação (findings triados)
+FRAMEWORK_CONTROL_MODEL: dict[str, dict[str, Any]] = {
+    "iso27001": {
+        "label": "ISO/IEC 27001:2022",
+        "domains": "A.8 Controles tecnológicos — gestão de vulnerabilidades e configuração segura",
+        "sev_critical": 19.0, "sev_high": 11.0, "sev_medium": 5.0, "sev_low": 1.6,
+        "w_config": 4.5, "w_exposure": 2.6, "w_vuln": 3.4,
+        "waf_credit": 7.0, "remed_credit": 14.0,
+    },
+    "nist": {
+        "label": "NIST CSF 2.0",
+        "domains": "Identify/Protect/Detect — exposição de ativos, gestão de vulnerabilidades e detecção",
+        "sev_critical": 17.0, "sev_high": 10.5, "sev_medium": 5.4, "sev_low": 1.8,
+        "w_config": 3.4, "w_exposure": 4.4, "w_vuln": 3.0,
+        "waf_credit": 6.0, "remed_credit": 16.0,
+    },
+    "cis_v8": {
+        "label": "CIS Controls v8",
+        "domains": "Controles 4/7/12 — configuração segura, gestão contínua de vulnerabilidades e defesa de rede",
+        "sev_critical": 18.0, "sev_high": 11.5, "sev_medium": 5.6, "sev_low": 1.9,
+        "w_config": 5.4, "w_exposure": 2.8, "w_vuln": 3.6,
+        "waf_credit": 6.5, "remed_credit": 15.0,
+    },
+    "pci": {
+        "label": "PCI DSS v4.0",
+        "domains": "Req. 1/6/11 — firewall/WAF, desenvolvimento seguro e testes de segurança",
+        "sev_critical": 26.0, "sev_high": 15.5, "sev_medium": 6.2, "sev_low": 2.0,
+        "w_config": 3.8, "w_exposure": 2.2, "w_vuln": 4.6,
+        "waf_credit": 9.0, "remed_credit": 12.0,
+    },
+}
+
+
+def compute_framework_scores(
+    *,
+    severity_count: dict[str, int],
+    security_header_findings: float = 0.0,
+    exposure_findings: float = 0.0,
+    vulnerability_findings: float = 0.0,
+    waf_findings: float = 0.0,
+    findings_total: float = 0.0,
+    findings_triaged: float = 0.0,
+) -> dict[str, dict[str, Any]]:
+    """Calcula a maturidade por framework a partir das evidências do scan.
+
+    Substitui o score sintético único (``base ± offset``) por um modelo de
+    penalidade log-amortecida específico de cada framework. Cada framework parte
+    de 100 e:
+      - perde pontos por pressão de severidade (log1p amortecido, estilo BitSight);
+      - perde pontos por má configuração (cabeçalhos), exposição e vulnerabilidades;
+      - recupera pontos por presença de WAF e pela taxa de remediação.
+
+    Retorna ``{framework_key: {score, grade, label, domains, evidence}}``.
+    """
+    critical = int(severity_count.get("critical") or 0)
+    high = int(severity_count.get("high") or 0)
+    medium = int(severity_count.get("medium") or 0)
+    low = int(severity_count.get("low") or 0)
+
+    headers = max(0.0, float(security_header_findings))
+    exposure = max(0.0, float(exposure_findings))
+    vulns = max(0.0, float(vulnerability_findings))
+    waf = max(0.0, float(waf_findings))
+    total = max(0.0, float(findings_total))
+    triaged = max(0.0, float(findings_triaged))
+    remediation_ratio = (triaged / total) if total > 0 else 0.0
+
+    result: dict[str, dict[str, Any]] = {}
+    for key, model in FRAMEWORK_CONTROL_MODEL.items():
+        sev_penalty = (
+            math.log1p(critical) * float(model["sev_critical"])
+            + math.log1p(high) * float(model["sev_high"])
+            + math.log1p(medium) * float(model["sev_medium"])
+            + math.log1p(low) * float(model["sev_low"])
+        )
+        config_penalty = math.log1p(headers) * float(model["w_config"])
+        exposure_penalty = math.log1p(exposure) * float(model["w_exposure"])
+        vuln_penalty = math.log1p(vulns) * float(model["w_vuln"])
+
+        waf_credit = min(float(model["waf_credit"]), waf * float(model["waf_credit"]) / 2.0) if waf > 0 else 0.0
+        remediation_credit = remediation_ratio * float(model["remed_credit"])
+
+        raw = (
+            100.0
+            - sev_penalty
+            - config_penalty
+            - exposure_penalty
+            - vuln_penalty
+            + waf_credit
+            + remediation_credit
+        )
+        score = round(max(5.0, min(100.0, raw)), 1)
+        result[key] = {
+            "score": score,
+            "grade": _grade_from_score(score),
+            "label": str(model["label"]),
+            "domains": str(model["domains"]),
+            "evidence": {
+                "severity_penalty": round(sev_penalty, 1),
+                "config_penalty": round(config_penalty, 1),
+                "exposure_penalty": round(exposure_penalty, 1),
+                "vulnerability_penalty": round(vuln_penalty, 1),
+                "waf_credit": round(waf_credit, 1),
+                "remediation_credit": round(remediation_credit, 1),
+            },
+        }
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Detecção BAS — fechamento do detection_proof_pack a partir da evidência real
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Sinais textuais de que um controle defensivo respondeu ao ataque simulado.
+_DETECTION_BLOCK_SIGNALS = (
+    "403 forbidden", "406 not acceptable", "429 too many", "rate limit", "rate-limit",
+    "request blocked", "blocked by", "access denied", "forbidden by", "captcha",
+    "challenge", "mod_security", "modsecurity", "cloudflare", "akamai", "incapsula",
+    "imperva", "connection reset", "reset by peer", "waf detected",
+)
+# Sinais de que o ataque foi bem-sucedido sem resposta defensiva (gap de controle).
+_DETECTION_SUCCESS_SIGNALS = (
+    "confirmed", "exploitable", "vulnerable", "payload reflected", "reflected in",
+    "injection successful", "sql injection", "extracted", "dumped", "bypassed",
+    "unauthorized access", "sensitive data exposed", "information disclosure",
+)
+
+
+def classify_detection_outcome(
+    details: dict[str, Any] | None,
+    *,
+    title: str = "",
+    severity: str | None = None,
+    source_group: str = "",
+    target_has_waf: bool = False,
+    expected_telemetry: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Classifica o resultado de detecção de um achado/execução BAS.
+
+    O scan emite o ``detection_proof_pack`` apenas como template
+    (``detection_status="unknown"``) e nunca o fecha. Esta fórmula deriva o
+    status real a partir da evidência já coletada pelo scan:
+      - ``detected`` : o controle respondeu (bloqueio/desafio/WAF na evidência);
+      - ``gap``      : ataque confirmado sem qualquer resposta defensiva;
+      - ``partial``  : WAF presente porém contornado, ou evidência mista;
+      - ``unknown``  : achado de recon/OSINT/informativo — nada a detectar.
+
+    Retorna um ``detection_proof_pack`` preenchido (status + lacuna de controle +
+    telemetria observada + racional).
+    """
+    details = details if isinstance(details, dict) else {}
+    nested = details.get("details") if isinstance(details.get("details"), dict) else {}
+    sev = str(severity or "").strip().lower()
+    grp = str(source_group or "").strip().lower()
+
+    evidence_blob = " ".join(
+        str(part or "")
+        for part in (
+            title,
+            details.get("evidence"), nested.get("evidence"),
+            details.get("description"), nested.get("description"),
+            details.get("technical_evidence"), nested.get("technical_evidence"),
+            details.get("raw_output"), nested.get("raw_output"),
+        )
+    ).lower()
+
+    validation_status = str(
+        details.get("validation_status") or nested.get("validation_status") or ""
+    ).strip().lower()
+
+    has_block = any(sig in evidence_blob for sig in _DETECTION_BLOCK_SIGNALS)
+    has_success = (
+        validation_status == "verified"
+        or any(sig in evidence_blob for sig in _DETECTION_SUCCESS_SIGNALS)
+    )
+
+    if grp in {"recon", "osint"} or sev in {"info", "informational", ""}:
+        # Reconhecimento/OSINT: não houve ação ofensiva — nada a detectar.
+        if has_block:
+            status, control_gap = "detected", ""
+            rationale = "Evidência defensiva observada durante a coleta."
+        elif has_success:
+            status, control_gap = "gap", "Exposição visível sem controle compensatório."
+            rationale = "Exposição confirmada sem resposta de controle."
+        else:
+            status, control_gap = "unknown", ""
+            rationale = "Achado de reconhecimento/OSINT — sem ação ofensiva a detectar."
+    elif has_block and has_success:
+        status = "partial"
+        control_gap = "Controle respondeu, porém o ataque ainda obteve resultado parcial."
+        rationale = "Sinais de bloqueio e de sucesso coexistem na evidência."
+    elif has_block:
+        status = "detected"
+        control_gap = ""
+        rationale = "Controle defensivo respondeu (bloqueio/desafio/WAF) na evidência."
+    elif has_success:
+        if target_has_waf:
+            status = "partial"
+            control_gap = "WAF presente no alvo, mas o ataque foi confirmado (provável bypass)."
+            rationale = "Alvo possui WAF; ataque confirmado indica controle contornado."
+        else:
+            status = "gap"
+            control_gap = "Ataque confirmado sem qualquer resposta defensiva observável."
+            rationale = "Severidade ofensiva confirmada e nenhuma evidência de controle."
+    else:
+        status = "partial" if target_has_waf else "unknown"
+        control_gap = "" if target_has_waf else "Sem evidência suficiente para confirmar detecção."
+        rationale = "Evidência insuficiente; classificação conservadora."
+
+    # Telemetria observada: marca as fontes esperadas cujos sinais aparecem na evidência.
+    telemetry_observed: list[str] = []
+    for item in (expected_telemetry or []):
+        if isinstance(item, dict):
+            source = str(item.get("source") or item.get("log_source") or item.get("data_source") or "").strip()
+            signals = [str(s).lower() for s in (item.get("signals") or [])]
+        else:
+            source = str(item or "").strip()
+            signals = []
+        if not source:
+            continue
+        if signals and any(sig and sig in evidence_blob for sig in signals):
+            telemetry_observed.append(source)
+        elif not signals and source.lower() in evidence_blob:
+            telemetry_observed.append(source)
+
+    return {
+        "detection_status": status,
+        "control_gap": control_gap,
+        "rationale": rationale,
+        "telemetry_observed": sorted(set(telemetry_observed)),
+        "evidence_signals": {
+            "block_signal": has_block,
+            "success_signal": has_success,
+            "validation_status": validation_status or "unverified",
+        },
+    }

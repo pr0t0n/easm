@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
 
+const STATUS_DOT = {
+  completed: "ok",
+  running: "run",
+  retrying: "warn",
+  queued: "idle",
+  failed: "crit",
+  blocked: "crit",
+};
+
 export default function JobsRegistryPage() {
   const [jobs, setJobs] = useState([]);
   const [events, setEvents] = useState([]);
@@ -29,53 +38,60 @@ export default function JobsRegistryPage() {
   }, []);
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
-      <section className="panel p-5">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <h2 className="text-xl font-semibold">Jobs Registry</h2>
-            <p className="mt-1 text-sm text-slate-300">Historico real de execucoes e trilha de auditoria.</p>
-          </div>
-          <button onClick={load} className="rounded-xl bg-[#1A365D] px-4 py-2 font-semibold text-white hover:bg-[#2C5282]">Atualizar</button>
+    <main className="dpage">
+      <div className="page-intro" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div>
+          <h2>Job Registry.</h2>
+          <div className="sub">histórico real de execuções Celery e trilha de auditoria</div>
         </div>
-      </section>
+        <button className="btn btn-ghost" onClick={load}>Atualizar</button>
+      </div>
 
-      {error && <section className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">{error}</section>}
+      {error && <div className="err-box" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Execucoes</h3>
-          {loading && <p className="mt-2 text-sm text-slate-400">Carregando jobs...</p>}
-          {!loading && jobs.length === 0 && <p className="mt-2 text-sm text-slate-500">Sem jobs registrados.</p>}
-          <div className="mt-3 space-y-2">
-            {jobs.map((job) => (
-              <div key={job.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-mono font-semibold">#{job.id} - {job.target_query}</p>
-                  <span className="rounded-md border border-slate-600 bg-slate-700/50 px-2 py-0.5 text-xs uppercase text-slate-200">{job.status}</span>
+      <div className="grid-2">
+        <section className="t-wrap">
+          <div className="t-head"><div><h3>Execuções</h3><div className="sub">jobs por scan</div></div></div>
+          {loading && <div className="state" style={{ minHeight: 200 }}><div><div className="spin" /><p className="st-title">Carregando jobs…</p></div></div>}
+          {!loading && jobs.length === 0 && <div className="empty">Sem jobs registrados.</div>}
+          {!loading && jobs.length > 0 && (
+            <div style={{ maxHeight: 540, overflowY: "auto" }}>
+              {jobs.map((job) => (
+                <div key={job.id} style={{ padding: "14px 22px", borderBottom: "1px solid var(--line-soft)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                    <span className="mono" style={{ fontWeight: 600 }}>#{job.id} · {job.target_query}</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <span className={`dot-state ${STATUS_DOT[job.status] || "idle"}`} />
+                      <span className="mono-sm">{job.status}</span>
+                    </span>
+                  </div>
+                  <div className="mono-sm muted" style={{ marginTop: 4 }}>
+                    {job.mode} · compliance {job.compliance_status} · {job.findings_count} findings · retry {job.retry_attempt || 0}/{job.retry_max || 0} · {job.mission_progress}%
+                  </div>
+                  {job.last_error && (
+                    <div className="mono-sm" style={{ marginTop: 4, color: "var(--sev-critical-text)" }}>erro: {job.last_error}</div>
+                  )}
                 </div>
-                <p className="mt-1 text-xs text-slate-300">{job.mode} | compliance: {job.compliance_status} | findings: {job.findings_count}</p>
-                <p className="text-xs text-slate-400">retry {job.retry_attempt || 0}/{job.retry_max || 0} | progresso {job.mission_progress}%</p>
-                <p className="text-xs text-slate-400">duracao: {job.duration_seconds ?? "-"}s | atualizado: {job.updated_at ? new Date(job.updated_at).toLocaleString("pt-BR") : "-"}</p>
-                {job.last_error && <p className="mt-1 text-xs text-rose-300">erro: {job.last_error}</p>}
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </section>
 
-        <section className="panel p-5">
-          <h3 className="text-lg font-semibold">Eventos de Auditoria</h3>
-          {loading && <p className="mt-2 text-sm text-slate-400">Carregando eventos...</p>}
-          {!loading && events.length === 0 && <p className="mt-2 text-sm text-slate-500">Sem eventos.</p>}
-          <div className="mt-3 space-y-2">
-            {events.map((event) => (
-              <div key={event.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs">
-                <p className="font-semibold text-slate-100">{event.event_type}</p>
-                <p className="mt-1 text-slate-300">{event.message}</p>
-                <p className="mt-1 text-slate-500">{new Date(event.created_at).toLocaleString("pt-BR")}</p>
-              </div>
-            ))}
-          </div>
+        <section className="t-wrap">
+          <div className="t-head"><div><h3>Eventos de auditoria</h3><div className="sub">trilha governada</div></div></div>
+          {loading && <div className="state" style={{ minHeight: 200 }}><div><div className="spin" /><p className="st-title">Carregando eventos…</p></div></div>}
+          {!loading && events.length === 0 && <div className="empty">Sem eventos.</div>}
+          {!loading && events.length > 0 && (
+            <div style={{ maxHeight: 540, overflowY: "auto" }}>
+              {events.map((event) => (
+                <div key={event.id} style={{ padding: "12px 22px", borderBottom: "1px solid var(--line-soft)" }}>
+                  <div style={{ fontWeight: 600, fontSize: 12.5 }}>{event.event_type}</div>
+                  <div className="mono-sm soft" style={{ marginTop: 3 }}>{event.message}</div>
+                  <div className="mono-sm muted" style={{ marginTop: 3 }}>{new Date(event.created_at).toLocaleString("pt-BR")}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       </div>
     </main>

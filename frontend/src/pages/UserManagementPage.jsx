@@ -1,6 +1,19 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
 
+const inputStyle = {
+  width: "100%", padding: "9px 12px", borderRadius: 8,
+  border: "1px solid var(--line)", background: "var(--canvas)",
+  fontSize: 13, color: "var(--ink)",
+};
+const chip = (on) => ({
+  display: "inline-flex", alignItems: "center", gap: 6,
+  padding: "5px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+  border: `1px solid ${on ? "var(--brand-500)" : "var(--line)"}`,
+  background: on ? "rgba(233,99,99,0.08)" : "var(--surface)",
+  color: on ? "var(--brand-700)" : "var(--ink-soft)",
+});
+
 export default function UserManagementPage() {
   const [users, setUsers] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -41,10 +54,10 @@ export default function UserManagementPage() {
     try {
       await client.post("/api/users", newUser);
       setNewUser({ email: "", password: "", is_admin: false, group_ids: [] });
-      setFeedback("Usuario criado com sucesso.");
+      setFeedback("Usuário criado com sucesso.");
       await loadData();
     } catch (err) {
-      setError(err?.response?.data?.detail || "Falha ao criar usuario.");
+      setError(err?.response?.data?.detail || "Falha ao criar usuário.");
     }
   };
 
@@ -83,13 +96,7 @@ export default function UserManagementPage() {
   };
 
   const updateDraft = (userId, field, value) => {
-    setDrafts((prev) => ({
-      ...prev,
-      [userId]: {
-        ...prev[userId],
-        [field]: value,
-      },
-    }));
+    setDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], [field]: value } }));
   };
 
   const toggleDraftGroup = (userId, groupId) => {
@@ -105,152 +112,136 @@ export default function UserManagementPage() {
   const saveUser = async (userId) => {
     const draft = drafts[userId];
     if (!draft) return;
-
     setBusyUserId(userId);
     setError("");
     setFeedback("");
     try {
       await client.put(`/api/users/${userId}`, draft);
-      setFeedback("Usuario atualizado com sucesso.");
+      setFeedback("Usuário atualizado com sucesso.");
       await loadData();
     } catch (err) {
-      setError(err?.response?.data?.detail || "Falha ao atualizar usuario.");
+      setError(err?.response?.data?.detail || "Falha ao atualizar usuário.");
     } finally {
       setBusyUserId(null);
     }
   };
 
   const deleteUser = async (userId) => {
-    const confirmed = window.confirm("Deseja realmente excluir este usuario?");
-    if (!confirmed) return;
-
+    if (!window.confirm("Deseja realmente excluir este usuário?")) return;
     setBusyUserId(userId);
     setError("");
     setFeedback("");
     try {
       await client.delete(`/api/users/${userId}`);
-      setFeedback("Usuario excluido com sucesso.");
+      setFeedback("Usuário excluído com sucesso.");
       await loadData();
     } catch (err) {
-      setError(err?.response?.data?.detail || "Falha ao excluir usuario.");
+      setError(err?.response?.data?.detail || "Falha ao excluir usuário.");
     } finally {
       setBusyUserId(null);
     }
   };
 
   return (
-    <main className="mx-auto mt-6 w-[95%] max-w-6xl space-y-4 pb-10">
-      {error && <section className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">{error}</section>}
-      {feedback && <section className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200">{feedback}</section>}
+    <main className="dpage">
+      <div className="page-intro">
+        <h2>Usuários e grupos.</h2>
+        <div className="sub">identidades, grupos de acesso e permissões</div>
+      </div>
 
-      <section className="panel p-5">
-        <h2 className="text-xl font-semibold">Gestao de Usuarios</h2>
-        <div className="mt-3 grid gap-2 md:grid-cols-4">
-          <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
-          <input type="password" className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="senha" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={newUser.is_admin} onChange={(e) => setNewUser({ ...newUser, is_admin: e.target.checked })} />
-            Administrador
-          </label>
-          <button onClick={createUser} className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Criar usuario</button>
+      {error && <div className="err-box" style={{ marginBottom: 14 }}>{error}</div>}
+      {feedback && (
+        <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 13, border: "1px solid var(--sev-low-border)", background: "var(--sev-low-bg)", color: "var(--sev-low-text)" }}>
+          {feedback}
         </div>
-        <div className="mt-3 flex flex-wrap gap-2 text-sm">
-          {groups.map((g) => (
-            <label key={g.id} className="flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1">
-              <input type="checkbox" checked={newUser.group_ids.includes(g.id)} onChange={() => toggleGroupOnNewUser(g.id)} />
-              {g.name}
+      )}
+
+      <div className="grid-2" style={{ marginBottom: 16 }}>
+        <section className="card">
+          <div className="card-h"><div><h3>Novo usuário</h3><div className="sub">cadastro restrito a administradores</div></div></div>
+          <div style={{ display: "grid", gap: 10 }}>
+            <input style={inputStyle} placeholder="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
+            <input type="password" style={inputStyle} placeholder="senha" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--ink-soft)" }}>
+              <input type="checkbox" checked={newUser.is_admin} onChange={(e) => setNewUser({ ...newUser, is_admin: e.target.checked })} />
+              Administrador
             </label>
-          ))}
-        </div>
-      </section>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {groups.map((g) => (
+                <span key={g.id} style={chip(newUser.group_ids.includes(g.id))} onClick={() => toggleGroupOnNewUser(g.id)}>{g.name}</span>
+              ))}
+            </div>
+            <button className="btn btn-primary" onClick={createUser}>Criar usuário</button>
+          </div>
+        </section>
 
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Grupos de Acesso</h3>
-        <div className="mt-3 grid gap-2 md:grid-cols-3">
-          <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Nome do grupo" value={groupForm.name} onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })} />
-          <input className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="Descricao" value={groupForm.description} onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })} />
-          <button onClick={createGroup} className="rounded-xl bg-blue-600 px-4 py-2 font-semibold text-white">Criar grupo</button>
-        </div>
-        <div className="mt-3 space-y-1 text-sm text-slate-200">
-          {groups.map((g) => <p key={g.id}>#{g.id} - {g.name} ({g.description || "sem descricao"})</p>)}
-        </div>
-      </section>
+        <section className="card">
+          <div className="card-h"><div><h3>Grupos de acesso</h3><div className="sub">segmentação por cliente</div></div></div>
+          <div style={{ display: "grid", gap: 10 }}>
+            <input style={inputStyle} placeholder="Nome do grupo" value={groupForm.name} onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })} />
+            <input style={inputStyle} placeholder="Descrição" value={groupForm.description} onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })} />
+            <button className="btn btn-primary" onClick={createGroup}>Criar grupo</button>
+          </div>
+          <div className="divider-h" />
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {groups.map((g) => (
+              <div key={g.id} className="mono-sm" style={{ color: "var(--ink-soft)" }}>
+                #{g.id} · <b style={{ color: "var(--ink)" }}>{g.name}</b> — {g.description || "sem descrição"}
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
 
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Reset de Senha (Admin)</h3>
-        <div className="mt-3 grid gap-2 md:grid-cols-3">
-          <select className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" value={passwordForm.userId} onChange={(e) => setPasswordForm({ ...passwordForm, userId: e.target.value })}>
-            <option value="">Selecione usuario</option>
+      <section className="card" style={{ marginBottom: 16 }}>
+        <div className="card-h"><div><h3>Reset de senha</h3><div className="sub">ação administrativa</div></div></div>
+        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr auto" }}>
+          <select style={inputStyle} value={passwordForm.userId} onChange={(e) => setPasswordForm({ ...passwordForm, userId: e.target.value })}>
+            <option value="">Selecione o usuário</option>
             {users.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
           </select>
-          <input type="password" className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2" placeholder="nova senha" value={passwordForm.newPassword} onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })} />
-          <button onClick={resetPassword} className="rounded-xl bg-amber-500 px-4 py-2 font-semibold text-white">Alterar senha</button>
+          <input type="password" style={inputStyle} placeholder="nova senha" value={passwordForm.newPassword} onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })} />
+          <button className="btn btn-ghost" onClick={resetPassword}>Alterar senha</button>
         </div>
       </section>
 
-      <section className="panel p-5">
-        <h3 className="text-lg font-semibold">Usuarios</h3>
-        <div className="mt-3 space-y-2">
+      <section className="t-wrap">
+        <div className="t-head"><div><h3>Usuários</h3><div className="sub">{users.length} identidades</div></div></div>
+        <div>
           {users.map((u) => (
-            <div key={u.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+            <div key={u.id} style={{ padding: "16px 22px", borderBottom: "1px solid var(--line-soft)" }}>
+              <div style={{ display: "grid", gap: 14, gridTemplateColumns: "1.3fr 0.7fr" }}>
                 <div>
-                  <label className="text-xs uppercase tracking-[0.2em] text-slate-500">Email</label>
-                  <input
-                    className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2"
-                    value={drafts[u.id]?.email || ""}
-                    onChange={(e) => updateDraft(u.id, "email", e.target.value)}
-                  />
-                  <div className="mt-3 grid gap-2 md:grid-cols-2">
-                    <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(drafts[u.id]?.is_admin)}
-                        onChange={(e) => updateDraft(u.id, "is_admin", e.target.checked)}
-                      />
+                  <label className="mono-sm muted" style={{ display: "block", marginBottom: 4 }}>Email</label>
+                  <input style={inputStyle} value={drafts[u.id]?.email || ""} onChange={(e) => updateDraft(u.id, "email", e.target.value)} />
+                  <div style={{ display: "flex", gap: 16, marginTop: 10 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "var(--ink-soft)" }}>
+                      <input type="checkbox" checked={Boolean(drafts[u.id]?.is_admin)} onChange={(e) => updateDraft(u.id, "is_admin", e.target.checked)} />
                       Administrador
                     </label>
-                    <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(drafts[u.id]?.is_active)}
-                        onChange={(e) => updateDraft(u.id, "is_active", e.target.checked)}
-                      />
-                      Usuario ativo
+                    <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "var(--ink-soft)" }}>
+                      <input type="checkbox" checked={Boolean(drafts[u.id]?.is_active)} onChange={(e) => updateDraft(u.id, "is_active", e.target.checked)} />
+                      Usuário ativo
                     </label>
                   </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+                    {groups.map((g) => (
+                      <span key={g.id} style={chip((drafts[u.id]?.group_ids || []).includes(g.id))} onClick={() => toggleDraftGroup(u.id, g.id)}>{g.name}</span>
+                    ))}
+                  </div>
                 </div>
-
-                <div className="rounded-xl border border-slate-700 bg-slate-800 p-3 text-sm text-slate-300">
-                  <p className="font-medium text-slate-200">#{u.id}</p>
-                  <p className="mt-1">Estado atual: admin {String(u.is_admin)} | ativo {String(u.is_active)}</p>
-                  <p className="mt-1">Grupos atuais: {(u.group_ids || []).join(", ") || "nenhum"}</p>
+                <div className="card-soft" style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>
+                  <p style={{ fontWeight: 600, color: "var(--ink)" }}>#{u.id}</p>
+                  <p style={{ marginTop: 4 }}>admin {String(u.is_admin)} · ativo {String(u.is_active)}</p>
+                  <p style={{ marginTop: 4 }}>grupos: {(u.group_ids || []).join(", ") || "nenhum"}</p>
                 </div>
               </div>
-
-              <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                {groups.map((g) => (
-                  <label key={g.id} className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-slate-300">
-                    <input type="checkbox" checked={(drafts[u.id]?.group_ids || []).includes(g.id)} onChange={() => toggleDraftGroup(u.id, g.id)} />
-                    {g.name}
-                  </label>
-                ))}
-              </div>
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={() => saveUser(u.id)}
-                  disabled={busyUserId === u.id}
-                  className="rounded-lg bg-blue-500/15 px-3 py-1.5 text-xs font-semibold text-blue-200 disabled:opacity-50"
-                >
-                  {busyUserId === u.id ? "Salvando..." : "Salvar alteracoes"}
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => saveUser(u.id)} disabled={busyUserId === u.id}>
+                  {busyUserId === u.id ? "Salvando…" : "Salvar alterações"}
                 </button>
-                <button
-                  onClick={() => deleteUser(u.id)}
-                  disabled={busyUserId === u.id}
-                  className="rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-300 disabled:opacity-50"
-                >
-                  Excluir usuario
+                <button className="btn btn-danger" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => deleteUser(u.id)} disabled={busyUserId === u.id}>
+                  Excluir
                 </button>
               </div>
             </div>
