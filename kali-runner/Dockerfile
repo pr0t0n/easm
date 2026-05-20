@@ -29,13 +29,13 @@ ENV GOPATH=/root/go \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       nmap masscan nikto \
       whatweb wafw00f \
-      gobuster feroxbuster dirsearch wfuzz \
+      gobuster feroxbuster dirsearch dirb wfuzz \
       hydra medusa \
       dnsrecon dnsenum sublist3r findomain \
       theharvester \
       sslscan testssl.sh \
       hashcat \
-      seclists \
+      seclists wordlists \
     && rm -rf /var/lib/apt/lists/*
 
 # crackmapexec was renamed nxc in Kali 2024; install whichever is available
@@ -147,10 +147,10 @@ RUN set -eux; \
     for tool in \
       curl nuclei ffuf sqlmap dalfox wapiti \
       subfinder httpx naabu dnsx shuffledns alterx katana \
-      interactsh-client assetfinder waybackurls gau hakrawler \
+      interactsh-client assetfinder waybackurls gau hakrawler amass \
       gospider subjack gitleaks trufflehog trivy \
       nmap masscan nikto whatweb wafw00f \
-      gobuster feroxbuster dirsearch wfuzz \
+      gobuster feroxbuster dirsearch dirb wfuzz \
       hydra medusa crackmapexec \
       dnsrecon dnsenum sublist3r findomain \
       sslscan testssl.sh \
