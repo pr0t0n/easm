@@ -231,12 +231,7 @@ export default function WorkerLogsPage() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [activeTab, setActiveTab] = useState("cockpit");
   const logEndRef = useRef(null);
-  const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
-
-  useEffect(() => () => {
-    mountedRef.current = false;
-  }, []);
 
   const fetchLogs = async (scanId, tool) => {
     if (!scanId) return;
@@ -251,17 +246,17 @@ export default function WorkerLogsPage() {
         client.get(`/api/scans/${scanId}/phase-monitor`),
         client.get("/api/worker-manager/health"),
       ]);
-      if (!mountedRef.current || currentRequestId !== requestIdRef.current) return;
+      if (currentRequestId !== requestIdRef.current) return;
       setData(logsRes.data);
       setPhaseData(phaseRes.data);
       setHealth(healthRes.data || null);
       if (logsRes.data?.scans?.length) setScans(logsRes.data.scans);
     } catch (err) {
-      if (mountedRef.current && currentRequestId === requestIdRef.current) {
+      if (currentRequestId === requestIdRef.current) {
         setError(err?.response?.data?.detail || "Falha ao carregar telemetria operacional.");
       }
     } finally {
-      if (mountedRef.current && currentRequestId === requestIdRef.current) {
+      if (currentRequestId === requestIdRef.current) {
         setLoading(false);
       }
     }
@@ -272,7 +267,6 @@ export default function WorkerLogsPage() {
       try {
         const res = await client.get("/api/admin/worker-logs");
         const rows = res.data?.scans || [];
-        if (!mountedRef.current) return;
         setScans(rows);
         const preferred = rows.find((scan) => ["running", "retrying", "queued"].includes(scan.status)) || rows[0];
         if (preferred && !selectedScan) {
@@ -456,7 +450,23 @@ export default function WorkerLogsPage() {
         </>
       )}
 
-      {!scanInfo && !loading && <div className="empty">Selecione um scan para abrir a telemetria operacional.</div>}
+      {!scanInfo && loading && (
+        <section className="panel p-6">
+          <div className="state" style={{ minHeight: 180 }}>
+            <div><div className="spin" /><p className="st-title">Carregando telemetria operacional...</p></div>
+          </div>
+        </section>
+      )}
+
+      {!scanInfo && !loading && (
+        <section className="panel p-6">
+          <div className="empty" style={{ padding: 18 }}>
+            {scans.length > 0
+              ? `Há ${scans.length} scan(s) disponíveis. Selecione um scan ou clique em Atualizar para abrir a telemetria.`
+              : "Nenhum scan encontrado para abrir a telemetria operacional."}
+          </div>
+        </section>
+      )}
 
       {scanInfo && activeTab === "cockpit" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
