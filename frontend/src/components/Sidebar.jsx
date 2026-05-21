@@ -42,7 +42,6 @@ export default function Sidebar() {
       title: "Security",
       items: [
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
-        { to: "/evolucao", label: "Attack Evolution", adminOnly: false },
         { to: "/aprendizado", label: "Aprendizado", adminOnly: true },
         { to: "/relatorios", label: "Relatórios", adminOnly: false },
       ],
@@ -50,9 +49,6 @@ export default function Sidebar() {
     {
       title: "Management",
       items: [
-        { to: "/workers", label: "Workers", adminOnly: true },
-        { to: "/jobs", label: "Jobs Registry", adminOnly: true },
-        { to: "/worker-logs", label: "Worker Logs", adminOnly: true },
         { to: "/configuracao", label: "Settings", adminOnly: true },
       ],
     },

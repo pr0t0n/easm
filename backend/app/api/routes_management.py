@@ -15,7 +15,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
+from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -365,6 +365,58 @@ def admin_worker_logs(
         for row in logs
     ]
 
+    trace_rows = (
+        db.query(AgentTraceEvent)
+        .filter(AgentTraceEvent.scan_id == scan_id)
+        .order_by(AgentTraceEvent.created_at.asc())
+        .limit(500)
+        .all()
+    )
+    traces = [
+        {
+            "id": row.id,
+            "iteration": row.iteration,
+            "event_type": row.event_type,
+            "from_node": row.from_node,
+            "to_node": row.to_node,
+            "skill_id": row.skill_id,
+            "tool_name": row.tool_name,
+            "capability": row.capability,
+            "status": row.status,
+            "duration_ms": row.duration_ms,
+            "payload": row.payload or {},
+            "created_at": row.created_at,
+        }
+        for row in trace_rows
+    ]
+
+    activity_rows = (
+        db.query(AgentActivityLog)
+        .filter(AgentActivityLog.scan_job_id == scan_id)
+        .order_by(AgentActivityLog.created_at.asc())
+        .limit(300)
+        .all()
+    )
+    activities = [
+        {
+            "id": row.id,
+            "iteration": row.iteration,
+            "activity_demand": row.activity_demand or {},
+            "skill_found": row.skill_found or {},
+            "skill_lookup_source": row.skill_lookup_source,
+            "tool_selected": row.tool_selected,
+            "tool_score": row.tool_score,
+            "execution_result": row.execution_result or {},
+            "agent_report": row.agent_report or {},
+            "supervisor_evaluation": row.supervisor_evaluation or {},
+            "approved": row.approved,
+            "status": row.status,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        for row in activity_rows
+    ]
+
     # ── Resumo por ferramenta ────────────────────────────────────────────────
     tool_summary: dict[str, dict] = {}
     for r in runs:
@@ -394,6 +446,8 @@ def admin_worker_logs(
         "tool_summary": list(tool_summary.values()),
         "executions": executions,
         "logs": logs_list,
+        "traces": traces,
+        "activities": activities,
     }
 
 
