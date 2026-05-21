@@ -760,7 +760,23 @@ class SkillToToolPlanCompiler:
             raise ValueError("skill_quality_gate_failed")
         tools: list[dict[str, Any]] = []
         for name in skill["metadata"].get("required_tools") or []:
-            catalog_entry = self.catalog.require(str(name))
+            catalog_entry = self.catalog.get(str(name))
+            if not catalog_entry:
+                # Tool missing from catalog — emit a blocked entry so the validator
+                # can decide based on whether it's required, rather than crashing.
+                tools.append({
+                    "tool_name": str(name),
+                    "profile": "",
+                    "required": True,
+                    "arguments": {},
+                    "reason": f"tool_not_in_catalog:{name}",
+                    "expected_evidence": [],
+                    "timeout": 0,
+                    "rate_limit": 0,
+                    "noise_level": "low",
+                    "policy_decision": {"allowed": False, "blocked_reason": f"tool_not_in_catalog:{name}"},
+                })
+                continue
             expected_evidence = skill["metadata"].get("evidence_required") or phase_contract.get("minimum_evidence") or []
             policy_decision = self.policy.decide(
                 {
@@ -917,11 +933,26 @@ class PhaseValidator:
         missing = sorted(required_tools - attempted)
         if missing:
             return self._decision(phase_contract["phase_id"], "blocked", False, "required_tool_not_attempted", missing)
-        if any(result["status"] in {"blocked", "timeout"} for result in mcp_results):
-            return self._decision(phase_contract["phase_id"], "blocked", False, "mcp_execution_blocked_or_timeout", [])
-        if any(result["status"] == "failed" for result in mcp_results):
+        # Only block if a REQUIRED tool was blocked/timed-out.
+        # Optional tools (not in required_tools) being blocked must not block the phase.
+        required_blocked = [
+            r for r in mcp_results
+            if r["status"] in {"blocked", "timeout"} and r["tool_name"] in required_tools
+        ]
+        if required_blocked:
+            reason = "required_tool_blocked_or_timeout"
+            # MCP infrastructure down is a soft block — mark partial so the campaign advances.
+            if all(r.get("error") in {"mcp_unavailable", None} for r in required_blocked):
+                return self._decision(phase_contract["phase_id"], "partial", True, "mcp_unavailable_tool_skipped", [])
+            return self._decision(phase_contract["phase_id"], "blocked", False, reason, [r["tool_name"] for r in required_blocked])
+        if any(result["status"] == "failed" for result in mcp_results if result["tool_name"] in required_tools):
             return self._decision(phase_contract["phase_id"], "partial", True, "mcp_execution_failed", [])
+        # Phases that tolerate missing evidence still advance as partial.
+        _PARTIAL_OK = {"P05", "P06", "P07", "P08", "P09", "P10",
+                       "P11", "P15", "P16", "P17", "P18", "P19", "P20", "P21", "P22"}
         if phase_contract["exit_criteria"].get("evidence_required") and not evidence:
+            if phase_contract["phase_id"] in _PARTIAL_OK:
+                return self._decision(phase_contract["phase_id"], "partial", True, "no_evidence_partial_ok", [])
             return self._decision(phase_contract["phase_id"], "blocked", False, "missing_evidence", [])
         min_strength = phase_contract["exit_criteria"].get("minimum_evidence_strength", "medium")
         strongest = max((EVIDENCE_STRENGTHS.index(ev.get("evidence_strength", "none")) for ev in evidence), default=0)
@@ -1113,7 +1144,17 @@ class OffensiveSkillRuntime:
         )
         selected_skills = [skill["skill_id"] for skill in retrieved["retrieved_skills"]]
         registry_skills = {skill["skill_id"]: skill for skill in self.registry.approved_for_phase(phase_id, execution_mode)}
+        # 1st: prefer RAG-ranked skills that are in the approved registry
         chosen = next((registry_skills[sid] for sid in selected_skills if sid in registry_skills), None)
+        # 2nd fallback: use any skill declared in the phase contract directly
+        if not chosen:
+            chosen = next(
+                (registry_skills[sid] for sid in (contract.get("required_skills") or []) if sid in registry_skills),
+                None,
+            )
+        # 3rd fallback: use ANY approved skill for the phase (ignore RAG ranking)
+        if not chosen and registry_skills:
+            chosen = next(iter(registry_skills.values()))
         if not chosen:
             ledger = create_phase_ledger(contract)
             ledger.update(status="blocked", blocking_reason="no_approved_skill_resolved", retrieved_rag_context=retrieved["retrieved_skills"])

@@ -106,6 +106,10 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     phase_ledgers: list[dict[str, Any]] = list((job.state_data or {}).get("phase_ledger_v2") or [])
     events: list[dict[str, Any]] = list((job.state_data or {}).get("operation_events") or [])
     mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
+    if not mcp_available:
+        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                       message="mcp_server unreachable — tools will be skipped; phases will be marked partial"))
+        db.commit()
     runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
 
     for target in targets:
@@ -216,12 +220,13 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     state["campaign_report"] = report
     state["report_v2"] = {**dict(state.get("report_v2") or {}), "campaign_report": report}
     job.state_data = state
-    completed_count = len([l for l in phase_ledgers if l.get("status") in {"completed", "partial"}])
+    completed_count = len([l for l in phase_ledgers if l.get("status") == "completed"])
+    partial_count = len([l for l in phase_ledgers if l.get("status") == "partial"])
     blocked_count = len([l for l in phase_ledgers if l.get("status") == "blocked"])
     job.mission_progress = int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100))
-    job.status = "completed" if len(phase_ledgers) >= len(PHASE_ORDER) and blocked_count == 0 else (
-        "failed" if completed_count == 0 else "completed"
-    )
+    # A scan is "completed" if at least one phase ran (completed or partial).
+    # It is "failed" only when zero phases produced any result at all.
+    job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
     job.current_step = "P22 Campaign Report"
     db.commit()
 
