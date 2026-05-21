@@ -2236,7 +2236,12 @@ def bulk_review_vulnerability_learnings(
     raw_ids = payload.get("ids") or payload.get("learning_ids") or []
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ids deve ser uma lista.")
-    learning_ids = sorted({int(item) for item in raw_ids if str(item).strip().isdigit()})
+    # Accept both numeric IDs and catalog-<key> IDs (materialized on first use)
+    learning_ids: list[str | int] = [
+        int(item) if str(item).strip().isdigit() else str(item).strip()
+        for item in raw_ids
+        if str(item).strip()
+    ]
     if not learning_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selecione pelo menos um aprendizado.")
 
@@ -2245,14 +2250,14 @@ def bulk_review_vulnerability_learnings(
     if not status_value:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action deve ser accept ou reject.")
 
-    rows = (
-        db.query(VulnerabilityLearning)
-        .filter(VulnerabilityLearning.id.in_(learning_ids))
-        .order_by(VulnerabilityLearning.created_at.desc())
-        .all()
-    )
-    found_ids = {row.id for row in rows}
-    missing_ids = [item for item in learning_ids if item not in found_ids]
+    rows: list[VulnerabilityLearning] = []
+    missing_ids: list[str | int] = []
+    for raw in learning_ids:
+        row = _resolve_or_materialize_learning(db, raw, owner_id=current_user.id)
+        if row:
+            rows.append(row)
+        else:
+            missing_ids.append(raw)
 
     reviewed = []
     notes = str(payload.get("review_notes") or "").strip() or None
@@ -2360,16 +2365,67 @@ def delete_vulnerability_learning(
     return {"ok": True, "deleted_id": learning_id, "summary": vulnerability_learning_summary(db)}
 
 
+def _resolve_or_materialize_learning(db: Session, learning_id_raw: str | int, owner_id: int | None) -> VulnerabilityLearning | None:
+    """Convert a learning_id (numeric or 'catalog-<key>') into a real DB row.
+
+    Catalog seeds are materialized into the DB the first time they're acted on,
+    so they can be accepted/rejected like any other learning.
+    """
+    raw = str(learning_id_raw).strip()
+    if raw.isdigit():
+        return db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == int(raw)).first()
+    if raw.startswith("catalog-"):
+        key = raw[len("catalog-"):]
+        from app.services.vulnerability_learning_catalog import get_curated_seed
+        seed = get_curated_seed(key)
+        if not seed:
+            return None
+        # check if already materialized
+        existing = db.query(VulnerabilityLearning).filter(
+            VulnerabilityLearning.vulnerability_type == seed.get("vulnerability_type"),
+            VulnerabilityLearning.title == (seed.get("title") or seed.get("vulnerability_type")),
+        ).first()
+        if existing:
+            return existing
+        from datetime import datetime as _dt
+        steps = seed.get("safe_validation_steps") or []
+        row = VulnerabilityLearning(
+            owner_id=owner_id or 1,
+            title=(seed.get("title") or seed.get("vulnerability_type") or key)[:255],
+            vulnerability_type=(seed.get("vulnerability_type") or "")[:120],
+            summary=seed.get("impact") or "",
+            impact=seed.get("impact") or "",
+            remediation=seed.get("remediation") or "",
+            learned_techniques=steps,
+            technique_count=len(steps) or 1,
+            affected_phases=seed.get("affected_phases") or [],
+            affected_skills=seed.get("affected_skills") or [],
+            recommended_tools=seed.get("recommended_tools") or [],
+            raw_extraction={"seed_key": key, "evidence_signals": seed.get("evidence_signals") or []},
+            llm_model="curated-learning-catalog",
+            source_kind="curated_learning_seed",
+            source_urls=[],
+            url_count=0,
+            status="pending_review",
+            created_at=_dt.utcnow(),
+            updated_at=_dt.utcnow(),
+        )
+        db.add(row)
+        db.flush()
+        return row
+    return None
+
+
 @router.put("/learning/vulnerabilities/{learning_id}/accept")
 def accept_vulnerability_learning(
-    learning_id: int,
+    learning_id: str,
     payload: dict | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     from app.services.vulnerability_learning_service import serialize_vulnerability_learning, update_learning_review
 
-    row = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == learning_id).first()
+    row = _resolve_or_materialize_learning(db, learning_id, owner_id=current_user.id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
     row = update_learning_review(db, row, current_user, "accepted", notes=(payload or {}).get("review_notes"))
@@ -2378,14 +2434,14 @@ def accept_vulnerability_learning(
 
 @router.put("/learning/vulnerabilities/{learning_id}/reject")
 def reject_vulnerability_learning(
-    learning_id: int,
+    learning_id: str,
     payload: dict | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     from app.services.vulnerability_learning_service import serialize_vulnerability_learning, update_learning_review
 
-    row = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.id == learning_id).first()
+    row = _resolve_or_materialize_learning(db, learning_id, owner_id=current_user.id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
     row = update_learning_review(db, row, current_user, "rejected", notes=(payload or {}).get("review_notes"))
