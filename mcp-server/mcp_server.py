@@ -446,6 +446,9 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
                 "target": request.target,
                 "scan_id": request.arguments.get("scan_id"),
                 "timeout": request.arguments.get("timeout"),
+                # Propagate scanner authentication so kali runner injects
+                # the right -H flags into supported tool commands.
+                "auth_headers": request.arguments.get("auth_headers") or {},
             },
         )
         exit_code = raw.get("return_code", raw.get("exit_code"))

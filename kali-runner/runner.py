@@ -103,6 +103,7 @@ class JobRequest(BaseModel):
     tool: Optional[str] = Field(None, description="Override profile tool name (legacy bridge)")
     extra_args: list[str] = Field(default_factory=list)
     timeout: Optional[int] = None
+    auth_headers: dict[str, str] = Field(default_factory=dict, description="Authentication headers injected into tool command")
 
 
 class JobStatus(BaseModel):
@@ -247,6 +248,56 @@ def _render_template(value: str, context: dict[str, str]) -> str:
     # operator-facing contract placeholders ({{domain}}, {{url}}, {{out}}).
     template = re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", r"{\1}", str(value))
     return template.format(**context)
+
+
+def _inject_auth_headers(argv: list[str], auth_headers: dict[str, str], tool: str) -> list[str]:
+    """Inject authentication headers into supported tool commands.
+
+    Different tools use different flags for headers:
+      ffuf, gobuster, nuclei, httpx, feroxbuster, wfuzz, dirsearch: -H "Key: Value"
+      curl: -H "Key: Value"
+      sqlmap: --header="Key: Value"  OR  --cookie="..." for cookies
+      dalfox: --header "Key: Value"
+      wpscan: --headers "Key: Value"
+    """
+    if not auth_headers:
+        return argv
+    tool_lower = tool.lower().strip()
+    headers_pairs = [f"{k}: {v}" for k, v in auth_headers.items() if v]
+    if not headers_pairs:
+        return argv
+
+    new_argv = list(argv)
+
+    # Tools that use -H "Key: Value" syntax
+    H_SYNTAX = {"ffuf", "gobuster", "nuclei", "httpx", "feroxbuster", "wfuzz", "dirsearch", "curl"}
+    # Tools that use --header
+    LONG_HEADER_SYNTAX = {"sqlmap", "dalfox"}
+    # Tools that use --headers (plural, with all in one)
+    HEADERS_SYNTAX = {"wpscan"}
+
+    if tool_lower in H_SYNTAX or any(tool_lower.startswith(t) for t in H_SYNTAX):
+        for pair in headers_pairs:
+            new_argv.extend(["-H", pair])
+    elif tool_lower in LONG_HEADER_SYNTAX:
+        if tool_lower == "sqlmap":
+            # sqlmap special-cases Cookie via --cookie
+            cookie_val = auth_headers.get("Cookie") or auth_headers.get("cookie")
+            other = {k: v for k, v in auth_headers.items() if k.lower() != "cookie" and v}
+            if cookie_val:
+                new_argv.append(f"--cookie={cookie_val}")
+            if other:
+                # --headers="Header1: v1\nHeader2: v2"
+                joined = "\\n".join(f"{k}: {v}" for k, v in other.items())
+                new_argv.append(f'--headers={joined}')
+        else:  # dalfox
+            for pair in headers_pairs:
+                new_argv.extend(["--header", pair])
+    elif tool_lower in HEADERS_SYNTAX:
+        joined = ",".join(headers_pairs)
+        new_argv.extend(["--headers", joined])
+    # For unsupported tools, leave argv unchanged.
+    return new_argv
 
 
 def _build_command(
@@ -454,6 +505,10 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             return
 
         argv = _build_command(profile, req.target, req.extra_args, workdir=workdir)
+        # Inject authentication headers into supported tools (ffuf, curl, gobuster,
+        # nuclei, httpx, wfuzz, sqlmap, dalfox, wpscan, feroxbuster, dirsearch).
+        if req.auth_headers:
+            argv = _inject_auth_headers(argv, req.auth_headers, str(profile.get("tool") or ""))
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)

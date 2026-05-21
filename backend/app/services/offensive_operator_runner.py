@@ -116,8 +116,18 @@ def _mcp_available() -> bool:
         return False
 
 
+# Module-level holder for current scan's auth headers (set per scan by runner).
+# Single Celery worker process executes one scan task at a time per fork, so this
+# is safe. Reset to {} at the start of each run_offensive_operator_scan().
+_CURRENT_AUTH_HEADERS: dict[str, str] = {}
+
+
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     tool_timeout = max(900, int(execution.get("timeout") or 0))
+    arguments: dict[str, Any] = {"target": execution["target"]}
+    if _CURRENT_AUTH_HEADERS:
+        # Pass auth headers to kali runner so it can inject -H flags into the tool command
+        arguments["auth_headers"] = dict(_CURRENT_AUTH_HEADERS)
     request = {
         "mcp_request_id": execution.get("mcp_request_id"),
         "phase_id": execution["phase_id"],
@@ -125,7 +135,7 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
         "tool_name": execution["tool_name"],
         "profile": execution["profile"],
         "target": execution["target"],
-        "arguments": {"target": execution["target"]},
+        "arguments": arguments,
         "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
     }
     response = requests.post(
@@ -160,6 +170,15 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     if allowed_phases is not None:
         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                        message=f"scan_level={scan_level} — limiting to phases: {sorted(allowed_phases)}"))
+        db.commit()
+
+    # Set auth headers for this scan so _call_mcp_execution propagates them to kali.
+    global _CURRENT_AUTH_HEADERS
+    _CURRENT_AUTH_HEADERS = auth_headers_from_state(initial_state)
+    if _CURRENT_AUTH_HEADERS:
+        masked = {k: (v[:10] + "***" if v else "") for k, v in _CURRENT_AUTH_HEADERS.items()}
+        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                       message=f"auth_engaged headers={masked} — tools will inject these into requests"))
         db.commit()
 
     for target in targets:
