@@ -80,6 +80,31 @@ def _phase_ledger_map(raw: Any) -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _parse_dt(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _normalized_ledger_status(status: str) -> str:
+    raw = str(status or "").strip().lower()
+    if raw == "completed":
+        return "executed"
+    if raw == "partial":
+        return "partial_coverage"
+    if raw in {"failed", "error"}:
+        return "attempted_failed"
+    if raw == "blocked":
+        return "blocked"
+    if raw:
+        return raw
+    return ""
+
+
 def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     """Cross-references phase_ledger, state_data, executed_tool_runs, findings, scan_logs.
 
@@ -161,6 +186,51 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         if r.execution_time_seconds:
             stats["total_seconds"] += float(r.execution_time_seconds or 0.0)
 
+    # New offensive-operator scans persist tool execution inside phase_ledger_v2,
+    # not ExecutedToolRun. Fold that ledger into the same inventory so every UI
+    # sees the real MCP/Kali activity.
+    for ledger_entry in phase_ledger.values():
+        target = str(ledger_entry.get("target") or scan.target_query or "")
+        target_key = target.strip().lower()
+        attempted = [_normalize_tool(t) for t in ledger_entry.get("tools_attempted") or [] if _normalize_tool(t)]
+        succeeded = {_normalize_tool(t) for t in (ledger_entry.get("tools_success") or ledger_entry.get("tools_succeeded") or [])}
+        failed = {_normalize_tool(t) for t in ledger_entry.get("tools_failed") or []}
+        skipped = {_normalize_tool(t) for t in ledger_entry.get("tools_skipped") or []}
+        started = _parse_dt(ledger_entry.get("started_at"))
+        finished = _parse_dt(ledger_entry.get("finished_at"))
+        elapsed = 0.0
+        if started and finished:
+            elapsed = max((finished - started).total_seconds(), 0.0)
+
+        for tool in attempted:
+            if (tool, target_key) in run_status_by_tool_target:
+                continue
+            stats = tool_stats[tool]
+            stats["tool"] = tool
+            stats["attempts"] += 1
+            stats["targets"].add(target)
+            if tool in succeeded:
+                stats["success"] += 1
+                status_value = "success"
+            elif tool in skipped:
+                stats["skipped"] += 1
+                status_value = "skipped"
+            elif tool in failed or str(ledger_entry.get("status") or "").lower() in {"failed", "blocked"}:
+                stats["failed"] += 1
+                status_value = "failed"
+            else:
+                status_value = str(ledger_entry.get("status") or "unknown")
+                if status_value == "completed":
+                    stats["success"] += 1
+                    status_value = "success"
+                else:
+                    stats["failed"] += 1
+            stats["last_status"] = status_value
+            stats["total_seconds"] += elapsed
+            if ledger_entry.get("blocking_reason"):
+                stats["last_error"] = str(ledger_entry.get("blocking_reason"))[:300]
+            run_status_by_tool_target[(tool, target_key)] = status_value
+
     # ── Findings by tool ──────────────────────────────────────────────────────
     findings_by_tool: dict[str, int] = defaultdict(int)
     severity_counts: dict[str, int] = defaultdict(int)
@@ -188,7 +258,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         phase_idx = int(str(pid).replace("P", "") or 0)
         ledger_entry = dict(phase_ledger.get(pid) or {})
         ledger_tools_attempted = [_normalize_tool(t) for t in ledger_entry.get("tools_attempted") or []]
-        ledger_tools_succeeded = [_normalize_tool(t) for t in ledger_entry.get("tools_succeeded") or []]
+        ledger_tools_succeeded = [_normalize_tool(t) for t in (ledger_entry.get("tools_success") or ledger_entry.get("tools_succeeded") or [])]
+        ledger_tools_failed = [_normalize_tool(t) for t in ledger_entry.get("tools_failed") or []]
+        ledger_tools_skipped = [_normalize_tool(t) for t in ledger_entry.get("tools_skipped") or []]
         phase_used_tools_set.update(t for t in ledger_tools_attempted if t)
         node_done = node in completed_caps
         node_visited = node in node_history
@@ -207,25 +279,26 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         })
         tools_failed = [
             t for t in tools_used
-            if tool_stats.get(t, {}).get("failed", 0) > 0
+            if (tool_stats.get(t, {}).get("failed", 0) > 0 or t in ledger_tools_failed)
             and tool_stats.get(t, {}).get("success", 0) == 0
             and tool_stats.get(t, {}).get("skipped", 0) == 0
         ]
         tools_skipped = [
             t for t in tools_used
-            if tool_stats.get(t, {}).get("skipped", 0) > 0
+            if (tool_stats.get(t, {}).get("skipped", 0) > 0 or t in ledger_tools_skipped)
             and tool_stats.get(t, {}).get("success", 0) == 0
             and tool_stats.get(t, {}).get("failed", 0) == 0
         ]
         # Distinguish "missing because unavailable in Kali" vs "ready but skipped".
-        tools_missing_uninstalled = [t for t in tools_uninstalled if tool_stats.get(t, {}).get("attempts", 0) == 0]
-        tools_missing_unused = [t for t in tools_installed if tool_stats.get(t, {}).get("attempts", 0) == 0]
+        tools_missing_uninstalled = [t for t in tools_uninstalled if t not in tools_used]
+        tools_missing_unused = [t for t in tools_installed if t not in tools_used]
         tools_missing = tools_missing_uninstalled + tools_missing_unused
         tools_failed_list = sorted(set(tools_failed))
         ledger_status = str(ledger_entry.get("status") or "")
+        normalized_ledger_status = _normalized_ledger_status(ledger_status)
 
-        if ledger_status:
-            status_label = ledger_status
+        if normalized_ledger_status:
+            status_label = normalized_ledger_status
         elif not effective_node_visited:
             status_label = "skipped"
         elif tools_missing_unused and tools_success:
@@ -296,6 +369,11 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             if str(p.get("ledger_mcp_status") or "").lower() in {"failed", "timeout", "unreachable"}
         ),
     }
+    ledger_completed_count = sum(
+        1 for entry in phase_ledger.values()
+        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked"}
+    )
+    computed_progress = round((ledger_completed_count / max(1, len(PENTEST_PHASES))) * 100)
 
     # ── Capability summary ────────────────────────────────────────────────────
     capabilities: list[dict[str, Any]] = []
@@ -533,7 +611,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "scan_id": scan.id,
         "status": scan.status,
         "current_step": scan.current_step,
-        "mission_progress": scan.mission_progress,
+        "mission_progress": max(int(scan.mission_progress or 0), int(computed_progress or 0)),
         "objective_met": objective_met,
         "termination_reason": termination_reason,
         # ── Pentest phase execution state ──────────────────────────────────
@@ -547,14 +625,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         },
         # ── Metrics ───────────────────────────────────────────────────────
         "metrics": {
-            "tools_attempted": int(metrics.get("tools_attempted", 0) or 0),
-            "tools_success": int(metrics.get("tools_success", 0) or 0),
-            "steps_done": int(metrics.get("steps_done", 0) or 0),
-            "steps_success": int(metrics.get("steps_success", 0) or 0),
+            "tools_attempted": max(int(metrics.get("tools_attempted", 0) or 0), sum(int(v.get("attempts", 0) or 0) for v in tool_stats.values())),
+            "tools_success": max(int(metrics.get("tools_success", 0) or 0), sum(int(v.get("success", 0) or 0) for v in tool_stats.values())),
+            "steps_done": max(int(metrics.get("steps_done", 0) or 0), ledger_completed_count),
+            "steps_success": max(int(metrics.get("steps_success", 0) or 0), sum(1 for entry in phase_ledger.values() if str(entry.get("status") or "").lower() == "completed")),
             "loop_iteration": int(state.get("loop_iteration", 0) or 0),
             "max_iterations": int(state.get("max_iterations", 0) or 0),
             "findings_total": len(findings),
-            "tool_runs_total": len(runs),
+            "tool_runs_total": max(len(runs), sum(int(v.get("attempts", 0) or 0) for v in tool_stats.values())),
             "tools_installed_used_ratio": round(coverage_ratio_installed, 3),
             "tools_installed_total": len(installed_expected),
             "tools_uninstalled_total": len(uninstalled_expected),

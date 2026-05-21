@@ -187,6 +187,7 @@ export default function AttackEvolutionPage() {
   const [sortMode, setSortMode] = useState("risk");
   const [dashboard, setDashboard] = useState(null);
   const [comparisonDashboard, setComparisonDashboard] = useState(null);
+  const [operationalScans, setOperationalScans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
@@ -230,6 +231,12 @@ export default function AttackEvolutionPage() {
   useEffect(() => {
     fetchDashboard(targetFilter, severity, periodDays);
   }, [targetFilter, severity, periodDays, fetchDashboard]);
+
+  useEffect(() => {
+    client.get("/api/scans", { _skipToast: true })
+      .then((res) => setOperationalScans(res.data || []))
+      .catch(() => setOperationalScans([]));
+  }, []);
 
   const vulnerabilities = useMemo(
     () => {
@@ -498,6 +505,33 @@ export default function AttackEvolutionPage() {
       {error && (
         <div style={{ background: "var(--sev-critical-bg)", border: "1px solid var(--sev-critical-border)", color: "var(--sev-critical-text)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}>
           {error}
+        </div>
+      )}
+
+      {vulnerabilities.length === 0 && operationalScans.length > 0 && (
+        <div style={panelStyle}>
+          <div style={{ color: colors.ink, fontWeight: 800, fontSize: 13 }}>Evolução operacional dos testes</div>
+          <div style={{ color: colors.inkMuted, fontSize: 12, marginTop: 3 }}>
+            Ainda não há vulnerabilidades promovidas para o histórico, mas há execução ofensiva em andamento/recente.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8, marginTop: 10 }}>
+            {operationalScans.slice(0, 8).map((scan) => {
+              const progress = Math.max(0, Math.min(100, Number(scan.mission_progress || 0)));
+              const tone = scan.status === "running" ? colors.brand : scan.status === "failed" ? "var(--sev-critical-text)" : "var(--sev-low-text)";
+              return (
+                <div key={scan.id} style={{ border: `1px solid ${colors.line}`, borderLeft: `3px solid ${tone}`, borderRadius: 8, padding: 10, background: colors.surfaceSoft }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <strong style={{ color: colors.ink }}>#{scan.id} · {scan.target_query}</strong>
+                    <span style={{ color: tone, fontSize: 11, fontWeight: 800 }}>{scan.status}</span>
+                  </div>
+                  <div style={{ marginTop: 8, height: 7, background: colors.bgMuted, borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{ width: `${progress}%`, height: "100%", background: tone }} />
+                  </div>
+                  <div style={{ marginTop: 6, color: colors.inkMuted, fontSize: 11 }}>{progress}% · {scan.current_step || "aguardando fase"}</div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

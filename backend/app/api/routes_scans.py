@@ -50,6 +50,25 @@ router = APIRouter(prefix="/api", tags=["scans"])
 vector_store = FalsePositiveVectorStore()
 
 
+def _effective_mission_progress(job: ScanJob) -> int:
+    progress = int(job.mission_progress or 0)
+    state = dict(job.state_data or {})
+    raw = state.get("phase_ledger_v2") or state.get("phase_ledger") or []
+    if isinstance(raw, dict):
+        entries = [dict(value or {}) for value in raw.values()]
+    elif isinstance(raw, list):
+        entries = [dict(item or {}) for item in raw if isinstance(item, dict)]
+    else:
+        entries = []
+    counted = sum(
+        1 for entry in entries
+        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked", "failed"}
+    )
+    if counted:
+        progress = max(progress, round((counted / 22) * 100))
+    return max(0, min(100, progress))
+
+
 def _extract_scan_id_from_task(task: dict) -> int | None:
     kwargs = task.get("kwargs")
     if isinstance(kwargs, dict) and "scan_id" in kwargs:
@@ -2293,7 +2312,7 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             status=s.status,
             compliance_status=s.compliance_status,
             current_step=s.current_step,
-            mission_progress=s.mission_progress,
+            mission_progress=_effective_mission_progress(s),
             retry_attempt=s.retry_attempt,
             retry_max=s.retry_max,
             next_retry_at=s.next_retry_at,
@@ -3488,7 +3507,7 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
         status=job.status,
         compliance_status=job.compliance_status,
         current_step=job.current_step,
-        mission_progress=job.mission_progress,
+        mission_progress=_effective_mission_progress(job),
         mission_index=state_data.get("mission_index", 0),
         mission_items=state_data.get("mission_items") or [],
         node_history=state_data.get("node_history") or [],

@@ -37,12 +37,15 @@ def get_agent_flow(
         .order_by(AgentActivityLog.iteration.asc(), AgentActivityLog.created_at.asc())
         .all()
     )
+    activities = [_serialize_log(entry) for entry in logs]
+    if not activities:
+        activities = _serialize_state_activities(scan)
 
     return {
         "scan_id": scan_id,
         "target": scan.target_query,
-        "total_activities": len(logs),
-        "activities": [_serialize_log(entry) for entry in logs],
+        "total_activities": len(activities),
+        "activities": activities,
     }
 
 
@@ -157,3 +160,74 @@ def _serialize_log(entry: AgentActivityLog) -> dict:
             "evaluated_at": evaluation.get("evaluated_at", ""),
         },
     }
+
+
+def _serialize_state_activities(scan: ScanJob) -> list[dict]:
+    state = dict(scan.state_data or {})
+    raw = state.get("phase_ledger_v2") or state.get("phase_ledger") or []
+    if isinstance(raw, dict):
+        entries = [dict(value or {}, phase_id=str(key)) for key, value in raw.items()]
+    elif isinstance(raw, list):
+        entries = [dict(item or {}) for item in raw if isinstance(item, dict)]
+    else:
+        entries = []
+
+    result: list[dict] = []
+    for idx, entry in enumerate(entries, start=1):
+        phase_id = str(entry.get("phase_id") or f"P{idx:02d}")
+        phase_name = str(entry.get("phase_name") or phase_id)
+        skills = [str(item) for item in entry.get("selected_skills") or []]
+        tools = [str(item) for item in entry.get("tools_attempted") or []]
+        success_tools = [str(item) for item in entry.get("tools_success") or entry.get("tools_succeeded") or []]
+        validation = dict(entry.get("validation_result") or {})
+        approved = validation.get("can_advance")
+        if approved is None:
+            approved = str(entry.get("status") or "").lower() == "completed"
+
+        result.append({
+            "id": -idx,
+            "iteration": idx,
+            "status": "approved" if approved else str(entry.get("status") or "pending"),
+            "approved": bool(approved),
+            "created_at": entry.get("started_at"),
+            "updated_at": entry.get("finished_at"),
+            "supervisor_demand": {
+                "activity_id": phase_id,
+                "activity_type": phase_name,
+                "skill_category": phase_id,
+                "kill_chain_phases": [phase_id],
+                "objective": phase_name,
+                "quality_criteria": "exit criteria + evidence",
+                "target": entry.get("target") or scan.target_query,
+                "demanded_at": entry.get("started_at"),
+            },
+            "skill_lookup": {
+                "skill_name": ", ".join(skills) or phase_name,
+                "skill_category": phase_id,
+                "objective": phase_name,
+                "source": "phase_ledger_v2",
+                "tools_available": len(tools),
+                "top_tools": [{"tool_name": tool, "score": 1.0 if tool in success_tools else 0.5} for tool in tools[:3]],
+            },
+            "tool_selection": {
+                "tool_name": ", ".join(tools),
+                "score": 1.0 if success_tools else 0.0,
+                "usage_guide": ", ".join(entry.get("mcp_executions") or []),
+            },
+            "agent_report": {
+                "operation_performed": phase_name,
+                "findings_count": len(entry.get("evidence_ids") or []),
+                "quality_score": 1.0 if success_tools else 0.0,
+                "question_to_supervisor": entry.get("blocking_reason") or "",
+                "data_collected": entry.get("evidence_ids") or [],
+                "reported_at": entry.get("finished_at"),
+            },
+            "supervisor_evaluation": {
+                "approved": bool(approved),
+                "reason": validation.get("reason") or entry.get("blocking_reason") or "",
+                "quality_assessment": str(entry.get("status") or ""),
+                "next_phase": "",
+                "evaluated_at": entry.get("finished_at"),
+            },
+        })
+    return result

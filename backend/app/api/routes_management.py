@@ -82,6 +82,46 @@ def _normalize_domain_candidate(raw_target: str) -> str | None:
     return f"*.{host}" if wildcard and is_valid_domain else host
 
 
+def _state_phase_entries(job: ScanJob) -> list[dict]:
+    state = dict(job.state_data or {})
+    raw = state.get("phase_ledger_v2") or state.get("phase_ledger") or []
+    if isinstance(raw, dict):
+        return [dict(value or {}, phase_id=str(key)) for key, value in raw.items()]
+    if isinstance(raw, list):
+        return [dict(item or {}) for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _parse_state_ts(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _state_duration_seconds(entry: dict) -> float | None:
+    start = _parse_state_ts(entry.get("started_at"))
+    finish = _parse_state_ts(entry.get("finished_at"))
+    if not start or not finish:
+        return None
+    return round(max((finish - start).total_seconds(), 0.0), 3)
+
+
+def _effective_state_progress(job: ScanJob) -> int:
+    progress = int(job.mission_progress or 0)
+    entries = _state_phase_entries(job)
+    counted = sum(
+        1 for entry in entries
+        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked", "failed"}
+    )
+    if counted:
+        progress = max(progress, round((counted / 22) * 100))
+    return max(0, min(100, progress))
+
+
 def _validate_schedule_targets(targets_text: str) -> tuple[list[str], list[str]]:
     parsed = _parse_targets(targets_text)
     valid_targets: list[str] = []
@@ -341,6 +381,41 @@ def admin_worker_logs(
         }
         for r in runs
     ]
+    if not executions:
+        synthetic_id = 0
+        for entry in _state_phase_entries(job):
+            target = str(entry.get("target") or job.target_query or "")
+            duration = _state_duration_seconds(entry)
+            succeeded = {str(t).strip().lower() for t in entry.get("tools_success") or entry.get("tools_succeeded") or []}
+            failed = {str(t).strip().lower() for t in entry.get("tools_failed") or []}
+            skipped = {str(t).strip().lower() for t in entry.get("tools_skipped") or []}
+            attempted = [str(t).strip().lower() for t in entry.get("tools_attempted") or [] if str(t).strip()]
+            for tool_name in attempted:
+                synthetic_id -= 1
+                if tool_name in succeeded:
+                    status_value = "success"
+                elif tool_name in skipped:
+                    status_value = "skipped"
+                elif tool_name in failed or str(entry.get("status") or "").lower() in {"failed", "blocked"}:
+                    status_value = "failed"
+                else:
+                    status_value = str(entry.get("status") or "unknown")
+                executions.append(
+                    {
+                        "id": synthetic_id,
+                        "tool": tool_name,
+                        "target": target,
+                        "status": status_value,
+                        "error_message": str(entry.get("blocking_reason") or ""),
+                        "execution_time_seconds": duration,
+                        "created_at": entry.get("started_at") or entry.get("finished_at"),
+                        "phase_id": entry.get("phase_id"),
+                        "phase_name": entry.get("phase_name"),
+                        "skill_ids": entry.get("selected_skills") or [],
+                        "mcp_executions": entry.get("mcp_executions") or [],
+                        "evidence_ids": entry.get("evidence_ids") or [],
+                    }
+                )
 
     # ── ScanLog ──────────────────────────────────────────────────────────────
     logs_query = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id)
@@ -364,6 +439,22 @@ def admin_worker_logs(
         }
         for row in logs
     ]
+    if len(logs_list) <= 2:
+        synthetic_id = -1
+        for event in dict(job.state_data or {}).get("operation_events") or []:
+            synthetic_id -= 1
+            logs_list.append(
+                {
+                    "id": synthetic_id,
+                    "source": "offensive_operator",
+                    "level": "INFO" if str(event.get("status") or "") not in {"blocked", "failed"} else "ERROR",
+                    "message": (
+                        f"{event.get('event_type') or 'event'} phase={event.get('phase_id') or '-'} "
+                        f"status={event.get('status') or '-'} skill={event.get('skill_id') or '-'}"
+                    ),
+                    "created_at": event.get("timestamp"),
+                }
+            )
 
     trace_rows = (
         db.query(AgentTraceEvent)
@@ -389,6 +480,26 @@ def admin_worker_logs(
         }
         for row in trace_rows
     ]
+    if not traces:
+        synthetic_id = -1
+        for event in dict(job.state_data or {}).get("operation_events") or []:
+            synthetic_id -= 1
+            traces.append(
+                {
+                    "id": synthetic_id,
+                    "iteration": 0,
+                    "event_type": event.get("event_type") or "phase_event",
+                    "from_node": "supervisor" if event.get("event_type") == "phase_started" else "worker",
+                    "to_node": "worker" if event.get("event_type") == "phase_started" else "supervisor",
+                    "skill_id": event.get("skill_id") or None,
+                    "tool_name": None,
+                    "capability": event.get("phase_id") or None,
+                    "status": event.get("status") or "ok",
+                    "duration_ms": None,
+                    "payload": event,
+                    "created_at": event.get("timestamp"),
+                }
+            )
 
     activity_rows = (
         db.query(AgentActivityLog)
@@ -416,15 +527,57 @@ def admin_worker_logs(
         }
         for row in activity_rows
     ]
+    if not activities:
+        synthetic_id = -1
+        for idx, entry in enumerate(_state_phase_entries(job), start=1):
+            synthetic_id -= 1
+            skills = entry.get("selected_skills") or []
+            tools = entry.get("tools_attempted") or []
+            success_tools = entry.get("tools_success") or entry.get("tools_succeeded") or []
+            activities.append(
+                {
+                    "id": synthetic_id,
+                    "iteration": idx,
+                    "activity_demand": {
+                        "activity_type": entry.get("phase_name") or entry.get("phase_id"),
+                        "target": entry.get("target") or job.target_query,
+                        "objective": entry.get("phase_name") or "",
+                        "kill_chain_phases": [entry.get("phase_id")],
+                    },
+                    "skill_found": {
+                        "skill_name": ", ".join(skills),
+                        "skill_category": entry.get("phase_id") or "",
+                        "tools": [{"tool_name": tool, "score": 1.0} for tool in tools],
+                    },
+                    "skill_lookup_source": "phase_ledger_v2",
+                    "tool_selected": ", ".join(tools),
+                    "tool_score": 1.0 if success_tools else 0.0,
+                    "execution_result": {
+                        "mcp_executions": entry.get("mcp_executions") or [],
+                        "evidence_ids": entry.get("evidence_ids") or [],
+                    },
+                    "agent_report": {
+                        "operation_performed": entry.get("phase_name") or entry.get("phase_id"),
+                        "findings_count": len(entry.get("evidence_ids") or []),
+                        "quality_score": 1.0 if success_tools else 0.0,
+                        "data_collected": entry.get("evidence_ids") or [],
+                    },
+                    "supervisor_evaluation": entry.get("validation_result") or {},
+                    "approved": bool((entry.get("validation_result") or {}).get("can_advance")),
+                    "status": "approved" if str(entry.get("status") or "").lower() == "completed" else str(entry.get("status") or "pending"),
+                    "created_at": entry.get("started_at"),
+                    "updated_at": entry.get("finished_at"),
+                }
+            )
 
     # ── Resumo por ferramenta ────────────────────────────────────────────────
     tool_summary: dict[str, dict] = {}
-    for r in runs:
-        t = r.tool_name
+    for item in executions:
+        t = item.get("tool")
         if t not in tool_summary:
             tool_summary[t] = {"tool": t, "executed": 0, "failed": 0, "skipped": 0, "total": 0}
         tool_summary[t]["total"] += 1
-        s_ = str(r.status or "").lower()
+        s_ = str(item.get("status") or "").lower()
         if s_ in ("success", "executed"):
             tool_summary[t]["executed"] += 1
         elif s_ == "failed":
@@ -439,7 +592,7 @@ def admin_worker_logs(
             "target_query": job.target_query,
             "status": job.status,
             "current_step": job.current_step,
-            "mission_progress": job.mission_progress,
+            "mission_progress": _effective_state_progress(job),
             "created_at": job.created_at,
             "updated_at": job.updated_at,
         },
