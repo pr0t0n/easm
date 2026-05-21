@@ -12,11 +12,22 @@ requires_authorization: true
 required_tools:
   - ffuf
 optional_tools:
+  - nuclei
   - gobuster
   - feroxbuster
   - dirsearch
   - katana
+  - katana-js
   - hakrawler
+  - gospider
+  - gau
+  - waybackurls
+  - nmap-http
+  - httpx
+  - whatweb
+  - nikto
+  - curl-headers
+  - wafw00f
 fallback_tools:
   - gobuster
 evidence_required:

@@ -133,44 +133,58 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
 
     # (phase_id, name, description, skill_ids, fb_required, fb_optional)
     rows = [
-        ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets via OSINT",
-         ["skill.recon.subdomain_enumeration"], ["subfinder"], ["amass", "theharvester", "dnsx", "assetfinder"]),
+        ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets via OSINT + active brute-force",
+         ["skill.recon.subdomain_enumeration"], ["subfinder"],
+         ["amass", "amass-brute", "amass-intel", "theharvester", "dnsx", "assetfinder",
+          "sublist3r", "findomain", "dnsrecon-brt", "dnsrecon-zt", "dnsenum", "shuffledns", "alterx"]),
         ("P02", "Port Service Discovery", "Discover exposed ports and services; enrich with OSINT banners",
-         ["skill.recon.port_service_discovery"], ["naabu"], ["shodan-cli", "nmap", "masscan"]),
+         ["skill.recon.port_service_discovery"], ["naabu"],
+         ["shodan-cli", "nmap", "nmap-vuln", "nmap-ssl", "nmap-ssh", "nmap-smb", "nmap-dns",
+          "masscan", "sslscan", "testssl"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
-         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["gobuster", "katana"]),
+         ["skill.discovery.endpoint_discovery"], ["ffuf"],
+         ["gobuster", "katana", "hakrawler", "gospider", "feroxbuster", "dirsearch",
+          "gau", "waybackurls", "nmap-http", "code-analyzer"]),
         ("P04", "Parameter Discovery", "Discover input points and parameters",
-         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf"]),
-        ("P05", "Surface Expansion", "Expand hidden routes and crawlable content",
-         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["gobuster", "katana"]),
-        ("P06", "HTTP Fingerprinting", "Fingerprint HTTP behavior, headers and WAF clues",
-         ["skill.recon.port_service_discovery"], ["naabu"], ["nmap", "httpx"]),
+         ["skill.discovery.parameter_discovery"], ["arjun"],
+         ["paramspider", "ffuf", "ffuf-params", "ffuf-content", "wfuzz", "gau", "waybackurls"]),
+        ("P05", "Surface Expansion", "Expand hidden routes and crawlable content via HTTP headers + OWASP fingerprint",
+         ["skill.discovery.endpoint_discovery"], ["ffuf"],
+         ["gobuster", "katana", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]),
+        ("P06", "HTTP Fingerprinting & WAF Detection", "Fingerprint HTTP behavior, headers, WAF profile and evasion clues",
+         ["skill.recon.port_service_discovery"], ["httpx"],
+         ["wafw00f", "curl-headers", "nmap-http", "whatweb"]),
         ("P07", "Technology Detection", "Identify services and technology versions",
-         ["skill.recon.port_service_discovery"], ["naabu"], ["whatweb-basic", "httpx"]),
+         ["skill.recon.port_service_discovery"], ["whatweb"],
+         ["httpx", "whatweb-basic", "nmap-http", "wpscan"]),
         ("P08", "JavaScript Endpoint Analysis", "Analyze application routes and script-linked endpoints",
-         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["katana", "katana-js"]),
+         ["skill.discovery.endpoint_discovery"], ["katana"],
+         ["katana-js", "hakrawler", "gospider", "ffuf"]),
         ("P09", "Vulnerability Template Scan", "Nuclei CVE/misconfiguration templates + content discovery",
-         ["skill.discovery.endpoint_discovery"], ["nuclei"], ["ffuf", "gobuster"]),
+         ["skill.discovery.endpoint_discovery"], ["nuclei"],
+         ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan"]),
         ("P10", "Injection Testing", "Test injection hypotheses with controls",
-         ["skill.sqli_testing"], ["curl"], ["sqlmap", "manual_http_probe"]),
+         ["skill.sqli_testing"], ["curl"], ["sqlmap", "manual_http_probe", "wapiti"]),
         ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses",
          ["skill.vuln.ssrf"], ["curl"], ["interactsh", "ffuf", "wapiti"]),
         ("P12", "XSS Testing", "Validate reflected or stored XSS safely",
-         ["skill.stored_xss_testing"], ["curl"], ["dalfox", "manual_http_probe"]),
+         ["skill.stored_xss_testing"], ["curl"], ["dalfox", "manual_http_probe", "wapiti"]),
         ("P13", "Access Control Testing", "Validate object and authorization boundaries",
-         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe"]),
+         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe", "ffuf"]),
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries",
-         ["skill.vuln.auth_bypass"], ["ffuf"], ["hydra", "curl"]),
-        ("P15", "File Handling Testing", "Validate exposed files and upload-adjacent risks",
-         ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["git", "gitleaks"]),
+         ["skill.vuln.auth_bypass"], ["curl"], ["ffuf", "hydra", "medusa", "jwt_tool", "crackmapexec"]),
+        ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks and upload-adjacent risks",
+         ["skill.chain.exposed_git_to_credential_leak"], ["curl"],
+         ["git", "gitleaks", "trufflehog", "trufflehog-filesystem"]),
         ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage",
-         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf"]),
+         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf", "wfuzz", "gau", "waybackurls"]),
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
-         ["skill.vuln.sqli"], ["nuclei"], ["sqlmap", "wapiti"]),
+         ["skill.vuln.sqli"], ["nuclei"], ["sqlmap", "wapiti", "nikto", "wpscan"]),
         ("P18", "Credential Exposure Boundary", "Validate credential exposure via OSINT and secret scanning",
-         ["skill.chain.exposed_git_to_credential_leak"], ["theharvester"], ["gitleaks", "trufflehog-filesystem", "curl"]),
+         ["skill.chain.exposed_git_to_credential_leak"], ["theharvester"],
+         ["gitleaks", "trufflehog", "trufflehog-filesystem", "h8mail", "curl", "bandit", "semgrep", "trivy"]),
         ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls",
-         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe"]),
+         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe", "crackmapexec"]),
         ("P20", "Attack Path Correlation", "Build offensive chains from evidence",
          ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["manual_correlation"]),
         ("P21", "Evidence Quality Review", "Score evidence and false positive controls",
@@ -299,9 +313,60 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("git", "manual-http-probe.yaml", ["git_exposure_review"], "manual_parser"),
         entry("gitleaks", "gitleaks_secrets", ["secret_detection"], "secret_parser"),
         entry("trufflehog-filesystem", "trufflehog-filesystem.yaml", ["secret_detection"], "secret_parser"),
-        entry("amass", "amass_enum", ["subdomain_enumeration", "passive_recon", "osint"], "subfinder_parser"),
+        entry("amass", "amass_brute", ["subdomain_enumeration", "passive_recon", "osint"], "subfinder_parser"),
         entry("shodan-cli", "shodan_lookup", ["port_service_discovery", "osint", "banner_grabbing"], "generic_json_parser"),
         entry("theharvester", "theharvester_passive", ["osint", "email_harvesting"], "generic_json_parser"),
+        # === Expanded catalog — Kali tools now reachable from offensive operator ===
+        # Subdomain enumeration variants
+        entry("amass-brute", "amass_brute", ["subdomain_enumeration", "active_recon", "dns_brute"], "subfinder_parser"),
+        entry("amass-intel", "amass_intel", ["subdomain_enumeration", "osint", "whois"], "subfinder_parser"),
+        entry("sublist3r", "sublist3r_basic", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
+        entry("findomain", "findomain_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
+        entry("dnsrecon-brt", "dnsrecon_brute", ["subdomain_enumeration", "dns_brute"], "subfinder_parser"),
+        entry("dnsrecon-zt", "dnsrecon_zone_transfer", ["subdomain_enumeration", "dns_zone_transfer"], "subfinder_parser"),
+        entry("dnsenum", "dnsenum_basic", ["subdomain_enumeration", "dns_brute"], "subfinder_parser"),
+        entry("dnsx", "dnsx_resolve", ["dns_resolution", "passive_recon"], "subfinder_parser"),
+        entry("shuffledns", "shuffledns_brute", ["subdomain_enumeration", "dns_brute"], "subfinder_parser"),
+        entry("alterx", "alterx_permutations", ["subdomain_enumeration", "permutation"], "subfinder_parser"),
+        # Port & service discovery
+        entry("masscan", "masscan_full", ["port_service_discovery", "internet_scale"], "naabu_parser"),
+        entry("httpx", "httpx_probe", ["http_fingerprinting", "tech_detection"], "httpx_parser"),
+        entry("whatweb", "whatweb_fingerprint", ["technology_detection", "fingerprinting"], "whatweb_parser"),
+        entry("wafw00f", "wafw00f_detect", ["waf_detection", "fingerprinting"], "generic_json_parser"),
+        entry("sslscan", "sslscan_audit", ["tls_audit", "cipher_review"], "generic_json_parser"),
+        entry("testssl", "testssl_audit", ["tls_audit", "vulnerability_scan"], "generic_json_parser"),
+        # Nmap NSE variants
+        entry("nmap-vuln", "nmap_vuln_scripts", ["vulnerability_scan", "nse_scripts"], "nmap_parser"),
+        entry("nmap-http", "nmap_http_enum", ["http_enumeration", "nse_scripts"], "nmap_parser"),
+        entry("nmap-smb", "nmap_smb_vuln", ["smb_audit", "nse_scripts"], "nmap_parser"),
+        entry("nmap-ssh", "nmap_ssh_audit", ["ssh_audit", "nse_scripts"], "nmap_parser"),
+        entry("nmap-ssl", "nmap_ssl_vuln", ["tls_audit", "nse_scripts"], "nmap_parser"),
+        entry("nmap-dns", "nmap_dns_vuln", ["dns_audit", "nse_scripts"], "nmap_parser"),
+        # Crawling / endpoint extraction
+        entry("hakrawler", "hakrawler_crawl", ["endpoint_discovery", "crawling"], "katana_parser"),
+        entry("gospider", "gospider_crawl", ["endpoint_discovery", "crawling"], "katana_parser"),
+        entry("gau", "gau_archives", ["url_mining", "archive_recon"], "katana_parser"),
+        entry("waybackurls", "waybackurls_archives", ["url_mining", "archive_recon"], "katana_parser"),
+        # Content / parameter fuzzing
+        entry("feroxbuster", "feroxbuster_recursive", ["content_discovery", "fuzzing"], "ffuf_parser"),
+        entry("dirsearch", "dirsearch_paths", ["content_discovery", "fuzzing"], "ffuf_parser"),
+        entry("wfuzz", "wfuzz_param_names", ["parameter_discovery", "fuzzing"], "ffuf_parser"),
+        # Vulnerability scanning
+        entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser"),
+        entry("wpscan", "wpscan_basic", ["cms_audit", "vuln_scanning"], "generic_json_parser"),
+        # Credential / brute-force
+        entry("crackmapexec", "crackmapexec_smb", ["smb_enumeration", "auth_validation"], "generic_json_parser"),
+        entry("medusa", "medusa_smb", ["auth_validation", "credential_test"], "generic_json_parser"),
+        entry("jwt_tool", "jwt_tool_audit", ["jwt_audit", "auth_validation"], "generic_json_parser"),
+        entry("h8mail", "h8mail_breach", ["osint", "credential_exposure"], "generic_json_parser"),
+        # Secret scanning / SAST
+        entry("trufflehog", "trufflehog_secrets", ["secret_detection"], "secret_parser"),
+        entry("bandit", "bandit_python", ["sast", "secret_detection"], "generic_json_parser"),
+        entry("semgrep", "semgrep_sast", ["sast", "code_analysis"], "generic_json_parser"),
+        entry("trivy", "trivy_fs", ["sca", "vuln_scanning"], "generic_json_parser"),
+        entry("retire", "retire_js", ["sca", "js_audit"], "generic_json_parser"),
+        # Takeover detection
+        entry("subjack", "subjack_takeover", ["subdomain_takeover", "passive_recon"], "generic_json_parser"),
     ]
 
 
@@ -762,24 +827,23 @@ class SkillToToolPlanCompiler:
         if skill.get("quality_gate_status") != "passed":
             raise ValueError("skill_quality_gate_failed")
         tools: list[dict[str, Any]] = []
-        for name in skill["metadata"].get("required_tools") or []:
+        def _add_tool(name: str, is_required: bool) -> None:
             catalog_entry = self.catalog.get(str(name))
             if not catalog_entry:
-                # Tool missing from catalog — emit a blocked entry so the validator
-                # can decide based on whether it's required, rather than crashing.
-                tools.append({
-                    "tool_name": str(name),
-                    "profile": "",
-                    "required": True,
-                    "arguments": {},
-                    "reason": f"tool_not_in_catalog:{name}",
-                    "expected_evidence": [],
-                    "timeout": 0,
-                    "rate_limit": 0,
-                    "noise_level": "low",
-                    "policy_decision": {"allowed": False, "blocked_reason": f"tool_not_in_catalog:{name}"},
-                })
-                continue
+                if is_required:
+                    tools.append({
+                        "tool_name": str(name),
+                        "profile": "",
+                        "required": True,
+                        "arguments": {},
+                        "reason": f"tool_not_in_catalog:{name}",
+                        "expected_evidence": [],
+                        "timeout": 0,
+                        "rate_limit": 0,
+                        "noise_level": "low",
+                        "policy_decision": {"allowed": False, "blocked_reason": f"tool_not_in_catalog:{name}"},
+                    })
+                return
             expected_evidence = skill["metadata"].get("evidence_required") or phase_contract.get("minimum_evidence") or []
             policy_decision = self.policy.decide(
                 {
@@ -800,9 +864,9 @@ class SkillToToolPlanCompiler:
                 {
                     "tool_name": catalog_entry.tool_name,
                     "profile": catalog_entry.profile,
-                    "required": True,
+                    "required": is_required,
                     "arguments": {"target": target, "timeout": catalog_entry.timeout_policy["default_timeout"]},
-                    "reason": f"Required by {skill['skill_id']}",
+                    "reason": f"{'Required' if is_required else 'Optional'} by {skill['skill_id']}",
                     "expected_evidence": expected_evidence,
                     "timeout": catalog_entry.timeout_policy["default_timeout"],
                     "rate_limit": 50,
@@ -810,6 +874,16 @@ class SkillToToolPlanCompiler:
                     "policy_decision": policy_decision,
                 }
             )
+
+        seen_tools: set[str] = set()
+        for name in skill["metadata"].get("required_tools") or []:
+            if name not in seen_tools:
+                seen_tools.add(name)
+                _add_tool(name, is_required=True)
+        for name in (skill["metadata"].get("optional_tools") or []) + (skill["metadata"].get("fallback_tools") or []):
+            if name not in seen_tools:
+                seen_tools.add(name)
+                _add_tool(name, is_required=False)
         return {
             "tool_plan_id": stable_id("TP", {"phase_id": phase_contract["phase_id"], "skill_id": skill["skill_id"], "target": target}),
             "phase_id": phase_contract["phase_id"],

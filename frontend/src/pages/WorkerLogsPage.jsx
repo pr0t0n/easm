@@ -196,6 +196,89 @@ function ActivityTimeline({ data }) {
   );
 }
 
+function RuntimeFeed({ runtime, toolFilter }) {
+  if (!runtime || !runtime.phases?.length) {
+    return (
+      <section className="panel p-5">
+        <h3 className="text-base font-semibold text-slate-100">RedTeam Runtime</h3>
+        <p className="text-sm text-slate-500 mt-2">Aguardando execução de tools para este scan. As fases preencherão command/stdout/exit_code em tempo real.</p>
+      </section>
+    );
+  }
+  return (
+    <section className="panel p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-base font-semibold text-slate-100">RedTeam Runtime</h3>
+          <div className="sub">command, stdout, return_code e duração por tool em cada fase</div>
+        </div>
+      </div>
+      <div className="max-h-[70vh] overflow-y-auto space-y-3">
+        {runtime.phases.map((phase) => {
+          const tools = (phase.tools || []).filter((t) =>
+            !toolFilter || (t.tool_name || "").toLowerCase().includes(toolFilter.toLowerCase())
+          );
+          if (!tools.length) return null;
+          return (
+            <div key={`${phase.phase_id}-${phase.target}`} className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <span className="text-xs font-mono font-bold text-emerald-300">{phase.phase_id}</span>
+                  <span className="ml-2 text-sm text-slate-200">{phase.phase_name}</span>
+                  <span className="ml-2 text-xs text-slate-500">({phase.target})</span>
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded-md ${
+                  phase.status === "completed" ? "bg-emerald-900/30 text-emerald-300" :
+                  phase.status === "partial" ? "bg-amber-900/30 text-amber-300" :
+                  "bg-rose-900/30 text-rose-300"
+                }`}>{phase.status}</span>
+              </div>
+              <div className="space-y-2">
+                {tools.map((tool, idx) => (
+                  <div key={idx} className="rounded-lg border border-slate-800 bg-slate-900/50 p-3">
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className={`font-mono font-bold ${
+                        tool.status === "success" ? "text-emerald-300" :
+                        tool.status === "failed" || tool.status === "timeout" ? "text-rose-300" :
+                        "text-amber-300"
+                      }`}>{tool.tool_name}</span>
+                      <span className="text-slate-500">[{tool.status}]</span>
+                      {tool.exit_code !== null && tool.exit_code !== undefined && (
+                        <span className="text-slate-500">exit={tool.exit_code}</span>
+                      )}
+                      {tool.duration_seconds && (
+                        <span className="text-slate-500">{tool.duration_seconds.toFixed?.(1) || tool.duration_seconds}s</span>
+                      )}
+                    </div>
+                    {tool.command && (
+                      <pre className="mt-2 bg-slate-950/80 rounded-md px-3 py-2 text-xs font-mono text-cyan-200 overflow-x-auto">
+                        $ {tool.command}
+                      </pre>
+                    )}
+                    {tool.stdout && (
+                      <details className="mt-2">
+                        <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-200">
+                          stdout {tool.stdout_truncated ? "(truncated)" : ""}
+                        </summary>
+                        <pre className="mt-1 bg-slate-950/80 rounded-md px-3 py-2 text-xs font-mono text-slate-300 max-h-64 overflow-auto">
+                          {tool.stdout}
+                        </pre>
+                      </details>
+                    )}
+                    {tool.error && (
+                      <p className="mt-2 text-xs text-rose-300">⚠ {tool.error}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function CommandFeed({ logs, toolFilter, onCopy }) {
   const commandRows = logs.filter((row) => /cmd=|stdout=|stderr=|return_code=|dispatch|tool=|mcp|kali|runner/i.test(getMessageText(row.message)));
 
@@ -225,6 +308,7 @@ export default function WorkerLogsPage() {
   const [toolFilter, setToolFilter] = useState("");
   const [data, setData] = useState(null);
   const [phaseData, setPhaseData] = useState(null);
+  const [runtime, setRuntime] = useState(null);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -241,14 +325,16 @@ export default function WorkerLogsPage() {
     try {
       const params = { scan_id: scanId, limit: 2000 };
       if (tool) params.tool = tool;
-      const [logsRes, phaseRes, healthRes] = await Promise.all([
+      const [logsRes, phaseRes, runtimeRes, healthRes] = await Promise.all([
         client.get("/api/admin/worker-logs", { params }),
         client.get(`/api/scans/${scanId}/phase-monitor`),
+        client.get(`/api/scans/${scanId}/runtime`).catch(() => ({ data: null })),
         client.get("/api/worker-manager/health"),
       ]);
       if (currentRequestId !== requestIdRef.current) return;
       setData(logsRes.data);
       setPhaseData(phaseRes.data);
+      setRuntime(runtimeRes.data || null);
       setHealth(healthRes.data || null);
       if (logsRes.data?.scans?.length) setScans(logsRes.data.scans);
     } catch (err) {
@@ -419,6 +505,7 @@ export default function WorkerLogsPage() {
 
           <div className="t-tools" style={{ marginBottom: 4 }}>
             {tabBtn("cockpit", "Cockpit")}
+            {tabBtn("runtime", "Runtime", runtime?.phases?.reduce((acc, p) => acc + (p.tools?.length || 0), 0) || 0)}
             {tabBtn("commands", "Comandos", filteredLogs.length)}
             {tabBtn("executions", "Execuções", filteredExecutions.length)}
             {tabBtn("logs", "Eventos", filteredLogs.length)}
@@ -473,6 +560,10 @@ export default function WorkerLogsPage() {
           <PhaseStrip phaseData={phaseData} />
           <ActivityTimeline data={data} />
         </div>
+      )}
+
+      {scanInfo && activeTab === "runtime" && (
+        <RuntimeFeed runtime={runtime} toolFilter={toolFilter} />
       )}
 
       {scanInfo && activeTab === "commands" && (

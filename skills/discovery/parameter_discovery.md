@@ -14,6 +14,9 @@ required_tools:
 optional_tools:
   - paramspider
   - ffuf
+  - ffuf-params
+  - ffuf-content
+  - wfuzz
   - gau
   - waybackurls
 fallback_tools:

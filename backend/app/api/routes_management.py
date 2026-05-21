@@ -1989,6 +1989,7 @@ def list_vulnerability_learnings(
         serialize_vulnerability_learning,
         vulnerability_learning_summary,
     )
+    from app.services.vulnerability_learning_catalog import CURATED_VULNERABILITY_LEARNINGS
 
     query = db.query(VulnerabilityLearning)
     if status_filter:
@@ -1999,9 +2000,45 @@ def list_vulnerability_learnings(
         .limit(limit)
         .all()
     )
+
+    items = [serialize_vulnerability_learning(row) for row in rows]
+
+    if not items and (not status_filter or status_filter == "pending_review"):
+        from datetime import datetime as _dt
+        baseline = _dt.utcnow().isoformat()
+        for idx, seed in enumerate(CURATED_VULNERABILITY_LEARNINGS[:limit]):
+            items.append({
+                "id": f"catalog-{seed['key']}",
+                "status": "pending_review",
+                "title": seed.get("title") or seed.get("vulnerability_type") or seed["key"],
+                "vulnerability_type": seed.get("vulnerability_type"),
+                "url": "",
+                "final_url": "",
+                "summary": seed.get("impact") or "",
+                "impact": seed.get("impact") or "",
+                "remediation": seed.get("remediation") or "",
+                "evidence_signals": seed.get("evidence_signals") or [],
+                "safe_validation_steps": seed.get("safe_validation_steps") or [],
+                "affected_phases": seed.get("affected_phases") or [],
+                "affected_skills": seed.get("affected_skills") or [],
+                "recommended_tools": seed.get("recommended_tools") or [],
+                "aliases": seed.get("aliases") or [],
+                "technique_count": len(seed.get("safe_validation_steps") or []) or 1,
+                "novelty_score": None,
+                "novelty_reason": "Curated learning seed (not yet promoted to DB)",
+                "source": "curated_catalog",
+                "source_kind": "curated_learning_seed",
+                "model": "curated-learning-catalog",
+                "raw_response": "",
+                "created_at": baseline,
+                "updated_at": baseline,
+                "reviewed_at": None,
+                "is_catalog_seed": True,
+            })
+
     return {
         "summary": vulnerability_learning_summary(db),
-        "items": [serialize_vulnerability_learning(row) for row in rows],
+        "items": items,
     }
 
 

@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     mcp_rag_enabled: bool = True
     mcp_execute_tools_via_mcp: bool = True
     mcp_default_top_k: int = 5
-    mcp_request_timeout_seconds: int = 60
+    mcp_request_timeout_seconds: int = 1800
     offensive_operator_enabled: bool = True
 
 

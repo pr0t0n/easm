@@ -13,8 +13,19 @@ required_tools:
   - naabu
 optional_tools:
   - nmap
+  - nmap-vuln
+  - nmap-ssl
+  - nmap-ssh
+  - nmap-smb
+  - nmap-dns
+  - nmap-http
   - masscan
   - httpx
+  - whatweb
+  - wafw00f
+  - sslscan
+  - testssl
+  - shodan-cli
 fallback_tools:
   - nmap
 evidence_required:

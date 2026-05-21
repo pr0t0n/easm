@@ -13,8 +13,16 @@ required_tools:
   - subfinder
 optional_tools:
   - amass
+  - amass-brute
+  - amass-intel
+  - theharvester
   - dnsx
   - assetfinder
+  - sublist3r
+  - findomain
+  - dnsrecon-brt
+  - dnsrecon-zt
+  - dnsenum
   - shuffledns
   - alterx
 fallback_tools:

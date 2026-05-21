@@ -17,6 +17,7 @@ export default function ScansPage({ embedded = false }) {
   const [groups, setGroups] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [scans, setScans] = useState([]);
+  const [targets, setTargets] = useState([]);
   const [selected, setSelected] = useState(null);
   const [logs, setLogs] = useState([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -26,6 +27,16 @@ export default function ScansPage({ embedded = false }) {
   const [submitting, setSubmitting] = useState(false);
   const [selectedScans, setSelectedScans] = useState(new Set());
   const ACTIVE_SCAN_STATUS = ["queued", "running", "retrying"];
+
+  // Unified mode selector: "now" | "schedule" | "targets"
+  const [mode, setMode] = useState("now");
+  const [scheduleForm, setScheduleForm] = useState({
+    frequency: "daily",
+    run_time: "00:00",
+    day_of_week: "monday",
+    day_of_month: 1,
+    enabled: true,
+  });
 
   const parseTargets = (raw) => {
     return String(raw || "")
@@ -47,6 +58,45 @@ export default function ScansPage({ embedded = false }) {
       setSchedules(data);
     } catch {
       setSchedules([]);
+    }
+  };
+
+  const loadTargets = async () => {
+    try {
+      const { data } = await client.get("/api/targets/summary");
+      setTargets(data || []);
+    } catch {
+      setTargets([]);
+    }
+  };
+
+  const createSchedule = async (e) => {
+    e.preventDefault();
+    const parsedTargets = parseTargets(target);
+    if (parsedTargets.length === 0) {
+      setAuthStatus("Informe ao menos um alvo para o agendamento.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await client.post("/api/schedules", {
+        access_group_id: accessGroupId ? Number(accessGroupId) : null,
+        targets_text: target,
+        scan_type: "full",
+        frequency: scheduleForm.frequency,
+        run_time: scheduleForm.run_time,
+        day_of_week: scheduleForm.day_of_week,
+        day_of_month: scheduleForm.day_of_month,
+        enabled: scheduleForm.enabled,
+      });
+      setTarget("");
+      setAccessGroupId("");
+      setAuthStatus(`Agendamento criado para ${parsedTargets.length} alvo(s) com sucesso.`);
+      await loadSchedules();
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || "Falha ao criar agendamento.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -76,6 +126,7 @@ export default function ScansPage({ embedded = false }) {
   useEffect(() => {
     loadScans();
     loadSchedules();
+    loadTargets();
     client.get("/api/access-groups").then((res) => setGroups(res.data));
   }, []);
 
@@ -340,8 +391,8 @@ export default function ScansPage({ embedded = false }) {
       {/* Top Banner */}
       {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
         <div className="mx-auto max-w-7xl">
-          <h1 className="section-title">Operações de RedTeam</h1>
-          <p className="mt-2 text-sm text-slate-400">Execução governada das 22 fases, com workers, MCP, Kali Runner, evidências e evolução ofensiva</p>
+          <h1 className="section-title">Scan · Agendamento · Alvos</h1>
+          <p className="mt-2 text-sm text-slate-400">Painel unificado de execução das 22 fases — criação manual, agendamentos recorrentes e gestão de targets</p>
         </div>
       </div>}
 
@@ -350,53 +401,169 @@ export default function ScansPage({ embedded = false }) {
           <div className="grid gap-6 lg:grid-cols-3">
             {/* Main Content */}
             <div className="lg:col-span-2 space-y-6">
-              {/* Create Scan Section */}
+              {/* Unified Create Section — Scan / Schedule / Target */}
               <section className="panel p-6">
-                <h2 className="text-lg font-semibold mb-6">Scan</h2>
-                <form onSubmit={createScan} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-2">Alvos (separe por ;)</label>
-                    <input
-                      className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
-                      placeholder="exemplo.com;*.exemplo.com;192.168.0.10"
-                      value={target}
-                      onChange={(e) => setTarget(e.target.value)}
-                    />
-                    <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera uma execução independente das 22 fases.</p>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Nova Operação</h2>
+                  <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setMode("now")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "now" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                    >
+                      Executar Agora
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode("schedule")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "schedule" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                    >
+                      Agendar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode("targets")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "targets" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                    >
+                      Alvos
+                    </button>
                   </div>
+                </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                {mode !== "targets" ? (
+                  <form onSubmit={mode === "now" ? createScan : createSchedule} className="space-y-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
-                      <select
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                        value={accessGroupId}
-                        onChange={(e) => setAccessGroupId(e.target.value)}
-                      >
-                        <option value="">Sem grupo</option>
-                        {groups.map((g) => (
-                          <option key={g.id} value={g.id}>{g.name}</option>
+                      <label className="block text-xs font-medium text-slate-400 mb-2">Alvos (separe por ;)</label>
+                      <input
+                        className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
+                        placeholder="exemplo.com;*.exemplo.com;192.168.0.10"
+                        value={target}
+                        onChange={(e) => setTarget(e.target.value)}
+                      />
+                      <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera uma execução independente das 22 fases.</p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
+                        <select
+                          className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                          value={accessGroupId}
+                          onChange={(e) => setAccessGroupId(e.target.value)}
+                        >
+                          <option value="">Sem grupo</option>
+                          {groups.map((g) => (
+                            <option key={g.id} value={g.id}>{g.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {mode === "schedule" && (
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Frequência</label>
+                          <select
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                            value={scheduleForm.frequency}
+                            onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })}
+                          >
+                            <option value="hourly">A cada hora</option>
+                            <option value="daily">Diário</option>
+                            <option value="weekly">Semanal</option>
+                            <option value="monthly">Mensal</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {mode === "schedule" && (
+                      <div className="grid grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Horário</label>
+                          <input
+                            type="time"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100"
+                            value={scheduleForm.run_time}
+                            onChange={(e) => setScheduleForm({ ...scheduleForm, run_time: e.target.value })}
+                          />
+                        </div>
+                        {scheduleForm.frequency === "weekly" && (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-400 mb-2">Dia da semana</label>
+                            <select
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                              value={scheduleForm.day_of_week}
+                              onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: e.target.value })}
+                            >
+                              <option value="monday">Segunda</option>
+                              <option value="tuesday">Terça</option>
+                              <option value="wednesday">Quarta</option>
+                              <option value="thursday">Quinta</option>
+                              <option value="friday">Sexta</option>
+                              <option value="saturday">Sábado</option>
+                              <option value="sunday">Domingo</option>
+                            </select>
+                          </div>
+                        )}
+                        {scheduleForm.frequency === "monthly" && (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-400 mb-2">Dia do mês</label>
+                            <input
+                              type="number" min="1" max="31"
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100"
+                              value={scheduleForm.day_of_month}
+                              onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_month: Number(e.target.value) })}
+                            />
+                          </div>
+                        )}
+                        <div className="flex items-end">
+                          <label className="inline-flex items-center gap-2 text-xs text-slate-400">
+                            <input type="checkbox" checked={scheduleForm.enabled} onChange={(e) => setScheduleForm({ ...scheduleForm, enabled: e.target.checked })} />
+                            <span>Ativo</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {authStatus && (
+                      <div className={`rounded-lg px-4 py-3 text-xs ${
+                        authStatus.includes("sucesso") ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-amber-50 text-amber-800 border border-amber-200"
+                      }`}>
+                        {authStatus}
+                      </div>
+                    )}
+
+                    <button type="submit" disabled={submitting} className="btn-primary w-full">
+                      {submitting ? "Processando..." : mode === "now" ? "Iniciar Varredura" : "Criar Agendamento"}
+                    </button>
+                  </form>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-400">Alvos descobertos via scans anteriores e ativos cadastrados. Use o modo &ldquo;Executar Agora&rdquo; ou &ldquo;Agendar&rdquo; para criar um novo scan a partir deles.</p>
+                    {targets.length === 0 ? (
+                      <div className="py-8 text-center text-sm text-slate-400">Nenhum alvo registrado ainda.</div>
+                    ) : (
+                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                        {targets.map((t, i) => (
+                          <div key={t.domain_or_ip || i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 flex items-center justify-between">
+                            <div>
+                              <p className="font-medium text-sm text-slate-100">{t.domain_or_ip || t.target_query || t.target}</p>
+                              <p className="text-xs text-slate-500 mt-0.5">
+                                {t.scan_count ? `${t.scan_count} scan(s)` : ""}
+                                {t.last_scan ? ` · último em ${fmtDateTime(t.last_scan)}` : ""}
+                                {t.findings_count ? ` · ${t.findings_count} finding(s)` : ""}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => { setTarget(t.domain_or_ip || t.target_query || t.target); setMode("now"); }}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-blue-900/20 text-blue-300 border border-blue-800/50 hover:bg-blue-900/40"
+                            >
+                              Rescan
+                            </button>
+                          </div>
                         ))}
-                      </select>
-                    </div>
+                      </div>
+                    )}
                   </div>
-
-                  {authStatus && (
-                    <div className={`rounded-lg px-4 py-3 text-xs ${
-                      authStatus.includes("sucesso") ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-amber-50 text-amber-800 border border-amber-200"
-                    }`}>
-                      {authStatus}
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="btn-primary w-full"
-                  >
-                    {submitting ? "Iniciando..." : "Iniciar Varredura"}
-                  </button>
-                </form>
+                )}
               </section>
 
               {/* Scans List */}

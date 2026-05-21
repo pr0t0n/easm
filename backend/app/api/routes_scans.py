@@ -3593,6 +3593,83 @@ def scan_autonomy(scan_id: int, db: Session = Depends(get_db), current_user: Use
     )
 
 
+@router.get("/scans/{scan_id}/runtime")
+def scan_runtime_feed(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return per-phase tool runtime data: command, stdout, stderr, return_code, status.
+
+    This powers the RedTeam Runtime view that the operator uses to validate
+    real tool output (not just truncated log lines).
+    """
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    state = dict(job.state_data or {})
+    ledgers = state.get("phase_ledger_v2") or state.get("phase_ledger") or []
+    if not isinstance(ledgers, list):
+        ledgers = []
+
+    runtime: list[dict] = []
+    for ledger in ledgers:
+        if not isinstance(ledger, dict):
+            continue
+        phase_id = str(ledger.get("phase_id") or "")
+        phase_name = str(ledger.get("phase_name") or phase_id)
+        target = str(ledger.get("target") or "")
+        ledger_status = str(ledger.get("status") or "")
+        mcp_results = ledger.get("mcp_results") or []
+        tools_runtime: list[dict] = []
+        for mcp in mcp_results:
+            if not isinstance(mcp, dict):
+                continue
+            stdout_raw = str(mcp.get("stdout") or "")
+            tools_runtime.append({
+                "tool_name": mcp.get("tool_name") or "",
+                "profile": mcp.get("profile") or "",
+                "status": mcp.get("status") or "",
+                "command": mcp.get("command") or "",
+                "stdout": stdout_raw[:6000],
+                "stdout_truncated": len(stdout_raw) > 6000,
+                "stdout_path": mcp.get("stdout_path") or "",
+                "stderr_path": mcp.get("stderr_path") or "",
+                "exit_code": mcp.get("exit_code"),
+                "duration_seconds": mcp.get("duration_seconds"),
+                "started_at": mcp.get("started_at") or "",
+                "finished_at": mcp.get("finished_at") or "",
+                "error": mcp.get("error"),
+                "parsed_preview": str(mcp.get("parsed_result") or "")[:1500],
+                "artifacts": mcp.get("artifact_paths") or mcp.get("artifacts") or [],
+            })
+        runtime.append({
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "target": target,
+            "status": ledger_status,
+            "tools_attempted": ledger.get("tools_attempted") or [],
+            "tools_success": ledger.get("tools_success") or [],
+            "tools_failed": ledger.get("tools_failed") or [],
+            "blocking_reason": ledger.get("blocking_reason"),
+            "tools": tools_runtime,
+        })
+
+    return {
+        "scan_id": scan_id,
+        "target_query": job.target_query,
+        "status": job.status,
+        "current_step": job.current_step,
+        "mission_progress": job.mission_progress or 0,
+        "phases": runtime,
+    }
+
+
 @router.get("/scans/{scan_id}/phase-monitor")
 def scan_phase_monitor(
     scan_id: int,

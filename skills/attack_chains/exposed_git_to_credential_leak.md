@@ -15,6 +15,13 @@ optional_tools:
   - git
   - gitleaks
   - trufflehog
+  - trufflehog-filesystem
+  - bandit
+  - semgrep
+  - trivy
+  - retire
+  - h8mail
+  - theharvester
 fallback_tools:
   - gitleaks
 evidence_required:
