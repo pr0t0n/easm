@@ -140,6 +140,8 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             offensive_state = result["offensive_state"]
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
+            # Embed mcp_results in the ledger so _persist_offensive_findings can extract evidence
+            phase_ledger["mcp_results"] = result.get("mcp_results") or []
             phase_ledgers.append(phase_ledger)
 
             # Emit per-tool command log lines so WorkerLogsPage CommandFeed picks them up
@@ -237,24 +239,275 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     return campaign
 
 
+def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) -> dict[str, Any]:
+    """Parse tool stdout/parsed_result into structured evidence for RedTeam reporting."""
+    import json as _json
+    stdout = str(mcp_res.get("stdout") or "")
+    parsed = mcp_res.get("parsed_result")
+    command = str(mcp_res.get("command") or "")
+    duration = mcp_res.get("duration_seconds")
+    workdir = str(mcp_res.get("stdout_path") or "")
+
+    evidence: dict[str, Any] = {
+        "tool": tool_name,
+        "command": command,
+        "duration_seconds": duration,
+        "workdir": workdir,
+        "raw_output_preview": stdout[:3000] if stdout else None,
+    }
+
+    tool_lower = tool_name.lower()
+
+    # --- subfinder / amass: subdomains list ---
+    if tool_lower in {"subfinder", "amass", "assetfinder", "dnsx"}:
+        lines = [l.strip() for l in stdout.splitlines() if l.strip() and not l.startswith("[")]
+        domains = [l for l in lines if "." in l and not l.startswith("http")]
+        evidence["discovered_subdomains"] = domains[:200]
+        evidence["subdomain_count"] = len(domains)
+        evidence["finding_summary"] = (
+            f"{len(domains)} subdomains discovered via {tool_name}: "
+            + (", ".join(domains[:5]) + ("…" if len(domains) > 5 else ""))
+            if domains else f"No subdomains found via {tool_name}"
+        )
+
+    # --- theHarvester: emails, hosts, IPs from OSINT ---
+    elif tool_lower in {"theharvester"}:
+        emails = [l.strip() for l in stdout.splitlines() if "@" in l and "." in l]
+        hosts = [l.strip() for l in stdout.splitlines() if l.strip().startswith("-") or ("." in l and "@" not in l and not l.startswith("["))]
+        evidence["emails_found"] = emails[:50]
+        evidence["hosts_found"] = hosts[:50]
+        evidence["finding_summary"] = (
+            f"OSINT harvest: {len(emails)} email(s), {len(hosts)} host(s). "
+            + ("Emails: " + ", ".join(emails[:3]) if emails else "")
+        )
+
+    # --- naabu / nmap: open ports ---
+    elif tool_lower in {"naabu", "nmap", "masscan"}:
+        port_lines = [l.strip() for l in stdout.splitlines() if l.strip() and ":" in l]
+        parsed_ports = []
+        if isinstance(parsed, list):
+            parsed_ports = parsed
+        elif port_lines:
+            parsed_ports = port_lines[:50]
+        evidence["open_ports"] = parsed_ports[:50]
+        evidence["port_count"] = len(parsed_ports)
+        evidence["finding_summary"] = (
+            f"{len(parsed_ports)} open port(s) found: "
+            + ", ".join(str(p) for p in parsed_ports[:10])
+            if parsed_ports else "No open ports found"
+        )
+
+    # --- shodan: service banners and exposed services ---
+    elif tool_lower in {"shodan-cli", "shodan"}:
+        evidence["shodan_raw"] = stdout[:2000]
+        # Extract interesting lines: IP, ports, OS, org, vulns
+        interesting = [l.strip() for l in stdout.splitlines()
+                       if any(k in l.lower() for k in ["ip:", "port:", "os:", "org:", "cpe:", "vuln", "banner"])]
+        evidence["service_intel"] = interesting[:30]
+        evidence["finding_summary"] = (
+            f"Shodan OSINT: " + "; ".join(interesting[:5])
+            if interesting else "Shodan: no enrichment data (API key not configured)"
+        )
+
+    # --- ffuf / gobuster: discovered paths ---
+    elif tool_lower in {"ffuf", "gobuster", "feroxbuster"}:
+        if isinstance(parsed, list) and parsed:
+            paths = [str(p.get("url") or p.get("path") or p) for p in parsed[:100]]
+        else:
+            paths = [l.strip() for l in stdout.splitlines() if l.strip() and "/" in l][:100]
+        evidence["discovered_paths"] = paths[:100]
+        evidence["path_count"] = len(paths)
+        evidence["finding_summary"] = (
+            f"{len(paths)} path(s) discovered: "
+            + ", ".join(paths[:5]) + ("…" if len(paths) > 5 else "")
+            if paths else "No paths discovered"
+        )
+
+    # --- nuclei: CVEs, vulnerabilities, misconfigurations ---
+    elif tool_lower in {"nuclei"}:
+        findings = []
+        if isinstance(parsed, list):
+            for item in parsed[:50]:
+                if isinstance(item, dict):
+                    findings.append({
+                        "template": item.get("template-id") or item.get("template"),
+                        "name": item.get("info", {}).get("name") or item.get("name"),
+                        "severity": item.get("info", {}).get("severity") or item.get("severity"),
+                        "url": item.get("matched-at") or item.get("url"),
+                        "description": item.get("info", {}).get("description") or "",
+                        "cve": item.get("info", {}).get("classification", {}).get("cve-id") if isinstance(item.get("info"), dict) else None,
+                    })
+        else:
+            # Try parsing JSONL from stdout
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = _json.loads(line)
+                    findings.append({
+                        "template": item.get("template-id"),
+                        "name": (item.get("info") or {}).get("name"),
+                        "severity": (item.get("info") or {}).get("severity"),
+                        "url": item.get("matched-at"),
+                        "description": (item.get("info") or {}).get("description", ""),
+                        "cve": ((item.get("info") or {}).get("classification") or {}).get("cve-id"),
+                    })
+                except Exception:
+                    pass
+        evidence["nuclei_findings"] = findings
+        evidence["vulnerability_count"] = len(findings)
+        crits = [f for f in findings if str(f.get("severity") or "").lower() in {"critical", "high"}]
+        evidence["finding_summary"] = (
+            f"Nuclei: {len(findings)} finding(s) — "
+            + (f"{len(crits)} critical/high: " + ", ".join(f.get("name","?") for f in crits[:3]) if crits
+               else "no critical/high findings" if findings else "no vulnerabilities detected")
+        )
+
+    # --- gitleaks / trufflehog: secrets and credentials ---
+    elif tool_lower in {"gitleaks", "trufflehog", "trufflehog-filesystem"}:
+        secrets = []
+        if isinstance(parsed, list):
+            for item in parsed[:20]:
+                if isinstance(item, dict):
+                    secrets.append({
+                        "type": item.get("RuleID") or item.get("rule_id") or item.get("DetectorName") or "secret",
+                        "file": item.get("File") or item.get("SourceMetadata", {}).get("Data", {}).get("Filesystem", {}).get("file") or "unknown",
+                        "line": item.get("StartLine") or item.get("line"),
+                        "secret_preview": str(item.get("Secret") or item.get("Raw") or "")[:20] + "***",
+                        "description": item.get("Description") or item.get("RuleDescription") or "",
+                    })
+        else:
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = _json.loads(line)
+                    secrets.append({
+                        "type": item.get("RuleID") or item.get("DetectorName") or "secret",
+                        "file": item.get("File") or "unknown",
+                        "line": item.get("StartLine"),
+                        "secret_preview": str(item.get("Secret") or item.get("Raw") or "")[:20] + "***",
+                    })
+                except Exception:
+                    pass
+        evidence["secrets_found"] = secrets
+        evidence["secret_count"] = len(secrets)
+        evidence["finding_summary"] = (
+            f"Credential scan: {len(secrets)} secret(s) found — "
+            + "; ".join(f"{s['type']} in {s['file']}:{s.get('line','?')}" for s in secrets[:3])
+            if secrets else "No credentials or secrets found"
+        )
+
+    # --- curl / curl-headers: HTTP response evidence ---
+    elif tool_lower in {"curl", "curl-headers"}:
+        headers = {}
+        status_line = ""
+        for line in stdout.splitlines():
+            if line.startswith("HTTP/"):
+                status_line = line.strip()
+            elif ":" in line:
+                k, _, v = line.partition(":")
+                headers[k.strip().lower()] = v.strip()
+        security_headers = {
+            k: v for k, v in headers.items()
+            if k in {"server", "x-powered-by", "x-frame-options", "content-security-policy",
+                     "strict-transport-security", "x-content-type-options", "set-cookie",
+                     "www-authenticate", "cf-ray", "x-amz-request-id", "x-aspnet-version"}
+        }
+        missing_security = [
+            h for h in ["x-frame-options", "content-security-policy", "strict-transport-security",
+                        "x-content-type-options"]
+            if h not in headers
+        ]
+        tech_hints = []
+        if "server" in headers:
+            tech_hints.append(f"Server: {headers['server']}")
+        if "x-powered-by" in headers:
+            tech_hints.append(f"X-Powered-By: {headers['x-powered-by']}")
+        if "x-aspnet-version" in headers:
+            tech_hints.append(f"ASP.NET: {headers['x-aspnet-version']}")
+        evidence["http_status"] = status_line
+        evidence["security_headers"] = security_headers
+        evidence["missing_security_headers"] = missing_security
+        evidence["technology_hints"] = tech_hints
+        evidence["finding_summary"] = (
+            f"HTTP {status_line}. "
+            + (f"Tech: {'; '.join(tech_hints)}. " if tech_hints else "")
+            + (f"Missing headers: {', '.join(missing_security)}" if missing_security else "All security headers present")
+        )
+
+    # --- arjun: discovered parameters ---
+    elif tool_lower in {"arjun", "paramspider"}:
+        params = []
+        if isinstance(parsed, list):
+            params = [str(p) for p in parsed[:100]]
+        else:
+            params = [l.strip() for l in stdout.splitlines() if l.strip() and "?" not in l and len(l.strip()) < 50][:50]
+        evidence["discovered_parameters"] = params
+        evidence["parameter_count"] = len(params)
+        evidence["finding_summary"] = (
+            f"{len(params)} parameter(s) discovered: " + ", ".join(params[:10])
+            if params else "No parameters discovered"
+        )
+
+    # --- sqlmap: injection points ---
+    elif tool_lower in {"sqlmap"}:
+        injections = [l.strip() for l in stdout.splitlines()
+                      if any(k in l.lower() for k in ["parameter", "injectable", "payload", "technique", "dbms"])]
+        evidence["injection_evidence"] = injections[:20]
+        evidence["finding_summary"] = (
+            "SQLMap injection evidence: " + "; ".join(injections[:3])
+            if injections else "No SQL injection found"
+        )
+
+    else:
+        # Generic: return first meaningful output lines
+        lines = [l.strip() for l in stdout.splitlines() if l.strip()][:20]
+        evidence["output_lines"] = lines
+        evidence["finding_summary"] = lines[0] if lines else f"{tool_name} ran (no parseable output)"
+
+    return evidence
+
+
+def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_list: list[dict[str, Any]]) -> str:
+    """Build a descriptive finding title that reflects what was actually found."""
+    summaries = [e.get("finding_summary", "") for e in evidence_list if e.get("finding_summary")]
+    if not summaries:
+        return f"{phase_name} — {'Finding' if status == 'completed' else 'Partial Evidence'} [{phase_id}]"
+    # Use the first non-empty summary as the title suffix
+    primary = summaries[0][:120]
+    return f"[{phase_id}] {phase_name}: {primary}"
+
+
 def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:
-    """Convert phase ledger evidence + hypotheses into Finding rows."""
+    """Convert phase ledger + MCP tool output into rich Finding rows with real evidence."""
     from app.models.models import Asset, Vulnerability
 
     seen: set[tuple[str, str]] = set()
     primary_target = targets[0] if targets else str(job.target_query or "")
 
-    # Map severity from phase type
     PHASE_SEVERITY: dict[str, str] = {
-        "P10": "high",   # injection
-        "P11": "high",   # ssrf
-        "P12": "medium", # xss
-        "P13": "high",   # idor
-        "P14": "high",   # auth bypass
-        "P15": "medium", # file handling
+        "P09": "medium",    # nuclei vuln templates
+        "P10": "high",      # injection
+        "P11": "high",      # ssrf
+        "P12": "medium",    # xss
+        "P13": "high",      # idor
+        "P14": "high",      # auth bypass
+        "P15": "medium",    # file handling
         "P17": "critical",  # exploit validation
         "P18": "critical",  # credential exposure
     }
+
+    # Build index of mcp_results per phase from state_data
+    state = dict(job.state_data or {})
+    # phase_ledger_v2 and last_mcp_results are the sources; build a map phase→mcp_results
+    phase_mcp_map: dict[str, list[dict[str, Any]]] = {}
+    for ledger in phase_ledgers:
+        pid = ledger.get("phase_id", "")
+        if pid and ledger.get("mcp_results"):
+            phase_mcp_map[pid] = list(ledger["mcp_results"])
 
     for ledger in phase_ledgers:
         phase_id = ledger.get("phase_id", "")
@@ -262,20 +515,29 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         status = ledger.get("status", "")
         target = ledger.get("target") or primary_target
 
-        # Only persist findings from phases with successful tool runs
         tools_success = ledger.get("tools_success", [])
         tools_attempted = ledger.get("tools_attempted", [])
         if not tools_attempted:
             continue
 
-        severity = PHASE_SEVERITY.get(phase_id, "info")
-        confidence = 75 if status == "completed" else (50 if status == "partial" else 30)
-        title = f"{phase_name} — {'Finding' if status == 'completed' else 'Partial Evidence'} [{phase_id}]"
-
         key = (phase_id, str(target))
         if key in seen:
             continue
         seen.add(key)
+
+        severity = PHASE_SEVERITY.get(phase_id, "info")
+        confidence = 75 if status == "completed" else (50 if status == "partial" else 30)
+
+        # Extract per-tool evidence from MCP results stored in the ledger
+        mcp_results = phase_mcp_map.get(phase_id) or ledger.get("mcp_results") or []
+        tool_evidences: list[dict[str, Any]] = []
+        for mcp_res in mcp_results:
+            tool_name = str(mcp_res.get("tool_name") or "")
+            if mcp_res.get("status") in {"success", "done"} and tool_name:
+                ev = _extract_evidence(phase_id, tool_name, mcp_res)
+                tool_evidences.append(ev)
+
+        title = _build_redteam_title(phase_id, phase_name, status, tool_evidences)
 
         details: dict[str, Any] = {
             "phase_id": phase_id,
@@ -291,11 +553,13 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             "target": target,
             "scan_mode": "offensive_operator",
             "source_worker": "offensive_operator",
+            # RedTeam evidence — one entry per tool that ran
+            "tool_evidence": tool_evidences,
         }
 
         finding = Finding(
             scan_job_id=job.id,
-            title=title,
+            title=title[:255],
             severity=severity,
             cve=None,
             cvss=None,
@@ -308,7 +572,7 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         )
         db.add(finding)
 
-        # Also persist asset + vulnerability for completed/partial phases
+        # Persist asset + vulnerability for completed/partial phases
         if status in {"completed", "partial"} and target:
             try:
                 asset = db.query(Asset).filter(
@@ -330,14 +594,14 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
                     db.flush()
                 existing_vuln = db.query(Vulnerability).filter(
                     Vulnerability.asset_id == asset.id,
-                    Vulnerability.title == title,
+                    Vulnerability.title == title[:255],
                 ).first()
                 if not existing_vuln:
                     from datetime import datetime as _dt
                     _now = _dt.utcnow()
                     vuln = Vulnerability(
                         asset_id=asset.id,
-                        title=title,
+                        title=title[:255],
                         severity=severity,
                         tool_source=", ".join(tools_success or tools_attempted)[:100] or "offensive_operator",
                         first_detected=_now,

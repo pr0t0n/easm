@@ -450,6 +450,7 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
         )
         exit_code = raw.get("return_code", raw.get("exit_code"))
         raw_status = raw.get("status")
+        stdout_raw = str(raw.get("stdout") or "")
         contract.update(
             status="success" if raw_status in {"done", "success"} and exit_code == 0 else "failed",
             exit_code=exit_code,
@@ -457,6 +458,11 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
             stderr_path=raw.get("stderr_path") or "",
             artifact_paths=raw.get("artifact_paths") or [],
             error=raw.get("error"),
+            # Pass actual output so the runner can extract evidence without a second HTTP call.
+            stdout=stdout_raw[:10_000],
+            parsed_result=raw.get("parsed"),
+            command=raw.get("command") or "",
+            duration_seconds=raw.get("duration_seconds"),
         )
         return contract
     except HTTPException as exc:
