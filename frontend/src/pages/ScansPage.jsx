@@ -335,8 +335,8 @@ export default function ScansPage({ embedded = false }) {
       {/* Top Banner */}
       {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
         <div className="mx-auto max-w-7xl">
-          <h1 className="section-title">Scans de Superfície</h1>
-          <p className="mt-2 text-sm text-slate-400">Gerenciamento de execuções de varredura e coleta de inteligência sobre ativos</p>
+          <h1 className="section-title">Operações de RedTeam</h1>
+          <p className="mt-2 text-sm text-slate-400">Execução governada das 22 fases, com workers, MCP, Kali Runner, evidências e evolução ofensiva</p>
         </div>
       </div>}
 
@@ -347,7 +347,7 @@ export default function ScansPage({ embedded = false }) {
             <div className="lg:col-span-2 space-y-6">
               {/* Create Scan Section */}
               <section className="panel p-6">
-                <h2 className="text-lg font-semibold mb-6">Iniciar Nova Varredura</h2>
+                <h2 className="text-lg font-semibold mb-6">Iniciar teste autorizado</h2>
                 <form onSubmit={createScan} className="space-y-4">
                   <div>
                     <label className="block text-xs font-medium text-slate-400 mb-2">Alvos (separe por ;)</label>
@@ -357,7 +357,7 @@ export default function ScansPage({ embedded = false }) {
                       value={target}
                       onChange={(e) => setTarget(e.target.value)}
                     />
-                    <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera um scan individual.</p>
+                    <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera uma execução independente das 22 fases.</p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
@@ -549,7 +549,7 @@ export default function ScansPage({ embedded = false }) {
               <section className="panel p-6">
                 <div className="flex items-center justify-between mb-6">
                   <div className="flex items-center gap-3">
-                    <h2 className="text-lg font-semibold">Histórico de Varreduras</h2>
+                    <h2 className="text-lg font-semibold">Histórico operacional</h2>
                     {scans.length > 0 && (
                       <span className="text-xs font-medium text-slate-400 bg-slate-800/50 px-3 py-1 rounded-full">
                         {selectedScans.size}/{scans.length} selecionadas
@@ -593,7 +593,7 @@ export default function ScansPage({ embedded = false }) {
 
                   {scans.length === 0 ? (
                     <div className="py-12 text-center">
-                      <p className="text-sm text-slate-400">Nenhuma varredura iniciada</p>
+                      <p className="text-sm text-slate-400">Nenhuma execução iniciada</p>
                     </div>
                   ) : (
                     scans.map((scan) => (
