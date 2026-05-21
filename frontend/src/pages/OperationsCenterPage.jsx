@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import ErrorBoundary from "../components/ErrorBoundary";
 import AgentFlowPage from "./AgentFlowPage";
 import AttackEvolutionPage from "./AttackEvolutionPage";
@@ -17,7 +18,15 @@ const modules = [
 ];
 
 export default function OperationsCenterPage() {
-  const [activeModule, setActiveModule] = useState("runtime");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeModule, setActiveModule] = useState(() => {
+    const m = searchParams.get("module");
+    return modules.some((mod) => mod.id === m) ? m : "runtime";
+  });
+
+  useEffect(() => {
+    setSearchParams({ module: activeModule }, { replace: true });
+  }, [activeModule, setSearchParams]);
   const ActiveComponent = useMemo(
     () => modules.find((module) => module.id === activeModule)?.component || WorkerLogsPage,
     [activeModule],

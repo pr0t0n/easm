@@ -54,42 +54,142 @@ def stable_id(prefix: str, payload: Any) -> str:
     return f"{prefix}-{digest}"
 
 
-def default_phase_contracts() -> dict[str, dict[str, Any]]:
-    """Return P01-P22 contracts with deterministic ordering and exit rules."""
+def _load_skill_tool_map(skills_root: Path | str | None = None) -> dict[str, dict[str, Any]]:
+    """Read every skill .md and return skill_id → {required_tools, optional_tools, fallback_tools}.
+
+    Tries common relative paths when skills_root is not given; returns {} if the directory
+    is absent so callers fall back to hardcoded lists gracefully.
+    """
+    roots: list[Path] = []
+    if skills_root is not None:
+        roots = [Path(skills_root)]
+    else:
+        for candidate in ["skills", "../skills", "../../skills"]:
+            p = Path(candidate)
+            if p.is_dir() and any(p.rglob("*.md")):
+                roots.append(p)
+                break
+
+    skill_map: dict[str, dict[str, Any]] = {}
+    for root in roots:
+        for path in sorted(root.rglob("*.md")):
+            try:
+                if is_dataless_file(path):
+                    continue
+                parsed = parse_skill_markdown(path)
+                meta = parsed["metadata"]
+                skill_id = str(meta.get("skill_id") or "")
+                if not skill_id:
+                    continue
+                skill_map[skill_id] = {
+                    "required_tools": list(meta.get("required_tools") or []),
+                    "optional_tools": list(meta.get("optional_tools") or []),
+                    "fallback_tools": list(meta.get("fallback_tools") or []),
+                }
+            except Exception:  # noqa: BLE001
+                pass
+    return skill_map
+
+
+def _resolve_phase_tools(
+    skill_ids: list[str],
+    skill_map: dict[str, dict[str, Any]],
+    fallback_required: list[str],
+    fallback_optional: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Merge required/optional tools from skill metadata; fall back to hardcoded lists.
+
+    Required tools come from the skill's required_tools.
+    Optional tools include the skill's optional_tools + fallback_tools (deduplicated).
+    """
+    if not skill_map:
+        return fallback_required, fallback_optional or []
+
+    required: list[str] = []
+    optional: list[str] = []
+    for skill_id in skill_ids:
+        tools = skill_map.get(skill_id) or {}
+        required.extend(tools.get("required_tools") or [])
+        optional.extend(tools.get("optional_tools") or [])
+        optional.extend(tools.get("fallback_tools") or [])
+
+    seen: set[str] = set()
+    req_deduped = [t for t in required if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
+    opt_deduped = [t for t in optional if t not in seen and not seen.add(t)]  # type: ignore[func-returns-value]
+
+    if not req_deduped:
+        return fallback_required, fallback_optional or []
+    return req_deduped, opt_deduped
+
+
+def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, dict[str, Any]]:
+    """Return P01-P22 contracts with tools resolved from skill metadata.
+
+    Tool lists are read from the skill markdown frontmatter (required_tools /
+    optional_tools / fallback_tools). The hardcoded tuples serve as fallbacks
+    when the skills directory is not mounted (e.g. unit tests without Docker).
+    """
+    skill_map = _load_skill_tool_map(skills_root)
+
+    # (phase_id, name, description, skill_ids, fb_required, fb_optional)
     rows = [
-        ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets", ["skill.recon.subdomain_enumeration"], ["subfinder"]),
-        ("P02", "Port Service Discovery", "Discover exposed ports and services", ["skill.recon.port_service_discovery"], ["naabu"]),
-        ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
-        ("P04", "Parameter Discovery", "Discover input points and parameters", ["skill.discovery.parameter_discovery"], ["arjun"]),
-        ("P05", "Surface Expansion", "Expand hidden routes and crawlable content", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
-        ("P06", "HTTP Fingerprinting", "Fingerprint HTTP behavior, headers and WAF clues", ["skill.recon.port_service_discovery"], ["naabu"]),
-        ("P07", "Technology Detection", "Identify services and technology versions", ["skill.recon.port_service_discovery"], ["naabu"]),
-        ("P08", "JavaScript Endpoint Analysis", "Analyze application routes and script-linked endpoints", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
-        ("P09", "Content Discovery", "Discover files and directories", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
-        ("P10", "Injection Testing", "Test injection hypotheses with controls", ["skill.sqli_testing"], ["curl"]),
-        ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses", ["skill.vuln.ssrf"], ["nuclei"]),
-        ("P12", "XSS Testing", "Validate reflected or stored XSS safely", ["skill.stored_xss_testing"], ["curl"]),
-        ("P13", "Access Control Testing", "Validate object and authorization boundaries", ["skill.idor_object_authorization"], ["curl"]),
-        ("P14", "Auth Boundary Testing", "Test authentication and session boundaries", ["skill.vuln.auth_bypass"], ["ffuf"]),
-        ("P15", "File Handling Testing", "Validate exposed files and upload-adjacent risks", ["skill.chain.exposed_git_to_credential_leak"], ["curl"]),
-        ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage", ["skill.discovery.parameter_discovery"], ["arjun"]),
-        ("P17", "Exploit Validation", "Reproduce validated exploit paths safely", ["skill.vuln.sqli"], ["sqlmap"]),
-        ("P18", "Credential Exposure Boundary", "Validate credential exposure only when authorized", ["skill.chain.exposed_git_to_credential_leak"], ["curl"]),
-        ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls", ["skill.idor_object_authorization"], ["curl"]),
-        ("P20", "Attack Path Correlation", "Build offensive chains from evidence", ["skill.chain.exposed_git_to_credential_leak"], ["curl"]),
-        ("P21", "Evidence Quality Review", "Score evidence and false positive controls", ["skill.reporting.evidence_quality"], ["manual_review"]),
-        ("P22", "Campaign Reporting", "Build offensive campaign narrative", ["skill.technical_report"], ["report-builder"]),
+        ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets",
+         ["skill.recon.subdomain_enumeration"], ["subfinder"], ["amass", "dnsx", "assetfinder"]),
+        ("P02", "Port Service Discovery", "Discover exposed ports and services",
+         ["skill.recon.port_service_discovery"], ["naabu"], ["nmap", "masscan"]),
+        ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
+         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["gobuster", "katana"]),
+        ("P04", "Parameter Discovery", "Discover input points and parameters",
+         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf"]),
+        ("P05", "Surface Expansion", "Expand hidden routes and crawlable content",
+         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["gobuster", "katana"]),
+        ("P06", "HTTP Fingerprinting", "Fingerprint HTTP behavior, headers and WAF clues",
+         ["skill.recon.port_service_discovery"], ["naabu"], ["nmap", "httpx"]),
+        ("P07", "Technology Detection", "Identify services and technology versions",
+         ["skill.recon.port_service_discovery"], ["naabu"], ["whatweb-basic", "httpx"]),
+        ("P08", "JavaScript Endpoint Analysis", "Analyze application routes and script-linked endpoints",
+         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["katana", "katana-js"]),
+        ("P09", "Content Discovery", "Discover files and directories",
+         ["skill.discovery.endpoint_discovery"], ["ffuf"], ["gobuster", "feroxbuster"]),
+        ("P10", "Injection Testing", "Test injection hypotheses with controls",
+         ["skill.sqli_testing"], ["curl"], ["sqlmap", "manual_http_probe"]),
+        ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses",
+         ["skill.vuln.ssrf"], ["curl"], ["interactsh", "ffuf", "wapiti"]),
+        ("P12", "XSS Testing", "Validate reflected or stored XSS safely",
+         ["skill.stored_xss_testing"], ["curl"], ["dalfox", "manual_http_probe"]),
+        ("P13", "Access Control Testing", "Validate object and authorization boundaries",
+         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe"]),
+        ("P14", "Auth Boundary Testing", "Test authentication and session boundaries",
+         ["skill.vuln.auth_bypass"], ["ffuf"], ["hydra", "curl"]),
+        ("P15", "File Handling Testing", "Validate exposed files and upload-adjacent risks",
+         ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["git", "gitleaks"]),
+        ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage",
+         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf"]),
+        ("P17", "Exploit Validation", "Reproduce validated exploit paths safely",
+         ["skill.vuln.sqli"], ["sqlmap"], ["wapiti"]),
+        ("P18", "Credential Exposure Boundary", "Validate credential exposure only when authorized",
+         ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["gitleaks", "trufflehog-filesystem"]),
+        ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls",
+         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe"]),
+        ("P20", "Attack Path Correlation", "Build offensive chains from evidence",
+         ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["manual_correlation"]),
+        ("P21", "Evidence Quality Review", "Score evidence and false positive controls",
+         ["skill.reporting.evidence_quality"], ["manual_review"], []),
+        ("P22", "Campaign Reporting", "Build offensive campaign narrative",
+         ["skill.technical_report"], ["report-builder"], ["manual_review"]),
     ]
+
     contracts: dict[str, dict[str, Any]] = {}
-    for phase_id, name, description, skills, tools in rows:
+    for phase_id, name, description, skills, fb_required, fb_optional in rows:
+        required_tools, optional_tools = _resolve_phase_tools(skills, skill_map, fb_required, fb_optional)
         contracts[phase_id] = {
             "phase_id": phase_id,
             "name": name,
             "description": description,
             "required_skills": skills,
             "optional_skills": [],
-            "required_tools": tools,
-            "optional_tools": [],
+            "required_tools": required_tools,
+            "optional_tools": optional_tools,
             "minimum_evidence": ["tool_output", "raw_tool_output", "parsed_result"],
             "exit_criteria": {
                 "minimum_required_tools_attempted": 1,
@@ -101,9 +201,6 @@ def default_phase_contracts() -> dict[str, dict[str, Any]]:
             },
             "retry_policy": {"max_retries": 2, "fallback_allowed": True, "rag_reconsult_allowed": True},
         }
-    # P11: interactsh is optional (OOB callback tool not available in all runners);
-    # nuclei + curl can validate SSRF without an OOB listener.
-    contracts["P11"]["optional_tools"] = ["interactsh", "curl"]
     return contracts
 
 
@@ -163,7 +260,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
             required_arguments=["target"],
             output_format="json",
             parser=parser,
-            timeout_policy={"default_timeout": 120, "max_timeout": 600},
+            timeout_policy={"default_timeout": 300, "max_timeout": 1800},
             risk_level="medium",
             noise_level="medium",
         )

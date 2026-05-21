@@ -15,12 +15,7 @@ import ScanOperationsPage from "./pages/ScanOperationsPage";
 import OperationsCenterPage from "./pages/OperationsCenterPage";
 import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
-import WorkersPage from "./pages/WorkersPage";
-import JobsRegistryPage from "./pages/JobsRegistryPage";
 import LearningPage from "./pages/LearningPage";
-import WorkerLogsPage from "./pages/WorkerLogsPage";
-import PhaseMonitorPage from "./pages/PhaseMonitorPage";
-import AgentFlowPage from "./pages/AgentFlowPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -93,13 +88,13 @@ export default function App() {
                     <Route path="/agendamento" element={<Navigate to="/scan" replace />} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
-                    <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />
                     <Route path="/operacional" element={<AdminOnly><OperationsCenterPage /></AdminOnly>} />
-                    <Route path="/workers" element={<AdminOnly><WorkersPage /></AdminOnly>} />
-                    <Route path="/jobs" element={<AdminOnly><JobsRegistryPage /></AdminOnly>} />
+                    <Route path="/phase-monitor" element={<Navigate to="/operacional?module=phases" replace />} />
+                    <Route path="/workers" element={<Navigate to="/operacional?module=workers" replace />} />
+                    <Route path="/jobs" element={<Navigate to="/operacional?module=jobs" replace />} />
+                    <Route path="/worker-logs" element={<Navigate to="/operacional?module=runtime" replace />} />
+                    <Route path="/agent-flow" element={<Navigate to="/operacional?module=agents" replace />} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
-                    <Route path="/worker-logs" element={<AdminOnly><WorkerLogsPage /></AdminOnly>} />
-                    <Route path="/agent-flow" element={<AdminOnly><AgentFlowPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
                   </RoutedBoundary>

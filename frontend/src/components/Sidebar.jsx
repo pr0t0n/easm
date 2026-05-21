@@ -33,7 +33,7 @@ export default function Sidebar() {
     {
       title: "Vulnerability Ops",
       items: [
-        { to: "/scan", label: "Scans e Agendamentos", icon: "scans", adminOnly: true },
+        { to: "/scan", label: "Scan", icon: "scans", adminOnly: true },
         { to: "/operacional", label: "Centro Operacional", icon: "operations", adminOnly: true },
       ],
     },
@@ -43,12 +43,6 @@ export default function Sidebar() {
         { to: "/vulnerabilidades", label: "Vulnerabilities", adminOnly: false },
         { to: "/aprendizado", label: "Aprendizado", adminOnly: true },
         { to: "/relatorios", label: "Relatórios", adminOnly: false },
-      ],
-    },
-    {
-      title: "Management",
-      items: [
-        { to: "/configuracao", label: "Settings", adminOnly: true },
       ],
     },
     {

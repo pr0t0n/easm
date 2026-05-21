@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     llm_risk_strategy_profile: str = "balanced"
     llm_risk_strategies: str = "prompt-injection,jailbreak,jailbreak:composite"
     llm_risk_num_tests: int = 5
-    llm_risk_timeout_seconds: int = 15
+    llm_risk_timeout_seconds: int = 60
     ai_recommendations_use_ollama: bool = True
-    ai_recommendations_timeout_seconds: int = 20
+    ai_recommendations_timeout_seconds: int = 60
     frontend_origin: str = "http://localhost:5173"
     frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
     frontend_origin_regex: str | None = None
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     mcp_rag_enabled: bool = True
     mcp_execute_tools_via_mcp: bool = True
     mcp_default_top_k: int = 5
-    mcp_request_timeout_seconds: int = 20
+    mcp_request_timeout_seconds: int = 60
     offensive_operator_enabled: bool = True
 
 
