@@ -2220,6 +2220,17 @@ def create_scan(
         "response_field": str(payload.llm_risk_response_field or "").strip(),
     }
 
+    scan_level = str(payload.scan_level or "full").lower().strip()
+    if scan_level not in {"full", "asm"}:
+        scan_level = "full"
+    auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
+    initial_state: dict[str, Any] = {
+        "llm_risk": llm_risk_state,
+        "scan_level": scan_level,
+    }
+    if auth_config:
+        initial_state["auth_config"] = auth_config
+
     job = ScanJob(
         owner_id=current_user.id,
         access_group_id=access_group_id,
@@ -2229,7 +2240,7 @@ def create_scan(
         compliance_status=compliance_status,
         authorization_id=None,
         current_step="1. Amass Subdomain Recon",
-        state_data={"llm_risk": llm_risk_state},
+        state_data=initial_state,
     )
     db.add(job)
     db.flush()

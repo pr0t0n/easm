@@ -19,6 +19,10 @@ class ScanCreate(BaseModel):
     llm_risk_strategy_profile: str | None = None
     llm_risk_request_template: str | None = None
     llm_risk_response_field: str | None = None
+    # EASM scan level: 'full' (P01-P22) or 'asm' (passive recon only P01-P08+P18+P21-P22)
+    scan_level: str = "full"
+    # Target authentication for scanner (propagated to ffuf/curl/sqlmap)
+    auth_config: dict[str, Any] | None = None
 
 
 class ScanResponse(BaseModel):

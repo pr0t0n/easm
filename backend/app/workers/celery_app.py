@@ -28,7 +28,9 @@ celery.conf.update(
     task_reject_on_worker_lost=True,
     worker_disable_rate_limits=True,
     broker_transport_options={
-        "visibility_timeout": max(300, int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "3600"))),
+        # Must be >= task_time_limit otherwise long-running scans get redelivered
+        # and re-executed from P01 (orphan retry storm).
+        "visibility_timeout": max(300, int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "25200"))),
     },
     beat_schedule={
         # Dispara a cada minuto para verificar schedules devidos

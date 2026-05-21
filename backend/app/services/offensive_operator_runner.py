@@ -25,6 +25,19 @@ from app.services.offensive_operator_core import (
     create_offensive_state,
 )
 from app.services.capability_runtime import mark_capability
+from app.services.scan_intelligence import (
+    expand_targets_after_p01,
+    detect_tech_stack,
+    tools_to_inject_for_tech,
+    wordlist_for_tech,
+    validate_critical_findings,
+    evasion_profile_for,
+    enrich_finding_with_mappings,
+    auth_headers_from_state,
+    has_auth,
+    phases_for_scan_level,
+    extract_learning_signals,
+)
 
 
 # Phase → capability mapping: which capabilities each phase contributes evidence for
@@ -140,6 +153,15 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         db.commit()
     runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
 
+    # Read EASM scan-level (asm/full) from state_data; default = full.
+    initial_state = dict(job.state_data or {})
+    scan_level = str(initial_state.get("scan_level") or "full").lower()
+    allowed_phases = phases_for_scan_level(scan_level)
+    if allowed_phases is not None:
+        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                       message=f"scan_level={scan_level} — limiting to phases: {sorted(allowed_phases)}"))
+        db.commit()
+
     for target in targets:
         if not target:
             continue
@@ -148,6 +170,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
 
         for phase_id in PHASE_ORDER:
+            # Skip phases outside the configured scan_level (asm = recon only).
+            if allowed_phases is not None and phase_id not in allowed_phases:
+                continue
             job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({target})"
             state = dict(job.state_data or {})
             state.update(
@@ -279,6 +304,40 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                 if p not in ports and 1 <= p <= 65535:
                                     ports.append(p)
                 state["discovered_ports"] = ports[:500]
+
+            # ─── Scan Intelligence hooks ───────────────────────────────────
+            # 1. Multi-target propagation: after P01, expand to discovered subdomains
+            if phase_id == "P01":
+                expanded = expand_targets_after_p01(state, target, mcp_list)
+                if len(expanded) > 1:
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                   message=f"target_expansion phase=P01 root={target} expanded_to={len(expanded)} hosts (first 5: {expanded[1:6]})"))
+            # 2. Tech-stack detection: every phase contributes signals
+            tech_stack = detect_tech_stack(state, mcp_list)
+            if tech_stack.get("detected") and phase_id in {"P06", "P07"}:
+                db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                               message=f"tech_detected phase={phase_id} stack={tech_stack['detected']} cms={tech_stack.get('cms')} waf={tech_stack.get('waf')}"))
+            # 3. Evasion profile: adapt rate-limits when WAF detected
+            evasion = evasion_profile_for(tech_stack)
+            state["evasion_profile"] = evasion
+            if tech_stack.get("waf") and not state.get("_evasion_logged"):
+                db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                               message=f"evasion_engaged {evasion['rationale']} rate={evasion['rate_limit']}/s threads={evasion['threads']}"))
+                state["_evasion_logged"] = True
+            # 4. Evidence validation: re-probe critical findings via MCP curl
+            try:
+                def _call_curl(url: str) -> dict:
+                    import requests as _r
+                    headers = {"User-Agent": evasion.get("user_agents", ["Mozilla/5.0"])[0], **auth_headers_from_state(state)}
+                    r = _r.get(url, headers=headers, timeout=15, allow_redirects=True, verify=False)
+                    return {"status_code": r.status_code, "body": r.text[:500]}
+                validations = validate_critical_findings(state, mcp_list, call_curl=_call_curl)
+                if validations:
+                    confirmed = sum(1 for v in validations if v.get("validation_status") == "confirmed")
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                   message=f"finding_validation phase={phase_id} validated={len(validations)} confirmed={confirmed}"))
+            except Exception as exc:  # noqa: BLE001
+                pass
             # adversarial_hypothesis needs: pentest_hypotheses, skill_invocation, tool_selection_contract
             hypotheses = list(state.get("pentest_hypotheses") or [])
             for h in offensive_state.get("open_hypotheses", [])[-5:]:
@@ -347,6 +406,53 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     break
                 # Otherwise continue to the next phase — record as covered/partial.
 
+    # ─── Multi-target propagation: re-run recon phases on discovered subdomains ───
+    # After completing the primary loop, iterate the top discovered subdomains and
+    # run recon-heavy phases (P02-P09) against each. Skipped when scan_level=asm
+    # already covered subset, when state doesn't have expanded_targets, or when
+    # tools_attempted on primary is empty (no point propagating a failed scan).
+    state = dict(job.state_data or {})
+    expanded = list(state.get("expanded_targets") or [])
+    # exclude root (already scanned) and cap propagation to first 5 subs to bound runtime
+    secondary_targets = [t for t in expanded[1:6] if t and t != targets[0]]
+    recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07", "P09"]
+    if secondary_targets and scan_level != "asm":
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                       message=f"multi_target_propagation starting for {len(secondary_targets)} subdomains: {secondary_targets}"))
+        db.commit()
+        for sub_target in secondary_targets:
+            sub_scope = _scope_from_job(job, sub_target, execution_mode)
+            for phase_id in recon_propagation_phases:
+                if allowed_phases is not None and phase_id not in allowed_phases:
+                    continue
+                job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} (sub:{sub_target})"
+                db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                               message=f"dispatch phase_id={phase_id} tool=kali target={sub_target} (multi-target)"))
+                db.commit()
+                try:
+                    result = runtime.run_phase(phase_id, sub_target, sub_scope, execution_mode, offensive_state)
+                    sub_ledger = result["phase_ledger"]
+                    sub_ledger["target"] = sub_target
+                    sub_ledger["mcp_results"] = result.get("mcp_results") or []
+                    sub_ledger["multi_target_propagation"] = True
+                    phase_ledgers.append(sub_ledger)
+                    offensive_state = result["offensive_state"]
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                                   message=f"phase_result phase_id={phase_id} status={sub_ledger.get('status')} target={sub_target} tools_attempted={sub_ledger.get('tools_attempted', [])}"))
+                    state = dict(job.state_data or {})
+                    state["phase_ledger_v2"] = phase_ledgers
+                    job.state_data = state
+                    db.commit()
+                    try:
+                        _persist_offensive_findings(db, job, phase_ledgers, [sub_target])
+                        db.commit()
+                    except Exception as exc:  # noqa: BLE001
+                        db.rollback()
+                except Exception as exc:  # noqa: BLE001
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                   message=f"multi_target_propagation_failed phase={phase_id} target={sub_target} error={exc!s}"))
+                    db.commit()
+
     campaign = {
         "target": targets[0] if targets else "",
         "targets": targets,
@@ -388,6 +494,55 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     evidence={"easm_rating": state["easm_rating"]})
     mark_capability(state, "executive_analyst", source="report_builder", status="completed",
                     evidence={"summary": state["executive_summary"]})
+
+    # ─── Learning loop: extract VulnerabilityLearning seeds from scan results ───
+    try:
+        learning_signals = extract_learning_signals(state, phase_ledgers)
+        if learning_signals:
+            from app.models.models import VulnerabilityLearning
+            from datetime import datetime as _dt
+            persisted = 0
+            for sig in learning_signals[:30]:  # cap to 30 per scan
+                exists = db.query(VulnerabilityLearning).filter(
+                    VulnerabilityLearning.title == (sig.get("title") or "")[:255],
+                    VulnerabilityLearning.vulnerability_type == (sig.get("template") or "nuclei")[:120],
+                ).first()
+                if exists:
+                    continue
+                row = VulnerabilityLearning(
+                    title=(sig.get("title") or sig.get("template") or "scan-derived")[:255],
+                    vulnerability_type=(sig.get("template") or "nuclei")[:120],
+                    url=(sig.get("evidence_url") or "")[:500],
+                    final_url=(sig.get("evidence_url") or "")[:500],
+                    summary=sig.get("description") or "",
+                    impact=f"Tech stack: {', '.join(sig.get('tech_stack', [])) or 'unknown'}. Severity: {sig.get('severity')}",
+                    remediation="Review nuclei template guidance and apply patch/configuration changes.",
+                    evidence_signals=[sig.get("template"), sig.get("cve")],
+                    safe_validation_steps=[f"curl {sig.get('evidence_url')}", "Verify with nuclei -id " + str(sig.get("template"))],
+                    affected_phases=[sig.get("phase_id")],
+                    affected_skills=[],
+                    recommended_tools=["nuclei", "curl"],
+                    technique_count=1,
+                    status="pending_review",
+                    source="scan_extraction",
+                    source_kind="scan_finding",
+                    model="scan_intelligence_extractor",
+                    owner_id=job.owner_id,
+                    created_at=_dt.utcnow(),
+                    updated_at=_dt.utcnow(),
+                )
+                db.add(row)
+                persisted += 1
+            if persisted:
+                db.commit()
+                db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                               message=f"learning_loop persisted={persisted} new_signals_from_scan"))
+                db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                       message=f"learning_loop_failed error={exc!s}"))
+        db.commit()
 
     job.state_data = state
     job.mission_progress = int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100))
@@ -873,6 +1028,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         title = _build_redteam_title(phase_id, phase_name, status, tool_evidences)
         recommendation = _generate_recommendation(phase_id, tool_evidences)
 
+        # State-derived context for MITRE/OWASP enrichment + tech_stack snapshot
+        state_snap = dict(job.state_data or {})
+        tech_snap = state_snap.get("tech_stack") or {}
+
         details: dict[str, Any] = {
             "phase_id": phase_id,
             "phase_name": phase_name,
@@ -889,7 +1048,12 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             "source_worker": "offensive_operator",
             # RedTeam evidence — one entry per tool that ran
             "tool_evidence": tool_evidences,
+            # Tech stack snapshot at time of finding
+            "tech_stack": tech_snap.get("detected") or [],
+            "cms_detected": tech_snap.get("cms") or [],
+            "waf_detected": tech_snap.get("waf") or [],
         }
+        details = enrich_finding_with_mappings(phase_id, details)
 
         finding = Finding(
             scan_job_id=job.id,

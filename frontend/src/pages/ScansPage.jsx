@@ -30,6 +30,17 @@ export default function ScansPage({ embedded = false }) {
 
   // Unified mode selector: "now" | "schedule" | "targets"
   const [mode, setMode] = useState("now");
+  const [scanLevel, setScanLevel] = useState("full"); // 'full' | 'asm'
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authConfig, setAuthConfig] = useState({
+    type: "bearer", // bearer | cookie | basic | header
+    token: "",
+    cookie: "",
+    username: "",
+    password: "",
+    headerName: "X-API-Key",
+    headerValue: "",
+  });
   const [scheduleForm, setScheduleForm] = useState({
     frequency: "daily",
     run_time: "00:00",
@@ -37,6 +48,17 @@ export default function ScansPage({ embedded = false }) {
     day_of_month: 1,
     enabled: true,
   });
+
+  const buildAuthPayload = () => {
+    if (!authEnabled) return null;
+    if (authConfig.type === "bearer" && authConfig.token) return { type: "bearer", token: authConfig.token };
+    if (authConfig.type === "cookie" && authConfig.cookie) return { type: "cookie", cookie: authConfig.cookie };
+    if (authConfig.type === "basic" && authConfig.username) return { type: "basic", username: authConfig.username, password: authConfig.password };
+    if (authConfig.type === "header" && authConfig.headerName && authConfig.headerValue) {
+      return { type: "header", headers: { [authConfig.headerName]: authConfig.headerValue } };
+    }
+    return null;
+  };
 
   const parseTargets = (raw) => {
     return String(raw || "")
@@ -229,6 +251,8 @@ export default function ScansPage({ embedded = false }) {
             target_query: singleTarget,
             mode: "single",
             access_group_id: accessGroupId ? Number(accessGroupId) : null,
+            scan_level: scanLevel,
+            auth_config: buildAuthPayload(),
           });
           created.push(singleTarget);
         } catch (err) {
@@ -442,6 +466,76 @@ export default function ScansPage({ embedded = false }) {
                       />
                       <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera uma execução independente das 22 fases.</p>
                     </div>
+
+                    {/* Scan Level (EASM/Full) */}
+                    {mode === "now" && (
+                      <div>
+                        <label className="block text-xs font-medium text-slate-400 mb-2">Profundidade do Scan</label>
+                        <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs">
+                          <button type="button" onClick={() => setScanLevel("full")}
+                            className={`px-4 py-1.5 rounded-md transition-colors ${scanLevel === "full" ? "bg-emerald-700/40 text-emerald-200 border border-emerald-700" : "text-slate-400 hover:text-slate-200"}`}>
+                            Full (P01-P22, exploração)
+                          </button>
+                          <button type="button" onClick={() => setScanLevel("asm")}
+                            className={`px-4 py-1.5 rounded-md transition-colors ${scanLevel === "asm" ? "bg-amber-700/40 text-amber-200 border border-amber-700" : "text-slate-400 hover:text-slate-200"}`}>
+                            ASM (recon passivo, sem exploitation)
+                          </button>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {scanLevel === "asm"
+                            ? "ASM analisa apenas P01-P08 + P18 + P21-P22 (descoberta de superfície, sem exploração ativa)."
+                            : "Full executa as 22 fases incluindo testes de exploração."}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Authentication */}
+                    {mode === "now" && (
+                      <div>
+                        <label className="inline-flex items-center gap-2 text-xs text-slate-400 mb-2">
+                          <input type="checkbox" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
+                          <span>Autenticação no scanner (testa rotas protegidas)</span>
+                        </label>
+                        {authEnabled && (
+                          <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-3">
+                            <div>
+                              <label className="block text-xs text-slate-500 mb-1">Tipo</label>
+                              <select className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
+                                value={authConfig.type} onChange={(e) => setAuthConfig({...authConfig, type: e.target.value})}>
+                                <option value="bearer">Bearer Token (JWT/OAuth)</option>
+                                <option value="cookie">Cookie (PHPSESSID, etc)</option>
+                                <option value="basic">Basic Auth</option>
+                                <option value="header">Header customizado (X-API-Key)</option>
+                              </select>
+                            </div>
+                            {authConfig.type === "bearer" && (
+                              <input type="text" placeholder="eyJhbGc..." className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
+                                value={authConfig.token} onChange={(e) => setAuthConfig({...authConfig, token: e.target.value})} />
+                            )}
+                            {authConfig.type === "cookie" && (
+                              <input type="text" placeholder="session=abc123; csrftoken=xyz" className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
+                                value={authConfig.cookie} onChange={(e) => setAuthConfig({...authConfig, cookie: e.target.value})} />
+                            )}
+                            {authConfig.type === "basic" && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <input type="text" placeholder="username" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
+                                  value={authConfig.username} onChange={(e) => setAuthConfig({...authConfig, username: e.target.value})} />
+                                <input type="password" placeholder="password" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
+                                  value={authConfig.password} onChange={(e) => setAuthConfig({...authConfig, password: e.target.value})} />
+                              </div>
+                            )}
+                            {authConfig.type === "header" && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <input type="text" placeholder="X-API-Key" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
+                                  value={authConfig.headerName} onChange={(e) => setAuthConfig({...authConfig, headerName: e.target.value})} />
+                                <input type="text" placeholder="valor" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
+                                  value={authConfig.headerValue} onChange={(e) => setAuthConfig({...authConfig, headerValue: e.target.value})} />
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-4">
                       <div>
