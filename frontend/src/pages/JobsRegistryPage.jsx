@@ -87,7 +87,7 @@ export default function JobsRegistryPage() {
                 <div key={event.id} style={{ padding: "12px 22px", borderBottom: "1px solid var(--line-soft)" }}>
                   <div style={{ fontWeight: 600, fontSize: 12.5 }}>{event.event_type}</div>
                   <div className="mono-sm soft" style={{ marginTop: 3 }}>{event.message}</div>
-                  <div className="mono-sm muted" style={{ marginTop: 3 }}>{new Date(event.created_at).toLocaleString("pt-BR")}</div>
+                  <div className="mono-sm muted" style={{ marginTop: 3 }}>{new Date(event.created_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</div>
                 </div>
               ))}
             </div>

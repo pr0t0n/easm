@@ -31,7 +31,7 @@ export default function ExecutionCard({ run }) {
             </div>
           )}
           <p className="text-slate-500">
-            Iniciado em: <span className="text-slate-300">{run.created_at ? new Date(run.created_at).toLocaleString("pt-BR") : "-"}</span>
+            Iniciado em: <span className="text-slate-300">{run.created_at ? new Date(run.created_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "-"}</span>
           </p>
         </div>
       )}

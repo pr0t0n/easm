@@ -16,7 +16,7 @@ const statusClass = {
 function formatDate(value) {
   if (!value) return "-";
   try {
-    return new Date(value).toLocaleString();
+    return new Date(value).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
   } catch {
     return "-";
   }

@@ -3,11 +3,24 @@ import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 import MissionProgress from "../components/MissionProgress";
 
+// Formats a UTC date string to São Paulo timezone (America/Sao_Paulo, UTC-3)
+function fmtDateTimeSP(value) {
+  if (!value) return "-";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return dt.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+}
+
 export default function ScansPage({ embedded = false }) {
   const [target, setTarget] = useState("");
   const [mode, setMode] = useState("single");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState("daily");
+  const [scheduleTime, setScheduleTime] = useState("00:00");
   const [accessGroupId, setAccessGroupId] = useState("");
   const [groups, setGroups] = useState([]);
+  const [schedules, setSchedules] = useState([]);
+  const [scheduleEditingId, setScheduleEditingId] = useState(null);
   const [scans, setScans] = useState([]);
   const [selected, setSelected] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -36,16 +49,20 @@ export default function ScansPage({ embedded = false }) {
       .filter(Boolean);
   };
 
-  const fmtDateTime = (value) => {
-    if (!value) return "-";
-    const dt = new Date(value);
-    if (Number.isNaN(dt.getTime())) return "-";
-    return dt.toLocaleString();
-  };
+  const fmtDateTime = fmtDateTimeSP;
 
   const loadScans = async () => {
     const { data } = await client.get("/api/scans");
     setScans(data);
+  };
+
+  const loadSchedules = async () => {
+    try {
+      const { data } = await client.get("/api/schedules");
+      setSchedules(data);
+    } catch {
+      setSchedules([]);
+    }
   };
 
   const loadLogs = async (scanId) => {
@@ -73,6 +90,7 @@ export default function ScansPage({ embedded = false }) {
 
   useEffect(() => {
     loadScans();
+    loadSchedules();
     client.get("/api/access-groups").then((res) => setGroups(res.data));
   }, []);
 
@@ -134,6 +152,57 @@ export default function ScansPage({ embedded = false }) {
     setAuthStatus(`Alvo ${singleTarget} validado e policy liberada para este scan.`);
   };
 
+  const createSchedule = async (targetsText) => {
+    try {
+      if (scheduleEditingId) {
+        await client.put(`/api/schedules/${scheduleEditingId}`, {
+          targets_text: targetsText,
+          frequency: scheduleFrequency,
+          run_time: scheduleTime,
+          access_group_id: accessGroupId ? Number(accessGroupId) : null,
+          enabled: true,
+        });
+        setScheduleEditingId(null);
+        setAuthStatus("Agendamento atualizado com sucesso.");
+      } else {
+        await client.post("/api/schedules", {
+          targets_text: targetsText,
+          scan_type: "full",
+          frequency: scheduleFrequency,
+          run_time: scheduleTime,
+          access_group_id: accessGroupId ? Number(accessGroupId) : null,
+          enabled: true,
+        });
+        setAuthStatus(`Agendamento criado: ${scheduleFrequency} às ${scheduleTime}.`);
+      }
+      await loadSchedules();
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || err?.message || "Falha ao criar agendamento.");
+    }
+  };
+
+  const deleteSchedule = async (schedId) => {
+    const confirmed = window.confirm("Deseja excluir este agendamento?");
+    if (!confirmed) return;
+    try {
+      await client.delete(`/api/schedules/${schedId}`);
+      await loadSchedules();
+      setAuthStatus(`Agendamento #${schedId} excluído.`);
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || "Falha ao excluir agendamento.");
+    }
+  };
+
+  const runScheduleNow = async (schedId) => {
+    try {
+      const { data } = await client.post(`/api/schedules/${schedId}/execute`);
+      await loadScans();
+      setAuthStatus(`Agendamento #${schedId} executado agora: ${data.batches_created || 0} job(s).`);
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || "Falha ao executar agendamento.");
+    }
+  };
+
   const createScan = async (e) => {
     e.preventDefault();
     const parsedTargets = parseTargets(target);
@@ -147,6 +216,14 @@ export default function ScansPage({ embedded = false }) {
     }
     setSubmitting(true);
     try {
+      // If scheduling, create a schedule instead of immediate scans
+      if (scheduleEnabled) {
+        await createSchedule(target);
+        setTarget("");
+        setSubmitting(false);
+        return;
+      }
+
       const created = [];
       const failed = [];
 
@@ -362,23 +439,6 @@ export default function ScansPage({ embedded = false }) {
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-2">Modo de Execução</label>
-                      {embedded ? (
-                        <div className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-200">
-                          Unitário
-                        </div>
-                      ) : (
-                        <select
-                          className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                          value={mode}
-                          onChange={(e) => setMode(e.target.value)}
-                        >
-                          <option value="single">Unitário</option>
-                          <option value="scheduled">Agendado</option>
-                        </select>
-                      )}
-                    </div>
-                    <div>
                       <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
                       <select
                         className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
@@ -391,6 +451,43 @@ export default function ScansPage({ embedded = false }) {
                         ))}
                       </select>
                     </div>
+                  </div>
+
+                  {/* Agendar checkbox */}
+                  <div className="rounded-lg border border-slate-700/70 bg-slate-900/20 p-4 space-y-3">
+                    <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={scheduleEnabled}
+                        onChange={(e) => setScheduleEnabled(e.target.checked)}
+                      />
+                      Agendar (criar agendamento recorrente em vez de executar agora)
+                    </label>
+                    {scheduleEnabled && (
+                      <div className="grid grid-cols-2 gap-4 pt-2">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Frequência</label>
+                          <select
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
+                            value={scheduleFrequency}
+                            onChange={(e) => setScheduleFrequency(e.target.value)}
+                          >
+                            <option value="daily">Diário</option>
+                            <option value="weekly">Semanal</option>
+                            <option value="monthly">Mensal</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-400 mb-2">Horário (HH:MM)</label>
+                          <input
+                            type="time"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100"
+                            value={scheduleTime}
+                            onChange={(e) => setScheduleTime(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-lg border border-slate-700/70 bg-slate-900/20 p-4 space-y-4">
@@ -540,7 +637,9 @@ export default function ScansPage({ embedded = false }) {
                     disabled={submitting}
                     className="btn-primary w-full"
                   >
-                    {submitting ? "Iniciando..." : "Iniciar Varredura"}
+                    {submitting
+                      ? (scheduleEnabled ? "Agendando..." : "Iniciando...")
+                      : (scheduleEnabled ? "Criar Agendamento" : "Iniciar Varredura")}
                   </button>
                 </form>
               </section>
@@ -656,6 +755,40 @@ export default function ScansPage({ embedded = false }) {
                   )}
                 </div>
               </section>
+
+              {/* Schedules List */}
+              {schedules.length > 0 && (
+                <section className="panel p-6">
+                  <h2 className="text-lg font-semibold mb-4">Agendamentos Ativos</h2>
+                  <div className="space-y-2">
+                    {schedules.map((sched) => (
+                      <div key={sched.id} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-100 text-sm">#{sched.id} · {sched.frequency}</p>
+                            <p className="text-xs text-slate-400 mt-0.5 truncate">{sched.targets_text || (sched.targets || []).join("; ")}</p>
+                            <p className="text-xs text-slate-500 mt-0.5">Horário: {sched.run_time}{!sched.enabled ? " · desativado" : ""}</p>
+                          </div>
+                          <div className="flex gap-2 flex-shrink-0">
+                            <button
+                              onClick={() => runScheduleNow(sched.id)}
+                              className="text-xs px-2 py-1 rounded-lg bg-blue-900/20 text-blue-300 border border-blue-800/50 hover:bg-blue-900/40 transition-colors"
+                            >
+                              Executar
+                            </button>
+                            <button
+                              onClick={() => deleteSchedule(sched.id)}
+                              className="text-xs px-2 py-1 rounded-lg bg-rose-900/20 text-rose-300 border border-rose-800/50 hover:bg-rose-900/40 transition-colors"
+                            >
+                              Excluir
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
             </div>
 
             {/* Sidebar */}
@@ -664,16 +797,6 @@ export default function ScansPage({ embedded = false }) {
               {selected && (
                 <MissionProgress scan={selected} scanStatus={scanStatus} />
               )}
-
-              {/* Logs */}
-              <section className="panel p-6">
-                <h3 className="text-sm font-semibold mb-4">Timeline de Logs</h3>
-                {selected ? (
-                  <LogTerminal logs={logs} />
-                ) : (
-                  <p className="text-xs text-slate-400 py-8 text-center">Selecione uma varredura</p>
-                )}
-              </section>
 
               {/* Status Details */}
               {selected && scanStatus && (

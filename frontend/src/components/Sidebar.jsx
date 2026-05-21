@@ -33,7 +33,6 @@ export default function Sidebar() {
     {
       title: "Vulnerability Ops",
       items: [
-        { to: "/targets", label: "Targets", icon: "target", adminOnly: false },
         { to: "/scan", label: "Scans e Agendamentos", icon: "scans", adminOnly: true },
         { to: "/operacional", label: "Centro Operacional", icon: "operations", adminOnly: true },
       ],

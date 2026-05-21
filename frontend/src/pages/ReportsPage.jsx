@@ -295,7 +295,7 @@ export default function ReportsPage() {
         <div style={{ display: "flex", gap: 20, padding: "8px 14px", background: "#ffffff", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12, color: "var(--ink-muted)", flexWrap: "wrap" }}>
           <span><strong style={{ color: "var(--ink)" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
           <span><strong style={{ color: "var(--ink)" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "var(--sev-low-text)" : selectedScan.status === "failed" ? "var(--sev-critical-text)" : "var(--sev-medium-text)", fontWeight: 600 }}>{selectedScan.status}</span></span>
-          <span><strong style={{ color: "var(--ink)" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR") : "—"}</span>
+          <span><strong style={{ color: "var(--ink)" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "—"}</span>
         </div>
       )}
 

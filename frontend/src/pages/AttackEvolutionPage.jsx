@@ -72,7 +72,7 @@ function fmtDate(value) {
   if (!value) return "-";
   const dt = new Date(value);
   if (Number.isNaN(dt.getTime())) return "-";
-  return dt.toLocaleString("pt-BR");
+  return dt.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
 function sevBadge(sev) {

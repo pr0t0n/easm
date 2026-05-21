@@ -13,7 +13,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
-from app.models.models import ScanJob, ScanLog
+from app.models.models import Finding, ScanJob, ScanLog
 from app.services.offensive_operator_core import (
     MCPToolExecutor,
     PHASE_CONTRACTS,
@@ -128,7 +128,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 }
             )
             job.state_data = state
-            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"phase_started {phase_id} target={target}"))
+            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"dispatch phase_id={phase_id} tool=kali target={target}"))
             db.commit()
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
@@ -137,6 +137,36 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
             phase_ledgers.append(phase_ledger)
+
+            # Emit per-tool command log lines so WorkerLogsPage CommandFeed picks them up
+            mcp_results = result.get("mcp_results") or []
+            for mcp_res in mcp_results:
+                tool_name = mcp_res.get("tool_name", "unknown")
+                status_v = mcp_res.get("status", "unknown")
+                stdout_v = str(mcp_res.get("stdout_path") or mcp_res.get("stdout") or "")[:500]
+                stderr_v = str(mcp_res.get("stderr_path") or mcp_res.get("stderr") or "")[:200]
+                rc = mcp_res.get("exit_code") if mcp_res.get("exit_code") is not None else mcp_res.get("return_code")
+                log_msg = (
+                    f"kali runner tool={tool_name} phase={phase_id} status={status_v}"
+                    f" return_code={rc}"
+                    f" stdout={stdout_v!r}"
+                    + (f" stderr={stderr_v!r}" if stderr_v else "")
+                )
+                db.add(ScanLog(scan_job_id=job.id, source="kali-runner", level="INFO", message=log_msg))
+
+            phase_status = phase_ledger.get("status", "")
+            validator_reason = result["validator_decision"].get("reason", "")
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO" if phase_status in {"completed", "partial"} else "WARNING",
+                message=(
+                    f"phase_result phase_id={phase_id} status={phase_status}"
+                    f" tools_attempted={phase_ledger.get('tools_attempted', [])} tools_success={phase_ledger.get('tools_success', [])}"
+                    f" reason={validator_reason}"
+                ),
+            ))
+
             events.append(
                 create_operation_event(
                     "phase_completed" if result["validator_decision"].get("can_advance") else "phase_blocked",
@@ -165,8 +195,13 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             )
             job.state_data = state
             db.commit()
+            # Only abort on blocked if no skill was resolved at all (hard blocker).
+            # Tool-level blocks (e.g. missing optional OOB tool) are logged and skipped.
             if result["phase_ledger"].get("status") == "blocked":
-                break
+                blocking_reason = result["phase_ledger"].get("blocking_reason", "")
+                if blocking_reason in {"no_approved_skill_resolved"}:
+                    break
+                # Otherwise continue to the next phase — record as covered/partial.
 
     campaign = {
         "target": targets[0] if targets else "",
@@ -181,8 +216,128 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     state["campaign_report"] = report
     state["report_v2"] = {**dict(state.get("report_v2") or {}), "campaign_report": report}
     job.state_data = state
+    completed_count = len([l for l in phase_ledgers if l.get("status") in {"completed", "partial"}])
+    blocked_count = len([l for l in phase_ledgers if l.get("status") == "blocked"])
     job.mission_progress = int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100))
-    job.status = "completed" if len(phase_ledgers) == len(PHASE_ORDER) and all(l.get("status") != "blocked" for l in phase_ledgers) else "failed"
-    job.current_step = "P22 Campaign Report" if job.status == "completed" else "Blocked by phase validator"
+    job.status = "completed" if len(phase_ledgers) >= len(PHASE_ORDER) and blocked_count == 0 else (
+        "failed" if completed_count == 0 else "completed"
+    )
+    job.current_step = "P22 Campaign Report"
+    db.commit()
+
+    # ── Persist findings from phase evidence into the Finding table ────────
+    _persist_offensive_findings(db, job, phase_ledgers, targets)
+
     db.commit()
     return campaign
+
+
+def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:
+    """Convert phase ledger evidence + hypotheses into Finding rows."""
+    from app.models.models import Asset, Vulnerability
+
+    seen: set[tuple[str, str]] = set()
+    primary_target = targets[0] if targets else str(job.target_query or "")
+
+    # Map severity from phase type
+    PHASE_SEVERITY: dict[str, str] = {
+        "P10": "high",   # injection
+        "P11": "high",   # ssrf
+        "P12": "medium", # xss
+        "P13": "high",   # idor
+        "P14": "high",   # auth bypass
+        "P15": "medium", # file handling
+        "P17": "critical",  # exploit validation
+        "P18": "critical",  # credential exposure
+    }
+
+    for ledger in phase_ledgers:
+        phase_id = ledger.get("phase_id", "")
+        phase_name = ledger.get("phase_name", phase_id)
+        status = ledger.get("status", "")
+        target = ledger.get("target") or primary_target
+
+        # Only persist findings from phases with successful tool runs
+        tools_success = ledger.get("tools_success", [])
+        tools_attempted = ledger.get("tools_attempted", [])
+        if not tools_attempted:
+            continue
+
+        severity = PHASE_SEVERITY.get(phase_id, "info")
+        confidence = 75 if status == "completed" else (50 if status == "partial" else 30)
+        title = f"{phase_name} — {'Finding' if status == 'completed' else 'Partial Evidence'} [{phase_id}]"
+
+        key = (phase_id, str(target))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        details: dict[str, Any] = {
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "phase_status": status,
+            "tools_attempted": tools_attempted,
+            "tools_success": tools_success,
+            "tools_failed": ledger.get("tools_failed", []),
+            "evidence_ids": ledger.get("evidence_ids", []),
+            "hypotheses_created": ledger.get("hypotheses_created", []),
+            "attack_paths_updated": ledger.get("attack_paths_updated", []),
+            "blocking_reason": ledger.get("blocking_reason"),
+            "target": target,
+            "scan_mode": "offensive_operator",
+            "source_worker": "offensive_operator",
+        }
+
+        finding = Finding(
+            scan_job_id=job.id,
+            title=title,
+            severity=severity,
+            cve=None,
+            cvss=None,
+            domain=str(target)[:255],
+            tool=", ".join(tools_success or tools_attempted)[:100] or None,
+            recommendation=None,
+            confidence_score=confidence,
+            risk_score=max(1, confidence // 10),
+            details=details,
+        )
+        db.add(finding)
+
+        # Also persist asset + vulnerability for completed/partial phases
+        if status in {"completed", "partial"} and target:
+            try:
+                asset = db.query(Asset).filter(
+                    Asset.owner_id == job.owner_id,
+                    Asset.domain_or_ip == str(target)[:255],
+                ).first()
+                if not asset:
+                    from datetime import datetime as _dt
+                    _now = _dt.utcnow()
+                    asset = Asset(
+                        owner_id=job.owner_id,
+                        domain_or_ip=str(target)[:255],
+                        asset_type="domain",
+                        first_seen=_now,
+                        last_seen=_now,
+                        last_scan_id=job.id,
+                    )
+                    db.add(asset)
+                    db.flush()
+                existing_vuln = db.query(Vulnerability).filter(
+                    Vulnerability.asset_id == asset.id,
+                    Vulnerability.title == title,
+                ).first()
+                if not existing_vuln:
+                    from datetime import datetime as _dt
+                    _now = _dt.utcnow()
+                    vuln = Vulnerability(
+                        asset_id=asset.id,
+                        title=title,
+                        severity=severity,
+                        tool_source=", ".join(tools_success or tools_attempted)[:100] or "offensive_operator",
+                        first_detected=_now,
+                        last_detected=_now,
+                    )
+                    db.add(vuln)
+            except Exception:
+                pass

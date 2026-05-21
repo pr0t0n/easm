@@ -385,7 +385,7 @@ export default function WorkersPage() {
                     modo: {worker.mode} | status: {worker.status} | task: {worker.last_task_name || "—"}
                   </p>
                   <p className="text-xs text-slate-400">
-                    last_seen: {worker.last_seen_at ? new Date(worker.last_seen_at).toLocaleString("pt-BR") : "—"}
+                    last_seen: {worker.last_seen_at ? new Date(worker.last_seen_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "—"}
                     {worker.last_seen_lag_seconds != null ? ` (${worker.last_seen_lag_seconds}s atrás)` : ""}
                   </p>
                   <p className="text-xs text-slate-500">origem: {worker.online_reason || "—"}</p>

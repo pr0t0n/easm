@@ -66,7 +66,7 @@ export default function AssetsPage() {
                 <p>tipo: <span className="capitalize text-white">{asset.type}</span></p>
                 <p>origem: <span className="text-white">{asset.source_target}</span></p>
                 <p>visto em scans: <span className="text-white">{asset.seen_in_scans}</span></p>
-                <p>ultima vez: <span className="text-white">{asset.last_seen_at ? new Date(asset.last_seen_at).toLocaleString("pt-BR") : "-"}</span></p>
+                <p>ultima vez: <span className="text-white">{asset.last_seen_at ? new Date(asset.last_seen_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "-"}</span></p>
                 {asset.type === "domain" && (
                   <p>subdomínios: <span className="text-white">{asset.subdomain_count || 0}</span></p>
                 )}

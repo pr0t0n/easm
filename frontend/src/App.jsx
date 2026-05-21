@@ -11,10 +11,8 @@ import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
 import AttackEvolutionPage from "./pages/AttackEvolutionPage";
 import ReportsPage from "./pages/ReportsPage";
-import SchedulingPage from "./pages/SchedulingPage";
 import ScanOperationsPage from "./pages/ScanOperationsPage";
 import OperationsCenterPage from "./pages/OperationsCenterPage";
-import TargetsPage from "./pages/TargetsPage";
 import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import WorkersPage from "./pages/WorkersPage";
@@ -90,9 +88,9 @@ export default function App() {
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<ReportsPage />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
-                    <Route path="/targets" element={<TargetsPage />} />
+                    <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
-                    <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
+                    <Route path="/agendamento" element={<Navigate to="/scan" replace />} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<AdminOnly><PhaseMonitorPage /></AdminOnly>} />

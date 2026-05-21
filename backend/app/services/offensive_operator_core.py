@@ -67,7 +67,7 @@ def default_phase_contracts() -> dict[str, dict[str, Any]]:
         ("P08", "JavaScript Endpoint Analysis", "Analyze application routes and script-linked endpoints", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
         ("P09", "Content Discovery", "Discover files and directories", ["skill.discovery.endpoint_discovery"], ["ffuf"]),
         ("P10", "Injection Testing", "Test injection hypotheses with controls", ["skill.sqli_testing"], ["curl"]),
-        ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses", ["skill.vuln.ssrf"], ["interactsh"]),
+        ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses", ["skill.vuln.ssrf"], ["nuclei"]),
         ("P12", "XSS Testing", "Validate reflected or stored XSS safely", ["skill.stored_xss_testing"], ["curl"]),
         ("P13", "Access Control Testing", "Validate object and authorization boundaries", ["skill.idor_object_authorization"], ["curl"]),
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries", ["skill.vuln.auth_bypass"], ["ffuf"]),
@@ -101,6 +101,9 @@ def default_phase_contracts() -> dict[str, dict[str, Any]]:
             },
             "retry_policy": {"max_retries": 2, "fallback_allowed": True, "rag_reconsult_allowed": True},
         }
+    # P11: interactsh is optional (OOB callback tool not available in all runners);
+    # nuclei + curl can validate SSRF without an OOB listener.
+    contracts["P11"]["optional_tools"] = ["interactsh", "curl"]
     return contracts
 
 
