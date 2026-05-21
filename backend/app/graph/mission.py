@@ -17,63 +17,48 @@ MISSION_ITEMS = [
 ]
 
 # Detailed vulnerability analysis phases executed within nodes (xalgorix-inspired 22-phase pipeline)
-PENTEST_PHASES = [
-    # Phase 1 – Recon
-    {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery",
-     "tools": [
-         "subfinder", "amass", "amass-brute", "amass-intel", "sublist3r", "findomain",
-         "assetfinder", "alterx", "shuffledns", "dnsx", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
-     ]},
-    {"id": "P02", "title": "Port & Service Scan", "node": "asset_discovery",
-     "tools": ["naabu", "nmap", "masscan", "httpx"]},
-    {"id": "P03", "title": "Web Crawling & JS Extraction", "node": "asset_discovery",
-     "tools": ["code-analyzer", "katana", "hakrawler", "gau", "waybackurls", "gospider"]},
-    {"id": "P04", "title": "Parameter Discovery", "node": "asset_discovery",
-     "tools": ["arjun", "paramspider", "ffuf-params", "ffuf-values", "wfuzz"]},
-    # Phase 2 – Tech Fingerprint
-    {"id": "P05", "title": "HTTP Security Headers & OWASP Top 10 Fingerprint", "node": "asset_discovery",
-     "tools": ["httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]},
-    {"id": "P06", "title": "WAF Detection & Evasion Profile", "node": "asset_discovery",
-     "tools": ["wafw00f", "curl-headers"]},
-    # Phase 3 – OSINT
-    {"id": "P07", "title": "OSINT & Leak Intelligence", "node": "threat_intel",
-     "tools": ["shodan-cli", "theHarvester", "h8mail", "trufflehog", "gitleaks"],
-     "required_skill": "recon-surface-map"},
-    {"id": "P08", "title": "Email Security Posture (SPF/DKIM/DMARC)", "node": "threat_intel",
-     "tools": ["theHarvester"]},
-    {"id": "P09", "title": "Subdomain Takeover", "node": "threat_intel",
-     "tools": ["subjack", "nuclei"]},
-    {"id": "P10", "title": "Cloud Asset Exposure (S3/GCP/Azure)", "node": "threat_intel",
-     "tools": ["nuclei", "shodan-cli", "trufflehog"]},
-    # Phase 4 – Vulnerability Assessment
-    {"id": "P11", "title": "Nuclei CVE & Misconfiguration Scan", "node": "risk_assessment",
-     "tools": [
-         "nuclei", "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
-         "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
-     ]},
-    {"id": "P12", "title": "Web Injection (SQLi/XSS/SSTI/XXE)", "node": "risk_assessment",
-     "tools": ["sqlmap", "dalfox", "wapiti", "nikto"]},
-    {"id": "P13", "title": "SSRF & Open Redirect", "node": "risk_assessment",
-     "tools": ["nuclei", "interactsh-client"]},
-    {"id": "P14", "title": "Authentication Bypass & Brute Force", "node": "risk_assessment",
-     "tools": ["hydra", "medusa", "jwt_tool", "nuclei", "crackmapexec"]},
-    {"id": "P15", "title": "Directory & File Enumeration", "node": "risk_assessment",
-     "tools": ["ffuf", "ffuf-files", "ffuf-params", "gobuster", "feroxbuster", "dirsearch", "wfuzz"]},
-    {"id": "P16", "title": "API Security (REST/GraphQL/Rate Limit)", "node": "risk_assessment",
-     "tools": ["nuclei", "arjun", "wapiti", "ffuf-params", "ffuf-post"]},
-    {"id": "P17", "title": "Upload & WebShell Bypass", "node": "risk_assessment",
-     "tools": ["nuclei"]},
-    {"id": "P18", "title": "SSL/TLS Certificate, Protocol & Cipher Audit", "node": "risk_assessment",
-     "tools": ["sslscan", "testssl", "nmap", "curl-headers"]},
-    {"id": "P19", "title": "IDOR & Access Control Flaws", "node": "risk_assessment",
-     "tools": ["nuclei", "katana", "arjun", "curl-headers"]},
-    {"id": "P20", "title": "CMS-Specific Scan (WP/Joomla/Drupal)", "node": "risk_assessment",
-     "tools": ["wpscan", "nuclei", "nikto"]},
-    # Phase 5 – Code/Supply Chain
-    {"id": "P21", "title": "Secret & Credential Exposure", "node": "threat_intel",
-     "tools": ["trufflehog", "gitleaks", "semgrep", "bandit"]},
-    {"id": "P22", "title": "Dependency & Supply Chain Risk", "node": "risk_assessment",
-     "tools": ["retire", "trivy", "semgrep", "bandit", "gitleaks"]},
+def _build_pentest_phases_from_runner() -> list[dict[str, Any]]:
+    """Single source of truth: derive PENTEST_PHASES from offensive_operator_core.
+
+    Previously this list was hardcoded with a different taxonomy than the actual
+    runner, causing phase_monitor to flag all post-P02 phases as "blocked"
+    because it expected tools that the runner never requested.
+
+    By reading from PHASE_CONTRACTS we keep both views consistent.
+    """
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS as _OC
+    except Exception:
+        return []
+    phases: list[dict[str, Any]] = []
+    # Capability nodes per phase (used by phase_monitor for graph traversal validation)
+    NODE_MAP = {
+        "P01": "asset_discovery", "P02": "asset_discovery",
+        "P03": "asset_discovery", "P04": "asset_discovery",
+        "P05": "asset_discovery", "P06": "asset_discovery",
+        "P07": "threat_intel", "P08": "threat_intel",
+        "P09": "risk_assessment", "P10": "risk_assessment",
+        "P11": "risk_assessment", "P12": "risk_assessment",
+        "P13": "risk_assessment", "P14": "risk_assessment",
+        "P15": "risk_assessment", "P16": "risk_assessment",
+        "P17": "risk_assessment", "P18": "threat_intel",
+        "P19": "risk_assessment", "P20": "evidence_adjudication",
+        "P21": "evidence_adjudication", "P22": "executive_analyst",
+    }
+    for pid, contract in _OC.items():
+        all_tools = list(dict.fromkeys((contract.get("required_tools") or []) + (contract.get("optional_tools") or [])))
+        phases.append({
+            "id": pid,
+            "title": contract.get("name") or pid,
+            "node": NODE_MAP.get(pid, "asset_discovery"),
+            "tools": all_tools,
+        })
+    return phases
+
+
+PENTEST_PHASES = _build_pentest_phases_from_runner() or [
+    # Legacy fallback (when offensive_operator_core fails to import) — kept minimal
+    {"id": "P01", "title": "Subdomain Enumeration", "node": "asset_discovery", "tools": ["subfinder"]},
 ]
 
 

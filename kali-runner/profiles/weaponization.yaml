@@ -114,10 +114,8 @@ shodan_lookup:
   tool: shodan-cli
   category: osint
   phase: WEAPONIZATION_SIMULATION
-  description: "Shodan host lookup — banners, exposed services via Python API."
-  cmd: ["/opt/pipx/venvs/shodan/bin/python", "-c",
-        "import shodan,os,json,sys,socket; h=sys.argv[1]; ip=socket.gethostbyname(h); api=shodan.Shodan(os.environ['SHODAN_API_KEY']); r=api.host(ip); print(json.dumps({'ip':r.get('ip_str'),'ports':[p['port'] for p in r.get('data',[])],'org':r.get('org'),'hostnames':r.get('hostnames',[]),'vulns':list(r.get('vulns',{}).keys()),'banners':[{'port':p['port'],'transport':p.get('transport','tcp'),'product':p.get('product',''),'version':p.get('version',''),'banner':str(p.get('data',''))[:200]} for p in r.get('data',[])]}));",
-        "{host}"]
+  description: "Shodan host lookup — banners, ports, CVEs (uses bundled wrapper script to avoid template interpolation issues)."
+  cmd: ["/opt/pipx/venvs/shodan/bin/python", "/opt/runner-scripts/shodan_lookup.py", "{host}"]
   requires_env: ["SHODAN_API_KEY"]
   timeout: 60
   parser: json

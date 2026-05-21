@@ -149,6 +149,8 @@ RUN python3 -m venv /opt/runner-venv && \
 ENV PATH="/opt/runner-venv/bin:${PATH}"
 COPY runner.py .
 COPY profiles ./profiles
+COPY scripts /opt/runner-scripts
+RUN chmod +x /opt/runner-scripts/*.py 2>/dev/null || true
 
 # ── Sanity check: every profile binary must be on PATH ──────────────────────
 RUN set -eux; \
