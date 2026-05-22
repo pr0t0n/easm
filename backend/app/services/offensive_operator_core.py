@@ -875,15 +875,24 @@ class SkillToToolPlanCompiler:
                 }
             )
 
+        # A tool is REQUIRED only if the *phase contract* requires it. A skill
+        # shared across phases (e.g. port_service_discovery → P02/P06/P07)
+        # accumulates required_tools from every phase; using that list directly
+        # would wrongly mark P06's httpx requirement as required for P02.
+        phase_required = set(phase_contract.get("required_tools") or [])
+        skill_required = list(skill["metadata"].get("required_tools") or [])
+        skill_optional = list(skill["metadata"].get("optional_tools") or []) + \
+                         list(skill["metadata"].get("fallback_tools") or [])
+        # Fallback: if the contract declares no required tools, treat the
+        # skill's first required tool as required so the phase still gates.
+        if not phase_required and skill_required:
+            phase_required = {skill_required[0]}
+
         seen_tools: set[str] = set()
-        for name in skill["metadata"].get("required_tools") or []:
+        for name in skill_required + skill_optional:
             if name not in seen_tools:
                 seen_tools.add(name)
-                _add_tool(name, is_required=True)
-        for name in (skill["metadata"].get("optional_tools") or []) + (skill["metadata"].get("fallback_tools") or []):
-            if name not in seen_tools:
-                seen_tools.add(name)
-                _add_tool(name, is_required=False)
+                _add_tool(name, is_required=(name in phase_required))
         return {
             "tool_plan_id": stable_id("TP", {"phase_id": phase_contract["phase_id"], "skill_id": skill["skill_id"], "target": target}),
             "phase_id": phase_contract["phase_id"],
