@@ -41,6 +41,11 @@ from app.services.scan_intelligence import (
     apply_waf_confidence_adjustment,
     refine_target_set,
     NETWORK_PHASES,
+    detect_rate_limit_signals,
+    dedup_findings_by_signature,
+    derive_cvss,
+    build_executive_narrative,
+    diff_against_previous,
 )
 
 
@@ -396,6 +401,17 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     headers = {"User-Agent": evasion.get("user_agents", ["Mozilla/5.0"])[0], **auth_headers_from_state(state)}
                     r = _r.get(url, headers=headers, timeout=15, allow_redirects=True, verify=False)
                     return {"status_code": r.status_code, "body": r.text[:500]}
+                # 429 detection — WAF rate-limiting in the phase output. We
+                # mark the phase for adaptive retry (logged once); the evasion
+                # profile is already at reduced rate for the next phase.
+                _rl = detect_rate_limit_signals(mcp_list)
+                if _rl.get("hit") and not state.get(f"_rl_logged_{phase_id}"):
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                   message=(f"rate_limit_detected phase={phase_id} target={target} "
+                                            f"tools_throttled={_rl['tools_throttled']} — "
+                                            f"evasion profile (10/s, 5 threads) will apply to remaining phases")))
+                    state[f"_rl_logged_{phase_id}"] = True
+                    state["rate_limited_phases"] = list(set((state.get("rate_limited_phases") or []) + [phase_id]))
                 validations = validate_critical_findings(state, mcp_list, call_curl=_call_curl)
                 if validations:
                     _vc = {}
@@ -558,6 +574,73 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     state = dict(job.state_data or {})
     state["campaign_report"] = report
     state["report_v2"] = {**dict(state.get("report_v2") or {}), "campaign_report": report}
+
+    # ─── Tier 3/4 post-processing: dedup, CVSS, narrative, diff vs previous ───
+    try:
+        all_findings = db.query(Finding).filter(Finding.scan_job_id == job.id).all()
+        finding_dicts = [{
+            "id": f.id, "title": f.title, "severity": f.severity,
+            "domain": f.domain, "details": f.details or {},
+            "recommendation": f.recommendation,
+        } for f in all_findings]
+        env_snap = state.get("environment_profile") or {}
+        for f, fd in zip(all_findings, finding_dicts):
+            _signal = ""
+            te = (fd["details"] or {}).get("tool_evidence") or []
+            for e in te:
+                if e.get("nuclei_findings"): _signal = "nuclei_finding"; break
+                if e.get("secrets_found"): _signal = "secret_exposed"; break
+                if e.get("open_ports"): _signal = "ports_open"
+                elif e.get("discovered_paths"): _signal = "sensitive_path"
+            cvss = derive_cvss(f.severity, _signal, bool(env_snap.get("waf_present")))
+            f.cvss = cvss
+            (f.details or {})["cvss_calculated"] = cvss
+        db.commit()
+        deduped = dedup_findings_by_signature(finding_dicts)
+        state["unique_findings"] = [{
+            "title": d["title"], "severity": d["severity"],
+            "instance_count": d.get("instance_count", 1),
+            "instances": d.get("instances", []),
+        } for d in deduped]
+        primary = targets[0] if targets else ""
+        narrative = build_executive_narrative(
+            job.id, primary, finding_dicts,
+            env_profile=env_snap,
+            origin=state.get("origin_discovery"),
+        )
+        state["executive_summary"] = narrative
+        from app.models.models import ScanJob as _SJ
+        prev_scan = (
+            db.query(_SJ)
+            .filter(_SJ.target_query == job.target_query, _SJ.id != job.id, _SJ.status == "completed")
+            .order_by(_SJ.created_at.desc())
+            .first()
+        )
+        if prev_scan:
+            prev_findings = db.query(Finding).filter(Finding.scan_job_id == prev_scan.id).all()
+            prev_dicts = [{"id": pf.id, "title": pf.title, "severity": pf.severity,
+                           "domain": pf.domain, "details": pf.details or {}} for pf in prev_findings]
+            diff = diff_against_previous(finding_dicts, prev_dicts)
+            state["regression_diff"] = {
+                "previous_scan_id": prev_scan.id,
+                "previous_scan_date": prev_scan.created_at.isoformat() if prev_scan.created_at else None,
+                "new_count": diff["new_count"],
+                "fixed_count": diff["fixed_count"],
+                "persistent_count": diff["persistent_count"],
+                "new_titles": [f.get("title") for f in diff["new_findings"]][:10],
+                "fixed_titles": [f.get("title") for f in diff["fixed_findings"]][:10],
+            }
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                           message=(f"regression_diff vs scan #{prev_scan.id}: "
+                                    f"new={diff['new_count']} fixed={diff['fixed_count']} "
+                                    f"persistent={diff['persistent_count']}")))
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                       message=(f"post_processing dedup_unique={len(deduped)} from {len(finding_dicts)} raw, "
+                                f"headline=\"{narrative['headline']}\"")))
+    except Exception as _ppe:  # noqa: BLE001
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                       message=f"post_processing_failed error={_ppe!s}"))
+    db.commit()
 
     completed_count = len([l for l in phase_ledgers if l.get("status") == "completed"])
     partial_count = len([l for l in phase_ledgers if l.get("status") == "partial"])
@@ -745,7 +828,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
     # --- ffuf / gobuster: discovered paths ---
     elif tool_lower in {"ffuf", "gobuster", "feroxbuster"}:
         if isinstance(parsed, list) and parsed:
-            paths = [str(p.get("url") or p.get("path") or p) for p in parsed[:100]]
+            paths = [str(p.get("url") or p.get("path") or p) if isinstance(p, dict) else str(p) for p in parsed[:100]]
         else:
             paths = [l.strip() for l in stdout.splitlines() if l.strip() and "/" in l][:100]
         evidence["discovered_paths"] = paths[:100]

@@ -378,6 +378,199 @@ def validate_critical_findings(state: dict[str, Any], mcp_results: list[dict[str
     return confirmations
 
 
+def detect_rate_limit_signals(mcp_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inspect tool output for HTTP 429 / WAF-throttling signatures.
+
+    Returns {hit: bool, tools_throttled: [tool_name], evidence: [snippet]}.
+    The runner uses this to decide whether to re-run the phase with the
+    reduced-rate evasion profile.
+    """
+    throttled: list[str] = []
+    evidence: list[str] = []
+    for mcp in mcp_results or []:
+        if not isinstance(mcp, dict):
+            continue
+        out = (str(mcp.get("stdout") or "") + " " + str(mcp.get("stderr_path") or "")).lower()
+        if (" 429" in out or "429 too many" in out or "too many requests" in out
+                or "rate limit" in out or "throttled" in out or "retry-after" in out):
+            t = str(mcp.get("tool_name") or "?")
+            if t not in throttled:
+                throttled.append(t)
+                evidence.append(out[:200])
+    return {"hit": bool(throttled), "tools_throttled": throttled, "evidence": evidence}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5b. Cross-target finding deduplication
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dedup_findings_by_signature(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge findings of the same kind across multiple targets/subdomains.
+
+    The same vuln template firing on 30 subdomains should be ONE finding with
+    30 instances, not 30 copies polluting the report. Signature = (phase_id,
+    nuclei_template OR finding_kind OR signal_class). Distinct targets are
+    rolled into 'instances'.
+    """
+    groups: dict[tuple, dict[str, Any]] = {}
+    for f in findings:
+        details = f.get("details") or {}
+        # Build a dedup signature
+        sig_parts: list[str] = [str(details.get("phase_id") or "")]
+        kind = details.get("finding_kind")
+        if kind:
+            sig_parts.append(str(kind))
+        else:
+            # Use the first nuclei template ID found in tool_evidence, else title
+            tmpl = ""
+            for te in (details.get("tool_evidence") or []):
+                for nf in (te.get("nuclei_findings") or []):
+                    tmpl = nf.get("template") or ""
+                    if tmpl:
+                        break
+                if tmpl:
+                    break
+            sig_parts.append(tmpl or str(f.get("title") or "")[:80])
+        signature = tuple(sig_parts)
+        target = details.get("target") or f.get("domain") or ""
+        if signature not in groups:
+            f = dict(f)
+            f["instances"] = [target] if target else []
+            f["instance_count"] = len(f["instances"])
+            groups[signature] = f
+        else:
+            existing = groups[signature]
+            insts = existing.get("instances") or []
+            if target and target not in insts:
+                insts.append(target)
+            existing["instances"] = insts
+            existing["instance_count"] = len(insts)
+            # Promote severity to the highest seen across instances
+            sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+            if sev_rank.get(str(f.get("severity")), 0) > sev_rank.get(str(existing.get("severity")), 0):
+                existing["severity"] = f.get("severity")
+    return list(groups.values())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5c. CVSS auto-derivation (rule-based, no NVD lookup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def derive_cvss(severity: str, signal: str, waf_present: bool = False) -> float:
+    """Map evidence-derived severity + finding signal to a CVSS-style score.
+
+    Not a real NVD lookup — a rule-based base score so the report has a
+    consistent numeric next to qualitative severity. Adjusts down when a
+    WAF is present (less directly exploitable).
+    """
+    base: dict[str, float] = {
+        "critical": 9.5, "high": 7.5, "medium": 5.5, "low": 3.5, "info": 1.5,
+    }.copy()
+    # signal-class bumps
+    bumps: dict[str, float] = {
+        "secret_exposed": 1.0, "injection_confirmed": 1.5,
+        "cve_identified": 0.8, "sensitive_path": 0.5,
+        "missing_headers": -0.5, "ports_open": -1.0,
+    }
+    score = base.get((severity or "info").lower(), 1.5) + bumps.get(signal or "", 0.0)
+    if waf_present:
+        score -= 1.0  # WAF reduces direct exploitability
+    return round(max(0.1, min(10.0, score)), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5d. Executive narrative
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_executive_narrative(scan_id: int, target: str, findings: list[dict[str, Any]],
+                              env_profile: dict[str, Any] | None = None,
+                              origin: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Generate an executive-level summary of the scan.
+
+    Returns a dict with: headline, key_findings, attack_surface, environment,
+    recommendation_priority, full narrative text. Intended for the report PDF
+    and the dashboard.
+    """
+    by_sev: dict[str, int] = {}
+    top: list[dict[str, Any]] = []
+    for f in findings:
+        sev = str(f.get("severity") or "info").lower()
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+        if sev in {"critical", "high", "medium"}:
+            top.append(f)
+    top.sort(key=lambda x: {"critical": 0, "high": 1, "medium": 2}.get(x.get("severity", "info"), 9))
+    top = top[:5]
+
+    waf = (env_profile or {}).get("waf_vendors") or []
+    origin_cands = (origin or {}).get("candidate_origins") or []
+
+    headline_parts: list[str] = []
+    if by_sev.get("critical", 0) + by_sev.get("high", 0) > 0:
+        headline_parts.append(f"{by_sev.get('critical', 0)} crítico(s), {by_sev.get('high', 0)} alto(s)")
+    if origin_cands:
+        headline_parts.append(f"WAF bypass possível ({len(origin_cands)} IPs candidatos a origem)")
+    if waf:
+        headline_parts.append(f"perímetro {', '.join(waf)}")
+    headline = " · ".join(headline_parts) if headline_parts else "Superfície mapeada, sem achados críticos confirmados"
+
+    return {
+        "scan_id": scan_id,
+        "target": target,
+        "headline": headline,
+        "severity_distribution": by_sev,
+        "total_findings": sum(by_sev.values()),
+        "top_findings": [
+            {"id": f.get("id"), "title": f.get("title"), "severity": f.get("severity"),
+             "instances": f.get("instance_count", 1)}
+            for f in top
+        ],
+        "environment": {
+            "waf_vendors": waf,
+            "waf_present": bool(waf),
+            "origin_candidates": len(origin_cands),
+        },
+        "narrative": (
+            f"Avaliação ofensiva do alvo {target}. " +
+            (f"O perímetro é defendido por {', '.join(waf)}; " if waf else "") +
+            (f"foram identificados {len(origin_cands)} candidatos a IP de origem fora dos ranges do WAF — "
+             f"a confirmação habilita bypass total da proteção. " if origin_cands else "") +
+            f"Total de {sum(by_sev.values())} achado(s): " +
+            ", ".join(f"{c} {s}" for s, c in sorted(by_sev.items(),
+                key=lambda kv: {"critical":0,"high":1,"medium":2,"low":3,"info":4}.get(kv[0], 9)) if c) + "."
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5e. Asset / finding diff vs previous scan of same target
+# ─────────────────────────────────────────────────────────────────────────────
+
+def diff_against_previous(current_findings: list[dict[str, Any]],
+                          previous_findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare current scan to the previous scan of the same target.
+
+    Returns: new_findings, fixed_findings (in previous, not in current),
+    persistent_findings (in both), regression candidates.
+    """
+    def _sig(f: dict[str, Any]) -> str:
+        d = f.get("details") or {}
+        return f"{d.get('phase_id', '')}:{d.get('finding_kind') or f.get('title', '')[:80]}"
+
+    cur_sigs = {_sig(f): f for f in current_findings}
+    prev_sigs = {_sig(f): f for f in previous_findings}
+    new = [f for sig, f in cur_sigs.items() if sig not in prev_sigs]
+    fixed = [f for sig, f in prev_sigs.items() if sig not in cur_sigs]
+    persistent = [cur_sigs[sig] for sig in cur_sigs if sig in prev_sigs]
+    return {
+        "new_findings": new,
+        "fixed_findings": fixed,
+        "persistent_findings": persistent,
+        "new_count": len(new),
+        "fixed_count": len(fixed),
+        "persistent_count": len(persistent),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Defense evasion
 # ─────────────────────────────────────────────────────────────────────────────
