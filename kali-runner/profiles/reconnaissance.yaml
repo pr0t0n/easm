@@ -290,6 +290,23 @@ curl_headers:
   phase: RECONNAISSANCE
   description: "HTTP header inspection (security headers, server, WAF hints)."
   target_type: url
-  cmd: ["curl", "-sS", "-I", "-L", "--max-time", "30", "{{url}}"]
-  timeout: 60
+  # --max-time 60: WAF/CDN-fronted targets (Incapsula, Cloudflare) are slow;
+  # 30s caused curl exit 28 (operation timeout). -A spoofs a browser UA so
+  # bot-filtering WAFs don't drop the request.
+  cmd: ["curl", "-sS", "-I", "-L", "--max-time", "60",
+        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "{{url}}"]
+  timeout: 90
+  parser: raw
+
+curl_probe:
+  tool: curl
+  category: http_validation
+  phase: DELIVERY_MAPPING
+  description: "Full HTTP request — status line, headers and body — for validation."
+  target_type: url
+  cmd: ["curl", "-sk", "-i", "-L", "--max-time", "60",
+        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "{{url}}"]
+  timeout: 90
   parser: raw
