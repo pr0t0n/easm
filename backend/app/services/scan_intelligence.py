@@ -261,11 +261,61 @@ def wordlist_for_tech(tech_stack: dict[str, list[str]]) -> str | None:
 # 3. Evidence validation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_critical_findings(state: dict[str, Any], mcp_results: list[dict[str, Any]], call_curl: callable | None = None) -> list[dict[str, Any]]:
-    """For each critical finding (nuclei high/critical, exposed-file, leaked-secret),
-    re-run a curl probe to confirm. Returns list of confirmation entries.
+# Markers that mean the response is a WAF challenge/block page — NOT the
+# real origin content. A finding "confirmed" by such a page is a false lead.
+_WAF_CHALLENGE_MARKERS = (
+    "incap_ses", "_incapsula_", "visid_incap", "captcha", "challenge-platform",
+    "attention required", "request blocked", "access denied", "request unsuccessful",
+    "ray id", "cf-error", "akamai reference", "support id", "this request was blocked",
+)
 
-    Skipped when call_curl is None (validation disabled).
+# Expected response-body content per finding class — used to confirm a finding
+# is REAL (the body actually contains what the finding claims) vs a 200 from a
+# generic page or a WAF challenge.
+_CONTENT_SIGNATURES: dict[str, list[str]] = {
+    "git": ["ref:", "[core]", "repositoryformatversion", "x-pack", "objects/pack"],
+    "env": ["app_key", "db_password", "db_host", "db_username", "api_key", "secret_key", "aws_"],
+    "phpinfo": ["php version", "phpinfo()", "php credits", "configuration php core"],
+    "config": ["password", "secret", "connectionstring", "<?php", "datasource"],
+    "backup": ["sql dump", "create table", "insert into", "<?php", "mysqldump"],
+    "swagger": ["swagger", "openapi", '"paths"', "basepath"],
+    "listing": ["index of /", "directory listing", "<title>index of"],
+}
+
+
+def _finding_class_for(template_id: str, url: str) -> str | None:
+    """Map a nuclei template / URL to a content-signature class."""
+    t = (str(template_id or "") + " " + str(url or "")).lower()
+    if ".git" in t or "git-config" in t or "git-exposure" in t or "git/head" in t:
+        return "git"
+    if ".env" in t or "env-file" in t or "dotenv" in t:
+        return "env"
+    if "phpinfo" in t:
+        return "phpinfo"
+    if "swagger" in t or "openapi" in t or "api-docs" in t:
+        return "swagger"
+    if "backup" in t or ".sql" in t or ".bak" in t or "dump" in t:
+        return "backup"
+    if "config" in t or ".conf" in t or "settings" in t:
+        return "config"
+    if "listing" in t or "directory" in t:
+        return "listing"
+    return None
+
+
+def validate_critical_findings(state: dict[str, Any], mcp_results: list[dict[str, Any]],
+                                call_curl: callable | None = None) -> list[dict[str, Any]]:
+    """Deep, content-based validation of critical findings.
+
+    For each nuclei critical/high finding, re-fetch the URL and classify:
+      - confirmed       : response body actually contains the expected content
+      - false_positive  : 404/403, or 200 whose body does NOT match the claim
+      - waf_blocked     : response is a WAF challenge/block page (inconclusive)
+      - unconfirmed     : reachable 200 but no signature to check against
+      - error           : the probe itself failed
+
+    This stops a WAF challenge page or a generic 200 from "confirming" a vuln.
+    Skipped when call_curl is None.
     """
     confirmations: list[dict[str, Any]] = []
     if not call_curl:
@@ -277,31 +327,52 @@ def validate_critical_findings(state: dict[str, Any], mcp_results: list[dict[str
         tool = str(mcp.get("tool_name") or "").lower()
         parsed = mcp.get("parsed_result")
         if tool == "nuclei" and isinstance(parsed, list):
-            for item in parsed[:20]:
+            for item in parsed[:25]:
                 if not isinstance(item, dict):
                     continue
-                sev = str((item.get("info") or {}).get("severity") or item.get("severity") or "").lower()
+                info = item.get("info") or {}
+                sev = str(info.get("severity") or item.get("severity") or "").lower()
                 url = item.get("matched-at") or item.get("url")
-                if sev in {"critical", "high"} and url:
-                    candidates.append({"tool": "nuclei", "url": str(url), "severity": sev, "template": item.get("template-id")})
-    # de-dup
+                if sev in {"critical", "high", "medium"} and url:
+                    candidates.append({
+                        "tool": "nuclei", "url": str(url), "severity": sev,
+                        "template": item.get("template-id"),
+                        "name": info.get("name"),
+                    })
     seen_urls: set[str] = set()
-    unique = []
-    for c in candidates:
-        if c["url"] not in seen_urls:
-            seen_urls.add(c["url"])
-            unique.append(c)
-    for c in unique[:10]:
+    unique = [c for c in candidates if not (c["url"] in seen_urls or seen_urls.add(c["url"]))]
+
+    for c in unique[:15]:
         try:
             raw = call_curl(c["url"])
+            code = int(raw.get("status_code") or 0)
+            body = str(raw.get("body") or "")
+            low = body.lower()
+            if any(m in low for m in _WAF_CHALLENGE_MARKERS):
+                status, reason = "waf_blocked", "response is a WAF challenge/block page — inconclusive"
+            elif code in (0, 404, 403, 503):
+                status, reason = "false_positive", f"resource not actually reachable (HTTP {code})"
+            else:
+                cls = _finding_class_for(c.get("template"), c["url"])
+                if cls:
+                    expected = _CONTENT_SIGNATURES.get(cls, [])
+                    if any(e in low for e in expected):
+                        status, reason = "confirmed", f"body matches {cls} signature"
+                    else:
+                        status, reason = "false_positive", f"HTTP {code} but body lacks {cls} content"
+                else:
+                    status = "confirmed" if (code == 200 and body.strip()) else "unconfirmed"
+                    reason = f"HTTP {code}, {len(body)} bytes (no class signature to verify)"
             confirmations.append({
                 **c,
-                "validation_status": "confirmed" if raw.get("status_code", 0) > 0 else "unconfirmed",
-                "validation_code": raw.get("status_code"),
-                "validation_preview": str(raw.get("body") or "")[:300],
+                "validation_status": status,
+                "validation_reason": reason,
+                "validation_code": code,
+                "validation_preview": body[:300],
             })
         except Exception as exc:  # noqa: BLE001
-            confirmations.append({**c, "validation_status": "error", "validation_error": str(exc)})
+            confirmations.append({**c, "validation_status": "error", "validation_reason": str(exc)})
+
     if confirmations:
         state["finding_validations"] = (state.get("finding_validations") or []) + confirmations
     return confirmations

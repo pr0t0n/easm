@@ -398,9 +398,14 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     return {"status_code": r.status_code, "body": r.text[:500]}
                 validations = validate_critical_findings(state, mcp_list, call_curl=_call_curl)
                 if validations:
-                    confirmed = sum(1 for v in validations if v.get("validation_status") == "confirmed")
+                    _vc = {}
+                    for _v in validations:
+                        _s = _v.get("validation_status", "?")
+                        _vc[_s] = _vc.get(_s, 0) + 1
                     db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
-                                   message=f"finding_validation phase={phase_id} validated={len(validations)} confirmed={confirmed}"))
+                                   message=(f"finding_validation phase={phase_id} validated={len(validations)} "
+                                            f"confirmed={_vc.get('confirmed', 0)} false_positive={_vc.get('false_positive', 0)} "
+                                            f"waf_blocked={_vc.get('waf_blocked', 0)} unconfirmed={_vc.get('unconfirmed', 0)}")))
             except Exception as exc:  # noqa: BLE001
                 pass
             # adversarial_hypothesis needs: pentest_hypotheses, skill_invocation, tool_selection_contract
