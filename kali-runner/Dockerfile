@@ -67,7 +67,7 @@ RUN set -eux; \
       "github.com/projectdiscovery/alterx/cmd/alterx@latest" \
       "github.com/projectdiscovery/katana/cmd/katana@latest" \
       "github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest" \
-      "github.com/owasp-amass/amass/v4/...@latest" \
+      "github.com/owasp-amass/amass/v4/cmd/amass@latest" \
       "github.com/tomnomnom/assetfinder@latest" \
       "github.com/tomnomnom/waybackurls@latest" \
       "github.com/lc/gau/v2/cmd/gau@latest" \
