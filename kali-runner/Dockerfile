@@ -56,6 +56,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     rm -rf /tmp/massdns /var/lib/apt/lists/*
 
 # ── Layer 3: Go-based tools (ProjectDiscovery suite + recon/exploit tools) ──
+# Each tool installs in its own command so one failure doesn't abort the rest,
+# AND a final verification step FAILS the build if any critical binary is
+# missing — previously silent 'WARN: skip' left scans without nuclei/ffuf/etc.
+ENV GOFLAGS=-mod=mod GOBIN=/usr/local/bin
 RUN set -eux; \
     for pkg in \
       "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest" \
@@ -78,9 +82,15 @@ RUN set -eux; \
       "github.com/haccer/subjack@latest" \
       "github.com/gitleaks/gitleaks/v8@latest" \
       "github.com/trufflesecurity/trufflehog/v3@latest" ; \
-    do go install -v "$pkg" 2>&1 | tail -2 || echo "WARN: skip $pkg"; done; \
-    cp -v /root/go/bin/* /usr/local/bin/ 2>/dev/null || true; \
-    nuclei -update-templates 2>/dev/null || true
+    do echo "go install $pkg"; go install "$pkg" || echo "WARN: failed $pkg"; done; \
+    nuclei -update-templates 2>/dev/null || true; \
+    echo "── verifying critical Go binaries ──"; \
+    MISSING=""; \
+    for bin in subfinder httpx naabu nuclei dnsx shuffledns alterx katana \
+               amass assetfinder waybackurls gau hakrawler ffuf gospider ; do \
+      command -v "$bin" >/dev/null 2>&1 && echo "  OK $bin" || { echo "  MISSING $bin"; MISSING="$MISSING $bin"; }; \
+    done; \
+    if [ -n "$MISSING" ]; then echo "FATAL: missing Go binaries:$MISSING"; exit 1; fi
 
 # ── Layer 4: Python tools (pipx) ─────────────────────────────────────────────
 ENV PIPX_HOME=/opt/pipx \
