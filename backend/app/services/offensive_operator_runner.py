@@ -1063,6 +1063,78 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
     return f"[{phase_id}] {phase_name} — Sem achados (cobertura executada)"
 
 
+def _build_reproduction(phase_id: str, target: str, tool_evidences: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a complete reproduction package for a finding.
+
+    Every finding must be independently verifiable. This returns:
+      - discovery_method: how the issue was found (tool + technique)
+      - commands: exact CLI commands that produced the evidence (copy-paste ready)
+      - payloads: any attack payloads used (SQLi/XSS/SSRF strings, fuzz inputs)
+      - proof: raw tool output snippets that constitute the evidence
+      - steps: numbered reproduction steps an analyst can follow
+    """
+    commands: list[dict[str, str]] = []
+    payloads: list[str] = []
+    proof: list[dict[str, str]] = []
+
+    for ev in tool_evidences:
+        tool = str(ev.get("tool") or "")
+        cmd = str(ev.get("command") or "")
+        if cmd and not any(c["command"] == cmd for c in commands):
+            commands.append({"tool": tool, "command": cmd})
+        # Raw output proof — first meaningful slice of stdout
+        raw = ev.get("raw_output_preview") or ""
+        summary = ev.get("finding_summary") or ""
+        if raw and summary and not summary.lower().startswith(("no ", "nenhum", "sem ")):
+            proof.append({"tool": tool, "output": str(raw)[:1200], "summary": summary})
+        # Tool-specific payloads
+        if tool == "nuclei":
+            for nf in (ev.get("nuclei_findings") or [])[:5]:
+                tid = nf.get("template") or ""
+                url = nf.get("url") or ""
+                if tid:
+                    payloads.append(f"nuclei -id {tid} -u {url or target} -v")
+        if tool in {"sqlmap"}:
+            for inj in (ev.get("injection_evidence") or [])[:3]:
+                payloads.append(str(inj))
+        if tool in {"ffuf", "gobuster", "feroxbuster", "dirsearch"}:
+            for p in (ev.get("discovered_paths") or [])[:8]:
+                payloads.append(f"curl -sk -i {p}")
+        if tool in {"dalfox"}:
+            for x in (ev.get("xss_payloads") or [])[:3]:
+                payloads.append(str(x))
+        if tool in {"arjun", "paramspider"}:
+            for prm in (ev.get("discovered_parameters") or [])[:8]:
+                payloads.append(f"# parameter to fuzz: {prm}")
+
+    # Discovery method narrative
+    tools_used = sorted({str(ev.get("tool") or "") for ev in tool_evidences if ev.get("tool")})
+    discovery_method = (
+        f"Fase {phase_id}: descoberto via {', '.join(tools_used)}"
+        if tools_used else f"Fase {phase_id}: nenhuma ferramenta produziu evidência"
+    )
+
+    # Numbered reproduction steps
+    steps: list[str] = []
+    if commands:
+        steps.append(f"1. Garanta que as ferramentas estejam instaladas: {', '.join(tools_used)}")
+        for idx, c in enumerate(commands[:6], start=2):
+            steps.append(f"{idx}. Execute: {c['command']}")
+        if payloads:
+            steps.append(f"{len(steps) + 1}. Valide manualmente com os payloads listados em 'payloads'")
+        steps.append(f"{len(steps) + 1}. Compare a saída obtida com a evidência em 'proof'")
+
+    return {
+        "discovery_method": discovery_method,
+        "commands": commands,
+        "payloads": payloads[:20],
+        "proof": proof[:8],
+        "steps": steps,
+        "target": target,
+        "verifiable": bool(commands and proof),
+    }
+
+
 def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:
     """Convert phase ledger + MCP tool output into rich Finding rows with real evidence.
 
@@ -1124,8 +1196,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             continue
         seen.add(key)
 
-        # Extract per-tool evidence from MCP results stored in the ledger
-        mcp_results = phase_mcp_map.get(phase_id) or ledger.get("mcp_results") or []
+        # Extract per-tool evidence from MCP results stored in the ledger.
+        # Prefer the ledger's own mcp_results (correct for multi-target
+        # propagation where many ledgers share the same phase_id).
+        mcp_results = ledger.get("mcp_results") or phase_mcp_map.get(phase_id) or []
         tool_evidences: list[dict[str, Any]] = []
         for mcp_res in mcp_results:
             tool_name = str(mcp_res.get("tool_name") or "")
@@ -1160,6 +1234,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             "source_worker": "offensive_operator",
             # RedTeam evidence — one entry per tool that ran
             "tool_evidence": tool_evidences,
+            # Complete reproduction package: discovery method, commands,
+            # payloads, raw proof and numbered steps so the finding is
+            # independently verifiable by an analyst.
+            "reproduction": _build_reproduction(phase_id, str(target), tool_evidences),
             # Tech stack snapshot at time of finding
             "tech_stack": tech_snap.get("detected") or [],
             "cms_detected": tech_snap.get("cms") or [],
