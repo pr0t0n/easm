@@ -82,6 +82,69 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
     return expanded
 
 
+# Phases whose result is bound to the host's IP, not the hostname — running
+# them once per unique IP avoids redundant scans of a shared WAF/CDN edge
+# (and the 429s that 50 identical port scans of one IP would trigger).
+NETWORK_PHASES = {"P02"}
+
+
+def _resolve_host(host: str) -> str | None:
+    """Resolve a hostname to its primary IPv4. None = does not resolve (dead)."""
+    import socket
+    h = str(host or "").strip().lower()
+    for prefix in ("http://", "https://"):
+        if h.startswith(prefix):
+            h = h[len(prefix):].split("/")[0]
+            break
+    h = h.split("/")[0].split(":")[0]
+    if not h:
+        return None
+    try:
+        return socket.gethostbyname(h)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def refine_target_set(root: str, subdomains: list[str], cap: int = 25) -> dict[str, Any]:
+    """Liveness-filter + IP-group the discovered subdomains before Stage 2.
+
+    - Liveness: a host that does not resolve in DNS is 'dead' — it gets no
+      P02-P22 phases, only a report entry 'discovered but inactive'.
+    - IP-grouping: hosts are mapped to their resolved IP so the runner can
+      run network phases (port scan) once per unique IP.
+
+    Returns:
+      live_targets: hosts that resolve (root always first, capped)
+      dead_targets: hosts that do not resolve
+      host_ip:      host → resolved IP
+      ip_groups:    IP → [hosts sharing it]
+    """
+    host_ip: dict[str, str] = {}
+    live: list[str] = []
+    dead: list[str] = []
+    ordered = [root] + [s for s in subdomains if s and s != root]
+    for host in ordered:
+        if len(live) > cap:  # root + cap subdomains
+            break
+        ip = _resolve_host(host)
+        if ip:
+            host_ip[host] = ip
+            live.append(host)
+        elif host != root:  # root stays even if resolution hiccups
+            dead.append(host)
+        else:
+            live.append(host)
+    ip_groups: dict[str, list[str]] = {}
+    for host, ip in host_ip.items():
+        ip_groups.setdefault(ip, []).append(host)
+    return {
+        "live_targets": live,
+        "dead_targets": dead,
+        "host_ip": host_ip,
+        "ip_groups": ip_groups,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Tech-stack detection
 # ─────────────────────────────────────────────────────────────────────────────

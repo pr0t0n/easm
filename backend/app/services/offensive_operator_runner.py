@@ -39,6 +39,8 @@ from app.services.scan_intelligence import (
     extract_learning_signals,
     analyze_waf_behavior,
     apply_waf_confidence_adjustment,
+    refine_target_set,
+    NETWORK_PHASES,
 )
 
 
@@ -193,6 +195,8 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     all_targets: list[str] = list(initial_state.get("target_set") or targets)
     _input_target_count = len(targets)
     _phases_for_level = [p for p in PHASE_ORDER if allowed_phases is None or p in allowed_phases]
+    # host → resolved IP, for IP-grouped network phases (populated after P01)
+    host_ip_map: dict[str, str] = dict(initial_state.get("host_ip_map") or {})
     _target_idx = 0
     while _target_idx < len(all_targets):
         target = all_targets[_target_idx]
@@ -215,6 +219,17 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             _work_key = f"{phase_id}:{target}"
             if _work_key in completed_work:
                 continue
+            # IP-GROUPING: a network phase (port scan) is bound to the host's
+            # IP. If a sibling hostname on the same IP already ran it, reuse —
+            # don't re-scan the same WAF/CDN edge (and trigger 429s).
+            if phase_id in NETWORK_PHASES:
+                _host_ip = host_ip_map.get(target)
+                if _host_ip and f"{phase_id}:ip:{_host_ip}" in completed_work:
+                    completed_work.add(_work_key)
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                                   message=f"ip_dedup phase={phase_id} target={target} — IP {_host_ip} already scanned, reused"))
+                    db.commit()
+                    continue
             job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({target})"
             state = dict(job.state_data or {})
             state.update(
@@ -459,24 +474,33 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
 
             # ─── Checkpoint Engine: mark work done, expand targets, re-dispatch ──
             completed_work.add(_work_key)
+            # Record the IP-level key for network phases so sibling hostnames
+            # on the same IP skip the redundant re-scan.
+            if phase_id in NETWORK_PHASES:
+                _done_ip = host_ip_map.get(target)
+                if _done_ip:
+                    completed_work.add(f"{phase_id}:ip:{_done_ip}")
             _cp_state = dict(job.state_data or {})
             _cp_state["completed_work"] = sorted(completed_work)
             # After P01 on a root target, expand the work set with every
-            # discovered subdomain so each gets the full P02-P22 depth.
-            # subdomain_propagation_cap bounds how many subdomains are queued
-            # (default 25 — set higher/lower in state_data per scan).
+            # discovered subdomain. Liveness-filter (drop hosts that don't
+            # resolve) and IP-group (so network phases run once per IP).
             if phase_id == "P01":
                 _cap = int(_cp_state.get("subdomain_propagation_cap") or 25)
-                _added = 0
-                for _sub in (_cp_state.get("expanded_targets") or []):
-                    if _added >= _cap:
-                        break
-                    if _sub and _sub not in all_targets:
-                        all_targets.append(_sub)
-                        _added += 1
+                _subs = [s for s in (_cp_state.get("expanded_targets") or []) if s and s != target]
+                _refined = refine_target_set(target, _subs, cap=_cap)
+                for _live in _refined["live_targets"]:
+                    if _live and _live not in all_targets:
+                        all_targets.append(_live)
                 _cp_state["target_set"] = list(all_targets)
+                _cp_state["host_ip_map"] = _refined["host_ip"]
+                _cp_state["dead_targets"] = _refined["dead_targets"]
+                _cp_state["ip_groups"] = _refined["ip_groups"]
+                host_ip_map = _refined["host_ip"]
                 db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                               message=f"target_set built — {len(all_targets)} target(s) queued for full P02-P22 depth (cap={_cap})"))
+                               message=(f"target_set refined — {len(_refined['live_targets'])} live, "
+                                        f"{len(_refined['dead_targets'])} dead, "
+                                        f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
             job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
@@ -557,8 +581,6 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 row = VulnerabilityLearning(
                     title=(sig.get("title") or sig.get("template") or "scan-derived")[:255],
                     vulnerability_type=(sig.get("template") or "nuclei")[:120],
-                    url=(sig.get("evidence_url") or "")[:500],
-                    final_url=(sig.get("evidence_url") or "")[:500],
                     summary=sig.get("description") or "",
                     impact=f"Tech stack: {', '.join(sig.get('tech_stack', [])) or 'unknown'}. Severity: {sig.get('severity')}",
                     remediation="Review nuclei template guidance and apply patch/configuration changes.",
@@ -1223,6 +1245,8 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         mcp_results = ledger.get("mcp_results") or phase_mcp_map.get(phase_id) or []
         tool_evidences: list[dict[str, Any]] = []
         for mcp_res in mcp_results:
+            if not isinstance(mcp_res, dict):
+                continue
             tool_name = str(mcp_res.get("tool_name") or "")
             if mcp_res.get("status") in {"success", "done"} and tool_name:
                 ev = _extract_evidence(phase_id, tool_name, mcp_res)
