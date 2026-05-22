@@ -501,6 +501,25 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                message=(f"target_set refined — {len(_refined['live_targets'])} live, "
                                         f"{len(_refined['dead_targets'])} dead, "
                                         f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
+                # ─ WAF Origin Discovery — hunt the real server behind the WAF ─
+                try:
+                    from app.services.waf_origin import discover_origin_candidates as _disc_origin
+                    _origin = _disc_origin(target, _refined["host_ip"], result.get("mcp_results") or [])
+                    _cp_state["origin_discovery"] = _origin
+                    _cands = _origin.get("candidate_origins") or []
+                    if _cands:
+                        _top = _cands[0]
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                       message=(f"waf_origin_discovery {_origin['summary']} — "
+                                                f"top candidate {_top['ip']} (confidence={_top['confidence']}, "
+                                                f"hosts={_top['hosts'][:3]})")))
+                        _persist_origin_finding(db, job, target, _origin)
+                    else:
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                       message=f"waf_origin_discovery {_origin['summary']}"))
+                except Exception as _oexc:  # noqa: BLE001
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                   message=f"waf_origin_discovery_failed error={_oexc!s}"))
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
             job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
@@ -1176,6 +1195,82 @@ def _build_reproduction(phase_id: str, target: str, tool_evidences: list[dict[st
         "target": target,
         "verifiable": bool(commands and proof),
     }
+
+
+def _persist_origin_finding(db, job: ScanJob, target: str, origin: dict[str, Any]) -> None:
+    """Persist a Finding for WAF origin discovery — the real server behind the edge.
+
+    This is one of the highest-value RedTeam findings: if the origin is
+    reachable directly, every WAF protection is bypassable.
+    """
+    candidates = origin.get("candidate_origins") or []
+    if not candidates:
+        return
+    # Idempotent — one origin-discovery finding per (scan, target)
+    existing = (
+        db.query(Finding)
+        .filter(Finding.scan_job_id == job.id, Finding.domain == str(target)[:255])
+        .all()
+    )
+    for f in existing:
+        if (f.details or {}).get("finding_kind") == "waf_origin_discovery":
+            return
+
+    top = candidates[0]
+    high_conf = [c for c in candidates if c.get("confidence") == "high"]
+    severity = "high" if high_conf else "medium"
+    confidence = 80 if high_conf else 55
+
+    title = (f"[WAF-BYPASS] Origem potencial exposta atrás do WAF — "
+             f"{len(candidates)} IP(s) candidato(s), top {top['ip']}")
+    recommendation = (
+        "Confirme o IP de origem com requisição Host-header direta; se a origem "
+        "responder a aplicação real, TODA proteção do WAF é contornável. "
+        "Mitigação: bloqueie no firewall da origem todo tráfego que não venha "
+        "dos ranges do WAF, e rotacione o IP de origem após exposição."
+    )
+    repro_commands = [{"tool": "curl", "command": c["verify"]} for c in candidates[:6]]
+    steps = [
+        "1. Para cada IP candidato, envie uma requisição com o Host header do alvo",
+        "2. Compare o corpo da resposta com a resposta servida pelo WAF",
+        "3. Resposta idêntica à aplicação real = origem confirmada (WAF bypassável)",
+        "4. Documente o IP de origem e o vetor de acesso direto",
+    ]
+    details: dict[str, Any] = {
+        "finding_kind": "waf_origin_discovery",
+        "phase_id": "P01",
+        "phase_name": "WAF Origin Discovery",
+        "target": target,
+        "apex_behind_waf": origin.get("apex_behind_waf"),
+        "waf_edge_ips": origin.get("waf_edge_ips") or [],
+        "candidate_origins": candidates,
+        "summary": origin.get("summary"),
+        "reproduction": {
+            "discovery_method": "Análise de divergência de IP entre subdomínios + mineração de registros DNS (SPF/MX)",
+            "commands": repro_commands,
+            "payloads": [c["verify"] for c in candidates[:10]],
+            "proof": [{"tool": "dns", "summary": f"{c['ip']} via {c['source']} (hosts: {', '.join(c['hosts'][:3]) or 'DNS record'})", "output": c["verify"]} for c in candidates[:6]],
+            "steps": steps,
+            "verifiable": True,
+        },
+        "mitre_attack": [{"id": "T1590.005", "name": "Gather Victim Network Info: IP Addresses"},
+                         {"id": "T1133", "name": "External Remote Services"}],
+        "owasp_top10": ["A05:2021 Security Misconfiguration"],
+        "kill_chain_stage": "Reconnaissance",
+    }
+    finding = Finding(
+        scan_job_id=job.id,
+        title=title[:255],
+        severity=severity,
+        domain=str(target)[:255],
+        tool="waf_origin_discovery",
+        recommendation=recommendation,
+        confidence_score=confidence,
+        risk_score=max(1, confidence // 10),
+        details=details,
+    )
+    db.add(finding)
+    db.commit()
 
 
 def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:
