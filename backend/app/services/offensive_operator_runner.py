@@ -183,8 +183,21 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                        message=f"auth_engaged headers={masked} — tools will inject these into requests"))
         db.commit()
 
-    for target in targets:
+    # ─── Checkpoint Engine: resumable work queue across root + subdomains ────
+    import time as _time
+    _checkpoint_start = _time.monotonic()
+    _CHECKPOINT_SECONDS = int(initial_state.get("checkpoint_seconds") or 3000)
+    completed_work: set[str] = set(initial_state.get("completed_work") or [])
+    # all_targets starts as the input targets; after P01 it grows with every
+    # discovered subdomain so each phase P02-P22 runs against the full set.
+    all_targets: list[str] = list(initial_state.get("target_set") or targets)
+    _input_target_count = len(targets)
+    _phases_for_level = [p for p in PHASE_ORDER if allowed_phases is None or p in allowed_phases]
+    _target_idx = 0
+    while _target_idx < len(all_targets):
+        target = all_targets[_target_idx]
         if not target:
+            _target_idx += 1
             continue
         scope = _scope_from_job(job, target, execution_mode)
         offensive_state["target"] = target
@@ -193,6 +206,14 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         for phase_id in PHASE_ORDER:
             # Skip phases outside the configured scan_level (asm = recon only).
             if allowed_phases is not None and phase_id not in allowed_phases:
+                continue
+            # P01 (subdomain enumeration) only runs on root/input targets — a
+            # discovered subdomain does not get re-enumerated for subdomains.
+            if phase_id == "P01" and _target_idx >= _input_target_count:
+                continue
+            # RESUME: skip work already completed in a prior checkpoint segment.
+            _work_key = f"{phase_id}:{target}"
+            if _work_key in completed_work:
                 continue
             job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({target})"
             state = dict(job.state_data or {})
@@ -429,63 +450,53 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 db.commit()
             # Only abort on blocked if no skill was resolved at all (hard blocker).
             # Tool-level blocks (e.g. missing optional OOB tool) are logged and skipped.
+            _hard_blocked = False
             if result["phase_ledger"].get("status") == "blocked":
                 blocking_reason = result["phase_ledger"].get("blocking_reason", "")
                 if blocking_reason in {"no_approved_skill_resolved"}:
-                    break
+                    _hard_blocked = True
                 # Otherwise continue to the next phase — record as covered/partial.
 
-    # ─── Multi-target propagation: MANDATORY for domain scans ────────────────
-    # When a scan is requested by domain, discovered subdomains MUST be tested —
-    # a domain scan that only tests the apex is incomplete. Each discovered
-    # subdomain gets the recon + vulnerability phase set re-run against it.
-    state = dict(job.state_data or {})
-    expanded = list(state.get("expanded_targets") or [])
-    # exclude root (already scanned); cap at 12 subdomains to bound runtime
-    propagation_cap = int(state.get("subdomain_propagation_cap") or 12)
-    secondary_targets = [t for t in expanded[1:propagation_cap + 1] if t and t != targets[0]]
-    # Recon + nuclei-driven vuln phases — fast, high-signal coverage per subdomain.
-    # ASM mode keeps recon-only; full mode adds vuln template scanning.
-    if scan_level == "asm":
-        recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07"]
-    else:
-        recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07", "P09", "P11", "P15", "P18"]
-    if secondary_targets:
-        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
-                       message=f"multi_target_propagation starting for {len(secondary_targets)} subdomains: {secondary_targets}"))
-        db.commit()
-        for sub_target in secondary_targets:
-            sub_scope = _scope_from_job(job, sub_target, execution_mode)
-            for phase_id in recon_propagation_phases:
-                if allowed_phases is not None and phase_id not in allowed_phases:
-                    continue
-                job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} (sub:{sub_target})"
+            # ─── Checkpoint Engine: mark work done, expand targets, re-dispatch ──
+            completed_work.add(_work_key)
+            _cp_state = dict(job.state_data or {})
+            _cp_state["completed_work"] = sorted(completed_work)
+            # After P01 on a root target, expand the work set with every
+            # discovered subdomain so each gets the full P02-P22 depth.
+            # subdomain_propagation_cap bounds how many subdomains are queued
+            # (default 25 — set higher/lower in state_data per scan).
+            if phase_id == "P01":
+                _cap = int(_cp_state.get("subdomain_propagation_cap") or 25)
+                _added = 0
+                for _sub in (_cp_state.get("expanded_targets") or []):
+                    if _added >= _cap:
+                        break
+                    if _sub and _sub not in all_targets:
+                        all_targets.append(_sub)
+                        _added += 1
+                _cp_state["target_set"] = list(all_targets)
                 db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                               message=f"dispatch phase_id={phase_id} tool=kali target={sub_target} (multi-target)"))
+                               message=f"target_set built — {len(all_targets)} target(s) queued for full P02-P22 depth (cap={_cap})"))
+            # Progress across the whole job (every target × every phase).
+            _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
+            job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
+            job.state_data = _cp_state
+            db.commit()
+            # Re-dispatch before the Celery time limit so deep multi-target
+            # scans run effectively unbounded — each (phase,target) is a
+            # durable checkpoint, so a continuation resumes exactly here.
+            if _time.monotonic() - _checkpoint_start > _CHECKPOINT_SECONDS:
+                db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                               message=(f"checkpoint — {len(completed_work)} phase-targets done; "
+                                        f"re-dispatching scan to continue")))
+                job.current_step = f"checkpoint: {len(completed_work)} concluídos — continuando"
                 db.commit()
-                try:
-                    result = runtime.run_phase(phase_id, sub_target, sub_scope, execution_mode, offensive_state)
-                    sub_ledger = result["phase_ledger"]
-                    sub_ledger["target"] = sub_target
-                    sub_ledger["mcp_results"] = result.get("mcp_results") or []
-                    sub_ledger["multi_target_propagation"] = True
-                    phase_ledgers.append(sub_ledger)
-                    offensive_state = result["offensive_state"]
-                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                                   message=f"phase_result phase_id={phase_id} status={sub_ledger.get('status')} target={sub_target} tools_attempted={sub_ledger.get('tools_attempted', [])}"))
-                    state = dict(job.state_data or {})
-                    state["phase_ledger_v2"] = phase_ledgers
-                    job.state_data = state
-                    db.commit()
-                    try:
-                        _persist_offensive_findings(db, job, phase_ledgers, [sub_target])
-                        db.commit()
-                    except Exception as exc:  # noqa: BLE001
-                        db.rollback()
-                except Exception as exc:  # noqa: BLE001
-                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
-                                   message=f"multi_target_propagation_failed phase={phase_id} target={sub_target} error={exc!s}"))
-                    db.commit()
+                from app.workers.tasks import run_scan_job_unit as _continue_scan
+                _continue_scan.delay(job.id)
+                return {"checkpointed": True, "completed_phase_targets": len(completed_work)}
+            if _hard_blocked:
+                break
+        _target_idx += 1
 
     campaign = {
         "target": targets[0] if targets else "",

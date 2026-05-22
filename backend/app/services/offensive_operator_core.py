@@ -248,6 +248,51 @@ class ToolCatalogEntry:
     noise_level: str
 
 
+# Capabilities that require real external DNS resolution — useless against
+# localhost / host.docker.internal / RFC-1918 targets.
+_DNS_BRUTE_CAPABILITIES = {"dns_brute", "dns_zone_transfer"}
+
+# Tools that rely on OSINT/certificate-transparency databases and yield nothing
+# for internal hosts even when they don't do DNS brute-force.
+# Also includes protocol-specific scanners (DNS/SMB/SSH) that are irrelevant
+# when the target is an internal HTTP service.
+_OSINT_ONLY_TOOLS = {
+    # DNS enumeration / brute-force
+    "amass", "amass-brute", "amass-intel",
+    "shuffledns", "dnsrecon-brt", "dnsrecon-zt", "dnsenum",
+    "sublist3r", "findomain", "alterx", "assetfinder", "theharvester",
+    # Protocol-specific scanners irrelevant for localhost/internal HTTP targets
+    "nmap-dns",   # scans UDP/53 for DNS vulns — no DNS server on localhost web apps
+    "nmap-smb",   # SMB vuln scripts — not relevant for web apps
+    "nmap-ssh",   # SSH audit — not relevant for web apps
+    # Vulnerability scan scripts that hammer every port/service — too slow and irrelevant
+    # against internal HTTP-only targets (JuiceShop, dev apps, etc.)
+    "nmap-vuln", "nmap-vulscan",   # nmap --script vuln: 300+ s against internal hosts
+    "masscan",   # mass internet scanner — useless / dangerous for localhost
+    # Fuzzing fallbacks that duplicate ffuf but have no --maxtime flag
+    "wfuzz",
+}
+
+_INTERNAL_HOST_RE = re.compile(
+    r"^(localhost|127\.\d+\.\d+\.\d+|::1|0\.0\.0\.0"
+    r"|10\.\d+\.\d+\.\d+"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+"
+    r"|192\.168\.\d+\.\d+"
+    r"|host\.docker\.internal)$",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_host(target: str) -> bool:
+    """Return True when *target* is localhost, a private IP, or a Docker-internal name."""
+    try:
+        parsed = urlparse(target if "://" in target else f"https://{target}")
+        host = (parsed.hostname or target).lower().split(":")[0]
+    except Exception:
+        host = target.lower()
+    return bool(_INTERNAL_HOST_RE.match(host))
+
+
 class ToolCatalog:
     def __init__(self, entries: list[ToolCatalogEntry] | None = None) -> None:
         self.entries = {entry.tool_name: entry for entry in (entries or default_tool_catalog())}
@@ -827,7 +872,13 @@ class SkillToToolPlanCompiler:
         if skill.get("quality_gate_status") != "passed":
             raise ValueError("skill_quality_gate_failed")
         tools: list[dict[str, Any]] = []
+        _skip_dns_tools = _is_internal_host(target)
+
         def _add_tool(name: str, is_required: bool) -> None:
+            # Skip DNS brute-force and OSINT-only tools for internal/local targets —
+            # they block indefinitely without producing any results.
+            if _skip_dns_tools and str(name) in _OSINT_ONLY_TOOLS:
+                return
             catalog_entry = self.catalog.get(str(name))
             if not catalog_entry:
                 if is_required:
@@ -1037,6 +1088,15 @@ class PhaseValidator:
             # MCP infrastructure down is a soft block — mark partial so the campaign advances.
             if all(r.get("error") in {"mcp_unavailable", None} for r in required_blocked):
                 return self._decision(phase_contract["phase_id"], "partial", True, "mcp_unavailable_tool_skipped", [])
+            # Recon/discovery phases run many redundant tools. If the nominally
+            # 'required' tool timed out (common behind a WAF) but other tools
+            # in the phase still succeeded, the phase produced value — mark it
+            # 'partial' and advance instead of hard-blocking.
+            other_success = [r for r in mcp_results
+                             if r["status"] == "success" and r["tool_name"] not in required_tools]
+            if other_success:
+                return self._decision(phase_contract["phase_id"], "partial", True,
+                                      "required_tool_degraded_other_tools_succeeded", [])
             return self._decision(phase_contract["phase_id"], "blocked", False, reason, [r["tool_name"] for r in required_blocked])
         if any(result["status"] == "failed" for result in mcp_results if result["tool_name"] in required_tools):
             return self._decision(phase_contract["phase_id"], "partial", True, "mcp_execution_failed", [])
