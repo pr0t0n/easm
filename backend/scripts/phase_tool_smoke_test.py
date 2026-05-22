@@ -64,9 +64,12 @@ def _post_job(profile: str, target: str) -> str | None:
         return None
 
 
-def _get_job(job_id: str) -> dict:
+def _get_job(job_id: str, full: bool = False) -> dict:
+    """Fetch job state. full=True hits /result (includes stdout/stderr/parsed);
+    full=False hits /jobs/{id} (status only — lighter for polling)."""
+    suffix = "/result" if full else ""
     try:
-        with urllib.request.urlopen(f"{KALI_URL}/jobs/{job_id}", timeout=15) as resp:
+        with urllib.request.urlopen(f"{KALI_URL}/jobs/{job_id}{suffix}", timeout=15) as resp:
             return json.loads(resp.read())
     except Exception:  # noqa: BLE001
         return {}
@@ -77,16 +80,17 @@ def _poll_result(job_id: str) -> dict:
 
     A smoke test only needs to confirm the tool *runs*. If after POLL_TIMEOUT
     the job is still 'running', the binary launched and is actively working —
-    that counts as a pass ('RUNS'), not a failure.
+    that counts as a pass ('RUNS'). On terminal status the full /result
+    payload (with stdout) is fetched for classification.
     """
     deadline = time.time() + POLL_TIMEOUT
     last = {}
     while time.time() < deadline:
         last = _get_job(job_id)
         if last.get("status") in {"done", "failed", "timeout", "skipped"}:
-            return last
+            # fetch full result with stdout for accurate classification
+            return _get_job(job_id, full=True) or last
         time.sleep(5)
-    # Final check after the window
     last = _get_job(job_id) or last
     if last.get("status") == "running":
         return {"status": "running_ok", "return_code": None}

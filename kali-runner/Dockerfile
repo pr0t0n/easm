@@ -84,12 +84,15 @@ RUN set -eux; \
       "github.com/trufflesecurity/trufflehog/v3@latest" ; \
     do echo "go install $pkg"; go install "$pkg" || echo "WARN: failed $pkg"; done; \
     nuclei -update-templates 2>/dev/null || true; \
+    echo "── removing python httpx CLI wrappers (conflict with ProjectDiscovery httpx) ──"; \
+    rm -f /usr/bin/httpx /bin/httpx; \
     echo "── verifying critical Go binaries ──"; \
     MISSING=""; \
     for bin in subfinder httpx naabu nuclei dnsx shuffledns alterx katana \
                amass assetfinder waybackurls gau hakrawler ffuf gospider ; do \
-      command -v "$bin" >/dev/null 2>&1 && echo "  OK $bin" || { echo "  MISSING $bin"; MISSING="$MISSING $bin"; }; \
+      command -v "$bin" >/dev/null 2>&1 && echo "  OK $bin ($(command -v $bin))" || { echo "  MISSING $bin"; MISSING="$MISSING $bin"; }; \
     done; \
+    httpx -version >/dev/null 2>&1 || { echo "FATAL: httpx is not the ProjectDiscovery build"; exit 1; }; \
     if [ -n "$MISSING" ]; then echo "FATAL: missing Go binaries:$MISSING"; exit 1; fi
 
 # ── Layer 4: Python tools (pipx) ─────────────────────────────────────────────
@@ -105,6 +108,14 @@ RUN set -eux; \
     pipx install semgrep==1.161.0; \
     npm install -g retire@5.4.2; \
     rm -rf /root/.npm
+
+# ── Layer 4b: dirsearch runtime deps ─────────────────────────────────────────
+# The Kali dirsearch package ships without its Python deps resolved on
+# Python 3.13 (pkg_resources removed from setuptools >=81). Pin setuptools<81
+# and install every import dirsearch needs so it runs out of the box.
+RUN pip install --break-system-packages --no-cache-dir \
+      "setuptools<81" requests requests_ntlm requests-ntlm2 ntlm-auth \
+      beautifulsoup4 cryptography defusedxml colorama jinja2 markupsafe pyparsing
 
 # ── Layer 5: Trivy (container/IaC/secret scanner — post_exploitation profile) ─
 # Trivy release naming: amd64→64bit, arm64→ARM64 (not the dpkg arch name directly)

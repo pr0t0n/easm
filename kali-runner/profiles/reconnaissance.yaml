@@ -42,6 +42,9 @@ amass_intel:
   description: "OSINT mode: WHOIS-based + reverse WHOIS + ASN-based domain discovery."
   # Article: 'amass intel -src -d X' / 'amass intel -d X -whois'
   cmd: ["amass", "intel", "-d", "{host}", "-whois", "-timeout", "5"]
+  # amass intel exits 1 when reverse-WHOIS yields no related domains — that is
+  # 'no findings', not a failure. Accept it so the phase isn't marked failed.
+  allowed_return_codes: [0, 1]
   timeout: 300
   parser: lines
 
@@ -292,10 +295,13 @@ curl_headers:
   target_type: url
   # --max-time 60: WAF/CDN-fronted targets (Incapsula, Cloudflare) are slow;
   # 30s caused curl exit 28 (operation timeout). -A spoofs a browser UA so
-  # bot-filtering WAFs don't drop the request.
-  cmd: ["curl", "-sS", "-I", "-L", "--max-time", "60",
+  # bot-filtering WAFs don't drop the request. --max-redirs 5 bounds WAF
+  # redirect loops; exit 47 (max redirects) is accepted — we still captured
+  # the response headers along the chain.
+  cmd: ["curl", "-sS", "-I", "-L", "--max-time", "60", "--max-redirs", "5",
         "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "{{url}}"]
+  allowed_return_codes: [0, 47]
   timeout: 90
   parser: raw
 
@@ -305,8 +311,9 @@ curl_probe:
   phase: DELIVERY_MAPPING
   description: "Full HTTP request — status line, headers and body — for validation."
   target_type: url
-  cmd: ["curl", "-sk", "-i", "-L", "--max-time", "60",
+  cmd: ["curl", "-sk", "-i", "-L", "--max-time", "60", "--max-redirs", "5",
         "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "{{url}}"]
+  allowed_return_codes: [0, 47]
   timeout: 90
   parser: raw
