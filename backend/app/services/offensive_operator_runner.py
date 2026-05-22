@@ -37,6 +37,8 @@ from app.services.scan_intelligence import (
     has_auth,
     phases_for_scan_level,
     extract_learning_signals,
+    analyze_waf_behavior,
+    apply_waf_confidence_adjustment,
 )
 
 
@@ -343,6 +345,14 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
                                message=f"evasion_engaged {evasion['rationale']} rate={evasion['rate_limit']}/s threads={evasion['threads']}"))
                 state["_evasion_logged"] = True
+            # 3b. WAF deception analysis — learn the environment, flag fake ports/429
+            env_profile = analyze_waf_behavior(state, mcp_list)
+            if env_profile.get("waf_present") and not state.get("_waf_analysis_logged"):
+                behaviors = env_profile.get("observed_behaviors") or []
+                db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                               message=(f"waf_environment_learned vendors={env_profile.get('waf_vendors')} "
+                                        f"behaviors={behaviors} confidence_penalty={env_profile.get('finding_confidence_penalty')}%")))
+                state["_waf_analysis_logged"] = True
             # 4. Evidence validation: re-probe critical findings via MCP curl
             try:
                 def _call_curl(url: str) -> dict:
@@ -1211,12 +1221,22 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         # A phase that ran with no findings → 'info', never 'high'.
         severity, confidence = _assess_evidence_severity(phase_id, status, tool_evidences, PHASE_SEVERITY)
 
-        title = _build_redteam_title(phase_id, phase_name, status, tool_evidences)
-        recommendation = _generate_recommendation(phase_id, tool_evidences)
-
         # State-derived context for MITRE/OWASP enrichment + tech_stack snapshot
         state_snap = dict(job.state_data or {})
         tech_snap = state_snap.get("tech_stack") or {}
+        env_snap = state_snap.get("environment_profile") or {}
+
+        # WAF deception adjustment — discount findings the WAF likely faked.
+        waf_caveat = None
+        if env_snap.get("waf_present"):
+            _, signal = _has_real_evidence(tool_evidences)
+            severity, confidence, waf_caveat = apply_waf_confidence_adjustment(
+                env_snap, severity, confidence, phase_id, signal)
+
+        title = _build_redteam_title(phase_id, phase_name, status, tool_evidences)
+        recommendation = _generate_recommendation(phase_id, tool_evidences)
+        if waf_caveat:
+            recommendation = f"[WAF] {waf_caveat} | {recommendation}"
 
         details: dict[str, Any] = {
             "phase_id": phase_id,
@@ -1242,6 +1262,16 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             "tech_stack": tech_snap.get("detected") or [],
             "cms_detected": tech_snap.get("cms") or [],
             "waf_detected": tech_snap.get("waf") or [],
+            # Learned environment profile — WAF behaviour, deception flags,
+            # and how to interpret results for this target.
+            "environment_profile": {
+                "waf_present": env_snap.get("waf_present", False),
+                "waf_vendors": env_snap.get("waf_vendors") or [],
+                "observed_behaviors": env_snap.get("observed_behaviors") or [],
+                "interpretation_notes": env_snap.get("interpretation_notes") or [],
+                "finding_confidence_penalty": env_snap.get("finding_confidence_penalty", 0),
+            },
+            "waf_caveat": waf_caveat,
         }
         details = enrich_finding_with_mappings(phase_id, details)
 

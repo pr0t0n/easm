@@ -104,12 +104,28 @@ _TECH_SIGNATURES: dict[str, list[str]] = {
     "apache": ["server: apache"],
     "nginx": ["server: nginx"],
     "cloudflare": ["server: cloudflare", "cf-ray", "cf-cache-status"],
-    "akamai": ["x-akamai", "akamai"],
+    "akamai": ["x-akamai", "akamai", "akamaighost"],
+    "incapsula": ["incap_ses", "visid_incap", "x-iinfo", "incapsula", "imperva"],
+    "sucuri": ["x-sucuri", "sucuri/cloudproxy", "sucuri"],
+    "f5-bigip": ["bigipserver", "f5-", "x-waf-status", "ts01"],
+    "barracuda": ["barra_counter", "barracuda"],
+    "fortinet": ["fortiwafsid", "fortigate", "fortiweb"],
+    "aws-waf": ["awselb", "x-amzn-waf", "aws-waf"],
+    "modsecurity": ["mod_security", "modsecurity", "not acceptable"],
+    "wordfence": ["wordfence", "wfwaf"],
     "aws": ["x-amz-cf-id", "x-amz-request-id"],
     "graphql": ["/graphql", "graphql"],
     "swagger": ["/swagger", "swagger-ui", "openapi.json"],
     "tomcat": ["apache-coyote", "jsessionid", "tomcat"],
     "php": ["x-powered-by: php", "phpsessid"],
+}
+
+# WAF/CDN vendors — when one of these fronts the target, recon results
+# (open ports, "vulnerabilities", banners) are frequently the WAF edge
+# rather than the origin, and must be treated with skepticism.
+_WAF_VENDORS = {
+    "cloudflare", "akamai", "incapsula", "sucuri", "f5-bigip",
+    "barracuda", "fortinet", "aws-waf", "modsecurity", "wordfence",
 }
 
 
@@ -134,7 +150,7 @@ def detect_tech_stack(state: dict[str, Any], mcp_results: list[dict[str, Any]]) 
                     cms.add(tech)
                 if tech in {"apache", "nginx", "iis", "tomcat"}:
                     servers.add(tech)
-                if tech in {"cloudflare", "akamai"}:
+                if tech in _WAF_VENDORS:
                     waf.add(tech)
 
     tech_stack = {
@@ -243,7 +259,7 @@ _USER_AGENTS = [
 def evasion_profile_for(tech_stack: dict[str, list[str]]) -> dict[str, Any]:
     """Pick rate-limits and user-agent strategy based on detected WAF / CDN."""
     waf = set(tech_stack.get("waf") or [])
-    if "cloudflare" in waf or "akamai" in waf:
+    if waf:  # any WAF/CDN vendor → reduced-noise profile
         return {
             "rate_limit": 10,
             "threads": 5,
@@ -251,7 +267,7 @@ def evasion_profile_for(tech_stack: dict[str, list[str]]) -> dict[str, Any]:
             "user_agents": _USER_AGENTS,
             "rotate_ua": True,
             "respect_robots": True,
-            "rationale": f"WAF detected: {', '.join(waf)} — reduced noise profile",
+            "rationale": f"WAF detected: {', '.join(sorted(waf))} — reduced noise profile",
         }
     return {
         "rate_limit": 100,
@@ -262,6 +278,127 @@ def evasion_profile_for(tech_stack: dict[str, list[str]]) -> dict[str, Any]:
         "respect_robots": False,
         "rationale": "No WAF detected — normal scan profile",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4b. WAF deception analysis + environment learning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def analyze_waf_behavior(state: dict[str, Any], mcp_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Detect WAF deception and build a learned environment profile.
+
+    A WAF/CDN in front of the origin actively lies to a scanner:
+      - reports many 'open' ports that are just the CDN edge listener
+      - returns 200/302 for paths that don't exist on the origin
+      - serves generic challenge pages that fuzzers count as 'findings'
+      - emits HTTP 429 when it decides the access pattern is abusive
+
+    This records those behaviours in state['environment_profile'] so the
+    current scan AND future scans of the same target know how to interpret
+    results. Returns the updated environment profile.
+    """
+    tech = state.get("tech_stack") or {}
+    waf_vendors = list(tech.get("waf") or [])
+    env = dict(state.get("environment_profile") or {})
+    env.setdefault("target", state.get("target") or "")
+    env["waf_present"] = bool(waf_vendors)
+    env["waf_vendors"] = waf_vendors
+
+    rate_limited = 0
+    challenge_responses = 0
+    suspicious_port_runs = 0
+    observed_behaviors: set[str] = set(env.get("observed_behaviors") or [])
+
+    for mcp in mcp_results or []:
+        if not isinstance(mcp, dict):
+            continue
+        tool = str(mcp.get("tool_name") or "").lower()
+        stdout = str(mcp.get("stdout") or "")
+        low = stdout.lower()
+        # HTTP 429 — WAF rate-limiting / abuse blocking, NOT a finding
+        if " 429" in low or "429 too many" in low or "too many requests" in low:
+            rate_limited += 1
+            observed_behaviors.add("waf_returns_429_on_abuse")
+        # WAF challenge / block pages
+        if any(m in low for m in ("incap_ses", "_incapsula_", "attention required",
+                                  "access denied", "request blocked", "ray id",
+                                  "challenge-platform", "captcha")):
+            challenge_responses += 1
+            observed_behaviors.add("waf_serves_challenge_pages")
+        # Port scanners against a WAF/CDN edge — many "open" ports are the edge
+        if tool in {"naabu", "masscan", "nmap", "shodan-cli"} and waf_vendors:
+            ports = []
+            for line in stdout.splitlines():
+                if ":" in line:
+                    tail = line.rsplit(":", 1)[-1].strip()
+                    if tail.isdigit():
+                        ports.append(int(tail))
+            if len(set(ports)) >= 6:
+                suspicious_port_runs += 1
+                observed_behaviors.add("waf_edge_reports_many_ports")
+
+    env["observed_behaviors"] = sorted(observed_behaviors)
+    env["rate_limit_hits"] = int(env.get("rate_limit_hits", 0)) + rate_limited
+    env["challenge_page_hits"] = int(env.get("challenge_page_hits", 0)) + challenge_responses
+    # Confidence penalty applied to findings when the WAF is actively deceiving
+    penalty = 0
+    if waf_vendors:
+        penalty = 25
+    if rate_limited:
+        penalty += 20
+    if challenge_responses:
+        penalty += 15
+    if suspicious_port_runs:
+        penalty += 10
+    env["finding_confidence_penalty"] = min(70, penalty)
+    env["interpretation_notes"] = _waf_interpretation_notes(env)
+    state["environment_profile"] = env
+    return env
+
+
+def _waf_interpretation_notes(env: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    if not env.get("waf_present"):
+        return notes
+    vendors = ", ".join(env.get("waf_vendors") or []) or "WAF"
+    notes.append(f"{vendors} fronts this target — origin responses are mediated by the WAF.")
+    behaviors = set(env.get("observed_behaviors") or [])
+    if "waf_edge_reports_many_ports" in behaviors:
+        notes.append("Open-port results likely reflect the WAF/CDN edge, not the origin host — "
+                     "treat port findings as low-confidence until origin IP is confirmed.")
+    if "waf_returns_429_on_abuse" in behaviors:
+        notes.append("Target returned HTTP 429 — the WAF rate-limited the scan; "
+                     "affected results are incomplete, not negative. Re-test with reduced rate.")
+    if "waf_serves_challenge_pages" in behaviors:
+        notes.append("WAF served challenge/block pages — fuzzer 'discovered paths' and some "
+                     "nuclei matches may be the challenge page, not real origin content.")
+    notes.append("Recommendation: confirm the origin IP (DNS history, SPF, certificate SANs) "
+                 "and re-validate findings directly against the origin where authorized.")
+    return notes
+
+
+def apply_waf_confidence_adjustment(env: dict[str, Any], severity: str, confidence: int,
+                                    phase_id: str, signal: str) -> tuple[str, int, str | None]:
+    """Discount a finding's severity/confidence when the WAF is known to deceive.
+
+    Returns (severity, confidence, caveat). caveat is a human-readable note
+    appended to the finding when the WAF likely manufactured the result.
+    """
+    if not env or not env.get("waf_present"):
+        return severity, confidence, None
+    penalty = int(env.get("finding_confidence_penalty", 0) or 0)
+    caveat = None
+    adjusted = max(5, confidence - penalty)
+    # Port/recon findings behind a WAF are the least trustworthy
+    if signal in {"ports_open"} and "waf_edge_reports_many_ports" in (env.get("observed_behaviors") or []):
+        severity = "info"
+        caveat = "Portas reportadas atrás de WAF/CDN — provavelmente o edge, não a origem."
+    # nuclei / path findings behind a WAF need manual confirmation
+    elif signal in {"nuclei_finding", "sensitive_path", "path_discovered"}:
+        if severity in {"critical", "high"}:
+            severity = "medium"
+        caveat = "WAF presente — finding requer confirmação manual contra a origem (possível falso-positivo do WAF)."
+    return severity, adjusted, caveat
 
 
 # ─────────────────────────────────────────────────────────────────────────────
