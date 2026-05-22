@@ -480,6 +480,11 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             for item in (profile.get("requires_scheme") or [])
             if str(item).strip()
         }
+        # Auto-promote bare hostnames to https when profile requires a scheme.
+        # The backend sends 'example.com' but TLS tools need 'https://example.com'.
+        if required_schemes and "://" not in str(req.target):
+            preferred = "https" if "https" in required_schemes else next(iter(required_schemes))
+            req.target = f"{preferred}://{req.target}"
         target_scheme = _target_context(req.target).get("scheme", "").lower()
         if required_schemes and target_scheme not in required_schemes:
             _set_job_fields(

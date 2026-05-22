@@ -47,6 +47,14 @@ RUN apt-get update && \
     (command -v crackmapexec || \
      (command -v nxc && ln -sf "$(command -v nxc)" /usr/local/bin/crackmapexec))
 
+# massdns — required by shuffledns for bulk DNS brute-force resolution.
+# Build from source (not in default Kali repos as a separate package).
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git ca-certificates && \
+    git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns && \
+    cd /tmp/massdns && make && \
+    cp /tmp/massdns/bin/massdns /usr/local/bin/ && \
+    rm -rf /tmp/massdns /var/lib/apt/lists/*
+
 # ── Layer 3: Go-based tools (ProjectDiscovery suite + recon/exploit tools) ──
 RUN set -eux; \
     for pkg in \

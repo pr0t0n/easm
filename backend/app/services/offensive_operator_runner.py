@@ -425,17 +425,22 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     break
                 # Otherwise continue to the next phase — record as covered/partial.
 
-    # ─── Multi-target propagation: re-run recon phases on discovered subdomains ───
-    # After completing the primary loop, iterate the top discovered subdomains and
-    # run recon-heavy phases (P02-P09) against each. Skipped when scan_level=asm
-    # already covered subset, when state doesn't have expanded_targets, or when
-    # tools_attempted on primary is empty (no point propagating a failed scan).
+    # ─── Multi-target propagation: MANDATORY for domain scans ────────────────
+    # When a scan is requested by domain, discovered subdomains MUST be tested —
+    # a domain scan that only tests the apex is incomplete. Each discovered
+    # subdomain gets the recon + vulnerability phase set re-run against it.
     state = dict(job.state_data or {})
     expanded = list(state.get("expanded_targets") or [])
-    # exclude root (already scanned) and cap propagation to first 5 subs to bound runtime
-    secondary_targets = [t for t in expanded[1:6] if t and t != targets[0]]
-    recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07", "P09"]
-    if secondary_targets and scan_level != "asm":
+    # exclude root (already scanned); cap at 12 subdomains to bound runtime
+    propagation_cap = int(state.get("subdomain_propagation_cap") or 12)
+    secondary_targets = [t for t in expanded[1:propagation_cap + 1] if t and t != targets[0]]
+    # Recon + nuclei-driven vuln phases — fast, high-signal coverage per subdomain.
+    # ASM mode keeps recon-only; full mode adds vuln template scanning.
+    if scan_level == "asm":
+        recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07"]
+    else:
+        recon_propagation_phases = ["P02", "P03", "P05", "P06", "P07", "P09", "P11", "P15", "P18"]
+    if secondary_targets:
         db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
                        message=f"multi_target_propagation starting for {len(secondary_targets)} subdomains: {secondary_targets}"))
         db.commit()
@@ -961,14 +966,101 @@ def _generate_recommendation(phase_id: str, tool_evidences: list[dict[str, Any]]
     return " | ".join(recs)
 
 
+def _has_real_evidence(tool_evidences: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Inspect tool evidence and decide whether an actual security-relevant
+    finding exists. Returns (has_evidence, strongest_signal).
+
+    A finding is only "real" when a tool produced concrete output:
+    discovered ports/paths/subdomains/params, nuclei findings, secrets,
+    missing security headers, etc. Phases that ran but found nothing must
+    NOT be reported as high/critical vulnerabilities.
+    """
+    strongest = ""
+    for ev in tool_evidences:
+        if ev.get("nuclei_findings"):
+            crits = [f for f in ev["nuclei_findings"] if str(f.get("severity") or "").lower() in {"critical", "high"}]
+            if crits:
+                return True, "nuclei_critical"
+            strongest = "nuclei_finding"
+        if ev.get("secrets_found"):
+            return True, "secret_exposed"
+        if ev.get("cve_ids"):
+            return True, "cve_identified"
+        if ev.get("vulnerability_count", 0) > 0:
+            strongest = strongest or "vulnerability"
+        if ev.get("discovered_paths"):
+            sensitive = [p for p in ev["discovered_paths"] if any(
+                k in str(p).lower() for k in ["admin", "backup", ".git", "config", ".env", "secret", "debug", "swagger"])]
+            if sensitive:
+                strongest = "sensitive_path"
+            else:
+                strongest = strongest or "path_discovered"
+        if ev.get("open_ports"):
+            strongest = strongest or "ports_open"
+        if ev.get("discovered_subdomains"):
+            strongest = strongest or "subdomains_found"
+        if ev.get("discovered_parameters"):
+            strongest = strongest or "params_found"
+        if ev.get("missing_security_headers"):
+            strongest = strongest or "missing_headers"
+        if ev.get("injection_evidence"):
+            return True, "injection_confirmed"
+    return (bool(strongest), strongest)
+
+
+def _assess_evidence_severity(phase_id: str, status: str, tool_evidences: list[dict[str, Any]],
+                              phase_severity_map: dict[str, str]) -> tuple[str, int]:
+    """Derive severity + confidence from ACTUAL evidence — not just the phase.
+
+    Previously every P11 (SSRF) finding was 'high' even with zero evidence,
+    producing false positives. Now:
+      - no evidence at all   → 'info', low confidence
+      - weak recon evidence  → 'info'/'low'
+      - confirmed vuln/secret/CVE → phase severity
+    """
+    has_evidence, signal = _has_real_evidence(tool_evidences)
+    phase_sev = phase_severity_map.get(phase_id, "info")
+
+    if not has_evidence:
+        # Phase ran but produced nothing actionable — informational only.
+        return "info", (25 if status == "completed" else 15)
+
+    # Strong, confirmed signals → escalate to the phase's intended severity.
+    if signal in {"nuclei_critical", "secret_exposed", "cve_identified", "injection_confirmed"}:
+        return phase_sev if phase_sev != "info" else "high", 90
+
+    # Sensitive path / nuclei medium finding → at least medium.
+    if signal in {"sensitive_path", "nuclei_finding", "vulnerability"}:
+        escalated = phase_sev if phase_sev in {"high", "critical", "medium"} else "medium"
+        return escalated, 70
+
+    # Recon-level evidence (ports, subdomains, params) → low/info, never high.
+    if signal in {"ports_open", "subdomains_found", "path_discovered", "params_found"}:
+        return "low", 55
+    if signal in {"missing_headers"}:
+        return "medium", 60
+
+    return "info", 40
+
+
 def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_list: list[dict[str, Any]]) -> str:
-    """Build a descriptive finding title that reflects what was actually found."""
-    summaries = [e.get("finding_summary", "") for e in evidence_list if e.get("finding_summary")]
-    if not summaries:
-        return f"{phase_name} — {'Finding' if status == 'completed' else 'Partial Evidence'} [{phase_id}]"
-    # Use the first non-empty summary as the title suffix
-    primary = summaries[0][:120]
-    return f"[{phase_id}] {phase_name}: {primary}"
+    """Build a descriptive finding title that reflects what was actually found.
+
+    Titles must not imply a vulnerability when no evidence exists. A phase that
+    ran but found nothing is labelled 'Sem achados' (coverage only).
+    """
+    has_evidence, signal = _has_real_evidence(evidence_list)
+    # Pick the most informative non-empty summary that isn't a "nothing found" line
+    meaningful = [
+        e.get("finding_summary", "") for e in evidence_list
+        if e.get("finding_summary") and not str(e.get("finding_summary")).lower().startswith(("no ", "nenhum", "sem "))
+    ]
+    if has_evidence and meaningful:
+        return f"[{phase_id}] {phase_name}: {meaningful[0][:120]}"
+    if has_evidence:
+        return f"[{phase_id}] {phase_name}: evidência de superfície coletada"
+    # No real evidence — coverage record only, not a vulnerability.
+    return f"[{phase_id}] {phase_name} — Sem achados (cobertura executada)"
 
 
 def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:
@@ -1032,9 +1124,6 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             continue
         seen.add(key)
 
-        severity = PHASE_SEVERITY.get(phase_id, "info")
-        confidence = 75 if status == "completed" else (50 if status == "partial" else 30)
-
         # Extract per-tool evidence from MCP results stored in the ledger
         mcp_results = phase_mcp_map.get(phase_id) or ledger.get("mcp_results") or []
         tool_evidences: list[dict[str, Any]] = []
@@ -1043,6 +1132,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             if mcp_res.get("status") in {"success", "done"} and tool_name:
                 ev = _extract_evidence(phase_id, tool_name, mcp_res)
                 tool_evidences.append(ev)
+
+        # Severity + confidence are derived from ACTUAL evidence, not the phase.
+        # A phase that ran with no findings → 'info', never 'high'.
+        severity, confidence = _assess_evidence_severity(phase_id, status, tool_evidences, PHASE_SEVERITY)
 
         title = _build_redteam_title(phase_id, phase_name, status, tool_evidences)
         recommendation = _generate_recommendation(phase_id, tool_evidences)

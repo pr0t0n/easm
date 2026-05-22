@@ -940,12 +940,19 @@ class MCPToolExecutor:
                     status = "success"
                 execution.update(
                     status=status if status in {"queued", "running", "success", "failed", "timeout", "blocked"} else "failed",
-                    stdout_path=raw.get("stdout_path") or raw.get("stdout") or "",
+                    stdout_path=raw.get("stdout_path") or "",
                     stderr_path=raw.get("stderr_path") or raw.get("stderr") or "",
                     artifacts=raw.get("artifact_paths") or raw.get("artifacts") or [],
                     exit_code=raw.get("exit_code", raw.get("return_code")),
                     finished_at=utc_now(),
                     error=raw.get("error"),
+                    # Carry the actual tool output so evidence extraction has data
+                    # to parse (previously only stdout_path was kept → evidence
+                    # always reported "nothing found").
+                    stdout=raw.get("stdout") or "",
+                    parsed_result=raw.get("parsed_result") or raw.get("parsed"),
+                    command=raw.get("command") or "",
+                    duration_seconds=raw.get("duration_seconds"),
                 )
             except Exception as exc:  # noqa: BLE001
                 execution.update(status="failed", error=str(exc), finished_at=utc_now())
