@@ -189,9 +189,12 @@ whatweb_fingerprint:
   category: recon
   phase: RECONNAISSANCE
   description: "Web tech fingerprint (CMS, frameworks, JS libs)."
-  cmd: ["whatweb", "--no-errors", "-a", "3", "--log-json=-", "{url}"]
+  # '--log-json=-' makes whatweb's Ruby logger write to a stdout stream the
+  # runner already owns → 'closed stream (IOError)'. Use the default verbose
+  # stdout output (parser: raw) instead — it is fully parseable.
+  cmd: ["whatweb", "--no-errors", "-a", "3", "--colour=never", "{url}"]
   timeout: 120
-  parser: jsonl
+  parser: raw
 
 wafw00f_detect:
   tool: wafw00f
