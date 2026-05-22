@@ -25,10 +25,12 @@ amass_brute:
   tool: amass-brute
   category: recon
   phase: RECONNAISSANCE
-  description: "Active amass brute-force DNS enumeration with trusted resolvers + SecLists wordlist."
+  description: "Active amass brute-force DNS enumeration — resolver file (-rf) + SecLists wordlist."
+  # amass v4: -r expects ONE resolver IP (repeatable); a comma list fails with
+  # 'unable to build pool of untrusted resolvers'. Use -rf <file> instead.
   cmd: ["amass", "enum", "-brute", "-d", "{host}",
         "-w", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",
-        "-r", "8.8.8.8,1.1.1.1,9.9.9.9",
+        "-rf", "/usr/share/seclists/Miscellaneous/dns-resolvers.txt",
         "-timeout", "10"]
   timeout: 900
   parser: lines
