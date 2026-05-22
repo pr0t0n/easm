@@ -46,6 +46,10 @@ from app.services.scan_intelligence import (
     derive_cvss,
     build_executive_narrative,
     diff_against_previous,
+    chain_findings,
+    load_fp_blocklist,
+    apply_fp_blocklist,
+    llm_phase_reasoning,
 )
 
 
@@ -401,18 +405,63 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     headers = {"User-Agent": evasion.get("user_agents", ["Mozilla/5.0"])[0], **auth_headers_from_state(state)}
                     r = _r.get(url, headers=headers, timeout=15, allow_redirects=True, verify=False)
                     return {"status_code": r.status_code, "body": r.text[:500]}
-                # 429 detection — WAF rate-limiting in the phase output. We
-                # mark the phase for adaptive retry (logged once); the evasion
-                # profile is already at reduced rate for the next phase.
+                # 429 detection + ADAPTIVE RETRY. If the WAF throttled tools,
+                # wait the back-off window and re-run the phase with the
+                # reduced-rate evasion profile already engaged. Cap at 1 retry
+                # per (phase,target) so we never loop indefinitely.
                 _rl = detect_rate_limit_signals(mcp_list)
-                if _rl.get("hit") and not state.get(f"_rl_logged_{phase_id}"):
+                _retry_key = f"_rl_retried_{_work_key}"
+                if _rl.get("hit") and not state.get(_retry_key):
+                    state[_retry_key] = True
                     db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
                                    message=(f"rate_limit_detected phase={phase_id} target={target} "
-                                            f"tools_throttled={_rl['tools_throttled']} — "
-                                            f"evasion profile (10/s, 5 threads) will apply to remaining phases")))
-                    state[f"_rl_logged_{phase_id}"] = True
+                                            f"tools_throttled={_rl['tools_throttled']} — backing off 30s "
+                                            f"and re-running with reduced-rate evasion profile")))
                     state["rate_limited_phases"] = list(set((state.get("rate_limited_phases") or []) + [phase_id]))
+                    job.state_data = state
+                    db.commit()
+                    _time.sleep(30)
+                    # Re-run the phase with the slow profile already in state
+                    try:
+                        _retry_result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+                        _retry_ledger = _retry_result["phase_ledger"]
+                        _retry_ledger["target"] = target
+                        _retry_ledger["mcp_results"] = _retry_result.get("mcp_results") or []
+                        _retry_ledger["rate_limit_retry"] = True
+                        phase_ledgers.append(_retry_ledger)
+                        offensive_state = _retry_result["offensive_state"]
+                        # Replace mcp_list with retry data for downstream hooks
+                        mcp_list = _retry_result.get("mcp_results") or []
+                        result = _retry_result
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                       message=f"rate_limit_retry_completed phase={phase_id} target={target} status={_retry_ledger.get('status')}"))
+                    except Exception as _re_exc:  # noqa: BLE001
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                       message=f"rate_limit_retry_failed phase={phase_id} error={_re_exc!s}"))
                 validations = validate_critical_findings(state, mcp_list, call_curl=_call_curl)
+                # LLM reasoning between phases — only after high-signal phases
+                try:
+                    _tool_evs_for_llm = []
+                    for m in mcp_list:
+                        if isinstance(m, dict) and m.get("status") in ("success", "done"):
+                            _tool_evs_for_llm.append(_extract_evidence(phase_id, m.get("tool_name", ""), m))
+                    _reasoning = llm_phase_reasoning(state, phase_id, target, _tool_evs_for_llm, tech_stack, env_profile)
+                    if _reasoning:
+                        state["llm_reasoning"] = (state.get("llm_reasoning") or []) + [_reasoning]
+                        # Merge injected_tools into per-phase plans
+                        merged = state.get("llm_injected_tools") or {}
+                        for ph, tools in (_reasoning.get("injected_tools") or {}).items():
+                            merged.setdefault(ph, [])
+                            for t in tools:
+                                if t not in merged[ph]:
+                                    merged[ph].append(t)
+                        state["llm_injected_tools"] = merged
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                       message=(f"llm_reasoning after={phase_id} "
+                                                f"suggested_phases={list((_reasoning.get('injected_tools') or {}).keys())} "
+                                                f"reason=\"{_reasoning.get('reasoning','')[:120]}\"")))
+                except Exception:  # noqa: BLE001
+                    pass
                 if validations:
                     _vc = {}
                     for _v in validations:
@@ -522,6 +571,21 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                message=(f"target_set refined — {len(_refined['live_targets'])} live, "
                                         f"{len(_refined['dead_targets'])} dead, "
                                         f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
+                # ─ Parallel fan-out: dispatch a subtask per non-root target ─
+                if _cp_state.get("parallelize"):
+                    try:
+                        from app.workers.tasks import run_scan_target_subset as _rsts
+                        _dispatched = 0
+                        for _t in _refined["live_targets"]:
+                            if _t and _t != target:
+                                _rsts.delay(job.id, _t)
+                                _dispatched += 1
+                        if _dispatched:
+                            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                                           message=f"parallel_fanout dispatched {_dispatched} subtasks (one per non-root target)"))
+                    except Exception as _pfe:  # noqa: BLE001
+                        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                       message=f"parallel_fanout_failed error={_pfe!s}"))
                 # ─ WAF Origin Discovery — hunt the real server behind the WAF ─
                 try:
                     from app.services.waf_origin import discover_origin_candidates as _disc_origin
@@ -596,12 +660,39 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             f.cvss = cvss
             (f.details or {})["cvss_calculated"] = cvss
         db.commit()
+        # FP blocklist — downgrade findings matching past analyst FP markings
+        try:
+            blocklist = load_fp_blocklist(db, owner_id=job.owner_id)
+            if blocklist:
+                downgraded = 0
+                for f, fd in zip(all_findings, finding_dicts):
+                    if apply_fp_blocklist(fd, blocklist):
+                        f.severity = "info"
+                        d = f.details or {}
+                        d["fp_downgraded"] = True
+                        f.details = d
+                        downgraded += 1
+                if downgraded:
+                    db.commit()
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                   message=f"fp_blocklist_applied downgraded={downgraded} finding(s) matching known FP signatures"))
+                    db.commit()
+        except Exception as _fpe:  # noqa: BLE001
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                           message=f"fp_blocklist_failed error={_fpe!s}"))
         deduped = dedup_findings_by_signature(finding_dicts)
         state["unique_findings"] = [{
             "title": d["title"], "severity": d["severity"],
             "instance_count": d.get("instance_count", 1),
             "instances": d.get("instances", []),
         } for d in deduped]
+        # Attack-path chaining — correlate findings into kill chains
+        chains = chain_findings(finding_dicts)
+        state["attack_chains"] = chains
+        if chains:
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                           message=(f"attack_chains_identified count={len(chains)} "
+                                    f"top=\"{chains[0]['name']}\" severity={chains[0]['severity']}")))
         primary = targets[0] if targets else ""
         narrative = build_executive_narrative(
             job.id, primary, finding_dicts,
@@ -1283,6 +1374,82 @@ def _build_reproduction(phase_id: str, target: str, tool_evidences: list[dict[st
         "target": target,
         "verifiable": bool(commands and proof),
     }
+
+
+def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Run P02-P22 for a single target. Used by the parallel fan-out task.
+
+    Each phase result is persisted via the same idempotent _persist_offensive_findings
+    flow used by the main scan, so concurrent subtasks writing different (phase,
+    target) pairs do not collide.
+    """
+    state = dict(job.state_data or {})
+    execution_mode = str(state.get("execution_mode") or "controlled_pentest")
+    allowed_phases = phases_for_scan_level(state.get("scan_level"))
+    scope = _scope_from_job(job, target, execution_mode)
+    offensive_state = dict(state.get("offensive_state") or create_offensive_state(target, campaign_id=f"scan-{job.id}"))
+    offensive_state["target"] = target
+
+    # Auth for downstream tools — shared across all subtasks
+    global _CURRENT_AUTH_HEADERS
+    _CURRENT_AUTH_HEADERS = auth_headers_from_state(state)
+
+    mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
+    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
+
+    completed_work: set[str] = set(state.get("completed_work") or [])
+    host_ip_map: dict[str, str] = dict(state.get("host_ip_map") or {})
+    phase_ledgers: list[dict[str, Any]] = list(state.get("phase_ledger_v2") or [])
+    processed = 0
+    skipped = 0
+    for phase_id in PHASE_ORDER:
+        if phase_id == "P01":
+            continue
+        if allowed_phases is not None and phase_id not in allowed_phases:
+            continue
+        wk = f"{phase_id}:{target}"
+        if wk in completed_work:
+            skipped += 1
+            continue
+        # IP dedup
+        if phase_id in NETWORK_PHASES:
+            _ip = host_ip_map.get(target)
+            if _ip and f"{phase_id}:ip:{_ip}" in completed_work:
+                completed_work.add(wk)
+                skipped += 1
+                continue
+        try:
+            result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+            offensive_state = result["offensive_state"]
+            ledger = result["phase_ledger"]
+            ledger["target"] = target
+            ledger["mcp_results"] = result.get("mcp_results") or []
+            ledger["parallel_subtask"] = True
+            phase_ledgers.append(ledger)
+            completed_work.add(wk)
+            if phase_id in NETWORK_PHASES:
+                ip = host_ip_map.get(target)
+                if ip:
+                    completed_work.add(f"{phase_id}:ip:{ip}")
+            # Persist incremental state
+            cur = dict(job.state_data or {})
+            cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
+            cur["phase_ledger_v2"] = (cur.get("phase_ledger_v2") or []) + [ledger]
+            job.state_data = cur
+            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                           message=f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} (parallel)"))
+            db.commit()
+            try:
+                _persist_offensive_findings(db, job, phase_ledgers, [target])
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+            processed += 1
+        except Exception as exc:  # noqa: BLE001
+            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                           message=f"parallel_phase_failed phase={phase_id} target={target} error={exc!s}"))
+            db.commit()
+    return {"target": target, "processed": processed, "skipped": skipped}
 
 
 def _persist_origin_finding(db, job: ScanJob, target: str, origin: dict[str, Any]) -> None:

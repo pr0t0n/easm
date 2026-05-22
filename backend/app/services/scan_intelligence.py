@@ -572,6 +572,246 @@ def diff_against_previous(current_findings: list[dict[str, Any]],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 5f. Attack-path chaining — link findings into kill chains
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Rules: each rule lists trigger conditions (finding_kinds OR phase_ids) that,
+# when present together, materialise into a named attack chain.
+_CHAIN_RULES: list[dict[str, Any]] = [
+    {
+        "name": "WAF Bypass → Direct Origin Exposure",
+        "severity": "critical",
+        "triggers": {"finding_kinds": ["waf_origin_discovery"], "phase_ids": []},
+        "second": {"phase_ids": ["P09", "P10", "P11", "P12", "P13", "P15", "P17", "P18"]},
+        "story": (
+            "O atacante descobre o IP da origem fora do WAF e usa para acessar "
+            "diretamente os endpoints vulneráveis identificados em P09-P18, "
+            "contornando completamente toda proteção do perímetro."
+        ),
+        "mitre": ["T1133", "T1190"],
+    },
+    {
+        "name": "Credential Leak Chain",
+        "severity": "critical",
+        "triggers": {"phase_ids": ["P15", "P18"], "title_markers": ["secret", "credential", ".git", ".env"]},
+        "second": {"phase_ids": ["P14"], "title_markers": ["auth"]},
+        "story": (
+            "Credencial vazada (P15/P18) habilita autenticação direta (P14), "
+            "convertendo um vazamento de informação em acesso autenticado."
+        ),
+        "mitre": ["T1552", "T1078"],
+    },
+    {
+        "name": "Subdomain Takeover → Brand Hijack",
+        "severity": "high",
+        "triggers": {"title_markers": ["takeover", "subjack"]},
+        "second": {"phase_ids": ["P01"]},
+        "story": (
+            "Subdomínio com referência DNS pendente pode ser tomado pelo atacante, "
+            "permitindo hospedar conteúdo malicioso sob a marca do alvo."
+        ),
+        "mitre": ["T1583.001"],
+    },
+    {
+        "name": "Injection → Data Exfiltration",
+        "severity": "critical",
+        "triggers": {"phase_ids": ["P10", "P12"], "title_markers": ["sql", "xss", "inject"]},
+        "second": {"phase_ids": ["P13", "P19"]},
+        "story": (
+            "Injection confirmada (P10/P12) combinada com falha de access control "
+            "(P13/P19) permite extração de dados de outros usuários/contas."
+        ),
+        "mitre": ["T1190", "T1213"],
+    },
+    {
+        "name": "Exposed API → IDOR",
+        "severity": "high",
+        "triggers": {"phase_ids": ["P04", "P16"], "title_markers": ["parameter", "api"]},
+        "second": {"phase_ids": ["P13"]},
+        "story": (
+            "Parâmetros descobertos em APIs (P04/P16) sem controle adequado de "
+            "autorização (P13) permitem IDOR — acesso a recursos de outros usuários."
+        ),
+        "mitre": ["T1213"],
+    },
+]
+
+
+def _finding_matches(finding: dict[str, Any], cond: dict[str, Any]) -> bool:
+    details = finding.get("details") or {}
+    phase = str(details.get("phase_id") or "")
+    kind = str(details.get("finding_kind") or "")
+    title = str(finding.get("title") or "").lower()
+    if cond.get("finding_kinds") and kind in cond["finding_kinds"]:
+        return True
+    if cond.get("phase_ids") and phase in cond["phase_ids"]:
+        markers = cond.get("title_markers") or []
+        if not markers or any(m in title for m in markers):
+            return True
+    return False
+
+
+def chain_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Correlate findings into attack chains.
+
+    For each rule, collect findings matching the trigger and findings matching
+    the second link. If both sets are non-empty, materialise the chain.
+    """
+    chains: list[dict[str, Any]] = []
+    for rule in _CHAIN_RULES:
+        primary = [f for f in findings if _finding_matches(f, rule["triggers"])]
+        if not primary:
+            continue
+        secondary = [f for f in findings if _finding_matches(f, rule["second"])]
+        if not secondary:
+            continue
+        chains.append({
+            "name": rule["name"],
+            "severity": rule["severity"],
+            "story": rule["story"],
+            "mitre_attack": rule["mitre"],
+            "trigger_findings": [{"id": f.get("id"), "title": f.get("title")} for f in primary[:5]],
+            "exploit_findings": [{"id": f.get("id"), "title": f.get("title")} for f in secondary[:5]],
+            "trigger_count": len(primary),
+            "exploit_count": len(secondary),
+        })
+    return chains
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5g. False-positive feedback loop — learn from analyst FP markings
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_fp_signature(finding: Any) -> str:
+    """Stable signature for an FP-blocklist entry. Same across scans."""
+    details = (finding.details if hasattr(finding, "details") else finding.get("details")) or {}
+    phase = str(details.get("phase_id") or "")
+    kind = str(details.get("finding_kind") or "")
+    # Pull a nuclei template if present, else title
+    tmpl = ""
+    for te in (details.get("tool_evidence") or []):
+        for nf in (te.get("nuclei_findings") or []):
+            tmpl = nf.get("template") or ""
+            if tmpl:
+                break
+        if tmpl:
+            break
+    title = str(finding.title if hasattr(finding, "title") else finding.get("title") or "")[:80]
+    return f"{phase}|{kind}|{tmpl}|{title}"
+
+
+def load_fp_blocklist(db, owner_id: int | None = None) -> set[str]:
+    """Read all findings marked as false positive and return their signatures.
+
+    The runner uses this to downgrade matching findings on new scans.
+    """
+    from app.models.models import Finding as _F
+    q = db.query(_F).filter(_F.is_false_positive == True)  # noqa: E712
+    if owner_id is not None:
+        from app.models.models import ScanJob as _SJ
+        q = q.join(_SJ, _F.scan_job_id == _SJ.id).filter(_SJ.owner_id == owner_id)
+    sigs: set[str] = set()
+    for f in q.all():
+        sigs.add(build_fp_signature(f))
+    return sigs
+
+
+def apply_fp_blocklist(finding_dict: dict[str, Any], blocklist: set[str]) -> bool:
+    """If the finding matches a known FP, downgrade it to info + flag.
+
+    Returns True if downgraded.
+    """
+    sig = build_fp_signature(finding_dict)
+    if sig in blocklist:
+        finding_dict["severity"] = "info"
+        details = finding_dict.get("details") or {}
+        details["fp_downgraded"] = True
+        details["fp_signature"] = sig
+        finding_dict["details"] = details
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5h. LLM-driven phase reasoning — adapt next-phase plan from evidence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def llm_phase_reasoning(state: dict[str, Any], phase_id: str, target: str,
+                        tool_evidences: list[dict[str, Any]],
+                        tech_stack: dict[str, list[str]],
+                        env_profile: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Ask the LLM to suggest payload/tool adjustments for downstream phases
+    based on the evidence collected so far.
+
+    Returns a dict like:
+      {"injected_tools": {"P09": ["wpscan"]},
+       "payloads_hint": ["..."],
+       "reasoning": "..."}
+    or None when the LLM is unreachable or disabled.
+
+    Disabled with state["llm_reasoning_disabled"] = True or env LLM_REASONING=0.
+    """
+    import os
+    if state.get("llm_reasoning_disabled") or os.environ.get("LLM_REASONING") == "0":
+        return None
+    # Only call the LLM after phases that produce actionable signal
+    if phase_id not in {"P01", "P03", "P06", "P07", "P09", "P15", "P18"}:
+        return None
+    try:
+        from app.services.vulnerability_learning_service import _call_learning_llm, _extract_json_object
+    except Exception:
+        return None
+
+    # Compact context the LLM can reason about
+    findings_summary: list[str] = []
+    for ev in (tool_evidences or [])[:8]:
+        s = ev.get("finding_summary") or ""
+        if s and not s.lower().startswith(("no ", "nenhum", "sem ")):
+            findings_summary.append(f"- {ev.get('tool')}: {s[:120]}")
+    if not findings_summary:
+        return None
+
+    prompt = f"""Você é um operador RedTeam.
+Analise as evidências coletadas até agora e sugira como ajustar o teste das próximas fases.
+
+Alvo: {target}
+Fase recém-concluída: {phase_id}
+Stack detectado: {tech_stack.get('detected', [])} (CMS: {tech_stack.get('cms', [])}, WAF: {tech_stack.get('waf', [])})
+WAF presente: {bool((env_profile or {}).get('waf_present'))}
+
+Evidências:
+{chr(10).join(findings_summary)}
+
+Responda em JSON estrito:
+{{
+  "injected_tools": {{"PXX": ["tool1"]}},   // ferramentas extras por fase futura, baseadas nas evidências
+  "payloads_hint": ["payload sugerido 1", "..."],
+  "reasoning": "1-2 frases explicando seu raciocínio"
+}}
+
+Apenas JSON. Sem texto adicional."""
+    try:
+        _model, raw = _call_learning_llm(prompt)
+        if not raw:
+            return None
+        parsed = _extract_json_object(raw) if hasattr(_extract_json_object, "__call__") else {}
+        if not isinstance(parsed, dict):
+            return None
+        # Sanitize
+        injected = parsed.get("injected_tools") if isinstance(parsed.get("injected_tools"), dict) else {}
+        payloads = parsed.get("payloads_hint") if isinstance(parsed.get("payloads_hint"), list) else []
+        reasoning = str(parsed.get("reasoning") or "")[:300]
+        return {
+            "injected_tools": {str(k): [str(t) for t in (v or [])] for k, v in injected.items()},
+            "payloads_hint": [str(p) for p in payloads[:8]],
+            "reasoning": reasoning,
+            "source_phase": phase_id,
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. Defense evasion
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -837,6 +1077,20 @@ def auth_headers_from_state(state: dict[str, Any]) -> dict[str, str]:
     elif auth_type == "header" and isinstance(cfg.get("headers"), dict):
         for k, v in cfg["headers"].items():
             headers[str(k)] = str(v)
+    elif auth_type == "login_flow":
+        # Execute the login flow once; cached headers stored in state
+        # under '_login_flow_cache' so we don't re-login every phase.
+        cached = state.get("_login_flow_cache") or {}
+        if cached.get("ok") and cached.get("headers"):
+            return dict(cached["headers"])
+        try:
+            from app.services.login_flow import execute_login_flow
+            result = execute_login_flow(cfg.get("login_flow") or {})
+            state["_login_flow_cache"] = result
+            if result.get("ok"):
+                return dict(result.get("headers") or {})
+        except Exception:  # noqa: BLE001
+            return {}
     return headers
 
 

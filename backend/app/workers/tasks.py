@@ -1457,6 +1457,30 @@ def run_scan_job_unit(self, scan_id: int):
     return _run_scan_with_retry(self, scan_id, "unit")
 
 
+@celery.task(bind=True, name="run_scan_target_subset", queue=SCAN_UNIT_QUEUE)
+def run_scan_target_subset(self, scan_id: int, target: str):
+    """Parallel fan-out: process P02-P22 for ONE target inside an ongoing scan.
+
+    Dispatched by the main scan when state.parallelize is True, after P01 has
+    built the target_set. Each subtask processes its target's phases and
+    persists findings/ledgers idempotently to the same scan_job row.
+    """
+    from app.db.session import SessionLocal
+    from app.models.models import ScanJob, ScanLog
+    from app.services.offensive_operator_runner import _run_target_phases_subset
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not job:
+            return {"error": f"scan {scan_id} not found"}
+        db.add(ScanLog(scan_job_id=scan_id, source="offensive-operator", level="INFO",
+                       message=f"parallel_subtask started target={target}"))
+        db.commit()
+        return _run_target_phases_subset(db, job, target)
+    finally:
+        db.close()
+
+
 @celery.task(bind=True, name="run_scan_job_scheduled", queue=SCAN_SCHEDULED_QUEUE)
 def run_scan_job_scheduled(self, scan_id: int):
     """
