@@ -96,6 +96,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState(null);
   const [frameworks, setFrameworks] = useState([]);
   const [recentScans, setRecentScans] = useState([]);
+  const [scanRows, setScanRows] = useState([]);
   const [topVulns, setTopVulns] = useState([]);
   const [assets, setAssets] = useState([]);
   const [activity, setActivity] = useState([]);
@@ -202,6 +203,12 @@ export default function DashboardPage() {
         ]);
 
         setRecentScans(dashboard.recent_scans || []);
+        try {
+          const { data: scanList } = await client.get("/api/scans");
+          setScanRows(Array.isArray(scanList) ? scanList : []);
+        } catch {
+          setScanRows([]);
+        }
         setTopVulns(dashboard.top_vulns || []);
         setAssets(dashboard.assets || []);
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
@@ -450,6 +457,17 @@ export default function DashboardPage() {
   const attemptedToolCount = Number(vulnToolExecution?.summary?.attempted_count || 0);
   const evidenceReadiness = attemptedToolCount > 0 ? Math.round((executedToolCount / attemptedToolCount) * 100) : 0;
   const activeToolRows = Array.isArray(vulnToolExecution?.tools) ? vulnToolExecution.tools : [];
+  const scanStatusCounts = scanRows.reduce((acc, scan) => {
+    const status = String(scan?.status || "unknown").toLowerCase();
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const scansRunning = Number(scanStatusCounts.running || 0) + Number(scanStatusCounts.retrying || 0);
+  const scansQueued = Number(scanStatusCounts.queued || 0);
+  const scansStopped = Number(scanStatusCounts.stopped || 0);
+  const scansCompleted = Number(scanStatusCounts.completed || 0);
+  const scansFailed = Number(scanStatusCounts.failed || 0) + Number(scanStatusCounts.blocked || 0);
+  const scansExecuting = scansRunning + scansQueued;
   const weakFrameworks = frameworks
     .slice()
     .sort((a, b) => Number(a.score || 0) - Number(b.score || 0))
@@ -567,6 +585,23 @@ export default function DashboardPage() {
               <span>Gaps de detecção</span>
               <strong>{gapCount}</strong>
               <small>telemetria ausente/parcial</small>
+            </div>
+          </div>
+
+          <div className="scan-state-card">
+            <div className="scan-state-head">
+              <div>
+                <h3>Estado dos scans</h3>
+                <span>fila operacional agora</span>
+              </div>
+              <strong>{scanRows.length}</strong>
+            </div>
+            <div className="scan-state-grid">
+              <div className="run"><span>Rodando</span><b>{scansRunning}</b></div>
+              <div className="queue"><span>Executando / fila</span><b>{scansExecuting}</b></div>
+              <div className="stop"><span>Parados</span><b>{scansStopped}</b></div>
+              <div className="done"><span>Concluídos</span><b>{scansCompleted}</b></div>
+              <div className="fail"><span>Falhos / bloqueados</span><b>{scansFailed}</b></div>
             </div>
           </div>
 

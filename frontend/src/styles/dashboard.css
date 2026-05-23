@@ -163,6 +163,68 @@
   gap: 10px;
   margin-bottom: 14px;
 }
+.dash .scan-state-card {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 11px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.dash .scan-state-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.dash .scan-state-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink);
+}
+.dash .scan-state-head span {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+}
+.dash .scan-state-head strong {
+  font-family: var(--font-display);
+  font-size: 26px;
+  color: var(--ink);
+}
+.dash .scan-state-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.dash .scan-state-grid > div {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+.dash .scan-state-grid span {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.dash .scan-state-grid b {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  line-height: 1;
+  color: var(--ink);
+}
+.dash .scan-state-grid .run b { color: var(--sev-low-text); }
+.dash .scan-state-grid .queue b { color: var(--sev-info-text); }
+.dash .scan-state-grid .stop b { color: var(--sev-medium-text); }
+.dash .scan-state-grid .fail b { color: var(--sev-critical-text); }
 .dash .rt-kpi {
   border: 1px solid var(--line);
   background: var(--surface-soft);
@@ -859,5 +921,6 @@
 @media (max-width: 640px) {
   .dash .redteam { padding: 18px; }
   .dash .redteam-kpis { grid-template-columns: 1fr; }
+  .dash .scan-state-grid { grid-template-columns: 1fr; }
   .dash .rt-finding { grid-template-columns: 1fr; }
 }
