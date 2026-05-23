@@ -105,7 +105,7 @@ def _resolve_host(host: str) -> str | None:
         return None
 
 
-def refine_target_set(root: str, subdomains: list[str], cap: int = 25) -> dict[str, Any]:
+def refine_target_set(root: str, subdomains: list[str], cap: int = 10000) -> dict[str, Any]:
     """Liveness-filter + IP-group the discovered subdomains before Stage 2.
 
     - Liveness: a host that does not resolve in DNS is 'dead' — it gets no
@@ -113,8 +113,11 @@ def refine_target_set(root: str, subdomains: list[str], cap: int = 25) -> dict[s
     - IP-grouping: hosts are mapped to their resolved IP so the runner can
       run network phases (port scan) once per unique IP.
 
+    By default NO cap — every alive subdomain enters the queue. The 'cap'
+    parameter is an absolute safety ceiling only.
+
     Returns:
-      live_targets: hosts that resolve (root always first, capped)
+      live_targets: hosts that resolve (root always first)
       dead_targets: hosts that do not resolve
       host_ip:      host → resolved IP
       ip_groups:    IP → [hosts sharing it]
@@ -124,7 +127,7 @@ def refine_target_set(root: str, subdomains: list[str], cap: int = 25) -> dict[s
     dead: list[str] = []
     ordered = [root] + [s for s in subdomains if s and s != root]
     for host in ordered:
-        if len(live) > cap:  # root + cap subdomains
+        if len(live) > cap:
             break
         ip = _resolve_host(host)
         if ip:

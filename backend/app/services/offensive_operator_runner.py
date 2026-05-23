@@ -212,6 +212,22 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         if not target:
             _target_idx += 1
             continue
+        # RACE-FIX: refresh completed_work + target_set from DB at every target
+        # iteration so updates from parallel subtasks are visible to the main
+        # task (and vice-versa). Without this, parallel subtasks' progress is
+        # invisible and the main task re-executes phases they already finished.
+        try:
+            db.refresh(job)
+            _live_state = job.state_data or {}
+            for _k in (_live_state.get("completed_work") or []):
+                completed_work.add(_k)
+            for _t in (_live_state.get("target_set") or []):
+                if _t and _t not in all_targets:
+                    all_targets.append(_t)
+            for _h, _ip in (_live_state.get("host_ip_map") or {}).items():
+                host_ip_map.setdefault(_h, _ip)
+        except Exception:  # noqa: BLE001
+            pass
         scope = _scope_from_job(job, target, execution_mode)
         offensive_state["target"] = target
         offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
@@ -555,8 +571,11 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # After P01 on a root target, expand the work set with every
             # discovered subdomain. Liveness-filter (drop hosts that don't
             # resolve) and IP-group (so network phases run once per IP).
+            # NO CAP by default — every alive subdomain enters the queue.
+            # Set subdomain_propagation_cap explicitly to limit if needed.
             if phase_id == "P01":
-                _cap = int(_cp_state.get("subdomain_propagation_cap") or 25)
+                _cap_raw = _cp_state.get("subdomain_propagation_cap")
+                _cap = int(_cap_raw) if _cap_raw not in (None, 0) else 10000
                 _subs = [s for s in (_cp_state.get("expanded_targets") or []) if s and s != target]
                 _refined = refine_target_set(target, _subs, cap=_cap)
                 for _live in _refined["live_targets"]:
