@@ -89,7 +89,7 @@ export default function Navbar() {
         <div className="app-hdr-sub">{meta.sub}</div>
       </div>
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+      <div className="app-hdr-actions" style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <span
           title={kali?.runner?.error || `${kali?.tool_profile_mappings || 0} profiles mapeados`}
           style={{

@@ -418,23 +418,23 @@ export default function ScansPage({ embedded = false }) {
   return (
     <Shell className={embedded ? "flex flex-col gap-0" : "flex flex-col gap-0"}>
       {/* Top Banner */}
-      {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-8 py-6">
+      {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-4 py-5 sm:px-6 lg:px-8 lg:py-6">
         <div className="mx-auto max-w-7xl">
           <h1 className="section-title">Scan · Agendamento · Alvos</h1>
           <p className="mt-2 text-sm text-slate-400">Painel unificado de execução das 22 fases — criação manual, agendamentos recorrentes e gestão de targets</p>
         </div>
       </div>}
 
-      <div className={embedded ? "flex-1" : "flex-1 px-8 py-8"}>
+      <div className={embedded ? "flex-1" : "flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-8"}>
         <div className="mx-auto max-w-7xl">
           <div className="grid gap-6 lg:grid-cols-3">
             {/* Main Content */}
             <div className="lg:col-span-2 space-y-6">
               {/* Unified Create Section — Scan / Schedule / Target */}
               <section className="panel p-6">
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
                   <h2 className="text-lg font-semibold">Nova Operação</h2>
-                  <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs">
+                  <div className="inline-flex w-full overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs sm:w-auto">
                     <button
                       type="button"
                       onClick={() => setMode("now")}
@@ -542,7 +542,7 @@ export default function ScansPage({ embedded = false }) {
                       </div>
                     )}
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div>
                         <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
                         <select
@@ -592,7 +592,7 @@ export default function ScansPage({ embedded = false }) {
                     </div>
 
                     {mode === "schedule" && (
-                      <div className="grid grid-cols-3 gap-4">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                         <div>
                           <label className="block text-xs font-medium text-slate-400 mb-2">Horário</label>
                           <input
@@ -660,7 +660,7 @@ export default function ScansPage({ embedded = false }) {
                     ) : (
                       <div className="space-y-2 max-h-[400px] overflow-y-auto">
                         {targets.map((t, i) => (
-                          <div key={t.domain_or_ip || i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 flex items-center justify-between">
+                          <div key={t.domain_or_ip || i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div>
                               <p className="font-medium text-sm text-slate-100">{t.domain_or_ip || t.target_query || t.target}</p>
                               <p className="text-xs text-slate-500 mt-0.5">
@@ -685,8 +685,8 @@ export default function ScansPage({ embedded = false }) {
 
               {/* Scans List */}
               <section className="panel p-6">
-                <div className="flex items-center justify-between mb-6">
-                  <div className="flex items-center gap-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
+                  <div className="flex flex-wrap items-center gap-3">
                     <h2 className="text-lg font-semibold">Histórico operacional</h2>
                     {scans.length > 0 && (
                       <span className="text-xs font-medium text-slate-400 bg-slate-800/50 px-3 py-1 rounded-full">
@@ -704,7 +704,7 @@ export default function ScansPage({ embedded = false }) {
                 </div>
 
                 {selectedScans.size > 0 && (
-                  <div className="mb-4 rounded-lg border border-blue-700/50 bg-blue-900/20 p-4 flex items-center justify-between">
+                  <div className="mb-4 rounded-lg border border-blue-700/50 bg-blue-900/20 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <span className="text-sm font-medium text-blue-300">{selectedScans.size} varredura(s) selecionada(s)</span>
                     <button
                       onClick={removeSelectedScans}
@@ -744,7 +744,7 @@ export default function ScansPage({ embedded = false }) {
                             className="mt-1 flex-shrink-0 form-checkbox"
                           />
                           <button onClick={() => setSelected(scan)} className="flex-1 text-left">
-                            <div className="flex items-start justify-between">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                               <div>
                                 <p className="font-semibold text-slate-100">#{scan.id}</p>
                                 <p className="text-sm text-slate-300 mt-0.5">{scan.target_query}</p>
@@ -805,10 +805,10 @@ export default function ScansPage({ embedded = false }) {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <p className="font-semibold text-slate-100 text-sm">#{sched.id} · {sched.frequency}</p>
-                            <p className="text-xs text-slate-400 mt-0.5 truncate">{sched.targets_text || (sched.targets || []).join("; ")}</p>
+                            <p className="text-xs text-slate-400 mt-0.5 break-all sm:truncate">{sched.targets_text || (sched.targets || []).join("; ")}</p>
                             <p className="text-xs text-slate-500 mt-0.5">Horário: {sched.run_time}{!sched.enabled ? " · desativado" : ""}</p>
                           </div>
-                          <div className="flex gap-2 flex-shrink-0">
+                          <div className="flex flex-wrap gap-2 flex-shrink-0">
                             <button
                               onClick={() => runScheduleNow(sched.id)}
                               className="text-xs px-2 py-1 rounded-lg bg-blue-900/20 text-blue-300 border border-blue-800/50 hover:bg-blue-900/40 transition-colors"
@@ -865,7 +865,7 @@ export default function ScansPage({ embedded = false }) {
                     <div className="pt-3 border-t border-slate-800">
                       <p className="text-slate-400 mb-2">BAS / Validação de Controles</p>
                       {basSummary ? (
-                        <div className="grid grid-cols-2 gap-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           <div className="rounded-lg border border-cyan-900/60 bg-cyan-950/20 p-2">
                             <p className="text-slate-500">Técnicas</p>
                             <p className="mt-1 font-mono text-lg text-cyan-200">{basSummary.techniques_exercised || 0}</p>
