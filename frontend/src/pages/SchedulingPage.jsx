@@ -4,6 +4,7 @@ import { toastError, toastSuccess } from "../utils/toast";
 
 const emptyForm = {
   access_group_id: "",
+  access_group_name: "",
   targets_text: "",
   scan_type: "full",
   frequency: "daily",
@@ -59,6 +60,7 @@ export default function SchedulingPage({ embedded = false }) {
     setEditingId(row.id);
     setForm({
       access_group_id: row.access_group_id || "",
+      access_group_name: "",
       targets_text: row.targets_text,
       scan_type: row.scan_type,
       frequency: row.frequency,
@@ -140,10 +142,20 @@ export default function SchedulingPage({ embedded = false }) {
             onChange={(e) => setForm({ ...form, targets_text: e.target.value })}
           />
           <select style={{ ...fieldStyle, gridColumn: "1 / -1" }} value={form.access_group_id}
-            onChange={(e) => setForm({ ...form, access_group_id: e.target.value ? Number(e.target.value) : "" })}>
+            onChange={(e) => setForm({ ...form, access_group_id: e.target.value ? Number(e.target.value) : "", access_group_name: e.target.value ? "" : form.access_group_name })}>
             <option value="">Sem grupo</option>
             {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
+          <input
+            style={{ ...fieldStyle, gridColumn: "1 / -1" }}
+            placeholder="Ou digite o nome do grupo de acesso"
+            value={form.access_group_name}
+            onChange={(e) => setForm({ ...form, access_group_name: e.target.value, access_group_id: e.target.value.trim() ? "" : form.access_group_id })}
+            list="schedule-access-groups"
+          />
+          <datalist id="schedule-access-groups">
+            {groups.map((g) => <option key={g.id} value={g.name} />)}
+          </datalist>
           <select style={fieldStyle} value={form.scan_type} onChange={(e) => setForm({ ...form, scan_type: e.target.value })}>
             <option value="full">Full</option>
             <option value="recon">Recon</option>

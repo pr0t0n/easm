@@ -38,6 +38,30 @@ def _parse_targets(targets_text: str) -> list[str]:
     return [item.strip() for item in targets_text.split(";") if item.strip()]
 
 
+def _resolve_access_group_id(
+    db: Session,
+    current_user: User,
+    access_group_id: int | None,
+    access_group_name: str | None = None,
+) -> int | None:
+    group_name = str(access_group_name or "").strip()
+    if group_name:
+        existing = db.query(AccessGroup).filter(AccessGroup.name == group_name).first()
+        if existing is None:
+            if not current_user.is_admin:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+            existing = AccessGroup(owner_id=current_user.id, name=group_name, description="")
+            db.add(existing)
+            db.flush()
+        access_group_id = existing.id
+
+    if access_group_id is not None and not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        if access_group_id not in allowed_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+    return access_group_id
+
+
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 SIMPLE_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 IPV4_RE = re.compile(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")
@@ -779,10 +803,12 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
         access_group_id = None
     if access_group_id is not None:
         access_group_id = int(access_group_id)
-        if not current_user.is_admin:
-            allowed_ids = [g.id for g in current_user.groups]
-            if access_group_id not in allowed_ids:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+    access_group_id = _resolve_access_group_id(
+        db,
+        current_user,
+        access_group_id,
+        payload.get("access_group_name"),
+    )
 
     row = ScheduledScan(
         owner_id=current_user.id,
@@ -812,16 +838,18 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento nao encontrado")
 
-    if "access_group_id" in payload:
+    if "access_group_id" in payload or "access_group_name" in payload:
         access_group_id = payload.get("access_group_id")
         if access_group_id in ["", 0]:
             access_group_id = None
         if access_group_id is not None:
             access_group_id = int(access_group_id)
-            if not current_user.is_admin:
-                allowed_ids = [g.id for g in current_user.groups]
-                if access_group_id not in allowed_ids:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+        access_group_id = _resolve_access_group_id(
+            db,
+            current_user,
+            access_group_id,
+            payload.get("access_group_name"),
+        )
         row.access_group_id = access_group_id
 
     allowed_frequencies = {"daily", "weekly", "monthly", "every_3_hours", "every_6_hours", "every_12_hours"}

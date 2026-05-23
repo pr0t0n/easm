@@ -17,7 +17,7 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
-    ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning,
+    ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning, AccessGroup,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -172,6 +172,30 @@ def _authorized_finding_query(db: Session, current_user: User):
         allowed_ids = [g.id for g in current_user.groups]
         query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
     return query
+
+
+def _resolve_access_group_id(
+    db: Session,
+    current_user: User,
+    access_group_id: int | None,
+    access_group_name: str | None = None,
+) -> int | None:
+    group_name = str(access_group_name or "").strip()
+    if group_name:
+        existing = db.query(AccessGroup).filter(AccessGroup.name == group_name).first()
+        if existing is None:
+            if not current_user.is_admin:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+            existing = AccessGroup(owner_id=current_user.id, name=group_name, description="")
+            db.add(existing)
+            db.flush()
+        access_group_id = existing.id
+
+    if access_group_id is not None and not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        if access_group_id not in allowed_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+    return access_group_id
 
 
 def _sev_weight(severity: str) -> int:
@@ -2195,11 +2219,12 @@ def create_scan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    access_group_id = payload.access_group_id
-    if access_group_id is not None and not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        if access_group_id not in allowed_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
+    access_group_id = _resolve_access_group_id(
+        db,
+        current_user,
+        payload.access_group_id,
+        payload.access_group_name,
+    )
 
     compliance_status = "approved"
 

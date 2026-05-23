@@ -14,6 +14,7 @@ function fmtDateTimeSP(value) {
 export default function ScansPage({ embedded = false }) {
   const [target, setTarget] = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
+  const [accessGroupName, setAccessGroupName] = useState("");
   const [groups, setGroups] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [scans, setScans] = useState([]);
@@ -103,6 +104,7 @@ export default function ScansPage({ embedded = false }) {
     try {
       await client.post("/api/schedules", {
         access_group_id: accessGroupId ? Number(accessGroupId) : null,
+        access_group_name: accessGroupName.trim() || null,
         targets_text: target,
         scan_type: "full",
         frequency: scheduleForm.frequency,
@@ -113,6 +115,7 @@ export default function ScansPage({ embedded = false }) {
       });
       setTarget("");
       setAccessGroupId("");
+      setAccessGroupName("");
       setAuthStatus(`Agendamento criado para ${parsedTargets.length} alvo(s) com sucesso.`);
       await loadSchedules();
     } catch (err) {
@@ -251,6 +254,7 @@ export default function ScansPage({ embedded = false }) {
             target_query: singleTarget,
             mode: "single",
             access_group_id: accessGroupId ? Number(accessGroupId) : null,
+            access_group_name: accessGroupName.trim() || null,
             scan_level: scanLevel,
             auth_config: buildAuthPayload(),
           });
@@ -265,6 +269,7 @@ export default function ScansPage({ embedded = false }) {
 
       setTarget("");
       setAccessGroupId("");
+      setAccessGroupName("");
       if (failed.length === 0) {
         setAuthStatus(`${created.length} scan(s) criado(s) com sucesso.`);
       } else {
@@ -543,13 +548,31 @@ export default function ScansPage({ embedded = false }) {
                         <select
                           className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
                           value={accessGroupId}
-                          onChange={(e) => setAccessGroupId(e.target.value)}
+                          onChange={(e) => {
+                            setAccessGroupId(e.target.value);
+                            if (e.target.value) setAccessGroupName("");
+                          }}
                         >
                           <option value="">Sem grupo</option>
                           {groups.map((g) => (
                             <option key={g.id} value={g.id}>{g.name}</option>
                           ))}
                         </select>
+                        <input
+                          className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
+                          placeholder="Ou digite o nome do grupo"
+                          value={accessGroupName}
+                          onChange={(e) => {
+                            setAccessGroupName(e.target.value);
+                            if (e.target.value.trim()) setAccessGroupId("");
+                          }}
+                          list="scan-access-groups"
+                        />
+                        <datalist id="scan-access-groups">
+                          {groups.map((g) => (
+                            <option key={g.id} value={g.name} />
+                          ))}
+                        </datalist>
                       </div>
                       {mode === "schedule" && (
                         <div>

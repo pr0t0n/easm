@@ -8,6 +8,7 @@ class ScanCreate(BaseModel):
     target_query: str
     mode: str = "single"
     access_group_id: int | None = None
+    access_group_name: str | None = None
     schedule_at: datetime | None = None
     llm_risk_enabled: bool = False
     llm_risk_url: str | None = None
