@@ -79,6 +79,17 @@ function targetHost(value) {
   }
 }
 
+function sevLabel(severity) {
+  const normalized = String(severity || "info").toLowerCase();
+  return {
+    critical: "Crítico",
+    high: "Alto",
+    medium: "Médio",
+    low: "Baixo",
+    info: "Info",
+  }[normalized] || normalized;
+}
+
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -430,6 +441,27 @@ export default function DashboardPage() {
     },
   ];
 
+  const redteamFindings = (Array.isArray(prioritizedActions) && prioritizedActions.length > 0
+    ? prioritizedActions
+    : (Array.isArray(topVulns) ? topVulns : [])
+  ).slice(0, 6);
+  const criticalHighCount = Number(stats?.critical || 0) + Number(stats?.high || 0);
+  const executedToolCount = Number(vulnToolExecution?.summary?.executed_count || 0);
+  const attemptedToolCount = Number(vulnToolExecution?.summary?.attempted_count || 0);
+  const evidenceReadiness = attemptedToolCount > 0 ? Math.round((executedToolCount / attemptedToolCount) * 100) : 0;
+  const activeToolRows = Array.isArray(vulnToolExecution?.tools) ? vulnToolExecution.tools : [];
+  const weakFrameworks = frameworks
+    .slice()
+    .sort((a, b) => Number(a.score || 0) - Number(b.score || 0))
+    .slice(0, 4);
+  const attackQueue = redteamFindings.map((item, idx) => ({
+    id: item.finding_id || item.id || idx,
+    title: item.title || item.name || item.problem || "Achado sem titulo",
+    severity: item.severity || "info",
+    target: item.target_query || item.target || item.asset || "-",
+    reason: item.operational_reason || item.financial_reason || item.recommendation || `${item.count || 1} ocorrência(s) no ambiente`,
+  }));
+
   const showEmptyScanNote = Boolean(selectedTarget) && stats && stats.scans === 0;
 
   return (
@@ -503,6 +535,92 @@ export default function DashboardPage() {
               Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
             </div>
           )}
+        </section>
+
+        {/* ===== Red Team Cockpit ===== */}
+        <section className="redteam">
+          <div className="redteam-head">
+            <div>
+              <div className="eb">Red Team Cockpit</div>
+              <h2>O que atacar primeiro, por quê e com qual evidência.</h2>
+            </div>
+            <p>Foco operacional para o executor: riscos exploráveis, alvos com maior retorno, cobertura de ferramenta e lacunas que o Blue Team precisa enxergar.</p>
+          </div>
+
+          <div className="redteam-kpis">
+            <div className="rt-kpi danger">
+              <span>Críticos + Altos</span>
+              <strong>{criticalHighCount}</strong>
+              <small>prioridade de exploração e validação</small>
+            </div>
+            <div className="rt-kpi">
+              <span>Achados abertos</span>
+              <strong>{Number(stats?.findings_open || stats?.vulnerability_findings || 0)}</strong>
+              <small>superfície ainda acionável</small>
+            </div>
+            <div className="rt-kpi">
+              <span>Evidência de execução</span>
+              <strong>{evidenceReadiness}%</strong>
+              <small>{executedToolCount}/{attemptedToolCount || 0} ferramentas executadas</small>
+            </div>
+            <div className="rt-kpi warn">
+              <span>Gaps de detecção</span>
+              <strong>{gapCount}</strong>
+              <small>telemetria ausente/parcial</small>
+            </div>
+          </div>
+
+          <div className="redteam-grid">
+            <div className="rt-card rt-priority">
+              <div className="rt-card-head">
+                <h3>Fila de ataque recomendada</h3>
+                <span>{attackQueue.length} itens</span>
+              </div>
+              {attackQueue.length === 0 ? (
+                <div className="rt-empty">Sem vulnerabilidades priorizadas no escopo atual.</div>
+              ) : attackQueue.map((item, idx) => (
+                <div key={`${item.id}-${idx}`} className="rt-finding">
+                  <div className={`sev-dot sev-${String(item.severity).toLowerCase()}`}>{sevLabel(item.severity)}</div>
+                  <div>
+                    <b>{item.title}</b>
+                    <span>{item.target}</span>
+                    <p>{item.reason}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="rt-card">
+              <div className="rt-card-head">
+                <h3>Ferramentas para continuar</h3>
+                <span>{activeToolRows.length} tools</span>
+              </div>
+              {activeToolRows.length === 0 ? (
+                <div className="rt-empty">Sem execução de ferramenta de vulnerabilidade registrada.</div>
+              ) : activeToolRows.slice(0, 6).map((tool) => (
+                <div key={tool.tool} className="rt-tool">
+                  <div>
+                    <b>{tool.tool}</b>
+                    <span>{tool.status || tool.last_status || "observado"}</span>
+                  </div>
+                  <strong>{Number(tool.executed_count || tool.success || tool.attempts || 0)}</strong>
+                </div>
+              ))}
+            </div>
+
+            <div className="rt-card">
+              <div className="rt-card-head">
+                <h3>Frameworks mais pressionados</h3>
+                <span>Blue Team</span>
+              </div>
+              {weakFrameworks.map((fw) => (
+                <div key={fw.name} className="rt-framework">
+                  <div><b>{fw.name}</b><span>{Number(fw.score || 0).toFixed(0)}%</span></div>
+                  <div className="rt-bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(fw.score || 0)))}%` }} /></div>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
 
         {/* ===== BAS Command Center ===== */}

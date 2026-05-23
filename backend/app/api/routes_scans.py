@@ -897,6 +897,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.28 Secure coding",
             "nist": "NIST PR.DS-6 / SI-10",
             "cis": "CIS v8 Control 16 - Application Software Security",
+            "pci": "PCI DSS 6.2.4 / 6.4.2 Secure software development",
         },
         "Web Encryption": {
             "owasp": "A02:2021 - Cryptographic Failures",
@@ -905,6 +906,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.24 Use of cryptography",
             "nist": "NIST SC-8 / SC-13",
             "cis": "CIS v8 Control 3 - Data Protection",
+            "pci": "PCI DSS 4.2 Strong cryptography over open networks",
         },
         "Authentication": {
             "owasp": "A07:2021 - Identification and Authentication Failures",
@@ -913,6 +915,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.5.17 Authentication information",
             "nist": "NIST IA-2 / AC-7",
             "cis": "CIS v8 Control 6 - Access Control Management",
+            "pci": "PCI DSS 8 Identify users and authenticate access",
         },
         "Authorization": {
             "owasp": "A01:2021 - Broken Access Control",
@@ -921,6 +924,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.5.15 Access control",
             "nist": "NIST AC-3 / AC-6",
             "cis": "CIS v8 Control 6 - Access Control Management",
+            "pci": "PCI DSS 7 Restrict access by business need to know",
         },
         "Network Filtering": {
             "owasp": "A05:2021 - Security Misconfiguration",
@@ -929,6 +933,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.20 Network security",
             "nist": "NIST SC-7 / CM-7",
             "cis": "CIS v8 Control 12 - Network Infrastructure Management",
+            "pci": "PCI DSS 1 Install and maintain network security controls",
         },
         "Data Exposure": {
             "owasp": "A01:2021 - Broken Access Control",
@@ -937,6 +942,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.5.12 Classification of information",
             "nist": "NIST PR.DS-1 / PR.DS-5",
             "cis": "CIS v8 Control 3 - Data Protection",
+            "pci": "PCI DSS 3 Protect stored account data",
         },
         "Software Patching": {
             "owasp": "A06:2021 - Vulnerable and Outdated Components",
@@ -945,6 +951,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.8 Management of technical vulnerabilities",
             "nist": "NIST SI-2 / RA-5",
             "cis": "CIS v8 Control 7 - Continuous Vulnerability Management",
+            "pci": "PCI DSS 6.3 / 6.4 Manage vulnerabilities and patching",
         },
         "DNS Security": {
             "owasp": "A05:2021 - Security Misconfiguration",
@@ -953,6 +960,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.20 Network security",
             "nist": "NIST SC-20 / SC-21",
             "cis": "CIS v8 Control 12 - Network Infrastructure Management",
+            "pci": "PCI DSS 1.2 Network security controls",
         },
         "System Hosting": {
             "owasp": "A05:2021 - Security Misconfiguration",
@@ -961,6 +969,7 @@ def _framework_context(category: str, title: str, details: dict) -> dict[str, st
             "iso": "ISO 27001 A.8.9 Configuration management",
             "nist": "NIST CM-2 / CM-6",
             "cis": "CIS v8 Control 4 - Secure Configuration",
+            "pci": "PCI DSS 2 Apply secure configurations",
         },
     }
 
@@ -3896,6 +3905,7 @@ def scan_report(
                 "nist_control": _sanitize_text(details.get("nist_control") or details.get("nist") or framework_ctx.get("nist") or "-"),
                 "iso_control": _sanitize_text(details.get("iso_control") or details.get("iso27001") or framework_ctx.get("iso") or "-"),
                 "cis_control": _sanitize_text(details.get("cis_control") or framework_ctx.get("cis") or "-"),
+                "pci_control": _sanitize_text(details.get("pci_control") or details.get("pci") or framework_ctx.get("pci") or "-"),
                 "recommendation": _normalize_recommendation({**recommendation_source, "severity": sev}),
                 "recommendation_structured": recommendation_payload,
                 "recommendation_llm": recommendation_payload,

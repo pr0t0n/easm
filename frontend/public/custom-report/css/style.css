@@ -1058,6 +1058,78 @@ body {
   border: 1px solid rgba(59,130,246,0.2);
 }
 
+.vuln-handoff-box,
+.vuln-framework-box {
+  grid-column: 1 / -1;
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
+.vuln-handoff-box {
+  border-left: 3px solid var(--critical);
+  background: rgba(176, 51, 51, 0.045);
+}
+
+.vuln-framework-box {
+  border-left: 3px solid var(--info);
+  background: rgba(45, 82, 230, 0.045);
+}
+
+.handoff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.handoff-grid span,
+.handoff-output span,
+.framework-grid span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+
+.handoff-output {
+  margin-top: 10px;
+}
+
+.handoff-note {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(176, 51, 51, 0.20);
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.framework-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.framework-grid > div {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.framework-grid strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 /* ── Consolidação de alvos ───────────────────────────────────────────────── */
 .vuln-affected-box {
   grid-column: 1 / -1;
@@ -1386,6 +1458,8 @@ body {
 
   .vuln-card-body { display: block !important; }
   .vuln-toggle { display: none; }
+  .handoff-grid,
+  .framework-grid { grid-template-columns: 1fr; }
 
   .filter-summary,
   .section-intro,

@@ -81,6 +81,24 @@ function truncate(str, max = 400) {
   return s.length <= max ? s : `${s.slice(0, max)}...`;
 }
 
+function firstText(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (text && text !== '-') return text;
+  }
+  return '';
+}
+
+function buildFallbackCommand(vuln) {
+  const tool = String(vuln.tool || '').trim();
+  const target = firstText(vuln.full_url, vuln.target, vuln.asset, vuln.endpoint);
+  const payload = firstText(vuln.payload, vuln.attack_input);
+  if (vuln.command && vuln.command !== '-') return vuln.command;
+  if (tool && target) return `${tool} ${target}${payload ? ` # payload: ${payload}` : ''}`;
+  if (target) return `curl -k -i '${target}'${payload ? ` --data '${payload.replace(/'/g, "'\\''")}'` : ''}`;
+  return '';
+}
+
 function setText(id, value) {
   const el = document.getElementById(id);
   if (el) el.textContent = value == null ? '-' : String(value);
@@ -169,6 +187,11 @@ function normalizeFindingForReport(finding) {
     adversary_technique: details.adversary_technique || {},
     adversary_technique_id: details.adversary_technique_id || details.adversary_technique?.id || '',
     adversary_technique_name: details.adversary_technique_name || details.adversary_technique?.name || '',
+    iso_control: details.iso_control || details.iso27001 || '',
+    cis_control: details.cis_control || '',
+    pci_control: details.pci_control || details.pci || '',
+    nist_control: details.nist_control || details.nist || '',
+    owasp: details.owasp || '',
     control_objectives: Array.isArray(details.control_objectives) ? details.control_objectives : [],
     expected_telemetry: Array.isArray(details.expected_telemetry) ? details.expected_telemetry : [],
     detection_status: details.detection_status || details.detection_proof_pack?.detection_status || 'unknown',
@@ -728,6 +751,15 @@ function renderVulnCard(vuln, index) {
 
   const evidence = vuln.evidence && vuln.evidence !== '-' ? vuln.evidence : null;
   const payload = vuln.payload && vuln.payload !== '-' ? vuln.payload : null;
+  const command = firstText(vuln.command, buildFallbackCommand(vuln));
+  const pocRequest = firstText(vuln.poc_request, vuln.attack_input, payload);
+  const rawOutput = firstText(vuln.response_http, vuln.response_application, evidence);
+  const observedBehavior = firstText(vuln.observed_behavior, vuln.technical_validation, vuln.error);
+  const isoControl = firstText(vuln.iso_control);
+  const cisControl = firstText(vuln.cis_control);
+  const pciControl = firstText(vuln.pci_control);
+  const nistControl = firstText(vuln.nist_control);
+  const owaspControl = firstText(vuln.owasp);
   const rec = vuln.recommendation || 'Ver documentação do achado.';
   const llmRecommendation = vuln.recommendation_llm || vuln.recommendation_structured || {};
   const llmSummary = llmRecommendation.resumo || '';
@@ -798,6 +830,36 @@ function renderVulnCard(vuln, index) {
       <div class="vuln-detail-item">
         <div class="vuln-detail-label"><i class="fas fa-tools"></i> Ferramenta</div>
         <div class="vuln-detail-value">${esc(vuln.tool || '-')}</div>
+      </div>
+      <div class="vuln-handoff-box">
+        <div class="vuln-detail-label"><i class="fas fa-person-rifle"></i> Reproduzir o ataque</div>
+        <div class="handoff-grid">
+          <div>
+            <span>Comando executado / sugerido</span>
+            <pre class="vuln-code">${esc(truncate(command || 'Comando não registrado; reproduzir com a ferramenta indicada e o alvo listado.', 900))}</pre>
+          </div>
+          <div>
+            <span>Entrada ofensiva / request</span>
+            <pre class="vuln-code">${esc(truncate(pocRequest || 'Payload/request não registrado no achado.', 900))}</pre>
+          </div>
+        </div>
+        <div class="handoff-output">
+          <span>Saída específica / evidência para Blue Team</span>
+          <pre class="vuln-code">${esc(truncate(rawOutput || 'Sem saída específica registrada.', 1200))}</pre>
+        </div>
+        ${observedBehavior ? `<div class="handoff-note">${esc(observedBehavior)}</div>` : ''}
+      </div>
+      <div class="vuln-framework-box">
+        <div class="vuln-detail-label"><i class="fas fa-scale-balanced"></i> CVE/CVSS, MITRE e frameworks defensivos</div>
+        <div class="framework-grid">
+          <div><span>CVE</span><strong>${esc(cve || '-')}</strong></div>
+          <div><span>CVSS</span><strong>${esc(String(cvss))}</strong></div>
+          <div><span>MITRE ATT&CK</span><strong>${esc([basId, basName].filter(Boolean).join(' — ') || '-')}</strong></div>
+          <div><span>PCI DSS</span><strong>${esc(pciControl || '-')}</strong></div>
+          <div><span>CIS</span><strong>${esc(cisControl || '-')}</strong></div>
+          <div><span>ISO 27001</span><strong>${esc(isoControl || '-')}</strong></div>
+          <div><span>NIST/OWASP</span><strong>${esc(firstText(nistControl, owaspControl) || '-')}</strong></div>
+        </div>
       </div>
       ${affectedBlock}
       ${evidence ? `
