@@ -276,12 +276,21 @@
   background: var(--brand-50, #fff7ed);
 }
 .dash .subdomain-tabs b,
+.dash .subdomain-tabs em,
 .dash .subdomain-tabs span {
   display: block;
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
 .dash .subdomain-tabs b { color: var(--ink); }
+.dash .subdomain-tabs em {
+  color: var(--brand-700);
+  font-style: normal;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dash .subdomain-tabs span { color: var(--ink-muted); margin-top: 3px; }
 .dash .subdomain-summary {
   display: grid;

@@ -667,6 +667,7 @@ export default function DashboardPage() {
                       type="button"
                     >
                       <b>#{scan.scan_id}</b>
+                      <em title={scan.target_query || ""}>{scan.target_query || "alvo não informado"}</em>
                       <span>{Number(scan.subdomain_count || 0)} subs</span>
                     </button>
                   ))}
