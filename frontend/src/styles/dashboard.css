@@ -313,6 +313,17 @@
 .dash .subdomain-list {
   border-top: 1px solid var(--line);
   margin-top: 8px;
+  max-height: min(420px, 52vh);
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.dash .subdomain-list::-webkit-scrollbar { width: 8px; }
+.dash .subdomain-list::-webkit-scrollbar-track { background: transparent; }
+.dash .subdomain-list::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
 }
 .dash .subdomain-row {
   display: grid;

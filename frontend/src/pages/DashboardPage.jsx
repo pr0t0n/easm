@@ -680,7 +680,7 @@ export default function DashboardPage() {
                 <div className="subdomain-list">
                   {selectedSubdomains.length === 0 ? (
                     <div className="rt-empty">Sem subdomínios detalhados para este scan.</div>
-                  ) : selectedSubdomains.slice(0, 12).map((row) => (
+                  ) : selectedSubdomains.map((row) => (
                     <div key={`${selectedSubdomainScan.scan_id}-${row.subdomain}`} className="subdomain-row">
                       <div>
                         <b>{row.subdomain}</b>
