@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     mcp_default_top_k: int = 5
     mcp_request_timeout_seconds: int = 1800
     offensive_operator_enabled: bool = True
+    scan_parallelize_default: bool = True
+    scan_parallel_target_batch_size: int = 1024
+    scan_parallel_wait_seconds: int = 60
 
 
 settings = Settings()

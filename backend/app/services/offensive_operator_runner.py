@@ -188,12 +188,16 @@ def _record_preflight_skip(
     }
     phase_ledgers.append(ledger)
     completed_work.add(work_key)
+    try:
+        db.refresh(job)
+    except Exception:  # noqa: BLE001
+        pass
     state = dict(job.state_data or {})
     skipped_work = list(state.get("skipped_work") or [])
     skipped_work.append({"phase_id": phase_id, "target": target, "reason": reason, "tier": "tier1_preflight"})
     state["skipped_work"] = skipped_work[-2000:]
     state["completed_work"] = sorted(set(state.get("completed_work") or []) | completed_work)
-    state["phase_ledger_v2"] = phase_ledgers
+    state["phase_ledger_v2"] = _merge_phase_ledgers(list(state.get("phase_ledger_v2") or []), [ledger])
     job.state_data = state
     db.add(ScanLog(
         scan_job_id=job.id,
@@ -202,6 +206,42 @@ def _record_preflight_skip(
         message=f"tier1_preflight_skip phase={phase_id} target={target} reason={reason}",
     ))
     db.commit()
+
+
+def _phase_ids_for_target_subset(allowed_phases: set[str] | None) -> list[str]:
+    return [
+        phase_id for phase_id in PHASE_ORDER
+        if phase_id != "P01" and (allowed_phases is None or phase_id in allowed_phases)
+    ]
+
+
+def _pending_parallel_targets(state: dict[str, Any], completed_work: set[str], allowed_phases: set[str] | None) -> list[str]:
+    phase_ids = _phase_ids_for_target_subset(allowed_phases)
+    delegated = [str(target) for target in (state.get("parallel_delegated_targets") or []) if str(target or "").strip()]
+    pending: list[str] = []
+    for target in delegated:
+        if not all(f"{phase_id}:{target}" in completed_work for phase_id in phase_ids):
+            pending.append(target)
+    return pending
+
+
+def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for ledger in list(existing or []) + list(additions or []):
+        if not isinstance(ledger, dict):
+            continue
+        key = (
+            str(ledger.get("phase_id") or ""),
+            str(ledger.get("target") or ""),
+            str(ledger.get("status") or ""),
+            str(ledger.get("skip_reason") or ledger.get("parallel_subtask") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ledger)
+    return merged
 
 
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +337,10 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 host_ip_map.setdefault(_h, _ip)
         except Exception:  # noqa: BLE001
             pass
+        _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
+        if target in _delegated_targets:
+            _target_idx += 1
+            continue
         scope = _scope_from_job(job, target, execution_mode)
         offensive_state["target"] = target
         offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
@@ -317,7 +361,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 _pf_state = dict(job.state_data or {})
                 _profile, _created = _preflight_profile_for(_pf_state, target)
                 if _created:
-                    job.state_data = _pf_state
+                    _current_state = dict(job.state_data or {})
+                    _current_state["preflight"] = _pf_state.get("preflight") or {}
+                    job.state_data = _current_state
                     db.add(ScanLog(
                         scan_job_id=job.id,
                         source="scan-intelligence",
@@ -683,14 +729,27 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 if _cp_state.get("parallelize"):
                     try:
                         from app.workers.tasks import run_scan_target_subset as _rsts
+                        _batch_size = max(1, int(_cp_state.get("parallel_target_batch_size") or settings.scan_parallel_target_batch_size or 1024))
+                        _already_delegated = set(_cp_state.get("parallel_delegated_targets") or [])
+                        _to_dispatch = [
+                            _t for _t in _refined["live_targets"]
+                            if _t and _t not in _already_delegated
+                        ][:_batch_size]
                         _dispatched = 0
-                        for _t in _refined["live_targets"]:
-                            if _t and _t != target:
-                                _rsts.delay(job.id, _t)
-                                _dispatched += 1
+                        for _t in _to_dispatch:
+                            _rsts.delay(job.id, _t)
+                            _already_delegated.add(_t)
+                            _dispatched += 1
+                        _cp_state["parallel_delegated_targets"] = sorted(_already_delegated)
+                        _cp_state["parallel_pending_targets"] = sorted(_already_delegated)
+                        _cp_state["parallel_batch_size"] = _batch_size
+                        _cp_state["_parallel_checkpoint_after_p01"] = bool(_dispatched)
                         if _dispatched:
                             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                                           message=f"parallel_fanout dispatched {_dispatched} subtasks (one per non-root target)"))
+                                           message=(
+                                               f"parallel_fanout dispatched {_dispatched} subtasks "
+                                               f"(delegated_total={len(_already_delegated)}, batch_size={_batch_size}, phases=P02-P22)"
+                                           )))
                     except Exception as _pfe:  # noqa: BLE001
                         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
                                        message=f"parallel_fanout_failed error={_pfe!s}"))
@@ -716,8 +775,26 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
             job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
+            _parallel_checkpoint_after_p01 = bool(_cp_state.pop("_parallel_checkpoint_after_p01", False))
             job.state_data = _cp_state
             db.commit()
+            if phase_id == "P01" and _parallel_checkpoint_after_p01:
+                _pending_parallel = _pending_parallel_targets(_cp_state, completed_work, allowed_phases)
+                _wait_seconds = max(15, int(_cp_state.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
+                job.current_step = f"parallel: {len(_pending_parallel)} target(s) delegados"
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="offensive-operator",
+                    level="INFO",
+                    message=(
+                        f"parallel_checkpoint_after_p01 delegated={len(_pending_parallel)} "
+                        f"redispatch_in={_wait_seconds}s"
+                    ),
+                ))
+                db.commit()
+                from app.workers.tasks import run_scan_job_unit as _continue_scan
+                _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
+                return {"checkpointed": True, "parallel_delegated_targets": len(_pending_parallel)}
             # Re-dispatch before the Celery time limit so deep multi-target
             # scans run effectively unbounded — each (phase,target) is a
             # durable checkpoint, so a continuation resumes exactly here.
@@ -733,6 +810,39 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             if _hard_blocked:
                 break
         _target_idx += 1
+
+    try:
+        db.refresh(job)
+        _final_state_snapshot = dict(job.state_data or {})
+        completed_work = set(_final_state_snapshot.get("completed_work") or completed_work)
+        phase_ledgers = list(_final_state_snapshot.get("phase_ledger_v2") or phase_ledgers)
+        _pending_parallel = _pending_parallel_targets(_final_state_snapshot, completed_work, allowed_phases)
+        if _pending_parallel:
+            _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
+            _final_state_snapshot["parallel_pending_targets"] = _pending_parallel
+            job.state_data = _final_state_snapshot
+            job.current_step = f"parallel: aguardando {len(_pending_parallel)} target(s) delegados"
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message=(
+                    f"parallel_wait pending={len(_pending_parallel)} "
+                    f"completed_work={len(completed_work)} redispatch_in={_wait_seconds}s"
+                ),
+            ))
+            db.commit()
+            from app.workers.tasks import run_scan_job_unit as _continue_scan
+            _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
+            return {"checkpointed": True, "parallel_pending_targets": len(_pending_parallel)}
+        if _final_state_snapshot.get("parallel_delegated_targets"):
+            _final_state_snapshot["parallel_pending_targets"] = []
+            job.state_data = _final_state_snapshot
+            db.commit()
+    except Exception as _pwait_exc:  # noqa: BLE001
+        db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                       message=f"parallel_wait_check_failed error={_pwait_exc!s}"))
+        db.commit()
 
     campaign = {
         "target": targets[0] if targets else "",
@@ -1522,7 +1632,18 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
         pf_state = dict(job.state_data or {})
         profile, created = _preflight_profile_for(pf_state, target)
         if created:
-            job.state_data = pf_state
+            try:
+                db.refresh(job)
+            except Exception:  # noqa: BLE001
+                pass
+            cur_state = dict(job.state_data or {})
+            cur_preflight = dict(cur_state.get("preflight") or {})
+            cur_targets = dict(cur_preflight.get("targets") or {})
+            cur_targets[target] = profile
+            cur_preflight.update(pf_state.get("preflight") or {})
+            cur_preflight["targets"] = cur_targets
+            cur_state["preflight"] = cur_preflight
+            job.state_data = cur_state
             db.add(ScanLog(
                 scan_job_id=job.id,
                 source="scan-intelligence",
@@ -1560,10 +1681,15 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 if ip:
                     completed_work.add(f"{phase_id}:ip:{ip}")
             # Persist incremental state
+            try:
+                db.refresh(job)
+            except Exception:  # noqa: BLE001
+                pass
             cur = dict(job.state_data or {})
             cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
-            cur["phase_ledger_v2"] = (cur.get("phase_ledger_v2") or []) + [ledger]
+            cur["phase_ledger_v2"] = _merge_phase_ledgers(list(cur.get("phase_ledger_v2") or []), [ledger])
             job.state_data = cur
+            phase_ledgers = _merge_phase_ledgers(phase_ledgers, [ledger])
             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                            message=f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} (parallel)"))
             db.commit()

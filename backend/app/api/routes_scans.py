@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.models import (
@@ -2308,6 +2309,9 @@ def create_scan(
     initial_state: dict[str, Any] = {
         "llm_risk": llm_risk_state,
         "scan_level": scan_level,
+        "parallelize": bool(settings.scan_parallelize_default),
+        "parallel_target_batch_size": int(settings.scan_parallel_target_batch_size or 1024),
+        "parallel_wait_seconds": int(settings.scan_parallel_wait_seconds or 60),
     }
     if auth_config:
         initial_state["auth_config"] = auth_config
