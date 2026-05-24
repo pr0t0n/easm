@@ -11,6 +11,7 @@ const PAGE_META = {
   "/agendamento":    { eyebrow: "Vulnerability Ops · Schedules", title: "Agendamentos",          sub: "Janelas e cadência de scans recorrentes" },
   "/operacional":    { eyebrow: "Operations · Runtime",       title: "Centro Operacional",       sub: "Fases, agentes, jobs, workers, logs e evolução de ataque" },
   "/vulnerabilidades": { eyebrow: "Security · Vulns",        title: "Vulnerabilidades",          sub: "Achados priorizados por severidade, FAIR e AGE" },
+  "/dominios":       { eyebrow: "Security · Domains",      title: "Domínios",                  sub: "Domínios, subdomínios e vulnerabilidades por scan" },
   "/evolucao":       { eyebrow: "Security · Evolution",      title: "Attack Evolution",          sub: "Trajetória da postura de segurança ao longo do tempo" },
   "/aprendizado":    { eyebrow: "Security · Learning",        title: "Aprendizado de Vulnerabilidades", sub: "Técnicas revisadas antes de entrar na missão dos agentes" },
   "/relatorios":     { eyebrow: "Security · Report",         title: "Relatório Único",           sub: "Executivo, técnico, escopo, revisão, BAS e evidências em uma única visão" },

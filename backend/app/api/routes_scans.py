@@ -3026,6 +3026,198 @@ def list_assets(db: Session = Depends(get_db), current_user: User = Depends(get_
     return rows[:500]
 
 
+def _host_from_domain_value(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = str(parsed.hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if not host:
+        host = raw.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0].strip().lower()
+    return host.strip(".")
+
+
+def _belongs_to_domain(host: str, domain: str) -> bool:
+    clean_host = _host_from_domain_value(host)
+    clean_domain = _host_from_domain_value(domain)
+    return bool(clean_host and clean_domain and (clean_host == clean_domain or clean_host.endswith(f".{clean_domain}")))
+
+
+def _empty_severity_counts() -> dict[str, int]:
+    return {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+
+@router.get("/domains/overview")
+def domains_overview(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scans = _authorized_scan_query(db, current_user).order_by(ScanJob.created_at.desc(), ScanJob.id.desc()).all()
+    findings = _authorized_finding_query(db, current_user).order_by(Finding.created_at.desc()).all()
+
+    domains: dict[str, dict[str, Any]] = {}
+
+    def ensure_domain(domain_name: str, scan: ScanJob | None = None) -> dict[str, Any]:
+        domain_host = _host_from_domain_value(domain_name)
+        if not domain_host:
+            domain_host = str(domain_name or "").strip().lower()
+        item = domains.get(domain_host)
+        if not item:
+            item = {
+                "domain": domain_host,
+                "latest_scan_id": None,
+                "latest_scan_status": None,
+                "latest_scan_at": None,
+                "scan_count": 0,
+                "subdomains": {},
+                "severity_counts": _empty_severity_counts(),
+                "total_findings": 0,
+            }
+            domains[domain_host] = item
+        if scan:
+            current_at = item.get("latest_scan_at")
+            if not current_at or (scan.created_at and scan.created_at >= current_at):
+                item["latest_scan_id"] = scan.id
+                item["latest_scan_status"] = scan.status
+                item["latest_scan_at"] = scan.created_at
+        return item
+
+    def ensure_subdomain(domain_item: dict[str, Any], host: str, scan: ScanJob | None = None) -> dict[str, Any]:
+        clean_host = _host_from_domain_value(host) or str(host or "").strip().lower()
+        if not clean_host:
+            clean_host = str(domain_item["domain"])
+        subdomains = domain_item["subdomains"]
+        item = subdomains.get(clean_host)
+        if not item:
+            item = {
+                "name": clean_host,
+                "scan_id": None,
+                "scan_status": None,
+                "scan_created_at": None,
+                "severity_counts": _empty_severity_counts(),
+                "total_findings": 0,
+                "findings": [],
+            }
+            subdomains[clean_host] = item
+        if scan:
+            current_at = item.get("scan_created_at")
+            if not current_at or (scan.created_at and scan.created_at >= current_at):
+                item["scan_id"] = scan.id
+                item["scan_status"] = scan.status
+                item["scan_created_at"] = scan.created_at
+        return item
+
+    scan_domains: dict[int, list[str]] = {}
+    for scan in scans:
+        roots = [_host_from_domain_value(token) for token in _target_tokens(scan.target_query)]
+        roots = [root for root in roots if root]
+        if not roots:
+            fallback = _host_from_domain_value(scan.target_query)
+            if fallback:
+                roots = [fallback]
+        scan_domains[scan.id] = roots
+        for root in roots:
+            domain_item = ensure_domain(root, scan)
+            domain_item["scan_count"] += 1
+
+            state = scan.state_data if isinstance(scan.state_data, dict) else {}
+            raw_assets: list[Any] = []
+            raw_assets.extend(state.get("lista_ativos", []) or [])
+            raw_assets.extend(state.get("discovered_assets", []) or [])
+            raw_assets.extend(state.get("hosts", []) or [])
+            raw_assets.extend(_target_tokens(scan.target_query))
+            for asset in raw_assets:
+                host = _host_from_domain_value(asset)
+                if host and _belongs_to_domain(host, root):
+                    ensure_subdomain(domain_item, host, scan)
+
+    lifecycle_status = _build_finding_lifecycle_status_map(findings)
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+    for finding in findings:
+        scan = finding.scan_job
+        loc = _extract_finding_location(finding)
+        host = _host_from_domain_value(loc.get("subdomain") or loc.get("target") or finding.domain)
+        roots = scan_domains.get(finding.scan_job_id or 0) or []
+        matching_root = next((root for root in roots if _belongs_to_domain(host, root)), None)
+        if not matching_root and roots:
+            matching_root = roots[0]
+        if not matching_root:
+            matching_root = _host_from_domain_value(finding.domain or host)
+        if not matching_root:
+            continue
+
+        domain_item = ensure_domain(matching_root, scan)
+        sub_item = ensure_subdomain(domain_item, host or matching_root, scan)
+        sev = str(finding.severity or "info").lower()
+        if sev not in sub_item["severity_counts"]:
+            sev = "info"
+
+        sub_item["severity_counts"][sev] += 1
+        sub_item["total_findings"] += 1
+        domain_item["severity_counts"][sev] += 1
+        domain_item["total_findings"] += 1
+        sub_item["findings"].append(
+            {
+                "id": finding.id,
+                "scan_id": finding.scan_job_id,
+                "scan_status": scan.status if scan else None,
+                "scan_created_at": scan.created_at if scan else None,
+                "title": finding.title,
+                "severity": finding.severity,
+                "risk_score": finding.risk_score,
+                "cve": finding.cve,
+                "cvss": finding.cvss,
+                "tool": finding.tool,
+                "lifecycle_status": lifecycle_status.get(finding.id, "open"),
+                "url": loc.get("url"),
+                "path": loc.get("path"),
+                "created_at": finding.created_at,
+            }
+        )
+
+    result = []
+    for domain_item in domains.values():
+        subdomains = list(domain_item["subdomains"].values())
+        for subdomain in subdomains:
+            subdomain["findings"].sort(
+                key=lambda row: (
+                    severity_rank.get(str(row.get("severity") or "info").lower(), 9),
+                    -int(row.get("risk_score") or 0),
+                    str(row.get("title") or "").lower(),
+                )
+            )
+        subdomains.sort(
+            key=lambda row: (
+                -int(row.get("total_findings") or 0),
+                severity_rank.get(
+                    next((sev for sev, count in row.get("severity_counts", {}).items() if count), "info"),
+                    9,
+                ),
+                str(row.get("name") or ""),
+            )
+        )
+        result.append(
+            {
+                "domain": domain_item["domain"],
+                "latest_scan_id": domain_item["latest_scan_id"],
+                "latest_scan_status": domain_item["latest_scan_status"],
+                "latest_scan_at": domain_item["latest_scan_at"],
+                "scan_count": domain_item["scan_count"],
+                "subdomain_count": sum(1 for row in subdomains if row.get("name") != domain_item["domain"]),
+                "severity_counts": domain_item["severity_counts"],
+                "total_findings": domain_item["total_findings"],
+                "subdomains": subdomains,
+            }
+        )
+
+    result.sort(key=lambda item: (-(item.get("total_findings") or 0), str(item.get("domain") or "")))
+    return result
+
+
 @router.get("/findings/timeline")
 def findings_timeline(
     days: int = Query(default=90, ge=7, le=730),

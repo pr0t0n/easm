@@ -15,6 +15,7 @@ import ScanOperationsPage from "./pages/ScanOperationsPage";
 import OperationsCenterPage from "./pages/OperationsCenterPage";
 import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
+import DomainsPage from "./pages/DomainsPage";
 import LearningPage from "./pages/LearningPage";
 import { authStore } from "./store/auth";
 
@@ -85,6 +86,7 @@ export default function App() {
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
+                    <Route path="/dominios" element={<DomainsPage />} />
                     <Route path="/agendamento" element={<Navigate to="/scan" replace />} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
