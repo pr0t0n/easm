@@ -962,62 +962,90 @@ class MCPToolExecutor:
         self.call_tool = call_tool
         self.available = available
 
+    def _build_execution_record(self, tool: dict[str, Any], tool_plan: dict[str, Any], target: str) -> dict[str, Any]:
+        return {
+            "mcp_execution_id": stable_id("MCP", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
+            "mcp_request_id": stable_id("mcp", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
+            "tool_plan_id": tool_plan["tool_plan_id"],
+            "phase_id": tool_plan["phase_id"],
+            "skill_id": tool_plan["skill_id"],
+            "tool_name": tool["tool_name"],
+            "profile": tool["profile"],
+            "arguments_hash": stable_id("ARG", tool.get("arguments") or {}),
+            "target": target,
+            "status": "blocked",
+            "stdout_path": "",
+            "stderr_path": "",
+            "artifacts": [],
+            "exit_code": None,
+            "timeout": tool.get("timeout"),
+            "started_at": utc_now(),
+            "finished_at": "",
+            "error": None,
+        }
+
+    def _run_one_tool(self, execution: dict[str, Any]) -> dict[str, Any]:
+        try:
+            raw = self.call_tool(execution) if self.call_tool else {"status": "success", "exit_code": 0, "stdout_path": ""}
+            status = raw.get("status") or "failed"
+            if status == "done":
+                status = "success"
+            execution.update(
+                status=status if status in {"queued", "running", "success", "failed", "timeout", "blocked"} else "failed",
+                stdout_path=raw.get("stdout_path") or "",
+                stderr_path=raw.get("stderr_path") or raw.get("stderr") or "",
+                artifacts=raw.get("artifact_paths") or raw.get("artifacts") or [],
+                exit_code=raw.get("exit_code", raw.get("return_code")),
+                finished_at=utc_now(),
+                error=raw.get("error"),
+                stdout=raw.get("stdout") or "",
+                parsed_result=raw.get("parsed_result") or raw.get("parsed"),
+                command=raw.get("command") or "",
+                duration_seconds=raw.get("duration_seconds"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            execution.update(status="failed", error=str(exc), finished_at=utc_now())
+        return execution
+
     def execute(self, tool_plan: dict[str, Any], target: str) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for tool in tool_plan.get("tools") or []:
-            execution = {
-                "mcp_execution_id": stable_id("MCP", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
-                "mcp_request_id": stable_id("mcp", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
-                "tool_plan_id": tool_plan["tool_plan_id"],
-                "phase_id": tool_plan["phase_id"],
-                "skill_id": tool_plan["skill_id"],
-                "tool_name": tool["tool_name"],
-                "profile": tool["profile"],
-                "arguments_hash": stable_id("ARG", tool.get("arguments") or {}),
-                "target": target,
-                "status": "blocked",
-                "stdout_path": "",
-                "stderr_path": "",
-                "artifacts": [],
-                "exit_code": None,
-                "timeout": tool.get("timeout"),
-                "started_at": utc_now(),
-                "finished_at": "",
-                "error": None,
-            }
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+        tools = tool_plan.get("tools") or []
+        if not tools:
+            return []
+
+        # Split into immediately-blocked (no I/O) and runnable (need kali call)
+        blocked: list[tuple[int, dict[str, Any]]] = []
+        runnable: list[tuple[int, dict[str, Any]]] = []
+        for idx, tool in enumerate(tools):
+            execution = self._build_execution_record(tool, tool_plan, target)
             if not self.available or tool["policy_decision"].get("blocked_reason") == "mcp_unavailable":
                 execution.update(status="blocked", error="mcp_unavailable", finished_at=utc_now())
-                results.append(execution)
-                continue
-            if not tool["policy_decision"]["allowed"]:
+                blocked.append((idx, execution))
+            elif not tool["policy_decision"]["allowed"]:
                 execution.update(status="blocked", error=tool["policy_decision"].get("blocked_reason"), finished_at=utc_now())
-                results.append(execution)
-                continue
-            try:
-                raw = self.call_tool(execution) if self.call_tool else {"status": "success", "exit_code": 0, "stdout_path": ""}
-                status = raw.get("status") or "failed"
-                if status == "done":
-                    status = "success"
-                execution.update(
-                    status=status if status in {"queued", "running", "success", "failed", "timeout", "blocked"} else "failed",
-                    stdout_path=raw.get("stdout_path") or "",
-                    stderr_path=raw.get("stderr_path") or raw.get("stderr") or "",
-                    artifacts=raw.get("artifact_paths") or raw.get("artifacts") or [],
-                    exit_code=raw.get("exit_code", raw.get("return_code")),
-                    finished_at=utc_now(),
-                    error=raw.get("error"),
-                    # Carry the actual tool output so evidence extraction has data
-                    # to parse (previously only stdout_path was kept → evidence
-                    # always reported "nothing found").
-                    stdout=raw.get("stdout") or "",
-                    parsed_result=raw.get("parsed_result") or raw.get("parsed"),
-                    command=raw.get("command") or "",
-                    duration_seconds=raw.get("duration_seconds"),
-                )
-            except Exception as exc:  # noqa: BLE001
-                execution.update(status="failed", error=str(exc), finished_at=utc_now())
-            results.append(execution)
-        return results
+                blocked.append((idx, execution))
+            else:
+                runnable.append((idx, execution))
+
+        ordered: dict[int, dict[str, Any]] = {idx: ex for idx, ex in blocked}
+
+        # Run all kali-dispatched tools concurrently — each is an independent
+        # HTTP POST to kali runner; there are no ordering dependencies within a phase.
+        if runnable:
+            max_workers = min(len(runnable), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(self._run_one_tool, ex): idx for idx, ex in runnable}
+                for fut in _as_completed(futures):
+                    idx = futures[fut]
+                    try:
+                        ordered[idx] = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        _, ex = runnable[next(i for i, (ri, _) in enumerate(runnable) if ri == idx)]
+                        ex.update(status="failed", error=str(exc), finished_at=utc_now())
+                        ordered[idx] = ex
+
+        return [ordered[i] for i in range(len(tools))]
 
 
 class EvidenceCollector:

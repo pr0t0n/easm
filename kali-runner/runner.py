@@ -39,6 +39,7 @@ JOBS_DIR = WORKSPACE / ".runner_jobs"
 PROFILES_DIR = Path(__file__).parent / "profiles"
 MAX_PARALLEL = int(os.getenv("KALI_MAX_PARALLEL", "8"))
 DEFAULT_TIMEOUT = int(os.getenv("KALI_DEFAULT_TIMEOUT", "300"))
+WORKSPACE_TTL_HOURS = int(os.getenv("KALI_WORKSPACE_TTL_HOURS", "24"))
 VOLATILE_JOB_STATES = {"queued", "running"}
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,7 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
 class JobRequest(BaseModel):
     profile: str = Field(..., description="Profile id (see GET /profiles)")
     target: str
+    targets: list[str] = Field(default_factory=list, description="Optional batch target list materialized as {target_file}")
     scan_id: Optional[int] = None
     tool: Optional[str] = Field(None, description="Override profile tool name (legacy bridge)")
     extra_args: list[str] = Field(default_factory=list)
@@ -203,7 +205,12 @@ def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
         job = _JOBS[job_id]
         job.update(fields)
         snapshot = dict(job)
-    _persist_job_record(snapshot)
+    # Write to disk only for terminal state, stdout arrival, or finished_at
+    # (the final bookkeeping write).  All other intermediate updates (running,
+    # workdir, command) stay in-memory — keeps crash-recovery intact while
+    # eliminating ~8 of the 11 disk writes per job.
+    if fields.get("status") in TERMINAL_STATES or "stdout" in fields or "finished_at" in fields:
+        _persist_job_record(snapshot)
     return snapshot
 
 
@@ -226,7 +233,7 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "job_id": str(uuid.uuid4()),
         "profile": req.profile,
         "tool": profile.get("tool") or req.tool or req.profile,
-        "target": req.target,
+        "target": req.target or (f"{len(req.targets)} targets" if req.targets else ""),
         "scan_id": req.scan_id,
         "status": "queued",
         "enqueued_at": datetime.utcnow().isoformat(),
@@ -305,6 +312,7 @@ def _build_command(
     target: str,
     extra_args: list[str],
     workdir: Path | None = None,
+    target_file: Path | None = None,
 ) -> list[str]:
     """Materialize the argv for a profile. Profile spec:
         tool: subfinder
@@ -315,13 +323,13 @@ def _build_command(
     raw = shlex.split(raw_cmd) if isinstance(raw_cmd, str) else list(raw_cmd)
     if not raw:
         raise ValueError(f"profile {profile.get('source_file')} missing 'cmd'")
-    context = _target_context(target, workdir=workdir)
+    context = _target_context(target, workdir=workdir, target_file=target_file)
     materialized = [_render_template(str(part), context) for part in raw]
     materialized.extend(str(a) for a in (extra_args or []))
     return materialized
 
 
-def _target_context(target: str, workdir: Path | None = None) -> dict[str, str]:
+def _target_context(target: str, workdir: Path | None = None, target_file: Path | None = None) -> dict[str, str]:
     raw = str(target or "").strip()
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
     host = parsed.hostname or raw.replace("http://", "").replace("https://", "").split("/")[0]
@@ -346,6 +354,7 @@ def _target_context(target: str, workdir: Path | None = None) -> dict[str, str]:
         "scheme": scheme,
         "path": raw,
         "out": str(workdir or WORKSPACE),
+        "target_file": str(target_file or ""),
         **{f"env_{key}": value for key, value in os.environ.items()},
     }
     for env_name in (
@@ -407,6 +416,8 @@ def _target_validation_error(profile: dict[str, Any], target: str) -> str:
         except ValueError:
             return f"target_type {target_type} requires a resolvable IP for host: {host}"
         return ""
+    if target_type in {"target_list", "targets_file"}:
+        return ""
     if target_type != "local_path":
         return ""
     raw = str(target or "").strip()
@@ -446,17 +457,20 @@ def _parse_output(profile: dict[str, Any], stdout: str) -> Any:
 
 def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     """Worker thread — executes the tool, streams stdout/stderr to disk."""
+    started = time.perf_counter()
+    # Batch the two initial field writes (status=running + workdir) into one
+    # lock acquisition instead of two.
+    tool_name = str(profile.get("tool") or req.tool or req.profile)
+    workdir = WORKSPACE / str(req.scan_id or "ad-hoc") / tool_name / job_id
+    workdir.mkdir(parents=True, exist_ok=True)
     job = _set_job_fields(
         job_id,
         status="running",
         started_at=datetime.utcnow().isoformat(),
+        workdir=str(workdir),
     )
-    started = time.perf_counter()
-
-    tool_name = str(job.get("tool") or req.tool or req.profile)
-    workdir = WORKSPACE / str(req.scan_id or "ad-hoc") / tool_name / job_id
-    workdir.mkdir(parents=True, exist_ok=True)
-    _set_job_fields(job_id, workdir=str(workdir))
+    # Refresh tool_name from stored job record in case it differs from profile
+    tool_name = str(job.get("tool") or tool_name)
 
     try:
         missing_env = [
@@ -509,7 +523,18 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             )
             return
 
-        argv = _build_command(profile, req.target, req.extra_args, workdir=workdir)
+        # Tier 3: if a batch target list was provided, write it to disk so
+        # profiles can reference it as {target_file}.  Only meaningful when the
+        # profile's cmd actually contains {target_file}; otherwise it's ignored.
+        batch_target_file: Path | None = None
+        if req.targets:
+            batch_target_file = workdir / "targets.txt"
+            batch_target_file.write_text(
+                "\n".join(str(t).strip() for t in req.targets if str(t).strip()),
+                encoding="utf-8",
+            )
+
+        argv = _build_command(profile, req.target, req.extra_args, workdir=workdir, target_file=batch_target_file)
         # Inject authentication headers into supported tools (ffuf, curl, gobuster,
         # nuclei, httpx, wfuzz, sqlmap, dalfox, wpscan, feroxbuster, dirsearch).
         if req.auth_headers:
@@ -517,8 +542,8 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)
-
-        _set_job_fields(job_id, command=command)
+        # Don't write command to _JOBS yet — it will be included in the terminal
+        # _set_job_fields call below, saving one lock acquisition per job.
 
         proc = subprocess.run(
             argv,
@@ -572,6 +597,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # buffers are safe; stderr stays at 20K (mostly progress/errors).
         _set_job_fields(
             job_id,
+            command=command,
             status=status,
             return_code=return_code,
             stdout=stdout[-500_000:] if stdout else "",
@@ -581,6 +607,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     except subprocess.TimeoutExpired as exc:
         _set_job_fields(
             job_id,
+            command=command,
             status="timeout",
             error=f"timeout after {exc.timeout}s",
             stdout=str(exc.stdout or ""),
@@ -589,11 +616,85 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     except Exception as exc:  # noqa: BLE001
         _set_job_fields(job_id, status="failed", error=f"{type(exc).__name__}: {exc}")
     finally:
+        # Batch finished_at + duration into one call; persist because finished_at
+        # should survive a restart even if status was already written.
         _set_job_fields(
             job_id,
             finished_at=datetime.utcnow().isoformat(),
             duration_seconds=round(time.perf_counter() - started, 3),
         )
+
+
+def _cleanup_old_workspace(ttl_hours: int = WORKSPACE_TTL_HOURS) -> dict[str, int]:
+    """Delete job work-dirs and JSON records older than ttl_hours.
+
+    Only removes entries that are not in VOLATILE_JOB_STATES (queued/running)
+    so that an in-progress job's files are never touched.
+    """
+    cutoff = time.time() - ttl_hours * 3600
+    removed_dirs = removed_jsons = 0
+
+    # Collect job_ids that are still active so we never delete their files.
+    with _JOBS_LOCK:
+        active_ids = {jid for jid, j in _JOBS.items() if j.get("status") in VOLATILE_JOB_STATES}
+
+    # Remove stale .runner_jobs JSON files.
+    for json_path in list(JOBS_DIR.glob("*.json")):
+        if json_path.stem in active_ids:
+            continue
+        try:
+            if json_path.stat().st_mtime < cutoff:
+                json_path.unlink(missing_ok=True)
+                removed_jsons += 1
+        except OSError:
+            pass
+
+    # Remove stale per-scan/tool/job_id work directories.
+    for scan_dir in WORKSPACE.iterdir():
+        if scan_dir.name.startswith(".") or not scan_dir.is_dir():
+            continue
+        for tool_dir in scan_dir.iterdir():
+            if not tool_dir.is_dir():
+                continue
+            for job_dir in tool_dir.iterdir():
+                if not job_dir.is_dir() or job_dir.name in active_ids:
+                    continue
+                try:
+                    if job_dir.stat().st_mtime < cutoff:
+                        import shutil as _shutil
+                        _shutil.rmtree(job_dir, ignore_errors=True)
+                        removed_dirs += 1
+                except OSError:
+                    pass
+
+    # Evict cleaned-up job_ids from the in-memory cache.
+    if removed_jsons:
+        with _JOBS_LOCK:
+            stale = [jid for jid in list(_JOBS) if jid not in active_ids
+                     and not (JOBS_DIR / f"{jid}.json").exists()]
+            for jid in stale:
+                _JOBS.pop(jid, None)
+
+    print(f"[cleanup] removed {removed_dirs} job dirs, {removed_jsons} JSON records (ttl={ttl_hours}h)")
+    return {"removed_dirs": removed_dirs, "removed_jsons": removed_jsons}
+
+
+def _schedule_periodic_cleanup(interval_hours: int = 6) -> None:
+    """Run _cleanup_old_workspace every interval_hours using a daemon timer thread."""
+    def _run():
+        _cleanup_old_workspace()
+        t = threading.Timer(interval_hours * 3600, _run)
+        t.daemon = True
+        t.start()
+    t = threading.Timer(interval_hours * 3600, _run)
+    t.daemon = True
+    t.start()
+
+
+# Run cleanup at startup to reclaim disk from previous container runs,
+# then schedule periodic cleanup every 6 hours.
+_cleanup_old_workspace()
+_schedule_periodic_cleanup(interval_hours=int(os.getenv("KALI_CLEANUP_INTERVAL_HOURS", "6")))
 
 
 # ── FastAPI surface ──────────────────────────────────────────────────────────
@@ -613,6 +714,13 @@ def healthz() -> dict[str, Any]:
         "total_jobs": total_jobs,
         "workspace": str(WORKSPACE),
     }
+
+
+@app.post("/cleanup")
+def trigger_cleanup(ttl_hours: int = WORKSPACE_TTL_HOURS) -> dict[str, Any]:
+    """Delete job dirs and JSON records older than ttl_hours (default: KALI_WORKSPACE_TTL_HOURS)."""
+    result = _cleanup_old_workspace(ttl_hours=ttl_hours)
+    return {"status": "ok", **result}
 
 
 @app.get("/profiles")
@@ -727,11 +835,23 @@ def get_job(job_id: str) -> JobStatus:
 
 
 @app.get("/jobs/{job_id}/result")
-def get_job_result(job_id: str) -> JobResult:
+def get_job_result(job_id: str, stdout_cap: int = 0) -> JobResult:
+    """Return job result.
+
+    stdout_cap: if > 0, truncate stdout/stderr in the response to this many bytes.
+    The full output is always available in workdir/stdout.txt.
+    Default 0 = no cap (full stdout returned).
+    """
     job = _get_job_record(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return JobResult(**{k: job.get(k) for k in JobResult.model_fields.keys()})
+    data = {k: job.get(k) for k in JobResult.model_fields.keys()}
+    if stdout_cap > 0:
+        if data.get("stdout") and len(str(data["stdout"])) > stdout_cap:
+            data["stdout"] = str(data["stdout"])[-stdout_cap:]
+        if data.get("stderr") and len(str(data["stderr"])) > stdout_cap:
+            data["stderr"] = str(data["stderr"])[-stdout_cap:]
+    return JobResult(**data)
 
 
 @app.get("/jobs")

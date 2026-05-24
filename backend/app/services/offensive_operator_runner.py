@@ -8,6 +8,7 @@ Validator output.
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 import requests
@@ -23,6 +24,7 @@ from app.services.offensive_operator_core import (
     OffensiveSkillRuntime,
     create_operation_event,
     create_offensive_state,
+    stable_id,
 )
 from app.services.capability_runtime import mark_capability
 from app.services.scan_intelligence import (
@@ -52,6 +54,9 @@ from app.services.scan_intelligence import (
     load_fp_blocklist,
     apply_fp_blocklist,
     llm_phase_reasoning,
+    build_asset_dag,
+    detect_incremental_changes,
+    emit_partial_report,
 )
 
 
@@ -131,10 +136,41 @@ def _mcp_available() -> bool:
         return False
 
 
-# Module-level holder for current scan's auth headers (set per scan by runner).
-# Single Celery worker process executes one scan task at a time per fork, so this
-# is safe. Reset to {} at the start of each run_offensive_operator_scan().
-_CURRENT_AUTH_HEADERS: dict[str, str] = {}
+_MCP_STDOUT_STATE_CAP = 5_000  # bytes kept per mcp_result entry in state_data
+
+
+def _trim_mcp_stdout(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a shallow copy of each result with stdout/stderr capped for DB storage.
+
+    Full stdout is already written to the kali-runner workspace file; keeping
+    500KB blobs per tool in Postgres state_data causes multi-MB commits per phase.
+    """
+    trimmed = []
+    for r in results:
+        if not isinstance(r, dict):
+            trimmed.append(r)
+            continue
+        entry = dict(r)
+        if "stdout" in entry and isinstance(entry["stdout"], str) and len(entry["stdout"]) > _MCP_STDOUT_STATE_CAP:
+            entry["stdout"] = entry["stdout"][-_MCP_STDOUT_STATE_CAP:]
+        if "stderr" in entry and isinstance(entry["stderr"], str) and len(entry["stderr"]) > _MCP_STDOUT_STATE_CAP:
+            entry["stderr"] = entry["stderr"][-_MCP_STDOUT_STATE_CAP:]
+        trimmed.append(entry)
+    return trimmed
+
+
+# Thread-local auth header storage — safe for both prefork and --pool=threads workers.
+# Each OS thread / Celery task gets its own isolated copy; concurrent subtasks for
+# different scans running in the same process cannot overwrite each other's creds.
+_AUTH_LOCAL = threading.local()
+
+
+def _get_auth_headers() -> dict[str, str]:
+    return dict(getattr(_AUTH_LOCAL, "headers", {}))
+
+
+def _set_auth_headers(headers: dict[str, str]) -> None:
+    _AUTH_LOCAL.headers = dict(headers)
 
 
 def _preflight_profile_for(state: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
@@ -247,9 +283,9 @@ def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[st
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     tool_timeout = max(900, int(execution.get("timeout") or 0))
     arguments: dict[str, Any] = {"target": execution["target"]}
-    if _CURRENT_AUTH_HEADERS:
-        # Pass auth headers to kali runner so it can inject -H flags into the tool command
-        arguments["auth_headers"] = dict(_CURRENT_AUTH_HEADERS)
+    _auth = _get_auth_headers()
+    if _auth:
+        arguments["auth_headers"] = _auth
     request = {
         "mcp_request_id": execution.get("mcp_request_id"),
         "phase_id": execution["phase_id"],
@@ -257,6 +293,8 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
         "tool_name": execution["tool_name"],
         "profile": execution["profile"],
         "target": execution["target"],
+        # Tier 3: batch target list — populated for _batch profiles.
+        "targets": list(execution.get("targets") or []),
         "arguments": arguments,
         "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
     }
@@ -267,6 +305,111 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     )
     response.raise_for_status()
     return response.json()
+
+
+# ─── Tier 3: Batch phase profiles ───────────────────────────────────────────
+# When ≥2 live targets exist for a phase, one batch job replaces N individual
+# jobs.  Tool startup overhead (nuclei: ~15s, naabu: ~3s, nmap: ~5s) is paid
+# once for all targets instead of once per target.
+_BATCH_PHASE_PROFILES: dict[str, str] = {
+    "P02": "naabu_top1000_batch",      # naabu -list targets.txt
+    "P09": "nuclei_cves_batch",         # nuclei -list targets.txt
+}
+# Minimum number of targets to justify a batch call over N single calls.
+_BATCH_MIN_TARGETS = 2
+
+
+def _extract_host_from_target(target: str) -> str:
+    from urllib.parse import urlparse as _up
+    raw = str(target or "").strip()
+    try:
+        p = _up(raw if "://" in raw else f"http://{raw}")
+        return (p.hostname or raw).split(":")[0]
+    except Exception:  # noqa: BLE001
+        return raw
+
+
+def _dispatch_batch_phase(
+    db,
+    job: ScanJob,
+    phase_id: str,
+    targets: list[str],
+    phase_ledgers: list[dict[str, Any]],
+    completed_work: set[str],
+) -> bool:
+    """Dispatch ONE batch kali job for phase_id across all targets.
+
+    Returns True when the batch ran successfully and all (phase_id, target)
+    pairs have been added to completed_work.  Returns False on any error so
+    callers fall back to sequential single-target dispatch.
+    """
+    batch_profile = _BATCH_PHASE_PROFILES.get(phase_id)
+    if not batch_profile or len(targets) < _BATCH_MIN_TARGETS:
+        return False
+
+    # For port-scan phases, pass bare hosts; for URL phases pass full URLs.
+    if phase_id in {"P02"}:
+        batch_list = [_extract_host_from_target(t) for t in targets]
+    else:
+        batch_list = list(targets)
+    batch_list = [t for t in batch_list if t]
+    if not batch_list:
+        return False
+
+    primary = targets[0]
+    contract = PHASE_CONTRACTS.get(phase_id, {})
+    execution: dict[str, Any] = {
+        "mcp_execution_id": stable_id("MCP", {"batch": phase_id, "targets_hash": hash(tuple(sorted(batch_list)))}),
+        "mcp_request_id": stable_id("mcp", {"batch": phase_id, "targets_hash": hash(tuple(sorted(batch_list)))}),
+        "tool_plan_id": f"batch-{phase_id}-{job.id}",
+        "phase_id": phase_id,
+        "skill_id": contract.get("required_skills", [phase_id])[0] if contract.get("required_skills") else phase_id,
+        "tool_name": batch_profile,
+        "profile": batch_profile,
+        "target": primary,
+        "targets": batch_list,
+        "timeout": 1200,
+    }
+    try:
+        result = _call_mcp_execution(execution)
+        status = result.get("status", "failed")
+        ledger_status = "completed" if status in {"success", "done"} else "partial"
+
+        for t in targets:
+            completed_work.add(f"{phase_id}:{t}")
+            phase_ledgers.append({
+                "phase_id": phase_id,
+                "phase_name": contract.get("name", phase_id),
+                "target": t,
+                "status": ledger_status,
+                "tools_attempted": [batch_profile],
+                "tools_success": [batch_profile] if ledger_status == "completed" else [],
+                "tools_failed": [] if ledger_status == "completed" else [batch_profile],
+                "mcp_results": [result],
+                "batch_mode": True,
+                "batch_size": len(batch_list),
+            })
+
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                f"batch_phase phase_id={phase_id} profile={batch_profile} "
+                f"targets={len(batch_list)} status={ledger_status}"
+            ),
+        ))
+        db.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"batch_phase_failed phase_id={phase_id} error={exc!s} — falling back to sequential",
+        ))
+        db.commit()
+        return False
 
 
 def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> dict[str, Any]:
@@ -294,11 +437,11 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                        message=f"scan_level={scan_level} — limiting to phases: {sorted(allowed_phases)}"))
         db.commit()
 
-    # Set auth headers for this scan so _call_mcp_execution propagates them to kali.
-    global _CURRENT_AUTH_HEADERS
-    _CURRENT_AUTH_HEADERS = auth_headers_from_state(initial_state)
-    if _CURRENT_AUTH_HEADERS:
-        masked = {k: (v[:10] + "***" if v else "") for k, v in _CURRENT_AUTH_HEADERS.items()}
+    # Set thread-local auth headers so _call_mcp_execution propagates them to kali.
+    _set_auth_headers(auth_headers_from_state(initial_state))
+    _auth_now = _get_auth_headers()
+    if _auth_now:
+        masked = {k: (v[:10] + "***" if v else "") for k, v in _auth_now.items()}
         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                        message=f"auth_engaged headers={masked} — tools will inject these into requests"))
         db.commit()
@@ -410,8 +553,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             offensive_state = result["offensive_state"]
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
-            # Embed mcp_results in the ledger so _persist_offensive_findings can extract evidence
-            phase_ledger["mcp_results"] = result.get("mcp_results") or []
+            # Embed mcp_results in the ledger so _persist_offensive_findings can extract evidence.
+            # Trim stdout/stderr to _MCP_STDOUT_STATE_CAP before storing in state_data.
+            phase_ledger["mcp_results"] = _trim_mcp_stdout(result.get("mcp_results") or [])
             phase_ledgers.append(phase_ledger)
 
             # Emit per-tool command log lines so WorkerLogsPage CommandFeed picks them up
@@ -465,7 +609,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     "operation_events": events,
                     "last_skill_plan": result.get("skill_plan"),
                     "last_tool_plan": result.get("tool_plan"),
-                    "last_mcp_results": result.get("mcp_results"),
+                    "last_mcp_results": _trim_mcp_stdout(result.get("mcp_results") or []),
                     "last_evidence": result.get("evidence"),
                 }
             )
@@ -521,6 +665,36 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                 if p not in ports and 1 <= p <= 65535:
                                     ports.append(p)
                 state["discovered_ports"] = ports[:500]
+                # Tier 1 feedback: P02 tells us which ports are actually open.
+                # Update preflight_ports so future _preflight_profile_for calls
+                # have accurate data, and correct any tcp_closed profile to
+                # tcp_open so P03+ phases aren't skipped for live hosts.
+                if ports:
+                    state["preflight_ports"] = ports[:500]
+                    _pf = dict(state.get("preflight") or {})
+                    _pf_tgts = dict(_pf.get("targets") or {})
+                    if target in _pf_tgts:
+                        _old_pf = dict(_pf_tgts[target])
+                        if _old_pf.get("status") in ("tcp_closed", "unknown") or not _old_pf.get("open_ports"):
+                            _old_pf["status"] = "tcp_open"
+                            _old_pf["open_ports"] = sorted(set((_old_pf.get("open_ports") or []) + ports))
+                            _old_pf["reason"] = f"P02 scan discovered {len(ports)} open port(s)"
+                            _pf_tgts[target] = _old_pf
+                            _pf["targets"] = _pf_tgts
+                            state["preflight"] = _pf
+                    # Tier 4: detect new ports and record the incremental change
+                    _p02_prev_ports = list(state.get("discovered_ports_snapshot") or [])
+                    _p02_ic = detect_incremental_changes(
+                        prev_targets=[], curr_targets=[],
+                        prev_ports=_p02_prev_ports, curr_ports=ports,
+                        prev_tech=[], curr_tech=[],
+                        source_phase="P02",
+                    )
+                    if _p02_ic["has_changes"]:
+                        _p02_changes = list(state.get("incremental_changes") or [])
+                        _p02_changes.append(_p02_ic)
+                        state["incremental_changes"] = _p02_changes[-100:]
+                    state["discovered_ports_snapshot"] = ports[:500]
 
             # ─── Scan Intelligence hooks ───────────────────────────────────
             # 1. Multi-target propagation: after P01, expand to discovered subdomains
@@ -639,7 +813,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 "tools": [t.get("tool_name") for t in (result.get("tool_plan") or {}).get("tools", [])],
             }
             # risk_assessment needs: tool_execution_results, vulnerabilidades_encontradas
-            state["tool_execution_results"] = mcp_list
+            state["tool_execution_results"] = _trim_mcp_stdout(mcp_list)
             vulns = list(state.get("vulnerabilidades_encontradas") or [])
             for ev in (result.get("evidence") or []):
                 if isinstance(ev, dict) and ev.get("evidence_strength") in {"medium", "strong", "conclusive"}:
@@ -725,6 +899,65 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                message=(f"target_set refined — {len(_refined['live_targets'])} live, "
                                         f"{len(_refined['dead_targets'])} dead, "
                                         f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
+                # ─ Tier 4: Asset DAG init + incremental change detection ────
+                _cp_state["asset_dag"] = build_asset_dag(_cp_state, all_targets, PHASE_ORDER)
+                _ic_prev_targets = list(state.get("expanded_targets_snapshot") or [target])
+                _ic_change = detect_incremental_changes(
+                    prev_targets=_ic_prev_targets,
+                    curr_targets=all_targets,
+                    prev_ports=[],
+                    curr_ports=[],
+                    prev_tech=[],
+                    curr_tech=list((state.get("tech_stack") or {}).get("detected") or []),
+                    source_phase="P01",
+                )
+                if _ic_change["has_changes"]:
+                    _changes = list(_cp_state.get("incremental_changes") or [])
+                    _changes.append(_ic_change)
+                    _cp_state["incremental_changes"] = _changes[-100:]
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                   message=(f"tier4_incremental P01 new_targets={len(_ic_change['new_targets'])} "
+                                            f"triggered={_ic_change['triggered_phases']}")))
+                _cp_state["expanded_targets_snapshot"] = list(all_targets)
+                # Emit first partial report after P01 target expansion
+                _pr = emit_partial_report(_cp_state, phase_ledgers, all_targets, PHASE_ORDER)
+                _reports = list(_cp_state.get("scan_reports") or [])
+                _reports.append(_pr)
+                _cp_state["scan_reports"] = _reports[-50:]
+                db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                               message=(f"tier4_partial_report coverage={_pr['coverage_pct']}% "
+                                        f"targets={_pr['targets_total']} findings={_pr['findings']}")))
+                # ─ Tier 3 Batch dispatch: run P02/P09 once for all targets ──
+                # Instead of N sequential jobs (one per subdomain), dispatch a
+                # single batch job that passes all hosts in one targets.txt.
+                # Marked as done in completed_work so the per-target loop skips them.
+                _all_live = [t for t in _refined["live_targets"] if t]
+                if len(_all_live) >= _BATCH_MIN_TARGETS:
+                    _batch_targets_for_phase = [target] + [t for t in _all_live if t != target]
+                    for _bp_id in list(_BATCH_PHASE_PROFILES):
+                        if allowed_phases is not None and _bp_id not in allowed_phases:
+                            continue
+                        if all(f"{_bp_id}:{t}" in completed_work for t in _batch_targets_for_phase):
+                            continue  # Already done (e.g., resumed scan)
+                        _batch_targets_todo = [
+                            t for t in _batch_targets_for_phase
+                            if f"{_bp_id}:{t}" not in completed_work
+                        ]
+                        if len(_batch_targets_todo) >= _BATCH_MIN_TARGETS:
+                            _dispatch_batch_phase(
+                                db, job, _bp_id, _batch_targets_todo,
+                                phase_ledgers, completed_work,
+                            )
+                    # Persist batch completions before subtasks are dispatched so
+                    # each subtask reads the updated completed_work from DB and
+                    # skips P02/P09 that were already handled in batch.
+                    _cp_state["completed_work"] = sorted(completed_work)
+                    _cp_state["phase_ledger_v2"] = _merge_phase_ledgers(
+                        list(_cp_state.get("phase_ledger_v2") or []), phase_ledgers
+                    )
+                    job.state_data = _cp_state
+                    db.commit()
+
                 # ─ Parallel fan-out: dispatch a subtask per non-root target ─
                 if _cp_state.get("parallelize"):
                     try:
@@ -775,6 +1008,30 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
             job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
+            # ─ Tier 4: per-phase DAG update + periodic partial report ─────────
+            # Update only this target's entry in the DAG (cheap: one target).
+            try:
+                _dag_patch = build_asset_dag(_cp_state, [target], PHASE_ORDER)
+                _cur_dag = dict(_cp_state.get("asset_dag") or {})
+                _cur_dag.update(_dag_patch)
+                _cp_state["asset_dag"] = _cur_dag
+            except Exception:  # noqa: BLE001
+                pass
+            # Emit a partial report every 5 completed phases.
+            _pr_counter = int(_cp_state.get("_partial_report_counter") or 0) + 1
+            _cp_state["_partial_report_counter"] = _pr_counter
+            if _pr_counter % 5 == 0:
+                try:
+                    _pr = emit_partial_report(_cp_state, phase_ledgers, all_targets, PHASE_ORDER)
+                    _scan_reports = list(_cp_state.get("scan_reports") or [])
+                    _scan_reports.append(_pr)
+                    _cp_state["scan_reports"] = _scan_reports[-50:]
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                                   message=(f"tier4_partial_report coverage={_pr['coverage_pct']}% "
+                                            f"targets_active={_pr['targets_active']}/{_pr['targets_total']} "
+                                            f"findings={_pr['findings']}")))
+                except Exception:  # noqa: BLE001
+                    pass
             _parallel_checkpoint_after_p01 = bool(_cp_state.pop("_parallel_checkpoint_after_p01", False))
             job.state_data = _cp_state
             db.commit()
@@ -1608,9 +1865,9 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     offensive_state = dict(state.get("offensive_state") or create_offensive_state(target, campaign_id=f"scan-{job.id}"))
     offensive_state["target"] = target
 
-    # Auth for downstream tools — shared across all subtasks
-    global _CURRENT_AUTH_HEADERS
-    _CURRENT_AUTH_HEADERS = auth_headers_from_state(state)
+    # Auth headers stored in thread-local so concurrent subtasks in the same
+    # process (--pool=threads) don't overwrite each other's credentials.
+    _set_auth_headers(auth_headers_from_state(state))
 
     mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
     runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))

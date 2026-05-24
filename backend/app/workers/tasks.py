@@ -26,6 +26,7 @@ from app.workers.worker_groups import (
     SCHEDULED_WORKER_GROUPS,
     SCAN_UNIT_QUEUE,
     SCAN_SCHEDULED_QUEUE,
+    SCAN_PARALLEL_QUEUE,
     ScanMode,
     find_group_by_tool,
     get_worker_agent_profile,
@@ -1457,7 +1458,7 @@ def run_scan_job_unit(self, scan_id: int):
     return _run_scan_with_retry(self, scan_id, "unit")
 
 
-@celery.task(bind=True, name="run_scan_target_subset", queue=SCAN_UNIT_QUEUE)
+@celery.task(bind=True, name="run_scan_target_subset", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
 def run_scan_target_subset(self, scan_id: int, target: str):
     """Parallel fan-out: process P02-P22 for ONE target inside an ongoing scan.
 

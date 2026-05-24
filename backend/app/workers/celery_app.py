@@ -27,6 +27,16 @@ celery.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_disable_rate_limits=True,
+    # Tier 1-D: Results expire after 1h — subtask results are never consumed by
+    # the caller (fire-and-forget), so without this they accumulate in Redis forever.
+    result_expires=int(os.getenv("CELERY_RESULT_EXPIRES", "3600")),
+    # Tier 4-D: Compress task payloads with zlib — scan state dicts can be 10-50KB;
+    # compression reduces Redis memory and broker I/O by ~70%.
+    task_compression="zlib",
+    result_compression="zlib",
+    # Tier 4-D: Limit broker connection pool to avoid Redis socket exhaustion
+    # under high worker concurrency (9 workers × 16 threads = 144 potential conns).
+    broker_pool_limit=int(os.getenv("CELERY_BROKER_POOL_LIMIT", "20")),
     broker_transport_options={
         # Must be >= task_time_limit otherwise long-running scans get redelivered
         # and re-executed from P01 (orphan retry storm).

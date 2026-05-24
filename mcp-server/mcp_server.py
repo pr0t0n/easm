@@ -27,6 +27,12 @@ KALI_RUNNER_URL = os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088").rstrip
 MCP_PORT = int(os.getenv("MCP_PORT", "3000"))
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
 
+# Per-request timeout overrides for the kali_runner calls (Tier 4-A).
+# Status poll: just a JSON status dict — must respond in <5s or the runner is stuck.
+# Result fetch: includes full stdout blob — allow up to 60s.
+_KALI_POLL_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
+_KALI_RESULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
+
 kali_client: httpx.AsyncClient | None = None
 kali_profiles: dict[str, dict[str, Any]] = {}
 tool_aliases: dict[str, str] = {}
@@ -54,6 +60,9 @@ class MCPExecutionRequest(BaseModel):
     tool_name: str
     profile: str
     target: str
+    # Tier 3: optional batch target list — when provided the kali runner
+    # materialises a targets.txt file and the profile uses {target_file}.
+    targets: list[str] = Field(default_factory=list)
     arguments: dict[str, Any] = Field(default_factory=dict)
     expected_evidence: list[str] = Field(default_factory=list)
 
@@ -255,7 +264,22 @@ async def _refresh_kali_catalog() -> None:
 async def lifespan(app: FastAPI):
     global kali_client, knowledge_store
     knowledge_store = _load_store()
-    kali_client = httpx.AsyncClient(base_url=KALI_RUNNER_URL, timeout=30.0)
+    # Tier 2-A / 4-A: separate timeouts per call type.
+    # The client default covers POST /jobs (submit).  Status polls and result
+    # fetches override read= per-request so a hung kali_runner doesn't block
+    # the MCP event loop for 30s per poll iteration.
+    kali_client = httpx.AsyncClient(
+        base_url=KALI_RUNNER_URL,
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0),
+        limits=httpx.Limits(
+            max_connections=50,
+            max_keepalive_connections=20,
+            keepalive_expiry=30.0,
+        ),
+    )
+    # Per-request timeout overrides used in _run_kali_profile:
+    #   _POLL_TIMEOUT   — GET /jobs/{id}       — just a status JSON, must be fast
+    #   _RESULT_TIMEOUT — GET /jobs/{id}/result — includes stdout, allow more time
     await _refresh_kali_catalog()
     yield
     if kali_client is not None:
@@ -366,11 +390,13 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             scan_id = None
 
     timeout = int(parameters.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
+    batch_targets = [str(t).strip() for t in (parameters.get("targets") or []) if str(t).strip()]
     response = await kali_client.post(
         "/jobs",
         json={
             "profile": profile_name,
             "target": parameters["target"],
+            "targets": batch_targets,   # Tier 3: populated for batch profiles
             "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "timeout": timeout,
@@ -385,15 +411,25 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
     job_id = response.json()["job_id"]
     start = asyncio.get_running_loop().time()
     while True:
-        if asyncio.get_running_loop().time() - start > timeout:
+        elapsed = asyncio.get_running_loop().time() - start
+        if elapsed > timeout:
             raise HTTPException(status_code=504, detail=f"MCP timed out waiting for job {job_id}")
-        status_response = await kali_client.get(f"/jobs/{job_id}")
+        # Tier 4-A: short 5s read timeout for status polls — the runner just
+        # reads an in-memory dict; anything slower means it is stuck.
+        status_response = await kali_client.get(f"/jobs/{job_id}", timeout=_KALI_POLL_TIMEOUT)
         status_response.raise_for_status()
         payload = status_response.json()
         if payload.get("status") in TERMINAL_STATES:
             break
-        await asyncio.sleep(2)
-    result_response = await kali_client.get(f"/jobs/{job_id}/result")
+        # Adaptive backoff: 2s for the first 30s, then grows 1s per 30s elapsed,
+        # capped at 15s.  Reduces polls from 450→~90 for a 900s nuclei scan.
+        _sleep = min(2 + int(elapsed // 30), 15)
+        await asyncio.sleep(_sleep)
+    # Tier 4-A: 60s read timeout for result fetch — stdout can be up to 500KB.
+    # Full stdout is needed here: offensive_operator_runner parses raw stdout for
+    # subdomain/port discovery.  Tier 2-C (_trim_mcp_stdout) handles truncation
+    # before the data reaches Postgres state_data.
+    result_response = await kali_client.get(f"/jobs/{job_id}/result", timeout=_KALI_RESULT_TIMEOUT)
     result_response.raise_for_status()
     result = dict(result_response.json())
     result.setdefault("dispatch_task_id", job_id)
@@ -444,6 +480,7 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
             profile_name,
             {
                 "target": request.target,
+                "targets": list(request.targets or []),          # Tier 3 batch
                 "scan_id": request.arguments.get("scan_id"),
                 "timeout": request.arguments.get("timeout"),
                 # Propagate scanner authentication so kali runner injects

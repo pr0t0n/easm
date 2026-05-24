@@ -197,18 +197,33 @@ def classify_target_preflight(
             "checked_at": checked_at,
         }
 
-    open_ports: list[int] = []
-    http_signals: list[dict[str, Any]] = []
-    for port in ports or DEFAULT_PREFLIGHT_PORTS:
+    port_list = []
+    for port in (ports or DEFAULT_PREFLIGHT_PORTS):
         try:
-            p = int(port)
+            port_list.append(int(port))
         except (TypeError, ValueError):
             continue
+
+    # Probe all ports in parallel — 14 sequential socket calls would add ~20s
+    # of latency at 1.5s timeout each; ThreadPoolExecutor cuts this to ~1-2s.
+    open_ports: list[int] = []
+    http_signals: list[dict[str, Any]] = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _probe_port(p: int) -> tuple[int, dict | None] | None:
         if _tcp_connects(host, p, timeout=tcp_timeout):
-            open_ports.append(p)
-            probe = _http_probe(host, p, timeout=http_timeout)
-            if probe:
-                http_signals.append(probe)
+            return p, _http_probe(host, p, timeout=http_timeout)
+        return None
+
+    with ThreadPoolExecutor(max_workers=min(len(port_list), 20)) as pool:
+        futures = {pool.submit(_probe_port, p): p for p in port_list}
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result is not None:
+                p, probe = result
+                open_ports.append(p)
+                if probe:
+                    http_signals.append(probe)
 
     if http_signals:
         status = "http_live"
@@ -238,9 +253,12 @@ def preflight_skip_reason(phase_id: str, profile: dict[str, Any] | None) -> str 
     if phase_id == "P01" or not profile:
         return None
     status = str(profile.get("status") or "").lower()
+    # Dead hosts: skip ALL phases — no point port-scanning an unresolvable host.
     if status in {"invalid", "dns_dead"}:
         return profile.get("reason") or "preflight sem DNS válido"
-    if phase_id in WEB_HEAVY_PHASES and status in {"tcp_closed", "tcp_live"}:
+    # tcp_closed (DNS resolves, no open web ports): skip web-heavy phases but
+    # still run P02 (port scan) — P02 itself may find non-web open ports.
+    if phase_id in WEB_HEAVY_PHASES and status == "tcp_closed":
         return profile.get("reason") or "preflight sem superfície HTTP ativa"
     return None
 
@@ -1301,3 +1319,204 @@ def extract_learning_signals(state: dict[str, Any], phase_ledgers: list[dict[str
                         "evidence_url": item.get("matched-at") or "",
                     })
     return learnings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Tier 4 — Asset DAG, incremental state, continuous reporting
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Phase dependency graph: which phases must complete before each phase can start.
+# Used by build_asset_dag to mark phases as "ready" vs "pending" (blocked by deps).
+_PHASE_DEPS: dict[str, list[str]] = {
+    "P01": [],
+    "P02": ["P01"],
+    "P03": ["P02"],
+    "P04": ["P03"],
+    "P05": ["P03"],
+    "P06": ["P03"],
+    "P07": ["P02"],
+    "P08": ["P05", "P06"],
+    "P09": ["P07", "P08"],
+    "P10": ["P09"],
+    "P11": ["P10"],
+    "P12": ["P10", "P11"],
+    "P13": ["P12"],
+    "P14": ["P12"],
+    "P15": ["P04"],
+    "P16": ["P15"],
+    "P17": ["P16"],
+    "P18": ["P06"],
+    "P19": ["P17", "P18"],
+    "P20": ["P19"],
+    "P21": ["P20"],
+    "P22": ["P21"],
+}
+
+# Re-trigger policy: which downstream phases should be re-queued when a class
+# of new evidence appears.  Used by detect_incremental_changes.
+_NEW_TARGET_TRIGGERS = ["P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09"]
+_NEW_PORT_TRIGGERS = ["P03", "P05", "P07", "P09"]
+_NEW_TECH_TRIGGERS = ["P07", "P08", "P09"]
+
+
+def build_asset_dag(
+    state: dict[str, Any],
+    targets: list[str],
+    phase_order: list[str],
+) -> dict[str, Any]:
+    """Build or update the per-asset phase DAG stored in state["asset_dag"].
+
+    Each target gets an entry with per-phase status (completed / skipped / ready /
+    pending) and coverage metrics.  Calling this incrementally merges new targets
+    into the existing DAG without resetting already-completed entries.
+    """
+    completed = set(state.get("completed_work") or [])
+    skipped_keys = {
+        f"{s['phase_id']}:{s['target']}"
+        for s in (state.get("skipped_work") or [])
+        if isinstance(s, dict) and s.get("phase_id") and s.get("target")
+    }
+    host_ip = dict(state.get("host_ip_map") or {})
+    tech_stack = state.get("tech_stack") or {}
+    existing_dag = dict(state.get("asset_dag") or {})
+
+    dag: dict[str, Any] = dict(existing_dag)
+    for target in targets:
+        phases: dict[str, dict[str, Any]] = {}
+        for phase_id in phase_order:
+            key = f"{phase_id}:{target}"
+            if key in completed:
+                status = "skipped" if key in skipped_keys else "completed"
+            else:
+                deps = _PHASE_DEPS.get(phase_id, [])
+                deps_done = all(f"{d}:{target}" in completed for d in deps)
+                status = "ready" if deps_done else "pending"
+            phases[phase_id] = {"status": status, "deps": _PHASE_DEPS.get(phase_id, [])}
+
+        n_done = sum(1 for p in phases.values() if p["status"] in ("completed", "skipped"))
+        n_total = len(phase_order)
+        asset_status = (
+            "completed" if n_done == n_total
+            else "in_progress" if n_done > 0
+            else "pending"
+        )
+        dag[target] = {
+            "status": asset_status,
+            "phases": phases,
+            "phases_completed": n_done,
+            "phases_total": n_total,
+            "coverage_pct": round(n_done / max(1, n_total) * 100, 1),
+            "ip": host_ip.get(target),
+            "open_ports": list(state.get("discovered_ports") or [])[:20],
+            "tech_detected": list(tech_stack.get("detected") or [])[:10],
+            "discovered_by": existing_dag.get(target, {}).get("discovered_by", "root"),
+        }
+    return dag
+
+
+def detect_incremental_changes(
+    prev_targets: list[str],
+    curr_targets: list[str],
+    prev_ports: list[int],
+    curr_ports: list[int],
+    prev_tech: list[str],
+    curr_tech: list[str],
+    source_phase: str,
+) -> dict[str, Any]:
+    """Detect new assets / ports / technologies that appeared after a phase.
+
+    Returns a change record suitable for appending to state["incremental_changes"].
+    The triggered_phases field indicates which phases the runner should re-queue
+    for new assets (the actual re-queuing is handled by the existing fanout).
+    """
+    new_targets = [t for t in curr_targets if t and t not in set(prev_targets)]
+    new_ports = [p for p in curr_ports if p not in set(prev_ports)]
+    new_tech = [t for t in curr_tech if t and t not in set(prev_tech)]
+
+    if new_targets:
+        triggered = list(_NEW_TARGET_TRIGGERS)
+    elif new_ports:
+        triggered = list(_NEW_PORT_TRIGGERS)
+    elif new_tech:
+        triggered = list(_NEW_TECH_TRIGGERS)
+    else:
+        triggered = []
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source_phase": source_phase,
+        "new_targets": new_targets[:50],
+        "new_ports": new_ports[:50],
+        "new_tech": new_tech[:20],
+        "triggered_phases": triggered,
+        "has_changes": bool(new_targets or new_ports or new_tech),
+    }
+
+
+def emit_partial_report(
+    state: dict[str, Any],
+    phase_ledgers: list[dict[str, Any]],
+    all_targets: list[str],
+    phase_order: list[str],
+) -> dict[str, Any]:
+    """Build a lightweight scan snapshot for continuous / incremental reporting.
+
+    Appended to state["scan_reports"] so the frontend can poll for live progress
+    without waiting for scan completion.
+    """
+    completed = set(state.get("completed_work") or [])
+    total_units = max(1, len(all_targets) * len(phase_order))
+    done_units = len(completed)
+
+    sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    tools_used: set[str] = set()
+    for ledger in phase_ledgers:
+        if not isinstance(ledger, dict):
+            continue
+        for tool in (ledger.get("tools_success") or []):
+            tools_used.add(str(tool))
+        for mcp in (ledger.get("mcp_results") or []):
+            if not isinstance(mcp, dict):
+                continue
+            parsed = mcp.get("parsed_result")
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    info = item.get("info") or {}
+                    sev = str(
+                        info.get("severity") or item.get("severity") or "info"
+                    ).lower()
+                    if sev in sev_counts:
+                        sev_counts[sev] += 1
+
+    # Count targets that have at least one completed non-P01 phase
+    active_targets = len({
+        wk.split(":")[1]
+        for wk in completed
+        if ":" in wk and not wk.startswith("P01:")
+    })
+
+    dag = state.get("asset_dag") or {}
+    dag_summary = {
+        t: {
+            "coverage_pct": dag[t]["coverage_pct"],
+            "status": dag[t]["status"],
+            "phases_completed": dag[t]["phases_completed"],
+        }
+        for t in list(dag.keys())[:20]
+    }
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "phases_completed": done_units,
+        "phases_total": total_units,
+        "coverage_pct": round(done_units / total_units * 100, 1),
+        "targets_active": active_targets,
+        "targets_total": len(all_targets),
+        "findings": dict(sev_counts),
+        "tools_used": sorted(tools_used)[:30],
+        "asset_dag_summary": dag_summary,
+        "tech_detected": list((state.get("tech_stack") or {}).get("detected") or [])[:10],
+        "incremental_changes_count": len(state.get("incremental_changes") or []),
+    }

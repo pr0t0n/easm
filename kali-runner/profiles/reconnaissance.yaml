@@ -121,6 +121,19 @@ dnsx_resolve:
   timeout: 120
   parser: lines
 
+# Batch variant: resolve a list of hosts at once (-l flag).
+# Used after subfinder to bulk-validate all discovered subdomains in one shot.
+dnsx_resolve_batch:
+  tool: dnsx
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch DNS resolution for a list of discovered subdomains."
+  cmd: ["dnsx", "-l", "{target_file}", "-a", "-aaaa", "-cname", "-resp", "-silent",
+        "-t", "100"]
+  timeout: 120
+  parser: lines
+
 shuffledns_brute:
   tool: shuffledns
   category: recon
@@ -148,6 +161,18 @@ naabu_top1000:
   timeout: 600
   parser: lines
 
+# Batch variant: scan a list of hosts in a single naabu run.
+# Requires targets list via POST /jobs targets=[]. Outputs host:port lines.
+naabu_top1000_batch:
+  tool: naabu
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch TCP port scan top-1000 across multiple hosts in one run."
+  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "2000", "-c", "50"]
+  timeout: 600
+  parser: lines
+
 nmap_service_detect:
   tool: nmap
   category: recon
@@ -156,6 +181,19 @@ nmap_service_detect:
   # -sV service version, -sC default scripts, -O OS detection (-O may need root in some envs),
   # --top-ports 1000 ensures broad coverage but still fast, -T4 aggressive timing.
   cmd: ["nmap", "-sV", "-sC", "-Pn", "--top-ports", "1000", "-T4", "--max-retries", "2", "{host}"]
+  timeout: 900
+  parser: raw
+
+# Batch variant: one nmap run across multiple hosts from a file.
+# Much faster than N sequential runs; nmap parallelises internally per host.
+nmap_service_detect_batch:
+  tool: nmap
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch service detection across multiple hosts via -iL."
+  cmd: ["nmap", "-sV", "-Pn", "--top-ports", "200", "-T4", "--max-retries", "2",
+        "--open", "-oG", "-", "-iL", "{target_file}"]
   timeout: 900
   parser: raw
 
@@ -182,6 +220,21 @@ httpx_probe:
         "-follow-redirects", "-no-color", "-json",
         "-threads", "50"]
   timeout: 180
+  parser: jsonl
+
+# Batch variant: probe a list of hosts/URLs in one httpx run (100 threads).
+# The canonical pipeline pattern: `subfinder | httpx -l subs.txt`.
+httpx_probe_batch:
+  tool: httpx
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch HTTP/HTTPS prober: one run for all discovered hosts."
+  cmd: ["httpx", "-l", "{target_file}", "-silent",
+        "-status-code", "-title", "-tech-detect", "-tls-probe",
+        "-follow-redirects", "-no-color", "-json",
+        "-threads", "100", "-rate-limit", "150"]
+  timeout: 300
   parser: jsonl
 
 whatweb_fingerprint:

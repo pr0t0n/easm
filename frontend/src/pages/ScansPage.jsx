@@ -130,9 +130,12 @@ export default function ScansPage({ embedded = false }) {
     setLogs(data);
   };
 
+  const TERMINAL_SCAN_STATUSES = new Set(['completed', 'failed', 'blocked', 'cancelled']);
+
   const loadScanStatus = async (scanId) => {
     const { data } = await client.get(`/api/scans/${scanId}/status`);
     setScanStatus(data);
+    return data;
   };
 
   const loadBasSummary = async (scanId) => {
@@ -186,9 +189,31 @@ export default function ScansPage({ embedded = false }) {
       }
     };
 
-    const timer = setInterval(() => loadScanStatus(selected.id), 2000);
+    // Adaptive backoff polling: 1s → 2s → 4s → ... → 15s max.
+    // Stops automatically when the scan reaches a terminal status.
+    let cancelled = false;
+    let pollTimer = null;
+    const scheduleNextPoll = (intervalMs) => {
+      pollTimer = setTimeout(async () => {
+        if (cancelled) return;
+        let data;
+        try { data = await loadScanStatus(selected.id); } catch { data = null; }
+        if (!cancelled && !TERMINAL_SCAN_STATUSES.has(data?.status)) {
+          scheduleNextPoll(Math.min(intervalMs * 2, 15000));
+        }
+      }, intervalMs);
+    };
+    // Fire immediately, then start the backoff ladder.
+    (async () => {
+      let data;
+      try { data = await loadScanStatus(selected.id); } catch { data = null; }
+      if (!cancelled && !TERMINAL_SCAN_STATUSES.has(data?.status)) {
+        scheduleNextPoll(1000);
+      }
+    })();
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      clearTimeout(pollTimer);
       ws.close();
     };
   }, [selected]);

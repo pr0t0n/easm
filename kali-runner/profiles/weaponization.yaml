@@ -10,6 +10,20 @@ nuclei_cves:
   timeout: 900
   parser: jsonl
 
+# Batch variant: scan multiple URLs in a single nuclei run.
+# Eliminates template-loading overhead (10-30s startup per run) paid once for all targets.
+nuclei_cves_batch:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  target_type: targets_file
+  description: "Batch nuclei CVE/misconfiguration scan across multiple URLs."
+  cmd: ["nuclei", "-list", "{target_file}", "-silent", "-jsonl",
+        "-severity", "critical,high,medium", "-rate-limit", "200",
+        "-bulk-size", "25", "-concurrency", "25"]
+  timeout: 1200
+  parser: jsonl
+
 nmap_vuln_scripts:
   tool: nmap-vulscan
   category: vuln
@@ -21,6 +35,20 @@ nmap_vuln_scripts:
   cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4",
         "--top-ports", "200", "--max-retries", "2", "{host}"]
   timeout: 900
+  parser: raw
+
+# Batch variant: nmap vuln scripts across a list of hosts.
+# nmap processes all hosts in parallel (-T4, internal parallelism).
+nmap_vuln_scripts_batch:
+  tool: nmap-vulscan
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  target_type: targets_file
+  description: "Batch nmap NSE vuln scan across multiple hosts via -iL."
+  cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4",
+        "--top-ports", "100", "--max-retries", "1", "--open",
+        "-oG", "-", "-iL", "{target_file}"]
+  timeout: 1200
   parser: raw
 
 nmap_http_enum:

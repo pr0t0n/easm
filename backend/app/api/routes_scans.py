@@ -3786,30 +3786,52 @@ def jobs_registry(limit: int = 200, db: Session = Depends(get_db), current_user:
 
 @router.get("/scans/{scan_id}/status", response_model=ScanStatusResponse)
 def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
-    if not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
-    job = query.first()
-    if not job:
+    # Extract only the scalar columns and a handful of JSON subfields using
+    # Postgres operators — avoids deserializing the full state_data JSONB blob
+    # (can be 2–10 MB) on every 2-second frontend poll.
+    sql = text("""
+        SELECT
+            id, status, compliance_status, current_step,
+            mission_progress, retry_attempt, retry_max, next_retry_at, last_error,
+            owner_id, access_group_id,
+            COALESCE((state_data->>'mission_index')::int, 0)       AS mission_index,
+            COALESCE(state_data->'mission_items',  '[]'::jsonb)     AS mission_items,
+            COALESCE(state_data->'node_history',   '[]'::jsonb)     AS node_history,
+            COALESCE(state_data->'discovered_ports','[]'::jsonb)    AS discovered_ports,
+            COALESCE(state_data->'pending_port_tests','[]'::jsonb)  AS pending_port_tests,
+            COALESCE(jsonb_array_length(state_data->'phase_ledger_v2'), 0) AS ledger_count
+        FROM scan_jobs
+        WHERE id = :scan_id
+    """)
+    row = db.execute(sql, {"scan_id": scan_id}).mappings().first()
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+    if not current_user.is_admin:
+        allowed_ids = {g.id for g in current_user.groups}
+        if row["owner_id"] != current_user.id and row["access_group_id"] not in allowed_ids:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
-    state_data = job.state_data or {}
+    raw_progress = int(row["mission_progress"] or 0)
+    ledger_count = int(row["ledger_count"] or 0)
+    if ledger_count:
+        raw_progress = max(raw_progress, round((ledger_count / 22) * 100))
+    effective_progress = max(0, min(100, raw_progress))
+
     return ScanStatusResponse(
-        id=job.id,
-        status=job.status,
-        compliance_status=job.compliance_status,
-        current_step=job.current_step,
-        mission_progress=_effective_mission_progress(job),
-        mission_index=state_data.get("mission_index", 0),
-        mission_items=state_data.get("mission_items") or [],
-        node_history=state_data.get("node_history") or [],
-        discovered_ports=state_data.get("discovered_ports", []),
-        pending_port_tests=state_data.get("pending_port_tests", []),
-        retry_attempt=job.retry_attempt,
-        retry_max=job.retry_max,
-        next_retry_at=job.next_retry_at,
-        last_error=job.last_error,
+        id=row["id"],
+        status=row["status"],
+        compliance_status=row["compliance_status"],
+        current_step=row["current_step"],
+        mission_progress=effective_progress,
+        mission_index=row["mission_index"],
+        mission_items=row["mission_items"] or [],
+        node_history=row["node_history"] or [],
+        discovered_ports=row["discovered_ports"] or [],
+        pending_port_tests=row["pending_port_tests"] or [],
+        retry_attempt=row["retry_attempt"],
+        retry_max=row["retry_max"],
+        next_retry_at=row["next_retry_at"],
+        last_error=row["last_error"],
     )
 
 

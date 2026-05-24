@@ -647,3 +647,7 @@ def all_queues(mode: ScanMode) -> list[str]:
 # Public queue names for scan routing
 SCAN_UNIT_QUEUE = "scan.unit"
 SCAN_SCHEDULED_QUEUE = "scan.scheduled"
+# Dedicated queue for parallel per-target subtasks (run_scan_target_subset).
+# Kept separate from SCAN_UNIT_QUEUE so subtasks never starve the main scan task
+# that dispatched them.
+SCAN_PARALLEL_QUEUE = "scan.parallel"
