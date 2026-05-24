@@ -1787,14 +1787,6 @@ def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
     details = finding.details if isinstance(finding.details, dict) else {}
     nested = details.get("details") if isinstance(details.get("details"), dict) else {}
 
-    target = str(finding.domain or "").strip()
-    if not target and finding.scan_job:
-        tokens = _target_tokens(str(finding.scan_job.target_query or ""))
-        if tokens:
-            target = str(tokens[0]).strip()
-    if not target and finding.scan_job:
-        target = str(finding.scan_job.target_query or "").strip()
-
     def _pick_str(*values: Any) -> str:
         for value in values:
             candidate = str(value or "").strip()
@@ -1811,6 +1803,26 @@ def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
         nested.get("request_url"),
         nested.get("target_url"),
         nested.get("endpoint"),
+        details.get("matched-at"),
+        nested.get("matched-at"),
+    )
+    raw_asset = _pick_str(
+        details.get("subdomain"),
+        details.get("hostname"),
+        details.get("host"),
+        details.get("target_host"),
+        details.get("asset"),
+        details.get("matched_at"),
+        details.get("input"),
+        details.get("target"),
+        nested.get("subdomain"),
+        nested.get("hostname"),
+        nested.get("host"),
+        nested.get("target_host"),
+        nested.get("asset"),
+        nested.get("matched_at"),
+        nested.get("input"),
+        nested.get("target"),
     )
     raw_path = _pick_str(
         details.get("path"),
@@ -1822,12 +1834,33 @@ def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
     )
 
     parsed_path = ""
+    parsed_host = ""
     if raw_url:
         try:
             parsed = urlparse(raw_url)
+            parsed_host = str(parsed.hostname or "").strip()
             parsed_path = str(parsed.path or "").strip()
         except Exception:
+            parsed_host = ""
             parsed_path = ""
+
+    asset_host = ""
+    if raw_asset:
+        try:
+            parsed = urlparse(raw_asset if "://" in raw_asset else f"https://{raw_asset}")
+            asset_host = str(parsed.hostname or "").strip()
+        except Exception:
+            asset_host = ""
+        if not asset_host:
+            asset_host = raw_asset.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0].strip()
+
+    target = parsed_host or asset_host or str(finding.domain or "").strip()
+    if not target and finding.scan_job:
+        tokens = _target_tokens(str(finding.scan_job.target_query or ""))
+        if tokens:
+            target = str(tokens[0]).strip()
+    if not target and finding.scan_job:
+        target = str(finding.scan_job.target_query or "").strip()
 
     path = raw_path or parsed_path
     if path and not path.startswith("/"):
@@ -3461,6 +3494,7 @@ def list_findings_paginated(
     items = []
     for finding in rows:
         details = finding.details or {}
+        loc = _extract_finding_location(finding)
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
         items.append(
@@ -3478,6 +3512,10 @@ def list_findings_paginated(
                 "cve": finding.cve,
                 "cvss": finding.cvss,
                 "domain": finding.domain,
+                "target": loc.get("target"),
+                "subdomain": loc.get("subdomain"),
+                "path": loc.get("path"),
+                "url": loc.get("url"),
                 "tool": finding.tool,
                 "recommendation": finding.recommendation,
                 "lifecycle_status": lifecycle_status.get(finding.id, "open"),
@@ -4886,9 +4924,13 @@ def dashboard_insights(
     age_exploit_samples: list[int] = []
     prioritized_actions: list[dict] = []
     vuln_counter: dict[tuple[str, str], int] = {}
+    vuln_targets: dict[tuple[str, str], set[str]] = {}
     technologies_counter: dict[str, int] = {}
     for f in findings:
         sev = str(f.severity or "low").lower()
+        loc = _extract_finding_location(f)
+        finding_target = str(loc.get("subdomain") or loc.get("target") or "").strip()
+        finding_url = str(loc.get("url") or "").strip()
         target_metric = _metric_for_target(f.scan_job.target_query if f.scan_job else "")
         target_metric["findings_total"] = int(target_metric.get("findings_total", 0)) + 1
         if f.is_false_positive:
@@ -4916,6 +4958,8 @@ def dashboard_insights(
         normalized_title = _normalize_finding_title(f.title)
         key = (normalized_title or "Finding", sev)
         vuln_counter[key] = vuln_counter.get(key, 0) + 1
+        if finding_target:
+            vuln_targets.setdefault(key, set()).add(finding_target)
 
         tool = str(details.get("tool") or nested_details.get("tool") or "").strip().lower()
         evidence_text = str(details.get("evidence") or nested_details.get("evidence") or "")
@@ -4978,6 +5022,10 @@ def dashboard_insights(
                     "finding_id": f.id,
                     "title": normalized_title,
                     "severity": f.severity,
+                    "target": finding_target or (f.scan_job.target_query if f.scan_job else None),
+                    "subdomain": finding_target or None,
+                    "url": finding_url or None,
+                    "path": loc.get("path"),
                     "target_query": f.scan_job.target_query if f.scan_job else None,
                     "fair_score": fair["fair_score"],
                     "annualized_loss_exposure_usd": fair["annualized_loss_exposure_usd"],
@@ -5045,10 +5093,20 @@ def dashboard_insights(
         for j in jobs if j.status in {"queued", "running", "retrying"}
     ][:8]
 
-    top_vulns = [
-        {"title": title, "severity": severity, "count": count}
-        for (title, severity), count in sorted(vuln_counter.items(), key=lambda item: item[1], reverse=True)[:7]
-    ]
+    top_vulns = []
+    for (title, severity), count in sorted(vuln_counter.items(), key=lambda item: item[1], reverse=True)[:7]:
+        affected_targets = sorted(vuln_targets.get((title, severity), set()))
+        top_vulns.append(
+            {
+                "title": title,
+                "severity": severity,
+                "count": count,
+                "target": affected_targets[0] if affected_targets else None,
+                "subdomain": affected_targets[0] if affected_targets else None,
+                "affected_targets": affected_targets[:20],
+                "target_summary": ", ".join(affected_targets[:3]) + (f" +{len(affected_targets) - 3}" if len(affected_targets) > 3 else ""),
+            }
+        )
 
     top_technologies = [
         {"name": name, "count": count}

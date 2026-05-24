@@ -79,6 +79,28 @@ function targetHost(value) {
   }
 }
 
+function findingTarget(item) {
+  const affected = Array.isArray(item?.affected_targets) ? item.affected_targets.filter(Boolean) : [];
+  return (
+    item?.url
+    || item?.subdomain
+    || item?.target
+    || affected[0]
+    || item?.asset
+    || item?.target_query
+    || "-"
+  );
+}
+
+function findingTargetSummary(item) {
+  if (item?.target_summary) return item.target_summary;
+  const affected = Array.isArray(item?.affected_targets) ? item.affected_targets.filter(Boolean) : [];
+  if (affected.length > 0) {
+    return `${affected.slice(0, 3).join(", ")}${affected.length > 3 ? ` +${affected.length - 3}` : ""}`;
+  }
+  return findingTarget(item);
+}
+
 function sevLabel(severity) {
   const normalized = String(severity || "info").toLowerCase();
   return {
@@ -476,7 +498,7 @@ export default function DashboardPage() {
     id: item.finding_id || item.id || idx,
     title: item.title || item.name || item.problem || "Achado sem titulo",
     severity: item.severity || "info",
-    target: item.target_query || item.target || item.asset || "-",
+    target: findingTarget(item),
     reason: item.operational_reason || item.financial_reason || item.recommendation || `${item.count || 1} ocorrência(s) no ambiente`,
   }));
 
@@ -856,10 +878,10 @@ export default function DashboardPage() {
               <div className="tv-grid" style={{ marginTop: 14 }}>
                 {(topVulns || []).length === 0 && <div className="bas-empty">Sem vulnerabilidades recorrentes no escopo.</div>}
                 {(topVulns || []).slice(0, 6).map((vuln) => (
-                  <div key={`${vuln.title}-${vuln.severity}`} className="it">
+                  <div key={`${vuln.title}-${vuln.severity}-${findingTargetSummary(vuln)}`} className="it">
                     <div className="l">
                       <b>{vuln.title}</b>
-                      <span>{vuln.severity}</span>
+                      <span>{vuln.severity} · {findingTargetSummary(vuln)}</span>
                     </div>
                     <span className="ct">{vuln.count}</span>
                   </div>
