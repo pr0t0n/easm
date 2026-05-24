@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,23 +88,161 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
 # them once per unique IP avoids redundant scans of a shared WAF/CDN edge
 # (and the 429s that 50 identical port scans of one IP would trigger).
 NETWORK_PHASES = {"P02"}
+WEB_HEAVY_PHASES = {
+    "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10",
+    "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P19",
+}
+DEFAULT_PREFLIGHT_PORTS = (80, 443, 8080, 8081, 8443, 8000, 8008, 8888, 9000, 9443, 10443, 3000, 5000, 5001)
+
+
+def _normalize_host(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = parsed.hostname or ""
+    except Exception:  # noqa: BLE001
+        host = ""
+    if not host:
+        host = raw.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
+    return host.strip().strip(".")
 
 
 def _resolve_host(host: str) -> str | None:
     """Resolve a hostname to its primary IPv4. None = does not resolve (dead)."""
     import socket
-    h = str(host or "").strip().lower()
-    for prefix in ("http://", "https://"):
-        if h.startswith(prefix):
-            h = h[len(prefix):].split("/")[0]
-            break
-    h = h.split("/")[0].split(":")[0]
+    h = _normalize_host(host)
     if not h:
         return None
     try:
         return socket.gethostbyname(h)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _tcp_connects(host: str, port: int, timeout: float = 1.5) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _http_probe(host: str, port: int, timeout: float = 3.0) -> dict[str, Any] | None:
+    import requests
+
+    scheme = "https" if int(port) in {443, 8443} else "http"
+    default_port = (scheme == "http" and int(port) == 80) or (scheme == "https" and int(port) == 443)
+    url = f"{scheme}://{host}" if default_port else f"{scheme}://{host}:{int(port)}"
+    try:
+        response = requests.get(
+            url,
+            timeout=timeout,
+            allow_redirects=True,
+            verify=False,
+            headers={"User-Agent": "ScriptKidd.o-preflight/1.0"},
+        )
+        return {
+            "url": url,
+            "status_code": int(response.status_code),
+            "server": response.headers.get("server"),
+            "content_type": response.headers.get("content-type"),
+            "final_url": response.url,
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def classify_target_preflight(
+    target: str,
+    ports: Iterable[int] | None = None,
+    tcp_timeout: float = 1.5,
+    http_timeout: float = 3.0,
+) -> dict[str, Any]:
+    """Classify a host before expensive phases.
+
+    This is intentionally lightweight: DNS, a small TCP connect set and a tiny
+    HTTP request. It does not replace P02; it prevents obvious dead/non-HTTP
+    targets from consuming the full P03-P19 web-testing budget.
+    """
+    host = _normalize_host(target)
+    checked_at = datetime.now(timezone.utc).isoformat()
+    if not host:
+        return {
+            "target": target,
+            "host": "",
+            "status": "invalid",
+            "reason": "target vazio ou inválido",
+            "dns_resolves": False,
+            "ip": None,
+            "open_ports": [],
+            "http": [],
+            "checked_at": checked_at,
+        }
+
+    ip = _resolve_host(host)
+    if not ip:
+        return {
+            "target": target,
+            "host": host,
+            "status": "dns_dead",
+            "reason": "host não resolve em DNS",
+            "dns_resolves": False,
+            "ip": None,
+            "open_ports": [],
+            "http": [],
+            "checked_at": checked_at,
+        }
+
+    open_ports: list[int] = []
+    http_signals: list[dict[str, Any]] = []
+    for port in ports or DEFAULT_PREFLIGHT_PORTS:
+        try:
+            p = int(port)
+        except (TypeError, ValueError):
+            continue
+        if _tcp_connects(host, p, timeout=tcp_timeout):
+            open_ports.append(p)
+            probe = _http_probe(host, p, timeout=http_timeout)
+            if probe:
+                http_signals.append(probe)
+
+    if http_signals:
+        status = "http_live"
+        reason = f"HTTP respondeu em {len(http_signals)} porta(s)"
+    elif open_ports:
+        status = "tcp_live"
+        reason = f"TCP aberto sem resposta HTTP clara em {len(open_ports)} porta(s)"
+    else:
+        status = "tcp_closed"
+        reason = "DNS resolve, mas portas web comuns não aceitaram conexão"
+
+    return {
+        "target": target,
+        "host": host,
+        "status": status,
+        "reason": reason,
+        "dns_resolves": True,
+        "ip": ip,
+        "open_ports": open_ports,
+        "http": http_signals,
+        "checked_at": checked_at,
+    }
+
+
+def preflight_skip_reason(phase_id: str, profile: dict[str, Any] | None) -> str | None:
+    """Return a skip reason for a phase/target according to Tier 1 preflight."""
+    if phase_id == "P01" or not profile:
+        return None
+    status = str(profile.get("status") or "").lower()
+    if status in {"invalid", "dns_dead"}:
+        return profile.get("reason") or "preflight sem DNS válido"
+    if phase_id in WEB_HEAVY_PHASES and status in {"tcp_closed", "tcp_live"}:
+        return profile.get("reason") or "preflight sem superfície HTTP ativa"
+    return None
 
 
 def refine_target_set(root: str, subdomains: list[str], cap: int = 10000) -> dict[str, Any]:

@@ -41,6 +41,8 @@ from app.services.scan_intelligence import (
     apply_waf_confidence_adjustment,
     refine_target_set,
     NETWORK_PHASES,
+    classify_target_preflight,
+    preflight_skip_reason,
     detect_rate_limit_signals,
     dedup_findings_by_signature,
     derive_cvss,
@@ -133,6 +135,73 @@ def _mcp_available() -> bool:
 # Single Celery worker process executes one scan task at a time per fork, so this
 # is safe. Reset to {} at the start of each run_offensive_operator_scan().
 _CURRENT_AUTH_HEADERS: dict[str, str] = {}
+
+
+def _preflight_profile_for(state: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
+    """Return cached Tier 1 preflight profile; compute it when absent."""
+    preflight = dict(state.get("preflight") or {})
+    targets = dict(preflight.get("targets") or {})
+    cached = targets.get(target)
+    if isinstance(cached, dict) and cached.get("status"):
+        return cached, False
+
+    ports = state.get("preflight_ports")
+    if not isinstance(ports, list) or not ports:
+        ports = None
+    profile = classify_target_preflight(target, ports=ports)
+    targets[target] = profile
+    preflight.update(
+        {
+            "enabled": True,
+            "version": 1,
+            "mode": "dns_tcp_http",
+            "targets": targets,
+        }
+    )
+    state["preflight"] = preflight
+    return profile, True
+
+
+def _record_preflight_skip(
+    db,
+    job: ScanJob,
+    phase_ledgers: list[dict[str, Any]],
+    completed_work: set[str],
+    phase_id: str,
+    target: str,
+    reason: str,
+) -> None:
+    """Persist a skipped phase-target as completed work for resumability."""
+    work_key = f"{phase_id}:{target}"
+    if work_key in completed_work:
+        return
+    ledger = {
+        "phase_id": phase_id,
+        "phase_name": PHASE_CONTRACTS.get(phase_id, {}).get("name", phase_id),
+        "target": target,
+        "status": "skipped",
+        "skip_reason": reason,
+        "tools_attempted": [],
+        "tools_success": [],
+        "mcp_results": [],
+        "tier": "tier1_preflight",
+    }
+    phase_ledgers.append(ledger)
+    completed_work.add(work_key)
+    state = dict(job.state_data or {})
+    skipped_work = list(state.get("skipped_work") or [])
+    skipped_work.append({"phase_id": phase_id, "target": target, "reason": reason, "tier": "tier1_preflight"})
+    state["skipped_work"] = skipped_work[-2000:]
+    state["completed_work"] = sorted(set(state.get("completed_work") or []) | completed_work)
+    state["phase_ledger_v2"] = phase_ledgers
+    job.state_data = state
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="scan-intelligence",
+        level="INFO",
+        message=f"tier1_preflight_skip phase={phase_id} target={target} reason={reason}",
+    ))
+    db.commit()
 
 
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
@@ -244,6 +313,26 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             _work_key = f"{phase_id}:{target}"
             if _work_key in completed_work:
                 continue
+            if phase_id != "P01":
+                _pf_state = dict(job.state_data or {})
+                _profile, _created = _preflight_profile_for(_pf_state, target)
+                if _created:
+                    job.state_data = _pf_state
+                    db.add(ScanLog(
+                        scan_job_id=job.id,
+                        source="scan-intelligence",
+                        level="INFO",
+                        message=(
+                            f"tier1_preflight target={target} status={_profile.get('status')} "
+                            f"ip={_profile.get('ip') or '-'} ports={_profile.get('open_ports') or []} "
+                            f"http={len(_profile.get('http') or [])} reason={_profile.get('reason')}"
+                        ),
+                    ))
+                    db.commit()
+                _skip_reason = preflight_skip_reason(phase_id, _profile)
+                if _skip_reason:
+                    _record_preflight_skip(db, job, phase_ledgers, completed_work, phase_id, target, _skip_reason)
+                    continue
             # IP-GROUPING: a network phase (port scan) is bound to the host's
             # IP. If a sibling hostname on the same IP already ran it, reuse —
             # don't re-scan the same WAF/CDN edge (and trigger 429s).
@@ -1428,6 +1517,26 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
             continue
         wk = f"{phase_id}:{target}"
         if wk in completed_work:
+            skipped += 1
+            continue
+        pf_state = dict(job.state_data or {})
+        profile, created = _preflight_profile_for(pf_state, target)
+        if created:
+            job.state_data = pf_state
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="scan-intelligence",
+                level="INFO",
+                message=(
+                    f"tier1_preflight target={target} status={profile.get('status')} "
+                    f"ip={profile.get('ip') or '-'} ports={profile.get('open_ports') or []} "
+                    f"http={len(profile.get('http') or [])} reason={profile.get('reason')} (parallel)"
+                ),
+            ))
+            db.commit()
+        reason = preflight_skip_reason(phase_id, profile)
+        if reason:
+            _record_preflight_skip(db, job, phase_ledgers, completed_work, phase_id, target, reason)
             skipped += 1
             continue
         # IP dedup
