@@ -159,7 +159,7 @@
 }
 .dash .redteam-kpis {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -414,7 +414,7 @@
 .dash .rt-kpi.warn strong { color: var(--sev-medium-text); }
 .dash .redteam-grid {
   display: grid;
-  grid-template-columns: 1.4fr 0.9fr 0.9fr;
+  grid-template-columns: 1.4fr 0.9fr;
   gap: 14px;
 }
 .dash .rt-card {
@@ -583,7 +583,7 @@
 
 .dash .bas-metrics {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 10px;
   margin-bottom: 22px;
 }

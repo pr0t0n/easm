@@ -124,7 +124,6 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState([]);
   const [wafSummary, setWafSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], vendors: [] });
   const [securityHeadersSummary, setSecurityHeadersSummary] = useState({ findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
-  const [vulnToolExecution, setVulnToolExecution] = useState({ scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
   const [continuousRating, setContinuousRating] = useState({ score: 0, grade: "F", factors: [] });
   const [ratingTimeline, setRatingTimeline] = useState([]);
 
@@ -238,7 +237,6 @@ export default function DashboardPage() {
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
         setWafSummary(dashboard.waf_summary || { findings_count: 0, assets_count: 0, assets: [], vendors: [] });
         setSecurityHeadersSummary(dashboard.security_headers_summary || { findings_count: 0, assets_count: 0, assets: [], present_headers: [], missing_headers: [], owasp_top10_alignment: [] });
-        setVulnToolExecution(dashboard.vuln_tool_execution || { scan_id: null, scan_target: "", scan_status: "", summary: { requested_count: 0, attempted_count: 0, executed_count: 0 }, tools: [] });
         setBasCommandCenter(dashboard.bas_command_center || EMPTY_BAS);
         setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
         setTargetStatistics(Array.isArray(dashboard.target_statistics) ? dashboard.target_statistics : []);
@@ -474,13 +472,6 @@ export default function DashboardPage() {
       tone: gapCount > 0 ? "tone-red" : "tone-green",
     },
     {
-      label: "Ferramentas",
-      value: Number(basSummary.tool_efficiency_index || 0).toFixed(1),
-      unit: "%",
-      sub: `${basTools.length} ferramentas observadas`,
-      tone: "tone-slate",
-    },
-    {
       label: "Aprendizagem",
       value: Number(basSummary.learning_coverage_percent || 0).toFixed(1),
       unit: "%",
@@ -494,10 +485,6 @@ export default function DashboardPage() {
     : (Array.isArray(topVulns) ? topVulns : [])
   ).slice(0, 6);
   const criticalHighCount = Number(stats?.critical || 0) + Number(stats?.high || 0);
-  const executedToolCount = Number(vulnToolExecution?.summary?.executed_count || 0);
-  const attemptedToolCount = Number(vulnToolExecution?.summary?.attempted_count || 0);
-  const evidenceReadiness = attemptedToolCount > 0 ? Math.round((executedToolCount / attemptedToolCount) * 100) : 0;
-  const activeToolRows = Array.isArray(vulnToolExecution?.tools) ? vulnToolExecution.tools : [];
   const scanStatusCounts = scanRows.reduce((acc, scan) => {
     const status = String(scan?.status || "unknown").toLowerCase();
     acc[status] = (acc[status] || 0) + 1;
@@ -617,11 +604,6 @@ export default function DashboardPage() {
               <strong>{Number(stats?.findings_open || stats?.vulnerability_findings || 0)}</strong>
               <small>superfície ainda acionável</small>
             </div>
-            <div className="rt-kpi">
-              <span>Evidência de execução</span>
-              <strong>{evidenceReadiness}%</strong>
-              <small>{executedToolCount}/{attemptedToolCount || 0} ferramentas executadas</small>
-            </div>
             <div className="rt-kpi warn">
               <span>Gaps de detecção</span>
               <strong>{gapCount}</strong>
@@ -717,26 +699,6 @@ export default function DashboardPage() {
                     <span>{item.target}</span>
                     <p>{item.reason}</p>
                   </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="rt-card">
-              <div className="rt-card-head">
-                <h3>Cobertura das ferramentas</h3>
-                <span>{activeToolRows.length} tools</span>
-              </div>
-              {activeToolRows.length === 0 ? (
-                <div className="rt-empty">Sem execução de ferramenta de vulnerabilidade registrada.</div>
-              ) : activeToolRows.slice(0, 6).map((tool) => (
-                <div key={tool.tool} className="rt-tool">
-                  <div>
-                    <b>{tool.tool}</b>
-                    <span>
-                      {Number(tool.targets_count || 0)} alvos · {Number(tool.attempted_events || 0)} tentativas
-                    </span>
-                  </div>
-                  <strong>{Number(tool.executed_events || tool.executed_count || tool.successes || tool.success || 0)}</strong>
                 </div>
               ))}
             </div>
