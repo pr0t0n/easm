@@ -1898,6 +1898,20 @@ def _infer_asset_type(name: str) -> str:
     return "asset"
 
 
+def _asset_host_from_value(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = str(parsed.hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if not host:
+        host = raw.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0].strip().lower()
+    return host.lstrip("*.").strip(".")
+
+
 def _append_technology(counter: dict[str, int], value) -> None:
     if isinstance(value, str):
         name = value.strip()
@@ -5570,6 +5584,126 @@ def dashboard_insights(
     tool_usage.sort(key=lambda item: (item["attempts"], item["findings"]), reverse=True)
     tool_efficiency = _pct(sum(item["successes"] for item in tool_usage), sum(item["attempts"] for item in tool_usage))
 
+    runs_by_scan_asset: dict[int, dict[str, list[ExecutedToolRun]]] = {}
+    for run in executed_runs:
+        host = _asset_host_from_value(run.target)
+        if not host:
+            continue
+        runs_by_scan_asset.setdefault(int(run.scan_job_id), {}).setdefault(host, []).append(run)
+
+    findings_by_scan_asset: dict[int, dict[str, dict[str, Any]]] = {}
+    for finding in findings:
+        loc = _extract_finding_location(finding)
+        host = _asset_host_from_value(loc.get("url") or loc.get("subdomain") or loc.get("target") or finding.domain)
+        if not host:
+            continue
+        severity = str(finding.severity or "info").lower()
+        scan_bucket = findings_by_scan_asset.setdefault(int(finding.scan_job_id), {})
+        row = scan_bucket.setdefault(
+            host,
+            {
+                "findings_total": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            },
+        )
+        row["findings_total"] = int(row.get("findings_total") or 0) + 1
+        if severity in row["severity"]:
+            row["severity"][severity] = int(row["severity"].get(severity, 0)) + 1
+
+    terminal_scan_status = {"completed", "failed", "stopped", "blocked"}
+    active_scan_status = {"queued", "running", "retrying"}
+    subdomain_inventory: list[dict[str, Any]] = []
+    for job in jobs[:8]:
+        state = job.state_data if isinstance(job.state_data, dict) else {}
+        root_hosts = {_asset_host_from_value(token) for token in _target_tokens(job.target_query)}
+        root_hosts = {host for host in root_hosts if host}
+        if not root_hosts:
+            root_host = _asset_host_from_value(job.target_query)
+            if root_host:
+                root_hosts.add(root_host)
+
+        raw_assets: list[Any] = []
+        for key_name in ("lista_ativos", "discovered_assets", "hosts", "scanned_assets", "pending_asset_scans"):
+            value = state.get(key_name)
+            if isinstance(value, list):
+                raw_assets.extend(value)
+        raw_assets.extend((findings_by_scan_asset.get(int(job.id)) or {}).keys())
+        raw_assets.extend((runs_by_scan_asset.get(int(job.id)) or {}).keys())
+
+        pending_hosts = {
+            _asset_host_from_value(item)
+            for item in (state.get("pending_asset_scans") or [])
+            if _asset_host_from_value(item)
+        }
+        scanned_hosts = {
+            _asset_host_from_value(item)
+            for item in (state.get("scanned_assets") or [])
+            if _asset_host_from_value(item)
+        }
+
+        hosts = sorted(
+            {
+                host
+                for host in (_asset_host_from_value(item) for item in raw_assets)
+                if host and host not in root_hosts and (
+                    not root_hosts or any(host.endswith(f".{root}") for root in root_hosts)
+                )
+            }
+        )
+
+        rows: list[dict[str, Any]] = []
+        status_counts = {"BackLog": 0, "Analisado": 0, "Finalizado": 0}
+        scan_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for host in hosts[:200]:
+            finding_stats = (findings_by_scan_asset.get(int(job.id)) or {}).get(host) or {
+                "findings_total": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            }
+            host_runs = (runs_by_scan_asset.get(int(job.id)) or {}).get(host, [])
+            has_activity = bool(host_runs or int(finding_stats.get("findings_total") or 0) or host in scanned_hosts)
+            job_status = str(job.status or "").lower()
+            if host in pending_hosts or (not has_activity and job_status in active_scan_status):
+                operational_status = "BackLog"
+            elif job_status in terminal_scan_status and has_activity:
+                operational_status = "Finalizado"
+            elif has_activity:
+                operational_status = "Analisado"
+            else:
+                operational_status = "BackLog"
+
+            sev_payload = dict(finding_stats.get("severity") or {})
+            for sev_key in scan_severity:
+                scan_severity[sev_key] += int(sev_payload.get(sev_key) or 0)
+            status_counts[operational_status] = int(status_counts.get(operational_status, 0)) + 1
+            rows.append(
+                {
+                    "subdomain": host,
+                    "status": operational_status,
+                    "findings_total": int(finding_stats.get("findings_total") or 0),
+                    "severity": sev_payload,
+                    "tool_runs": len(host_runs),
+                }
+            )
+
+        rows.sort(
+            key=lambda item: (
+                -int(item.get("findings_total") or 0),
+                str(item.get("status") or ""),
+                str(item.get("subdomain") or ""),
+            )
+        )
+        subdomain_inventory.append(
+            {
+                "scan_id": job.id,
+                "target_query": job.target_query,
+                "scan_status": job.status,
+                "subdomain_count": len(hosts),
+                "status_counts": status_counts,
+                "severity": scan_severity,
+                "subdomains": rows,
+            }
+        )
+
     now_utc = datetime.now(timezone.utc)
     worker_active = 0
     worker_stale = 0
@@ -5805,6 +5939,7 @@ def dashboard_insights(
         },
         "assets": assets,
         "activity": activity,
+        "subdomain_inventory": subdomain_inventory,
         "prioritized_actions": paged_prioritized,
         "filters": {
             "target": normalized_target,

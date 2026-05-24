@@ -225,6 +225,140 @@
 .dash .scan-state-grid .queue b { color: var(--sev-info-text); }
 .dash .scan-state-grid .stop b { color: var(--sev-medium-text); }
 .dash .scan-state-grid .fail b { color: var(--sev-critical-text); }
+.dash .subdomain-card {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 11px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.dash .subdomain-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+.dash .subdomain-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink);
+}
+.dash .subdomain-head span {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+}
+.dash .subdomain-head strong {
+  font-family: var(--font-display);
+  font-size: 30px;
+  line-height: 1;
+  color: var(--brand-700);
+}
+.dash .subdomain-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.dash .subdomain-tabs button {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 9px;
+  padding: 9px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.dash .subdomain-tabs button.active {
+  border-color: var(--brand-500);
+  background: var(--brand-50, #fff7ed);
+}
+.dash .subdomain-tabs b,
+.dash .subdomain-tabs span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.dash .subdomain-tabs b { color: var(--ink); }
+.dash .subdomain-tabs span { color: var(--ink-muted); margin-top: 3px; }
+.dash .subdomain-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.dash .subdomain-summary > div {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 9px;
+  padding: 9px 10px;
+}
+.dash .subdomain-summary span {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 9.5px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.dash .subdomain-summary b {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  color: var(--ink);
+}
+.dash .subdomain-list {
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+}
+.dash .subdomain-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.dash .subdomain-row:last-child { border-bottom: 0; }
+.dash .subdomain-row b {
+  display: block;
+  color: var(--brand-700);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+.dash .subdomain-row span {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 10.5px;
+}
+.dash .sev-mini {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.dash .sev-mini span,
+.dash .sev-mini strong {
+  min-width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.dash .sev-mini .crit { color: var(--sev-critical-text); background: var(--sev-critical-bg); border-color: var(--sev-critical-border); }
+.dash .sev-mini .high { color: var(--sev-high-text); background: var(--sev-high-bg); border-color: var(--sev-high-border); }
+.dash .sev-mini .med { color: var(--sev-medium-text); background: var(--sev-medium-bg); border-color: var(--sev-medium-border); }
+.dash .sev-mini .low { color: var(--sev-low-text); background: var(--sev-low-bg); border-color: var(--sev-low-border); }
+.dash .sev-mini strong { color: var(--ink); }
 .dash .rt-kpi {
   border: 1px solid var(--line);
   background: var(--surface-soft);
@@ -922,5 +1056,8 @@
   .dash .redteam { padding: 18px; }
   .dash .redteam-kpis { grid-template-columns: 1fr; }
   .dash .scan-state-grid { grid-template-columns: 1fr; }
+  .dash .subdomain-summary { grid-template-columns: 1fr 1fr; }
+  .dash .subdomain-row { grid-template-columns: 1fr; }
+  .dash .sev-mini { flex-wrap: wrap; }
   .dash .rt-finding { grid-template-columns: 1fr; }
 }

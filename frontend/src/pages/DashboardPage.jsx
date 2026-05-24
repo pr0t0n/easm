@@ -145,6 +145,8 @@ export default function DashboardPage() {
   const [prioritizedActions, setPrioritizedActions] = useState([]);
   const [targetStatistics, setTargetStatistics] = useState([]);
   const [basCommandCenter, setBasCommandCenter] = useState(EMPTY_BAS);
+  const [subdomainInventory, setSubdomainInventory] = useState([]);
+  const [selectedSubdomainScanId, setSelectedSubdomainScanId] = useState(null);
 
   const handleSearch = () => {
     setIsSearching(true);
@@ -240,6 +242,12 @@ export default function DashboardPage() {
         setBasCommandCenter(dashboard.bas_command_center || EMPTY_BAS);
         setPrioritizedActions(Array.isArray(dashboard.prioritized_actions) ? dashboard.prioritized_actions : []);
         setTargetStatistics(Array.isArray(dashboard.target_statistics) ? dashboard.target_statistics : []);
+        const inventoryRows = Array.isArray(dashboard.subdomain_inventory) ? dashboard.subdomain_inventory : [];
+        setSubdomainInventory(inventoryRows);
+        setSelectedSubdomainScanId((current) => {
+          if (current && inventoryRows.some((row) => Number(row.scan_id) === Number(current))) return current;
+          return inventoryRows[0]?.scan_id || null;
+        });
         const resolvedContinuous = dashboard.continuous_rating || { score: 0, grade: "F", factors: [] };
         const resolvedTimeline = dashboard.rating_timeline || [];
         setContinuousRating(resolvedContinuous);
@@ -413,6 +421,7 @@ export default function DashboardPage() {
   }
 
   const basSummary = basCommandCenter?.summary || {};
+  const basDetection = basCommandCenter?.detection?.counts || {};
   const basFunnel = Array.isArray(basCommandCenter?.attack_detection_funnel) ? basCommandCenter.attack_detection_funnel : [];
   const maxFunnel = Math.max(...basFunnel.map((item) => Number(item.value || 0)), 1);
   const basTelemetry = Array.isArray(basCommandCenter?.detection?.telemetry_sources) ? basCommandCenter.detection.telemetry_sources : [];
@@ -424,6 +433,16 @@ export default function DashboardPage() {
   const resilience = Number(basSummary.bas_resilience_index || 0);
   const controlEff = Number(basSummary.control_efficacy_index || 0);
   const gapCount = Number(basSummary.detection_gap_count || 0);
+  const detectedCount = Number(basDetection.detected || 0);
+  const partialCount = Number(basDetection.partial || 0);
+  const unknownCount = Number(basDetection.unknown || 0);
+  const selectedSubdomainScan = (
+    subdomainInventory.find((row) => Number(row.scan_id) === Number(selectedSubdomainScanId))
+    || subdomainInventory[0]
+    || null
+  );
+  const totalDiscoveredSubdomains = subdomainInventory.reduce((acc, scan) => acc + Number(scan?.subdomain_count || 0), 0);
+  const selectedSubdomains = Array.isArray(selectedSubdomainScan?.subdomains) ? selectedSubdomainScan.subdomains : [];
 
   const basMetrics = [
     {
@@ -451,7 +470,7 @@ export default function DashboardPage() {
       label: "Gaps de detecção",
       value: String(gapCount),
       unit: "",
-      sub: "não detectado ou sem confirmação",
+      sub: `${detectedCount} detectados · ${partialCount} parciais · ${unknownCount} sem confirmação`,
       tone: gapCount > 0 ? "tone-red" : "tone-green",
     },
     {
@@ -627,6 +646,60 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          <div className="subdomain-card">
+            <div className="subdomain-head">
+              <div>
+                <h3>Subdomínios encontrados</h3>
+                <span>{subdomainInventory.length} scans · {totalDiscoveredSubdomains} subdomínios</span>
+              </div>
+              {!!selectedSubdomainScan && <strong>{Number(selectedSubdomainScan.subdomain_count || 0)}</strong>}
+            </div>
+            {subdomainInventory.length === 0 ? (
+              <div className="rt-empty">Nenhum subdomínio descoberto nos scans carregados.</div>
+            ) : (
+              <>
+                <div className="subdomain-tabs">
+                  {subdomainInventory.map((scan) => (
+                    <button
+                      key={scan.scan_id}
+                      className={Number(scan.scan_id) === Number(selectedSubdomainScan?.scan_id) ? "active" : ""}
+                      onClick={() => setSelectedSubdomainScanId(scan.scan_id)}
+                      type="button"
+                    >
+                      <b>#{scan.scan_id}</b>
+                      <span>{Number(scan.subdomain_count || 0)} subs</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="subdomain-summary">
+                  <div><span>BackLog</span><b>{Number(selectedSubdomainScan?.status_counts?.BackLog || 0)}</b></div>
+                  <div><span>Analisado</span><b>{Number(selectedSubdomainScan?.status_counts?.Analisado || 0)}</b></div>
+                  <div><span>Finalizado</span><b>{Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}</b></div>
+                  <div><span>Crítico/Alto</span><b>{Number(selectedSubdomainScan?.severity?.critical || 0) + Number(selectedSubdomainScan?.severity?.high || 0)}</b></div>
+                </div>
+                <div className="subdomain-list">
+                  {selectedSubdomains.length === 0 ? (
+                    <div className="rt-empty">Sem subdomínios detalhados para este scan.</div>
+                  ) : selectedSubdomains.slice(0, 12).map((row) => (
+                    <div key={`${selectedSubdomainScan.scan_id}-${row.subdomain}`} className="subdomain-row">
+                      <div>
+                        <b>{row.subdomain}</b>
+                        <span>{row.status} · {Number(row.tool_runs || 0)} execuções de ferramenta</span>
+                      </div>
+                      <div className="sev-mini">
+                        <span className="crit">{Number(row.severity?.critical || 0)}</span>
+                        <span className="high">{Number(row.severity?.high || 0)}</span>
+                        <span className="med">{Number(row.severity?.medium || 0)}</span>
+                        <span className="low">{Number(row.severity?.low || 0)}</span>
+                        <strong>{Number(row.findings_total || 0)}</strong>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           <div className="redteam-grid">
             <div className="rt-card rt-priority">
               <div className="rt-card-head">
@@ -649,7 +722,7 @@ export default function DashboardPage() {
 
             <div className="rt-card">
               <div className="rt-card-head">
-                <h3>Ferramentas para continuar</h3>
+                <h3>Cobertura das ferramentas</h3>
                 <span>{activeToolRows.length} tools</span>
               </div>
               {activeToolRows.length === 0 ? (
@@ -658,9 +731,11 @@ export default function DashboardPage() {
                 <div key={tool.tool} className="rt-tool">
                   <div>
                     <b>{tool.tool}</b>
-                    <span>{tool.status || tool.last_status || "observado"}</span>
+                    <span>
+                      {Number(tool.targets_count || 0)} alvos · {Number(tool.attempted_events || 0)} tentativas
+                    </span>
                   </div>
-                  <strong>{Number(tool.executed_count || tool.success || tool.attempts || 0)}</strong>
+                  <strong>{Number(tool.executed_events || tool.executed_count || tool.successes || tool.success || 0)}</strong>
                 </div>
               ))}
             </div>
