@@ -14,13 +14,6 @@ const EMPTY_BAS = {
   learning: { total: 0, accepted: 0, pending: 0, rejected: 0, recent: [] },
 };
 
-const FRAMEWORK_CLASS = {
-  "ISO 27001": "iso",
-  "NIST CSF": "nist",
-  "CIS v8": "cis",
-  PCI: "pci",
-};
-
 function aggregationLabel(mode) {
   if (mode === "target") return "Visão por Alvo";
   if (mode === "group_avg") return "Média do Grupo";
@@ -989,23 +982,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="bas-sect frameworks">
-            <h3>Maturidade por framework</h3>
-            <div className="top-sub">conformidade por framework de segurança</div>
-            {frameworks.map((info) => {
-              const cls = FRAMEWORK_CLASS[info.name] || "iso";
-              const score = Number(info.score || 0);
-              return (
-                <div key={info.name} className={`fw-row ${cls}`}>
-                  <div className="top">
-                    <span className="nm">{info.name}</span>
-                    <span className="pc">{score.toFixed(0)}%</span>
-                  </div>
-                  <div className="fbar"><div style={{ width: `${Math.max(0, Math.min(100, score))}%` }} /></div>
-                </div>
-              );
-            })}
-          </div>
         </section>
 
       </div>
