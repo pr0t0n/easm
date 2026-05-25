@@ -232,7 +232,7 @@ httpx_probe_batch:
   description: "Batch HTTP/HTTPS prober: one run for all discovered hosts."
   cmd: ["httpx", "-l", "{target_file}", "-silent",
         "-status-code", "-title", "-tech-detect", "-tls-probe",
-        "-follow-redirects", "-no-color", "-json",
+        "-follow-redirects", "-no-color", "-json", "-include-response-header",
         "-threads", "100", "-rate-limit", "150"]
   timeout: 300
   parser: jsonl

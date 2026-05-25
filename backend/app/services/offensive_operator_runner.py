@@ -289,7 +289,10 @@ def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[st
 
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     tool_timeout = max(900, int(execution.get("timeout") or 0))
-    arguments: dict[str, Any] = {"target": execution["target"]}
+    arguments: dict[str, Any] = dict(execution.get("arguments") or {})
+    arguments.setdefault("target", execution["target"])
+    arguments.setdefault("scan_id", execution.get("scan_id"))
+    arguments.setdefault("timeout", execution.get("timeout"))
     _auth = _get_auth_headers()
     if _auth:
         arguments["auth_headers"] = _auth
@@ -320,7 +323,7 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
 # once for all targets instead of once per target.
 _BATCH_PHASE_PROFILES: dict[str, str] = {
     "P02": "naabu_top1000_batch",      # naabu -list targets.txt
-    "P09": "nuclei_cves_batch",         # nuclei -list targets.txt
+    "P06": "httpx_probe_batch",         # httpx -l targets.txt (status, tech, headers)
 }
 # Minimum number of targets to justify a batch call over N single calls.
 _BATCH_MIN_TARGETS = 2
@@ -377,6 +380,8 @@ def _dispatch_batch_phase(
         "target": primary,
         "targets": batch_list,
         "timeout": 1200,
+        "scan_id": job.id,
+        "arguments": {"scan_id": job.id, "targets": batch_list, "timeout": 1200},
     }
     try:
         result = _call_mcp_execution(execution)
@@ -659,8 +664,8 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                         host = line.strip().split()[0] if line.strip() else ""
                         if host and "." in host and host not in lista:
                             lista.append(host)
-                state["lista_ativos"] = lista[:1000]
-                state["recon_graph"] = {"root": target, "assets": lista[:200]}
+                state["lista_ativos"] = lista
+                state["recon_graph"] = {"root": target, "assets": lista}
             if phase_id == "P02":
                 ports: list[int] = list(state.get("discovered_ports") or [])
                 for m in mcp_list:
@@ -892,7 +897,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # Set subdomain_propagation_cap explicitly to limit if needed.
             if phase_id == "P01":
                 _cap_raw = _cp_state.get("subdomain_propagation_cap")
-                _cap = int(_cap_raw) if _cap_raw not in (None, 0) else 10000
+                _cap = int(_cap_raw) if _cap_raw not in (None, "", 0, "0") else None
                 _subs = [s for s in (_cp_state.get("expanded_targets") or []) if s and s != target]
                 _refined = refine_target_set(target, _subs, cap=_cap)
                 for _live in _refined["live_targets"]:
@@ -935,7 +940,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                                message=(f"tier4_partial_report coverage={_pr['coverage_pct']}% "
                                         f"targets={_pr['targets_total']} findings={_pr['findings']}")))
-                # ─ Tier 3 Batch dispatch: run P02/P09 once for all targets ──
+                # ─ Tier 3 Batch dispatch: run P02/P06 once for all targets ──
                 # Instead of N sequential jobs (one per subdomain), dispatch a
                 # single batch job that passes all hosts in one targets.txt.
                 # Marked as done in completed_work so the per-target loop skips them.
@@ -958,7 +963,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                             )
                     # Persist batch completions before subtasks are dispatched so
                     # each subtask reads the updated completed_work from DB and
-                    # skips P02/P09 that were already handled in batch.
+                    # skips P02/P06 that were already handled in batch.
                     _cp_state["completed_work"] = sorted(completed_work)
                     _cp_state["phase_ledger_v2"] = _merge_phase_ledgers(
                         list(_cp_state.get("phase_ledger_v2") or []), phase_ledgers
@@ -970,12 +975,11 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 if _cp_state.get("parallelize"):
                     try:
                         from app.workers.tasks import run_scan_target_subset as _rsts
-                        _batch_size = max(1, int(_cp_state.get("parallel_target_batch_size") or settings.scan_parallel_target_batch_size or 1024))
                         _already_delegated = set(_cp_state.get("parallel_delegated_targets") or [])
                         _to_dispatch = [
                             _t for _t in _refined["live_targets"]
                             if _t and _t not in _already_delegated
-                        ][:_batch_size]
+                        ]
                         _dispatched = 0
                         for _t in _to_dispatch:
                             _rsts.delay(job.id, _t)
@@ -983,13 +987,13 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                             _dispatched += 1
                         _cp_state["parallel_delegated_targets"] = sorted(_already_delegated)
                         _cp_state["parallel_pending_targets"] = sorted(_already_delegated)
-                        _cp_state["parallel_batch_size"] = _batch_size
+                        _cp_state["parallel_batch_size"] = len(_to_dispatch)
                         _cp_state["_parallel_checkpoint_after_p01"] = bool(_dispatched)
                         if _dispatched:
                             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                                            message=(
                                                f"parallel_fanout dispatched {_dispatched} subtasks "
-                                               f"(delegated_total={len(_already_delegated)}, batch_size={_batch_size}, phases=P02-P22)"
+                                               f"(delegated_total={len(_already_delegated)}, phases=P02-P22)"
                                            )))
                     except Exception as _pfe:  # noqa: BLE001
                         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",

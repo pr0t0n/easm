@@ -400,6 +400,7 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "timeout": timeout,
+            "auth_headers": parameters.get("auth_headers") or {},
             "extra_args": [
                 str(arg)
                 for arg in list(parameters.get("extra_args") or [])

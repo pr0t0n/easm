@@ -71,9 +71,11 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
     Stored in state["expanded_targets"] so later phases can iterate.
     Uses lista_ativos (raw tool stdout, uncapped) when available so ALL
     discovered subdomains enter the pipeline. Falls back to MCP extraction.
-    Default cap: 10000 (effectively unlimited for real-world domains).
+    By default there is no cap: every discovered subdomain enters the pipeline.
+    Set expanded_targets_cap explicitly when an operator wants a safety limit.
     """
-    cap = int(state.get("expanded_targets_cap") or 10000)
+    raw_cap = state.get("expanded_targets_cap")
+    cap = int(raw_cap) if raw_cap not in (None, "", 0, "0") else None
     # lista_ativos is populated from raw P01 stdout before this function is called.
     # It contains ALL discovered subdomains without a cap, so prefer it.
     lista = list(state.get("lista_ativos") or [])
@@ -86,7 +88,7 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
     for s in subs:
         if s not in expanded:
             expanded.append(s)
-        if len(expanded) >= cap:
+        if cap is not None and len(expanded) >= cap:
             break
     state["expanded_targets"] = expanded
     return expanded
@@ -271,7 +273,7 @@ def preflight_skip_reason(phase_id: str, profile: dict[str, Any] | None) -> str 
     return None
 
 
-def refine_target_set(root: str, subdomains: list[str], cap: int = 10000) -> dict[str, Any]:
+def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) -> dict[str, Any]:
     """Liveness-filter + IP-group the discovered subdomains before Stage 2.
 
     - Liveness: a host that does not resolve in DNS is 'dead' — it gets no
@@ -280,7 +282,7 @@ def refine_target_set(root: str, subdomains: list[str], cap: int = 10000) -> dic
       run network phases (port scan) once per unique IP.
 
     By default NO cap — every alive subdomain enters the queue. The 'cap'
-    parameter is an absolute safety ceiling only.
+    parameter is an explicit operator safety ceiling only.
 
     Returns:
       live_targets: hosts that resolve (root always first)
@@ -293,7 +295,7 @@ def refine_target_set(root: str, subdomains: list[str], cap: int = 10000) -> dic
     dead: list[str] = []
     ordered = [root] + [s for s in subdomains if s and s != root]
     for host in ordered:
-        if len(live) > cap:
+        if cap is not None and len(live) >= cap:
             break
         ip = _resolve_host(host)
         if ip:
