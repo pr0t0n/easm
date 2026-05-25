@@ -409,6 +409,7 @@ export default function LearningPage() {
   const [manualInstruction, setManualInstruction] = useState("");
   const [manualUrlsText, setManualUrlsText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
+  const [crawlerLimit, setCrawlerLimit] = useState(500);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [manualSubmitting, setManualSubmitting] = useState(false);
@@ -433,6 +434,7 @@ export default function LearningPage() {
 
   const attackOptions = useMemo(() => skillIndex?.items || [], [skillIndex]);
   const phaseOptions = useMemo(() => phaseIndex?.items || [], [phaseIndex]);
+  const normalizedCrawlerLimit = Math.max(1, Math.min(5000, Number(crawlerLimit) || 500));
 
   const load = async () => {
     setLoading(true);
@@ -609,7 +611,7 @@ export default function LearningPage() {
       const { data } = await client.post("/api/learning/vulnerabilities/github-crawler", {
         min_per_phase: 50,
         min_per_skill: 150,
-        max_created: 500,
+        max_created: normalizedCrawlerLimit,
         purge_source: true,
       });
       setTaskStatus(data.message || "Crawler GitHub/HackerOne em execução.");
@@ -730,6 +732,20 @@ export default function LearningPage() {
             <button type="button" className="btn-secondary" onClick={seedCatalog} disabled={seeding}>
               {seeding ? "Antecipando..." : "Antecipar catálogo"}
             </button>
+            <label className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-wider" style={{ borderColor: "var(--line)", background: "var(--surface-soft)", color: "var(--ink-muted)" }}>
+              Limite
+              <input
+                type="number"
+                min="1"
+                max="5000"
+                step="50"
+                value={crawlerLimit}
+                onChange={(event) => setCrawlerLimit(event.target.value)}
+                className="w-24 rounded-md border px-2 py-1 text-sm font-semibold"
+                style={{ borderColor: "var(--line)", color: "var(--ink)" }}
+                aria-label="Limite de conhecimentos do crawler"
+              />
+            </label>
             <button type="button" className="btn-secondary" onClick={runGithubCrawler} disabled={crawlerRunning}>
               {crawlerRunning ? "Crawleando..." : "Crawler GitHub/HackerOne"}
             </button>
