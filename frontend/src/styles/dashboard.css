@@ -294,7 +294,7 @@
 .dash .subdomain-tabs span { color: var(--ink-muted); margin-top: 3px; }
 .dash .subdomain-summary {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 8px;
   margin-bottom: 8px;
 }
@@ -379,6 +379,67 @@
 .dash .sev-mini .med { color: var(--sev-medium-text); background: var(--sev-medium-bg); border-color: var(--sev-medium-border); }
 .dash .sev-mini .low { color: var(--sev-low-text); background: var(--sev-low-bg); border-color: var(--sev-low-border); }
 .dash .sev-mini strong { color: var(--ink); }
+
+/* Status color accents on summary tiles */
+.dash .subdomain-summary .status-descoberto  { border-color: #a78bfa; background: #f5f3ff; }
+.dash .subdomain-summary .status-descoberto span { color: #6d28d9; }
+.dash .subdomain-summary .status-descoberto b    { color: #4c1d95; }
+.dash .subdomain-summary .status-em-analise { border-color: #f59e0b; background: #fffbeb; }
+.dash .subdomain-summary .status-em-analise span { color: #b45309; }
+.dash .subdomain-summary .status-em-analise b  { color: #92400e; }
+.dash .subdomain-summary .status-executado   { border-color: #3b82f6; background: #eff6ff; }
+.dash .subdomain-summary .status-executado span { color: #1d4ed8; }
+.dash .subdomain-summary .status-executado b    { color: #1e3a8a; }
+.dash .subdomain-summary .status-finalizado  { border-color: #22c55e; background: #f0fdf4; }
+.dash .subdomain-summary .status-finalizado span { color: #15803d; }
+.dash .subdomain-summary .status-finalizado b    { color: #14532d; }
+
+/* Progress bar below summary tiles */
+.dash .subdomain-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.dash .subdomain-progress-bar {
+  flex: 1;
+  height: 7px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.dash .subdomain-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #22c55e);
+  border-radius: 999px;
+  transition: width 0.5s ease;
+  min-width: 4px;
+}
+.dash .subdomain-progress-label {
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* Inline status badge inside subdomain rows */
+.dash .subdomain-status-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+.dash .subdomain-status-badge.status-descoberto  { background: #ede9fe; color: #6d28d9; }
+.dash .subdomain-status-badge.status-backlog    { background: #f3f4f6; color: #6b7280; }
+.dash .subdomain-status-badge.status-em-analise { background: #fef3c7; color: #b45309; }
+.dash .subdomain-status-badge.status-executado  { background: #dbeafe; color: #1d4ed8; }
+.dash .subdomain-status-badge.status-finalizado { background: #dcfce7; color: #15803d; }
+
 .dash .rt-kpi {
   border: 1px solid var(--line);
   background: var(--surface-soft);

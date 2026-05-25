@@ -5858,6 +5858,13 @@ def dashboard_insights(
             for item in (state.get("scanned_assets") or [])
             if _asset_host_from_value(item)
         }
+        # Parallel subtask targets are not in scanned_assets but ARE in completed_work.
+        # Any host with at least one "P{n}:{host}" entry was actually processed.
+        for cw_entry in (state.get("completed_work") or []):
+            if isinstance(cw_entry, str) and ":" in cw_entry:
+                _cw_host = cw_entry.split(":", 1)[1]
+                if _cw_host:
+                    scanned_hosts.add(_cw_host)
 
         hosts = sorted(
             {
@@ -5869,8 +5876,21 @@ def dashboard_insights(
             }
         )
 
+        # Dead targets: discovered but DNS/HTTP non-responsive — show separately
+        dead_host_set = {
+            _asset_host_from_value(h)
+            for h in (state.get("dead_targets") or [])
+            if _asset_host_from_value(h)
+        }
+
         rows: list[dict[str, Any]] = []
-        status_counts = {"BackLog": 0, "Analisado": 0, "Finalizado": 0}
+        # Five operational states:
+        #   Descoberto — host found by recon but DNS/HTTP does not respond
+        #   BackLog    — host discovered but no scan activity yet
+        #   Em Análise — host actively being scanned (scan still running)
+        #   Executado  — host was scanned and scan has completed
+        #   Finalizado — host scanned, scan terminal AND has findings (reviewed)
+        status_counts = {"Descoberto": 0, "BackLog": 0, "Em Análise": 0, "Executado": 0, "Finalizado": 0}
         scan_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         for host in hosts[:200]:
             finding_stats = (findings_by_scan_asset.get(int(job.id)) or {}).get(host) or {
@@ -5879,13 +5899,18 @@ def dashboard_insights(
             }
             host_runs = (runs_by_scan_asset.get(int(job.id)) or {}).get(host, [])
             has_activity = bool(host_runs or int(finding_stats.get("findings_total") or 0) or host in scanned_hosts)
+            has_findings = int(finding_stats.get("findings_total") or 0) > 0
             job_status = str(job.status or "").lower()
-            if host in pending_hosts or (not has_activity and job_status in active_scan_status):
+            if host in dead_host_set and not has_activity and not has_findings:
+                operational_status = "Descoberto"
+            elif host in pending_hosts or (not has_activity and job_status in active_scan_status):
                 operational_status = "BackLog"
-            elif job_status in terminal_scan_status and has_activity:
+            elif job_status in terminal_scan_status and has_findings:
                 operational_status = "Finalizado"
-            elif has_activity:
-                operational_status = "Analisado"
+            elif job_status in terminal_scan_status and has_activity:
+                operational_status = "Executado"
+            elif has_activity and job_status in active_scan_status:
+                operational_status = "Em Análise"
             else:
                 operational_status = "BackLog"
 
@@ -5903,6 +5928,10 @@ def dashboard_insights(
                 }
             )
 
+        _scannable_hosts = status_counts["BackLog"] + status_counts["Em Análise"] + status_counts["Executado"] + status_counts["Finalizado"]
+        _done_hosts = status_counts["Executado"] + status_counts["Finalizado"]
+        progress_pct = round(_done_hosts / max(1, _scannable_hosts) * 100, 1)
+
         rows.sort(
             key=lambda item: (
                 -int(item.get("findings_total") or 0),
@@ -5917,6 +5946,7 @@ def dashboard_insights(
                 "scan_status": job.status,
                 "subdomain_count": len(hosts),
                 "status_counts": status_counts,
+                "progress_pct": progress_pct,
                 "severity": scan_severity,
                 "subdomains": rows,
             }

@@ -648,29 +648,59 @@ export default function DashboardPage() {
                   ))}
                 </div>
                 <div className="subdomain-summary">
+                  <div className="status-descoberto"><span>Descoberto</span><b>{Number(selectedSubdomainScan?.status_counts?.Descoberto || 0)}</b></div>
                   <div><span>BackLog</span><b>{Number(selectedSubdomainScan?.status_counts?.BackLog || 0)}</b></div>
-                  <div><span>Analisado</span><b>{Number(selectedSubdomainScan?.status_counts?.Analisado || 0)}</b></div>
-                  <div><span>Finalizado</span><b>{Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}</b></div>
+                  <div className="status-em-analise"><span>Em Análise</span><b>{Number(selectedSubdomainScan?.status_counts?.["Em Análise"] || 0)}</b></div>
+                  <div className="status-executado"><span>Executado</span><b>{Number(selectedSubdomainScan?.status_counts?.Executado || 0)}</b></div>
+                  <div className="status-finalizado"><span>Finalizado</span><b>{Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}</b></div>
                   <div><span>Crítico/Alto</span><b>{Number(selectedSubdomainScan?.severity?.critical || 0) + Number(selectedSubdomainScan?.severity?.high || 0)}</b></div>
                 </div>
+                {selectedSubdomainScan?.subdomain_count > 0 && (
+                  <div className="subdomain-progress">
+                    <div className="subdomain-progress-bar">
+                      <div
+                        className="subdomain-progress-fill"
+                        style={{ width: `${Number(selectedSubdomainScan?.progress_pct || 0)}%` }}
+                      />
+                    </div>
+                    <span className="subdomain-progress-label">
+                      {Number(selectedSubdomainScan?.progress_pct || 0).toFixed(1)}% finalizado
+                      &nbsp;·&nbsp;
+                      {Number(selectedSubdomainScan?.status_counts?.Executado || 0) + Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}
+                      /{Number(selectedSubdomainScan?.subdomain_count || 0)} hosts
+                    </span>
+                  </div>
+                )}
                 <div className="subdomain-list">
                   {selectedSubdomains.length === 0 ? (
                     <div className="rt-empty">Sem subdomínios detalhados para este scan.</div>
-                  ) : selectedSubdomains.map((row) => (
-                    <div key={`${selectedSubdomainScan.scan_id}-${row.subdomain}`} className="subdomain-row">
-                      <div>
-                        <b>{row.subdomain}</b>
-                        <span>{row.status} · {Number(row.tool_runs || 0)} execuções de ferramenta</span>
+                  ) : selectedSubdomains.map((row) => {
+                    const statusCls = {
+                      "Descoberto": "status-descoberto",
+                      "Em Análise": "status-em-analise",
+                      "Executado":  "status-executado",
+                      "Finalizado": "status-finalizado",
+                      "BackLog":    "status-backlog",
+                    }[row.status] || "";
+                    return (
+                      <div key={`${selectedSubdomainScan.scan_id}-${row.subdomain}`} className="subdomain-row">
+                        <div>
+                          <b>{row.subdomain}</b>
+                          <span>
+                            <em className={`subdomain-status-badge ${statusCls}`}>{row.status}</em>
+                            &nbsp;·&nbsp;{Number(row.tool_runs || 0)} execuções
+                          </span>
+                        </div>
+                        <div className="sev-mini">
+                          <span className="crit">{Number(row.severity?.critical || 0)}</span>
+                          <span className="high">{Number(row.severity?.high || 0)}</span>
+                          <span className="med">{Number(row.severity?.medium || 0)}</span>
+                          <span className="low">{Number(row.severity?.low || 0)}</span>
+                          <strong>{Number(row.findings_total || 0)}</strong>
+                        </div>
                       </div>
-                      <div className="sev-mini">
-                        <span className="crit">{Number(row.severity?.critical || 0)}</span>
-                        <span className="high">{Number(row.severity?.high || 0)}</span>
-                        <span className="med">{Number(row.severity?.medium || 0)}</span>
-                        <span className="low">{Number(row.severity?.low || 0)}</span>
-                        <strong>{Number(row.findings_total || 0)}</strong>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}

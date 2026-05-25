@@ -158,20 +158,3 @@ theharvester_passive:
   timeout: 300
   parser: raw
 
-h8mail_breach:
-  tool: h8mail
-  category: osint
-  phase: WEAPONIZATION_SIMULATION
-  description: "Email leak hunter (HIBP integration)."
-  cmd: ["h8mail", "-t", "{host}"]
-  timeout: 120
-  parser: raw
-
-trufflehog_secrets:
-  tool: trufflehog
-  category: code
-  phase: WEAPONIZATION_SIMULATION
-  description: "Verified secret scanner — works on URL/git/S3."
-  cmd: ["trufflehog", "filesystem", "--no-update", "--json", "."]
-  timeout: 600
-  parser: jsonl

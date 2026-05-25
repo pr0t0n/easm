@@ -69,10 +69,18 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
     """Return the expanded target list — root + every in-scope subdomain found.
 
     Stored in state["expanded_targets"] so later phases can iterate.
-    Capped at 50 by default to avoid runaway scans.
+    Uses lista_ativos (raw tool stdout, uncapped) when available so ALL
+    discovered subdomains enter the pipeline. Falls back to MCP extraction.
+    Default cap: 10000 (effectively unlimited for real-world domains).
     """
-    cap = int(state.get("expanded_targets_cap") or 50)
-    subs = extract_discovered_subdomains(mcp_results, root_target)
+    cap = int(state.get("expanded_targets_cap") or 10000)
+    # lista_ativos is populated from raw P01 stdout before this function is called.
+    # It contains ALL discovered subdomains without a cap, so prefer it.
+    lista = list(state.get("lista_ativos") or [])
+    if lista:
+        subs = [h for h in lista if h and h != root_target]
+    else:
+        subs = extract_discovered_subdomains(mcp_results, root_target)
     # Always keep the root first.
     expanded = [root_target]
     for s in subs:

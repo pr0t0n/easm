@@ -164,6 +164,12 @@ def _trim_mcp_stdout(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # different scans running in the same process cannot overwrite each other's creds.
 _AUTH_LOCAL = threading.local()
 
+# Serialises the read-modify-write on ScanJob.state_data for parallel subtasks
+# that share the same worker_parallel process (--pool=threads).  Each subtask
+# holds this lock only for the brief Python dict-merge + SQLAlchemy write, so
+# contention is negligible compared to the minutes-long MCP tool executions.
+_SUBTASK_STATE_LOCK = threading.Lock()
+
 
 def _get_auth_headers() -> dict[str, str]:
     return dict(getattr(_AUTH_LOCAL, "headers", {}))
@@ -224,24 +230,25 @@ def _record_preflight_skip(
     }
     phase_ledgers.append(ledger)
     completed_work.add(work_key)
-    try:
-        db.refresh(job)
-    except Exception:  # noqa: BLE001
-        pass
-    state = dict(job.state_data or {})
-    skipped_work = list(state.get("skipped_work") or [])
-    skipped_work.append({"phase_id": phase_id, "target": target, "reason": reason, "tier": "tier1_preflight"})
-    state["skipped_work"] = skipped_work[-2000:]
-    state["completed_work"] = sorted(set(state.get("completed_work") or []) | completed_work)
-    state["phase_ledger_v2"] = _merge_phase_ledgers(list(state.get("phase_ledger_v2") or []), [ledger])
-    job.state_data = state
-    db.add(ScanLog(
-        scan_job_id=job.id,
-        source="scan-intelligence",
-        level="INFO",
-        message=f"tier1_preflight_skip phase={phase_id} target={target} reason={reason}",
-    ))
-    db.commit()
+    with _SUBTASK_STATE_LOCK:
+        try:
+            db.refresh(job)
+        except Exception:  # noqa: BLE001
+            pass
+        state = dict(job.state_data or {})
+        skipped_work = list(state.get("skipped_work") or [])
+        skipped_work.append({"phase_id": phase_id, "target": target, "reason": reason, "tier": "tier1_preflight"})
+        state["skipped_work"] = skipped_work[-2000:]
+        state["completed_work"] = sorted(set(state.get("completed_work") or []) | completed_work)
+        state["phase_ledger_v2"] = _merge_phase_ledgers(list(state.get("phase_ledger_v2") or []), [ledger])
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="scan-intelligence",
+            level="INFO",
+            message=f"tier1_preflight_skip phase={phase_id} target={target} reason={reason}",
+        ))
+        db.commit()
 
 
 def _phase_ids_for_target_subset(allowed_phases: set[str] | None) -> list[str]:
@@ -1937,19 +1944,21 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 ip = host_ip_map.get(target)
                 if ip:
                     completed_work.add(f"{phase_id}:ip:{ip}")
-            # Persist incremental state
-            try:
-                db.refresh(job)
-            except Exception:  # noqa: BLE001
-                pass
-            cur = dict(job.state_data or {})
-            cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
-            cur["phase_ledger_v2"] = _merge_phase_ledgers(list(cur.get("phase_ledger_v2") or []), [ledger])
-            job.state_data = cur
-            phase_ledgers = _merge_phase_ledgers(phase_ledgers, [ledger])
-            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                           message=f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} (parallel)"))
-            db.commit()
+            # Persist incremental state — locked to prevent concurrent subtasks
+            # from clobbering each other's completed_work / phase_ledger updates.
+            with _SUBTASK_STATE_LOCK:
+                try:
+                    db.refresh(job)
+                except Exception:  # noqa: BLE001
+                    pass
+                cur = dict(job.state_data or {})
+                cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
+                cur["phase_ledger_v2"] = _merge_phase_ledgers(list(cur.get("phase_ledger_v2") or []), [ledger])
+                job.state_data = cur
+                phase_ledgers = _merge_phase_ledgers(phase_ledgers, [ledger])
+                db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                               message=f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} (parallel)"))
+                db.commit()
             try:
                 _persist_offensive_findings(db, job, phase_ledgers, [target])
                 db.commit()
