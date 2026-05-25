@@ -343,6 +343,7 @@ def _dispatch_batch_phase(
     targets: list[str],
     phase_ledgers: list[dict[str, Any]],
     completed_work: set[str],
+    profile_override: str | None = None,
 ) -> bool:
     """Dispatch ONE batch kali job for phase_id across all targets.
 
@@ -350,7 +351,7 @@ def _dispatch_batch_phase(
     pairs have been added to completed_work.  Returns False on any error so
     callers fall back to sequential single-target dispatch.
     """
-    batch_profile = _BATCH_PHASE_PROFILES.get(phase_id)
+    batch_profile = profile_override or _BATCH_PHASE_PROFILES.get(phase_id)
     if not batch_profile or len(targets) < _BATCH_MIN_TARGETS:
         return False
 
@@ -993,6 +994,28 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     except Exception as _pfe:  # noqa: BLE001
                         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
                                        message=f"parallel_fanout_failed error={_pfe!s}"))
+                # ─ Domain Takeover: check dead targets for dangling DNS ────────
+                # Subdomains that don't resolve may still have CNAME records
+                # pointing to unclaimed services (GitHub Pages, S3, Heroku, etc.).
+                try:
+                    _dead = [t for t in (_refined.get("dead_targets") or []) if t and t != target]
+                    if _dead and not _cp_state.get("_domain_takeover_dispatched"):
+                        _all_for_takeover = [target] + list(_refined.get("live_targets") or []) + _dead
+                        _all_for_takeover = sorted(set(_all_for_takeover))
+                        _dispatch_batch_phase(
+                            db, job, "P01",  # runs under P01 bucket, distinct profile
+                            _all_for_takeover, phase_ledgers, completed_work,
+                            profile_override="domain_takeover_batch",
+                        )
+                        _cp_state["_domain_takeover_dispatched"] = True
+                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                       message=(
+                                           f"domain_takeover_batch dispatched for {len(_dead)} dead + "
+                                           f"{len(_refined.get('live_targets') or [])} live targets"
+                                       )))
+                except Exception as _dte:  # noqa: BLE001
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                   message=f"domain_takeover_dispatch_failed error={_dte!s}"))
                 # ─ WAF Origin Discovery — hunt the real server behind the WAF ─
                 try:
                     from app.services.waf_origin import discover_origin_candidates as _disc_origin

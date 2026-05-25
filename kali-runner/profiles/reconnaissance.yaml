@@ -373,3 +373,26 @@ curl_probe:
   allowed_return_codes: [0, 47]
   timeout: 90
   parser: raw
+
+# Domain Takeover check: runs against subdomains with dangling DNS records.
+# subjack detects CNAMEs pointing to unclaimed services (GitHub Pages, S3, Heroku, etc.).
+domain_takeover_check:
+  tool: subjack
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: domain
+  description: "Dangling DNS / domain takeover detection — CNAME points to unclaimed service."
+  cmd: ["subjack", "-d", "{host}", "-t", "20", "-timeout", "30", "-ssl", "-v"]
+  timeout: 120
+  parser: raw
+
+# Batch variant: check all discovered (including dead) subdomains for takeover via file.
+domain_takeover_batch:
+  tool: subjack
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch domain takeover check across all discovered subdomains (live + dead)."
+  cmd: ["subjack", "-w", "{target_file}", "-t", "50", "-timeout", "30", "-ssl", "-v", "-c", "/usr/share/subjack/fingerprints.json"]
+  timeout: 600
+  parser: raw

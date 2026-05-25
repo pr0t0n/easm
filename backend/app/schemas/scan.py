@@ -40,6 +40,7 @@ class ScanResponse(BaseModel):
     next_retry_at: datetime | None = None
     last_error: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
 
 
 class LogResponse(BaseModel):

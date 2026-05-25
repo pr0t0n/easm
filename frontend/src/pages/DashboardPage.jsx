@@ -655,22 +655,37 @@ export default function DashboardPage() {
                   <div className="status-finalizado"><span>Finalizado</span><b>{Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}</b></div>
                   <div><span>Crítico/Alto</span><b>{Number(selectedSubdomainScan?.severity?.critical || 0) + Number(selectedSubdomainScan?.severity?.high || 0)}</b></div>
                 </div>
-                {selectedSubdomainScan?.subdomain_count > 0 && (
-                  <div className="subdomain-progress">
-                    <div className="subdomain-progress-bar">
-                      <div
-                        className="subdomain-progress-fill"
-                        style={{ width: `${Number(selectedSubdomainScan?.progress_pct || 0)}%` }}
-                      />
+                {selectedSubdomainScan?.subdomain_count > 0 && (() => {
+                  const pct = Number(selectedSubdomainScan?.progress_pct || 0);
+                  const done = Number(selectedSubdomainScan?.status_counts?.Executado || 0) + Number(selectedSubdomainScan?.status_counts?.Finalizado || 0);
+                  const total = Number(selectedSubdomainScan?.subdomain_count || 0);
+                  const createdAt = selectedSubdomainScan?.created_at;
+                  const updatedAt = selectedSubdomainScan?.updated_at;
+                  const scanStatus = selectedSubdomainScan?.scan_status || "";
+                  const isRunning = ["running","queued","retrying"].includes(scanStatus);
+                  const startMs = createdAt ? new Date(createdAt).getTime() : null;
+                  const endMs = !isRunning && updatedAt ? new Date(updatedAt).getTime() : null;
+                  const elapsedMs = startMs ? (endMs || Date.now()) - startMs : null;
+                  const etaMs = isRunning && pct > 0 && pct < 100 && elapsedMs ? (elapsedMs / pct) * (100 - pct) : null;
+                  const fmt = (ms) => {
+                    const s = Math.floor(ms / 1000);
+                    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+                    return h > 0 ? `${h}h ${String(m).padStart(2,"0")}m` : m > 0 ? `${m}m ${String(ss).padStart(2,"0")}s` : `${ss}s`;
+                  };
+                  return (
+                    <div className="subdomain-progress">
+                      <div className="subdomain-progress-bar">
+                        <div className="subdomain-progress-fill" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="subdomain-progress-label">
+                        <strong>{pct.toFixed(1)}%</strong> · {done}/{total} hosts escaneados
+                        {elapsedMs !== null && <> · ⏱ {fmt(elapsedMs)}</>}
+                        {etaMs !== null && <> · ⏳ ~{fmt(etaMs)}</>}
+                        {!isRunning && elapsedMs !== null && <> · ✓ concluído</>}
+                      </span>
                     </div>
-                    <span className="subdomain-progress-label">
-                      {Number(selectedSubdomainScan?.progress_pct || 0).toFixed(1)}% finalizado
-                      &nbsp;·&nbsp;
-                      {Number(selectedSubdomainScan?.status_counts?.Executado || 0) + Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}
-                      /{Number(selectedSubdomainScan?.subdomain_count || 0)} hosts
-                    </span>
-                  </div>
-                )}
+                  );
+                })()}
                 <div className="subdomain-list">
                   {selectedSubdomains.length === 0 ? (
                     <div className="rt-empty">Sem subdomínios detalhados para este scan.</div>

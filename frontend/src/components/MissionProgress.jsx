@@ -160,30 +160,77 @@ export default function MissionProgress({ scan, scanStatus }) {
 
   const progress = pct(phaseData?.mission_progress ?? scanStatus?.mission_progress ?? scan?.mission_progress);
   const status = phaseData?.status || scanStatus?.status || scan.status;
+  const isActive = ["queued", "running", "retrying"].includes(String(status).toLowerCase());
+
+  // Elapsed + ETA — recomputed every second while the scan is running
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isActive) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [isActive]);
+
+  const fmtDuration = (ms) => {
+    if (ms < 0) return "-";
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2,"0")}m`;
+    if (m > 0) return `${m}m ${String(ss).padStart(2,"0")}s`;
+    return `${ss}s`;
+  };
+
+  const startMs = scan?.created_at ? new Date(scan.created_at).getTime() : null;
+  const endMs = !isActive && scan?.updated_at ? new Date(scan.updated_at).getTime() : null;
+  const elapsedMs = startMs ? (endMs || now) - startMs : null;
+  const etaMs = (isActive && progress > 0 && progress < 100 && elapsedMs)
+    ? (elapsedMs / progress) * (100 - progress)
+    : null;
 
   return (
     <section className="panel p-6">
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", marginBottom: 14 }}>
+      {/* Header row: title + % */}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", marginBottom: 6 }}>
         <div>
           <h3 className="text-sm font-semibold">22 fases de evolução do teste</h3>
           <div className="mono-sm muted" style={{ marginTop: 4 }}>
             scan #{scan.id} · {status} · {view.completed}/22 fases executadas
           </div>
         </div>
-        <div className="mono-sm" style={{ color: view.failed ? "var(--sev-critical-text)" : "var(--brand-700)", fontWeight: 900 }}>
+        <div className="mono-sm" style={{ color: view.failed ? "var(--sev-critical-text)" : "var(--brand-700)", fontWeight: 900, fontSize: 22 }}>
           {progress}%
         </div>
       </div>
 
-      <div style={{ height: 9, borderRadius: 99, overflow: "hidden", background: "var(--bg-muted)", marginBottom: 14 }}>
+      {/* Progress bar */}
+      <div style={{ height: 9, borderRadius: 99, overflow: "hidden", background: "var(--bg-muted)", marginBottom: 8 }}>
         <div
           style={{
             width: `${progress}%`,
             height: "100%",
             background: view.failed ? "var(--sev-critical-solid)" : "var(--brand-500)",
+            transition: "width 0.4s ease",
           }}
         />
       </div>
+
+      {/* Elapsed + ETA */}
+      {elapsedMs !== null && (
+        <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 11 }}>
+          <span style={{ color: "var(--ink-muted)" }}>
+            ⏱ percorrido: <strong style={{ color: "var(--ink)" }}>{fmtDuration(elapsedMs)}</strong>
+          </span>
+          {etaMs !== null && (
+            <span style={{ color: "var(--ink-muted)" }}>
+              ⏳ previsto: <strong style={{ color: "var(--brand-600)" }}>{fmtDuration(etaMs)}</strong>
+            </span>
+          )}
+          {!isActive && (
+            <span style={{ color: "var(--sev-low-text)", fontWeight: 700 }}>✓ concluído</span>
+          )}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 8, marginBottom: 14 }}>
         <div style={metricBox}>

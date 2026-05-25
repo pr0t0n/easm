@@ -782,10 +782,39 @@ export default function ScansPage({ embedded = false }) {
                                 {scan.status}
                               </span>
                             </div>
-                            <div className="mt-2 text-xs text-slate-400 space-y-1">
-                              <p>Progresso: {scan.mission_progress}% | Passo: {scan.current_step}</p>
+                            <div className="mt-2 space-y-1.5">
+                              {/* Progress bar */}
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full transition-all duration-500"
+                                    style={{
+                                      width: `${scan.mission_progress}%`,
+                                      background: scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : '#fb923c',
+                                    }}
+                                  />
+                                </div>
+                                <span className="text-xs font-mono font-bold" style={{
+                                  color: scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : '#fb923c',
+                                  minWidth: 34, textAlign: 'right'
+                                }}>{scan.mission_progress}%</span>
+                              </div>
+                              {/* Step + timing */}
+                              <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
+                                <span className="truncate max-w-[180px]" title={scan.current_step}>{scan.current_step}</span>
+                                {scan.created_at && (() => {
+                                  const startMs = new Date(scan.created_at).getTime();
+                                  const endMs = scan.updated_at ? new Date(scan.updated_at).getTime() : Date.now();
+                                  const elapsedS = Math.floor((endMs - startMs) / 1000);
+                                  const h = Math.floor(elapsedS / 3600);
+                                  const m = Math.floor((elapsedS % 3600) / 60);
+                                  const s = elapsedS % 60;
+                                  const label = h > 0 ? `${h}h${String(m).padStart(2,"0")}m` : m > 0 ? `${m}m${String(s).padStart(2,"0")}s` : `${s}s`;
+                                  return <span className="text-slate-500 ml-auto shrink-0">⏱ {label}</span>;
+                                })()}
+                              </div>
                               {scan.retry_attempt > 0 && (
-                                <p className="text-amber-300">Tentativa {scan.retry_attempt}/{scan.retry_max}</p>
+                                <p className="text-xs text-amber-300">Tentativa {scan.retry_attempt}/{scan.retry_max}</p>
                               )}
                             </div>
                           </button>

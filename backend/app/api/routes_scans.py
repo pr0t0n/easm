@@ -2414,6 +2414,7 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             next_retry_at=s.next_retry_at,
             last_error=s.last_error,
             created_at=s.created_at,
+            updated_at=s.updated_at,
         )
         for s in rows
     ]
@@ -5944,6 +5945,8 @@ def dashboard_insights(
                 "scan_id": job.id,
                 "target_query": job.target_query,
                 "scan_status": job.status,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "updated_at": job.updated_at.isoformat() if job.updated_at else None,
                 "subdomain_count": len(hosts),
                 "status_counts": status_counts,
                 "progress_pct": progress_pct,
