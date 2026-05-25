@@ -2259,7 +2259,7 @@ def run_github_hackerone_learning_crawler(
 
     min_per_phase = int(payload.get("min_per_phase") or 50)
     min_per_skill = int(payload.get("min_per_skill") or 150)
-    max_created = min(5000, max(1, int(payload.get("max_created") or 5000)))
+    max_created = min(500, max(1, int(payload.get("max_created") or 500)))
     purge_source = bool(payload.get("purge_source", True))
     task = create_github_hackerone_learning_task.apply_async(
         args=(current_user.id, min_per_phase, min_per_skill, max_created, purge_source),

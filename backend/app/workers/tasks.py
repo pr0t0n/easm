@@ -1550,7 +1550,7 @@ def create_github_hackerone_learning_task(
     owner_id: int,
     min_per_phase: int = 50,
     min_per_skill: int = 150,
-    max_created: int = 5000,
+    max_created: int = 500,
     purge_source: bool = True,
 ):
     """Seed accepted operational learnings from public GitHub HackerOne indexes."""
@@ -1576,7 +1576,7 @@ def create_github_hackerone_learning_task(
             min_per_phase=max(0, int(min_per_phase or 0)),
             min_per_skill=max(0, int(min_per_skill or 0)),
             owner_id=owner_id,
-            max_created=max(1, int(max_created or 5000)),
+            max_created=max(1, int(max_created or 500)),
         )
         mcp_ingested = 0
         mcp_url = str(settings.mcp_server_url or "http://mcp_server:3000").rstrip("/")
@@ -1590,7 +1590,7 @@ def create_github_hackerone_learning_task(
             "created": len(created),
             "mcp_ingested": mcp_ingested,
             "mcp_purged": mcp_purged,
-            "max_created": int(max_created or 5000),
+            "max_created": int(max_created or 500),
             "min_per_phase": int(min_per_phase or 0),
             "min_per_skill": int(min_per_skill or 0),
             "phase_counts_before_min": min(before_phase.get(str(p.get("id")), 0) for p in PENTEST_PHASES),

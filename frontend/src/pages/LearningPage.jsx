@@ -609,7 +609,7 @@ export default function LearningPage() {
       const { data } = await client.post("/api/learning/vulnerabilities/github-crawler", {
         min_per_phase: 50,
         min_per_skill: 150,
-        max_created: 5000,
+        max_created: 500,
         purge_source: true,
       });
       setTaskStatus(data.message || "Crawler GitHub/HackerOne em execução.");

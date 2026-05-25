@@ -2,8 +2,8 @@
 Crawl public GitHub HackerOne report indexes and seed accepted learnings.
 
 Targets:
-- at least 50 accepted knowledge records for every P01-P22 phase;
-- at least 150 accepted knowledge records for every runtime skill.
+- cap each crawler run at 500 accepted knowledge records by default;
+- distribute records across runtime skills/fases as evenly as the cap allows.
 
 Run inside backend container:
   python3 scripts/crawl_github_hackerone_learnings.py
@@ -35,7 +35,7 @@ from app.models.models import User, VulnerabilityLearning
 SOURCE_KIND = "github_hackerone_crawler"
 DEFAULT_MIN_PER_PHASE = 50
 DEFAULT_MIN_PER_SKILL = 150
-DEFAULT_MAX_CREATED = 5000
+DEFAULT_MAX_CREATED = 500
 DEFAULT_OWNER_ID = int(os.getenv("H1_CRAWLER_OWNER_ID", "1"))
 DEFAULT_MCP_URL = os.getenv("MCP_SERVER_URL", "http://mcp_server:3000").rstrip("/")
 
@@ -581,21 +581,39 @@ def seed(
     skills = _skill_catalog()
     created: list[VulnerabilityLearning] = []
 
+    skill_runtime: dict[str, dict[str, Any]] = {}
     for skill_id, skill in sorted(skills.items()):
-        current = int(skill_counts.get(skill_id, 0))
-        deficit = max(0, min_per_skill - current)
-        if deficit <= 0:
-            continue
         phases = _skill_phases(skill_id, skill)
-        tools = _skill_tools(skill_id, skill, phases)
-        ranked = _rank_reports_for_skill(reports, skill_id, skill)
-        for index in range(deficit):
-            if len(created) >= max_created:
-                break
-            report = ranked[index % len(ranked)]
-            ordinal = current + index + 1
+        skill_runtime[skill_id] = {
+            "skill": skill,
+            "phases": phases,
+            "tools": _skill_tools(skill_id, skill, phases),
+            "ranked": _rank_reports_for_skill(reports, skill_id, skill),
+        }
+
+    while len(created) < max_created:
+        pending = [
+            (skill_counts.get(skill_id, 0), skill_id)
+            for skill_id in skill_runtime
+            if int(skill_counts.get(skill_id, 0)) < min_per_skill
+        ]
+        if not pending:
+            break
+        _, skill_id = min(pending)
+        runtime = skill_runtime[skill_id]
+        current = int(skill_counts.get(skill_id, 0))
+        phases = list(runtime["phases"])
+        tools = list(runtime["tools"])
+        ranked = list(runtime["ranked"])
+        report_index = current % len(ranked)
+        while len(created) < max_created and current < min_per_skill:
+            report = ranked[report_index % len(ranked)]
+            ordinal = current + 1
             title = f"H1 GitHub skill {skill_id} #{ordinal:03d}: {_compact(report.get('title') or '', 120)}"
+            report_index += 1
             if title in existing_titles:
+                current += 1
+                skill_counts[skill_id] = current
                 continue
             learning = _build_learning(
                 owner_id=owner.id,
@@ -611,30 +629,34 @@ def seed(
             db.add(learning)
             created.append(learning)
             existing_titles.add(title)
-            skill_counts[skill_id] = skill_counts.get(skill_id, 0) + 1
+            current += 1
+            skill_counts[skill_id] = current
             for phase in phases:
                 phase_counts[phase] = phase_counts.get(phase, 0) + 1
-        if len(created) >= max_created:
             break
 
-    for phase in [str(p.get("id")) for p in PENTEST_PHASES]:
-        if len(created) >= max_created:
+    while len(created) < max_created:
+        phase_pending = [
+            (phase_counts.get(str(p.get("id")), 0), str(p.get("id")))
+            for p in PENTEST_PHASES
+            if int(phase_counts.get(str(p.get("id")), 0)) < min_per_phase
+        ]
+        if not phase_pending:
             break
-        current = int(phase_counts.get(phase, 0))
-        deficit = max(0, min_per_phase - current)
-        if deficit <= 0:
-            continue
+        current, phase = min(phase_pending)
         contract = PHASE_CONTRACTS.get(phase) or {}
         phase_skills = list(contract.get("required_skills") or []) + list(contract.get("optional_skills") or [])
         tools = list(contract.get("required_tools") or []) + list(contract.get("optional_tools") or [])
         ranked = reports
-        for index in range(deficit):
-            if len(created) >= max_created:
-                break
-            report = ranked[(current + index) % len(ranked)]
-            ordinal = current + index + 1
+        report_index = int(current)
+        while len(created) < max_created and int(phase_counts.get(phase, 0)) < min_per_phase:
+            current = int(phase_counts.get(phase, 0))
+            report = ranked[report_index % len(ranked)]
+            ordinal = current + 1
             title = f"H1 GitHub phase {phase} #{ordinal:03d}: {_compact(report.get('title') or '', 120)}"
+            report_index += 1
             if title in existing_titles:
+                phase_counts[phase] = current + 1
                 continue
             learning = _build_learning(
                 owner_id=owner.id,
