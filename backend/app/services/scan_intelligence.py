@@ -22,10 +22,14 @@ state OR a list of artifacts. The runner calls them at well-defined hooks.
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
+
+import requests
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +133,86 @@ def _resolve_host(host: str) -> str | None:
         return socket.gethostbyname(h)
     except Exception:  # noqa: BLE001
         return None
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_RE.sub("", str(value or ""))
+
+
+def _parse_dnsx_line(line: str) -> tuple[str, str] | None:
+    """Parse dnsx -resp lines like: host [A] [1.2.3.4]."""
+    clean = _strip_ansi(line).strip()
+    if not clean:
+        return None
+    parts = clean.split()
+    host = _normalize_host(parts[0] if parts else "")
+    if not host:
+        return None
+    ips = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", clean)
+    return (host, ips[0]) if ips else None
+
+
+def _resolve_hosts_via_kali_dnsx(hosts: list[str], timeout: int = 180) -> dict[str, str]:
+    """Resolve hosts in one Kali dnsx batch job.
+
+    The backend resolver can produce transient false negatives under load.
+    dnsx runs from the same sidecar that executes the offensive tools and uses
+    a targets.txt batch profile, so it is both faster and closer to real scan
+    execution.
+    """
+    unique_hosts = []
+    seen: set[str] = set()
+    for host in hosts:
+        norm = _normalize_host(host)
+        if norm and norm not in seen:
+            seen.add(norm)
+            unique_hosts.append(norm)
+    if not unique_hosts:
+        return {}
+
+    base = str(os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088")).rstrip("/")
+    try:
+        post = requests.post(
+            f"{base}/jobs",
+            json={
+                "profile": "dnsx_resolve_batch",
+                "target": unique_hosts[0],
+                "targets": unique_hosts,
+                "timeout": timeout,
+            },
+            timeout=10,
+        )
+        post.raise_for_status()
+        job_id = post.json()["job_id"]
+        deadline = time.monotonic() + timeout + 30
+        while time.monotonic() < deadline:
+            result = requests.get(f"{base}/jobs/{job_id}/result", timeout=10)
+            result.raise_for_status()
+            body = result.json()
+            status = str(body.get("status") or "").lower()
+            if status in {"queued", "running"}:
+                time.sleep(2)
+                continue
+            if status not in {"done", "success"}:
+                return {}
+            resolved: dict[str, str] = {}
+            for line in str(body.get("stdout") or "").splitlines():
+                parsed = _parse_dnsx_line(line)
+                if parsed:
+                    resolved[parsed[0]] = parsed[1]
+            parsed_body = body.get("parsed")
+            if isinstance(parsed_body, list):
+                for item in parsed_body:
+                    parsed = _parse_dnsx_line(str(item))
+                    if parsed:
+                        resolved.setdefault(parsed[0], parsed[1])
+            return resolved
+    except Exception:  # noqa: BLE001
+        return {}
+    return {}
 
 
 def _tcp_connects(host: str, port: int, timeout: float = 1.5) -> bool:
@@ -294,10 +378,12 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
     live: list[str] = []
     dead: list[str] = []
     ordered = [root] + [s for s in subdomains if s and s != root]
+    ordered = list(dict.fromkeys(_normalize_host(host) for host in ordered if _normalize_host(host)))
+    kali_resolved = _resolve_hosts_via_kali_dnsx(ordered)
     for host in ordered:
         if cap is not None and len(live) >= cap:
             break
-        ip = _resolve_host(host)
+        ip = kali_resolved.get(host) or _resolve_host(host)
         if ip:
             host_ip[host] = ip
             live.append(host)
