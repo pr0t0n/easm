@@ -146,6 +146,9 @@ function PhaseKnowledgeIndex({ index, onLearn }) {
               </div>
             </div>
             <p className="mt-3 text-xs leading-5" style={{ color: "var(--ink-soft)" }}>
+              Skills: {(item.skills || []).join(", ") || "-"}
+            </p>
+            <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
               Workers: {(item.worker_groups || []).join(", ") || "-"}
             </p>
             <p className="mt-2 text-xs leading-5" style={{ color: "var(--ink-muted)" }}>
