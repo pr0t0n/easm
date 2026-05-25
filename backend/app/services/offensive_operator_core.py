@@ -132,11 +132,13 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
     skill_map = _load_skill_tool_map(skills_root)
 
     # (phase_id, name, description, skill_ids, fb_required, fb_optional)
+    # Optional tools include HackerOne-derived nuclei profiles segregated by vuln class.
     rows = [
         ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets via OSINT + active brute-force",
          ["skill.recon.subdomain_enumeration"], ["subfinder"],
          ["amass", "amass-brute", "amass-intel", "theharvester", "dnsx", "assetfinder",
-          "sublist3r", "findomain", "dnsrecon-brt", "dnsrecon-zt", "dnsenum", "shuffledns", "alterx"]),
+          "sublist3r", "findomain", "dnsrecon-brt", "dnsrecon-zt", "dnsenum", "shuffledns", "alterx",
+          "nuclei-takeover"]),  # HackerOne: 49 subdomain takeover reports
         ("P02", "Port Service Discovery", "Discover exposed ports and services; enrich with OSINT banners",
          ["skill.recon.port_service_discovery"], ["naabu"],
          ["shodan-cli", "nmap", "nmap-vuln", "nmap-ssl", "nmap-ssh", "nmap-smb", "nmap-dns",
@@ -144,7 +146,8 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
          ["gobuster", "katana", "hakrawler", "gospider", "feroxbuster", "dirsearch",
-          "gau", "waybackurls", "nmap-http"]),
+          "gau", "waybackurls", "nmap-http",
+          "nuclei-lfi"]),  # HackerOne: 13 path traversal reports — scan dirs for exposed paths
         ("P04", "Parameter Discovery", "Discover input points and parameters",
          ["skill.discovery.parameter_discovery"], ["arjun"],
          ["paramspider", "ffuf", "ffuf-params", "ffuf-content", "wfuzz", "gau", "waybackurls"]),
@@ -153,7 +156,12 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["gobuster", "katana", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]),
         ("P06", "HTTP Fingerprinting & WAF Detection", "Fingerprint HTTP behavior, headers, WAF profile and evasion clues",
          ["skill.recon.port_service_discovery"], ["httpx"],
-         ["wafw00f", "curl-headers", "nmap-http", "whatweb"]),
+         ["wafw00f", "curl-headers", "nmap-http", "whatweb",
+          "nuclei-headers",      # HackerOne: 27 missing security headers reports (CSP, HSTS, X-Content-Type)
+          "nuclei-cors",         # HackerOne: 8 CORS misconfiguration reports
+          "nuclei-clickjacking", # HackerOne: 19 clickjacking / X-Frame-Options reports
+          "nuclei-spoofing",     # HackerOne: 53 spoofing/email-spoofing reports (SPF/DMARC/DKIM)
+          "nuclei-crlf"]),       # HackerOne: CRLF/header injection — detected via HTTP response
         ("P07", "Technology Detection", "Identify services and technology versions",
          ["skill.recon.port_service_discovery"], ["whatweb"],
          ["httpx", "whatweb-basic", "nmap-http", "wpscan"]),
@@ -162,31 +170,68 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["katana-js", "hakrawler", "gospider", "ffuf"]),
         ("P09", "Vulnerability Template Scan", "Nuclei CVE/misconfiguration templates + content discovery",
          ["skill.discovery.endpoint_discovery"], ["nuclei"],
-         ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan"]),
+         ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan",
+          "nuclei-rce",           # HackerOne: injection class (135 reports) — RCE/command injection
+          "nuclei-auth",          # HackerOne: 119 auth bypass / default credentials reports
+          "nuclei-deserialization"]),  # HackerOne: 13 insecure deserialization reports
         ("P10", "Injection Testing", "Test injection hypotheses with controls",
-         ["skill.sqli_testing"], ["curl"], ["sqlmap", "manual_http_probe", "wapiti"]),
+         ["skill.sqli_testing"], ["curl"],
+         ["sqlmap", "manual_http_probe", "wapiti",
+          "nuclei-sqli",   # HackerOne: 46 SQL injection reports — template-based detection
+          "nuclei-ssti",   # HackerOne: injection class (135 reports) — SSTI patterns
+          "nuclei-xxe",    # HackerOne: 9 XXE reports
+          "nuclei-crlf"]), # HackerOne: CRLF injection → header injection
         ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses",
-         ["skill.vuln.ssrf"], ["curl"], ["interactsh", "ffuf", "wapiti"]),
+         ["skill.vuln.ssrf"], ["curl"],
+         ["interactsh", "ffuf", "wapiti",
+          "nuclei-ssrf"]),  # HackerOne: 68 SSRF reports — blind SSRF, EC2 metadata, webhook
         ("P12", "XSS Testing", "Validate reflected or stored XSS safely",
-         ["skill.stored_xss_testing"], ["curl"], ["dalfox", "manual_http_probe", "wapiti"]),
+         ["skill.stored_xss_testing"], ["curl"],
+         ["dalfox", "manual_http_probe", "wapiti",
+          "nuclei-xss",   # HackerOne: #1 class (652 reports) — reflected, stored, DOM, blind
+          "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
         ("P13", "Access Control Testing", "Validate object and authorization boundaries",
-         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe", "ffuf"]),
+         ["skill.idor_object_authorization"], ["curl"],
+         ["manual_http_probe", "ffuf",
+          "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
+          "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries",
-         ["skill.vuln.auth_bypass"], ["curl"], ["ffuf", "hydra", "medusa", "jwt_tool", "crackmapexec"]),
+         ["skill.vuln.auth_bypass"], ["curl"],
+         ["ffuf", "hydra", "medusa", "jwt_tool", "crackmapexec",
+          "nuclei-auth",  # HackerOne: 119 auth bypass reports — default creds, 2FA bypass
+          "nuclei-jwt"]), # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
         ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks and upload-adjacent risks",
          ["skill.chain.exposed_git_to_credential_leak"], ["curl"],
-         ["git", "gitleaks", "trufflehog", "trufflehog-filesystem"]),
+         ["git", "gitleaks", "trufflehog", "trufflehog-filesystem",
+          "nuclei-lfi",       # HackerOne: 13 path traversal/LFI reports
+          "nuclei-exposure"]),  # HackerOne: 78 information/secret exposure reports
         ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage",
-         ["skill.discovery.parameter_discovery"], ["arjun"], ["paramspider", "ffuf", "wfuzz", "gau", "waybackurls"]),
+         ["skill.discovery.parameter_discovery"], ["arjun"],
+         ["paramspider", "ffuf", "wfuzz", "gau", "waybackurls",
+          "nuclei-graphql",   # HackerOne: 25 GraphQL introspection / API disclosure reports
+          "nuclei-exposure"]), # HackerOne: hardcoded API keys, token leaks in API responses
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
-         ["skill.vuln.sqli"], ["nuclei"], ["sqlmap", "wapiti", "nikto", "wpscan"]),
+         ["skill.vuln.sqli"], ["nuclei"],
+         ["sqlmap", "wapiti", "nikto", "wpscan",
+          "nuclei-rce",    # HackerOne: critical RCE validation
+          "nuclei-lfi",    # HackerOne: path traversal exploit confirmation
+          "nuclei-sqli",   # HackerOne: SQL injection exploit confirmation
+          "nuclei-ssti"]), # HackerOne: template injection → RCE confirmation
         ("P18", "Credential Exposure Boundary", "Validate credential exposure via OSINT and secret scanning",
          ["skill.chain.exposed_git_to_credential_leak"], ["theharvester"],
-         ["gitleaks", "trufflehog", "trufflehog-filesystem", "h8mail", "curl", "bandit", "semgrep", "trivy"]),
+         ["gitleaks", "trufflehog", "trufflehog-filesystem", "h8mail", "curl", "bandit", "semgrep", "trivy",
+          "nuclei-exposure", # HackerOne: 78 info/secret exposure reports — API keys, debug endpoints
+          "nuclei-cloud"]),   # HackerOne: 15 cloud/S3 exposure reports — open buckets, AWS metadata
         ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls",
-         ["skill.idor_object_authorization"], ["curl"], ["manual_http_probe", "crackmapexec"]),
+         ["skill.idor_object_authorization"], ["curl"],
+         ["manual_http_probe", "crackmapexec",
+          "nuclei-csrf",    # HackerOne: 110 CSRF reports — post-auth CSRF on sensitive actions
+          "nuclei-cors",    # HackerOne: 8 CORS misconfig — cross-origin credential access
+          "nuclei-idor"]),  # HackerOne: 73 IDOR — post-auth object boundary testing
         ("P20", "Attack Path Correlation", "Build offensive chains from evidence",
-         ["skill.chain.exposed_git_to_credential_leak"], ["curl"], ["manual_correlation"]),
+         ["skill.chain.exposed_git_to_credential_leak"], ["curl"],
+         ["manual_correlation",
+          "nuclei-race"]),  # HackerOne: 20 race condition reports — coupon/invitation bypass chains
         ("P21", "Evidence Quality Review", "Score evidence and false positive controls",
          ["skill.reporting.evidence_quality"], ["manual_review"], []),
         ("P22", "Campaign Reporting", "Build offensive campaign narrative",
@@ -412,6 +457,54 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("retire", "retire_js", ["sca", "js_audit"], "generic_json_parser"),
         # Takeover detection
         entry("subjack", "subjack_takeover", ["subdomain_takeover", "passive_recon"], "generic_json_parser"),
+        # === HackerOne-derived nuclei profiles (23 vulnerability classes) ===
+        # Maps to kali-runner profile keys; each targets a specific vuln class via nuclei tags.
+        # XSS — #1 HackerOne class (652 reports): reflected, stored, DOM, blind, HTML inject
+        entry("nuclei-xss", "nuclei_xss", ["xss_validation", "template_validation"], "nuclei_parser"),
+        # SQL Injection — 46 reports: error-based, time-based, blind, NoSQL
+        entry("nuclei-sqli", "nuclei_sqli", ["sqli_validation", "template_validation"], "nuclei_parser"),
+        # SSRF — 68 reports: blind SSRF, EC2 metadata, webhook, bypass patterns
+        entry("nuclei-ssrf", "nuclei_ssrf", ["ssrf_validation", "template_validation"], "nuclei_parser"),
+        # LFI/Path Traversal — 13 reports: directory traversal, local/remote file inclusion
+        entry("nuclei-lfi", "nuclei_lfi", ["lfi_validation", "path_traversal"], "nuclei_parser"),
+        # SSTI — injection class (135 reports): template injection leading to RCE
+        entry("nuclei-ssti", "nuclei_ssti", ["ssti_validation", "template_injection"], "nuclei_parser"),
+        # XXE — 9 reports: blind OOB, SOAP XXE, XML parser injection
+        entry("nuclei-xxe", "nuclei_xxe", ["xxe_validation", "template_validation"], "nuclei_parser"),
+        # CORS misconfiguration — 8 reports: wildcard, credentials, allow-origin bypass
+        entry("nuclei-cors", "nuclei_cors", ["cors_misconfiguration", "header_audit"], "nuclei_parser"),
+        # Open Redirect — 69 reports: login redirect, OAuth redirect_uri, host header
+        entry("nuclei-redirect", "nuclei_open_redirect", ["open_redirect", "template_validation"], "nuclei_parser"),
+        # IDOR/Access Control — 73 reports: broken access control, unauthorized data access
+        entry("nuclei-idor", "nuclei_idor", ["idor_validation", "access_control"], "nuclei_parser"),
+        # CSRF — 110 reports: login CSRF, OAuth CSRF, missing token checks
+        entry("nuclei-csrf", "nuclei_csrf", ["csrf_validation", "template_validation"], "nuclei_parser"),
+        # CRLF/Header Injection — injection class: response splitting, log injection
+        entry("nuclei-crlf", "nuclei_crlf", ["crlf_injection", "header_injection"], "nuclei_parser"),
+        # GraphQL/API — 25 of 28 API reports: introspection enabled, field disclosure
+        entry("nuclei-graphql", "nuclei_graphql", ["graphql_exposure", "api_validation"], "nuclei_parser"),
+        # Race Condition — 20 reports: coupon/invitation bypass, resource exhaustion
+        entry("nuclei-race", "nuclei_race", ["race_condition", "business_logic"], "nuclei_parser"),
+        # RCE/Command Injection — critical severity, injection class (135 reports)
+        entry("nuclei-rce", "nuclei_rce", ["rce_validation", "command_injection"], "nuclei_parser"),
+        # Auth/Default Credentials — 119 reports: broken auth, default logins, 2FA bypass
+        entry("nuclei-auth", "nuclei_auth", ["auth_validation", "default_credentials"], "nuclei_parser"),
+        # JWT/OAuth — 19 reports: alg:none, weak HS256, token leak, OAuth state bypass
+        entry("nuclei-jwt", "nuclei_jwt", ["jwt_audit", "oauth_validation"], "nuclei_parser"),
+        # Information/Secret Exposure — 78 reports: API keys, tokens, stack traces, debug
+        entry("nuclei-exposure", "nuclei_exposure", ["information_disclosure", "secret_detection"], "nuclei_parser"),
+        # Cloud/S3 Exposure — 15 reports: open buckets, AWS metadata, GCP/Azure
+        entry("nuclei-cloud", "nuclei_cloud", ["cloud_exposure", "s3_audit"], "nuclei_parser"),
+        # Deserialization — 13 reports: Java, PHP, Python unsafe deserialize
+        entry("nuclei-deserialization", "nuclei_deserialization", ["deserialization_audit", "template_validation"], "nuclei_parser"),
+        # Clickjacking — 19 reports: missing X-Frame-Options, CSP frame-ancestors
+        entry("nuclei-clickjacking", "nuclei_clickjacking", ["clickjacking", "header_audit"], "nuclei_parser"),
+        # Security Headers — 27 reports: CSP, HSTS, X-Content-Type-Options, DMARC/SPF/DKIM
+        entry("nuclei-headers", "nuclei_headers", ["security_headers", "header_audit"], "nuclei_parser"),
+        # Spoofing/Impersonation — 53 reports: email spoofing, SPF/DMARC/DKIM missing
+        entry("nuclei-spoofing", "nuclei_spoofing", ["email_spoofing", "dns_security"], "nuclei_parser"),
+        # Subdomain Takeover (nuclei templates) — 49 reports: complement subjack
+        entry("nuclei-takeover", "nuclei_takeover", ["subdomain_takeover", "passive_recon"], "nuclei_parser"),
     ]
 
 

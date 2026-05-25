@@ -1,39 +1,51 @@
 ---
-skill_id: "skill.discovery.endpoint_discovery"
-name: "Endpoint and Content Discovery"
-version: "1.0.0"
-category: "discovery"
-phase_ids: ["P03", "P05", "P08", "P09"]
-status: "approved"
-supported_target_types: ["domain", "subdomain", "url", "ip_address"]
-risk_level: "medium"
-noise_level: "high"
+skill_id: skill.discovery.endpoint_discovery
+name: Endpoint and Content Discovery
+version: 1.0.0
+category: discovery
+phase_ids:
+- P03
+- P05
+- P08
+- P09
+status: approved
+supported_target_types:
+- domain
+- subdomain
+- url
+- ip_address
+risk_level: medium
+noise_level: high
 requires_authorization: true
 required_tools:
-  - ffuf
+- ffuf
 optional_tools:
-  - nuclei
-  - gobuster
-  - feroxbuster
-  - dirsearch
-  - katana
-  - katana-js
-  - hakrawler
-  - gospider
-  - gau
-  - waybackurls
-  - nmap-http
-  - httpx
-  - whatweb
-  - nikto
-  - curl-headers
-  - wafw00f
+- nuclei
+- gobuster
+- feroxbuster
+- dirsearch
+- katana
+- katana-js
+- hakrawler
+- gospider
+- gau
+- waybackurls
+- nmap-http
+- httpx
+- whatweb
+- nikto
+- curl-headers
+- wafw00f
+- nuclei-rce
+- nuclei-auth
+- nuclei-deserialization
+- nuclei-lfi
 fallback_tools:
-  - gobuster
+- gobuster
 evidence_required:
-  - discovered_paths
-  - http_status_codes
-  - response_sizes
+- discovered_paths
+- http_status_codes
+- response_sizes
 exit_criteria:
   minimum_tools_attempted: 1
   minimum_evidence_items: 1
@@ -44,16 +56,16 @@ retry_policy:
   change_tool_on_retry: true
   change_wordlist_on_retry: true
 attack_chain_opportunities:
-  - admin_panel_found
-  - backup_file_found
-  - git_exposed
-  - config_file_exposed
-  - api_endpoint_found
-  - upload_endpoint_found
+- admin_panel_found
+- backup_file_found
+- git_exposed
+- config_file_exposed
+- api_endpoint_found
+- upload_endpoint_found
 allowed_execution_modes:
-  - safe_validation
-  - controlled_pentest
-  - full_authorized_pentest
+- safe_validation
+- controlled_pentest
+- full_authorized_pentest
 safety_rules:
   destructive_payloads_allowed: false
   scope_guard_required: true

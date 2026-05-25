@@ -1,33 +1,44 @@
 ---
-skill_id: "skill.chain.exposed_git_to_credential_leak"
-name: "Exposed Git Repository to Credential Leak Chain"
-version: "1.0.0"
-category: "attack_chains"
-phase_ids: ["P03", "P14", "P15", "P18", "P20"]
-status: "approved"
-supported_target_types: ["url", "subdomain", "domain"]
-risk_level: "high"
-noise_level: "low"
+skill_id: skill.chain.exposed_git_to_credential_leak
+name: Exposed Git Repository to Credential Leak Chain
+version: 1.0.0
+category: attack_chains
+phase_ids:
+- P03
+- P14
+- P15
+- P18
+- P20
+status: approved
+supported_target_types:
+- url
+- subdomain
+- domain
+risk_level: high
+noise_level: low
 requires_authorization: true
 required_tools:
-  - curl
+- curl
 optional_tools:
-  - git
-  - gitleaks
-  - trufflehog
-  - trufflehog-filesystem
-  - bandit
-  - semgrep
-  - trivy
-  - retire
-  - h8mail
-  - theharvester
+- git
+- gitleaks
+- trufflehog
+- trufflehog-filesystem
+- bandit
+- semgrep
+- trivy
+- retire
+- h8mail
+- theharvester
+- nuclei-exposure
+- nuclei-cloud
+- nuclei-race
 fallback_tools:
-  - gitleaks
+- gitleaks
 evidence_required:
-  - git_repository_accessible
-  - source_code_downloaded
-  - credentials_found_in_source
+- git_repository_accessible
+- source_code_downloaded
+- credentials_found_in_source
 exit_criteria:
   minimum_tools_attempted: 1
   minimum_evidence_items: 2
@@ -37,25 +48,26 @@ retry_policy:
   max_attempts: 2
   change_tool_on_retry: true
 attack_chain_opportunities:
-  - credentials_reuse_candidate
-  - database_connection_string_found
-  - api_key_found
-  - aws_credentials_found
-  - hardcoded_secrets_found
+- credentials_reuse_candidate
+- database_connection_string_found
+- api_key_found
+- aws_credentials_found
+- hardcoded_secrets_found
 allowed_execution_modes:
-  - controlled_pentest
-  - full_authorized_pentest
+- controlled_pentest
+- full_authorized_pentest
 safety_rules:
   destructive_payloads_allowed: false
   scope_guard_required: true
   human_review_required_for_credentials: true
 source_report_ids: []
 changelog:
-  - version: "1.0.0"
-    date: "2025-01-01"
-    change: "Initial chain definition"
-    requires_human_review: true
-    review_reason: "Attack chain involving credential extraction requires human review before escalation"
+- version: 1.0.0
+  date: '2025-01-01'
+  change: Initial chain definition
+  requires_human_review: true
+  review_reason: Attack chain involving credential extraction requires human review
+    before escalation
 ---
 
 # Objective

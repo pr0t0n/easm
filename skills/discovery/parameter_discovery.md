@@ -1,30 +1,37 @@
 ---
-skill_id: "skill.discovery.parameter_discovery"
-name: "Parameter and Input Discovery"
-version: "1.0.0"
-category: "discovery"
-phase_ids: ["P04", "P16"]
-status: "approved"
-supported_target_types: ["url", "subdomain", "domain"]
-risk_level: "medium"
-noise_level: "medium"
+skill_id: skill.discovery.parameter_discovery
+name: Parameter and Input Discovery
+version: 1.0.0
+category: discovery
+phase_ids:
+- P04
+- P16
+status: approved
+supported_target_types:
+- url
+- subdomain
+- domain
+risk_level: medium
+noise_level: medium
 requires_authorization: true
 required_tools:
-  - arjun
+- arjun
 optional_tools:
-  - paramspider
-  - ffuf
-  - ffuf-params
-  - ffuf-content
-  - wfuzz
-  - gau
-  - waybackurls
+- paramspider
+- ffuf
+- ffuf-params
+- ffuf-content
+- wfuzz
+- gau
+- waybackurls
+- nuclei-graphql
+- nuclei-exposure
 fallback_tools:
-  - paramspider
+- paramspider
 evidence_required:
-  - discovered_parameters
-  - parameter_types
-  - endpoints_with_params
+- discovered_parameters
+- parameter_types
+- endpoints_with_params
 exit_criteria:
   minimum_tools_attempted: 1
   minimum_evidence_items: 1
@@ -34,15 +41,15 @@ retry_policy:
   reduce_rate_on_retry: true
   change_tool_on_retry: true
 attack_chain_opportunities:
-  - injectable_parameter_found
-  - reflected_parameter_found
-  - file_path_parameter_found
-  - url_parameter_found
-  - id_parameter_found
+- injectable_parameter_found
+- reflected_parameter_found
+- file_path_parameter_found
+- url_parameter_found
+- id_parameter_found
 allowed_execution_modes:
-  - safe_validation
-  - controlled_pentest
-  - full_authorized_pentest
+- safe_validation
+- controlled_pentest
+- full_authorized_pentest
 safety_rules:
   destructive_payloads_allowed: false
   scope_guard_required: true

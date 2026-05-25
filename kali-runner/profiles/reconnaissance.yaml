@@ -396,3 +396,17 @@ domain_takeover_batch:
   cmd: ["subjack", "-w", "{target_file}", "-t", "50", "-timeout", "30", "-ssl", "-v", "-c", "/usr/share/subjack/fingerprints.json"]
   timeout: 600
   parser: raw
+
+# Nuclei takeover templates — complement subjack with template-based detection.
+# Covers HubSpot, StatusPage, GitHub Pages, S3, Heroku, Fastly, Pantheon, etc.
+# (49 HackerOne subdomain takeover reports)
+nuclei_takeover:
+  tool: nuclei
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Nuclei subdomain takeover templates — dangling CNAME, unclaimed services, fingerprint-based detection."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "takeover,subdomain-takeover,dns-takeover",
+        "-rate-limit", "100"]
+  timeout: 300
+  parser: jsonl

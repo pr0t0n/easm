@@ -1,37 +1,49 @@
 ---
-skill_id: "skill.recon.port_service_discovery"
-name: "Port and Service Discovery"
-version: "1.0.0"
-category: "reconnaissance"
-phase_ids: ["P02", "P06", "P07"]
-status: "approved"
-supported_target_types: ["domain", "subdomain", "ip_address", "cidr"]
-risk_level: "medium"
-noise_level: "medium"
+skill_id: skill.recon.port_service_discovery
+name: Port and Service Discovery
+version: 1.0.0
+category: reconnaissance
+phase_ids:
+- P02
+- P06
+- P07
+status: approved
+supported_target_types:
+- domain
+- subdomain
+- ip_address
+- cidr
+risk_level: medium
+noise_level: medium
 requires_authorization: true
 required_tools:
-  - naabu
+- naabu
 optional_tools:
-  - nmap
-  - nmap-vuln
-  - nmap-ssl
-  - nmap-ssh
-  - nmap-smb
-  - nmap-dns
-  - nmap-http
-  - masscan
-  - httpx
-  - whatweb
-  - wafw00f
-  - sslscan
-  - testssl
-  - shodan-cli
+- nmap
+- nmap-vuln
+- nmap-ssl
+- nmap-ssh
+- nmap-smb
+- nmap-dns
+- nmap-http
+- masscan
+- httpx
+- whatweb
+- wafw00f
+- sslscan
+- testssl
+- shodan-cli
+- nuclei-headers
+- nuclei-cors
+- nuclei-clickjacking
+- nuclei-spoofing
+- nuclei-crlf
 fallback_tools:
-  - nmap
+- nmap
 evidence_required:
-  - open_ports_list
-  - service_banners
-  - protocol_per_port
+- open_ports_list
+- service_banners
+- protocol_per_port
 exit_criteria:
   minimum_tools_attempted: 1
   minimum_evidence_items: 1
@@ -41,14 +53,14 @@ retry_policy:
   reduce_rate_on_retry: true
   change_tool_on_retry: true
 attack_chain_opportunities:
-  - exposed_internal_service
-  - open_port_service
-  - admin_panel_found
-  - credentials_found
+- exposed_internal_service
+- open_port_service
+- admin_panel_found
+- credentials_found
 allowed_execution_modes:
-  - safe_validation
-  - controlled_pentest
-  - full_authorized_pentest
+- safe_validation
+- controlled_pentest
+- full_authorized_pentest
 safety_rules:
   destructive_payloads_allowed: false
   scope_guard_required: true

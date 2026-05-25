@@ -1,36 +1,40 @@
 ---
-skill_id: "skill.recon.subdomain_enumeration"
-name: "Subdomain Enumeration"
-version: "1.0.0"
-category: "reconnaissance"
-phase_ids: ["P01"]
-status: "approved"
-supported_target_types: ["domain", "apex_domain"]
-risk_level: "low"
-noise_level: "low"
+skill_id: skill.recon.subdomain_enumeration
+name: Subdomain Enumeration
+version: 1.0.0
+category: reconnaissance
+phase_ids:
+- P01
+status: approved
+supported_target_types:
+- domain
+- apex_domain
+risk_level: low
+noise_level: low
 requires_authorization: true
 required_tools:
-  - subfinder
+- subfinder
 optional_tools:
-  - amass
-  - amass-brute
-  - amass-intel
-  - theharvester
-  - dnsx
-  - assetfinder
-  - sublist3r
-  - findomain
-  - dnsrecon-brt
-  - dnsrecon-zt
-  - dnsenum
-  - shuffledns
-  - alterx
+- amass
+- amass-brute
+- amass-intel
+- theharvester
+- dnsx
+- assetfinder
+- sublist3r
+- findomain
+- dnsrecon-brt
+- dnsrecon-zt
+- dnsenum
+- shuffledns
+- alterx
+- nuclei-takeover
 fallback_tools:
-  - assetfinder
+- assetfinder
 evidence_required:
-  - subdomain_list
-  - dns_resolution_proof
-  - source_tool_name
+- subdomain_list
+- dns_resolution_proof
+- source_tool_name
 exit_criteria:
   minimum_tools_attempted: 1
   minimum_evidence_items: 1
@@ -40,14 +44,14 @@ retry_policy:
   change_tool_on_retry: true
   rag_reconsult_allowed: true
 attack_chain_opportunities:
-  - subdomain_takeover_candidate
-  - expanded_attack_surface
-  - internal_service_exposure
+- subdomain_takeover_candidate
+- expanded_attack_surface
+- internal_service_exposure
 allowed_execution_modes:
-  - passive_recon
-  - safe_validation
-  - controlled_pentest
-  - full_authorized_pentest
+- passive_recon
+- safe_validation
+- controlled_pentest
+- full_authorized_pentest
 safety_rules:
   destructive_payloads_allowed: false
   scope_guard_required: true

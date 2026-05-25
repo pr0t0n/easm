@@ -158,3 +158,107 @@ theharvester_passive:
   timeout: 300
   parser: raw
 
+# === HackerOne-derived nuclei template profiles (weaponization phase) ===
+# Covers vulnerability classes ranked medium–critical in HackerOne data:
+# RCE/Command Injection, Auth/Default Creds, JWT/OAuth, Info Disclosure,
+# Cloud/S3, Deserialization, Clickjacking, Security Headers.
+
+nuclei_rce:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei RCE/command injection templates — critical severity only (HackerOne injection class: 135 reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "rce,command-injection,code-injection,os-command-injection",
+        "-severity", "critical,high", "-rate-limit", "50"]
+  timeout: 600
+  parser: jsonl
+
+nuclei_auth:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei auth/default-credentials templates — broken auth, default logins, 2FA bypass (119 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "auth,authentication,default-login,default-credentials,auth-bypass,2fa-bypass",
+        "-rate-limit", "60"]
+  timeout: 600
+  parser: jsonl
+
+nuclei_jwt:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei JWT/OAuth templates — alg:none, weak HS256, token leak, OAuth state bypass (19 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "jwt,oauth,oauth2,token",
+        "-rate-limit", "80"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_exposure:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei information/secret exposure templates — API keys, tokens, stack traces, debug endpoints (78 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "exposure,token,api-key,secret,debug,stack-trace,config-exposure",
+        "-rate-limit", "100"]
+  timeout: 600
+  parser: jsonl
+
+nuclei_cloud:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei cloud/S3 exposure templates — open buckets, AWS metadata, GCP/Azure exposure (15 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "s3,cloud,aws,gcp,azure,bucket,instance-metadata,ec2-metadata",
+        "-rate-limit", "80"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_deserialization:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei deserialization templates — Java, PHP, Python unsafe deserialize (13 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "deserialization,insecure-deserialization,unsafe-deserialization",
+        "-severity", "critical,high", "-rate-limit", "50"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_clickjacking:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei clickjacking templates — missing X-Frame-Options, CSP frame-ancestors bypass (19 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "clickjacking,xfo,x-frame-options",
+        "-rate-limit", "100"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_headers:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei missing security headers — CSP, HSTS, X-Content-Type-Options, DMARC/SPF/DKIM (27 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "headers,missing-headers,security-misconfiguration,csp,hsts,dmarc,spf",
+        "-rate-limit", "100"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_spoofing:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei spoofing/impersonation templates — email spoofing via missing SPF/DMARC, content spoofing (53 HackerOne reports)."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "spoofing,email-spoofing,content-spoofing,spf,dmarc,dkim",
+        "-rate-limit", "100"]
+  timeout: 300
+  parser: jsonl
+
