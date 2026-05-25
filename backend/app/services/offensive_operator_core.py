@@ -137,6 +137,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
         ("P01", "Subdomain Enumeration", "Collect passive domains, subdomains and assets via OSINT + active brute-force",
          ["skill.recon.subdomain_enumeration"], ["subfinder"],
          ["amass", "amass-brute", "amass-intel", "theharvester", "dnsx", "assetfinder",
+          "ghdb-public-indexes",
           "sublist3r", "findomain", "dnsrecon-brt", "dnsrecon-zt", "dnsenum", "shuffledns", "alterx",
           "nuclei-takeover"]),  # HackerOne: 49 subdomain takeover reports
         ("P02", "Port Service Discovery", "Discover exposed ports and services; enrich with OSINT banners",
@@ -410,6 +411,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # Subdomain enumeration variants
         entry("amass-brute", "amass_brute", ["subdomain_enumeration", "active_recon", "dns_brute"], "subfinder_parser"),
         entry("amass-intel", "amass_intel", ["subdomain_enumeration", "osint", "whois"], "subfinder_parser"),
+        entry("ghdb-public-indexes", "ghdb_public_indexes", ["subdomain_enumeration", "passive_recon", "osint"], "subfinder_parser"),
         entry("sublist3r", "sublist3r_basic", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
         entry("findomain", "findomain_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
         entry("dnsrecon-brt", "dnsrecon_brute", ["subdomain_enumeration", "dns_brute"], "subfinder_parser"),

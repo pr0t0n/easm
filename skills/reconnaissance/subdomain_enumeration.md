@@ -21,6 +21,7 @@ optional_tools:
 - theharvester
 - dnsx
 - assetfinder
+- ghdb-public-indexes
 - sublist3r
 - findomain
 - dnsrecon-brt

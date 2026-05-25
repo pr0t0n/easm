@@ -58,6 +58,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "domain", "outputs": "subdomain list",
         "prerequisites": "internet egress",
     },
+    "ghdb-public-indexes": {
+        "category": "recon", "phase": "P01",
+        "description": "GHDB-style public index discovery from crt.sh, urlscan, OTX, HackerTarget and RapidDNS.",
+        "when_to_use": "Run in P01 to recover subdomains indexed publicly but missed by sublist3r/search-engine modules.",
+        "inputs": "domain", "outputs": "subdomain list",
+        "prerequisites": "internet egress",
+    },
     "findomain": {
         "category": "recon", "phase": "P01",
         "description": "Fast passive subdomain enumeration from CT logs and public datasets.",

@@ -44,6 +44,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "amass": "amass_enum",
     "amass-brute": "amass_brute",
     "amass-intel": "amass_intel",
+    "ghdb-public-indexes": "ghdb_public_indexes",
     "sublist3r": "sublist3r_basic",
     "findomain": "findomain_passive",
     "dnsrecon-brt": "dnsrecon_brute",

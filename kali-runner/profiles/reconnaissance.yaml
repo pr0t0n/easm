@@ -58,6 +58,15 @@ sublist3r_basic:
   timeout: 300
   parser: lines
 
+ghdb_public_indexes:
+  tool: ghdb-public-indexes
+  category: recon
+  phase: RECONNAISSANCE
+  description: "GHDB-style public index discovery via crt.sh, urlscan, OTX, HackerTarget and RapidDNS."
+  cmd: ["python3", "/opt/runner-scripts/ghdb_public_index_subdomains.py", "{host}", "--limit", "5000"]
+  timeout: 240
+  parser: lines
+
 findomain_passive:
   tool: findomain
   category: recon
