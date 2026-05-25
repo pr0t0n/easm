@@ -413,6 +413,7 @@ export default function LearningPage() {
   const [submitting, setSubmitting] = useState(false);
   const [manualSubmitting, setManualSubmitting] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [crawlerRunning, setCrawlerRunning] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [error, setError] = useState("");
@@ -482,6 +483,13 @@ export default function LearningPage() {
           setUrlsText("");
           await load();
           return;
+        }
+        if (data.result?.success) {
+          await load();
+          setTaskStatus(
+            `Crawler finalizado: ${data.result.created || 0} criados, ${data.result.purged || 0} removidos, ${data.result.mcp_ingested || 0} indexados no RAG.`,
+          );
+          return data.result;
         }
         throw new Error(data.result?.error || "A task terminou sem criar aprendizado.");
       }
@@ -593,6 +601,28 @@ export default function LearningPage() {
     }
   };
 
+  const runGithubCrawler = async () => {
+    setCrawlerRunning(true);
+    setError("");
+    setTaskStatus("");
+    try {
+      const { data } = await client.post("/api/learning/vulnerabilities/github-crawler", {
+        min_per_phase: 50,
+        min_per_skill: 150,
+        max_created: 5000,
+        purge_source: true,
+      });
+      setTaskStatus(data.message || "Crawler GitHub/HackerOne em execução.");
+      if (data.task_id) {
+        await pollLearningTask(data.task_id);
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || "Falha ao executar crawler GitHub/HackerOne.");
+    } finally {
+      setCrawlerRunning(false);
+    }
+  };
+
   const toggleSelected = (id) => {
     setSelectedIds((current) => (
       current.includes(id)
@@ -699,6 +729,9 @@ export default function LearningPage() {
             </button>
             <button type="button" className="btn-secondary" onClick={seedCatalog} disabled={seeding}>
               {seeding ? "Antecipando..." : "Antecipar catálogo"}
+            </button>
+            <button type="button" className="btn-secondary" onClick={runGithubCrawler} disabled={crawlerRunning}>
+              {crawlerRunning ? "Crawleando..." : "Crawler GitHub/HackerOne"}
             </button>
             <button type="button" className="btn-secondary" onClick={load} disabled={loading}>
               {loading ? "Atualizando..." : "Atualizar"}

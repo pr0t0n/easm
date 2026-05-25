@@ -88,6 +88,27 @@ def _persist_store() -> None:
     STORE_PATH.write_text(json.dumps(knowledge_store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _ingest_document_record(doc: Document, *, persist: bool = True) -> list[str]:
+    doc_id = doc.document_id or f"{doc.source}:{abs(hash(doc.content))}"
+    chunks = _chunk_text(doc.content) or [doc.content]
+    ids: list[str] = []
+    for index, chunk in enumerate(chunks):
+        chunk_id = f"{doc_id}:{index}"
+        metadata = dict(doc.metadata)
+        metadata["source"] = doc.source
+        metadata["chunk_index"] = index
+        metadata["chunk_total"] = len(chunks)
+        knowledge_store[chunk_id] = {
+            "content": chunk,
+            "metadata": metadata,
+            "tokens": sorted(_tokenize(chunk + " " + json.dumps(metadata, ensure_ascii=False))),
+        }
+        ids.append(chunk_id)
+    if persist:
+        _persist_store()
+    return ids
+
+
 def _tokenize(value: str) -> set[str]:
     return {
         token
@@ -321,21 +342,40 @@ async def health() -> dict[str, Any]:
 
 @app.post("/rag/ingest")
 async def ingest_document(doc: Document) -> dict[str, Any]:
-    doc_id = doc.document_id or f"{doc.source}:{abs(hash(doc.content))}"
-    chunks = _chunk_text(doc.content) or [doc.content]
-    for index, chunk in enumerate(chunks):
-        chunk_id = f"{doc_id}:{index}"
-        metadata = dict(doc.metadata)
-        metadata["source"] = doc.source
-        metadata["chunk_index"] = index
-        metadata["chunk_total"] = len(chunks)
-        knowledge_store[chunk_id] = {
-            "content": chunk,
-            "metadata": metadata,
-            "tokens": sorted(_tokenize(chunk + " " + json.dumps(metadata, ensure_ascii=False))),
-        }
+    ids = _ingest_document_record(doc)
+    return {"status": "success", "chunks_ingested": len(ids), "ids": ids}
+
+
+@app.post("/rag/ingest-bulk")
+async def ingest_documents_bulk(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_documents = payload.get("documents") or []
+    if not isinstance(raw_documents, list) or not raw_documents:
+        raise HTTPException(status_code=400, detail="Informe documents como lista.")
+    ids: list[str] = []
+    for raw in raw_documents:
+        ids.extend(_ingest_document_record(Document(**dict(raw or {})), persist=False))
     _persist_store()
-    return {"status": "success", "chunks_ingested": len(chunks), "ids": [f"{doc_id}:{i}" for i in range(len(chunks))]}
+    return {"status": "success", "documents_ingested": len(raw_documents), "chunks_ingested": len(ids)}
+
+
+@app.post("/rag/delete-source")
+async def delete_source(payload: dict[str, Any]) -> dict[str, Any]:
+    source = str(payload.get("source") or "").strip()
+    source_kind = str(payload.get("source_kind") or source).strip()
+    if not source and not source_kind:
+        raise HTTPException(status_code=400, detail="Informe source ou source_kind.")
+    removed = 0
+    for record_id, record in list(knowledge_store.items()):
+        metadata = dict(record.get("metadata") or {})
+        if (
+            (source and str(metadata.get("source") or "") == source)
+            or (source_kind and str(metadata.get("source_kind") or "") == source_kind)
+        ):
+            knowledge_store.pop(record_id, None)
+            removed += 1
+    if removed:
+        _persist_store()
+    return {"status": "success", "removed": removed}
 
 
 @app.post("/rag/query")

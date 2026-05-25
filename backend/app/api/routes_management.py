@@ -21,7 +21,7 @@ from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
-from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task
+from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task, create_github_hackerone_learning_task
 from app.workers.worker_groups import (
     SCHEDULED_WORKER_GROUPS,
     UNIT_WORKER_GROUPS,
@@ -2245,6 +2245,35 @@ def seed_vulnerability_learning_catalog(
     return {
         "created": len(rows),
         "items": [serialize_vulnerability_learning(row) for row in rows],
+        "summary": vulnerability_learning_summary(db),
+    }
+
+
+@router.post("/learning/vulnerabilities/github-crawler")
+def run_github_hackerone_learning_crawler(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.vulnerability_learning_service import vulnerability_learning_summary
+
+    min_per_phase = int(payload.get("min_per_phase") or 50)
+    min_per_skill = int(payload.get("min_per_skill") or 150)
+    max_created = min(5000, max(1, int(payload.get("max_created") or 5000)))
+    purge_source = bool(payload.get("purge_source", True))
+    task = create_github_hackerone_learning_task.apply_async(
+        args=(current_user.id, min_per_phase, min_per_skill, max_created, purge_source),
+        task_id=f"github-h1-learning-{current_user.id}-{int(datetime.now().timestamp()*1000)}",
+        queue="worker.unit.reporting",
+        countdown=1,
+    )
+    return {
+        "task_id": task.id,
+        "status": "processing",
+        "message": (
+            f"Crawler GitHub/HackerOne iniciado: meta {min_per_skill} por skill, "
+            f"{min_per_phase} por fase, limite {max_created} novos registros."
+        ),
         "summary": vulnerability_learning_summary(db),
     }
 

@@ -1542,3 +1542,63 @@ def create_vulnerability_learning_task(self, owner_id: int, urls_text: str):
         return {"error": f"Falha no aprendizado: {exc}"}
     finally:
         db.close()
+
+
+@celery.task(bind=True, name="create_github_hackerone_learning_task", queue="worker.unit.reporting")
+def create_github_hackerone_learning_task(
+    self,
+    owner_id: int,
+    min_per_phase: int = 50,
+    min_per_skill: int = 150,
+    max_created: int = 5000,
+    purge_source: bool = True,
+):
+    """Seed accepted operational learnings from public GitHub HackerOne indexes."""
+    import importlib.util
+    from pathlib import Path
+    from app.graph.mission import PENTEST_PHASES
+
+    script_path = Path("/app/scripts/crawl_github_hackerone_learnings.py")
+    spec = importlib.util.spec_from_file_location("crawl_github_hackerone_learnings", script_path)
+    if spec is None or spec.loader is None:
+        return {"error": f"Nao foi possivel carregar {script_path}"}
+    crawler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(crawler)
+
+    db = SessionLocal()
+    try:
+        reports = crawler.crawl_github_hackerone_reports()
+        purged = crawler.purge_crawler_learnings(db) if purge_source else 0
+        before_phase, before_skill = crawler._counts(db)
+        created = crawler.seed(
+            db,
+            reports,
+            min_per_phase=max(0, int(min_per_phase or 0)),
+            min_per_skill=max(0, int(min_per_skill or 0)),
+            owner_id=owner_id,
+            max_created=max(1, int(max_created or 5000)),
+        )
+        mcp_ingested = 0
+        mcp_url = str(settings.mcp_server_url or "http://mcp_server:3000").rstrip("/")
+        mcp_purged = crawler._purge_mcp_source(mcp_url) if purge_source else 0
+        mcp_ingested = crawler._ingest_mcp_bulk(created, mcp_url)
+        after_phase, after_skill = crawler._counts(db)
+        return {
+            "success": True,
+            "reports_crawled": len(reports),
+            "purged": purged,
+            "created": len(created),
+            "mcp_ingested": mcp_ingested,
+            "mcp_purged": mcp_purged,
+            "max_created": int(max_created or 5000),
+            "min_per_phase": int(min_per_phase or 0),
+            "min_per_skill": int(min_per_skill or 0),
+            "phase_counts_before_min": min(before_phase.get(str(p.get("id")), 0) for p in PENTEST_PHASES),
+            "phase_counts_after_min": min(after_phase.get(str(p.get("id")), 0) for p in PENTEST_PHASES),
+            "skill_counts_before_min": min(before_skill.get(skill_id, 0) for skill_id in crawler._skill_catalog()),
+            "skill_counts_after_min": min(after_skill.get(skill_id, 0) for skill_id in crawler._skill_catalog()),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Falha no crawler GitHub/HackerOne: {exc}"}
+    finally:
+        db.close()
