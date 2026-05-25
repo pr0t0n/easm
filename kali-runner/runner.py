@@ -41,6 +41,8 @@ MAX_PARALLEL = int(os.getenv("KALI_MAX_PARALLEL", "8"))
 DEFAULT_TIMEOUT = int(os.getenv("KALI_DEFAULT_TIMEOUT", "300"))
 WORKSPACE_TTL_HOURS = int(os.getenv("KALI_WORKSPACE_TTL_HOURS", "24"))
 VOLATILE_JOB_STATES = {"queued", "running"}
+TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
+STALE_JOB_GRACE_SECONDS = int(os.getenv("KALI_STALE_JOB_GRACE_SECONDS", "30"))
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -200,6 +202,52 @@ _JOBS: dict[str, dict[str, Any]] = _load_persisted_jobs()
 print(f"[jobs] loaded {len(_JOBS)} persisted jobs")
 
 
+def _parse_iso_ts(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except Exception:
+        return None
+
+
+def _job_timeout_seconds(job: dict[str, Any]) -> int:
+    try:
+        if job.get("timeout"):
+            return int(job.get("timeout") or DEFAULT_TIMEOUT)
+    except Exception:
+        pass
+    profile = PROFILES.get(str(job.get("profile") or "")) or {}
+    try:
+        return int(profile.get("timeout") or DEFAULT_TIMEOUT)
+    except Exception:
+        return DEFAULT_TIMEOUT
+
+
+def _mark_stale_job_if_needed(job: dict[str, Any]) -> dict[str, Any]:
+    status = str(job.get("status") or "")
+    if status not in VOLATILE_JOB_STATES:
+        return job
+    started_or_enqueued = _parse_iso_ts(job.get("started_at") or job.get("enqueued_at"))
+    if started_or_enqueued is None:
+        return job
+    timeout = _job_timeout_seconds(job)
+    if time.time() - started_or_enqueued <= timeout + STALE_JOB_GRACE_SECONDS:
+        return job
+    job_id = str(job.get("job_id") or "")
+    if not job_id:
+        return job
+    return _set_job_fields(
+        job_id,
+        status="timeout",
+        finished_at=datetime.utcnow().isoformat(),
+        duration_seconds=round(time.time() - started_or_enqueued, 3),
+        error=f"runner watchdog marked stale {status} job after {timeout}s timeout",
+        stdout=job.get("stdout") or "",
+        stderr=job.get("stderr") or "",
+    )
+
+
 def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
     with _JOBS_LOCK:
         job = _JOBS[job_id]
@@ -218,17 +266,18 @@ def _get_job_record(job_id: str) -> dict[str, Any] | None:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
     if job:
-        return job
+        return _mark_stale_job_if_needed(job)
 
     job = _load_job_from_disk(job_id)
     if not job:
         return None
     with _JOBS_LOCK:
         _JOBS[str(job["job_id"])] = job
-    return job
+    return _mark_stale_job_if_needed(job)
 
 
 def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
+    timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
     return {
         "job_id": str(uuid.uuid4()),
         "profile": req.profile,
@@ -247,6 +296,7 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "parsed": None,
         "error": None,
         "workdir": None,
+        "timeout": timeout,
     }
 
 
@@ -323,13 +373,24 @@ def _build_command(
     raw = shlex.split(raw_cmd) if isinstance(raw_cmd, str) else list(raw_cmd)
     if not raw:
         raise ValueError(f"profile {profile.get('source_file')} missing 'cmd'")
-    context = _target_context(target, workdir=workdir, target_file=target_file)
+    needs_host_ip = any(_template_needs_host_ip(str(part)) for part in raw)
+    context = _target_context(
+        target,
+        workdir=workdir,
+        target_file=target_file,
+        resolve_ip=needs_host_ip,
+    )
     materialized = [_render_template(str(part), context) for part in raw]
     materialized.extend(str(a) for a in (extra_args or []))
     return materialized
 
 
-def _target_context(target: str, workdir: Path | None = None, target_file: Path | None = None) -> dict[str, str]:
+def _target_context(
+    target: str,
+    workdir: Path | None = None,
+    target_file: Path | None = None,
+    resolve_ip: bool = False,
+) -> dict[str, str]:
     raw = str(target or "").strip()
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
     host = parsed.hostname or raw.replace("http://", "").replace("https://", "").split("/")[0]
@@ -340,7 +401,7 @@ def _target_context(target: str, workdir: Path | None = None, target_file: Path 
     query = parsed.query or ""
     url = urlunparse((scheme, netloc, path, "", query, ""))
     https_url = urlunparse(("https", netloc, path, "", query, ""))
-    host_ip = _resolve_host_ip(host)
+    host_ip = _resolve_host_ip(host) if resolve_ip else host
     context = {
         "target": raw,
         "url": url,
@@ -382,17 +443,39 @@ def _resolve_host_ip(host: str) -> str:
     except ValueError:
         pass
     try:
+        result = subprocess.run(
+            ["getent", "ahosts", host],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in (result.stdout or "").splitlines():
+            candidate = line.split()[0] if line.split() else ""
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    socket.setdefaulttimeout(5)
+    try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        for info in infos:
+            candidate = str(info[4][0])
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                continue
     except OSError:
         return host
-    for info in infos:
-        candidate = str(info[4][0])
-        try:
-            ipaddress.ip_address(candidate)
-            return candidate
-        except ValueError:
-            continue
     return host
+
+
+def _template_needs_host_ip(template: str) -> bool:
+    return "{host_ip}" in template or "{{host_ip}}" in template
 
 
 def _materialize_template(
@@ -402,13 +485,21 @@ def _materialize_template(
 ) -> str | None:
     if template is None:
         return None
-    return _render_template(str(template), _target_context(target, workdir=workdir))
+    raw_template = str(template)
+    return _render_template(
+        raw_template,
+        _target_context(
+            target,
+            workdir=workdir,
+            resolve_ip=_template_needs_host_ip(raw_template),
+        ),
+    )
 
 
 def _target_validation_error(profile: dict[str, Any], target: str) -> str:
     target_type = str(profile.get("target_type") or "").strip().lower()
     if target_type in {"resolved_ip", "ip"}:
-        context = _target_context(target)
+        context = _target_context(target, resolve_ip=True)
         host = context.get("host", "")
         host_ip = context.get("host_ip", "")
         try:
@@ -473,6 +564,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     tool_name = str(job.get("tool") or tool_name)
 
     try:
+        _set_job_fields(job_id, stage="checking_env")
         missing_env = [
             str(name)
             for name in (profile.get("requires_env") or [])
@@ -489,6 +581,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             )
             return
 
+        _set_job_fields(job_id, stage="checking_required_scheme")
         required_schemes = {
             str(item).strip().lower()
             for item in (profile.get("requires_scheme") or [])
@@ -499,6 +592,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         if required_schemes and "://" not in str(req.target):
             preferred = "https" if "https" in required_schemes else next(iter(required_schemes))
             req.target = f"{preferred}://{req.target}"
+        _set_job_fields(job_id, stage="materializing_target_scheme")
         target_scheme = _target_context(req.target).get("scheme", "").lower()
         if required_schemes and target_scheme not in required_schemes:
             _set_job_fields(
@@ -511,6 +605,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             )
             return
 
+        _set_job_fields(job_id, stage="validating_target")
         target_error = _target_validation_error(profile, req.target)
         if target_error:
             _set_job_fields(
@@ -528,22 +623,25 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # profile's cmd actually contains {target_file}; otherwise it's ignored.
         batch_target_file: Path | None = None
         if req.targets:
+            _set_job_fields(job_id, stage="writing_targets_file")
             batch_target_file = workdir / "targets.txt"
             batch_target_file.write_text(
                 "\n".join(str(t).strip() for t in req.targets if str(t).strip()),
                 encoding="utf-8",
             )
 
+        _set_job_fields(job_id, stage="building_command")
         argv = _build_command(profile, req.target, req.extra_args, workdir=workdir, target_file=batch_target_file)
         # Inject authentication headers into supported tools (ffuf, curl, gobuster,
         # nuclei, httpx, wfuzz, sqlmap, dalfox, wpscan, feroxbuster, dirsearch).
         if req.auth_headers:
+            _set_job_fields(job_id, stage="injecting_auth_headers")
             argv = _inject_auth_headers(argv, req.auth_headers, str(profile.get("tool") or ""))
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
+        _set_job_fields(job_id, stage="materializing_stdin")
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)
-        # Don't write command to _JOBS yet — it will be included in the terminal
-        # _set_job_fields call below, saving one lock acquisition per job.
+        _set_job_fields(job_id, stage="executing", command=command)
 
         proc = subprocess.run(
             argv,
@@ -625,6 +723,18 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         )
 
 
+def _run_job_safely(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
+    try:
+        _run_job(job_id, profile, req)
+    except Exception as exc:  # noqa: BLE001
+        _set_job_fields(
+            job_id,
+            status="failed",
+            error=f"uncaught runner error {type(exc).__name__}: {exc}",
+            finished_at=datetime.utcnow().isoformat(),
+        )
+
+
 def _cleanup_old_workspace(ttl_hours: int = WORKSPACE_TTL_HOURS) -> dict[str, int]:
     """Delete job work-dirs and JSON records older than ttl_hours.
 
@@ -703,6 +813,10 @@ app = FastAPI(title="ScriptKidd.o Kali Runner", version="1.0.0")
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
+    with _JOBS_LOCK:
+        jobs_snapshot = list(_JOBS.values())
+    for job in jobs_snapshot:
+        _mark_stale_job_if_needed(job)
     with _JOBS_LOCK:
         active_jobs = sum(1 for j in _JOBS.values() if j["status"] in VOLATILE_JOB_STATES)
         total_jobs = len(_JOBS)
@@ -816,7 +930,7 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         _JOBS[job_id] = job
     _persist_job_record(job)
 
-    _EXECUTOR.submit(_run_job, job_id, profile, req)
+    _EXECUTOR.submit(_run_job_safely, job_id, profile, req)
     return {
         "job_id": job_id,
         "status": "queued",
