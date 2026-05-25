@@ -2,8 +2,8 @@
 Crawl public GitHub HackerOne report indexes and seed accepted learnings.
 
 Targets:
-- cap each crawler run at 500 accepted knowledge records by default;
-- distribute records across runtime skills/fases as evenly as the cap allows.
+- cap each crawler run at 10,000 accepted knowledge records by default;
+- distribute records across P01-P22 and runtime skills as evenly as the cap allows.
 
 Run inside backend container:
   python3 scripts/crawl_github_hackerone_learnings.py
@@ -35,7 +35,7 @@ from app.models.models import User, VulnerabilityLearning
 SOURCE_KIND = "github_hackerone_crawler"
 DEFAULT_MIN_PER_PHASE = 50
 DEFAULT_MIN_PER_SKILL = 150
-DEFAULT_MAX_CREATED = 500
+DEFAULT_MAX_CREATED = 10_000
 DEFAULT_OWNER_ID = int(os.getenv("H1_CRAWLER_OWNER_ID", "1"))
 DEFAULT_MCP_URL = os.getenv("MCP_SERVER_URL", "http://mcp_server:3000").rstrip("/")
 
@@ -525,20 +525,25 @@ def _mcp_document(row: VulnerabilityLearning) -> dict[str, Any]:
 def _ingest_mcp_bulk(rows: list[VulnerabilityLearning], mcp_url: str) -> int:
     if not rows:
         return 0
-    payload = {"documents": [_mcp_document(row) for row in rows]}
-    data = json.dumps(payload).encode("utf-8")
-    request = Request(
-        f"{mcp_url.rstrip('/')}/rag/ingest-bulk",
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "ScriptKidd.o GitHub-HackerOne-KnowledgeCrawler/1.0"},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=120) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            return int(payload.get("documents_ingested") or 0)
-    except Exception:
-        return sum(1 for row in rows if _ingest_mcp(row, mcp_url))
+    total = 0
+    batch_size = 500
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+        payload = {"documents": [_mcp_document(row) for row in batch]}
+        data = json.dumps(payload).encode("utf-8")
+        request = Request(
+            f"{mcp_url.rstrip('/')}/rag/ingest-bulk",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "ScriptKidd.o GitHub-HackerOne-KnowledgeCrawler/1.0"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                total += int(response_payload.get("documents_ingested") or 0)
+        except Exception:
+            total += sum(1 for row in batch if _ingest_mcp(row, mcp_url))
+    return total
 
 
 def _purge_mcp_source(mcp_url: str) -> int:
@@ -675,6 +680,45 @@ def seed(
             phase_counts[phase] = phase_counts.get(phase, 0) + 1
             for skill_id in phase_skills[:4]:
                 skill_counts[str(skill_id)] = skill_counts.get(str(skill_id), 0) + 1
+
+    # If the requested cap is higher than the mandatory per-skill/per-phase
+    # minimums, keep filling evenly by phase until the cap is reached.
+    while len(created) < max_created:
+        current, phase = min(
+            (phase_counts.get(str(p.get("id")), 0), str(p.get("id")))
+            for p in PENTEST_PHASES
+        )
+        contract = PHASE_CONTRACTS.get(phase) or {}
+        phase_skills = [str(s) for s in list(contract.get("required_skills") or []) + list(contract.get("optional_skills") or [])]
+        tools = [str(t) for t in list(contract.get("required_tools") or []) + list(contract.get("optional_tools") or [])]
+        ranked = reports
+        report_index = int(current)
+        while len(created) < max_created:
+            report = ranked[report_index % len(ranked)]
+            ordinal = int(phase_counts.get(phase, 0)) + 1
+            title = f"H1 GitHub phase {phase} #{ordinal:04d}: {_compact(report.get('title') or '', 120)}"
+            report_index += 1
+            if title in existing_titles:
+                phase_counts[phase] = ordinal
+                continue
+            learning = _build_learning(
+                owner_id=owner.id,
+                title=title,
+                row=report,
+                phases=[phase],
+                skills=phase_skills[:4],
+                tools=tools[:12],
+                ordinal=ordinal,
+                target_kind="phase",
+                target_id=phase,
+            )
+            db.add(learning)
+            created.append(learning)
+            existing_titles.add(title)
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
+            for skill_id in phase_skills[:4]:
+                skill_counts[skill_id] = skill_counts.get(skill_id, 0) + 1
+            break
 
     db.commit()
     for row in created:

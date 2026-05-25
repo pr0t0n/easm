@@ -409,7 +409,7 @@ export default function LearningPage() {
   const [manualInstruction, setManualInstruction] = useState("");
   const [manualUrlsText, setManualUrlsText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
-  const [crawlerLimit, setCrawlerLimit] = useState(500);
+  const [crawlerLimit, setCrawlerLimit] = useState(10000);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [manualSubmitting, setManualSubmitting] = useState(false);
@@ -434,7 +434,7 @@ export default function LearningPage() {
 
   const attackOptions = useMemo(() => skillIndex?.items || [], [skillIndex]);
   const phaseOptions = useMemo(() => phaseIndex?.items || [], [phaseIndex]);
-  const normalizedCrawlerLimit = Math.max(1, Math.min(5000, Number(crawlerLimit) || 500));
+  const normalizedCrawlerLimit = Math.max(1, Math.min(10000, Number(crawlerLimit) || 10000));
 
   const load = async () => {
     setLoading(true);
@@ -737,8 +737,8 @@ export default function LearningPage() {
               <input
                 type="number"
                 min="1"
-                max="5000"
-                step="50"
+                max="10000"
+                step="100"
                 value={crawlerLimit}
                 onChange={(event) => setCrawlerLimit(event.target.value)}
                 className="w-24 rounded-md border px-2 py-1 text-sm font-semibold"
