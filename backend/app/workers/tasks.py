@@ -1482,6 +1482,173 @@ def run_scan_target_subset(self, scan_id: int, target: str):
         db.close()
 
 
+@celery.task(name="dispatch_scan_work_items", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
+    """Capacity-aware dispatcher for persistent scan_work_items."""
+    from app.db.session import SessionLocal
+    from app.models.models import ScanJob, ScanLog
+    from app.services.scan_work_queue import claim_work_items, work_queue_counts
+
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not job:
+            return {"error": f"scan {scan_id} not found"}
+        item_ids = claim_work_items(db, scan_id, limit=limit)
+        for item_id in item_ids:
+            execute_scan_work_item.delay(item_id)
+        counts = work_queue_counts(db, scan_id)
+        state = dict(job.state_data or {})
+        state["work_queue_counts"] = counts
+        state["work_queue_last_dispatch"] = {
+            "claimed": len(item_ids),
+            "limit": limit,
+            "engine": "capacity_work_queue",
+        }
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=scan_id,
+            source="work-queue",
+            level="INFO",
+            message=f"work_queue_dispatch claimed={len(item_ids)} counts={counts}",
+        ))
+        db.commit()
+        if item_ids or any(counts.get(st, 0) for st in ("queued", "retry", "dispatched", "running")):
+            dispatch_scan_work_items.apply_async(args=[scan_id, limit], countdown=30)
+        return {"claimed": len(item_ids), "counts": counts}
+    finally:
+        db.close()
+
+
+@celery.task(name="execute_scan_work_item", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+def execute_scan_work_item(item_id: int):
+    """Execute exactly one tool/profile/target work item through MCP -> Kali."""
+    from datetime import datetime, timedelta
+    from app.db.session import SessionLocal
+    from app.models.models import ExecutedToolRun, ScanJob, ScanLog, ScanWorkItem
+    from app.services.offensive_operator_runner import _call_mcp_execution
+    from app.services.scan_work_queue import work_queue_counts
+
+    db = SessionLocal()
+    try:
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if not item:
+            return {"error": f"work item {item_id} not found"}
+        job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if not job:
+            item.status = "failed"
+            item.last_error = "scan_not_found"
+            item.finished_at = datetime.utcnow()
+            db.commit()
+            return {"error": "scan_not_found"}
+        if item.status not in {"dispatched", "queued", "retry"}:
+            return {"status": item.status}
+
+        now = datetime.utcnow()
+        item.status = "running"
+        item.attempts = int(item.attempts or 0) + 1
+        item.started_at = item.started_at or now
+        item.lease_until = now + timedelta(seconds=1800)
+        item.updated_at = now
+        db.add(ScanLog(
+            scan_job_id=item.scan_job_id,
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"work_item_start id={item.id} phase={item.phase_id} "
+                f"target={item.target} tool={item.tool_name} rc={item.resource_class}"
+            ),
+        ))
+        db.commit()
+
+        execution = {
+            "mcp_request_id": f"wi-{item.id}",
+            "phase_id": item.phase_id,
+            "skill_id": f"work_queue.{item.phase_id}",
+            "tool_name": item.tool_name,
+            "profile": item.profile or item.tool_name,
+            "target": item.target,
+            "scan_id": item.scan_job_id,
+            "timeout": None,
+            "arguments": {"target": item.target, "scan_id": item.scan_job_id},
+        }
+        result = _call_mcp_execution(execution)
+        raw_status = str(result.get("status") or "").lower()
+        status = "success" if raw_status in {"success", "done"} else raw_status or "failed"
+        terminal = "completed" if status == "success" else ("retry" if item.attempts < item.max_attempts else status)
+
+        item.status = terminal
+        item.finished_at = datetime.utcnow() if terminal != "retry" else None
+        item.lease_until = None if terminal != "retry" else datetime.utcnow() + timedelta(seconds=120)
+        item.last_error = str(result.get("error") or "")[:2000] or None
+        item.result = {
+            "status": status,
+            "exit_code": result.get("exit_code"),
+            "command": result.get("command"),
+            "stdout_path": result.get("stdout_path"),
+            "stderr_path": result.get("stderr_path"),
+            "duration_seconds": result.get("duration_seconds"),
+            "error": result.get("error"),
+            "stdout_preview": str(result.get("stdout") or "")[:3000],
+            "parsed_result": result.get("parsed_result"),
+        }
+        item.updated_at = datetime.utcnow()
+
+        run_status = "success" if terminal == "completed" else ("failed" if terminal in {"failed", "timeout", "blocked"} else "timeout")
+        run = (
+            db.query(ExecutedToolRun)
+            .filter(
+                ExecutedToolRun.scan_job_id == item.scan_job_id,
+                ExecutedToolRun.tool_name == item.tool_name[:100],
+                ExecutedToolRun.target == item.target[:500],
+            )
+            .first()
+        )
+        if not run:
+            run = ExecutedToolRun(
+                scan_job_id=item.scan_job_id,
+                tool_name=item.tool_name[:100],
+                target=item.target[:500],
+                status=run_status,
+                created_at=datetime.utcnow(),
+            )
+            db.add(run)
+        run.status = run_status
+        run.error_message = item.last_error
+        try:
+            run.execution_time_seconds = float(result.get("duration_seconds")) if result.get("duration_seconds") is not None else None
+        except Exception:
+            run.execution_time_seconds = None
+
+        counts = work_queue_counts(db, item.scan_job_id)
+        state = dict(job.state_data or {})
+        state["work_queue_counts"] = counts
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=item.scan_job_id,
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"work_item_finish id={item.id} phase={item.phase_id} target={item.target} "
+                f"tool={item.tool_name} status={item.status} attempts={item.attempts}"
+            ),
+        ))
+        db.commit()
+        return {"id": item.id, "status": item.status}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if item:
+            item.status = "retry" if int(item.attempts or 0) < int(item.max_attempts or 1) else "failed"
+            item.last_error = str(exc)[:2000]
+            item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
+            item.finished_at = datetime.utcnow() if item.status == "failed" else None
+            db.commit()
+        return {"id": item_id, "status": "error", "error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(bind=True, name="run_scan_job_scheduled", queue=SCAN_SCHEDULED_QUEUE)
 def run_scan_job_scheduled(self, scan_id: int):
     """

@@ -1069,26 +1069,38 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 # ─ Parallel fan-out: dispatch a subtask per non-root target ─
                 if _cp_state.get("parallelize"):
                     try:
-                        from app.workers.tasks import run_scan_target_subset as _rsts
                         _already_delegated = set(_cp_state.get("parallel_delegated_targets") or [])
                         _to_dispatch = [
                             _t for _t in _refined["live_targets"]
                             if _t and _t not in _already_delegated
                         ]
                         _dispatched = 0
-                        for _t in _to_dispatch:
-                            _rsts.delay(job.id, _t)
-                            _already_delegated.add(_t)
-                            _dispatched += 1
+                        if settings.scan_work_queue_enabled:
+                            from app.services.scan_work_queue import enqueue_scan_work_items, work_queue_counts
+                            from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
+
+                            _seed = enqueue_scan_work_items(db, job, _to_dispatch, source="p01_parallel")
+                            _dispatched = int(_seed.get("created") or 0)
+                            _already_delegated.update(_to_dispatch)
+                            _cp_state["parallel_engine"] = "capacity_work_queue"
+                            _cp_state["work_queue_counts"] = work_queue_counts(db, job.id)
+                            _dispatch_wq.delay(job.id)
+                        else:
+                            from app.workers.tasks import run_scan_target_subset as _rsts
+                            for _t in _to_dispatch:
+                                _rsts.delay(job.id, _t)
+                                _already_delegated.add(_t)
+                                _dispatched += 1
+                            _cp_state["parallel_engine"] = "target_subset"
                         _cp_state["parallel_delegated_targets"] = sorted(_already_delegated)
-                        _cp_state["parallel_pending_targets"] = sorted(_already_delegated)
+                        _cp_state["parallel_pending_targets"] = sorted(_to_dispatch if not settings.scan_work_queue_enabled else [])
                         _cp_state["parallel_batch_size"] = len(_to_dispatch)
                         _cp_state["_parallel_checkpoint_after_p01"] = bool(_dispatched)
                         if _dispatched:
                             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                                            message=(
-                                               f"parallel_fanout dispatched {_dispatched} subtasks "
-                                               f"(delegated_total={len(_already_delegated)}, phases=P02-P22)"
+                                               f"parallel_fanout engine={_cp_state.get('parallel_engine')} "
+                                               f"dispatched={_dispatched} delegated_total={len(_already_delegated)}"
                                            )))
                     except Exception as _pfe:  # noqa: BLE001
                         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
@@ -1202,6 +1214,25 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         _final_state_snapshot = dict(job.state_data or {})
         completed_work = set(_final_state_snapshot.get("completed_work") or completed_work)
         phase_ledgers = list(_final_state_snapshot.get("phase_ledger_v2") or phase_ledgers)
+        if _final_state_snapshot.get("parallel_engine") == "capacity_work_queue":
+            from app.services.scan_work_queue import has_pending_work, work_queue_counts
+            if has_pending_work(db, job.id):
+                _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
+                _final_state_snapshot["work_queue_counts"] = work_queue_counts(db, job.id)
+                job.state_data = _final_state_snapshot
+                job.current_step = f"fila: aguardando work items {dict(_final_state_snapshot['work_queue_counts'])}"
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="work-queue",
+                    level="INFO",
+                    message=f"work_queue_wait counts={_final_state_snapshot['work_queue_counts']} redispatch_in={_wait_seconds}s",
+                ))
+                db.commit()
+                from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
+                from app.workers.tasks import run_scan_job_unit as _continue_scan
+                _dispatch_wq.delay(job.id)
+                _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
+                return {"checkpointed": True, "work_queue_counts": _final_state_snapshot["work_queue_counts"]}
         _pending_parallel = _pending_parallel_targets(_final_state_snapshot, completed_work, allowed_phases)
         if _pending_parallel:
             _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))

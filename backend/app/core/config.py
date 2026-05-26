@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     scan_parallelize_default: bool = True
     scan_parallel_target_batch_size: int = 1024
     scan_parallel_wait_seconds: int = 60
+    scan_work_queue_enabled: bool = True
+    scan_work_queue_dispatch_limit: int = 48
+    scan_work_queue_lease_seconds: int = 1800
+    scan_work_queue_cap_light: int = 6
+    scan_work_queue_cap_medium: int = 4
+    scan_work_queue_cap_heavy: int = 1
+    scan_work_queue_cap_oob: int = 1
 
 
 settings = Settings()

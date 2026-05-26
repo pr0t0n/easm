@@ -19,6 +19,7 @@ from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
     ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning, AccessGroup,
+    ScanWorkItem,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -3999,6 +4000,66 @@ def scan_runtime_feed(
         "current_step": job.current_step,
         "mission_progress": job.mission_progress or 0,
         "phases": runtime,
+    }
+
+
+@router.get("/scans/{scan_id}/work-queue")
+def scan_work_queue_status(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    rows = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == scan_id).all()
+    by_status: dict[str, int] = {}
+    by_resource: dict[str, int] = {}
+    by_phase: dict[str, dict[str, int]] = {}
+    for item in rows:
+        st = str(item.status or "unknown")
+        rc = str(item.resource_class or "unknown")
+        ph = str(item.phase_id or "unknown")
+        by_status[st] = by_status.get(st, 0) + 1
+        by_resource[rc] = by_resource.get(rc, 0) + 1
+        phase_bucket = by_phase.setdefault(ph, {})
+        phase_bucket[st] = phase_bucket.get(st, 0) + 1
+
+    recent = (
+        db.query(ScanWorkItem)
+        .filter(ScanWorkItem.scan_job_id == scan_id)
+        .order_by(ScanWorkItem.updated_at.desc(), ScanWorkItem.id.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        "scan_id": scan_id,
+        "engine": (job.state_data or {}).get("parallel_engine"),
+        "total": len(rows),
+        "by_status": by_status,
+        "by_resource": by_resource,
+        "by_phase": by_phase,
+        "recent": [
+            {
+                "id": item.id,
+                "phase_id": item.phase_id,
+                "target": item.target,
+                "tool_name": item.tool_name,
+                "profile": item.profile,
+                "resource_class": item.resource_class,
+                "priority": item.priority,
+                "status": item.status,
+                "attempts": item.attempts,
+                "last_error": item.last_error,
+                "updated_at": item.updated_at,
+            }
+            for item in recent
+        ],
     }
 
 

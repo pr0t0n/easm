@@ -129,6 +129,42 @@ class ExecutedToolRun(Base):
     scan_job = relationship("ScanJob")
 
 
+class ScanWorkItem(Base):
+    """Unidade persistente de trabalho ofensivo: um tool/profile contra um alvo."""
+    __tablename__ = "scan_work_items"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "scan_job_id",
+            "phase_id",
+            "tool_name",
+            "target",
+            name="uq_scan_work_items_scan_phase_tool_target",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    phase_id: Mapped[str] = mapped_column(String(10), index=True)
+    target: Mapped[str] = mapped_column(String(500), index=True)
+    tool_name: Mapped[str] = mapped_column(String(120), index=True)
+    profile: Mapped[str] = mapped_column(String(120), default="", index=True)
+    resource_class: Mapped[str] = mapped_column(String(40), default="light", index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict] = mapped_column(JSONB, default=dict)
+    item_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scan_job = relationship("ScanJob")
+
+
 class ScanAuditLog(Base):
     """Auditoria de memória operacional: notas, ações e observações do agente autônomo."""
     __tablename__ = "scan_audit_logs"
