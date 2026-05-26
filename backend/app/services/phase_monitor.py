@@ -264,7 +264,6 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         phase_used_tools_set.update(t for t in ledger_tools_attempted if t)
         node_done = node in completed_caps
         node_visited = node in node_history
-        effective_node_visited = node_visited or bool(ledger_entry) or bool(capability_ledger.get(node, {}).get("visited"))
         phase_started = bool(ledger_entry) or phase_idx <= pentest_phase_index or pid == current_pentest_phase_id
         tools_expected = [_normalize_tool(t) for t in phase.get("tools", [])]
         tools_installed = [t for t in tools_expected if is_tool_installed(t)]
@@ -273,6 +272,16 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             t for t in tools_expected
             if tool_stats.get(t, {}).get("attempts", 0) > 0 or t in ledger_tools_attempted
         })
+        # Work-queue tools (in ExecutedToolRun but not in tools_expected) also count
+        # as evidence that the phase was visited — check tool_stats directly for the
+        # phase's tool names even when not in PENTEST_PHASES tools list.
+        work_queue_ran = bool(tools_used)
+        effective_node_visited = (
+            node_visited
+            or bool(ledger_entry)
+            or bool(capability_ledger.get(node, {}).get("visited"))
+            or work_queue_ran  # ← work queue ran tools → phase was visited
+        )
         tools_success = sorted({
             t for t in tools_used
             if tool_stats.get(t, {}).get("success", 0) > 0 or t in ledger_tools_succeeded
