@@ -137,6 +137,101 @@ def _mcp_available() -> bool:
 
 
 _MCP_STDOUT_STATE_CAP = 5_000  # bytes kept per mcp_result entry in state_data
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b")
+_URL_PARAM_RE = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_.:-]{0,79})=")
+_BARE_PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,79}$")
+
+
+def _clean_tool_text(value: Any) -> str:
+    text = str(value or "")
+    text = _ANSI_RE.sub("", text)
+    text = text.replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+
+def _clean_lines(value: Any) -> list[str]:
+    return [line.strip() for line in _clean_tool_text(value).splitlines() if line.strip()]
+
+
+def _is_noise_line(line: str) -> bool:
+    lowered = line.lower()
+    if not line or len(line) > 500:
+        return True
+    return any(
+        marker in lowered
+        for marker in (
+            "[inf]",
+            "[err]",
+            "[wrn]",
+            "[debug]",
+            "stable version",
+            "projectdiscovery",
+            "starting scan",
+            "probing",
+            "target:",
+            "usage:",
+            "elapsed",
+            "requests",
+            "rate-limit",
+        )
+    )
+
+
+def _extract_domains_from_output(stdout: str) -> list[str]:
+    domains: list[str] = []
+    seen: set[str] = set()
+    for line in _clean_lines(stdout):
+        if _is_noise_line(line):
+            continue
+        for match in _DOMAIN_RE.findall(line):
+            domain = match.strip(".,;:()[]{}<>").lower()
+            if domain and domain not in seen:
+                seen.add(domain)
+                domains.append(domain)
+    return domains
+
+
+def _extract_parameters_from_output(stdout: str, parsed: Any) -> list[str]:
+    params: list[str] = []
+    seen: set[str] = set()
+
+    def add_param(raw: Any) -> None:
+        param = str(raw or "").strip().strip("[]'\",;")
+        if not param or param.lower() in {"none", "null", "true", "false", "target", "found", "stable"}:
+            return
+        if not _BARE_PARAM_RE.match(param):
+            return
+        if param.lower() in seen:
+            return
+        seen.add(param.lower())
+        params.append(param)
+
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                for key in ("param", "parameter", "name"):
+                    if item.get(key):
+                        add_param(item.get(key))
+                url = item.get("url") or item.get("matched") or item.get("endpoint")
+                if url:
+                    for match in _URL_PARAM_RE.findall(str(url)):
+                        add_param(match)
+            else:
+                raw = str(item or "")
+                for match in _URL_PARAM_RE.findall(raw):
+                    add_param(match)
+                add_param(raw)
+
+    for line in _clean_lines(stdout):
+        if _is_noise_line(line):
+            continue
+        for match in _URL_PARAM_RE.findall(line):
+            add_param(match)
+        if len(line) <= 100 and " " not in line and "?" not in line and "/" not in line:
+            add_param(line)
+
+    return params[:200]
 
 
 def _trim_mcp_stdout(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -861,7 +956,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # so partial results survive worker crashes / scan interruption.
             completed_so_far = len([l for l in phase_ledgers if l.get("status") == "completed"])
             partial_so_far = len([l for l in phase_ledgers if l.get("status") == "partial"])
-            job.mission_progress = int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100))
+            job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
             db.commit()
             try:
                 _persist_offensive_findings(db, job, phase_ledgers, targets)
@@ -1319,7 +1414,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         db.commit()
 
     job.state_data = state
-    job.mission_progress = int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100))
+    job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
     # A scan is "completed" if at least one phase ran (completed or partial).
     # It is "failed" only when zero phases produced any result at all.
     job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
@@ -1336,7 +1431,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
 def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) -> dict[str, Any]:
     """Parse tool stdout/parsed_result into structured evidence for RedTeam reporting."""
     import json as _json
-    stdout = str(mcp_res.get("stdout") or "")
+    stdout = _clean_tool_text(mcp_res.get("stdout") or "")
     parsed = mcp_res.get("parsed_result")
     command = str(mcp_res.get("command") or "")
     duration = mcp_res.get("duration_seconds")
@@ -1353,9 +1448,21 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
     tool_lower = tool_name.lower()
 
     # --- subfinder / amass: subdomains list ---
-    if tool_lower in {"subfinder", "amass", "assetfinder", "dnsx"}:
-        lines = [l.strip() for l in stdout.splitlines() if l.strip() and not l.startswith("[")]
-        domains = [l for l in lines if "." in l and not l.startswith("http")]
+    if tool_lower in {
+        "subfinder",
+        "amass",
+        "amass-brute",
+        "amass-intel",
+        "assetfinder",
+        "dnsx",
+        "dnsrecon",
+        "dnsrecon-brt",
+        "dnsenum",
+        "findomain",
+        "sublist3r",
+        "ghdb-public-indexes",
+    }:
+        domains = _extract_domains_from_output(stdout)
         evidence["discovered_subdomains"] = domains[:200]
         evidence["subdomain_count"] = len(domains)
         evidence["finding_summary"] = (
@@ -1366,8 +1473,8 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- theHarvester: emails, hosts, IPs from OSINT ---
     elif tool_lower in {"theharvester"}:
-        emails = [l.strip() for l in stdout.splitlines() if "@" in l and "." in l]
-        hosts = [l.strip() for l in stdout.splitlines() if l.strip().startswith("-") or ("." in l and "@" not in l and not l.startswith("["))]
+        emails = [l.strip() for l in _clean_lines(stdout) if "@" in l and "." in l]
+        hosts = _extract_domains_from_output(stdout)
         evidence["emails_found"] = emails[:50]
         evidence["hosts_found"] = hosts[:50]
         evidence["finding_summary"] = (
@@ -1377,7 +1484,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- naabu / nmap: open ports ---
     elif tool_lower in {"naabu", "nmap", "masscan"}:
-        port_lines = [l.strip() for l in stdout.splitlines() if l.strip() and ":" in l]
+        port_lines = [l.strip() for l in _clean_lines(stdout) if ":" in l or re.search(r"\b\d{1,5}/tcp\b", l)]
         parsed_ports = []
         if isinstance(parsed, list):
             parsed_ports = parsed
@@ -1417,7 +1524,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                 + vuln_str
             )
         else:
-            interesting = [l.strip() for l in stdout.splitlines()
+            interesting = [l.strip() for l in _clean_lines(stdout)
                            if any(k in l.lower() for k in ["ip:", "port:", "os:", "org:", "cpe:", "vuln", "banner"])]
             evidence["service_intel"] = interesting[:30]
             evidence["finding_summary"] = (
@@ -1426,11 +1533,11 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
             )
 
     # --- ffuf / gobuster: discovered paths ---
-    elif tool_lower in {"ffuf", "gobuster", "feroxbuster"}:
+    elif tool_lower in {"ffuf", "gobuster", "feroxbuster", "dirsearch", "wfuzz"}:
         if isinstance(parsed, list) and parsed:
             paths = [str(p.get("url") or p.get("path") or p) if isinstance(p, dict) else str(p) for p in parsed[:100]]
         else:
-            paths = [l.strip() for l in stdout.splitlines() if l.strip() and "/" in l][:100]
+            paths = [l.strip() for l in _clean_lines(stdout) if "/" in l and not _is_noise_line(l)][:100]
         evidence["discovered_paths"] = paths[:100]
         evidence["path_count"] = len(paths)
         evidence["finding_summary"] = (
@@ -1440,7 +1547,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
         )
 
     # --- nuclei: CVEs, vulnerabilities, misconfigurations ---
-    elif tool_lower in {"nuclei"}:
+    elif tool_lower == "nuclei" or tool_lower.startswith("nuclei-"):
         findings = []
         if isinstance(parsed, list):
             for item in parsed[:50]:
@@ -1455,7 +1562,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                     })
         else:
             # Try parsing JSONL from stdout
-            for line in stdout.splitlines():
+            for line in _clean_lines(stdout):
                 line = line.strip()
                 if not line:
                     continue
@@ -1494,10 +1601,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                         "description": item.get("Description") or item.get("RuleDescription") or "",
                     })
         else:
-            for line in stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
+            for line in _clean_lines(stdout):
                 try:
                     item = _json.loads(line)
                     secrets.append({
@@ -1517,10 +1621,10 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
         )
 
     # --- curl / curl-headers: HTTP response evidence ---
-    elif tool_lower in {"curl", "curl-headers"}:
+    elif tool_lower in {"curl", "curl-headers", "httpx", "httpx-headers"}:
         headers = {}
         status_line = ""
-        for line in stdout.splitlines():
+        for line in _clean_lines(stdout):
             if line.startswith("HTTP/"):
                 status_line = line.strip()
             elif ":" in line:
@@ -1556,11 +1660,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- arjun: discovered parameters ---
     elif tool_lower in {"arjun", "paramspider"}:
-        params = []
-        if isinstance(parsed, list):
-            params = [str(p) for p in parsed[:100]]
-        else:
-            params = [l.strip() for l in stdout.splitlines() if l.strip() and "?" not in l and len(l.strip()) < 50][:50]
+        params = _extract_parameters_from_output(stdout, parsed)
         evidence["discovered_parameters"] = params
         evidence["parameter_count"] = len(params)
         evidence["finding_summary"] = (
@@ -1570,7 +1670,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- sqlmap: injection points ---
     elif tool_lower in {"sqlmap"}:
-        injections = [l.strip() for l in stdout.splitlines()
+        injections = [l.strip() for l in _clean_lines(stdout)
                       if any(k in l.lower() for k in ["parameter", "injectable", "payload", "technique", "dbms"])]
         evidence["injection_evidence"] = injections[:20]
         evidence["finding_summary"] = (
@@ -1580,7 +1680,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     else:
         # Generic: return first meaningful output lines
-        lines = [l.strip() for l in stdout.splitlines() if l.strip()][:20]
+        lines = [l.strip() for l in _clean_lines(stdout) if not _is_noise_line(l)][:20]
         evidence["output_lines"] = lines
         evidence["finding_summary"] = lines[0] if lines else f"{tool_name} ran (no parseable output)"
 
@@ -1885,6 +1985,147 @@ def _build_reproduction(phase_id: str, target: str, tool_evidences: list[dict[st
     }
 
 
+def _severity_to_cvss(severity: str) -> float:
+    return {
+        "critical": 9.2,
+        "high": 8.1,
+        "medium": 5.6,
+        "low": 3.1,
+        "info": 0.0,
+    }.get(str(severity or "").lower(), 0.0)
+
+
+def _build_redteam_impact(phase_id: str, severity: str, target: str, tool_evidences: list[dict[str, Any]]) -> str:
+    _, signal = _has_real_evidence(tool_evidences)
+    if signal == "secret_exposed":
+        return (
+            f"Credenciais ou segredos expostos em {target} podem permitir acesso nao autorizado, "
+            "movimento lateral, abuso de APIs e persistencia fora do perimetro monitorado."
+        )
+    if signal in {"nuclei_critical", "cve_identified", "vulnerability", "nuclei_finding"}:
+        return (
+            f"Existe evidencia reproduzivel de vulnerabilidade em {target}. Um operador pode usar "
+            "a falha para ampliar acesso, contornar controles ou impactar confidencialidade, "
+            "integridade e disponibilidade conforme o componente afetado."
+        )
+    if signal == "injection_confirmed":
+        return (
+            f"O alvo {target} apresentou evidencia de injecao. O impacto potencial inclui leitura "
+            "ou alteracao de dados, bypass de autenticacao e execucao de consultas nao autorizadas."
+        )
+    if signal == "sensitive_path":
+        return (
+            f"Caminhos sensiveis expostos em {target} aumentam a chance de acesso a paineis, backups, "
+            "arquivos de configuracao ou endpoints administrativos."
+        )
+    if signal == "missing_headers":
+        return (
+            f"{target} responde sem controles HTTP defensivos esperados. Isso nao prova exploracao "
+            "sozinho, mas amplia risco de clickjacking, XSS exploravel e downgrade de transporte."
+        )
+    if signal == "ports_open":
+        return (
+            f"Servicos expostos em {target} ampliam a superficie de ataque e devem ser priorizados "
+            "para enumeracao de versao, autenticacao e hardening."
+        )
+    return (
+        f"A fase {phase_id} coletou evidencia de superficie em {target}. O impacto deve ser tratado "
+        f"como {severity} ate que a validacao manual confirme explorabilidade."
+    )
+
+
+def _framework_mapping_for_finding(phase_id: str, tool_evidences: list[dict[str, Any]]) -> dict[str, Any]:
+    _, signal = _has_real_evidence(tool_evidences)
+    pci = ["PCI DSS 11.3 - External and internal penetration testing"]
+    cis = ["CIS Control 7 - Continuous Vulnerability Management"]
+    iso = ["ISO 27001 A.8.8 - Management of technical vulnerabilities"]
+    mitre = [{"id": "T1595", "name": "Active Scanning"}]
+
+    if signal in {"secret_exposed"}:
+        pci.append("PCI DSS 8.3 - Strong authentication and credential protection")
+        cis.append("CIS Control 6 - Access Control Management")
+        iso.append("ISO 27001 A.5.17 - Authentication information")
+        mitre.append({"id": "T1552", "name": "Unsecured Credentials"})
+    elif signal in {"nuclei_critical", "cve_identified", "vulnerability", "nuclei_finding"}:
+        pci.append("PCI DSS 6.3 - Security vulnerabilities are identified and addressed")
+        cis.append("CIS Control 18 - Penetration Testing")
+        iso.append("ISO 27001 A.8.20 - Network security")
+        mitre.append({"id": "T1190", "name": "Exploit Public-Facing Application"})
+    elif signal == "missing_headers":
+        pci.append("PCI DSS 6.4 - Public-facing web applications are protected")
+        cis.append("CIS Control 16 - Application Software Security")
+        iso.append("ISO 27001 A.8.26 - Application security requirements")
+        mitre.append({"id": "T1189", "name": "Drive-by Compromise"})
+
+    return {
+        "mitre_attack": mitre,
+        "pci_dss": pci,
+        "cis_controls": cis,
+        "iso27001": iso,
+    }
+
+
+def _is_actionable_vulnerability(severity: str, tool_evidences: list[dict[str, Any]], reproduction: dict[str, Any]) -> bool:
+    if str(severity or "").lower() not in {"medium", "high", "critical"}:
+        return False
+    has_evidence, signal = _has_real_evidence(tool_evidences)
+    if not has_evidence:
+        return False
+    if signal in {"subdomains_found", "ports_open", "path_discovered", "params_found"}:
+        return False
+    if signal in {"missing_headers"}:
+        return bool(reproduction.get("commands") and reproduction.get("proof"))
+    return bool(reproduction.get("verifiable"))
+
+
+def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_results: list[dict[str, Any]]) -> None:
+    from datetime import datetime as _dt
+    from app.models.models import ExecutedToolRun
+
+    target = str(ledger.get("target") or job.target_query or "")[:500]
+    local_seen: set[tuple[int, str, str]] = set()
+    for mcp_res in mcp_results:
+        if not isinstance(mcp_res, dict):
+            continue
+        tool_name = str(mcp_res.get("tool_name") or "").strip().lower()
+        if not tool_name:
+            continue
+        key = (int(job.id), tool_name[:100], target)
+        if key in local_seen:
+            continue
+        local_seen.add(key)
+        raw_status = str(mcp_res.get("status") or ledger.get("status") or "unknown").strip().lower()
+        status = "success" if raw_status in {"success", "done", "completed", "executed"} else raw_status
+        if status not in {"success", "failed", "timeout", "skipped", "blocked"}:
+            status = "failed" if raw_status in {"error", "exception"} else status
+        run = (
+            db.query(ExecutedToolRun)
+            .filter(
+                ExecutedToolRun.scan_job_id == job.id,
+                ExecutedToolRun.tool_name == tool_name[:100],
+                ExecutedToolRun.target == target,
+            )
+            .first()
+        )
+        if not run:
+            run = ExecutedToolRun(
+                scan_job_id=job.id,
+                tool_name=tool_name[:100],
+                target=target,
+                status=status[:50],
+                created_at=_dt.utcnow(),
+            )
+            db.add(run)
+            db.flush()
+        run.status = status[:50]
+        run.error_message = str(mcp_res.get("stderr") or mcp_res.get("error") or "")[:2000] or None
+        try:
+            run.execution_time_seconds = float(mcp_res.get("duration_seconds")) if mcp_res.get("duration_seconds") is not None else None
+        except Exception:
+            run.execution_time_seconds = None
+        db.flush()
+
+
 def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     """Run P02-P22 for a single target. Used by the parallel fan-out task.
 
@@ -1996,6 +2237,17 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
                            message=f"parallel_phase_failed phase={phase_id} target={target} error={exc!s}"))
             db.commit()
+    with _SUBTASK_STATE_LOCK:
+        try:
+            db.refresh(job)
+            cur = dict(job.state_data or {})
+            final_completed = set(cur.get("completed_work") or [])
+            pending = _pending_parallel_targets(cur, final_completed, allowed_phases)
+            cur["parallel_pending_targets"] = pending
+            job.state_data = cur
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
     return {"target": target, "processed": processed, "skipped": skipped}
 
 
@@ -2131,15 +2383,17 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         if not tools_attempted:
             continue
 
+        # Extract per-tool evidence from MCP results stored in the ledger.
+        # Prefer the ledger's own mcp_results (correct for multi-target
+        # propagation where many ledgers share the same phase_id).
+        mcp_results = ledger.get("mcp_results") or phase_mcp_map.get(phase_id) or []
+        _persist_executed_tool_runs(db, job, ledger, mcp_results)
+
         key = (phase_id, str(target))
         if key in seen:
             continue
         seen.add(key)
 
-        # Extract per-tool evidence from MCP results stored in the ledger.
-        # Prefer the ledger's own mcp_results (correct for multi-target
-        # propagation where many ledgers share the same phase_id).
-        mcp_results = ledger.get("mcp_results") or phase_mcp_map.get(phase_id) or []
         tool_evidences: list[dict[str, Any]] = []
         for mcp_res in mcp_results:
             if not isinstance(mcp_res, dict):
@@ -2170,6 +2424,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         if waf_caveat:
             recommendation = f"[WAF] {waf_caveat} | {recommendation}"
 
+        reproduction = _build_reproduction(phase_id, str(target), tool_evidences)
+        impact_analysis = _build_redteam_impact(phase_id, severity, str(target), tool_evidences)
+        framework_mapping = _framework_mapping_for_finding(phase_id, tool_evidences)
+
         details: dict[str, Any] = {
             "phase_id": phase_id,
             "phase_name": phase_name,
@@ -2189,7 +2447,10 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             # Complete reproduction package: discovery method, commands,
             # payloads, raw proof and numbered steps so the finding is
             # independently verifiable by an analyst.
-            "reproduction": _build_reproduction(phase_id, str(target), tool_evidences),
+            "reproduction": reproduction,
+            "impact_analysis": impact_analysis,
+            "framework_mapping": framework_mapping,
+            "cvss_estimate": _severity_to_cvss(severity),
             # Tech stack snapshot at time of finding
             "tech_stack": tech_snap.get("detected") or [],
             "cms_detected": tech_snap.get("cms") or [],
@@ -2212,7 +2473,7 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             title=title[:255],
             severity=severity,
             cve=None,
-            cvss=None,
+            cvss=_severity_to_cvss(severity),
             domain=str(target)[:255],
             tool=", ".join(tools_success or tools_attempted)[:100] or None,
             recommendation=recommendation or None,
@@ -2221,9 +2482,14 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             details=details,
         )
         db.add(finding)
+        db.flush()
 
-        # Persist asset + vulnerability for completed/partial phases
-        if status in {"completed", "partial"} and target:
+        # Persist asset + vulnerability only for actionable, reproducible risk.
+        if (
+            status in {"completed", "partial"}
+            and target
+            and _is_actionable_vulnerability(severity, tool_evidences, reproduction)
+        ):
             try:
                 asset = db.query(Asset).filter(
                     Asset.owner_id == job.owner_id,
@@ -2251,11 +2517,26 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
                     _now = _dt.utcnow()
                     vuln = Vulnerability(
                         asset_id=asset.id,
+                        finding_id=finding.id,
                         title=title[:255],
                         severity=severity,
+                        cvss_score=_severity_to_cvss(severity),
+                        description=impact_analysis,
                         tool_source=", ".join(tools_success or tools_attempted)[:100] or "offensive_operator",
                         first_detected=_now,
                         last_detected=_now,
+                        remediation_notes=recommendation or None,
+                        ra_score=round(float(_severity_to_cvss(severity)) * (confidence / 100.0), 2),
+                        vulnerability_metadata={
+                            "scan_id": job.id,
+                            "phase_id": phase_id,
+                            "target": str(target),
+                            "evidence": tool_evidences,
+                            "reproduction": reproduction,
+                            "impact_analysis": impact_analysis,
+                            "framework_mapping": framework_mapping,
+                            "confidence_score": confidence,
+                        },
                     )
                     db.add(vuln)
             except Exception:

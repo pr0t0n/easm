@@ -2490,18 +2490,31 @@ def _build_tool_execution_summary(job: ScanJob, scan_logs: list[ScanLog], tools:
     commands_by_tool: dict[str, list[str]] = {}
 
     for raw in raw_runs:
-        run = str(raw or "").strip().lower()
+        if isinstance(raw, dict):
+            tool = str(raw.get("tool") or raw.get("tool_name") or "").strip().lower()
+            target = str(raw.get("target") or "").strip()
+            st = str(raw.get("status") or "success").strip().lower()
+            if tool:
+                bucket = status_by_tool.setdefault(tool, {})
+                bucket[st] = int(bucket.get(st, 0)) + 1
+                if target:
+                    targets_by_tool.setdefault(tool, set()).add(target)
+                cmd = str(raw.get("command") or "").strip()
+                if cmd:
+                    commands_by_tool.setdefault(tool, []).append(cmd)
+            continue
+        run = str(raw or "").strip()
         parts = run.split("|")
         if len(parts) < 3:
             continue
-        _, target, tool = parts[0], parts[1], parts[2]
+        _, target, tool = parts[0], parts[1], parts[2].lower()
         if not tool:
             continue
         if target:
             targets_by_tool.setdefault(tool, set()).add(target)
 
-    status_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+status=([a-z_\-]+)", re.IGNORECASE)
-    rc_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+return_code=([-0-9]+)", re.IGNORECASE)
+    status_re = re.compile(r"tool=([a-z0-9_\-\.]+)\b.*?\bstatus=([a-z_\-]+)", re.IGNORECASE)
+    rc_re = re.compile(r"tool=([a-z0-9_\-\.]+)\b.*?\breturn_code=([-0-9]+)", re.IGNORECASE)
     cmd_re = re.compile(r"tool=([a-z0-9_\-\.]+)\s+cmd=(.+)$", re.IGNORECASE)
 
     for log in scan_logs:
@@ -2542,7 +2555,10 @@ def _build_tool_execution_summary(job: ScanJob, scan_logs: list[ScanLog], tools:
         commands = commands_by_tool.get(tool, [])
         targets = sorted(list(targets_by_tool.get(tool, set())))
         attempted_events = int(sum(status_bucket.values()))
-        executed_events = int(status_bucket.get("executed", 0))
+        executed_events = int(sum(
+            status_bucket.get(st, 0)
+            for st in ("executed", "success", "done", "completed")
+        ))
         rows.append(
             {
                 "tool": tool,
