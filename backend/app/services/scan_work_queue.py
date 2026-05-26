@@ -133,11 +133,22 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
     status = str(preflight.get("status") or "").lower()
     if status in {"dead", "unresolved", "no_tcp"}:
         return ["P18"]
-    if not has_http:
+    # When preflight is not yet computed (empty dict), the target came through P01
+    # live-target refinement — assume HTTP is available. The "no http" branch must
+    # only fire when preflight was explicitly computed and HTTP was not found.
+    # Without this guard, batch phases (P02/P06) run but don't write preflight,
+    # so enqueue_scan_work_items seeds only P02/P06/P07/P18 and all web phases
+    # (P03 ffuf, P04 arjun, P08 katana, P09-P20 vuln) are silently skipped.
+    preflight_known = bool(status)
+    if preflight_known and not has_http:
         return ["P02", "P06", "P07", "P18"]
+    # Full web pentest phases — P08 (katana JS analysis) included alongside
+    # the existing web phases so JS endpoints are always crawled.
     return [
-        "P02", "P06", "P07", "P03", "P04", "P05", "P16",
-        "P09", "P15", "P18", "P10", "P11", "P12", "P13",
+        "P02", "P06", "P07", "P08",
+        "P03", "P04", "P05", "P16",
+        "P09", "P15", "P18",
+        "P10", "P11", "P12", "P13",
         "P14", "P17", "P19", "P20",
     ]
 
