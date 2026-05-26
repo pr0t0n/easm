@@ -72,8 +72,20 @@ export default function LoginPage() {
       if (data.refresh_token) {
         localStorage.setItem("refresh_token", data.refresh_token);
       }
-      const me = await client.get("/api/auth/me");
-      authStore.setMe(me.data);
+      
+      // Busca informações do usuário
+      try {
+        const me = await client.get("/api/auth/me");
+        authStore.setMe(me.data);
+      } catch (meError) {
+        // Se falhar ao obter "me", ainda assim considera o login bem-sucedido
+        // pois o token foi validado com sucesso pelo backend
+        console.warn("Falha ao obter dados do usuário:", meError);
+      }
+      
+      // Aguarda um tick para permitir que React processe antes de navegar
+      // Isso ajuda a evitar problemas de timing com listeners
+      await new Promise((resolve) => setTimeout(resolve, 0));
       navigate("/");
     } catch (err) {
       setError(normalizeApiError(err));

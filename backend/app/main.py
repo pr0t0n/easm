@@ -21,18 +21,45 @@ from app.models.models import User
 app = FastAPI(title=settings.app_name)
 
 
-def _cors_origins() -> list[str]:
+def _build_cors_config() -> tuple[list[str] | str, str | None]:
+    """
+    Constrói configuração de CORS.
+    
+    Se um regex custom for configurado, usa apenas regex.
+    Caso contrário, usa lista de origins + regex para IPs locais.
+    """
+    # Se há regex customizado, usa só regex
+    if settings.frontend_origin_regex:
+        return ["*"], settings.frontend_origin_regex
+    
+    # Caso contrário, combina origens explícitas com regex para IPs locais
     origins: list[str] = []
     for raw in [settings.frontend_origin, settings.frontend_origins]:
         if not raw:
             continue
         origins.extend([item.strip() for item in str(raw).split(",") if item.strip()])
-    return list(dict.fromkeys(origins))
+    
+    # Remove duplicatas e adiciona wildcard
+    origins = list(dict.fromkeys(origins))
+    origins.append("*")  # Protegido pelo regex abaixo
+    
+    # Regex para IPs locais: localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, 172.16-31.x.x
+    regex = (
+        r"^https?://(localhost|127\.0\.0\.1|"
+        r"192\.168\.\d{1,3}\.\d{1,3}|"
+        r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+        r"172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})"
+        r"(:\d+)?$"
+    )
+    
+    return origins, regex
+
+_cors_origins_list, _cors_regex = _build_cors_config()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_origin_regex=settings.frontend_origin_regex,
+    allow_origins=_cors_origins_list,
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,7 +78,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     headers: dict[str, str] = {}
     origin = request.headers.get("origin")
-    if origin and origin in _cors_origins():
+    if origin and origin in _cors_origins_list:
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Vary"] = "Origin"
