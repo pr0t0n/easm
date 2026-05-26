@@ -361,24 +361,55 @@ SKILL_CATALOG: list[dict[str, Any]] = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE CONTRACTS — operational contract per pentest phase P01–P22
+# PHASE CONTRACTS — single source of truth: offensive_operator_core
 #
-# Each contract defines:
-#   required_skills   — skill IDs from SKILL_CATALOG that MUST feed this phase
-#   required_tools    — tools where at least 1 must succeed for phase to complete
-#   optional_tools    — best-effort tools that improve coverage
-#   minimum_evidence  — what constitutes accepted evidence output
-#   exit_criteria     — conditions the Phase Validator checks before advancing
-#   retry_policy      — max retries, fallback behaviour, skip conditions
+# Previously this module had a hardcoded PHASE_CONTRACTS dict with a DIFFERENT
+# phase taxonomy than offensive_operator_core (e.g. P07 = "OSINT & Leak Intel"
+# here but P07 = "Technology Detection" there). PENTEST_PHASES is already built
+# from offensive_operator_core, so the phase walker dispatched tools from one
+# taxonomy while the workflow validator checked required_tools from another.
+# Result: no phase ever completed — the validator never saw its expected tools
+# in tools_succeeded because the walker never ran them.
 #
-# A phase is COMPLETED only when all exit_criteria are satisfied.
-# A phase is PARTIAL when tools were attempted but exit criteria not fully met.
-# A phase is SKIPPED only when skip_condition is true AND reason is recorded.
-# The supervisor MUST NOT advance to the next phase if the current one is
-# neither completed nor skipped with a valid reason.
+# Fix: delegate PHASE_CONTRACTS to offensive_operator_core and normalize the
+# exit_criteria keys that workflow.validate_phase_exit_criteria reads.
 # ─────────────────────────────────────────────────────────────────────────────
 
-PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
+
+def _build_mission_phase_contracts() -> "dict[str, dict[str, Any]]":
+    """Build PHASE_CONTRACTS from offensive_operator_core — single source of truth.
+
+    The workflow validator (workflow.validate_phase_exit_criteria) reads exit_criteria
+    with keys: min_required_tools_attempted, min_required_tools_succeeded,
+    evidence_persisted, parser_result_registered.
+
+    offensive_operator_core uses different internal keys. This function normalizes
+    them so PENTEST_PHASES (walker) and PHASE_CONTRACTS (validator) always refer to
+    the SAME required_tools list for each phase.
+    """
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS as _OC
+    except Exception:
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for phase_id, contract in _OC.items():
+        result[phase_id] = {
+            **contract,
+            # Normalized exit_criteria keys for workflow.validate_phase_exit_criteria
+            "exit_criteria": {
+                "min_required_tools_attempted": 1,
+                "min_required_tools_succeeded": 1,
+                "evidence_persisted": True,
+                # False: auto-registered by _update_phase_ledger_for_tool;
+                # never use this as a hard blocking gate.
+                "parser_result_registered": False,
+            },
+        }
+    return result
+
+
+_PHASE_CONTRACTS_FALLBACK: dict[str, dict[str, Any]] = {
     "P01": {
         "phase_id": "P01",
         "name": "Subdomain Enumeration",
@@ -908,6 +939,14 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+# PHASE_CONTRACTS: use offensive_operator_core as source of truth so that the
+# phase walker (PENTEST_PHASES) and the workflow validator (validate_phase_exit_criteria)
+# always operate on the same required_tools list. Falls back to the legacy dict above
+# only when offensive_operator_core fails to import (e.g. missing optional dep).
+PHASE_CONTRACTS: dict[str, dict[str, Any]] = (
+    _build_mission_phase_contracts() or _PHASE_CONTRACTS_FALLBACK
+)
 
 
 def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:

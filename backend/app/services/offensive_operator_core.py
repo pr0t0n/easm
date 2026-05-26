@@ -176,34 +176,34 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-auth",          # HackerOne: 119 auth bypass / default credentials reports
           "nuclei-deserialization"]),  # HackerOne: 13 insecure deserialization reports
         ("P10", "Injection Testing", "Test injection hypotheses with controls",
-         ["skill.sqli_testing"], ["curl"],
-         ["sqlmap", "manual_http_probe", "wapiti",
+         ["skill.sqli_testing"], ["wapiti"],
+         ["sqlmap", "dalfox", "nikto",
           "nuclei-sqli",   # HackerOne: 46 SQL injection reports — template-based detection
           "nuclei-ssti",   # HackerOne: injection class (135 reports) — SSTI patterns
           "nuclei-xxe",    # HackerOne: 9 XXE reports
           "nuclei-crlf"]), # HackerOne: CRLF injection → header injection
         ("P11", "SSRF Testing", "Validate SSRF and callback hypotheses",
-         ["skill.vuln.ssrf"], ["curl"],
-         ["interactsh", "ffuf", "wapiti",
+         ["skill.vuln.ssrf"], ["nuclei"],
+         ["interactsh-client", "ffuf", "wapiti",
           "nuclei-ssrf"]),  # HackerOne: 68 SSRF reports — blind SSRF, EC2 metadata, webhook
         ("P12", "XSS Testing", "Validate reflected or stored XSS safely",
-         ["skill.stored_xss_testing"], ["curl"],
-         ["dalfox", "manual_http_probe", "wapiti",
+         ["skill.stored_xss_testing"], ["dalfox"],
+         ["wapiti", "nikto",
           "nuclei-xss",   # HackerOne: #1 class (652 reports) — reflected, stored, DOM, blind
           "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
         ("P13", "Access Control Testing", "Validate object and authorization boundaries",
-         ["skill.idor_object_authorization"], ["curl"],
-         ["manual_http_probe", "ffuf",
+         ["skill.idor_object_authorization"], ["nuclei"],
+         ["ffuf", "arjun",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
           "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries",
-         ["skill.vuln.auth_bypass"], ["curl"],
+         ["skill.vuln.auth_bypass"], ["nuclei"],
          ["ffuf", "hydra", "medusa", "jwt_tool", "crackmapexec",
           "nuclei-auth",  # HackerOne: 119 auth bypass reports — default creds, 2FA bypass
           "nuclei-jwt"]), # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
         ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks and upload-adjacent risks",
-         ["skill.chain.exposed_git_to_credential_leak"], ["curl"],
-         ["git", "gitleaks", "trufflehog", "trufflehog-filesystem",
+         ["skill.chain.exposed_git_to_credential_leak"], ["gitleaks"],
+         ["trufflehog", "gau", "waybackurls",
           "nuclei-lfi",       # HackerOne: 13 path traversal/LFI reports
           "nuclei-exposure"]),  # HackerOne: 78 information/secret exposure reports
         ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage",
@@ -220,18 +220,18 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-ssti"]), # HackerOne: template injection → RCE confirmation
         ("P18", "Credential Exposure Boundary", "Validate credential exposure via OSINT and secret scanning",
          ["skill.chain.exposed_git_to_credential_leak"], ["theharvester"],
-         ["gitleaks", "trufflehog", "trufflehog-filesystem", "h8mail", "curl", "bandit", "semgrep", "trivy",
+         ["gitleaks", "trufflehog", "h8mail", "bandit", "semgrep", "trivy",
           "nuclei-exposure", # HackerOne: 78 info/secret exposure reports — API keys, debug endpoints
           "nuclei-cloud"]),   # HackerOne: 15 cloud/S3 exposure reports — open buckets, AWS metadata
         ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls",
-         ["skill.idor_object_authorization"], ["curl"],
-         ["manual_http_probe", "crackmapexec",
+         ["skill.idor_object_authorization"], ["nuclei"],
+         ["ffuf", "arjun",
           "nuclei-csrf",    # HackerOne: 110 CSRF reports — post-auth CSRF on sensitive actions
           "nuclei-cors",    # HackerOne: 8 CORS misconfig — cross-origin credential access
           "nuclei-idor"]),  # HackerOne: 73 IDOR — post-auth object boundary testing
         ("P20", "Attack Path Correlation", "Build offensive chains from evidence",
-         ["skill.chain.exposed_git_to_credential_leak"], ["curl"],
-         ["manual_correlation",
+         ["skill.chain.exposed_git_to_credential_leak"], ["nuclei"],
+         ["gitleaks", "trufflehog",
           "nuclei-race"]),  # HackerOne: 20 race condition reports — coupon/invitation bypass chains
         ("P21", "Evidence Quality Review", "Score evidence and false positive controls",
          ["skill.reporting.evidence_quality"], ["manual_review"], []),
