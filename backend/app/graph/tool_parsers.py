@@ -567,6 +567,10 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
         "cloudflare detected",
         "uncommon header",
         "cgi directories",
+        "[fail]",               # connection failures — not findings
+        "unable to connect",
+        "ssl handshake failure",
+        "error getting url",
     ]
 
     header_pattern = re.compile(

@@ -1745,6 +1745,18 @@ def poll_scan_work_item(item_id: int):
         except Exception:
             run.execution_time_seconds = None
 
+        # ── Extract and persist findings from completed tool output ──────────
+        findings_created = 0
+        if item.status == "completed" and job:
+            try:
+                from app.services.findings_extractor import persist_findings_from_work_item as _persist_findings
+                findings_created = _persist_findings(db, item, job)
+            except Exception as _fe:  # noqa: BLE001
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
+                )
+
         if job:
             counts = work_queue_counts(db, item.scan_job_id)
             state = dict(job.state_data or {})
@@ -1757,6 +1769,7 @@ def poll_scan_work_item(item_id: int):
                 message=(
                     f"work_item_finish id={item.id} phase={item.phase_id} target={item.target} "
                     f"tool={item.tool_name} status={item.status} kali_status={raw_status}"
+                    + (f" findings={findings_created}" if findings_created else "")
                 ),
             ))
         db.commit()
