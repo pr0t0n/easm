@@ -230,6 +230,7 @@ class MCPClient:
         tool_name: str,
         target: str,
         *,
+        targets: list[str] | None = None,
         scan_id: int | str | None = None,
         timeout: int | None = None,
         skill_context: dict[str, Any] | None = None,
@@ -266,6 +267,12 @@ class MCPClient:
             "timeout": runner_timeout,
             "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
         }
+        if targets and len(targets) > 1:
+            payload["targets"] = [
+                normalize_target_for_kali(str(t or "").strip())
+                for t in targets
+                if str(t or "").strip()
+            ]
         if skill_context:
             payload["skill_context"] = dict(skill_context)
         if normalized_target != original_target:

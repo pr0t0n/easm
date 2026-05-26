@@ -1037,7 +1037,28 @@ def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
             )
         return list(resolvable_targets)
 
-    return [str(state.get("target") or "").strip()]
+    # asset_discovery fallback:
+    # P01 (subdomain enumeration) runs only against the root domain — it IS the
+    # discovery phase, so running subfinder/amass against already-found subdomains
+    # makes no sense. P02-P06 (port scan, WAF, TLS, headers, crawling) MUST run
+    # against every discovered subdomain too, otherwise they are never port-scanned
+    # or fingerprinted — only the root gets those phases applied.
+    phase_id = str(state.get("current_pentest_phase_id") or "")
+    root = str(state.get("target") or "").strip()
+    if phase_id == "P01" or not root:
+        return [root] if root else []
+
+    # P02-P06: expand to root + all discovered subdomains (pending + already-scanned)
+    pending = list(state.get("pending_asset_scans") or [])
+    scanned = list(state.get("scanned_assets") or [])
+    seen: set[str] = set()
+    all_recon_targets: list[str] = []
+    for host in [root] + pending + scanned:
+        h = str(host or "").strip()
+        if h and h not in seen:
+            seen.add(h)
+            all_recon_targets.append(h)
+    return all_recon_targets or [root]
 
 
 def _apply_tool_execution_findings(
@@ -1313,42 +1334,107 @@ def tool_executor_node(state: AgentState) -> AgentState:
 
     if not selected_tools:
         state["logs_terminais"].append(f"[executor] capability={capability} sem tool selecionada; nada executado")
-    for scan_target in targets:
-        target_tools = selected_tools
-        if capability == "risk_assessment":
-            target_tools = _tools_for_validation_target(scan_target, selected_tools)
-        if not target_tools:
-            continue
-        findings, ports, assets, port_evidence = _run_tools_and_collect(
-            state,
-            target_tools,
-            scan_target,
-            _step_name(state),
-            f"ToolExecutor:{capability}",
-            root_domain=_target_host(state.get("target") or scan_target),
-            skill_context=selection,
-        )
-        _apply_tool_execution_findings(
-            state,
-            capability,
-            scan_target,
-            target_tools,
-            findings,
-            ports,
-            assets,
-            port_evidence,
-        )
-        all_results.append(
-            {
-                "target": scan_target,
-                "tools": target_tools,
-                "findings": len(findings),
-                "ports": ports,
-                "assets": assets,
-                "skill_id": selection.get("skill_id"),
-                "technique": (selection.get("technique") or {}).get("name"),
-            }
-        )
+    else:
+        # ── Batch-aware dispatch ─────────────────────────────────────────────────
+        # Tools that natively support a targets-file (-iL / -list / -l) run ONCE
+        # against ALL discovered subdomains.  Other tools still run per-target.
+        from app.services.kali_executor import BATCH_TOOL_TO_PROFILE as _BATCH_PROFILES
+
+        batch_tools = [t for t in selected_tools if t.lower() in _BATCH_PROFILES]
+        serial_tools = [t for t in selected_tools if t.lower() not in _BATCH_PROFILES]
+        use_batch = len(targets) > 1 and bool(batch_tools)
+
+        if use_batch:
+            state["logs_terminais"].append(
+                f"[executor] BATCH dispatch: {len(batch_tools)} tools × {len(targets)} targets "
+                f"→ 1 call each  batch={batch_tools[:4]}  serial_remaining={serial_tools[:4]}"
+            )
+            # Run batch-capable tools ONCE against the full target list.
+            # targets[0] is the nominal "scan_target" for dedup/logging; the real
+            # work happens against all hosts via the Kali runner's targets file.
+            findings, ports, assets, port_evidence = _run_tools_and_collect(
+                state,
+                batch_tools,
+                targets[0],
+                _step_name(state),
+                f"ToolExecutor:{capability}",
+                root_domain=_target_host(state.get("target") or targets[0]),
+                skill_context=selection,
+                all_targets=targets,
+            )
+            _apply_tool_execution_findings(
+                state,
+                capability,
+                targets[0],
+                batch_tools,
+                findings,
+                ports,
+                assets,
+                port_evidence,
+            )
+            # Mark ALL batch targets as scanned so pending queue drains correctly.
+            if capability in ("risk_assessment", "threat_intel"):
+                scanned = list(state.get("scanned_assets") or [])
+                pending = list(state.get("pending_asset_scans") or [])
+                for _bt in targets:
+                    if _bt and _bt not in scanned:
+                        scanned.append(_bt)
+                    if _bt in pending:
+                        pending.remove(_bt)
+                state["scanned_assets"] = scanned
+                state["pending_asset_scans"] = pending
+            all_results.append(
+                {
+                    "target": f"[batch:{len(targets)}×{','.join(batch_tools[:3])}]",
+                    "tools": batch_tools,
+                    "findings": len(findings),
+                    "ports": ports,
+                    "assets": assets,
+                    "skill_id": selection.get("skill_id"),
+                    "technique": (selection.get("technique") or {}).get("name"),
+                    "batch_target_count": len(targets),
+                }
+            )
+
+        # Run non-batch tools per-target (unchanged legacy behaviour for tools
+        # that do not support a targets file).
+        tools_for_serial = serial_tools if use_batch else selected_tools
+        for scan_target in targets:
+            target_tools = tools_for_serial
+            if capability == "risk_assessment":
+                target_tools = _tools_for_validation_target(scan_target, tools_for_serial)
+            if not target_tools:
+                continue
+            findings, ports, assets, port_evidence = _run_tools_and_collect(
+                state,
+                target_tools,
+                scan_target,
+                _step_name(state),
+                f"ToolExecutor:{capability}",
+                root_domain=_target_host(state.get("target") or scan_target),
+                skill_context=selection,
+            )
+            _apply_tool_execution_findings(
+                state,
+                capability,
+                scan_target,
+                target_tools,
+                findings,
+                ports,
+                assets,
+                port_evidence,
+            )
+            all_results.append(
+                {
+                    "target": scan_target,
+                    "tools": target_tools,
+                    "findings": len(findings),
+                    "ports": ports,
+                    "assets": assets,
+                    "skill_id": selection.get("skill_id"),
+                    "technique": (selection.get("technique") or {}).get("name"),
+                }
+            )
 
     state["tool_execution_results"] = list(state.get("tool_execution_results") or []) + all_results
 

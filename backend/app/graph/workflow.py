@@ -1212,8 +1212,16 @@ def _run_tools_and_collect(
     log_prefix: str,
     root_domain: str = "",
     skill_context: dict[str, Any] | None = None,
+    all_targets: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[int], list[str], dict[int, dict[str, str]]]:
-    """Runs the given tools against `scan_target` with parallel dispatch."""
+    """Runs the given tools against `scan_target` with parallel dispatch.
+
+    When ``all_targets`` is supplied and contains more than one host, batch-
+    capable tools (naabu, nmap, httpx, nuclei, etc.) receive the full list so
+    the Kali runner can invoke them ONCE against all hosts via ``-iL`` /
+    ``-list`` / ``-l``.  Tools that do not have a batch profile ignore the
+    list and run single-target as usual.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from time import perf_counter
     # Import autonomy helpers lazily to avoid circular import at module level
@@ -1306,6 +1314,7 @@ def _run_tools_and_collect(
                 sub_agent_plan=list(skill_context.get("sub_agent_plan") or []),
                 playbook=str(skill_context.get("playbook_title") or ""),
                 extra_args=tool_args,
+                targets=all_targets if all_targets and len(all_targets) > 1 else None,
             )
         except Exception as exc:
             r = {"status": "error", "dispatch_error": f"{type(exc).__name__}: {exc}"}

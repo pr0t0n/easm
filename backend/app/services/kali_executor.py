@@ -34,6 +34,21 @@ def kali_enabled_for_tool(tool_name: str) -> bool:
     return bool(name and name in TOOL_TO_PROFILE)
 
 
+# ── Batch profile mapping ─────────────────────────────────────────────────────
+# When multiple targets are provided, prefer these batch profiles that accept
+# a targets file (-iL / -list / -l) so the tool runs once for ALL hosts.
+# This eliminates the serialised 1-by-1 loop and lets nmap/naabu/nuclei/httpx
+# parallelise internally.
+BATCH_TOOL_TO_PROFILE: dict[str, str] = {
+    "naabu":      "naabu_top1000_batch",
+    "nmap":       "nmap_service_detect_batch",
+    "httpx":      "httpx_probe_batch",
+    "dnsx":       "dnsx_resolve_batch",
+    "nuclei":     "nuclei_cves_batch",
+    "nmap-vulscan": "nmap_vuln_scripts_batch",
+    "subjack":    "domain_takeover_batch",
+}
+
 # ── Tool name → profile id mapping ───────────────────────────────────────────
 # Profiles live in kali-runner/profiles/*.yaml. The agent uses tool names from
 # tool_catalog.py — we translate at the dispatch boundary so the rest of the
@@ -181,6 +196,7 @@ def execute_via_kali(
     tool_name: str,
     target: str,
     *,
+    targets: list[str] | None = None,
     scan_id: Optional[int] = None,
     scan_mode: str = "unit",
     poll_interval: float = 3.0,
@@ -190,32 +206,62 @@ def execute_via_kali(
 ) -> dict[str, Any]:
     """Dispatches `tool` to the Kali runner via HTTP and waits for completion.
 
+    When `targets` contains more than one host, the call automatically upgrades
+    to a batch profile (e.g. naabu_top1000_batch, nmap_service_detect_batch)
+    so the tool runs ONCE against ALL hosts instead of being called N times in
+    a serial loop.  Tools without a batch profile fall back to single-target.
+
     Returns a dict matching the shape produced by `run_tool_execution` so
     downstream code (`_run_tools_and_collect`) needs no special-case branch.
     """
-    profile = TOOL_TO_PROFILE.get(str(tool_name or "").strip().lower())
-    if not profile:
-        return _kali_failure(tool_name, target, scan_mode, "no_profile_mapping")
+    norm_tool = str(tool_name or "").strip().lower()
 
-    # Rewrite operator-friendly localhost into a docker-routable hostname.
-    # We keep the original in the failure trail for audit.
+    # Deduplicate and normalise the batch list (skip blanks / duplicates)
+    batch_targets: list[str] = []
+    if targets and len(targets) > 1:
+        seen: set[str] = set()
+        for t in targets:
+            nt = normalize_target_for_kali(str(t or "").strip())
+            if nt and nt not in seen:
+                seen.add(nt)
+                batch_targets.append(nt)
+
+    # Choose batch or single-target profile
+    use_batch = len(batch_targets) > 1 and norm_tool in BATCH_TOOL_TO_PROFILE
+    if use_batch:
+        profile = BATCH_TOOL_TO_PROFILE[norm_tool]
+        # Use the first target as the nominal "target" field (runner uses it
+        # only for logging when target_type=targets_file; the real targets come
+        # from the file written from req.targets).
+        dispatch_target = batch_targets[0]
+        dispatch_targets = batch_targets
+    else:
+        profile = TOOL_TO_PROFILE.get(norm_tool)
+        if not profile:
+            return _kali_failure(tool_name, target, scan_mode, "no_profile_mapping")
+        dispatch_target = normalize_target_for_kali(target)
+        dispatch_targets = []
+
     original_target = target
-    target = normalize_target_for_kali(target)
-
     base = _runner_url()
     started = time.perf_counter()
     try:
+        payload: dict[str, Any] = {
+            "profile": profile,
+            "target": dispatch_target,
+            "scan_id": scan_id,
+            "tool": tool_name,
+            "skill_context": dict(skill_context or {}),
+            "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
+        }
+        if dispatch_targets:
+            payload["targets"] = dispatch_targets
+        if original_target != dispatch_target and not dispatch_targets:
+            payload["original_target"] = original_target
+
         post = requests.post(
             f"{base}/jobs",
-            json={
-                "profile": profile,
-                "target": target,
-                "scan_id": scan_id,
-                "tool": tool_name,
-                "original_target": original_target if original_target != target else None,
-                "skill_context": dict(skill_context or {}),
-                "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
-            },
+            json=payload,
             timeout=10,
         )
         post.raise_for_status()

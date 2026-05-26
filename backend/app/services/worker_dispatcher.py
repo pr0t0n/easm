@@ -37,6 +37,7 @@ def execute_tool_with_workers(
     sub_agent_plan: list[dict[str, Any]] | None = None,
     playbook: str | None = None,
     extra_args: list[str] | None = None,
+    targets: list[str] | None = None,
 ) -> dict[str, Any]:
     """Single-path tool execution.
 
@@ -113,6 +114,7 @@ def execute_tool_with_workers(
             result = mcp_client.execute_kali_tool_sync(
                 tool_name=tool_name,
                 target=target,
+                targets=targets or None,
                 scan_id=scan_id,
                 skill_context={
                     "skill_id": skill_id,
@@ -127,6 +129,7 @@ def execute_tool_with_workers(
         result = execute_via_kali(
             tool_name=tool_name,
             target=target,
+            targets=targets or None,
             scan_id=scan_id,
             scan_mode=scan_mode,
             skill_context={
