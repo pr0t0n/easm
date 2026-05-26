@@ -1098,6 +1098,13 @@ def _apply_tool_execution_findings(
         )
         return
 
+    if capability in ("risk_assessment", "threat_intel"):
+        # Mark this target as scanned so progress can reflect real subdomain coverage
+        scanned = list(state.get("scanned_assets") or [])
+        if target and target not in scanned:
+            scanned.append(target)
+            state["scanned_assets"] = scanned
+
     if capability == "risk_assessment":
         state["vulnerabilidades_encontradas"].append(
             {

@@ -68,6 +68,19 @@ def _effective_mission_progress(job: ScanJob) -> int:
     )
     if counted:
         progress = max(progress, round((counted / 22) * 100))
+
+    # For running scans, modulate by subdomain coverage so progress reflects
+    # how many active subdomains have actually been analyzed.
+    if str(job.status or "").lower() in ("running", "queued", "retrying"):
+        cov = state.get("subdomain_coverage") or {}
+        active_total = int(cov.get("active_total") or 0)
+        scanned = int(cov.get("scanned") or 0)
+        if active_total > 0:
+            subdomain_pct = int(round(min(scanned, active_total) / active_total * 100))
+            progress = max(progress, subdomain_pct)
+        # Cap at 99 — only the final task completion sets 100%
+        return max(0, min(99, progress))
+
     return max(0, min(100, progress))
 
 
@@ -2416,6 +2429,7 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             last_error=s.last_error,
             created_at=s.created_at,
             updated_at=s.updated_at,
+            state_data={"subdomain_coverage": (s.state_data or {}).get("subdomain_coverage") or {}},
         )
         for s in rows
     ]

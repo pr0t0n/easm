@@ -485,9 +485,20 @@ def _start_scan_progress_pulse(scan_id: int, scan_mode: ScanMode, interval_secon
                     if job.current_step != step_label:
                         job.current_step = step_label
                         current_step = step_label
-                    # Também atualiza mission_progress em tempo real
                     total = max(1, len(mission_items))
-                    job.mission_progress = int(round(min(mi, total) / total * 100))
+                    phase_pct = int(round(min(mi, total) / total * 100))
+
+                    # Subdomain-coverage progress from snapshot
+                    cov = state_data.get("subdomain_coverage") or {}
+                    active_total = max(1, int(cov.get("active_total") or 1))
+                    scanned_count = int(cov.get("scanned") or 0)
+                    total_disc = int(cov.get("total_discovered") or 0)
+                    if total_disc > 0:
+                        subdomain_pct = int(round(min(scanned_count, active_total) / active_total * 100))
+                        raw_pct = max(phase_pct, subdomain_pct)
+                    else:
+                        raw_pct = phase_pct
+                    job.mission_progress = min(99, raw_pct)
                 
                 # Emite log simples de progresso a cada pulse
                 pulse_db.add(

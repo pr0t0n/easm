@@ -227,7 +227,27 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 mission_items = state.get("mission_items") or []
                 mi = state.get("mission_index", 0)
                 total = max(1, len(mission_items))
-                job.mission_progress = int(round(min(mi, total) / total * 100))
+                phase_pct = int(round(min(mi, total) / total * 100))
+
+                # Subdomain-coverage progress: how many active assets were analyzed
+                lista_ativos = list(state.get("lista_ativos") or [])
+                scanned_assets = list(state.get("scanned_assets") or [])
+                findings = list(state.get("vulnerabilidades_encontradas") or [])
+                failed_takeover = sum(
+                    1 for f in findings
+                    if "takeover" in str(f.get("title", "")).lower()
+                    and str(f.get("severity", "info")).lower() not in ("info", "low")
+                )
+                active_total = max(1, len(lista_ativos) - failed_takeover)
+                subdomain_pct = int(round(min(len(scanned_assets), active_total) / active_total * 100))
+
+                # Drive progress by subdomain coverage; fall back to phase % when
+                # no subdomains discovered yet. Cap at 99 until scan truly completes.
+                if lista_ativos:
+                    raw_pct = max(phase_pct, subdomain_pct)
+                else:
+                    raw_pct = phase_pct
+                job.mission_progress = min(99, raw_pct)
                 current_node = _node_for_step(step_label, state.get("scan_mode", "unit"))
                 snapshot_node_history = list(state.get("node_history", []))
                 if current_node and (not snapshot_node_history or snapshot_node_history[-1] != current_node):
@@ -248,6 +268,13 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["recon_reanalyze_queue"] = list(state.get("recon_reanalyze_queue") or [])[:50]
                 sd["recon_coverage"] = dict(state.get("recon_coverage") or {})
                 sd["recon_coverage_gaps"] = list(state.get("recon_coverage_gaps") or [])
+                sd["subdomain_coverage"] = {
+                    "total_discovered": len(lista_ativos),
+                    "scanned": len(scanned_assets),
+                    "failed_takeover": failed_takeover,
+                    "active_total": active_total,
+                    "pct": subdomain_pct,
+                }
                 job.state_data = sd
                 # Persist tech_stack to its dedicated column too (queryable by GIN index).
                 try:

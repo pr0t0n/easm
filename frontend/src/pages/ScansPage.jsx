@@ -784,21 +784,35 @@ export default function ScansPage({ embedded = false }) {
                             </div>
                             <div className="mt-2 space-y-1.5">
                               {/* Progress bar */}
-                              <div className="flex items-center gap-2">
-                                <div className="flex-1 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
-                                  <div
-                                    className="h-full rounded-full transition-all duration-500"
-                                    style={{
-                                      width: `${scan.mission_progress}%`,
-                                      background: scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : '#fb923c',
-                                    }}
-                                  />
-                                </div>
-                                <span className="text-xs font-mono font-bold" style={{
-                                  color: scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : '#fb923c',
-                                  minWidth: 34, textAlign: 'right'
-                                }}>{scan.mission_progress}%</span>
-                              </div>
+                              {(() => {
+                                const cov = scan.state_data?.subdomain_coverage;
+                                const barColor = scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : '#fb923c';
+                                const textColor = scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : '#fb923c';
+                                const pct = scan.mission_progress ?? 0;
+                                return (
+                                  <>
+                                    <div className="flex items-center gap-2">
+                                      <div className="flex-1 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: barColor }} />
+                                      </div>
+                                      <span className="text-xs font-mono font-bold" style={{ color: textColor, minWidth: 34, textAlign: 'right' }}>{pct}%</span>
+                                    </div>
+                                    {cov && cov.total_discovered > 0 && (
+                                      <div className="text-xs flex gap-3 mt-0.5" style={{ color: '#94a3b8' }}>
+                                        <span title="Subdomínios analisados / ativos descobertos">
+                                          <span style={{ color: textColor, fontWeight: 600 }}>{cov.scanned}</span>
+                                          <span>/{cov.active_total} subdomínios analisados</span>
+                                        </span>
+                                        {cov.failed_takeover > 0 && (
+                                          <span title="Excluídos: domain takeover confirmado" style={{ color: '#f87171' }}>
+                                            −{cov.failed_takeover} takeover
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()}
                               {/* Step + timing */}
                               <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
                                 <span className="truncate max-w-[180px]" title={scan.current_step}>{scan.current_step}</span>
