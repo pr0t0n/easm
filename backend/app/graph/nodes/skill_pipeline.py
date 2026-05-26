@@ -956,11 +956,12 @@ def _persist_tool_selection_to_log(
 
 
 def _all_pending_targets(state: AgentState) -> list[str]:
-    """Root domain + every discovered subdomain not yet fully scanned.
+    """ALL operator-supplied root targets + every discovered subdomain.
 
+    When the operator submitted "domain1.com; domain2.com", both are treated
+    as roots so threat_intel / risk_assessment cover the full target set.
     No artificial cap — every subdomain discovered in P01 must be analyzed
-    by subsequent phases.  Already-scanned assets are excluded so the same
-    subdomain is not re-processed if the executor loops back.
+    by subsequent phases.
     """
     from app.graph.workflow import _target_host
 
@@ -968,12 +969,24 @@ def _all_pending_targets(state: AgentState) -> list[str]:
     scanned = set(state.get("scanned_assets") or [])
     candidates: list[str] = []
 
-    # Always start with the explicit root target(s)
-    import re as _re
-    for token in _re.split(r"[;,]", root):
-        t = str(token or "").strip()
-        if t and t not in candidates:
-            candidates.append(t)
+    # Prefer the full input_targets list so ALL operator-supplied roots are
+    # included, not just the primary target stored in state['target'].
+    input_targets = [
+        str(t or "").strip()
+        for t in list(state.get("input_targets") or [])
+        if str(t or "").strip()
+    ]
+    if input_targets:
+        for t in input_targets:
+            if t and t not in candidates:
+                candidates.append(t)
+    else:
+        # Fallback: split primary target string (handles legacy state without input_targets)
+        import re as _re
+        for token in _re.split(r"[;,]", root):
+            t = str(token or "").strip()
+            if t and t not in candidates:
+                candidates.append(t)
 
     # All discovered subdomains not yet scanned
     for asset in list(state.get("pending_asset_scans") or []):
@@ -1038,27 +1051,36 @@ def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
         return list(resolvable_targets)
 
     # asset_discovery fallback:
-    # P01 (subdomain enumeration) runs only against the root domain — it IS the
-    # discovery phase, so running subfinder/amass against already-found subdomains
-    # makes no sense. P02-P06 (port scan, WAF, TLS, headers, crawling) MUST run
-    # against every discovered subdomain too, otherwise they are never port-scanned
-    # or fingerprinted — only the root gets those phases applied.
+    # P01 (subdomain enumeration) runs against EVERY root target the operator
+    # supplied (input_targets). If they typed "domain1.com; domain2.com", both
+    # domains are enumerated sequentially so their subdomains are combined into
+    # the discovery pool before P02-P06 begins.
+    # P02-P06 (port scan, WAF, TLS, headers, crawling) run against ALL root targets
+    # PLUS every discovered subdomain — no artificial limit.
     phase_id = str(state.get("current_pentest_phase_id") or "")
     root = str(state.get("target") or "").strip()
-    if phase_id == "P01" or not root:
-        return [root] if root else []
+    input_targets = [
+        str(t or "").strip()
+        for t in list(state.get("input_targets") or [])
+        if str(t or "").strip()
+    ] or ([root] if root else [])
 
-    # P02-P06: expand to root + all discovered subdomains (pending + already-scanned)
+    if phase_id == "P01" or not root:
+        # P01: run discovery tools on each operator-supplied root domain
+        # sequentially so all roots contribute subdomains to the scan pool.
+        return input_targets if input_targets else ([root] if root else [])
+
+    # P02-P06: expand from ALL root targets + all discovered subdomains
     pending = list(state.get("pending_asset_scans") or [])
     scanned = list(state.get("scanned_assets") or [])
     seen: set[str] = set()
     all_recon_targets: list[str] = []
-    for host in [root] + pending + scanned:
+    for host in input_targets + pending + scanned:
         h = str(host or "").strip()
         if h and h not in seen:
             seen.add(h)
             all_recon_targets.append(h)
-    return all_recon_targets or [root]
+    return all_recon_targets or input_targets or [root]
 
 
 def _apply_tool_execution_findings(
@@ -1099,7 +1121,10 @@ def _apply_tool_execution_findings(
             state["discovered_ports"] = sorted(set((state.get("discovered_ports") or []) + ports))
             state["pending_port_tests"] = state["discovered_ports"].copy()
         if assets:
-            root_domain = _target_host(state.get("target") or target)
+            # Use `target` (current scan target) as the scope root so that
+            # assets discovered while running on domain2.com are scoped to
+            # domain2.com, not filtered out by the primary state.target.
+            root_domain = _target_host(target or state.get("target") or "")
             _register_discovered_assets(state, root_domain=root_domain, assets=assets)
             owner_id = state.get("owner_id")
             scan_id = state.get("scan_id")
@@ -1358,7 +1383,7 @@ def tool_executor_node(state: AgentState) -> AgentState:
                 targets[0],
                 _step_name(state),
                 f"ToolExecutor:{capability}",
-                root_domain=_target_host(state.get("target") or targets[0]),
+                root_domain=_target_host(targets[0]),
                 skill_context=selection,
                 all_targets=targets,
             )
@@ -1411,7 +1436,10 @@ def tool_executor_node(state: AgentState) -> AgentState:
                 scan_target,
                 _step_name(state),
                 f"ToolExecutor:{capability}",
-                root_domain=_target_host(state.get("target") or scan_target),
+                # Use scan_target as the scope root so that when running on
+                # domain2.com the extracted assets (sub.domain2.com, etc.) are
+                # scoped to domain2.com and not filtered out by domain1.com.
+                root_domain=_target_host(scan_target),
                 skill_context=selection,
             )
             _apply_tool_execution_findings(
