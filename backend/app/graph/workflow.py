@@ -1062,7 +1062,13 @@ def _discovered_validation_targets(state: AgentState, root: str, limit: int = 40
     return normalized[: max(1, limit)]
 
 
-def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
+def _targets_for_deep_scan(state: AgentState, limit: int | None = None) -> list[str]:
+    """Return root + all discovered assets for deep analysis.
+
+    ``limit`` is kept for backward-compatibility with callers that still pass
+    it, but when called without a limit (or with limit=None) the full list is
+    returned so every subdomain is analyzed.
+    """
     root = str(state.get("target") or "").strip()
     candidates: list[str] = []
     if root:
@@ -1081,11 +1087,14 @@ def _targets_for_deep_scan(state: AgentState, limit: int = 8) -> list[str]:
         if host and host not in candidates:
             candidates.append(host)
 
-    for url in _discovered_validation_targets(state, root, limit=limit * 6):
+    url_limit = (limit * 6) if limit else max(60, len(candidates) * 4)
+    for url in _discovered_validation_targets(state, root, limit=url_limit):
         if url and url not in candidates:
             candidates.append(url)
 
-    return candidates[: max(1, limit)]
+    if limit:
+        return candidates[: max(1, limit)]
+    return candidates
 
 
 def _tools_for_validation_target(scan_target: str, tools: list[str]) -> list[str]:

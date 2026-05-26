@@ -955,6 +955,42 @@ def _persist_tool_selection_to_log(
         state["logs_terminais"].append(f"[ToolSelector] log update falhou: {exc}")
 
 
+def _all_pending_targets(state: AgentState) -> list[str]:
+    """Root domain + every discovered subdomain not yet fully scanned.
+
+    No artificial cap — every subdomain discovered in P01 must be analyzed
+    by subsequent phases.  Already-scanned assets are excluded so the same
+    subdomain is not re-processed if the executor loops back.
+    """
+    from app.graph.workflow import _target_host
+
+    root = str(state.get("target") or "").strip()
+    scanned = set(state.get("scanned_assets") or [])
+    candidates: list[str] = []
+
+    # Always start with the explicit root target(s)
+    import re as _re
+    for token in _re.split(r"[;,]", root):
+        t = str(token or "").strip()
+        if t and t not in candidates:
+            candidates.append(t)
+
+    # All discovered subdomains not yet scanned
+    for asset in list(state.get("pending_asset_scans") or []):
+        host = str(asset or "").strip()
+        if host and host not in scanned and host not in candidates:
+            candidates.append(host)
+
+    # Also include already-scanned assets so they aren't dropped from the list
+    # (threat_intel may need to revisit them for correlation)
+    for asset in list(state.get("scanned_assets") or []):
+        host = str(asset or "").strip()
+        if host and host not in candidates:
+            candidates.append(host)
+
+    return candidates
+
+
 def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
     from app.graph.workflow import (
         _validate_osint_targets,
@@ -969,30 +1005,35 @@ def _targets_for_tool_pipeline(state: AgentState, capability: str) -> list[str]:
         return [str(target) for target in list(context.get("targets") or []) if str(target or "").strip()]
 
     if capability == "threat_intel":
-        osint_targets = _validate_osint_targets(_targets_for_deep_scan(state, limit=6))
+        # All pending subdomains + root — no artificial cap
+        all_targets = _all_pending_targets(state)
+        osint_targets = _validate_osint_targets(all_targets)
         if osint_targets:
             return osint_targets
         host = _target_host(str(state.get("target") or ""))
         return [host or str(state.get("target") or "").strip()]
 
     if capability == "risk_assessment":
-        limit = 10 if _is_local_target(state.get("target", "")) else 6
-        primary_targets = _targets_for_deep_scan(state, limit=limit)
-        resolvable_targets, unresolved_targets = _filter_resolvable_targets(primary_targets)
+        # All pending subdomains + root — no artificial cap
+        all_targets = _all_pending_targets(state)
         explicit_target = str(state.get("target") or "").strip()
-        if explicit_target and _is_local_target(explicit_target):
-            local_targets = [t for t in primary_targets if _is_local_target(t)]
-            if explicit_target not in local_targets:
-                local_targets.insert(0, explicit_target)
-            resolvable_targets = list(dict.fromkeys(local_targets + resolvable_targets))
-            unresolved_targets = [t for t in unresolved_targets if not _is_local_target(t)]
+        is_local = _is_local_target(explicit_target)
+        if is_local:
+            # Local targets skip DNS resolution check
+            resolvable_targets = list(dict.fromkeys(all_targets))
+            unresolved_targets: list[str] = []
+        else:
+            resolvable_targets, unresolved_targets = _filter_resolvable_targets(all_targets)
+            if explicit_target and _is_local_target(explicit_target):
+                if explicit_target not in resolvable_targets:
+                    resolvable_targets.insert(0, explicit_target)
         if not resolvable_targets:
-            resolvable_targets = [state.get("target", "")]
+            resolvable_targets = [explicit_target or state.get("target", "")]
         state["risk_targets_resolvable"] = list(resolvable_targets)
         state["risk_targets_unresolved"] = list(unresolved_targets)
         if unresolved_targets:
             state["logs_terminais"].append(
-                f"RiskAssessment: unresolved_targets_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
+                f"RiskAssessment: unresolved_skipped={len(unresolved_targets)} sample={unresolved_targets[:5]}"
             )
         return list(resolvable_targets)
 
@@ -1099,11 +1140,15 @@ def _apply_tool_execution_findings(
         return
 
     if capability in ("risk_assessment", "threat_intel"):
-        # Mark this target as scanned so progress can reflect real subdomain coverage
+        # Mark this target as scanned and drain it from pending queue
         scanned = list(state.get("scanned_assets") or [])
         if target and target not in scanned:
             scanned.append(target)
             state["scanned_assets"] = scanned
+        pending = list(state.get("pending_asset_scans") or [])
+        if target in pending:
+            pending.remove(target)
+            state["pending_asset_scans"] = pending
 
     if capability == "risk_assessment":
         state["vulnerabilidades_encontradas"].append(
