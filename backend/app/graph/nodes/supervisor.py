@@ -1087,6 +1087,12 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
 
         # ── Build the tactic for THIS phase ──────────────────────────────
         state["pentest_phase_index"] = idx
+        # Keep current_pentest_phase_id in sync with the phase being walked.
+        # Without this, _update_phase_ledger_for_tool attributes all tool
+        # results to the stale phase_id (e.g. always P01), so the ledger
+        # never accumulates evidence for later phases and _validate_and_advance_phase
+        # gets stuck validating the wrong phase forever.
+        state["current_pentest_phase_id"] = ph_id
         state["kill_chain_stage"] = _PHASE_TO_KC_STAGE.get(ph_id, "RECONNAISSANCE")
         skill_id = phase_skill.get(ph_id) or node_default_skill.get(node, "recon-web-crawl")
         tactic = {
@@ -1535,10 +1541,21 @@ def supervisor_node(state: AgentState) -> AgentState:
         # always close any pending delegation task for the node we just left
         _complete_delegation_task(state, last_node, f"capability_executed:{last_node}")
 
-    # ── Phase ledger validation after each capability node ───────────────────
-    # When a capability node just ran, validate the current pentest phase and
-    # advance pentest_phase_index when exit criteria are met.
-    if last_node in TOOL_CAPABILITY_NODES | capability_nodes:
+    # ── Phase ledger validation after each tool-execution cycle ─────────────
+    # The graph flow is: supervisor → skill_selector → ... → tool_executor
+    # → agent_reporter → evidence_gate → supervisor.
+    # last_completed_node is set by _metric_end(), which means it is always
+    # "evidence_gate" (or occasionally "tool_executor") when we arrive back
+    # here — NEVER one of the virtual capability labels ("asset_discovery",
+    # "threat_intel", "risk_assessment").  The old guard
+    # `last_node in TOOL_CAPABILITY_NODES` therefore NEVER fired, so phases
+    # were never validated and advancement was permanently blocked.
+    # Fix: call _validate_and_advance_phase after ANY tool-pipeline return,
+    # identified by evidence_gate (normal path) or tool_executor (abort path).
+    _tool_pipeline_nodes = TOOL_CAPABILITY_NODES | capability_nodes | {
+        "evidence_gate", "tool_executor", "agent_reporter",
+    }
+    if last_node in _tool_pipeline_nodes:
         _validate_and_advance_phase(state)
 
     confidence = int((state.get("confidence_state") or {}).get("global_confidence", 60))

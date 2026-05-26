@@ -1167,6 +1167,19 @@ def _apply_tool_execution_findings(
         )
         return
 
+    # For threat_intel AND risk_assessment: drain the target from the pending
+    # queue BEFORE adding the finding, so the scanned/pending lists stay
+    # consistent even when we return early.
+    if capability in ("risk_assessment", "threat_intel"):
+        scanned = list(state.get("scanned_assets") or [])
+        if target and target not in scanned:
+            scanned.append(target)
+            state["scanned_assets"] = scanned
+        pending = list(state.get("pending_asset_scans") or [])
+        if target in pending:
+            pending.remove(target)
+            state["pending_asset_scans"] = pending
+
     if capability == "threat_intel":
         state["vulnerabilidades_encontradas"].append(
             {
@@ -1184,17 +1197,6 @@ def _apply_tool_execution_findings(
             }
         )
         return
-
-    if capability in ("risk_assessment", "threat_intel"):
-        # Mark this target as scanned and drain it from pending queue
-        scanned = list(state.get("scanned_assets") or [])
-        if target and target not in scanned:
-            scanned.append(target)
-            state["scanned_assets"] = scanned
-        pending = list(state.get("pending_asset_scans") or [])
-        if target in pending:
-            pending.remove(target)
-            state["pending_asset_scans"] = pending
 
     if capability == "risk_assessment":
         state["vulnerabilidades_encontradas"].append(

@@ -229,7 +229,31 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 total = max(1, len(mission_items))
                 phase_pct = int(round(min(mi, total) / total * 100))
 
-                # Subdomain-coverage progress: how many active assets were analyzed
+                # Phase-ledger progress: count completed/skipped phases out of 22.
+                # This is the primary progress signal — it advances smoothly as
+                # each pentest phase (P01→P22) finishes, not in one sudden jump
+                # when batch mode marks all subdomains scanned simultaneously.
+                try:
+                    from app.graph.mission import PENTEST_PHASES as _PP
+                    _ledger = dict(state.get("phase_ledger") or {})
+                    _total_phases = max(1, len(_PP))
+                    _done_phases = sum(
+                        1 for _p in _PP
+                        if dict(_ledger.get(str(_p["id"])) or {}).get("status") in ("completed", "skipped")
+                    )
+                    # Each completed phase = ~4.5 progress points (22 phases → 99%)
+                    phase_ledger_pct = int(_done_phases / _total_phases * 99)
+                    # Within the current phase: tool attempts give fractional credit.
+                    _cur_ph_id = str(state.get("current_pentest_phase_id") or "")
+                    _cur_entry = dict(_ledger.get(_cur_ph_id) or {})
+                    _attempted = len(_cur_entry.get("tools_attempted") or [])
+                    _intra_phase_bonus = min(4, _attempted)  # up to 4% within phase
+                    phase_ledger_pct = min(99, phase_ledger_pct + _intra_phase_bonus)
+                except Exception:
+                    phase_ledger_pct = phase_pct
+
+                # Subdomain-coverage metric kept for state_data telemetry only —
+                # no longer drives mission_progress directly.
                 lista_ativos = list(state.get("lista_ativos") or [])
                 scanned_assets = list(state.get("scanned_assets") or [])
                 findings = list(state.get("vulnerabilidades_encontradas") or [])
@@ -241,12 +265,10 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 active_total = max(1, len(lista_ativos) - failed_takeover)
                 subdomain_pct = int(round(min(len(scanned_assets), active_total) / active_total * 100))
 
-                # Drive progress by subdomain coverage; fall back to phase % when
-                # no subdomains discovered yet. Cap at 99 until scan truly completes.
-                if lista_ativos:
-                    raw_pct = max(phase_pct, subdomain_pct)
-                else:
-                    raw_pct = phase_pct
+                # Use phase-ledger progress as the authoritative value.
+                # Never go backwards — take the max of phase progress and the
+                # old mission-index % so the bar can't regress if ledger is empty.
+                raw_pct = max(phase_ledger_pct, phase_pct)
                 job.mission_progress = min(99, raw_pct)
                 current_node = _node_for_step(step_label, state.get("scan_mode", "unit"))
                 snapshot_node_history = list(state.get("node_history", []))
@@ -1737,13 +1759,18 @@ def _update_phase_ledger_for_tool(
         entry["status"] = "running"
         entry["started_at"] = entry.get("started_at") or datetime.utcnow().isoformat()
 
-    # Register parser result if tool produced findings
-    findings = _extract_tool_output_findings(result, phase_id, str(state.get("target") or ""))
-    if findings and not entry.get("parser_result"):
+    # Register parser_result when a tool executes successfully.
+    # A tool that ran IS the parser result — phases must not be blocked
+    # because a tool found zero items (e.g. subfinder finds no subs on a
+    # fresh domain). We also extract findings for the count, but execution
+    # alone is sufficient to satisfy the exit criterion.
+    if status == "executed" and not entry.get("parser_result"):
+        findings = _extract_tool_output_findings(result, phase_id, str(state.get("target") or ""))
         entry["parser_result"] = {
             "tool": tool_lower,
-            "findings_count": len(findings),
+            "findings_count": len(findings) if findings else 0,
             "ts": datetime.utcnow().isoformat(),
+            "status": "executed",
         }
 
     ledger[phase_id] = entry
@@ -1795,13 +1822,27 @@ def validate_phase_exit_criteria(
     min_attempted = int(exit_c.get("min_required_tools_attempted", 1))
     min_succeeded = int(exit_c.get("min_required_tools_succeeded", 1))
     needs_evidence = bool(exit_c.get("evidence_persisted", True))
-    needs_parser = bool(exit_c.get("parser_result_registered", True))
+    # Default False: parser_result auto-registers on execution in
+    # _update_phase_ledger_for_tool; phases that never set this key
+    # explicitly should not be permanently blocked.
+    needs_parser = bool(exit_c.get("parser_result_registered", False))
+    max_retries = int(retry_policy.get("max_retries", 2))
 
     req_attempted = [t for t in required_tools if t in tools_attempted]
     req_succeeded = [t for t in required_tools if t in tools_succeeded]
+    req_failed = [t for t in required_tools if t in entry.get("tools_failed", [])]
 
     # MCP architectural failure: MCP required but all tools failed via MCP
     if mcp_failures and not tools_succeeded:
+        # After max_retries MCP failures the scan must continue — mark as
+        # partial-skip rather than blocking the entire pipeline forever.
+        if len(mcp_failures) > max_retries:
+            reason = (
+                f"Phase {phase_id}: MCP unavailable after {len(mcp_failures)} failures "
+                f"(max_retries={max_retries}). Advancing as partial skip."
+            )
+            logger.warning("PHASE_LEDGER [%s] mcp_failure_skip errors=%d", phase_id, len(mcp_failures))
+            return True, "partial", reason
         reason = (
             f"Phase {phase_id}: MCP architectural failure — {len(mcp_failures)} MCP error(s). "
             "Tools attempted but MCP was unavailable. Phase is PARTIAL. "
@@ -1821,8 +1862,22 @@ def validate_phase_exit_criteria(
         return False, "partial", reason
 
     if len(req_succeeded) < min_succeeded:
-        req_failed = [t for t in required_tools if t in entry.get("tools_failed", [])]
+        # All required tools failed — advance as failed-skip after retries
+        # so the pipeline doesn't stall on an unreachable service.
         if req_failed and len(req_failed) >= len(required_tools):
+            tool_log = list(entry.get("tool_execution_log") or [])
+            req_attempts = sum(
+                1 for e in tool_log
+                if e.get("tool", "").lower() in {t.lower() for t in required_tools}
+            )
+            if req_attempts > max_retries:
+                reason = (
+                    f"Phase {phase_id}: all required tools failed after "
+                    f"{req_attempts} attempts (max_retries={max_retries}). "
+                    f"Advancing as failed-skip — {req_failed}."
+                )
+                logger.warning("PHASE_LEDGER [%s] all_required_failed_skip tools=%s", phase_id, req_failed)
+                return True, "partial", reason
             reason = (
                 f"Phase {phase_id}: all required tools failed — {req_failed}. "
                 "Phase cannot complete. Mark as failed+skip or retry with optional tools."
