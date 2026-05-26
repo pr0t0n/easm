@@ -7,12 +7,9 @@ function resolveApiBaseUrl() {
     return configured;
   }
 
-  if (typeof window === "undefined") {
-    return "http://localhost:8001";
-  }
-
-  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-  return `${protocol}//${window.location.hostname}:8001`;
+  // Use relative base so the Vite proxy (or any reverse proxy) forwards /api
+  // to the backend. This works regardless of how the host is accessed.
+  return "";
 }
 
 export function getApiBaseUrl() {
@@ -21,9 +18,17 @@ export function getApiBaseUrl() {
 
 export function getWsBaseUrl() {
   const apiUrl = resolveApiBaseUrl();
-  return apiUrl.startsWith("https://")
-    ? apiUrl.replace("https://", "wss://")
-    : apiUrl.replace("http://", "ws://");
+  if (apiUrl) {
+    return apiUrl.startsWith("https://")
+      ? apiUrl.replace("https://", "wss://")
+      : apiUrl.replace("http://", "ws://");
+  }
+  // Derive from current page origin when using the proxy (empty base URL)
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${window.location.host}`;
+  }
+  return "ws://localhost";
 }
 
 const client = axios.create({

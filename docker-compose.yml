@@ -319,7 +319,7 @@ services:
         INSTALL_DEPS: "${FRONTEND_INSTALL_DEPS:-true}"
     container_name: scriptkiddo_frontend
     environment:
-      VITE_API_URL: "${VITE_API_URL:-http://localhost:8001}"
+      VITE_API_URL: "${VITE_API_URL:-}"
       TZ: America/Sao_Paulo
     depends_on:
       backend:
