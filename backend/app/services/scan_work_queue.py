@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -220,80 +220,91 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
     dispatch_limit = max(1, int(limit or settings.scan_work_queue_dispatch_limit))
     caps = capacity_limits()
     claimed: list[int] = []
+    lock_key = 917000 + int(scan_id)
+    lock_acquired = bool(db.execute(text("select pg_try_advisory_lock(:key)"), {"key": lock_key}).scalar())
+    if not lock_acquired:
+        return []
 
-    db.query(ScanWorkItem).filter(
-        ScanWorkItem.scan_job_id == scan_id,
-        ScanWorkItem.status.in_(["dispatched", "running"]),
-        ScanWorkItem.lease_until.isnot(None),
-        ScanWorkItem.lease_until <= now,
-        ScanWorkItem.attempts < ScanWorkItem.max_attempts,
-    ).update(
-        {
-            "status": "retry",
-            "lease_until": None,
-            "updated_at": now,
-            "last_error": "lease_expired_requeued",
-        },
-        synchronize_session=False,
-    )
-    db.query(ScanWorkItem).filter(
-        ScanWorkItem.scan_job_id == scan_id,
-        ScanWorkItem.status.in_(["dispatched", "running"]),
-        ScanWorkItem.lease_until.isnot(None),
-        ScanWorkItem.lease_until <= now,
-        ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
-    ).update(
-        {
-            "status": "failed",
-            "lease_until": None,
-            "finished_at": now,
-            "updated_at": now,
-            "last_error": "lease_expired_max_attempts",
-        },
-        synchronize_session=False,
-    )
-    db.flush()
-
-    running_rows = (
-        db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
-        .filter(
+    try:
+        db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
-            ScanWorkItem.status.in_(["running", "dispatched"]),
-            or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until > now),
+            ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+            ScanWorkItem.lease_until.isnot(None),
+            ScanWorkItem.lease_until <= now,
+            ScanWorkItem.attempts < ScanWorkItem.max_attempts,
+        ).update(
+            {
+                "status": "retry",
+                "lease_until": None,
+                "updated_at": now,
+                "last_error": "lease_expired_requeued",
+            },
+            synchronize_session=False,
         )
-        .group_by(ScanWorkItem.resource_class)
-        .all()
-    )
-    running = {str(rc): int(count) for rc, count in running_rows}
+        db.query(ScanWorkItem).filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+            ScanWorkItem.lease_until.isnot(None),
+            ScanWorkItem.lease_until <= now,
+            ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
+        ).update(
+            {
+                "status": "failed",
+                "lease_until": None,
+                "finished_at": now,
+                "updated_at": now,
+                "last_error": "lease_expired_max_attempts",
+            },
+            synchronize_session=False,
+        )
+        db.flush()
 
-    for rc, cap in caps.items():
-        available = max(0, cap - running.get(rc, 0))
-        if available <= 0:
-            continue
-        room = max(0, dispatch_limit - len(claimed))
-        if room <= 0:
-            break
-        rows = (
-            db.query(ScanWorkItem)
+        running_rows = (
+            db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
             .filter(
                 ScanWorkItem.scan_job_id == scan_id,
-                ScanWorkItem.resource_class == rc,
-                ScanWorkItem.status.in_(["queued", "retry"]),
-                ScanWorkItem.attempts < ScanWorkItem.max_attempts,
-                or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
+                ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+                or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until > now),
             )
-            .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.created_at.asc(), ScanWorkItem.id.asc())
-            .limit(min(available, room))
-            .with_for_update(skip_locked=True)
+            .group_by(ScanWorkItem.resource_class)
             .all()
         )
-        for item in rows:
-            item.status = "dispatched"
-            item.lease_until = lease_until
-            item.updated_at = now
-            claimed.append(item.id)
-    db.commit()
-    return claimed
+        running = {str(rc): int(count) for rc, count in running_rows}
+
+        for rc, cap in caps.items():
+            available = max(0, cap - running.get(rc, 0))
+            if available <= 0:
+                continue
+            room = max(0, dispatch_limit - len(claimed))
+            if room <= 0:
+                break
+            rows = (
+                db.query(ScanWorkItem)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.resource_class == rc,
+                    ScanWorkItem.status.in_(["queued", "retry"]),
+                    ScanWorkItem.attempts < ScanWorkItem.max_attempts,
+                    or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
+                )
+                .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.created_at.asc(), ScanWorkItem.id.asc())
+                .limit(min(available, room))
+                .with_for_update(skip_locked=True)
+                .all()
+            )
+            for item in rows:
+                item.status = "dispatched"
+                item.lease_until = lease_until
+                item.updated_at = now
+                claimed.append(item.id)
+        db.commit()
+        return claimed
+    finally:
+        try:
+            db.execute(text("select pg_advisory_unlock(:key)"), {"key": lock_key})
+            db.commit()
+        except Exception:
+            db.rollback()
 
 
 def has_pending_work(db: Session, scan_id: int) -> bool:
@@ -301,7 +312,7 @@ def has_pending_work(db: Session, scan_id: int) -> bool:
     return db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,
         or_(
-            ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running"]),
-            and_(ScanWorkItem.status.in_(["dispatched", "running"]), ScanWorkItem.lease_until <= now),
+            ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted"]),
+            and_(ScanWorkItem.status.in_(["dispatched", "running", "submitted"]), ScanWorkItem.lease_until <= now),
         ),
     ).first() is not None

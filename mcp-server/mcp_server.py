@@ -478,6 +478,134 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
     return result
 
 
+def _base_contract(request: MCPExecutionRequest, mcp_request_id: str | None = None) -> dict[str, Any]:
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {
+        "mcp_execution_id": f"mexec_{uuid.uuid4().hex[:12]}",
+        "mcp_request_id": mcp_request_id or request.mcp_request_id or f"mcp_{uuid.uuid4().hex[:12]}",
+        "phase_id": request.phase_id,
+        "skill_id": request.skill_id,
+        "tool_name": request.tool_name,
+        "profile": request.profile,
+        "target": request.target,
+        "status": "blocked",
+        "exit_code": None,
+        "stdout_path": "",
+        "stderr_path": "",
+        "artifact_paths": [],
+        "started_at": started_at,
+        "finished_at": "",
+        "duration_ms": 0,
+        "evidence_ids": [],
+        "error": None,
+    }
+
+
+async def _resolve_profile_name(request: MCPExecutionRequest) -> str | None:
+    profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
+    if profile_name not in kali_profiles:
+        await _refresh_kali_catalog()
+        profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
+    return profile_name if profile_name in kali_profiles else None
+
+
+async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) -> dict[str, Any]:
+    if kali_client is None:
+        raise HTTPException(status_code=503, detail="Kali runner not available")
+    scan_id = request.arguments.get("scan_id")
+    if scan_id is not None:
+        try:
+            scan_id = int(str(scan_id))
+        except (ValueError, TypeError):
+            scan_id = None
+    timeout = int(request.arguments.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
+    batch_targets = [str(t).strip() for t in (request.targets or []) if str(t).strip()]
+    response = await kali_client.post(
+        "/jobs",
+        json={
+            "profile": profile_name,
+            "target": request.target,
+            "targets": batch_targets,
+            "scan_id": scan_id,
+            "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
+            "timeout": timeout,
+            "auth_headers": request.arguments.get("auth_headers") or {},
+            "extra_args": [
+                str(arg)
+                for arg in list(request.arguments.get("extra_args") or [])
+                if str(arg).strip()
+            ],
+        },
+    )
+    response.raise_for_status()
+    payload = dict(response.json())
+    payload["timeout"] = timeout
+    payload["profile"] = profile_name
+    return payload
+
+
+@app.post("/mcp/submit")
+async def submit_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
+    """Submit a Kali job and return immediately; callers poll status/result."""
+    started = time.monotonic()
+    contract = _base_contract(request)
+    try:
+        if not request.expected_evidence:
+            contract.update(status="blocked", error="expected_evidence_required")
+            return contract
+        if kali_client is None:
+            contract.update(status="blocked", error="kali_runner_not_available")
+            return contract
+        profile_name = await _resolve_profile_name(request)
+        if not profile_name:
+            contract.update(status="blocked", error=f"tool_or_profile_not_found:{request.tool_name}")
+            return contract
+        raw = await _submit_kali_profile(profile_name, request)
+        contract.update(
+            status="submitted",
+            profile=profile_name,
+            dispatch_task_id=raw.get("job_id"),
+            kali_job_id=raw.get("job_id"),
+            timeout=raw.get("timeout"),
+            execution_path="mcp_to_kali_async",
+        )
+        return contract
+    except HTTPException as exc:
+        contract.update(status="failed", error=str(exc.detail))
+        return contract
+    except Exception as exc:  # noqa: BLE001
+        contract.update(status="failed", error=str(exc))
+        return contract
+    finally:
+        contract["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        contract["duration_ms"] = int((time.monotonic() - started) * 1000)
+
+
+@app.get("/mcp/jobs/{job_id}")
+async def mcp_job_status(job_id: str) -> dict[str, Any]:
+    if kali_client is None:
+        raise HTTPException(status_code=503, detail="Kali runner not available")
+    response = await kali_client.get(f"/jobs/{job_id}", timeout=_KALI_POLL_TIMEOUT)
+    response.raise_for_status()
+    payload = dict(response.json())
+    payload.setdefault("kali_job_id", job_id)
+    payload["mcp_status"] = "terminal" if payload.get("status") in TERMINAL_STATES else "running"
+    return payload
+
+
+@app.get("/mcp/jobs/{job_id}/result")
+async def mcp_job_result(job_id: str) -> dict[str, Any]:
+    if kali_client is None:
+        raise HTTPException(status_code=503, detail="Kali runner not available")
+    result_response = await kali_client.get(f"/jobs/{job_id}/result", timeout=_KALI_RESULT_TIMEOUT)
+    result_response.raise_for_status()
+    result = dict(result_response.json())
+    result.setdefault("dispatch_task_id", job_id)
+    result.setdefault("kali_job_id", job_id)
+    result.setdefault("execution_path", "mcp_to_kali_async")
+    return result
+
+
 @app.post("/mcp/execute")
 async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
     """Execute a traceable MCP contract and always return explicit status."""

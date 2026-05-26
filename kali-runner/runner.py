@@ -134,6 +134,7 @@ class JobResult(JobStatus):
 
 _JOBS_LOCK = threading.Lock()
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_PARALLEL, thread_name_prefix="kali-job")
+_FUTURES: dict[str, Future] = {}
 
 
 def _job_path(job_id: str) -> Path:
@@ -930,7 +931,9 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         _JOBS[job_id] = job
     _persist_job_record(job)
 
-    _EXECUTOR.submit(_run_job_safely, job_id, profile, req)
+    future = _EXECUTOR.submit(_run_job_safely, job_id, profile, req)
+    with _JOBS_LOCK:
+        _FUTURES[job_id] = future
     return {
         "job_id": job_id,
         "status": "queued",
@@ -976,3 +979,40 @@ def list_jobs(status: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
         items = [j for j in items if j["status"] == status]
     items.sort(key=lambda j: j.get("enqueued_at", ""), reverse=True)
     return {"count": len(items), "items": items[:limit]}
+
+
+@app.post("/jobs/purge")
+def purge_jobs(status: Optional[str] = "queued", scan_id: Optional[int] = None, limit: int = 1000) -> dict[str, Any]:
+    """Cancel queued jobs and mark them terminal.
+
+    Running subprocesses are not killed here; this endpoint is intentionally for
+    backlog cleanup after a bad fan-out.  Queued futures are cancelled when the
+    executor has not started them yet.
+    """
+    now = datetime.utcnow().isoformat()
+    purged = 0
+    cancelled_futures = 0
+    max_items = max(1, min(int(limit or 1000), 100_000))
+    with _JOBS_LOCK:
+        candidates = [
+            job
+            for job in _JOBS.values()
+            if (not status or str(job.get("status") or "") == status)
+            and (scan_id is None or int(job.get("scan_id") or -1) == int(scan_id))
+        ][:max_items]
+    for job in candidates:
+        job_id = str(job.get("job_id") or "")
+        future = _FUTURES.get(job_id)
+        if future is not None and future.cancel():
+            cancelled_futures += 1
+        updated = _set_job_fields(
+            job_id,
+            status="skipped",
+            finished_at=now,
+            duration_seconds=0,
+            error="purged_from_runner_queue",
+            stdout=job.get("stdout") or "",
+            stderr=job.get("stderr") or "",
+        )
+        purged += 1 if updated else 0
+    return {"purged": purged, "cancelled_futures": cancelled_futures, "status": status, "scan_id": scan_id}
