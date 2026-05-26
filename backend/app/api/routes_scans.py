@@ -18,7 +18,7 @@ from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
-    ScanAuditLog, AgentTraceEvent, SkillScore, VulnerabilityLearning, AccessGroup,
+    ScanAuditLog, AgentTraceEvent, AgentActivityLog, SkillScore, VulnerabilityLearning, AccessGroup,
     ScanWorkItem,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
@@ -2766,6 +2766,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .filter(Finding.scan_job_id.in_(resettable_scan_ids))
                 .subquery()
             )
+            # Nullify nullable FKs pointing at findings/scan_jobs
             db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids_subquery)).update(
                 {Vulnerability.finding_id: None},
                 synchronize_session=False,
@@ -2778,11 +2779,16 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 {AssetRatingHistory.scan_id: None},
                 synchronize_session=False,
             )
+            # Delete child rows with NOT NULL FK before scan_jobs
             deleted_audit_events = (
                 db.query(AuditEvent)
                 .filter(AuditEvent.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
+            db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
+            db.query(AgentActivityLog).filter(AgentActivityLog.scan_job_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
+            db.query(SkillScore).filter(SkillScore.scan_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
+            db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
             deleted_scan_logs = (
                 db.query(ScanLog)
                 .filter(ScanLog.scan_job_id.in_(resettable_scan_ids))
