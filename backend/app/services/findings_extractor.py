@@ -775,7 +775,8 @@ def extract_findings_from_work_item(
     Route a completed work item result to the appropriate parser.
     Returns a list of finding dicts (not yet persisted to DB).
     """
-    stdout = str(result.get("stdout_preview") or "").strip()
+    # Prefer full stdout (stored since findings_extractor v2); fall back to preview
+    stdout = str(result.get("stdout_full") or result.get("stdout_preview") or "").strip()
     parsed = result.get("parsed_result")
     step = f"{phase_id}.{tool_name}"
     tool = tool_name.lower().strip()

@@ -1493,6 +1493,23 @@ def run_scan_target_subset(self, scan_id: int, target: str):
         db.close()
 
 
+@celery.task(name="correlate_tech_vulns", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+def correlate_tech_vulns(scan_id: int, target: str, tool_name: str, work_item_id: int):
+    """Correlate detected technologies with CVEs and queue targeted nuclei scans."""
+    from app.db.session import SessionLocal
+    from app.services.tech_vuln_correlator import correlate_tech_vulns as _correlate
+
+    db = SessionLocal()
+    try:
+        return _correlate(db, scan_id, target, tool_name, work_item_id)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("correlate_tech_vulns error scan=%s: %s", scan_id, exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(name="dispatch_scan_work_items", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
 def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
     """Capacity-aware dispatcher for persistent scan_work_items."""
@@ -1704,6 +1721,10 @@ def poll_scan_work_item(item_id: int):
         item.finished_at = datetime.utcnow() if terminal != "retry" else None
         item.lease_until = None if terminal != "retry" else datetime.utcnow() + timedelta(seconds=120)
         item.last_error = str(result.get("error") or "")[:2000] or None
+
+        # Capture full stdout BEFORE truncating for storage — parsers see the whole output
+        _full_stdout = str(result.get("stdout") or "")
+        _parsed_result = result.get("parsed")
         item.result = {
             **result_state,
             "status": raw_status,
@@ -1713,8 +1734,9 @@ def poll_scan_work_item(item_id: int):
             "stderr_path": result.get("stderr_path"),
             "duration_seconds": result.get("duration_seconds"),
             "error": result.get("error"),
-            "stdout_preview": str(result.get("stdout") or "")[:3000],
-            "parsed_result": result.get("parsed"),
+            "stdout_preview": _full_stdout[:3000],       # display only
+            "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
+            "parsed_result": _parsed_result,
             "finished_at": datetime.utcnow().isoformat(),
         }
         item.updated_at = datetime.utcnow()
@@ -1746,6 +1768,7 @@ def poll_scan_work_item(item_id: int):
             run.execution_time_seconds = None
 
         # ── Extract and persist findings from completed tool output ──────────
+        # Use full_result so parsers receive un-truncated stdout
         findings_created = 0
         if item.status == "completed" and job:
             try:
@@ -1756,6 +1779,20 @@ def poll_scan_work_item(item_id: int):
                 _log.getLogger(__name__).warning(
                     "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
                 )
+
+        # ── Technology → CVE correlation (async Celery task) ─────────────────
+        if item.status == "completed" and job and item.tool_name in (
+            "httpx", "whatweb", "whatweb-basic", "nmap", "nmap-http", "nmap-ssl", "nmap-vuln",
+            "wapiti", "nuclei", "shodan-cli",
+        ):
+            try:
+                correlate_tech_vulns.apply_async(
+                    args=[job.id, item.target, item.tool_name, item.id],
+                    countdown=5,
+                    queue="worker.unit.reconhecimento",
+                )
+            except Exception:
+                pass
 
         if job:
             counts = work_queue_counts(db, item.scan_job_id)
