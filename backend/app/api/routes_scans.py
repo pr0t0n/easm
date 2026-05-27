@@ -1691,6 +1691,18 @@ def _source_group_from_details(details: dict) -> str:
         "jwt_tool",
         "ffuf-post",
         "ffuf-values",
+        # Supply chain, business logic, ZAP scanners
+        "supply_chain_analyzer",
+        "business_logic_analyzer",
+        "zap_baseline",
+        "zap_active_scan",
+        "zap_ajax_spider",
+        "zap_api_scan",
+        "zap-baseline",
+        "zap-active",
+        "zap-ajax",
+        "zap-api",
+        "zaproxy",
     }:
         return "vuln"
     return "other"
@@ -1980,7 +1992,11 @@ def _consolidate_vulnerability_table(rows: list[dict]) -> list[dict]:
             str(row.get("severity") or "low").strip().lower(),
         )
 
-        raw_asset = str(row.get("asset") or row.get("target") or "").strip()
+        # asset defaults to "-" when not set — fall through to target/full_url in that case
+        _asset_col = str(row.get("asset") or "").strip()
+        _target_col = str(row.get("target") or row.get("full_url") or "").strip()
+        # Prefer a real hostname over the placeholder "-"
+        raw_asset = _asset_col if (_asset_col and _asset_col != "-") else _target_col
         if raw_asset.startswith(("http://", "https://")):
             _p = urlparse(raw_asset)
             raw_asset = _p.netloc or raw_asset
@@ -4219,6 +4235,27 @@ def scan_report(
         framework_ctx = _framework_context(category, normalized_title, details)
         recommendation_ctx = _technical_recommendation(category, normalized_title, sev)
         cve_recommendation = _build_cve_recommendation(_sanitize_text(finding.cve or ""), technical, details, sev)
+
+        # CVE description — pull from details, never show bare CVE ID without context
+        cve_description = _sanitize_text(
+            details.get("cve_description") or
+            details.get("description") or
+            details.get("desc") or
+            details.get("cve_summary") or
+            details.get("solution") or
+            ""
+        )[:1000]
+
+        # Knowledge base explanations (executive + technical)
+        try:
+            from app.services.vuln_knowledge_base import get_vuln_explanation
+            _tool_for_kb = str(finding.tool or details.get("tool") or "")
+            _kb = get_vuln_explanation(normalized_title, _tool_for_kb, details)
+            executive_explanation = _kb.get("executive", "")
+            technical_explanation = _kb.get("technical", "")
+        except Exception:
+            executive_explanation = ""
+            technical_explanation = ""
         
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
@@ -4248,6 +4285,9 @@ def scan_report(
                 "finding_id": finding.id,
                 "scan_job_id": finding.scan_job_id,
                 "cve": _sanitize_text(finding.cve or ""),
+                "cve_description": cve_description,
+                "executive_explanation": executive_explanation,
+                "technical_explanation": technical_explanation,
                 "target": target_value,
                 "full_url": technical.get("full_url") or target_value,
                 "endpoint": technical.get("endpoint") or "/",
@@ -7022,3 +7062,207 @@ def resolve_vulnerability_alert(
     db.commit()
 
     return {"message": "Alerta resolvido", "alert_id": alert.id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Executive Report — HTML gerado no servidor
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/scans/{scan_id}/executive-report", response_class=Response)
+def get_executive_report(
+    scan_id: int,
+    previous_scan_id: int | None = Query(default=None, description="ID do scan anterior para delta"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Gera relatório executivo HTML para o scan indicado.
+    Inclui sumário de severidades, superfície de alto risco, correlações e recomendações.
+    """
+    from app.models.models import ScanJob
+    from app.services.report_generator import generate_executive_report
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    # Antes de gerar o relatório, rodar inteligência pós-processamento
+    try:
+        from app.services.finding_intelligence import run_all_intelligence
+        run_all_intelligence(db, scan_id)
+    except Exception:
+        pass
+
+    html = generate_executive_report(db, scan_id, previous_scan_id=previous_scan_id)
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Content-Disposition": f'inline; filename="easm-report-scan{scan_id}.html"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@router.post("/scans/{scan_id}/run-intelligence")
+def run_scan_intelligence(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Executa pós-processamento de inteligência no scan:
+    - Consolida findings sistêmicos
+    - Correlaciona WAF bypass × Shodan
+    """
+    from app.models.models import ScanJob
+    from app.services.finding_intelligence import run_all_intelligence
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    result = run_all_intelligence(db, scan_id)
+    return {
+        "scan_id": scan_id,
+        "intelligence_results": result,
+        "message": (
+            f"{result.get('systemic', 0)} findings sistêmicos criados, "
+            f"{result.get('waf_shodan_correlations', 0)} correlações WAF×Shodan"
+        ),
+    }
+
+
+@router.post("/scans/{scan_id}/enrich-cves")
+def enrich_scan_cve_findings(
+    scan_id: int,
+    limit: int = Query(default=200, ge=1, le=500, description="Máx. de CVEs a enriquecer"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Enriquece findings de CVE de um scan com:
+    - Descrição técnica da vulnerabilidade
+    - Versões afetadas
+    - Passos para reprodução / PoC / payload
+    - URL do patch
+    - CVSS real do NVD
+    - CWEs (fraquezas associadas)
+
+    Para CVEs na base local (Log4Shell, Spring4Shell, Grafana, Portainer, etc.)
+    o enriquecimento é instantâneo. Para outras, consulta a API do NVD.
+    """
+    from app.models.models import ScanJob
+    from app.services.cve_enricher import enrich_scan_cves
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    enriched = enrich_scan_cves(db, scan_id, limit=limit)
+    return {
+        "scan_id": scan_id,
+        "enriched": enriched,
+        "message": (
+            f"{enriched} CVE findings enriquecidos com descrição, "
+            "passos de reprodução, payload e CVSS."
+        ),
+    }
+
+
+@router.get("/scans/{scan_id}/attack-graph")
+def get_attack_graph(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Constrói e retorna o grafo de ataque para o scan.
+
+    Analisa todos os findings e correlaciona:
+    - Capabilities geradas por cada vulnerabilidade
+    - Caminhos de ataque: internet → dado sensível
+    - Kill chains completas com narrativa e TTPs do MITRE ATT&CK
+    - Score de risco composto (não individual por finding)
+    """
+    from app.models.models import ScanJob
+    from app.services.attack_graph import build_attack_graph
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    graph = build_attack_graph(db, scan_id)
+    return {"scan_id": scan_id, **graph}
+
+
+@router.post("/scans/{scan_id}/business-logic")
+def run_business_logic_analysis(
+    scan_id: int,
+    domains: list[str] | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Executa análise de business logic nos domínios do scan.
+
+    Testa contexto de negócio:
+    - APIs financeiras: IDOR em contas, negative balance, BOLA
+    - Docker/Portainer: API sem auth, env vars expostas
+    - Auth services: JWT none alg, token reuse, rate limit
+    - Dev environments: debug endpoints, verbose errors, CORS aberto
+    """
+    from app.models.models import ScanJob
+    from app.services.business_logic_analyzer import run_business_logic_scan
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    result = run_business_logic_scan(db, scan_id, target_domains=domains)
+    return {"scan_id": scan_id, **result}
+
+
+@router.post("/scans/{scan_id}/supply-chain")
+def run_supply_chain_analysis(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Analisa supply chain e dependências de terceiros.
+
+    Detecta:
+    - Scripts sem SRI (CDN, GTM, analytics)
+    - Session recording tools (Hotjar, FullStory) — risco LGPD
+    - Google Tag Manager sem proteção (injeção de JS via conta GTM comprometida)
+    - Bibliotecas JS vulneráveis (jQuery, Lodash, Handlebars)
+    - package.json / .env expostos publicamente
+    """
+    from app.models.models import ScanJob
+    from app.services.supply_chain_analyzer import run_supply_chain_scan
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    result = run_supply_chain_scan(db, scan_id)
+    return {"scan_id": scan_id, **result}

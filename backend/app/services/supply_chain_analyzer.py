@@ -865,11 +865,19 @@ def run_supply_chain_scan(
                 continue
 
             details_payload = bf.get("details", {}) or {}
+            # Enrich details so report engine can extract target, description, and CVE info
+            finding_domain = bf.get("domain", domain)
             details_payload["evidence"] = bf.get("evidence", "")[:2000]
+            details_payload["target"] = finding_domain  # ← ensures per-subdomain target resolution
+            details_payload["url"] = f"https://{finding_domain}"
+            if bf.get("description"):
+                details_payload["description"] = bf.get("description", "")[:2000]
+            if bf.get("cve") and not details_payload.get("cve"):
+                details_payload["cve"] = bf["cve"]
 
             f = Finding(
                 scan_job_id=scan_id,
-                domain=bf.get("domain", domain),
+                domain=finding_domain,
                 title=title,
                 severity=bf["severity"],
                 cve=bf.get("cve"),

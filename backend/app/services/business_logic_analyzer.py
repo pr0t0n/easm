@@ -628,6 +628,13 @@ def run_business_logic_scan(
             details_payload = bf.get("details", {}) or {}
             details_payload["evidence"] = bf.get("evidence", "")[:2000]
             details_payload["validation_status"] = bf.get("validation_status", "hypothesis")
+            # Enrich for report engine: ensure target + description are accessible
+            if not details_payload.get("target"):
+                details_payload["target"] = domain
+            if not details_payload.get("url"):
+                details_payload["url"] = f"https://{domain}" if not domain.startswith("http") else domain
+            if bf.get("description") and not details_payload.get("description"):
+                details_payload["description"] = bf.get("description", "")[:2000]
 
             f = Finding(
                 scan_job_id=scan_id,

@@ -171,6 +171,7 @@ function normalizeFindingForReport(finding) {
     problem: finding?.title || details.title || 'Achado sem descrição',
     severity: finding?.severity || 'info',
     cve: finding?.cve || details.cve || '',
+    cve_description: finding?.cve_description || details.cve_description || details.description || details.desc || '',
     cvss: finding?.cvss || finding?.risk_score || details.cvss || details.cvss_score || '-',
     risk_score: finding?.risk_score || details.risk_score || 0,
     confidence_score: finding?.confidence_score || details.confidence_score || 0,
@@ -200,6 +201,8 @@ function normalizeFindingForReport(finding) {
     recommendation: finding?.recommendation || details.recommendation || 'Ver documentação do achado.',
     recommendation_structured: details.recommendation_structured || {},
     recommendation_llm: details.recommendation_llm || {},
+    executive_explanation: finding?.executive_explanation || details.executive_explanation || '',
+    technical_explanation: finding?.technical_explanation || details.technical_explanation || '',
     created_at: finding?.created_at || details.created_at || null,
     latest_seen_at: finding?.created_at || details.latest_seen_at || null,
     affected_count: 1,
@@ -742,13 +745,13 @@ function renderVulnCard(vuln, index) {
   const sev = getSevConfig(vuln.severity);
   const cvss = vuln.cvss && vuln.cvss !== '-' ? Number(vuln.cvss).toFixed(1) : '-';
   const cve = vuln.cve && vuln.cve !== '-' ? vuln.cve : null;
+  const cveDesc = vuln.cve_description && vuln.cve_description !== '-' ? vuln.cve_description : null;
   const id = `vuln-${index}`;
 
-  // Consolidação: usa target_summary quando disponível (contém resumo de todos os alvos)
-  const displayTarget = vuln.target_summary || vuln.target || vuln.asset || '-';
   const affectedAssets = Array.isArray(vuln.affected_assets) ? vuln.affected_assets.filter(Boolean) : [];
-  const affectedCount = Number(vuln.affected_count || 0);
+  const affectedCount = Math.max(Number(vuln.affected_count || 0), affectedAssets.length, 1);
   const affectedPorts = Array.isArray(vuln.affected_ports) ? vuln.affected_ports.filter(p => p && p !== '-') : [];
+  const displayTarget = vuln.target_summary || vuln.target || vuln.asset || '-';
 
   const evidence = vuln.evidence && vuln.evidence !== '-' ? vuln.evidence : null;
   const payload = vuln.payload && vuln.payload !== '-' ? vuln.payload : null;
@@ -756,11 +759,13 @@ function renderVulnCard(vuln, index) {
   const pocRequest = firstText(vuln.poc_request, vuln.attack_input, payload);
   const rawOutput = firstText(vuln.response_http, vuln.response_application, evidence);
   const observedBehavior = firstText(vuln.observed_behavior, vuln.technical_validation, vuln.error);
+
   const isoControl = firstText(vuln.iso_control);
   const cisControl = firstText(vuln.cis_control);
   const pciControl = firstText(vuln.pci_control);
   const nistControl = firstText(vuln.nist_control);
   const owaspControl = firstText(vuln.owasp);
+
   const rec = vuln.recommendation || 'Ver documentação do achado.';
   const llmRecommendation = vuln.recommendation_llm || vuln.recommendation_structured || {};
   const llmSummary = llmRecommendation.resumo || '';
@@ -776,6 +781,7 @@ function renderVulnCard(vuln, index) {
   const validation = Array.isArray(vuln?.recommendation_validation) && vuln.recommendation_validation.length
     ? vuln.recommendation_validation.join(' | ')
     : '-';
+
   const basTechnique = vuln.adversary_technique && typeof vuln.adversary_technique === 'object' ? vuln.adversary_technique : {};
   const basId = vuln.adversary_technique_id || basTechnique.id || '';
   const basName = vuln.adversary_technique_name || basTechnique.name || '';
@@ -788,72 +794,113 @@ function renderVulnCard(vuln, index) {
     return source ? `${source}${signals ? ` (${signals})` : ''}` : '';
   }).filter(Boolean).join(' | ');
 
-  // Bloco de alvos afetados — exibido quando há mais de 1 ativo afetado
-  const affectedBlock = affectedCount > 1 ? `
-      <div class="vuln-affected-box">
-        <div class="vuln-detail-label"><i class="fas fa-sitemap"></i> Alvos afetados (${affectedCount})</div>
-        <div class="vuln-affected-pills">
-          ${affectedAssets.map(a => `<span class="affected-pill">${esc(a)}</span>`).join('')}
-          ${affectedPorts.length ? `<span class="affected-pill affected-pill-port"><i class="fas fa-plug"></i> ${esc(affectedPorts.join(', '))}</span>` : ''}
-        </div>
-      </div>` : '';
+  // ── Executive and Technical Explanations (from KB or details) ──────────────
+  const execExplanation = vuln.executive_explanation || '';
+  const techExplanation = vuln.technical_explanation || '';
+
+  // ── CVE Block — sempre com descrição quando disponível ────────────────────
+  const cveBlock = cve ? `
+    <div class="vuln-cve-block">
+      <span class="vuln-cve-id"><i class="fas fa-bug"></i> ${esc(cve)}</span>
+      ${cvss !== '-' ? `<span class="vuln-cve-cvss">CVSS ${esc(String(cvss))}</span>` : ''}
+      ${cveDesc ? `<div class="vuln-cve-desc">${esc(cveDesc)}</div>` : ''}
+      ${!cveDesc && cveSummary ? `<div class="vuln-cve-desc">${esc(cveSummary)}</div>` : ''}
+    </div>` : '';
+
+  // ── Alvos afetados (sempre visível, não colapsado) ────────────────────────
+  const allAssets = affectedAssets.length > 0 ? affectedAssets : (displayTarget !== '-' ? [displayTarget] : []);
+  const affectedBlock = allAssets.length > 0 ? `
+    <div class="vuln-affected-block">
+      <div class="vuln-section-label"><i class="fas fa-sitemap"></i> Alvos afetados — ${allAssets.length} ${allAssets.length === 1 ? 'alvo' : 'alvos'}</div>
+      <div class="vuln-affected-pills">
+        ${allAssets.map(a => `<span class="affected-pill">${esc(a)}</span>`).join('')}
+        ${affectedPorts.length ? `<span class="affected-pill affected-pill-port"><i class="fas fa-plug"></i> Portas: ${esc(affectedPorts.join(', '))}</span>` : ''}
+      </div>
+    </div>` : '';
+
+  // ── Bloco de resolução — conteúdo principal do card ────────────────────────
+  const remediationText = envRequiredFix || llmSummary || rec;
+  const remediationControls = envControls.length ? envControls : llmMitigations;
 
   // data-search inclui todos os alvos para que o filtro de texto funcione
-  const searchAttr = [vuln.name || vuln.problem, displayTarget, cve || '', ...affectedAssets].join(' ');
+  const searchAttr = [vuln.name || vuln.problem, displayTarget, cve || '', ...allAssets].join(' ');
 
   return `
 <div class="vuln-card ${sev.cls}" data-sev="${String(vuln.severity || 'info').toLowerCase()}" data-search="${esc(searchAttr)}" id="${id}">
+  <!-- CABEÇALHO: clicável para expandir detalhes técnicos -->
   <div class="vuln-card-header" onclick="toggleVuln('${id}')">
-    <div>
+    <div class="vuln-header-left">
       <span class="vuln-sev-badge"><i class="fas ${sev.icon}"></i> ${sev.label}</span>
+      ${cve ? `<span class="vuln-cve-pill">${esc(cve)}</span>` : ''}
     </div>
-    <div>
+    <div class="vuln-header-center">
       <div class="vuln-title">${esc(vuln.name || vuln.problem || 'Achado sem descrição')}</div>
-      <div class="vuln-target">${esc(displayTarget)}${affectedCount > 1 ? ` <span class="affected-count-badge">${affectedCount} alvos</span>` : ''}</div>
+      <div class="vuln-subtitle">
+        ${esc(vuln.category || '')}
+        ${allAssets.length > 1 ? `<span class="affected-count-badge">${allAssets.length} alvos afetados</span>` : (displayTarget !== '-' ? `<span class="vuln-target-inline">${esc(displayTarget)}</span>` : '')}
+      </div>
     </div>
-    <div class="vuln-cvss">CVSS ${cvss}</div>
-    <div class="vuln-toggle"><i class="fas fa-chevron-down"></i></div>
+    <div class="vuln-header-right">
+      ${cvss !== '-' ? `<span class="vuln-cvss-badge">CVSS ${cvss}</span>` : ''}
+      <span class="vuln-toggle-btn"><i class="fas fa-chevron-down"></i></span>
+    </div>
   </div>
+
+  <!-- CORPO PRINCIPAL: sempre visível — foco em resolução ─────────────────── -->
+  <div class="vuln-card-main">
+    ${cveBlock}
+    ${affectedBlock}
+
+    ${execExplanation ? `
+    <div class="vuln-explanation-exec">
+      <div class="vuln-section-label"><i class="fas fa-briefcase"></i> Contexto executivo — por que isso importa</div>
+      <div class="vuln-explanation-text">${esc(execExplanation)}</div>
+    </div>` : ''}
+
+    <div class="vuln-resolution-block">
+      <div class="vuln-section-label"><i class="fas fa-wrench"></i> Como resolver — ações obrigatórias</div>
+      <div class="vuln-resolution-text">${esc(remediationText).replace(/\n/g, '<br/>')}</div>
+      ${remediationControls.length ? `
+      <ul class="vuln-resolution-list">
+        ${remediationControls.map(item => `<li>${esc(item)}</li>`).join('')}
+      </ul>` : ''}
+      ${validation && validation !== '-' ? `
+      <div class="vuln-validation-note">
+        <i class="fas fa-check-circle"></i> Validação pós-remediação: ${esc(validation)}
+      </div>` : ''}
+    </div>
+
+    ${techExplanation ? `
+    <div class="vuln-explanation-tech">
+      <div class="vuln-section-label"><i class="fas fa-code"></i> Detalhamento técnico</div>
+      <div class="vuln-explanation-text vuln-explanation-tech-text">${esc(techExplanation).replace(/\n/g, '<br/>')}</div>
+    </div>` : ''}
+  </div>
+
+  <!-- DETALHES TÉCNICOS: colapsável — para analistas ─────────────────────── -->
   <div class="vuln-card-body">
     <div class="vuln-detail-grid">
       <div class="vuln-detail-item">
-        <div class="vuln-detail-label"><i class="fas fa-tag"></i> ID do Achado</div>
-        <div class="vuln-detail-value">${esc(vuln.id || '-')} ${cve ? `| <strong style="color:#f87171">${esc(cve)}</strong>` : ''}</div>
-      </div>
-      <div class="vuln-detail-item">
-        <div class="vuln-detail-label"><i class="fas fa-layer-group"></i> Categoria</div>
-        <div class="vuln-detail-value">${esc(vuln.category || '-')}</div>
-      </div>
-      <div class="vuln-detail-item">
-        <div class="vuln-detail-label"><i class="fas fa-route"></i> Etapa do Scan</div>
-        <div class="vuln-detail-value">${esc(vuln.step || '-')} | Node: <code>${esc(vuln.node || '-')}</code></div>
+        <div class="vuln-detail-label"><i class="fas fa-tag"></i> ID</div>
+        <div class="vuln-detail-value">${esc(vuln.id || '-')}</div>
       </div>
       <div class="vuln-detail-item">
         <div class="vuln-detail-label"><i class="fas fa-tools"></i> Ferramenta</div>
         <div class="vuln-detail-value">${esc(vuln.tool || '-')}</div>
       </div>
-      <div class="vuln-handoff-box">
-        <div class="vuln-detail-label"><i class="fas fa-person-rifle"></i> Reproduzir o ataque</div>
-        <div class="handoff-grid">
-          <div>
-            <span>Comando executado / sugerido</span>
-            <pre class="vuln-code">${esc(truncate(command || 'Comando não registrado; reproduzir com a ferramenta indicada e o alvo listado.', 900))}</pre>
-          </div>
-          <div>
-            <span>Entrada ofensiva / request</span>
-            <pre class="vuln-code">${esc(truncate(pocRequest || 'Payload/request não registrado no achado.', 900))}</pre>
-          </div>
-        </div>
-        <div class="handoff-output">
-          <span>Saída específica / evidência para Blue Team</span>
-          <pre class="vuln-code">${esc(truncate(rawOutput || 'Sem saída específica registrada.', 1200))}</pre>
-        </div>
-        ${observedBehavior ? `<div class="handoff-note">${esc(observedBehavior)}</div>` : ''}
+      <div class="vuln-detail-item">
+        <div class="vuln-detail-label"><i class="fas fa-route"></i> Etapa</div>
+        <div class="vuln-detail-value">${esc(vuln.step || '-')} | Node: <code>${esc(vuln.node || '-')}</code></div>
       </div>
+      <div class="vuln-detail-item">
+        <div class="vuln-detail-label"><i class="fas fa-layer-group"></i> Categoria</div>
+        <div class="vuln-detail-value">${esc(vuln.category || '-')}</div>
+      </div>
+
       <div class="vuln-framework-box">
-        <div class="vuln-detail-label"><i class="fas fa-scale-balanced"></i> CVE/CVSS, MITRE e frameworks defensivos</div>
+        <div class="vuln-detail-label"><i class="fas fa-scale-balanced"></i> Frameworks defensivos</div>
         <div class="framework-grid">
-          <div><span>CVE</span><strong>${esc(cve || '-')}</strong></div>
+          <div><span>CVE</span><strong>${esc(cve || '-')}${cveDesc ? ` — ${esc(cveDesc.substring(0, 80))}${cveDesc.length > 80 ? '...' : ''}` : ''}</strong></div>
           <div><span>CVSS</span><strong>${esc(String(cvss))}</strong></div>
           <div><span>MITRE ATT&CK</span><strong>${esc([basId, basName].filter(Boolean).join(' — ') || '-')}</strong></div>
           <div><span>PCI DSS</span><strong>${esc(pciControl || '-')}</strong></div>
@@ -862,18 +909,33 @@ function renderVulnCard(vuln, index) {
           <div><span>NIST/OWASP</span><strong>${esc(firstText(nistControl, owaspControl) || '-')}</strong></div>
         </div>
       </div>
-      ${affectedBlock}
-      ${evidence ? `
+
+      <div class="vuln-handoff-box">
+        <div class="vuln-detail-label"><i class="fas fa-person-rifle"></i> Reprodução do ataque</div>
+        <div class="handoff-grid">
+          <div>
+            <span>Comando executado / sugerido</span>
+            <pre class="vuln-code">${esc(truncate(command || 'Não registrado — usar a ferramenta indicada com o alvo listado.', 900))}</pre>
+          </div>
+          <div>
+            <span>Entrada ofensiva / request</span>
+            <pre class="vuln-code">${esc(truncate(pocRequest || 'Payload/request não registrado.', 900))}</pre>
+          </div>
+        </div>
+        <div class="handoff-output">
+          <span>Saída / evidência para Blue Team</span>
+          <pre class="vuln-code">${esc(truncate(rawOutput || 'Sem saída registrada.', 1200))}</pre>
+        </div>
+        ${observedBehavior ? `<div class="handoff-note">${esc(observedBehavior)}</div>` : ''}
+      </div>
+
+      ${evidence && evidence !== rawOutput ? `
       <div class="vuln-evidence-box">
         <div class="vuln-detail-label"><i class="fas fa-microscope"></i> Evidência</div>
         <div class="vuln-code">${esc(truncate(evidence, 800))}</div>
       </div>` : ''}
-      ${payload && payload !== evidence ? `
-      <div class="vuln-evidence-box" style="border-left-color:#a47700">
-        <div class="vuln-detail-label" style="color:#a47700"><i class="fas fa-terminal"></i> Payload</div>
-        <div class="vuln-code" style="color:#1c1c1c">${esc(truncate(payload, 500))}</div>
-      </div>` : ''}
-      ${basId || basName || basControls.length || basTelemetry.length ? `
+
+      ${basId || basName || basControls.length ? `
       <div class="vuln-rec-box" style="border-left-color:#0ea5e9">
         <div class="vuln-detail-label" style="color:#0284c7"><i class="fas fa-crosshairs"></i> BAS / Validação de Controle</div>
         <div class="vuln-detail-value"><strong>${esc(basId || '-')}</strong>${basName ? ` — ${esc(basName)}` : ''}</div>
@@ -881,46 +943,29 @@ function renderVulnCard(vuln, index) {
         ${basControls.length ? `<div class="vuln-detail-value" style="margin-top:8px">${basControls.slice(0, 4).map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
         ${telemetryText ? `<div class="vuln-detail-value" style="margin-top:8px">Telemetria esperada: ${esc(telemetryText)}</div>` : ''}
       </div>` : ''}
-      ${cve && (cveSummary || cveActions.length) ? `
+
+      ${cveActions.length > 0 ? `
       <div class="vuln-rec-box" style="border-left-color:#fb7185">
-        <div class="vuln-detail-label" style="color:#fb7185"><i class="fas fa-bug"></i> Recomendação orientada ao CVE</div>
-        <div class="vuln-detail-value">${esc(cveSummary || `Aplicar correção específica para ${cve}.`)}</div>
-        ${cveActions.length ? `<div class="vuln-detail-value" style="margin-top:8px">${cveActions.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
+        <div class="vuln-detail-label" style="color:#fb7185"><i class="fas fa-bug"></i> Ações específicas para ${esc(cve || 'CVE')}</div>
+        <div class="vuln-detail-value">${cveActions.map((item) => `- ${esc(item)}`).join('<br/>')}</div>
       </div>` : ''}
-      ${envRequiredFix || envControls.length ? `
-      <div class="vuln-rec-box" style="border-left-color:#4b73ff">
-        <div class="vuln-detail-label" style="color:#2d52e6"><i class="fas fa-server"></i> Recomendação para o ambiente</div>
-        <div class="vuln-detail-value">${esc(envRequiredFix || rec)}</div>
-        ${envControls.length ? `<div class="vuln-detail-value" style="margin-top:8px">${envControls.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
-      </div>` : ''}
-      ${llmSummary || llmMitigations.length ? `
-      <div class="vuln-rec-box" style="border-left-color:#229160">
-        <div class="vuln-detail-label" style="color:#1f8a59"><i class="fas fa-brain"></i> Recomendação gerada por IA</div>
-        <div class="vuln-detail-value">${esc(llmSummary || rec)}</div>
-        ${llmMitigations.length ? `<div class="vuln-detail-value" style="margin-top:8px">${llmMitigations.map((item) => `- ${esc(item)}`).join('<br/>')}</div>` : ''}
-      </div>` : ''}
-      <div class="vuln-rec-box">
-        <div class="vuln-detail-label"><i class="fas fa-wrench"></i> Resumo consolidado</div>
-        <div class="vuln-detail-value">${esc(rec)}</div>
-      </div>
-      <div class="vuln-detail-item">
-        <div class="vuln-detail-label"><i class="fas fa-check-double"></i> Validação Pós-Remediação</div>
-        <div class="vuln-detail-value">${esc(validation)}</div>
-      </div>
     </div>
   </div>
 </div>`;
 }
 
-function renderGroupHeader(problem, count, sev) {
+function renderGroupHeader(problem, count, sev, totalAffected) {
   const cfg = getSevConfig(sev);
+  const affectedLabel = totalAffected > count
+    ? `${totalAffected} alvos em ${count} ocorrência${count > 1 ? 's' : ''}`
+    : `${count} ocorrência${count > 1 ? 's' : ''}`;
   return `
 <div class="vuln-group-header">
   <span class="vuln-sev-badge ${cfg.cls}">
     <i class="fas ${cfg.icon}"></i> ${cfg.label}
   </span>
   <span class="vgh-name">${esc(problem)}</span>
-  <span class="vgh-count">${count} afetado${count > 1 ? 's' : ''}</span>
+  <span class="vgh-count">${affectedLabel}</span>
 </div>`;
 }
 
@@ -1010,8 +1055,10 @@ function renderFiltered() {
   let html = '';
   let globalIdx = 0;
   Object.entries(grouped).forEach(([problem, group]) => {
+    // Calcular total de alvos distintos no grupo (soma de affected_count)
+    const totalAffected = group.items.reduce((sum, v) => sum + Math.max(Number(v.affected_count || 0), (Array.isArray(v.affected_assets) ? v.affected_assets.length : 0), 1), 0);
     html += '<div class="vuln-group" style="margin-bottom:16px">';
-    html += renderGroupHeader(problem, group.items.length, group.sev);
+    html += renderGroupHeader(problem, group.items.length, group.sev, totalAffected);
     group.items.forEach((v) => {
       html += renderVulnCard(v, globalIdx++);
     });
@@ -1358,9 +1405,128 @@ window.printReport = function() {
 function injectGroupStyles() {
   const style = document.createElement('style');
   style.textContent = `
-    .vuln-group-header {display:flex;align-items:center;gap:10px;padding:8px 12px;background:#faf8f4;border:1px solid #e5dcd5;border-radius:6px;margin-bottom:6px}
-    .vgh-name {flex:1;font-size:0.82rem;font-weight:600;color:#1c1c1c}
-    .vgh-count {font-size:0.72rem;color:#6b6b6b;background:#ffffff;padding:3px 10px;border-radius:20px;border:1px solid #e5dcd5}
+    /* ── Cabeçalho do grupo ──────────────────────────────────────────────── */
+    .vuln-group-header {
+      display:flex;align-items:center;gap:10px;
+      padding:10px 14px;
+      background:linear-gradient(90deg,#1e293b 0%,#0f172a 100%);
+      border-radius:8px;margin-bottom:4px;
+      box-shadow:0 2px 4px rgba(0,0,0,.18);
+    }
+    .vgh-name {flex:1;font-size:0.88rem;font-weight:700;color:#f1f5f9;letter-spacing:.01em}
+    .vgh-count {
+      font-size:0.72rem;color:#94a3b8;background:rgba(255,255,255,.08);
+      padding:3px 12px;border-radius:20px;border:1px solid rgba(255,255,255,.12);
+      white-space:nowrap;
+    }
+
+    /* ── Novo header do card ──────────────────────────────────────────────── */
+    .vuln-card-header {
+      display:flex;align-items:center;gap:12px;
+      padding:14px 16px;cursor:pointer;
+    }
+    .vuln-header-left {display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:90px}
+    .vuln-header-center {flex:1;min-width:0}
+    .vuln-header-right {display:flex;flex-direction:column;align-items:flex-end;gap:4px;min-width:80px}
+    .vuln-subtitle {font-size:0.75rem;color:#64748b;margin-top:2px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+    .vuln-target-inline {color:#94a3b8;font-family:monospace;font-size:0.72rem}
+    .vuln-cve-pill {
+      font-size:0.68rem;font-weight:700;color:#fca5a5;
+      background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);
+      padding:2px 7px;border-radius:4px;font-family:monospace;
+    }
+    .vuln-cvss-badge {
+      font-size:0.72rem;font-weight:700;color:#94a3b8;
+      background:rgba(148,163,184,.1);border:1px solid rgba(148,163,184,.2);
+      padding:2px 8px;border-radius:4px;
+    }
+    .vuln-toggle-btn {color:#64748b;font-size:0.75rem;margin-top:2px}
+    .vuln-card.expanded .vuln-toggle-btn i {transform:rotate(180deg)}
+
+    /* ── Corpo principal — sempre visível ─────────────────────────────────── */
+    .vuln-card-main {padding:0 16px 16px;display:flex;flex-direction:column;gap:14px}
+
+    /* CVE block */
+    .vuln-cve-block {
+      background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.2);
+      border-radius:6px;padding:10px 14px;
+      display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;
+    }
+    .vuln-cve-id {
+      font-family:monospace;font-size:0.82rem;font-weight:700;
+      color:#ef4444;white-space:nowrap;
+    }
+    .vuln-cve-cvss {
+      font-size:0.72rem;font-weight:600;color:#f87171;
+      background:rgba(239,68,68,.1);padding:1px 8px;border-radius:4px;
+    }
+    .vuln-cve-desc {
+      font-size:0.8rem;color:#374151;line-height:1.45;
+      width:100%;margin-top:4px;
+    }
+
+    /* Alvos afetados */
+    .vuln-affected-block {
+      background:#f8fafc;border:1px solid #e2e8f0;
+      border-radius:6px;padding:12px 14px;
+    }
+    .vuln-section-label {
+      font-size:0.73rem;font-weight:700;color:#475569;
+      text-transform:uppercase;letter-spacing:.05em;
+      margin-bottom:8px;display:flex;align-items:center;gap:6px;
+    }
+    .vuln-affected-pills {display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+    .affected-pill {
+      font-size:0.74rem;font-family:monospace;
+      background:#1e293b;color:#94a3b8;
+      padding:3px 10px;border-radius:4px;
+      border:1px solid rgba(148,163,184,.2);
+    }
+    .affected-pill:hover {background:#334155;color:#e2e8f0}
+    .affected-pill-port {background:#1e3a5f;color:#93c5fd;border-color:rgba(147,197,253,.2)}
+
+    /* Explicação executiva */
+    .vuln-explanation-exec {
+      background:linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%);
+      border:1px solid #fde68a;border-left:4px solid #f59e0b;
+      border-radius:6px;padding:14px 16px;
+    }
+    .vuln-explanation-exec .vuln-section-label {color:#92400e}
+    .vuln-explanation-text {font-size:0.84rem;color:#1c1917;line-height:1.6}
+
+    /* Bloco de resolução */
+    .vuln-resolution-block {
+      background:linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%);
+      border:1px solid #bbf7d0;border-left:4px solid #22c55e;
+      border-radius:6px;padding:14px 16px;
+    }
+    .vuln-resolution-block .vuln-section-label {color:#14532d}
+    .vuln-resolution-text {font-size:0.84rem;color:#1c1917;line-height:1.6;margin-bottom:8px}
+    .vuln-resolution-list {
+      margin:8px 0 0 16px;padding:0;
+      font-size:0.82rem;color:#166534;line-height:1.7;
+    }
+    .vuln-resolution-list li {margin-bottom:2px}
+    .vuln-validation-note {
+      margin-top:10px;font-size:0.76rem;color:#166534;
+      display:flex;align-items:center;gap:6px;
+      background:rgba(34,197,94,.08);padding:6px 10px;border-radius:4px;
+    }
+
+    /* Detalhamento técnico */
+    .vuln-explanation-tech {
+      background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #3b82f6;
+      border-radius:6px;padding:14px 16px;
+    }
+    .vuln-explanation-tech .vuln-section-label {color:#1e40af}
+    .vuln-explanation-tech-text {
+      font-size:0.81rem;color:#1e293b;line-height:1.65;
+      font-family:'SFMono-Regular',Consolas,monospace;white-space:pre-wrap;
+    }
+
+    /* Afeta o chevron no header expandido */
+    .vuln-card.expanded .vuln-toggle-btn i {transform:rotate(180deg);transition:transform .2s}
+    .vuln-toggle-btn i {transition:transform .2s}
   `;
   document.head.appendChild(style);
 }
