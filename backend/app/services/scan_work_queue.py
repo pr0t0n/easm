@@ -256,6 +256,21 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
     ]
 
 
+# ── T4: Batch-capable tools — run once for ALL targets instead of N serial jobs ─
+# naabu/nmap/httpx/dnsx/nuclei support -iL (targets file), so we create ONE
+# work item with target="__batch__" and item_metadata["batch_targets"]=[...].
+# This drops e.g. 279 nuclei items → 1 item; the executor passes targets list
+# to execute_via_kali which already handles batch dispatch.
+BATCH_CAPABLE_TOOLS: frozenset[str] = frozenset({
+    "naabu", "nmap", "httpx", "dnsx", "nuclei",
+    "nmap-vulscan", "subjack",
+    # nuclei variants also batch well
+    "nuclei-cves", "nuclei-headers", "nuclei-exposure", "nuclei-takeover",
+    "nuclei-cors", "nuclei-crlf", "nuclei-redirect", "nuclei-spoofing",
+    "nuclei-graphql", "nuclei-jwt", "nuclei-cloud",
+})
+
+
 def enqueue_scan_work_items(
     db: Session,
     job: ScanJob,
@@ -268,7 +283,17 @@ def enqueue_scan_work_items(
     created = 0
     existing = 0
     skipped = 0
-    for target in [str(t).strip() for t in targets if str(t or "").strip()]:
+
+    # ── Pass 1: collect per-(phase, tool) target sets for batch collapsing ──────
+    # batch_accumulator[(phase_id, tool)] → set of targets eligible for batching
+    # single_items: (phase_id, tool, target) for non-batchable tools
+    from collections import defaultdict
+    batch_accumulator: dict[tuple[str, str], set[str]] = defaultdict(set)
+    single_items: list[tuple[str, str, str]] = []
+
+    clean_targets = [str(t).strip() for t in targets if str(t or "").strip()]
+
+    for target in clean_targets:
         for phase_id in _eligible_phases_for_target(target, state):
             tools = _phase_tools(phase_id)
             if not tools:
@@ -277,44 +302,113 @@ def enqueue_scan_work_items(
             optional = [tool for tool in tools if tool not in set(required)]
             selected = list(dict.fromkeys(required + optional[:max_optional_per_phase]))
             for tool in selected:
-                already = db.query(ScanWorkItem.id).filter(
-                    ScanWorkItem.scan_job_id == job.id,
-                    ScanWorkItem.phase_id == phase_id,
-                    ScanWorkItem.tool_name == tool[:120],
-                    ScanWorkItem.target == target[:500],
-                ).first()
-                if already:
-                    existing += 1
-                    continue
-                rc = resource_class_for_tool(tool)
-                base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
-                risk_boost = _high_risk_priority_boost(target)
-                item = ScanWorkItem(
-                    scan_job_id=job.id,
-                    phase_id=phase_id,
-                    target=target[:500],
-                    tool_name=tool[:120],
-                    profile=_tool_profile(tool)[:120],
-                    resource_class=rc,
-                    priority=max(1, base_priority + risk_boost),
-                    status="queued",
-                    max_attempts=2,
-                    item_metadata={"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0},
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
-                )
-                db.add(item)
-                try:
+                if tool in BATCH_CAPABLE_TOOLS:
+                    batch_accumulator[(phase_id, tool)].add(target)
+                else:
+                    single_items.append((phase_id, tool, target))
+
+    # ── Pass 2: create / update batch work items ─────────────────────────────
+    for (phase_id, tool), tset in batch_accumulator.items():
+        if not tset:
+            continue
+        sorted_targets = sorted(tset)
+
+        # Check for existing batch item
+        existing_batch = db.query(ScanWorkItem).filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id == phase_id,
+            ScanWorkItem.tool_name == tool[:120],
+            ScanWorkItem.target == "__batch__",
+        ).first()
+
+        if existing_batch:
+            # If still queued/retry, merge in any new targets
+            if existing_batch.status in ("queued", "retry"):
+                old_meta = dict(existing_batch.item_metadata or {})
+                existing_tgts = set(old_meta.get("batch_targets") or [])
+                merged = sorted(existing_tgts | tset)
+                if merged != list(existing_tgts):
+                    old_meta["batch_targets"] = merged
+                    existing_batch.item_metadata = old_meta
+                    existing_batch.updated_at = datetime.utcnow()
                     db.flush()
-                    created += 1
-                except Exception:
-                    db.rollback()
-                    skipped += 1
+            existing += 1
+            continue
+
+        rc = resource_class_for_tool(tool)
+        base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
+        # Batch item gets best priority of all targets in the set
+        best_boost = min(_high_risk_priority_boost(t) for t in sorted_targets) if sorted_targets else 0
+
+        item = ScanWorkItem(
+            scan_job_id=job.id,
+            phase_id=phase_id,
+            target="__batch__",
+            tool_name=tool[:120],
+            profile=_tool_profile(tool)[:120],
+            resource_class=rc,
+            priority=max(1, base_priority + best_boost),
+            status="queued",
+            max_attempts=2,
+            item_metadata={
+                "source": source,
+                "engine": "capacity_work_queue",
+                "batch_targets": sorted_targets,
+                "batch_count": len(sorted_targets),
+                "high_risk": best_boost < 0,
+            },
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(item)
+        try:
+            db.flush()
+            created += 1
+        except Exception:
+            db.rollback()
+            skipped += 1
+
+    # ── Pass 3: create individual items for non-batch tools ───────────────────
+    for (phase_id, tool, target) in single_items:
+        already = db.query(ScanWorkItem.id).filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id == phase_id,
+            ScanWorkItem.tool_name == tool[:120],
+            ScanWorkItem.target == target[:500],
+        ).first()
+        if already:
+            existing += 1
+            continue
+        rc = resource_class_for_tool(tool)
+        base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
+        risk_boost = _high_risk_priority_boost(target)
+        item = ScanWorkItem(
+            scan_job_id=job.id,
+            phase_id=phase_id,
+            target=target[:500],
+            tool_name=tool[:120],
+            profile=_tool_profile(tool)[:120],
+            resource_class=rc,
+            priority=max(1, base_priority + risk_boost),
+            status="queued",
+            max_attempts=2,
+            item_metadata={"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0},
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(item)
+        try:
+            db.flush()
+            created += 1
+        except Exception:
+            db.rollback()
+            skipped += 1
+
     db.add(ScanLog(
         scan_job_id=job.id,
         source="work-queue",
         level="INFO",
-        message=f"work_queue_seed source={source} targets={len(targets)} created={created} existing={existing} skipped={skipped}",
+        message=f"work_queue_seed source={source} targets={len(targets)} created={created} existing={existing} skipped={skipped} batch_groups={len(batch_accumulator)}",
     ))
     db.commit()
     return {"created": created, "existing": existing, "skipped": skipped}

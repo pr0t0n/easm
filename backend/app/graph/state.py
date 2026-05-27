@@ -112,3 +112,14 @@ class AgentState(TypedDict):
     execution_control: dict[str, Any]
     tool_runtime: dict[str, dict[str, int]]
     validation_backlog: list[dict[str, Any]]
+    # ── Goal-oriented execution (ponto #1) ───────────────────────────────────
+    # crown_jewels: ativos de alto valor identificados durante recon
+    # Estrutura: [{asset: str, asset_type: str, value: int, reason: str, domain: str}]
+    crown_jewels: list[dict[str, Any]]
+    # scan_objective: objetivo da operação derivado dos crown jewels
+    # Estrutura: {primary_goal: str, target_assets: [str], priority_phases: [str],
+    #              attack_hypothesis: str, replan_count: int, objective_met_at: str|None}
+    scan_objective: dict[str, Any]
+    # phase_priority_override: lista de phase_ids que devem ser executados ANTES da ordem padrão
+    # Atualizado sempre que novos crown jewels são descobertos
+    phase_priority_override: list[str]

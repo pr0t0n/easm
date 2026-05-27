@@ -39,9 +39,9 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
         # Port/service scan (article §8-§10)
         "naabu", "nmap", "masscan",
         # Web fingerprint (article §6, §8)
-        "httpx", "whatweb", "wafw00f", "curl-headers", "sslscan", "testssl",
+        "httpx", "whatweb", "whatweb-basic", "wafw00f", "curl-headers", "sslscan", "testssl",
         # Content/JS/parameter discovery — removed: js-snooper, jsniper (no profile).
-        "katana", "hakrawler", "gau", "waybackurls", "gospider",
+        "katana", "katana-js", "hakrawler", "gau", "waybackurls", "gospider",
         "arjun", "paramspider",
         "ffuf-params", "ffuf-values", "wfuzz",
         # Header misconfig — runs early, complements code-analyzer
@@ -55,17 +55,38 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
         "nuclei",
         "nmap-vulscan", "nmap-http-enum", "nmap-smb-vuln",
         "nmap-dns-vuln", "nmap-ssh-audit", "nmap-ssl-vuln",
-        "shodan-cli", "theHarvester", "h8mail",
+        # nmap variant aliases used in phase contracts (P02/P06/P07 etc.)
+        "nmap-dns", "nmap-http", "nmap-smb", "nmap-ssh", "nmap-ssl", "nmap-vuln",
+        "shodan-cli", "theHarvester", "theharvester", "h8mail",
         "trufflehog", "gitleaks", "subjack",
+        # OSINT / exposure
+        "ghdb-public-indexes",
     ],
-    "delivery": ["ffuf", "ffuf-files", "ffuf-params", "ffuf-values", "ffuf-post", "wfuzz", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider"],
+    "delivery": [
+        "ffuf", "ffuf-files", "ffuf-content", "ffuf-params", "ffuf-values", "ffuf-post",
+        "wfuzz", "gobuster", "feroxbuster", "dirsearch", "arjun", "paramspider",
+    ],
     # Removed: impacket, evilwinrm (no profiles/binaries in our Kali image yet).
-    "exploitation": ["nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto", "interactsh-client", "katana", "arjun", "curl-headers", "ffuf-params", "ffuf-post", "hydra", "medusa", "crackmapexec", "jwt_tool", "sslscan", "testssl", "nmap"],
+    "exploitation": [
+        "nuclei", "sqlmap", "dalfox", "wapiti", "wpscan", "nikto",
+        "interactsh-client", "katana", "katana-js", "arjun", "curl-headers",
+        "ffuf-params", "ffuf-post", "hydra", "medusa", "crackmapexec", "jwt_tool",
+        "sslscan", "testssl", "nmap",
+        # Nuclei topic-specific templates (evidence-driven DAG)
+        "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-rce", "nuclei-lfi",
+        "nuclei-ssti", "nuclei-xxe", "nuclei-deserialization", "nuclei-idor",
+        "nuclei-auth", "nuclei-jwt", "nuclei-graphql", "nuclei-race",
+        "nuclei-takeover", "nuclei-redirect", "nuclei-cors", "nuclei-crlf",
+        "nuclei-csrf", "nuclei-clickjacking", "nuclei-headers", "nuclei-spoofing",
+        "nuclei-exposure", "nuclei-cloud",
+        # Web fingerprint variants
+        "whatweb-basic",
+    ],
     "installation": ["hydra", "medusa", "crackmapexec", "jwt_tool", "nuclei", "curl-headers", "arjun"],
     "command_control": ["nuclei", "interactsh-client", "testssl"],
     # Removed: eslint, jshint, ast-grep (no profiles/binaries in our Kali image).
     "actions_on_objectives": ["semgrep", "bandit", "trufflehog", "gitleaks", "retire", "trivy"],
-    "reporting": [],
+    "reporting": ["report-builder", "manual_review"],
 }
 
 CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {

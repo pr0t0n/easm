@@ -7452,3 +7452,138 @@ def run_supply_chain_analysis(
 
     result = run_supply_chain_scan(db, scan_id)
     return {"scan_id": scan_id, **result}
+
+
+# ── L5: Exploitation gate — approve/deny work items ───────────────────────────
+
+@router.post("/scans/{scan_id}/work-items/{item_id}/approve")
+def approve_work_item(
+    scan_id: int,
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Aprova execução de um work item em estado pending_approval (exploitation gate)."""
+    from app.services.exploitation_gate import approve_item
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    result = approve_item(db, scan_id, item_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.post("/scans/{scan_id}/work-items/{item_id}/deny")
+def deny_work_item(
+    scan_id: int,
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Nega execução de um work item em estado pending_approval (exploitation gate)."""
+    from app.services.exploitation_gate import deny_item
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    result = deny_item(db, scan_id, item_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.get("/scans/{scan_id}/attack-narrative")
+def get_attack_narrative(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retorna a narrativa de ataque gerada para o scan (L6)."""
+    from app.models.models import ScanJob
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    state = dict(job.state_data or {})
+    narrative = state.get("attack_narrative")
+    if not narrative:
+        raise HTTPException(status_code=404, detail="Narrativa não gerada ainda. Execute o scan primeiro.")
+    return {
+        "scan_id": scan_id,
+        "narrative": narrative,
+        "method": state.get("attack_narrative_method", "unknown"),
+        "generated_at": state.get("attack_narrative_generated_at"),
+    }
+
+
+@router.post("/scans/{scan_id}/generate-narrative")
+def generate_attack_narrative(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gera (ou regenera) a narrativa de ataque para o scan via LLM (L6)."""
+    from app.models.models import ScanJob
+    from app.services.attack_narrative import run_attack_narrative
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    result = run_attack_narrative(db, job)
+    if result.get("skipped"):
+        raise HTTPException(status_code=422, detail=f"Narrativa não pôde ser gerada: {result['skipped']}")
+    return {"scan_id": scan_id, **result}
+
+
+@router.get("/scans/{scan_id}/crown-jewels")
+def get_crown_jewels(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retorna os ativos de alto valor identificados pelo crown jewel analyzer (M1)."""
+    from app.models.models import ScanJob
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    state = dict(job.state_data or {})
+    crown_jewels = state.get("crown_jewels", [])
+    return {
+        "scan_id": scan_id,
+        "crown_jewels": crown_jewels,
+        "analysis_done": state.get("crown_jewel_analysis_done", False),
+    }
+
+
+@router.get("/scans/{scan_id}/osint")
+def get_osint_results(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retorna os resultados do OSINT Phase Zero para o scan (L1)."""
+    from app.models.models import ScanJob
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    state = dict(job.state_data or {})
+    osint = state.get("osint_phase_zero")
+    if not osint:
+        raise HTTPException(status_code=404, detail="OSINT não executado ainda.")
+    return {"scan_id": scan_id, "osint": osint}

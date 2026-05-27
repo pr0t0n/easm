@@ -1067,6 +1067,20 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     db.commit()
 
                 # ─ Parallel fan-out: dispatch a subtask per non-root target ─
+                # ── L1: OSINT Phase Zero — passive recon before active scanning ──
+                # Run once per scan (guarded by osint_phase_zero_done in state_data)
+                if not _cp_state.get("osint_phase_zero_done"):
+                    try:
+                        from app.services.osint_phase_zero import run_osint_phase_zero as _osint0
+                        _root_domain = str(target or "").strip()
+                        _osint0_result = _osint0(db, job, _root_domain)
+                        _cp_state["osint_phase_zero_done"] = True
+                        _cp_state["osint_phase_zero_result"] = _osint0_result
+                    except Exception as _osint_err:
+                        import logging as _olog
+                        _olog.getLogger(__name__).debug("osint_phase_zero failed: %s", _osint_err)
+                        _cp_state["osint_phase_zero_done"] = True  # Don't retry on failure
+
                 if _cp_state.get("parallelize"):
                     try:
                         _already_delegated = set(_cp_state.get("parallel_delegated_targets") or [])

@@ -104,6 +104,11 @@ class Finding(Base):
     # ── Retest ────────────────────────────────────────────────────────────────
     # valores: None | "pending_retest" | "confirmed" | "refuted"
     retest_status: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    # ── Evidence gate ─────────────────────────────────────────────────────────
+    # confirmed | candidate | hypothesis  (ver evidence_gate.py)
+    verification_status: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    # Endpoint específico do finding para business-impact scoring
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     scan_job = relationship("ScanJob", back_populates="findings")

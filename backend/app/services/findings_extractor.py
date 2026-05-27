@@ -1275,6 +1275,15 @@ def persist_findings_from_work_item(
         except (KeyError, TypeError, ValueError):
             cvss_val = None
 
+        # Pull verification_status / url from enriched details
+        v_status = str(details.get("verification_status") or "candidate")
+        finding_url = str(
+            f.get("url")
+            or details.get("url")
+            or details.get("matched-at")
+            or ""
+        )[:2000] or None
+
         finding = Finding(
             scan_job_id=job.id,
             title=title,
@@ -1286,6 +1295,8 @@ def persist_findings_from_work_item(
             risk_score=risk_score,
             confidence_score=50,
             details=details,
+            verification_status=v_status,
+            url=finding_url,
             created_at=datetime.utcnow(),
         )
         db.add(finding)
@@ -1294,8 +1305,147 @@ def persist_findings_from_work_item(
             created += 1
         except Exception:
             db.rollback()
+            continue
+
+        # ── T1: Evidence gate stage 2 ─────────────────────────────────────────
+        # candidate findings → seed a verification ScanWorkItem that re-runs
+        # a targeted check to confirm or refute the finding.
+        if v_status in ("candidate", "hypothesis"):
+            try:
+                _seed_verification_work_item(db, job, item, finding, tool, finding_url)
+            except Exception:
+                pass
 
     if created:
         db.commit()
 
     return created
+
+
+# ── T1: Evidence gate stage 2 helpers ─────────────────────────────────────────
+
+# Map tool → verification tool (more precise follow-up)
+_VERIFICATION_TOOL_MAP: dict[str, str] = {
+    # Generic → targeted nuclei checks
+    "nmap":           "nuclei",
+    "nmap-vuln":      "nuclei",
+    "nmap-vulscan":   "nuclei",
+    "masscan":        "nuclei",
+    "shodan-cli":     "nuclei",
+    "theharvester":   "nuclei",
+    "tech_correlator": "nuclei",
+    "curl-headers":   "shcheck",
+    "wafw00f":        "nuclei-headers",
+    # WAF / header findings → safety check
+    "shcheck":        "nuclei-headers",
+    # httpx findings → dalfox/arjun
+    "httpx":          "dalfox",
+    "katana-js":      "dalfox",
+    # arjun parameter discovery → targeted injection
+    "arjun":          "sqlmap",
+}
+
+# Findings that should NOT generate verification items (already definitive)
+_NO_VERIFY_TOOLS = {"sqlmap", "dalfox", "wpscan", "hydra", "nuclei-default-credentials"}
+
+# Keywords in title that map to a specific verification tool
+_TITLE_VERIFICATION: list[tuple[str, str]] = [
+    ("xss",              "dalfox"),
+    ("cross-site",       "dalfox"),
+    ("sql injection",    "sqlmap"),
+    ("sqli",             "sqlmap"),
+    ("open redirect",    "nuclei-redirect"),
+    ("ssrf",             "nuclei-ssrf"),
+    ("lfi",              "nuclei-lfi"),
+    ("rce",              "nuclei-rce"),
+    ("default credentials", "nuclei-default-credentials"),
+    ("exposed",          "nuclei-exposure"),
+    ("header",           "shcheck"),
+    ("cors",             "nuclei-cors"),
+    ("cve-",             "nuclei"),
+]
+
+
+def _seed_verification_work_item(
+    db,
+    job,
+    source_item,
+    finding,
+    tool: str,
+    finding_url: str | None,
+) -> None:
+    """Create a targeted verification ScanWorkItem for a candidate/hypothesis finding.
+
+    The verification item runs a more precise tool against the same target,
+    scoped to the finding's URL when available. On completion, the poll task
+    will update the finding's verification_status to "confirmed" or "refuted".
+    """
+    from app.models.models import ScanWorkItem
+    from app.services.scan_work_queue import resource_class_for_tool
+
+    if str(tool or "").lower() in _NO_VERIFY_TOOLS:
+        return
+
+    target = str(source_item.target or finding.domain or "").strip()
+    if not target:
+        return
+
+    # Choose the best verification tool
+    title_lower = str(finding.title or "").lower()
+    verify_tool = _VERIFICATION_TOOL_MAP.get(tool.lower(), "nuclei")
+
+    # Title-based override
+    for kw, vt in _TITLE_VERIFICATION:
+        if kw in title_lower:
+            verify_tool = vt
+            break
+
+    # CVE specific → nuclei with CVE template
+    if finding.cve and finding.cve.startswith("CVE-"):
+        cve_slug = finding.cve.lower().replace("-", "-")
+        verify_tool = f"nuclei-{cve_slug}"
+
+    # Build metadata linking back to the finding
+    meta: dict = {
+        "source": "evidence_gate_stage2",
+        "verifies_finding_id": finding.id,
+        "verifies_title": str(finding.title or "")[:120],
+        "verifies_tool": tool,
+        "verification_url": finding_url or "",
+    }
+
+    # Determine phase: reuse P09 (web app scanning) as default verification phase
+    phase_id = str(source_item.phase_id or "P09")
+
+    rc = resource_class_for_tool(verify_tool)
+
+    # Use a higher priority (lower number = more urgent)
+    base_priority = int(source_item.priority or 100)
+    verify_priority = max(1, base_priority - 5)
+
+    # Check dedup
+    already = db.query(ScanWorkItem.id).filter(
+        ScanWorkItem.scan_job_id == job.id,
+        ScanWorkItem.phase_id == phase_id,
+        ScanWorkItem.tool_name == verify_tool[:120],
+        ScanWorkItem.target == target[:500],
+        ScanWorkItem.status.notin_(["completed", "done", "failed", "skipped"]),
+    ).first()
+    if already:
+        return
+
+    verify_item = ScanWorkItem(
+        scan_job_id=job.id,
+        phase_id=phase_id,
+        target=target[:500],
+        tool_name=verify_tool[:120],
+        profile="",
+        resource_class=rc,
+        priority=verify_priority,
+        status="queued",
+        max_attempts=1,  # verification runs once; no retry
+        item_metadata=meta,
+        created_at=__import__("datetime").datetime.utcnow(),
+        updated_at=__import__("datetime").datetime.utcnow(),
+    )
+    db.add(verify_item)

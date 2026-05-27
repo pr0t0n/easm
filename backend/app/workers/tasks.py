@@ -1274,6 +1274,19 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             import logging as _clog
             _clog.getLogger(__name__).warning("cve_enricher failed: %s", _ce)
 
+        # ── L6: Attack narrative generation ─────────────────────────────────────
+        try:
+            from app.services.attack_narrative import run_attack_narrative as _run_narrative
+            _narrative_result = _run_narrative(db, job)
+            if _narrative_result.get("narrative"):
+                db.add(ScanLog(
+                    scan_job_id=job.id, source="attack-narrative", level="INFO",
+                    message=f"attack_narrative generated: method={_narrative_result.get('method')} findings={_narrative_result.get('findings_used')}",
+                ))
+        except Exception as _ne:
+            import logging as _nlog
+            _nlog.getLogger(__name__).warning("attack_narrative failed: %s", _ne)
+
         db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message=f"Execucao [{scan_mode}] finalizada"))
         log_audit(
             db,
@@ -1598,6 +1611,17 @@ def execute_scan_work_item(item_id: int):
         if item.status not in {"dispatched", "queued", "retry"}:
             return {"status": item.status}
 
+        # ── L5: Exploitation gate — pause high-impact tools for approval ─────
+        try:
+            from app.services.exploitation_gate import should_require_approval, request_approval
+            if should_require_approval(item):
+                _gate_result = request_approval(db, item, job)
+                db.commit()
+                return {"id": item.id, "status": "pending_approval", "gate": _gate_result}
+        except Exception as _gate_err:
+            import logging as _glog
+            _glog.getLogger(__name__).debug("exploitation_gate check failed: %s", _gate_err)
+
         now = datetime.utcnow()
         item.status = "running"
         item.attempts = int(item.attempts or 0) + 1
@@ -1615,16 +1639,29 @@ def execute_scan_work_item(item_id: int):
         ))
         db.commit()
 
+        # ── T4: Batch dispatch — one MCP call for all targets in batch item ──
+        _item_meta = dict(item.item_metadata or {})
+        _batch_targets: list[str] = list(_item_meta.get("batch_targets") or [])
+        _is_batch = item.target == "__batch__" and len(_batch_targets) > 1
+        _dispatch_target = _batch_targets[0] if _is_batch else item.target
+
         execution = {
             "mcp_request_id": f"wi-{item.id}",
             "phase_id": item.phase_id,
             "skill_id": f"work_queue.{item.phase_id}",
             "tool_name": item.tool_name,
             "profile": item.profile or item.tool_name,
-            "target": item.target,
-            "arguments": {"target": item.target, "scan_id": item.scan_job_id},
+            "target": _dispatch_target,
+            "arguments": {
+                "target": _dispatch_target,
+                "scan_id": item.scan_job_id,
+                **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
+            },
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }
+        if _is_batch:
+            execution["targets"] = _batch_targets
+
         response = requests.post(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/submit",
             json=execution,
@@ -1755,6 +1792,19 @@ def poll_scan_work_item(item_id: int):
             except Exception:
                 pass
 
+        # ── L2: Interactsh OOB — poll for callbacks and confirm blind findings ─
+        if terminal != "retry" and job:
+            try:
+                from app.services.interactsh_callback import check_and_confirm_oob_findings
+                _oob_confirmed = check_and_confirm_oob_findings(db, job.id)
+                if _oob_confirmed > 0:
+                    import logging as _ooblog
+                    _ooblog.getLogger(__name__).info(
+                        "interactsh_oob scan=%d confirmed=%d", job.id, _oob_confirmed
+                    )
+            except Exception as _ooberr:
+                pass  # OOB polling is best-effort
+
         # Capture full stdout BEFORE truncating for storage — parsers see the whole output
         _full_stdout = str(result.get("stdout") or "")
         _parsed_result = result.get("parsed")
@@ -1848,6 +1898,71 @@ def poll_scan_work_item(item_id: int):
             except Exception:
                 pass
 
+        # ── L4: Multi-identity BOLA/BFLA tester ────────────────────────────────
+        # Run after web app scanning phases complete for targets with auth endpoints
+        if item.status == "completed" and job and item.phase_id in ("P09", "P10", "P12"):
+            try:
+                from app.services.multi_identity_tester import run_multi_identity_test as _bola_test
+                _bola_meta = dict(item.item_metadata or {})
+                if not _bola_meta.get("bola_tested"):
+                    _bola_result = _bola_test(db, job, item.target)
+                    if _bola_result.get("bola_findings", 0) > 0:
+                        import logging as _bolog
+                        _bolog.getLogger(__name__).info(
+                            "bola_test scan=%d target=%s findings=%d",
+                            job.id, item.target, _bola_result["bola_findings"],
+                        )
+            except Exception as _bola_err:
+                import logging as _bolog2
+                _bolog2.getLogger(__name__).debug("multi_identity_tester failed: %s", _bola_err)
+
+        # ── L3: LLM operator — proposes novel attack chains after key phases ────
+        if item.status == "completed" and job and item.phase_id in ("P09", "P10", "P11"):
+            try:
+                from app.services.llm_operator import run_llm_operator as _llm_op
+                _llm_result = _llm_op(db, job)
+                if _llm_result.get("items_created", 0) > 0:
+                    import logging as _llmlog
+                    _llmlog.getLogger(__name__).info(
+                        "llm_operator scan=%d chains=%d items=%d",
+                        job.id, _llm_result.get("chains_proposed", 0), _llm_result.get("items_created", 0),
+                    )
+            except Exception as _llme:
+                import logging as _llmlog2
+                _llmlog2.getLogger(__name__).debug("llm_operator failed: %s", _llme)
+
+        # ── L5: Exploitation gate — pause high-impact items for approval ─────────
+        # Note: This check happens in execute_scan_work_item (before dispatch),
+        # not here. See exploitation_gate.py for the should_require_approval hook.
+
+        # ── M1: Crown jewel mid-scan analyzer ────────────────────────────────────
+        # After P01 or P02 items complete, identify crown jewel targets and
+        # boost their priority across the remaining work queue.
+        if item.status == "completed" and job and item.phase_id in ("P01", "P02"):
+            try:
+                _state = dict(job.state_data or {})
+                if not _state.get("crown_jewel_analysis_done"):
+                    from app.models.models import ScanWorkItem as _SWI
+                    _done_p01p02 = (
+                        db.query(_SWI)
+                        .filter(
+                            _SWI.scan_job_id == job.id,
+                            _SWI.phase_id.in_(["P01", "P02"]),
+                            _SWI.status.in_(["completed", "done", "failed", "skipped"]),
+                        )
+                        .count()
+                    )
+                    if _done_p01p02 >= 3:  # enough recon data to identify crown jewels
+                        from app.services.crown_jewel_analyzer import run_crown_jewel_analysis
+                        _cj_result = run_crown_jewel_analysis(db, job.id)
+                        import logging as _cjlog
+                        _cjlog.getLogger(__name__).info(
+                            "crown_jewel_analysis scan=%d: %s", job.id, _cj_result
+                        )
+            except Exception as _cje:
+                import logging as _cjlog2
+                _cjlog2.getLogger(__name__).debug("crown_jewel_analysis failed: %s", _cje)
+
         # ── Shared surface memory: propaga credenciais / versões / SANs ────────
         # Ponto #3: descobertas se propagam entre targets do mesmo scan.
         if item.status == "completed" and job:
@@ -1869,6 +1984,37 @@ def poll_scan_work_item(item_id: int):
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
+
+        # ── T1: Evidence gate stage 2 — promote candidate finding to confirmed ──
+        # When a verification work item completes, update the original finding.
+        if item.status in ("completed", "done", "failed") and job:
+            try:
+                _meta = dict(item.item_metadata or {})
+                _orig_finding_id = _meta.get("verifies_finding_id")
+                if _orig_finding_id:
+                    from app.models.models import Finding as _Finding
+                    _orig = db.query(_Finding).filter(_Finding.id == _orig_finding_id).first()
+                    if _orig:
+                        if item.status in ("completed", "done"):
+                            # Verification succeeded → confirmed
+                            _orig.verification_status = "confirmed"
+                            _orig_details = dict(_orig.details or {})
+                            _orig_details["verification_status"] = "confirmed"
+                            _orig_details["verified_by_item_id"] = item.id
+                            _orig_details["verified_by_tool"] = item.tool_name
+                            _orig_details["needs_verification"] = False
+                            _orig.details = _orig_details
+                        else:
+                            # Verification tool failed to reproduce → refuted
+                            _orig.verification_status = "refuted"
+                            _orig_details = dict(_orig.details or {})
+                            _orig_details["verification_status"] = "refuted"
+                            _orig_details["refuted_by_tool"] = item.tool_name
+                            _orig.details = _orig_details
+                        db.flush()
+            except Exception as _ve:
+                import logging as _vlog
+                _vlog.getLogger(__name__).debug("evidence gate stage2 update failed: %s", _ve)
 
         # ── Target triage: se httpx ou naabu confirma target morto, cancela fila ──
         if item.status == "completed" and item.tool_name in ("httpx", "naabu") and job:
