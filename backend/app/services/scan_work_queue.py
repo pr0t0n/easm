@@ -8,6 +8,61 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.models import ScanJob, ScanLog, ScanWorkItem
+
+
+# ── Global Redis semaphore — garante cap TOTAL cross-scans ───────────────────
+# Dois scans simultâneos não devem despachar 2×100=200 tarefas para 100 workers.
+# Usamos INCR/DECR atômico no Redis por resource_class como semáforo leve.
+# Se Redis estiver indisponível (timeout/conexão), fail-open — despacha normalmente.
+
+def _redis_client():
+    """Lazy Redis client. Reconecta se necessário."""
+    import redis
+    return redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+
+
+def kali_inflight_get(rc: str) -> int:
+    """Retorna contagem atual de tarefas em voo para a resource class."""
+    try:
+        val = _redis_client().get(f"kali:inflight:{rc}")
+        return max(0, int(val or 0))
+    except Exception:
+        return 0
+
+
+def kali_inflight_claim(rc: str, count: int, cap: int) -> bool:
+    """Tenta reservar `count` slots para `rc`. Retorna True se dentro do cap.
+
+    Usa INCR atômico: se o novo valor exceder o cap, faz rollback com DECR.
+    Fail-open: se Redis estiver indisponível, permite o despacho.
+    """
+    if count <= 0:
+        return True
+    try:
+        r = _redis_client()
+        key = f"kali:inflight:{rc}"
+        new_val = r.incrby(key, count)
+        r.expire(key, max(3600, int(settings.scan_work_queue_lease_seconds) * 2))
+        if new_val > cap:
+            r.decrby(key, count)
+            return False
+        return True
+    except Exception:
+        return True  # fail-open: Redis down → permite despacho
+
+
+def kali_inflight_release(rc: str, count: int = 1) -> None:
+    """Libera `count` slots ao completar/falhar uma tarefa."""
+    if count <= 0:
+        return
+    try:
+        r = _redis_client()
+        key = f"kali:inflight:{rc}"
+        new_val = r.decrby(key, count)
+        if new_val < 0:
+            r.set(key, 0)  # floor
+    except Exception:
+        pass
 from app.services.offensive_operator_core import PHASE_CONTRACTS, ToolCatalog
 
 
@@ -320,25 +375,19 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         )
         db.flush()
 
-        running_rows = (
-            db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
-            .filter(
-                ScanWorkItem.scan_job_id == scan_id,
-                ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
-                or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until > now),
-            )
-            .group_by(ScanWorkItem.resource_class)
-            .all()
-        )
-        running = {str(rc): int(count) for rc, count in running_rows}
-
         for rc, cap in caps.items():
-            available = max(0, cap - running.get(rc, 0))
+            # ── Global cap via Redis semaphore ────────────────────────────────
+            # kali_inflight_get retorna quantas tarefas estão em voo globalmente
+            # (todos os scans simultâneos), não só o scan atual.
+            # Se Redis estiver down, fail-open (retorna 0).
+            global_inflight = kali_inflight_get(rc)
+            available = max(0, cap - global_inflight)
             if available <= 0:
                 continue
             room = max(0, dispatch_limit - len(claimed))
             if room <= 0:
                 break
+            to_claim = min(available, room)
             rows = (
                 db.query(ScanWorkItem)
                 .filter(
@@ -349,10 +398,16 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                     or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
                 )
                 .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.created_at.asc(), ScanWorkItem.id.asc())
-                .limit(min(available, room))
+                .limit(to_claim)
                 .with_for_update(skip_locked=True)
                 .all()
             )
+            if not rows:
+                continue
+            # Reserva os slots no semáforo Redis atomicamente.
+            # Se a reserva falhar (outro scan chegou primeiro), não despacha.
+            if not kali_inflight_claim(rc, len(rows), cap):
+                continue
             for item in rows:
                 item.status = "dispatched"
                 item.lease_until = lease_until

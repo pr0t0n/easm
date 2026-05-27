@@ -1747,6 +1747,14 @@ def poll_scan_work_item(item_id: int):
         item.lease_until = None if terminal != "retry" else datetime.utcnow() + timedelta(seconds=120)
         item.last_error = str(result.get("error") or "")[:2000] or None
 
+        # Libera slot no semáforo Redis global quando tarefa termina (não é retry)
+        if terminal != "retry":
+            try:
+                from app.services.scan_work_queue import kali_inflight_release
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+
         # Capture full stdout BEFORE truncating for storage — parsers see the whole output
         _full_stdout = str(result.get("stdout") or "")
         _parsed_result = result.get("parsed")
@@ -1840,6 +1848,28 @@ def poll_scan_work_item(item_id: int):
             except Exception:
                 pass
 
+        # ── Shared surface memory: propaga credenciais / versões / SANs ────────
+        # Ponto #3: descobertas se propagam entre targets do mesmo scan.
+        if item.status == "completed" and job:
+            try:
+                from app.services.cross_target_propagator import (
+                    propagate_credential_findings,
+                    propagate_certificate_sans,
+                )
+                _full_result = dict(item.result or {})
+                _tool_lower = str(item.tool_name or "").lower()
+
+                # Credenciais: gitleaks/trufflehog → credential stuffing em outros targets
+                if _tool_lower in {"gitleaks", "trufflehog", "git-dumper", "h8mail"}:
+                    propagate_credential_findings(db, job.id, item.target, item.tool_name, _full_result)
+
+                # Certificado: extrai SANs → novos subdomínios in-scope
+                if _tool_lower in {"sslscan", "testssl"}:
+                    propagate_certificate_sans(db, job.id, item.target, item.tool_name, _full_result, job)
+            except Exception as _pe:
+                import logging as _plog
+                _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
+
         # ── Target triage: se httpx ou naabu confirma target morto, cancela fila ──
         if item.status == "completed" and item.tool_name in ("httpx", "naabu") and job:
             try:
@@ -1875,6 +1905,20 @@ def poll_scan_work_item(item_id: int):
             state = dict(job.state_data or {})
             state["work_queue_counts"] = counts
             job.state_data = state
+
+            # ── mission_progress: baseado em work items reais, não phase_ledger ──
+            # Terminal = completed | done | failed | timeout | skipped
+            # Não terminais = queued | retry | dispatched | running | submitted
+            # Progresso = terminais / total (cap 99% — 100% reservado para "scan completed")
+            _total_items = sum(counts.values())
+            _terminal_statuses = {"completed", "done", "failed", "timeout", "skipped", "blocked"}
+            _done_items = sum(counts.get(s, 0) for s in _terminal_statuses)
+            if _total_items > 0:
+                _pct = min(99, int(_done_items / _total_items * 99))
+                # Só avança — nunca regrida (ex: novos items adicionados pelo correlator)
+                if _pct > int(job.mission_progress or 0):
+                    job.mission_progress = _pct
+
             db.add(ScanLog(
                 scan_job_id=item.scan_job_id,
                 source="work-queue",
@@ -1882,6 +1926,7 @@ def poll_scan_work_item(item_id: int):
                 message=(
                     f"work_item_finish id={item.id} phase={item.phase_id} target={item.target} "
                     f"tool={item.tool_name} status={item.status} kali_status={raw_status}"
+                    f" progress={job.mission_progress}%"
                     + (f" findings={findings_created}" if findings_created else "")
                 ),
             ))

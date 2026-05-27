@@ -1217,6 +1217,15 @@ def persist_findings_from_work_item(
 
     created = 0
     for f in raw_findings:
+        # ── Evidence gate + business impact scoring ────────────────────────
+        # Ponto #4: marca verification_status (confirmed/candidate/hypothesis)
+        # Ponto #5: ajusta risk_score com contexto de endpoint
+        try:
+            from app.services.evidence_gate import enrich_finding_with_gate
+            f = enrich_finding_with_gate(f, tool_name=tool)
+        except Exception:
+            pass
+
         title = str(f.get("title") or "").strip()[:500]
         severity = str(f.get("severity") or "info").lower()
         risk_score = int(f.get("risk_score") or 1)

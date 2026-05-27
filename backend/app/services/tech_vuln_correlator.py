@@ -101,6 +101,70 @@ LOCAL_TECH_CVES: dict[str, list[dict]] = {
         {"cve": "CVE-2020-1938", "cvss": 9.8, "severity": "critical",
          "title": "Apache Tomcat Ghostcat AJP File Read/Include (< 9.0.31)",
          "remediation": "Desabilitar AJP connector ou atualizar Tomcat para >= 9.0.31"},
+        {"cve": "CVE-2017-12617", "cvss": 9.8, "severity": "critical",
+         "title": "Apache Tomcat 8.5.x/9.0.x RCE via HTTP PUT (JSP upload)",
+         "remediation": "Atualizar Tomcat >= 9.0.1/8.5.23; desabilitar DefaultServlet readonly=false"},
+        {"cve": "CVE-2019-0232", "cvss": 8.1, "severity": "high",
+         "title": "Apache Tomcat CGI Servlet RCE (Windows, CGI enabled)",
+         "remediation": "Atualizar Tomcat >= 9.0.18/8.5.40; desabilitar CGI Servlet"},
+    ],
+    "iis": [
+        {"cve": "CVE-2017-7269", "cvss": 10.0, "severity": "critical",
+         "title": "IIS 6.0 WebDAV Buffer Overflow RCE",
+         "remediation": "Desabilitar WebDAV ou atualizar; IIS 6.0 EOL"},
+        {"cve": "CVE-2010-2730", "cvss": 9.3, "severity": "critical",
+         "title": "IIS 7.5 FastCGI Remote Code Execution",
+         "remediation": "Atualizar IIS e aplicar MS10-065"},
+    ],
+    "exchange": [
+        {"cve": "CVE-2021-26855", "cvss": 9.8, "severity": "critical",
+         "title": "Microsoft Exchange ProxyLogon SSRF → RCE",
+         "remediation": "Aplicar patches KB5001779; isolar Exchange da internet"},
+        {"cve": "CVE-2021-34473", "cvss": 9.8, "severity": "critical",
+         "title": "Microsoft Exchange ProxyShell RCE (< Nov 2021 CU)",
+         "remediation": "Aplicar patches Exchange CU Nov 2021 ou posterior"},
+    ],
+    "django": [
+        {"cve": "CVE-2019-14234", "cvss": 9.8, "severity": "critical",
+         "title": "Django < 2.1.11 SQL Injection via JSON field key lookup",
+         "remediation": "Atualizar Django >= 2.1.11 / 2.2.4"},
+        {"cve": "CVE-2022-28347", "cvss": 9.8, "severity": "critical",
+         "title": "Django < 4.0.4 SQL Injection via QuerySet.explain()",
+         "remediation": "Atualizar Django >= 3.2.13 / 4.0.4"},
+    ],
+    "rails": [
+        {"cve": "CVE-2019-5420", "cvss": 9.8, "severity": "critical",
+         "title": "Rails < 5.2.2.1 Development Mode RCE via file_fixture_path",
+         "remediation": "Atualizar Rails >= 5.2.2.1; nunca expor development mode"},
+        {"cve": "CVE-2020-8164", "cvss": 9.8, "severity": "critical",
+         "title": "Rails Unsafe Deserialization of `rendered_format` leading to RCE",
+         "remediation": "Atualizar Rails >= 6.0.3.1 / 5.2.4.3"},
+    ],
+    "laravel": [
+        {"cve": "CVE-2021-3129", "cvss": 9.8, "severity": "critical",
+         "title": "Laravel <= 8.4.2 RCE via debug mode + Ignition",
+         "remediation": "Desabilitar APP_DEBUG=false em produção; atualizar Ignition >= 2.5.2"},
+    ],
+    "confluence": [
+        {"cve": "CVE-2022-26134", "cvss": 10.0, "severity": "critical",
+         "title": "Atlassian Confluence OGNL RCE (unauthenticated)",
+         "remediation": "Atualizar Confluence >= 7.4.17 / 7.13.7 / 7.14.3 / 7.15.2 / 7.16.4 / 7.17.4 / 7.18.1"},
+        {"cve": "CVE-2023-22527", "cvss": 10.0, "severity": "critical",
+         "title": "Atlassian Confluence SSTI RCE (< 8.5.4)",
+         "remediation": "Atualizar Confluence >= 8.5.4 ou aplicar workaround de mitigação"},
+    ],
+    "jira": [
+        {"cve": "CVE-2022-0540", "cvss": 9.8, "severity": "critical",
+         "title": "Atlassian Jira Authentication Bypass in WebWork",
+         "remediation": "Atualizar Jira >= 8.13.18 / 8.20.6 / 8.22.0"},
+    ],
+    "grafana": [
+        {"cve": "CVE-2021-43798", "cvss": 7.5, "severity": "high",
+         "title": "Grafana < 8.3.1 Path Traversal — leitura de arquivos locais",
+         "remediation": "Atualizar Grafana para >= 8.3.1"},
+        {"cve": "CVE-2022-31107", "cvss": 9.8, "severity": "critical",
+         "title": "Grafana OAuth account takeover (< 9.0.3 / 8.5.9)",
+         "remediation": "Atualizar Grafana para >= 9.0.3 ou 8.5.9"},
     ],
     "jquery": [
         {"cve": "CVE-2019-11358", "cvss": 6.1, "severity": "medium",
@@ -172,7 +236,7 @@ LOCAL_TECH_CVES: dict[str, list[dict]] = {
     ],
 }
 
-# Product keywords to nuclei template directory names
+# Product keywords to nuclei template tags
 TECH_TO_NUCLEI_TAGS: dict[str, list[str]] = {
     "wordpress":  ["wordpress", "wp"],
     "joomla":     ["joomla"],
@@ -210,6 +274,131 @@ TECH_TO_NUCLEI_TAGS: dict[str, list[str]] = {
     "weblogic":   ["weblogic"],
     "jboss":      ["jboss"],
     "solr":       ["solr"],
+}
+
+# ── Perfis de ataque específicos por tech stack ───────────────────────────────
+# Mapeia keyword de tech → lista de (tool_name, phase_id) a enfileirar.
+# Isso implementa o ponto #2 do usuário: cada tech detectada ativa
+# um perfil de ataque específico em vez de rodar tudo para todos.
+#
+# Exemplos de lógica:
+#   WordPress → wpscan (P09) + nuclei-wp-plugins (P09)
+#   Django    → nuclei-django-debug (P09) + arjun IDOR scan (P12)
+#   GraphQL   → nuclei-graphql (P09)
+#   JWT       → nuclei-jwt (P09)
+#   S3/Cloud  → nuclei-s3-misconfig (P07)
+
+TECH_ATTACK_PROFILES: dict[str, list[dict]] = {
+    "wordpress": [
+        {"tool": "wpscan",             "phase": "P09", "priority_boost": -10},
+        {"tool": "nuclei-wordpress",   "phase": "P09", "priority_boost": -8},
+        {"tool": "nuclei-wp-plugins",  "phase": "P09", "priority_boost": -6},
+    ],
+    "joomla": [
+        {"tool": "nuclei-joomla",      "phase": "P09", "priority_boost": -8},
+    ],
+    "drupal": [
+        {"tool": "nuclei-drupal",      "phase": "P09", "priority_boost": -10},
+    ],
+    "django": [
+        {"tool": "nuclei-django",      "phase": "P09", "priority_boost": -8},
+        # Django debug mode expõe /admin, tracebacks, SQL queries
+        {"tool": "nuclei-django-debug-mode", "phase": "P09", "priority_boost": -10},
+        # DRF: IDs sequenciais → IDOR em /api/users/{id}/
+        {"tool": "arjun",              "phase": "P12", "priority_boost": -5},
+    ],
+    "laravel": [
+        {"tool": "nuclei-laravel",     "phase": "P09", "priority_boost": -10},
+        # Laravel debug (APP_DEBUG=true) → full stack trace + env vars
+        {"tool": "nuclei-laravel-debug", "phase": "P09", "priority_boost": -10},
+    ],
+    "rails": [
+        {"tool": "nuclei-rails",       "phase": "P09", "priority_boost": -8},
+    ],
+    "graphql": [
+        # Introspection, BOLA, nested query DoS
+        {"tool": "nuclei-graphql",     "phase": "P09", "priority_boost": -10},
+        {"tool": "nuclei-graphql-introspection", "phase": "P09", "priority_boost": -12},
+    ],
+    "spring": [
+        {"tool": "nuclei-spring",      "phase": "P09", "priority_boost": -10},
+        # Spring Actuator: /actuator/env expõe TODAS as env vars
+        {"tool": "nuclei-spring-actuator", "phase": "P09", "priority_boost": -12},
+    ],
+    "jenkins": [
+        {"tool": "nuclei-jenkins",     "phase": "P09", "priority_boost": -10},
+    ],
+    "confluence": [
+        {"tool": "nuclei-confluence",  "phase": "P09", "priority_boost": -12},
+    ],
+    "jira": [
+        {"tool": "nuclei-jira",        "phase": "P09", "priority_boost": -8},
+    ],
+    "gitlab": [
+        {"tool": "nuclei-gitlab",      "phase": "P09", "priority_boost": -8},
+    ],
+    "grafana": [
+        {"tool": "nuclei-grafana",     "phase": "P09", "priority_boost": -8},
+    ],
+    "kibana": [
+        {"tool": "nuclei-kibana",      "phase": "P09", "priority_boost": -8},
+    ],
+    "elasticsearch": [
+        {"tool": "nuclei-elasticsearch", "phase": "P09", "priority_boost": -8},
+    ],
+    "tomcat": [
+        {"tool": "nuclei-tomcat",      "phase": "P09", "priority_boost": -10},
+        # Ghostcat + HTTP PUT RCE — templates específicos de CVE
+        {"tool": "nuclei-cve-2020-1938", "phase": "P09", "priority_boost": -12},
+        {"tool": "nuclei-cve-2017-12617", "phase": "P09", "priority_boost": -12},
+    ],
+    "iis": [
+        {"tool": "nuclei-iis",         "phase": "P09", "priority_boost": -8},
+    ],
+    "exchange": [
+        {"tool": "nuclei-exchange",    "phase": "P09", "priority_boost": -12},
+        {"tool": "nuclei-cve-2021-26855", "phase": "P09", "priority_boost": -15},
+    ],
+    "sharepoint": [
+        {"tool": "nuclei-sharepoint",  "phase": "P09", "priority_boost": -8},
+    ],
+    "portainer": [
+        {"tool": "nuclei-portainer",   "phase": "P09", "priority_boost": -12},
+    ],
+    "zabbix": [
+        {"tool": "nuclei-zabbix",      "phase": "P09", "priority_boost": -10},
+    ],
+    "struts": [
+        {"tool": "nuclei-struts",      "phase": "P09", "priority_boost": -12},
+        {"tool": "nuclei-cve-2017-5638", "phase": "P09", "priority_boost": -15},
+    ],
+    "weblogic": [
+        {"tool": "nuclei-weblogic",    "phase": "P09", "priority_boost": -12},
+    ],
+    "docker": [
+        {"tool": "nuclei-docker",      "phase": "P09", "priority_boost": -10},
+    ],
+    # JWT em header → testa alg:none, weak secret, kid injection
+    "jwt": [
+        {"tool": "nuclei-jwt",         "phase": "P09", "priority_boost": -10},
+    ],
+    # S3 / CloudFront → bucket misconfiguration, origin bypass
+    "s3": [
+        {"tool": "nuclei-s3",          "phase": "P07", "priority_boost": -10},
+        {"tool": "nuclei-aws-bucket",  "phase": "P07", "priority_boost": -10},
+    ],
+    "cloudfront": [
+        {"tool": "nuclei-cloudfront",  "phase": "P07", "priority_boost": -8},
+    ],
+    "php": [
+        {"tool": "nuclei-php",         "phase": "P09", "priority_boost": -5},
+    ],
+    "nginx": [
+        {"tool": "nuclei-nginx",       "phase": "P09", "priority_boost": -5},
+    ],
+    "apache": [
+        {"tool": "nuclei-apache",      "phase": "P09", "priority_boost": -8},
+    ],
 }
 
 
@@ -459,6 +648,84 @@ def _nvd_lookup(product: str, version: str, *, max_results: int = 5) -> list[dic
 # Nuclei targeted work-item seeding
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _seed_attack_profile_for_tech(
+    db: Session,
+    scan_id: int,
+    target: str,
+    product: str,
+) -> int:
+    """Implementa tech stack → attack profile (ponto #2 do usuário).
+
+    Para cada tech detectada, enfileira ferramentas de ataque específicas
+    com alta prioridade, em vez de rodar tudo para todos os targets.
+
+    Retorna número de work items criados.
+    """
+    from app.models.models import ScanWorkItem
+    from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+
+    product_lower = str(product or "").strip().lower()
+    seeded = 0
+
+    # Match por keywords (ex: "spring boot" → "spring")
+    for tech_kw, profile_list in TECH_ATTACK_PROFILES.items():
+        if tech_kw not in product_lower:
+            continue
+        for entry in profile_list:
+            tool_name = str(entry.get("tool") or "")[:120]
+            phase_id = str(entry.get("phase") or "P09")
+            priority_boost = int(entry.get("priority_boost") or 0)
+            if not tool_name:
+                continue
+
+            already = (
+                db.query(ScanWorkItem.id)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.phase_id == phase_id,
+                    ScanWorkItem.tool_name == tool_name,
+                    ScanWorkItem.target == target[:500],
+                )
+                .first()
+            )
+            if already:
+                continue
+
+            rc = resource_class_for_tool(tool_name)
+            base_pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
+            item = ScanWorkItem(
+                scan_job_id=scan_id,
+                phase_id=phase_id,
+                target=target[:500],
+                tool_name=tool_name,
+                profile=tool_name,
+                resource_class=rc,
+                priority=max(1, base_pri + priority_boost),
+                status="queued",
+                max_attempts=2,
+                item_metadata={
+                    "source": "tech_attack_profile",
+                    "detected_tech": product,
+                    "tech_keyword": tech_kw,
+                    "engine": "tech_vuln_correlator",
+                },
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(item)
+            try:
+                db.flush()
+                seeded += 1
+                logger.info(
+                    "tech_profile_seed scan=%s target=%s tech=%s → tool=%s phase=%s",
+                    scan_id, target, product, tool_name, phase_id,
+                )
+            except Exception:
+                db.rollback()
+
+    return seeded
+
+
 def _seed_targeted_nuclei(
     db: Session,
     scan_id: int,
@@ -691,8 +958,13 @@ def correlate_tech_vulns(
             except Exception:
                 db.rollback()
 
-        # ── 5. Queue targeted nuclei scan ─────────────────────────────────────
+        # ── 5. Queue targeted nuclei scan (genérico) ──────────────────────────
         nuclei_queued += _seed_targeted_nuclei(db, scan_id, target, product, phase_id="P09")
+
+        # ── 6. Tech attack profile: ferramenta específica para o tech stack ──
+        # Implementa o ponto #2: WordPress → wpscan; Django → nuclei-django-debug;
+        # GraphQL → nuclei-graphql-introspection; Tomcat → CVE específico; etc.
+        nuclei_queued += _seed_attack_profile_for_tech(db, scan_id, target, product)
 
     try:
         db.commit()
