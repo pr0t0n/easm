@@ -3753,6 +3753,14 @@ def list_findings_paginated(
         )
 
     total = len(rows)
+
+    # Severity breakdown BEFORE pagination — espelha exatamente o que o relatório faz
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for _f in rows:
+        _sev = str(_f.severity or "info").lower()
+        if _sev in severity_counts:
+            severity_counts[_sev] += 1
+
     rows = rows[offset:offset + limit]
 
     items = []
@@ -3797,6 +3805,7 @@ def list_findings_paginated(
         "offset": offset,
         "sort": normalized_sort,
         "scan_id": scan_id,
+        "severity_counts": severity_counts,
     }
 
 

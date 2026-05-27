@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import client from "../api/client";
 
 const SEV_CLASS = {
@@ -171,6 +171,7 @@ export default function VulnerabilitiesPage() {
   const [targets, setTargets] = useState([]);
   const [scans, setScans] = useState([]);
   const [page, setPage] = useState({ total: 0, limit: 50, offset: 0 });
+  const [severityCounts, setSeverityCounts] = useState({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [severitiesFilter, setSeveritiesFilter] = useState([...SEVERITIES]);
@@ -218,6 +219,16 @@ export default function VulnerabilitiesPage() {
       const items = Array.isArray(data?.items) ? data.items : [];
       setRows(items);
       setPage((prev) => ({ ...prev, total: Number(data?.total || 0) }));
+      // Totais reais de severidade (todos os resultados, não só a página atual)
+      if (data?.severity_counts && typeof data.severity_counts === "object") {
+        setSeverityCounts({
+          critical: Number(data.severity_counts.critical || 0),
+          high:     Number(data.severity_counts.high     || 0),
+          medium:   Number(data.severity_counts.medium   || 0),
+          low:      Number(data.severity_counts.low      || 0),
+          info:     Number(data.severity_counts.info     || 0),
+        });
+      }
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao carregar vulnerabilidades.");
     } finally {
@@ -241,16 +252,8 @@ export default function VulnerabilitiesPage() {
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
 
-  const counts = useMemo(() => {
-    return rows.reduce(
-      (acc, item) => {
-        const sev = String(item.severity || "low").toLowerCase();
-        if (sev in acc) acc[sev] += 1;
-        return acc;
-      },
-      { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
-    );
-  }, [rows]);
+  // counts = totais reais vindos do backend (todos os resultados do filtro atual, não só a página)
+  const counts = severityCounts;
 
   const toggleSeverity = (sev) => {
     setSeveritiesFilter((prev) => (prev.includes(sev) ? prev.filter((s) => s !== sev) : [...prev, sev]));
