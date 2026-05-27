@@ -3258,6 +3258,21 @@ def domains_overview(
                 str(row.get("name") or ""),
             )
         )
+        # Subdomínios excluindo o próprio domínio raiz
+        sub_only = [row for row in subdomains if row.get("name") != domain_item["domain"]]
+        subdomain_count = len(sub_only)
+
+        # Scan a 100%: subdomínios cujo scan_job foi concluído com status completed/finished
+        scanned_count = sum(
+            1 for row in sub_only
+            if str(row.get("scan_status") or "").lower() in {"completed", "finished"}
+        )
+
+        # Ativo: subdomínio com pelo menos 1 finding (foi sondado e respondeu)
+        # Inativo: descoberto via DNS mas sem achados (portas web fechadas / sem resposta HTTP)
+        active_count = sum(1 for row in sub_only if int(row.get("total_findings") or 0) > 0)
+        inactive_count = subdomain_count - active_count
+
         result.append(
             {
                 "domain": domain_item["domain"],
@@ -3265,7 +3280,10 @@ def domains_overview(
                 "latest_scan_status": domain_item["latest_scan_status"],
                 "latest_scan_at": domain_item["latest_scan_at"],
                 "scan_count": domain_item["scan_count"],
-                "subdomain_count": sum(1 for row in subdomains if row.get("name") != domain_item["domain"]),
+                "subdomain_count": subdomain_count,
+                "scanned_subdomain_count": scanned_count,
+                "active_subdomain_count": active_count,
+                "inactive_subdomain_count": inactive_count,
                 "severity_counts": domain_item["severity_counts"],
                 "total_findings": domain_item["total_findings"],
                 "subdomains": subdomains,

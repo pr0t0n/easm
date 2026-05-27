@@ -369,12 +369,12 @@ export default function VulnerabilitiesPage() {
                         {item.cvss != null ? Number(item.cvss).toFixed(1) : "—"}
                       </td>
                       <td><span className={`b ${SEV_CLASS[item.severity] || "b-low"}`}>{item.severity}</span></td>
-                      <td className="mono-sm" style={{ maxWidth: 230 }}>
-                        <div title={location.primary} style={{ fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <td className="mono-sm" style={{ minWidth: 200, wordBreak: "break-all" }}>
+                        <div style={{ fontWeight: 650 }}>
                           {location.primary}
                         </div>
                         {location.secondary && (
-                          <div className="muted" title={location.secondary} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <div className="muted">
                             scan: {location.secondary}
                           </div>
                         )}

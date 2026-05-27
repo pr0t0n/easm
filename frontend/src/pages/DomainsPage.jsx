@@ -64,6 +64,7 @@ export default function DomainsPage() {
   const [selectedSubdomain, setSelectedSubdomain] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -75,7 +76,11 @@ export default function DomainsPage() {
         if (!active) return;
         const rows = Array.isArray(data) ? data : [];
         setDomains(rows);
-        setSelectedDomain((current) => current || rows[0]?.domain || "");
+        setSelectedDomain((current) => {
+          // mantém seleção se o domínio ainda existe; caso contrário vai pro primeiro
+          const exists = rows.some((r) => r.domain === current);
+          return exists ? current : (rows[0]?.domain || "");
+        });
       } catch (err) {
         if (!active) return;
         setError(err?.response?.data?.detail || "Falha ao carregar domínios.");
@@ -84,10 +89,8 @@ export default function DomainsPage() {
       }
     };
     load();
-    return () => {
-      active = false;
-    };
-  }, []);
+    return () => { active = false; };
+  }, [refreshKey]);
 
   const domain = useMemo(
     () => domains.find((item) => item.domain === selectedDomain) || domains[0] || null,
@@ -144,9 +147,23 @@ export default function DomainsPage() {
                 Scan #{domain?.latest_scan_id || "—"} · {statusLabel(domain?.latest_scan_status)} · {fmtDate(domain?.latest_scan_at)}
               </div>
             </div>
-            <div className="domain-total">
-              <span>Total</span>
-              <strong>{domain?.total_findings || 0}</strong>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button
+                type="button"
+                onClick={() => setRefreshKey((k) => k + 1)}
+                title="Recarregar dados (após deletar scans)"
+                style={{
+                  background: "none", border: "1px solid var(--line)", borderRadius: 8,
+                  padding: "6px 12px", cursor: "pointer", color: "var(--ink-soft)",
+                  fontSize: 12, display: "flex", alignItems: "center", gap: 5,
+                }}
+              >
+                ↻ Atualizar
+              </button>
+              <div className="domain-total">
+                <span>Total</span>
+                <strong>{domain?.total_findings || 0}</strong>
+              </div>
             </div>
           </div>
 
@@ -156,8 +173,16 @@ export default function DomainsPage() {
               <strong>{domain?.subdomain_count || 0}</strong>
             </div>
             <div className="domain-kpi">
-              <span>Scans</span>
-              <strong>{domain?.scan_count || 0}</strong>
+              <span>Scan 100%</span>
+              <strong>{domain?.scanned_subdomain_count ?? domain?.scan_count ?? 0}</strong>
+            </div>
+            <div className="domain-kpi">
+              <span>Ativos</span>
+              <strong style={{ color: "var(--sev-low-text)" }}>{domain?.active_subdomain_count || 0}</strong>
+            </div>
+            <div className="domain-kpi">
+              <span>Inativos</span>
+              <strong style={{ color: "var(--sev-info-text)" }}>{domain?.inactive_subdomain_count || 0}</strong>
             </div>
             <div className="domain-kpi wide">
               <span>Criticidade consolidada</span>
