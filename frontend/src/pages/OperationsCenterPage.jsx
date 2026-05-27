@@ -7,6 +7,7 @@ import JobsRegistryPage from "./JobsRegistryPage";
 import PhaseMonitorPage from "./PhaseMonitorPage";
 import WorkerLogsPage from "./WorkerLogsPage";
 import WorkersPage from "./WorkersPage";
+import client from "../api/client";
 
 function SubTabs({ tabs, activeId, onSelect }) {
   return (
@@ -30,6 +31,156 @@ function SubTabs({ tabs, activeId, onSelect }) {
           {t.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// ── Intelligence View (Crown Jewels + LLM Operator + OSINT) ──────────────────
+function IntelligenceView() {
+  const [scans, setScans] = useState([]);
+  const [selectedScan, setSelectedScan] = useState("");
+  const [crownJewels, setCrownJewels] = useState([]);
+  const [osint, setOsint] = useState(null);
+  const [narrative, setNarrative] = useState("");
+  const [narrativeMethod, setNarrativeMethod] = useState("");
+  const [generatingNarrative, setGeneratingNarrative] = useState(false);
+  const [narrativeError, setNarrativeError] = useState("");
+
+  useEffect(() => {
+    client.get("/api/scans", { params: { limit: 50 } }).then(({ data }) => {
+      const list = Array.isArray(data) ? data : [];
+      setScans(list);
+      if (list.length) setSelectedScan(String(list[0].id));
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selectedScan) return;
+    client.get(`/api/scans/${selectedScan}/crown-jewels`)
+      .then(({ data }) => setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []))
+      .catch(() => setCrownJewels([]));
+    client.get(`/api/scans/${selectedScan}/osint`)
+      .then(({ data }) => setOsint(data?.osint || null))
+      .catch(() => setOsint(null));
+    client.get(`/api/scans/${selectedScan}/attack-narrative`)
+      .then(({ data }) => { setNarrative(data.narrative || ""); setNarrativeMethod(data.method || ""); })
+      .catch(() => { setNarrative(""); setNarrativeMethod(""); });
+  }, [selectedScan]);
+
+  const generateNarrative = async () => {
+    setGeneratingNarrative(true);
+    setNarrativeError("");
+    try {
+      const { data } = await client.post(`/api/scans/${selectedScan}/generate-narrative`);
+      setNarrative(data.narrative || "");
+      setNarrativeMethod(data.method || "");
+    } catch (err) {
+      setNarrativeError(err?.response?.data?.detail || "Falha ao gerar narrativa.");
+    } finally {
+      setGeneratingNarrative(false);
+    }
+  };
+
+  const CROWN_COLORS = {
+    "identity/auth": "#7c3aed", "payment/financial": "#b45309", "admin_panel": "#dc2626",
+    "data_store": "#1d4ed8", "cicd": "#0f766e", "secrets_mgmt": "#7c3aed",
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700 }}>🧠 Inteligência de Ataque</span>
+        <select
+          value={selectedScan}
+          onChange={(e) => setSelectedScan(e.target.value)}
+          style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 12.5 }}
+        >
+          {scans.map((s) => (
+            <option key={s.id} value={s.id}>#{s.id} · {String(s.target_query || "").slice(0, 50)}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        {/* Crown Jewels */}
+        <div style={{ padding: "14px 18px", background: "var(--canvas-soft)", borderRadius: 10, border: "1px solid var(--line)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>⭐ Crown Jewels ({crownJewels.length})</div>
+          {crownJewels.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>Análise ainda não executada (roda após 3+ items P01/P02)</div>
+          ) : (
+            <div style={{ display: "grid", gap: 6 }}>
+              {crownJewels.slice(0, 8).map((cj) => (
+                <div key={cj.target} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "#fff", borderRadius: 6, border: `1px solid ${CROWN_COLORS[cj.label] || "#e5e7eb"}` }}>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600 }}>{cj.target}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: CROWN_COLORS[cj.label] || "#6b7280" }}>{cj.label?.replace(/_/g, " ")}</span>
+                </div>
+              ))}
+              {crownJewels.length > 8 && <div style={{ fontSize: 11, color: "var(--ink-muted)" }}>+{crownJewels.length - 8} mais…</div>}
+            </div>
+          )}
+        </div>
+
+        {/* OSINT Phase Zero */}
+        <div style={{ padding: "14px 18px", background: "var(--canvas-soft)", borderRadius: 10, border: "1px solid var(--line)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>🔍 OSINT Phase Zero</div>
+          {!osint ? (
+            <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sem dados OSINT para este scan (configure HIBP_API_KEY e/ou GITHUB_TOKEN)</div>
+          ) : (
+            <div style={{ display: "grid", gap: 8 }}>
+              {osint.hibp && !osint.hibp.skipped && (
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span>🔓 HIBP emails em breach</span>
+                  <strong style={{ color: osint.hibp.emails_breached > 0 ? "#dc2626" : "#16a34a" }}>{osint.hibp.emails_breached || 0}</strong>
+                </div>
+              )}
+              {osint.github_dork && !osint.github_dork.skipped && (
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span>📂 GitHub secrets/env expostos</span>
+                  <strong style={{ color: osint.github_dork.results_count > 0 ? "#b45309" : "#16a34a" }}>{osint.github_dork.results_count || 0}</strong>
+                </div>
+              )}
+              {osint.shodan_asn && !osint.shodan_asn.skipped && (
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span>🌐 IPs Shodan ASN {osint.shodan_asn.asn}</span>
+                  <strong>{(osint.shodan_asn.total_hosts_in_asn || 0).toLocaleString("pt-BR")}</strong>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Attack Narrative */}
+      <div style={{ padding: "14px 18px", background: "var(--canvas-soft)", borderRadius: 10, border: "1px solid var(--line)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>
+            📖 Narrativa de Ataque
+            {narrativeMethod && <span style={{ fontWeight: 400, fontSize: 11, color: "var(--ink-muted)", marginLeft: 6 }}>via {narrativeMethod}</span>}
+          </div>
+          <button
+            onClick={generateNarrative}
+            disabled={generatingNarrative || !selectedScan}
+            style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid var(--brand-500)", background: "var(--brand-500)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: generatingNarrative ? 0.6 : 1 }}
+          >
+            {generatingNarrative ? "⟳ Gerando…" : "⚡ Gerar Narrativa"}
+          </button>
+        </div>
+        {narrativeError && <div style={{ color: "#dc2626", fontSize: 12, marginBottom: 8 }}>{narrativeError}</div>}
+        {narrative ? (
+          <div style={{
+            fontFamily: "var(--font-mono)", fontSize: 12.5, lineHeight: 1.7,
+            whiteSpace: "pre-wrap", maxHeight: 480, overflowY: "auto",
+            background: "#0f172a", color: "#e2e8f0", padding: "14px 16px",
+            borderRadius: 8,
+          }}>
+            {narrative}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+            Narrativa não gerada ainda. Clique em "Gerar Narrativa" para criar um relatório de ataque em linguagem natural (PT-BR) com Ollama.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -77,6 +228,7 @@ const modules = [
   { id: "runtime", label: "RedTeam Runtime", hint: "fase, comandos, saidas e comunicacao", component: WorkerLogsPage },
   { id: "phases_agents", label: "Fases & Agentes", hint: "phase monitor + fluxo de agentes", component: PhasesAgentsView },
   { id: "infra", label: "Evolução & Infra", hint: "attack evolution, workers e job registry", component: EvolutionInfraView },
+  { id: "intel", label: "Inteligência", hint: "crown jewels, OSINT, LLM chains, narrativa", component: IntelligenceView },
 ];
 
 const MODULE_ALIASES = {
@@ -112,6 +264,21 @@ export default function OperationsCenterPage() {
         <div className="sub">cabine única para operador RedTeam: runtime, fases &amp; agentes, evolução &amp; infra</div>
       </div>
 
+      {/* ── Banner informativo — apenas precaução, sem bloqueios ── */}
+      <div style={{
+        display: "flex", alignItems: "flex-start", gap: 12,
+        padding: "11px 16px", marginBottom: 16,
+        background: "#fefce8", border: "1px solid #fde68a",
+        borderRadius: 10, fontSize: 12.5, color: "#92400e",
+      }}>
+        <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+        <span>
+          <strong>Execute testes apenas em ambientes autorizados.</strong>
+          {" "}Certifique-se de ter autorização formal do proprietário do alvo antes de iniciar qualquer scan.
+          Testes em sistemas sem autorização são ilegais — o uso desta plataforma implica em responsabilidade do operador.
+        </span>
+      </div>
+
       <section className="panel p-4" style={{ marginBottom: 16 }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
           <div>
@@ -126,8 +293,8 @@ export default function OperationsCenterPage() {
           </div>
           <div>
             <div className="mono-sm muted">agrupamentos</div>
-            <strong style={{ display: "block", color: "var(--ink)", marginTop: 4 }}>3 módulos, 6 sub-views</strong>
-            <div className="mono-sm soft" style={{ marginTop: 2 }}>fases+agentes juntos · evolution+workers+jobs juntos</div>
+            <strong style={{ display: "block", color: "var(--ink)", marginTop: 4 }}>4 módulos, 7 sub-views</strong>
+            <div className="mono-sm soft" style={{ marginTop: 2 }}>inteligência (crown jewels, OSINT, LLM, narrativa)</div>
           </div>
         </div>
       </section>

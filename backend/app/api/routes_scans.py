@@ -7468,48 +7468,6 @@ def run_supply_chain_analysis(
     return {"scan_id": scan_id, **result}
 
 
-# ── L5: Exploitation gate — approve/deny work items ───────────────────────────
-
-@router.post("/scans/{scan_id}/work-items/{item_id}/approve")
-def approve_work_item(
-    scan_id: int,
-    item_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Aprova execução de um work item em estado pending_approval (exploitation gate)."""
-    from app.services.exploitation_gate import approve_item
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Scan não encontrado")
-    result = approve_item(db, scan_id, item_id)
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
-
-
-@router.post("/scans/{scan_id}/work-items/{item_id}/deny")
-def deny_work_item(
-    scan_id: int,
-    item_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Nega execução de um work item em estado pending_approval (exploitation gate)."""
-    from app.services.exploitation_gate import deny_item
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Scan não encontrado")
-    result = deny_item(db, scan_id, item_id)
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
 
 
 @router.get("/scans/{scan_id}/attack-narrative")

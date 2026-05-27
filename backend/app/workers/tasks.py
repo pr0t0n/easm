@@ -1611,17 +1611,6 @@ def execute_scan_work_item(item_id: int):
         if item.status not in {"dispatched", "queued", "retry"}:
             return {"status": item.status}
 
-        # ── L5: Exploitation gate — pause high-impact tools for approval ─────
-        try:
-            from app.services.exploitation_gate import should_require_approval, request_approval
-            if should_require_approval(item):
-                _gate_result = request_approval(db, item, job)
-                db.commit()
-                return {"id": item.id, "status": "pending_approval", "gate": _gate_result}
-        except Exception as _gate_err:
-            import logging as _glog
-            _glog.getLogger(__name__).debug("exploitation_gate check failed: %s", _gate_err)
-
         now = datetime.utcnow()
         item.status = "running"
         item.attempts = int(item.attempts or 0) + 1
@@ -1930,10 +1919,6 @@ def poll_scan_work_item(item_id: int):
             except Exception as _llme:
                 import logging as _llmlog2
                 _llmlog2.getLogger(__name__).debug("llm_operator failed: %s", _llme)
-
-        # ── L5: Exploitation gate — pause high-impact items for approval ─────────
-        # Note: This check happens in execute_scan_work_item (before dispatch),
-        # not here. See exploitation_gate.py for the should_require_approval hook.
 
         # ── M1: Crown jewel mid-scan analyzer ────────────────────────────────────
         # After P01 or P02 items complete, identify crown jewel targets and
