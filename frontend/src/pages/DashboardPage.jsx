@@ -140,6 +140,38 @@ export default function DashboardPage() {
   const [subdomainInventory, setSubdomainInventory] = useState([]);
   const [selectedSubdomainScanId, setSelectedSubdomainScanId] = useState(null);
 
+  // ── Intelligence widgets (M1 crown jewels, L1 OSINT, T1 verification gate) ──
+  const [crownJewels, setCrownJewels] = useState([]);
+  const [osintPhaseZero, setOsintPhaseZero] = useState(null);
+  const [verificationStats, setVerificationStats] = useState({ confirmed: 0, candidate: 0, hypothesis: 0, refuted: 0, none: 0, total: 0 });
+
+  // ── Crown Jewels + OSINT Phase Zero (per selected scan) ──────────────────
+  useEffect(() => {
+    if (!selectedSubdomainScanId) return;
+    client.get(`/api/scans/${selectedSubdomainScanId}/crown-jewels`)
+      .then(({ data }) => setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []))
+      .catch(() => setCrownJewels([]));
+    client.get(`/api/scans/${selectedSubdomainScanId}/osint`)
+      .then(({ data }) => setOsintPhaseZero(data?.osint || null))
+      .catch(() => setOsintPhaseZero(null));
+  }, [selectedSubdomainScanId]);
+
+  // ── Verification status breakdown (T1 Evidence Gate) ─────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (selectedTarget.trim()) params.append("target", selectedTarget.trim());
+    client.get(`/api/findings/verification-stats?${params.toString()}`)
+      .then(({ data }) => setVerificationStats({
+        confirmed: data?.counts?.confirmed || 0,
+        candidate: data?.counts?.candidate || 0,
+        hypothesis: data?.counts?.hypothesis || 0,
+        refuted: data?.counts?.refuted || 0,
+        none: data?.counts?.none || 0,
+        total: data?.total || 0,
+      }))
+      .catch(() => {});
+  }, [selectedTarget, selectedGroup]);
+
   const handleSearch = () => {
     setIsSearching(true);
     setSelectedGroup("");
@@ -752,6 +784,271 @@ export default function DashboardPage() {
                   <div className="rt-bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(fw.score || 0)))}%` }} /></div>
                 </div>
               ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ===== Intelligence — Crown Jewels · OSINT · Evidence Gate ===== */}
+        <section className="intel-section">
+          <div className="intel-head">
+            <div>
+              <div className="eb">Inteligência Ofensiva</div>
+              <h2>Crown Jewels · OSINT Phase Zero · Evidence Gate</h2>
+            </div>
+            <p>Alvos de alto valor priorizados, exposições passivas detectadas e qualidade de evidência por achado.</p>
+          </div>
+
+          <div className="intel-grid">
+            {/* ── Crown Jewels widget ── */}
+            <div className="intel-card">
+              <div className="intel-card-head">
+                <h3>⭐ Crown Jewels</h3>
+                <span>{crownJewels.length} alvo(s) crítico(s)</span>
+              </div>
+              {crownJewels.length === 0 ? (
+                <div className="intel-empty">
+                  Nenhum Crown Jewel identificado ainda.
+                  <br /><small>Execute um scan com M1 habilitado para detectar alvos de alto valor.</small>
+                </div>
+              ) : (
+                <div className="cj-list">
+                  {crownJewels.slice(0, 8).map((cj, idx) => {
+                    const label = String(cj.label || cj.type || "high_value");
+                    const colorMap = {
+                      "identity/auth": "#ef4444",
+                      "payment/financial": "#dc2626",
+                      "admin_panel": "#f97316",
+                      "data_store": "#8b5cf6",
+                      "cicd": "#3b82f6",
+                      "secrets_mgmt": "#ec4899",
+                      "api_gateway": "#06b6d4",
+                      "monitoring": "#84cc16",
+                      "mail": "#f59e0b",
+                      "staging_dev": "#6b7280",
+                    };
+                    const color = colorMap[label] || "#64748b";
+                    const delta = Number(cj.priority_delta || 0);
+                    return (
+                      <div key={`cj-${idx}-${cj.target}`} className="cj-row">
+                        <div className="cj-target">
+                          <b>{cj.target || cj.subdomain || "?"}</b>
+                          <span
+                            className="cj-label"
+                            style={{ background: `${color}22`, color, border: `1px solid ${color}55` }}
+                          >
+                            {label.replace(/_/g, " ")}
+                          </span>
+                        </div>
+                        <div className="cj-delta" style={{ color: "#ef4444" }}>
+                          ↑ {Math.abs(delta)} prioridade
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* ── OSINT Phase Zero widget ── */}
+            <div className="intel-card">
+              <div className="intel-card-head">
+                <h3>🔍 OSINT Phase Zero</h3>
+                <span>recon passivo antes do P01</span>
+              </div>
+              {!osintPhaseZero ? (
+                <div className="intel-empty">
+                  OSINT Phase Zero não executado.
+                  <br /><small>Disponível após o próximo scan completo com L1 ativado.</small>
+                </div>
+              ) : (
+                <div className="osint-summary">
+                  {/* HIBP */}
+                  {osintPhaseZero.hibp && (
+                    <div className="osint-block">
+                      <div className="osint-block-head">
+                        <span className="osint-icon">📧</span>
+                        <b>HIBP — Vazamentos de senha</b>
+                      </div>
+                      <div className="osint-stats">
+                        <div>
+                          <span>Emails verificados</span>
+                          <b>{Number(osintPhaseZero.hibp.emails_checked || 0)}</b>
+                        </div>
+                        <div className={Number(osintPhaseZero.hibp.breached_count || 0) > 0 ? "osint-hit" : ""}>
+                          <span>Comprometidos</span>
+                          <b>{Number(osintPhaseZero.hibp.breached_count || 0)}</b>
+                        </div>
+                        <div>
+                          <span>Breaches</span>
+                          <b>{Number(osintPhaseZero.hibp.breach_names?.length || 0)}</b>
+                        </div>
+                      </div>
+                      {Array.isArray(osintPhaseZero.hibp.breach_names) && osintPhaseZero.hibp.breach_names.length > 0 && (
+                        <div className="osint-tags">
+                          {osintPhaseZero.hibp.breach_names.slice(0, 4).map((b) => (
+                            <span key={b} className="osint-tag osint-tag-red">{b}</span>
+                          ))}
+                          {osintPhaseZero.hibp.breach_names.length > 4 && (
+                            <span className="osint-tag">+{osintPhaseZero.hibp.breach_names.length - 4}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* GitHub Dorks */}
+                  {osintPhaseZero.github_dorks && (
+                    <div className="osint-block">
+                      <div className="osint-block-head">
+                        <span className="osint-icon">🐙</span>
+                        <b>GitHub — Segredos expostos</b>
+                      </div>
+                      <div className="osint-stats">
+                        <div>
+                          <span>Queries executadas</span>
+                          <b>{Number(osintPhaseZero.github_dorks.queries_run || 0)}</b>
+                        </div>
+                        <div className={Number(osintPhaseZero.github_dorks.results_count || 0) > 0 ? "osint-hit" : ""}>
+                          <span>Resultados</span>
+                          <b>{Number(osintPhaseZero.github_dorks.results_count || 0)}</b>
+                        </div>
+                        <div className={Number(osintPhaseZero.github_dorks.high_risk_count || 0) > 0 ? "osint-hit" : ""}>
+                          <span>Alto risco</span>
+                          <b>{Number(osintPhaseZero.github_dorks.high_risk_count || 0)}</b>
+                        </div>
+                      </div>
+                      {Array.isArray(osintPhaseZero.github_dorks.repos_found) && osintPhaseZero.github_dorks.repos_found.length > 0 && (
+                        <div className="osint-tags">
+                          {osintPhaseZero.github_dorks.repos_found.slice(0, 3).map((r) => (
+                            <span key={r} className="osint-tag osint-tag-amber">{String(r).split("/").slice(-1)[0]}</span>
+                          ))}
+                          {osintPhaseZero.github_dorks.repos_found.length > 3 && (
+                            <span className="osint-tag">+{osintPhaseZero.github_dorks.repos_found.length - 3}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Shodan ASN */}
+                  {osintPhaseZero.shodan && (
+                    <div className="osint-block">
+                      <div className="osint-block-head">
+                        <span className="osint-icon">🌐</span>
+                        <b>Shodan — ASN sweep</b>
+                      </div>
+                      <div className="osint-stats">
+                        <div>
+                          <span>ASN</span>
+                          <b>{osintPhaseZero.shodan.asn || "—"}</b>
+                        </div>
+                        <div>
+                          <span>IPs descobertos</span>
+                          <b>{Number(osintPhaseZero.shodan.ip_count || 0)}</b>
+                        </div>
+                        <div className={Number(osintPhaseZero.shodan.vulns_found || 0) > 0 ? "osint-hit" : ""}>
+                          <span>CVEs expostos</span>
+                          <b>{Number(osintPhaseZero.shodan.vulns_found || 0)}</b>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── Evidence Gate — Verification Status Breakdown ── */}
+            <div className="intel-card">
+              <div className="intel-card-head">
+                <h3>🔬 Evidence Gate</h3>
+                <span>{verificationStats.total} achados categorizados</span>
+              </div>
+              {verificationStats.total === 0 ? (
+                <div className="intel-empty">
+                  Nenhum achado com status de verificação.
+                  <br /><small>Os achados serão classificados automaticamente após scans com T1 ativado.</small>
+                </div>
+              ) : (() => {
+                const total = verificationStats.total || 1;
+                const pctConf = Math.round((verificationStats.confirmed / total) * 100);
+                const pctCand = Math.round((verificationStats.candidate / total) * 100);
+                const pctHyp = Math.round((verificationStats.hypothesis / total) * 100);
+                const pctRef = Math.round((verificationStats.refuted / total) * 100);
+                return (
+                  <div className="vgate-breakdown">
+                    {/* stacked bar */}
+                    <div className="vgate-bar">
+                      {verificationStats.confirmed > 0 && (
+                        <div style={{ width: `${pctConf}%`, background: "#10b981" }} title={`Confirmado: ${verificationStats.confirmed}`} />
+                      )}
+                      {verificationStats.candidate > 0 && (
+                        <div style={{ width: `${pctCand}%`, background: "#f59e0b" }} title={`Candidato: ${verificationStats.candidate}`} />
+                      )}
+                      {verificationStats.hypothesis > 0 && (
+                        <div style={{ width: `${pctHyp}%`, background: "#6366f1" }} title={`Hipótese: ${verificationStats.hypothesis}`} />
+                      )}
+                      {verificationStats.refuted > 0 && (
+                        <div style={{ width: `${pctRef}%`, background: "#6b7280" }} title={`Refutado: ${verificationStats.refuted}`} />
+                      )}
+                    </div>
+                    <div className="vgate-legend">
+                      <div className="vgate-item">
+                        <div className="vgate-dot" style={{ background: "#10b981" }} />
+                        <div>
+                          <b>{verificationStats.confirmed}</b>
+                          <span>Confirmado</span>
+                        </div>
+                        <div className="vgate-pct">{pctConf}%</div>
+                      </div>
+                      <div className="vgate-item">
+                        <div className="vgate-dot" style={{ background: "#f59e0b" }} />
+                        <div>
+                          <b>{verificationStats.candidate}</b>
+                          <span>Candidato</span>
+                        </div>
+                        <div className="vgate-pct">{pctCand}%</div>
+                      </div>
+                      <div className="vgate-item">
+                        <div className="vgate-dot" style={{ background: "#6366f1" }} />
+                        <div>
+                          <b>{verificationStats.hypothesis}</b>
+                          <span>Hipótese</span>
+                        </div>
+                        <div className="vgate-pct">{pctHyp}%</div>
+                      </div>
+                      <div className="vgate-item">
+                        <div className="vgate-dot" style={{ background: "#6b7280" }} />
+                        <div>
+                          <b>{verificationStats.refuted}</b>
+                          <span>Refutado</span>
+                        </div>
+                        <div className="vgate-pct">{pctRef}%</div>
+                      </div>
+                      {verificationStats.none > 0 && (
+                        <div className="vgate-item vgate-item-muted">
+                          <div className="vgate-dot" style={{ background: "#d1d5db" }} />
+                          <div>
+                            <b>{verificationStats.none}</b>
+                            <span>Sem status</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="vgate-summary">
+                      <div className="vgate-quality">
+                        <span>Qualidade de evidência</span>
+                        <b style={{ color: pctConf >= 50 ? "#10b981" : pctConf >= 25 ? "#f59e0b" : "#ef4444" }}>
+                          {pctConf >= 50 ? "Alta" : pctConf >= 25 ? "Média" : "Baixa"}
+                        </b>
+                      </div>
+                      <div className="vgate-quality">
+                        <span>Taxa de confirmação</span>
+                        <b>{pctConf}%</b>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </section>

@@ -1112,3 +1112,299 @@
   .dash .sev-mini { flex-wrap: wrap; }
   .dash .rt-finding { grid-template-columns: 1fr; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Intelligence Section — Crown Jewels · OSINT · Evidence Gate
+   ═══════════════════════════════════════════════════════════════════════════ */
+.dash .intel-section {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 32px 32px;
+  margin-bottom: 24px;
+}
+.dash .intel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+.dash .intel-head h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 4px 0 0;
+}
+.dash .intel-head p {
+  font-size: 13px;
+  color: var(--ink-muted);
+  max-width: 480px;
+  margin: 0;
+  padding-top: 6px;
+}
+.dash .intel-head .eb {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand-600);
+  background: var(--brand-50);
+  padding: 3px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 4px;
+}
+
+/* ── 3-column grid for the 3 intel cards ── */
+.dash .intel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+}
+.dash .intel-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dash .intel-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dash .intel-card-head h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0;
+}
+.dash .intel-card-head span {
+  font-size: 11px;
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.dash .intel-empty {
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-align: center;
+  padding: 16px 8px;
+  line-height: 1.5;
+}
+.dash .intel-empty small {
+  color: var(--ink-faint, #94a3b8);
+}
+
+/* ── Crown Jewels list ── */
+.dash .cj-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.dash .cj-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.dash .cj-target {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.dash .cj-target b {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash .cj-label {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+  white-space: nowrap;
+}
+.dash .cj-delta {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* ── OSINT Phase Zero summary ── */
+.dash .osint-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dash .osint-block {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.dash .osint-block-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.dash .osint-block-head .osint-icon {
+  font-size: 14px;
+}
+.dash .osint-block-head b {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.dash .osint-stats {
+  display: flex;
+  gap: 12px;
+}
+.dash .osint-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dash .osint-stats span {
+  font-size: 10px;
+  color: var(--ink-muted);
+}
+.dash .osint-stats b {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.dash .osint-stats .osint-hit b {
+  color: #ef4444;
+}
+.dash .osint-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.dash .osint-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--ink-muted);
+}
+.dash .osint-tag-red {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #dc2626;
+}
+.dash .osint-tag-amber {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #d97706;
+}
+
+/* ── Evidence Gate / Verification Status breakdown ── */
+.dash .vgate-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.dash .vgate-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  gap: 2px;
+}
+.dash .vgate-bar > div {
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.dash .vgate-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dash .vgate-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dash .vgate-item-muted {
+  opacity: 0.6;
+}
+.dash .vgate-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dash .vgate-item > div {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dash .vgate-item b {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  min-width: 24px;
+}
+.dash .vgate-item span {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.dash .vgate-pct {
+  font-size: 11px;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  min-width: 32px;
+  text-align: right;
+}
+.dash .vgate-summary {
+  display: flex;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.dash .vgate-quality {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dash .vgate-quality span {
+  font-size: 10px;
+  color: var(--ink-muted);
+}
+.dash .vgate-quality b {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ── Responsive breakpoints for intel grid ── */
+@media (max-width: 1024px) {
+  .dash .intel-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px) {
+  .dash .intel-section { padding: 18px; }
+  .dash .intel-grid { grid-template-columns: 1fr; }
+  .dash .intel-head { flex-direction: column; }
+}

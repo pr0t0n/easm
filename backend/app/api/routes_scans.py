@@ -3837,10 +3837,21 @@ def list_findings_paginated(
     sort: str = Query(default="severity"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=50000),
+    verification_status: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     query = _authorized_finding_query(db, current_user)
+
+    # ── Evidence gate filter (T1 / M3) ──────────────────────────────────────
+    _VALID_VSTATUS = {"confirmed", "candidate", "hypothesis", "refuted", "none"}
+    if verification_status:
+        _vs = verification_status.strip().lower()
+        if _vs in _VALID_VSTATUS:
+            if _vs == "none":
+                query = query.filter(Finding.verification_status.is_(None))
+            else:
+                query = query.filter(Finding.verification_status == _vs)
 
     if severity:
         severity_values = [
@@ -3947,6 +3958,9 @@ def list_findings_paginated(
                 "age": age,
                 "fair": fair,
                 "created_at": finding.created_at,
+                # ── Evidence gate / M3 ───────────────────────────────────────
+                "verification_status": finding.verification_status,
+                "finding_url": finding.url,
             }
         )
 
@@ -7587,3 +7601,42 @@ def get_osint_results(
     if not osint:
         raise HTTPException(status_code=404, detail="OSINT não executado ainda.")
     return {"scan_id": scan_id, "osint": osint}
+
+
+# ── Evidence gate stats (T1 / M3) ─────────────────────────────────────────────
+@router.get("/findings/verification-stats")
+def get_verification_stats(
+    target: str | None = None,
+    scan_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retorna contagem de findings por verification_status (Evidence Gate)."""
+    from sqlalchemy import func as sql_func
+    query = _authorized_finding_query(db, current_user)
+    if target:
+        query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        query = query.filter(Finding.scan_job_id == scan_id)
+
+    # Count per verification_status — NULL counts as "none"
+    rows = (
+        db.query(
+            Finding.verification_status,
+            sql_func.count(Finding.id).label("cnt"),
+        )
+        .join(ScanJob, ScanJob.id == Finding.scan_job_id)
+        .filter(ScanJob.owner_id == current_user.id)
+        .group_by(Finding.verification_status)
+        .all()
+    )
+    counts = {"confirmed": 0, "candidate": 0, "hypothesis": 0, "refuted": 0, "none": 0}
+    total = 0
+    for vstatus, cnt in rows:
+        key = str(vstatus or "none").lower()
+        if key in counts:
+            counts[key] += int(cnt)
+        else:
+            counts["none"] += int(cnt)
+        total += int(cnt)
+    return {"counts": counts, "total": total}
