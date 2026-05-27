@@ -100,6 +100,9 @@ function deriveIntelligence(item) {
 
   const realProblem = repro.problem_description
     || details.problem_description
+    || item.cve_description
+    || details.cve_description
+    || details.description
     || titleIntel?.problem
     || "";
 
@@ -364,7 +367,18 @@ export default function VulnerabilitiesPage() {
                           {sanitizeText(item.title)}
                         </div>
                       </td>
-                      <td className="mono-sm" style={{ color: "var(--sev-info-text)" }}>{item.cve || "—"}</td>
+                      <td className="mono-sm" style={{ minWidth: 160 }}>
+                        {item.cve ? (
+                          <>
+                            <div style={{ color: "var(--sev-info-text)", fontWeight: 600 }}>{item.cve}</div>
+                            {(item.cve_description || item.details?.cve_description || item.details?.description) && (
+                              <div style={{ color: "var(--ink-muted)", fontSize: 11, marginTop: 2, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {String(item.cve_description || item.details?.cve_description || item.details?.description || "").slice(0, 80)}
+                              </div>
+                            )}
+                          </>
+                        ) : "—"}
+                      </td>
                       <td className="mono-sm" style={{ color: "var(--sev-medium-text)" }}>
                         {item.cvss != null ? Number(item.cvss).toFixed(1) : "—"}
                       </td>

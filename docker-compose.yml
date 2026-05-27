@@ -97,7 +97,7 @@ services:
     profiles: ["dev", "prod"]
     environment:
       KALI_WORKSPACE: /workspace
-      KALI_MAX_PARALLEL: "12"
+      KALI_MAX_PARALLEL: "${KALI_MAX_PARALLEL:-24}"
       SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
       SCAN_AUTH_USERNAME: "${SCAN_AUTH_USERNAME:-}"
       SCAN_AUTH_PASSWORD: "${SCAN_AUTH_PASSWORD:-}"

@@ -245,7 +245,7 @@
 
 .findings-domain-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 560px;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -290,6 +290,176 @@
   padding: 18px;
   color: var(--ink-muted);
   font-size: 12.5px;
+}
+
+/* ── Ports section ─────────────────────────────────────────────────────── */
+.domain-ports-section {
+  margin: 0 0 16px 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.domain-ports-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.domain-ports-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.port-filter-clear {
+  background: var(--brand-50, #eff6ff);
+  border: 1px solid var(--brand-200, #bfdbfe);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--brand-700, #1d4ed8);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.port-filter-clear:hover {
+  background: var(--brand-100, #dbeafe);
+}
+
+.domain-ports-table-wrap {
+  overflow-x: auto;
+}
+
+.domain-ports-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.domain-ports-table th {
+  text-align: left;
+  padding: 9px 14px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.domain-ports-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink);
+}
+
+.domain-ports-table .port-row:hover {
+  background: var(--surface-soft);
+}
+
+.domain-ports-table .port-row.active {
+  background: var(--brand-50, #eff6ff);
+}
+
+.domain-ports-table .port-row.active td {
+  color: var(--brand-700, #1d4ed8);
+}
+
+.port-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--brand-600, #2563eb);
+}
+
+.port-proto {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.proto-tcp {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.proto-udp {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.port-count {
+  display: inline-block;
+  background: var(--sev-info-bg, #f0f9ff);
+  color: var(--sev-info-text, #0ea5e9);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ── Subdomain port tags ────────────────────────────────────────────────── */
+.subdomain-ports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 2px;
+}
+
+.subdomain-port-tag {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+}
+
+.subdomain-port-tag.muted {
+  color: var(--ink-muted);
+  border-style: dashed;
+}
+
+/* ── Lifecycle badge ────────────────────────────────────────────────────── */
+.lifecycle-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.lifecycle-badge.open {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.lifecycle-badge.closed {
+  background: var(--surface-soft);
+  color: var(--ink-muted);
+}
+
+.lifecycle-badge.false_positive {
+  background: #fef3c7;
+  color: #92400e;
 }
 
 @media (max-width: 1120px) {

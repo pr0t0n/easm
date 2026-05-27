@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import text
+from sqlalchemy import case as sa_case, func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -3141,6 +3141,7 @@ def domains_overview(
                 item["latest_scan_id"] = scan.id
                 item["latest_scan_status"] = scan.status
                 item["latest_scan_at"] = scan.created_at
+                item["_latest_scan_ref"] = scan  # kept for progress calculation, not serialized
         return item
 
     def ensure_subdomain(domain_item: dict[str, Any], host: str, scan: ScanJob | None = None) -> dict[str, Any]:
@@ -3214,10 +3215,32 @@ def domains_overview(
         if sev not in sub_item["severity_counts"]:
             sev = "info"
 
-        sub_item["severity_counts"][sev] += 1
-        sub_item["total_findings"] += 1
-        domain_item["severity_counts"][sev] += 1
-        domain_item["total_findings"] += 1
+        details = finding.details or {}
+
+        # Only count/list "open" findings in the domain/subdomain totals —
+        # closed or false_positive findings are persisted historically but
+        # should not inflate the current attack-surface view.
+        finding_lifecycle = lifecycle_status.get(finding.id, "open")
+        if finding_lifecycle == "open":
+            sub_item["severity_counts"][sev] += 1
+            sub_item["total_findings"] += 1
+            domain_item["severity_counts"][sev] += 1
+            domain_item["total_findings"] += 1
+
+        # Collect port data from any finding (not filtered by lifecycle)
+        port_val = details.get("port")
+        if port_val:
+            port_num = str(port_val)
+            proto = str(details.get("protocol") or "tcp").lower()
+            service = str(details.get("service") or details.get("service_name") or "").strip()
+            ports_map = sub_item.setdefault("ports", {})
+            pk = f"{port_num}/{proto}"
+            if pk not in ports_map:
+                ports_map[pk] = {"port": port_num, "protocol": proto, "service": service, "count": 0}
+            elif service and not ports_map[pk]["service"]:
+                ports_map[pk]["service"] = service
+            ports_map[pk]["count"] += 1
+
         sub_item["findings"].append(
             {
                 "id": finding.id,
@@ -3229,17 +3252,93 @@ def domains_overview(
                 "risk_score": finding.risk_score,
                 "cve": finding.cve,
                 "cvss": finding.cvss,
-                "tool": finding.tool,
-                "lifecycle_status": lifecycle_status.get(finding.id, "open"),
+                "lifecycle_status": finding_lifecycle,
                 "url": loc.get("url"),
                 "path": loc.get("path"),
                 "created_at": finding.created_at,
             }
         )
 
+    # ── Per-subdomain analysis status from scan_work_items ──────────────────
+    # Query work item counts grouped by (scan_job_id, target) for each domain's
+    # latest scan. This gives us: how many subdomains are done / in progress / waiting.
+    latest_scan_ids: set[int] = {
+        domain_item["latest_scan_id"]
+        for domain_item in domains.values()
+        if domain_item.get("latest_scan_id")
+    }
+
+    wq_by_target: dict[tuple[int, str], dict] = {}
+    if latest_scan_ids:
+        wq_rows = (
+            db.query(
+                ScanWorkItem.scan_job_id,
+                ScanWorkItem.target,
+                func.sum(
+                    sa_case((ScanWorkItem.status.in_(["dispatched", "submitted", "retry"]), 1), else_=0)
+                ).label("active"),
+                func.sum(
+                    sa_case((ScanWorkItem.status == "queued", 1), else_=0)
+                ).label("queued"),
+                func.sum(
+                    sa_case((ScanWorkItem.status.in_(["completed", "done", "failed", "timeout", "blocked", "skipped"]), 1), else_=0)
+                ).label("terminal"),
+            )
+            .filter(ScanWorkItem.scan_job_id.in_(latest_scan_ids))
+            .group_by(ScanWorkItem.scan_job_id, ScanWorkItem.target)
+            .all()
+        )
+        for r in wq_rows:
+            norm = _host_from_domain_value(r.target) or str(r.target).strip().lower()
+            wq_by_target[(r.scan_job_id, norm)] = {
+                "active": int(r.active or 0),
+                "queued": int(r.queued or 0),
+                "terminal": int(r.terminal or 0),
+            }
+
+    def _subdomain_analysis_status(
+        scan_id: int | None, name: str
+    ) -> tuple[str, int, int, int]:
+        """Returns (status, active, queued, done) for a subdomain.
+        status: 'done' | 'analyzing' | 'waiting' | 'not_started'
+        """
+        if not scan_id:
+            return "not_started", 0, 0, 0
+        wq = wq_by_target.get((scan_id, name))
+        if not wq:
+            return "not_started", 0, 0, 0
+        active = wq["active"]
+        queued = wq["queued"]
+        terminal = wq["terminal"]
+        if active > 0:
+            return "analyzing", active, queued, terminal
+        if queued > 0:
+            return "waiting", 0, queued, terminal
+        if terminal > 0:
+            return "done", 0, 0, terminal
+        return "not_started", 0, 0, 0
+
     result = []
     for domain_item in domains.values():
         subdomains = list(domain_item["subdomains"].values())
+
+        # Build domain-level ports table aggregating all subdomains
+        domain_ports: dict[str, dict] = {}
+        for subdomain in subdomains:
+            for pk, pdata in (subdomain.get("ports") or {}).items():
+                if pk not in domain_ports:
+                    domain_ports[pk] = {
+                        "port": pdata["port"],
+                        "protocol": pdata["protocol"],
+                        "service": pdata["service"],
+                        "subdomain_count": 0,
+                        "subdomains": [],
+                    }
+                elif pdata["service"] and not domain_ports[pk]["service"]:
+                    domain_ports[pk]["service"] = pdata["service"]
+                domain_ports[pk]["subdomain_count"] += 1
+                domain_ports[pk]["subdomains"].append(subdomain.get("name", ""))
+
         for subdomain in subdomains:
             subdomain["findings"].sort(
                 key=lambda row: (
@@ -3248,6 +3347,21 @@ def domains_overview(
                     str(row.get("title") or "").lower(),
                 )
             )
+            # Expose ports list (sorted by port number) for each subdomain
+            subdomain["ports"] = sorted(
+                subdomain.get("ports", {}).values(),
+                key=lambda p: (int(p["port"]) if str(p["port"]).isdigit() else 9999),
+            )
+            # Annotate each subdomain with its analysis status from work queue
+            _scan_id = domain_item.get("latest_scan_id")
+            _sub_status, _sub_active, _sub_queued, _sub_done = _subdomain_analysis_status(
+                _scan_id, subdomain.get("name", "")
+            )
+            subdomain["analysis_status"] = _sub_status
+            subdomain["work_active"] = _sub_active
+            subdomain["work_queued"] = _sub_queued
+            subdomain["work_done"] = _sub_done
+
         subdomains.sort(
             key=lambda row: (
                 -int(row.get("total_findings") or 0),
@@ -3262,16 +3376,22 @@ def domains_overview(
         sub_only = [row for row in subdomains if row.get("name") != domain_item["domain"]]
         subdomain_count = len(sub_only)
 
-        # Scan a 100%: subdomínios cujo scan_job foi concluído com status completed/finished
-        scanned_count = sum(
-            1 for row in sub_only
-            if str(row.get("scan_status") or "").lower() in {"completed", "finished"}
-        )
-
         # Ativo: subdomínio com pelo menos 1 finding (foi sondado e respondeu)
-        # Inativo: descoberto via DNS mas sem achados (portas web fechadas / sem resposta HTTP)
         active_count = sum(1 for row in sub_only if int(row.get("total_findings") or 0) > 0)
         inactive_count = subdomain_count - active_count
+
+        # Per-subdomain analysis status aggregation
+        analyzed_count = sum(1 for row in sub_only if row.get("analysis_status") == "done")
+        analyzing_count = sum(1 for row in sub_only if row.get("analysis_status") == "analyzing")
+        waiting_count = sum(1 for row in sub_only if row.get("analysis_status") == "waiting")
+        not_started_count = sum(1 for row in sub_only if row.get("analysis_status") == "not_started")
+        subdomain_progress_pct = int(analyzed_count * 100 / subdomain_count) if subdomain_count > 0 else 0
+
+        # Sort ports by port number
+        ports_list = sorted(
+            domain_ports.values(),
+            key=lambda p: (int(p["port"]) if str(p["port"]).isdigit() else 9999),
+        )
 
         result.append(
             {
@@ -3281,11 +3401,19 @@ def domains_overview(
                 "latest_scan_at": domain_item["latest_scan_at"],
                 "scan_count": domain_item["scan_count"],
                 "subdomain_count": subdomain_count,
-                "scanned_subdomain_count": scanned_count,
+                # Per-subdomain analysis coverage
+                "subdomain_progress_pct": subdomain_progress_pct,
+                "analyzed_subdomain_count": analyzed_count,
+                "analyzing_subdomain_count": analyzing_count,
+                "waiting_subdomain_count": waiting_count,
+                "not_started_subdomain_count": not_started_count,
+                # Legacy / compat
+                "scanned_subdomain_count": analyzed_count,
                 "active_subdomain_count": active_count,
                 "inactive_subdomain_count": inactive_count,
                 "severity_counts": domain_item["severity_counts"],
                 "total_findings": domain_item["total_findings"],
+                "ports": ports_list,
                 "subdomains": subdomains,
             }
         )
@@ -3801,6 +3929,12 @@ def list_findings_paginated(
                 "retest_status": finding.retest_status,
                 "cve": finding.cve,
                 "cvss": finding.cvss,
+                "cve_description": (
+                    details.get("cve_description") or
+                    details.get("description") or
+                    details.get("desc") or
+                    ""
+                ),
                 "domain": finding.domain,
                 "target": loc.get("target"),
                 "subdomain": loc.get("subdomain"),
@@ -7202,6 +7336,31 @@ def enrich_scan_cve_findings(
         "message": (
             f"{enriched} CVE findings enriquecidos com descrição, "
             "passos de reprodução, payload e CVSS."
+        ),
+    }
+
+
+@router.post("/findings/enrich-all-cves")
+def enrich_all_cve_findings(
+    limit: int = Query(default=500, ge=1, le=2000, description="Máx. de findings a processar"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Backfill: enriquece TODOS os findings com CVE que ainda não têm cve_description.
+    Útil para corrigir dados históricos sem precisar re-rodar scans.
+
+    Processa findings onde:
+    - title == cve (bare CVE ID sem descrição)
+    - cve_description está vazio em details
+    """
+    from app.services.cve_enricher import enrich_all_cves
+
+    enriched = enrich_all_cves(db, limit=limit, owner_id=current_user.id)
+    return {
+        "enriched": enriched,
+        "message": (
+            f"{enriched} CVE findings backfill-enriquecidos com descrição e passos de reprodução."
         ),
     }
 

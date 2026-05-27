@@ -110,6 +110,45 @@ LOCAL_TECH_CVES: dict[str, list[dict]] = {
          "title": "jQuery < 3.0.0 XSS via cross-domain AJAX requests",
          "remediation": "Atualizar jQuery para >= 3.0.0"},
     ],
+    "litespeed": [
+        {"cve": "CVE-2022-0073", "cvss": 9.8, "severity": "critical",
+         "title": "LiteSpeed Web Server < 6.0.12 RCE via crafted HTTP request",
+         "remediation": "Atualizar LiteSpeed para >= 6.0.12"},
+        {"cve": "CVE-2021-43798", "cvss": 7.5, "severity": "high",
+         "title": "LiteSpeed Path Traversal — leitura de arquivos fora do webroot",
+         "remediation": "Atualizar LiteSpeed para versão corrigida"},
+    ],
+    "portainer": [
+        {"cve": "CVE-2022-26336", "cvss": 9.8, "severity": "critical",
+         "title": "Portainer < 2.11.1 — acesso não autenticado à API de containers Docker",
+         "remediation": "Atualizar Portainer para >= 2.11.1 e restringir acesso por IP/VPN"},
+    ],
+    "rabbitmq": [
+        {"cve": "CVE-2021-22116", "cvss": 7.5, "severity": "high",
+         "title": "RabbitMQ < 3.8.16 — DoS via malformed AMQP connection",
+         "remediation": "Atualizar RabbitMQ para >= 3.8.16"},
+    ],
+    "grafana": [
+        {"cve": "CVE-2021-43798", "cvss": 7.5, "severity": "high",
+         "title": "Grafana < 8.3.1 Path Traversal — leitura de arquivos locais",
+         "remediation": "Atualizar Grafana para >= 8.3.1"},
+        {"cve": "CVE-2022-31107", "cvss": 9.8, "severity": "critical",
+         "title": "Grafana OAuth account takeover (< 9.0.3 / 8.5.9)",
+         "remediation": "Atualizar Grafana para >= 9.0.3 ou 8.5.9"},
+    ],
+    "zabbix": [
+        {"cve": "CVE-2022-23131", "cvss": 9.8, "severity": "critical",
+         "title": "Zabbix < 5.4.9 SAML SSO Authentication Bypass",
+         "remediation": "Atualizar Zabbix para >= 5.4.9 / 6.0.0alpha6"},
+        {"cve": "CVE-2022-23134", "cvss": 5.3, "severity": "medium",
+         "title": "Zabbix < 5.4.9 Setup page accessible without auth",
+         "remediation": "Atualizar Zabbix e bloquear acesso ao /setup.php externamente"},
+    ],
+    "kibana": [
+        {"cve": "CVE-2019-7609", "cvss": 10.0, "severity": "critical",
+         "title": "Kibana < 5.6.15 / 6.6.1 RCE via Timelion prototype pollution",
+         "remediation": "Atualizar Kibana para >= 5.6.15 / 6.6.1"},
+    ],
     "react": [],   # React itself rarely has critical CVEs; deps are the issue
     "angular": [],
     "vue": [],
@@ -154,6 +193,15 @@ TECH_TO_NUCLEI_TAGS: dict[str, list[str]] = {
     "grafana":    ["grafana"],
     "elasticsearch": ["elasticsearch"],
     "kibana":     ["kibana"],
+    "portainer":  ["portainer"],
+    "rabbitmq":   ["rabbitmq"],
+    "zabbix":     ["zabbix"],
+    "litespeed":  ["litespeed"],
+    "flower":     ["flower"],
+    "redis":      ["redis"],
+    "mongo":      ["mongodb"],
+    "docker":     ["docker"],
+    "kubernetes": ["kubernetes"],
     "django":     ["django"],
     "rails":      ["rails"],
     "laravel":    ["laravel"],
@@ -286,11 +334,21 @@ def _split_product_version(raw: str) -> tuple[str, str]:
       "Apache httpd 2.4.41"    → ("Apache", "2.4.41")
       "OpenSSL 1.1.1n 15 Mar"  → ("OpenSSL", "1.1.1")
       "jQuery[3.3.1]"          → ("jQuery", "3.3.1")
+      "PHP:8.1.34"             → ("PHP", "8.1.34")   ← httpx format
+      "Bootstrap:7"            → ("Bootstrap", "7")
       "cloudflare"             → ("cloudflare", "")
     """
     raw = raw.strip().rstrip(",")
     if not raw:
         return "", ""
+
+    # colon separator: "PHP:8.1.34" or "Bootstrap:7"  (httpx tech format)
+    if ":" in raw and not raw.startswith("http") and ":/" not in raw:
+        parts = raw.split(":", 1)
+        product = parts[0].strip()
+        version = parts[1].strip().split()[0]  # stop at first space/extra info
+        if product:
+            return product, version
 
     # slash separator: "nginx/1.18.0" or "Apache/2.4.41"
     if "/" in raw and not raw.startswith("http"):

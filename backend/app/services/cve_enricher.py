@@ -19,6 +19,7 @@ from typing import Any
 
 import requests
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger(__name__)
 
@@ -267,10 +268,13 @@ def _fetch_nvd_cve(cve_id: str) -> dict:
     return result
 
 
-def enrich_cve_finding(finding: Any, db: Session) -> bool:
+def enrich_cve_finding(finding: Any, db: Session, *, force: bool = False) -> bool:
     """
     Enriquece um finding de CVE com description, reproduction steps, CVSS e referências.
     Retorna True se atualizado.
+
+    Args:
+        force: se True, re-enriquece mesmo que já tenha cve_description preenchido.
     """
     cve_id = str(finding.cve or "").upper()
     if not cve_id.startswith("CVE-"):
@@ -278,8 +282,9 @@ def enrich_cve_finding(finding: Any, db: Session) -> bool:
 
     details = dict(finding.details or {})
 
-    # Já enriquecido?
-    if details.get("enriched") or details.get("reproduction_steps"):
+    # Já enriquecido com cve_description? Pula, a menos que force=True
+    already_has_desc = bool(str(details.get("cve_description") or "").strip())
+    if not force and already_has_desc and details.get("enriched"):
         return False
 
     # 1. Base local (mais rica, com PoC)
@@ -290,7 +295,7 @@ def enrich_cve_finding(finding: Any, db: Session) -> bool:
     if not local.get("description"):
         nvd = _fetch_nvd_cve(cve_id)
 
-    description = local.get("description") or nvd.get("description") or ""
+    description = local.get("description") or nvd.get("description") or details.get("description") or ""
     cvss_real = nvd.get("cvss") or finding.cvss
     severity_real = nvd.get("severity") or str(finding.severity or "high")
     cwes = nvd.get("cwes") or []
@@ -302,10 +307,11 @@ def enrich_cve_finding(finding: Any, db: Session) -> bool:
     patch_url = local.get("patch_url") or ""
     affected_versions = local.get("affected_versions") or ""
 
-    # Atualizar details
+    # Atualizar details — cve_description é o campo canônico exposto na API
     details.update({
         "enriched": True,
-        "description": description,
+        "cve_description": description,   # ← campo canônico para UI e API
+        "description": description,       # ← mantém retrocompatibilidade
         "cvss": cvss_real,
         "cwes": cwes,
         "references": list(dict.fromkeys(references + [nvd_url]))[:8],
@@ -318,6 +324,13 @@ def enrich_cve_finding(finding: Any, db: Session) -> bool:
     })
 
     finding.details = details
+    # JSONB mutation must be signaled explicitly — SQLAlchemy may not detect
+    # dict replacement on mutable JSONB columns without this call.
+    try:
+        flag_modified(finding, "details")
+    except Exception:
+        pass
+
     if cvss_real and cvss_real > 0:
         finding.cvss = float(cvss_real)
         finding.risk_score = min(10, int(round(float(cvss_real))))
@@ -325,18 +338,20 @@ def enrich_cve_finding(finding: Any, db: Session) -> bool:
     if severity_real and severity_real in ("critical", "high", "medium", "low", "info"):
         finding.severity = severity_real
 
-    if description and not any(x in str(finding.title) for x in ["CVE-"]):
-        # Enrich title with description summary (first 80 chars)
-        desc_short = description.split(".")[0][:80].strip()
+    # Atualiza título quando é apenas o CVE ID em bruto (ex: "CVE-2025-14177")
+    current_title = str(finding.title or "").strip()
+    title_is_bare_cve = current_title.upper() == cve_id
+    if description and (title_is_bare_cve or not current_title):
+        desc_short = description.split(".")[0][:100].strip()
         if desc_short:
-            finding.title = f"{finding.cve}: {desc_short}"[:500]
+            finding.title = f"{cve_id}: {desc_short}"[:500]
 
     finding.updated_at = datetime.utcnow() if hasattr(finding, "updated_at") else None
 
     return True
 
 
-def enrich_scan_cves(db: Session, scan_id: int, *, limit: int = 100) -> int:
+def enrich_scan_cves(db: Session, scan_id: int, *, limit: int = 200) -> int:
     """
     Enriquece todos os findings de CVE de um scan que ainda não foram enriquecidos.
     Retorna quantidade enriquecida.
@@ -368,4 +383,69 @@ def enrich_scan_cves(db: Session, scan_id: int, *, limit: int = 100) -> int:
             db.rollback()
 
     logger.info("enrich_scan_cves: enriched %d / %d CVE findings for scan %s", enriched, len(findings), scan_id)
+    return enriched
+
+
+def enrich_all_cves(db: Session, *, limit: int = 500, owner_id: int | None = None) -> int:
+    """
+    Enriquece TODOS os findings com CVE que ainda não têm cve_description.
+    Usado para backfill de dados históricos.
+
+    Args:
+        limit: máximo de findings a processar por chamada
+        owner_id: se fornecido, restringe ao usuário (via scan_job.owner_id)
+
+    Retorna quantidade de findings enriquecidos.
+    """
+    from app.models.models import Finding, ScanJob
+
+    from sqlalchemy import or_, cast, String, text as sa_text
+
+    # Findings com CVE mas sem cve_description preenchido, OU com title = bare CVE ID
+    query = (
+        db.query(Finding)
+        .filter(Finding.cve.isnot(None))
+        .filter(
+            or_(
+                # cve_description ausente ou vazio no JSONB
+                cast(Finding.details["cve_description"], String).is_(None),
+                cast(Finding.details["cve_description"], String) == "",
+                cast(Finding.details["cve_description"], String) == "null",
+                # título ainda é o CVE em bruto (ex: "CVE-2025-14177")
+                Finding.title == Finding.cve,
+            )
+        )
+    )
+
+    if owner_id is not None:
+        query = query.join(ScanJob, Finding.scan_job_id == ScanJob.id).filter(ScanJob.owner_id == owner_id)
+
+    findings = query.limit(limit).all()
+
+    enriched = 0
+    batch_size = 20
+    for i, f in enumerate(findings):
+        try:
+            if enrich_cve_finding(f, db, force=False):
+                enriched += 1
+        except Exception as exc:
+            logger.warning("enrich_all_cves: error for finding %s cve=%s: %s", f.id, f.cve, exc)
+
+        # Commit em batches para evitar transação longa
+        if (i + 1) % batch_size == 0:
+            try:
+                db.commit()
+                logger.info("enrich_all_cves: batch commit %d/%d (enriched so far: %d)", i + 1, len(findings), enriched)
+            except Exception as exc:
+                logger.error("enrich_all_cves: batch commit error: %s", exc)
+                db.rollback()
+
+    # Commit final
+    try:
+        db.commit()
+    except Exception as exc:
+        logger.error("enrich_all_cves: final commit error: %s", exc)
+        db.rollback()
+
+    logger.info("enrich_all_cves: enriched %d / %d total CVE findings", enriched, len(findings))
     return enriched
