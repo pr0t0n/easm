@@ -144,6 +144,8 @@ services:
       APP_ENV: development
       KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}"
       MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}"
+      ZAP_URL: "${ZAP_URL:-http://zap:8090}"
+      ZAP_API_KEY: "${ZAP_API_KEY:-scriptkiddo-zap-key}"
       MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}"
       MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}"
       ENABLE_OBSERVABILITY: "${ENABLE_OBSERVABILITY:-false}"
@@ -162,6 +164,8 @@ services:
       kali_runner:
         condition: service_started
       mcp_server:
+        condition: service_started
+      zap:
         condition: service_started
     ports:
       - "${BACKEND_HOST_PORT:-8001}:8000"
@@ -307,6 +311,45 @@ services:
       - ./skills:/app/skills:ro
 
   # ─────────────────────────────────────────────────────────────────
+  # OWASP ZAP — Web Application Scanner
+  # Runs in daemon mode; backend calls REST API at :8090
+  # Capabilities: passive scan, AJAX spider (SPAs), active scan, OpenAPI scan
+  # ─────────────────────────────────────────────────────────────────
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: scriptkiddo_zap
+    profiles: ["dev", "prod"]
+    command: >
+      zap.sh -daemon
+        -host 0.0.0.0
+        -port 8090
+        -config api.key=${ZAP_API_KEY:-scriptkiddo-zap-key}
+        -config api.addrs.addr.name=.*
+        -config api.addrs.addr.regex=true
+        -config connection.timeoutInSecs=60
+        -config scanner.maxScanDurationInMins=30
+        -config ajaxSpider.browserId=htmlunit
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${ZAP_HOST_PORT:-8090}:8090"
+    volumes:
+      - zap_data:/home/zap/.ZAP
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/JSON/core/view/version/?apikey=${ZAP_API_KEY:-scriptkiddo-zap-key}"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
+
+  # ─────────────────────────────────────────────────────────────────
   # Frontend
   # ─────────────────────────────────────────────────────────────────
 
@@ -336,3 +379,4 @@ volumes:
   ollama_data:
   kali_workspace:
   mcp_chroma_data:
+  zap_data:

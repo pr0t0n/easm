@@ -4,7 +4,13 @@ import client from "../api/client";
 
 function resolveApiBaseUrl() {
   const byClient = String(client.defaults?.baseURL || "").trim();
-  if (byClient) return byClient.replace(/\/$/, "");
+  // Only use byClient if it's an absolute URL; relative base ("/api") should use current origin
+  if (byClient && (byClient.startsWith("http://") || byClient.startsWith("https://"))) {
+    return byClient.replace(/\/$/, "");
+  }
+  // When client uses relative paths (Vite proxy), use the current window origin
+  // so the iframe also routes through the proxy instead of hitting :8000 directly
+  if (typeof window !== "undefined") return window.location.origin;
   return `${window.location.protocol}//${window.location.hostname}:8000`;
 }
 

@@ -15,8 +15,9 @@ function getApiBaseUrl() {
   const byQuery = query.get('api_url') || query.get('api_base') || '';
   if (byQuery) return byQuery.replace(/\/$/, '');
 
-  if (window.location.port === '8000') return window.location.origin;
-  return `${window.location.protocol}//${window.location.hostname}:8000`;
+  // Default to current origin — the Vite proxy (or nginx in prod) forwards /api
+  // to the backend. This avoids hardcoding :8000 which may not be exposed.
+  return window.location.origin;
 }
 
 const API_BASE_URL = getApiBaseUrl();

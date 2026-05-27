@@ -144,25 +144,101 @@ def _extract_httpx_findings(
             cipher = str(tls.get("cipher") or "")
             issuer = str(tls.get("issuer_cn") or tls.get("issuer_dn") or "")
             serial = str(tls.get("serial") or "")
+            tls_version = str(tls.get("tls_version") or "").lower()
+            mismatched = bool(tls.get("mismatched"))
+            subject_cn = str(tls.get("subject_cn") or "")
             weak = any(w in cipher.upper() for w in ("RC4", "DES", "3DES", "EXPORT", "NULL", "MD5"))
-            findings.append({
-                "title": f"TLS configurado em {url}",
-                "severity": "medium" if weak else "info",
-                "risk_score": 5 if weak else 1,
-                "source_worker": "recon",
-                "details": {
-                    "node": "recon",
-                    "step": "httpx_probe",
-                    "asset": url,
-                    "tool": "httpx",
-                    "evidence": f"Cipher: {cipher} | Issuer: {issuer}",
-                    "tls_cipher": cipher,
-                    "tls_issuer": issuer,
-                    "tls_serial": serial,
-                    "weak_cipher": weak,
-                    "owasp_category": "A02:2021 Cryptographic Failures" if weak else "",
-                },
-            })
+
+            # TLS version risk
+            old_tls = tls_version in ("tls10", "tls1.0", "tls 1.0") or "tls10" in tls_version
+            very_old_tls = tls_version in ("ssl2", "ssl3", "ssl30", "sslv2", "sslv3")
+            tls_sev = "high" if very_old_tls else ("medium" if old_tls or weak else "info")
+            tls_risk = 7 if very_old_tls else (5 if old_tls or weak else 1)
+
+            if old_tls or very_old_tls:
+                findings.append({
+                    "title": f"Protocolo TLS obsoleto em uso: {tls_version.upper()} em {url}",
+                    "severity": tls_sev,
+                    "risk_score": tls_risk,
+                    "source_worker": "recon",
+                    "details": {
+                        "node": "recon",
+                        "step": "httpx_probe",
+                        "asset": url,
+                        "tool": "httpx",
+                        "evidence": f"Versão TLS detectada: {tls_version} — vulnerável a ataques BEAST/POODLE",
+                        "tls_version": tls_version,
+                        "tls_cipher": cipher,
+                        "tls_issuer": issuer,
+                        "owasp_category": "A02:2021 Cryptographic Failures",
+                        "remediation": "Desabilitar TLS 1.0/1.1/SSL e configurar apenas TLS 1.2+",
+                    },
+                })
+            elif weak:
+                findings.append({
+                    "title": f"Cipher TLS fraco detectado em {url}",
+                    "severity": "medium",
+                    "risk_score": 5,
+                    "source_worker": "recon",
+                    "details": {
+                        "node": "recon",
+                        "step": "httpx_probe",
+                        "asset": url,
+                        "tool": "httpx",
+                        "evidence": f"Cipher: {cipher} | Issuer: {issuer}",
+                        "tls_cipher": cipher,
+                        "tls_issuer": issuer,
+                        "tls_serial": serial,
+                        "weak_cipher": True,
+                        "owasp_category": "A02:2021 Cryptographic Failures",
+                        "remediation": "Desabilitar ciphers fracos (RC4, DES, 3DES, EXPORT, NULL, MD5)",
+                    },
+                })
+            else:
+                findings.append({
+                    "title": f"TLS configurado em {url}",
+                    "severity": "info",
+                    "risk_score": 1,
+                    "source_worker": "recon",
+                    "details": {
+                        "node": "recon",
+                        "step": "httpx_probe",
+                        "asset": url,
+                        "tool": "httpx",
+                        "evidence": f"Cipher: {cipher} | Issuer: {issuer} | Version: {tls_version}",
+                        "tls_cipher": cipher,
+                        "tls_version": tls_version,
+                        "tls_issuer": issuer,
+                        "tls_serial": serial,
+                    },
+                })
+
+            # Certificate mismatch — subdomain takeover candidate or misconfiguration
+            if mismatched and subject_cn and subject_cn != url.split("://")[-1].split("/")[0]:
+                findings.append({
+                    "title": f"Certificado TLS divergente (mismatch) em {url}",
+                    "severity": "medium",
+                    "risk_score": 5,
+                    "source_worker": "recon",
+                    "details": {
+                        "node": "recon",
+                        "step": "httpx_probe",
+                        "asset": url,
+                        "tool": "httpx",
+                        "evidence": (
+                            f"Domínio '{url}' apresenta cert emitido para '{subject_cn}' "
+                            f"(issuer: {issuer}) — possível subdomain takeover ou misconfiguration"
+                        ),
+                        "cert_subject": subject_cn,
+                        "cert_issuer": issuer,
+                        "cert_mismatched": True,
+                        "owasp_category": "A05:2021 Security Misconfiguration",
+                        "remediation": (
+                            "Verificar se o subdomínio está apontando para serviço de terceiro "
+                            "sem controle do certificado. Possível candidate de subdomain takeover."
+                        ),
+                    },
+                })
 
         # HTTP response
         if status_code:
@@ -220,35 +296,70 @@ def _extract_shodan_kali_findings(
     vulns = list(data.get("vulns") or [])
     banners = list(data.get("banners") or [])
 
+    # Cloudflare proxy ports — estas são portas do proxy Cloudflare, não do servidor de origem.
+    # Quando o IP pertence à Cloudflare, essas portas não representam superfície real do alvo.
+    CLOUDFLARE_PROXY_PORTS = {2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8080, 8443, 8880}
+    is_cloudflare = any(kw in (org + isp).lower() for kw in ("cloudflare", "cloud flare"))
+
     # Open ports finding
     if ports:
-        ports_str = ", ".join(str(p) for p in sorted(ports))
-        # Flag interesting ports
-        interesting = [p for p in ports if p not in (80, 443)]
-        severity = "medium" if interesting else "info"
-        risk_score = 4 if interesting else 1
-        notes = ""
-        if interesting:
-            notes = f" — portas não-padrão expostas: {', '.join(str(p) for p in interesting)}"
-        findings.append({
-            "title": f"Portas expostas (Shodan): {host} — {len(ports)} portas",
-            "severity": severity,
-            "risk_score": risk_score,
-            "source_worker": "osint",
-            "details": {
-                "node": "osint",
-                "step": "shodan_lookup",
-                "asset": host,
-                "tool": "shodan-cli",
-                "evidence": f"IP {ip} ({org}/{isp}): ports {ports_str}{notes}",
-                "ip_address": ip,
-                "isp": isp,
-                "org": org,
-                "open_ports": ports,
-                "interesting_ports": interesting,
-                "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
-            },
-        })
+        # Filter out Cloudflare-owned proxy ports when behind Cloudflare
+        real_ports = ports
+        cloudflare_filtered: list[int] = []
+        if is_cloudflare:
+            cloudflare_filtered = [p for p in ports if int(p) in CLOUDFLARE_PROXY_PORTS]
+            real_ports = [p for p in ports if int(p) not in CLOUDFLARE_PROXY_PORTS]
+
+        ports_str = ", ".join(str(p) for p in sorted(real_ports or ports))
+        interesting = [p for p in real_ports if p not in (80, 443)]
+
+        if real_ports:
+            severity = "medium" if interesting else "info"
+            risk_score = 4 if interesting else 1
+            notes = ""
+            if interesting:
+                notes = f" — portas não-padrão expostas: {', '.join(str(p) for p in interesting)}"
+            if cloudflare_filtered:
+                notes += f" (Cloudflare proxy: {len(cloudflare_filtered)} portas excluídas)"
+            findings.append({
+                "title": f"Portas expostas (Shodan): {host} — {len(real_ports)} portas",
+                "severity": severity,
+                "risk_score": risk_score,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "step": "shodan_lookup",
+                    "asset": host,
+                    "tool": "shodan-cli",
+                    "evidence": f"IP {ip} ({org}/{isp}): ports {ports_str}{notes}",
+                    "ip_address": ip,
+                    "isp": isp,
+                    "org": org,
+                    "open_ports": real_ports,
+                    "interesting_ports": interesting,
+                    "cloudflare_filtered_ports": cloudflare_filtered,
+                    "is_cloudflare_proxy": is_cloudflare,
+                    "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
+                },
+            })
+        elif cloudflare_filtered:
+            # All ports were Cloudflare proxy — report as info with context
+            findings.append({
+                "title": f"Host atrás de Cloudflare (Shodan): {host} — apenas portas do proxy Cloudflare visíveis",
+                "severity": "info",
+                "risk_score": 1,
+                "source_worker": "osint",
+                "details": {
+                    "node": "osint",
+                    "step": "shodan_lookup",
+                    "asset": host,
+                    "tool": "shodan-cli",
+                    "evidence": f"IP {ip} ({org}): todas as {len(ports)} portas são do proxy Cloudflare — origem real oculta",
+                    "ip_address": ip,
+                    "cloudflare_proxy_ports": cloudflare_filtered,
+                    "is_cloudflare_proxy": True,
+                },
+            })
 
     # Banners — look for server/version info
     server_banners: list[str] = []
@@ -384,12 +495,53 @@ def _extract_nmap_findings(
             },
         })
 
-    # NSE vuln script results (|_ lines with CVE patterns)
+    # NSE vuln script results — parse port-contextual CVE blocks
+    # Split output into per-port blocks so each CVE is linked to its port/service
     cve_pattern = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
-    nse_vulns = cve_pattern.findall(stdout)
-    for cve_id in set(nse_vulns):
+
+    # Build a map: port_info → [cve_ids found in its NSE block]
+    # Strategy: split output on port header lines, then scan each block for CVEs
+    port_block_pattern = re.compile(
+        r"^(\d+)/(tcp|udp)\s+open\s+(\S+)(?:\s+([^\n|]+))?",
+        re.MULTILINE,
+    )
+
+    # Find all port header positions
+    port_blocks: list[tuple[int, int, str, str, str]] = []  # (start, port, proto, service, version)
+    for m in port_block_pattern.finditer(stdout):
+        port_blocks.append((m.start(), int(m.group(1)), m.group(2), m.group(3).strip(), (m.group(4) or "").strip()))
+
+    # For each CVE in the full output, determine which port block it belongs to
+    cve_port_map: dict[str, dict] = {}  # cve_id → port context dict
+    for cve_m in cve_pattern.finditer(stdout):
+        cve_id = cve_m.group(0).upper()
+        cve_pos = cve_m.start()
+        # Find the last port block that started before this CVE position
+        port_ctx = {"port": None, "proto": "tcp", "service": "unknown", "version": ""}
+        for (blk_start, port_num, proto, service, version) in reversed(port_blocks):
+            if blk_start <= cve_pos:
+                port_ctx = {"port": port_num, "proto": proto, "service": service, "version": version}
+                break
+        # Keep highest-context match (prefer port-linked over generic)
+        if cve_id not in cve_port_map or port_ctx["port"] is not None:
+            cve_port_map[cve_id] = port_ctx
+
+    for cve_id, port_ctx in cve_port_map.items():
+        port_num = port_ctx.get("port")
+        service = port_ctx.get("service", "unknown")
+        version = port_ctx.get("version", "")
+        proto = port_ctx.get("proto", "tcp")
+
+        # Build contextual evidence
+        if port_num:
+            port_label = f"porta {port_num}/{proto}"
+            service_label = f"{service} {version}".strip() if version else service
+            evidence = f"{cve_id} — {port_label} ({service_label}) em {target}"
+        else:
+            evidence = f"{cve_id} encontrado em output nmap para {target}"
+
         findings.append({
-            "title": cve_id.upper(),
+            "title": cve_id,
             "severity": "high",
             "risk_score": 7,
             "source_worker": "vuln",
@@ -398,8 +550,13 @@ def _extract_nmap_findings(
                 "step": step_name,
                 "asset": target,
                 "tool": "nmap",
-                "evidence": f"{cve_id.upper()} encontrado em output nmap",
-                "cve_id": cve_id.upper(),
+                "evidence": evidence,
+                "cve_id": cve_id,
+                "port": port_num,
+                "protocol": proto,
+                "service": service,
+                "service_version": version,
+                "port_context": f"{port_num}/{proto} ({service_label})" if port_num else None,
                 "owasp_category": "A06:2021 Vulnerable and Outdated Components",
             },
         })
@@ -762,6 +919,158 @@ def _extract_waybackurls_gau_findings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ZAP parser — converts ZAP JSON alerts to platform findings
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_zap_findings(
+    parsed: Any,
+    stdout: str,
+    target: str,
+    tool_name: str = "zap_baseline",
+) -> list[dict[str, Any]]:
+    """
+    Convert ZAP Automation Framework JSON report to platform Finding dicts.
+
+    ZAP JSON report format (json-plus template):
+    {
+      "site": [
+        {"alerts": [
+          {
+            "name": "...",
+            "riskdesc": "High (Confirmed)",
+            "confidence": "High",
+            "desc": "...",
+            "solution": "...",
+            "reference": "...",
+            "cweid": "79",
+            "wascid": "8",
+            "instances": [{"uri": "...", "evidence": "..."}],
+            "count": 3
+          }
+        ]}
+      ]
+    }
+    """
+    findings: list[dict[str, Any]] = []
+
+    # parsed_result might be the full JSON dict or just the alerts list
+    alerts_data = None
+    if isinstance(parsed, dict):
+        if "alerts" in parsed:
+            # Direct alerts dict from our zap_json parser
+            alerts_data = parsed.get("alerts", [])
+        elif "site" in parsed:
+            # Full ZAP report format
+            for site in (parsed.get("site") or []):
+                if isinstance(site, list):
+                    for s in site:
+                        alerts_data = (alerts_data or []) + (s.get("alerts") or [])
+                elif isinstance(site, dict):
+                    alerts_data = (alerts_data or []) + (site.get("alerts") or [])
+
+    # Fallback: try to parse stdout for JSON block
+    if alerts_data is None and stdout:
+        start = stdout.find("[ZAP-REPORT-START]")
+        end = stdout.find("[ZAP-REPORT-END]")
+        if start != -1 and end != -1:
+            try:
+                block = stdout[start + len("[ZAP-REPORT-START]"):end].strip()
+                data = json.loads(block)
+                alerts_data = data.get("alerts", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+    if not alerts_data:
+        return findings
+
+    severity_map = {
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+        "informational": "info",
+        "info": "info",
+        "false positive": "info",
+    }
+    risk_score_map = {"high": 7, "medium": 5, "low": 2, "info": 1}
+
+    for alert in alerts_data:
+        if not isinstance(alert, dict):
+            continue
+
+        name = str(alert.get("title") or alert.get("name") or "").strip()
+        if not name:
+            continue
+
+        risk_desc = str(alert.get("riskdesc") or alert.get("risk") or "Informational")
+        risk_level = risk_desc.split(" ")[0].lower()
+        severity = severity_map.get(risk_level, "low")
+        risk_score = risk_score_map.get(severity, 2)
+
+        evidence = str(alert.get("evidence") or "")[:1000]
+        uri = str(alert.get("uri") or target)
+        description = str(alert.get("description") or alert.get("desc") or "")
+        solution = str(alert.get("solution") or "")
+        reference = str(alert.get("reference") or "")
+        cwe = str(alert.get("cwe") or alert.get("cweid") or "")
+        count = int(alert.get("count") or 1)
+
+        # Compute domain from target or URI
+        domain = target
+        if uri and uri.startswith("http"):
+            from urllib.parse import urlparse as _urlparse
+            try:
+                domain = _urlparse(uri).hostname or target
+            except Exception:
+                pass
+
+        title = f"[ZAP] {name}"
+
+        findings.append({
+            "title": title[:500],
+            "severity": severity,
+            "risk_score": risk_score,
+            "details": {
+                "tool": tool_name,
+                "asset": target,
+                "zap_alert_name": name,
+                "risk": risk_desc,
+                "confidence": str(alert.get("confidence") or "Medium"),
+                "description": description[:2000],
+                "solution": solution[:1000],
+                "reference": reference[:500],
+                "cwe_id": cwe,
+                "evidence": evidence,
+                "uri": uri[:500],
+                "instance_count": count,
+                "owasp_category": _zap_cwe_to_owasp(cwe),
+                "source": "zap",
+            },
+        })
+
+    return findings
+
+
+def _zap_cwe_to_owasp(cwe_id: str) -> str:
+    """Map CWE ID to OWASP Top 10 2021 category."""
+    mapping = {
+        "79": "A03:2021 Injection (XSS)",
+        "89": "A03:2021 Injection (SQLi)",
+        "78": "A03:2021 Injection (Command Injection)",
+        "22": "A01:2021 Broken Access Control (Path Traversal)",
+        "352": "A01:2021 Broken Access Control (CSRF)",
+        "601": "A01:2021 Broken Access Control (Open Redirect)",
+        "200": "A02:2021 Cryptographic Failures (Information Exposure)",
+        "319": "A02:2021 Cryptographic Failures (Cleartext Transmission)",
+        "16": "A05:2021 Security Misconfiguration",
+        "693": "A05:2021 Security Misconfiguration (Missing Security Headers)",
+        "1021": "A04:2021 Insecure Design (Clickjacking/X-Frame-Options)",
+        "614": "A02:2021 Cryptographic Failures (Insecure Cookie)",
+        "1004": "A02:2021 Cryptographic Failures (Cookie without HttpOnly)",
+    }
+    return mapping.get(str(cwe_id).strip(), f"CWE-{cwe_id}" if cwe_id else "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -856,6 +1165,10 @@ def extract_findings_from_work_item(
         elif tool in ("waybackurls", "gau"):
             findings = _extract_waybackurls_gau_findings(stdout, target, tool)
 
+        elif tool in ("zap-baseline", "zap_baseline", "zap-ajax", "zap_ajax_spider",
+                      "zap-active", "zap_active_scan", "zap-api", "zap_api_scan"):
+            findings = _extract_zap_findings(parsed, stdout, target, tool)
+
     except Exception as exc:  # noqa: BLE001
         # Never let parser failure crash the work queue
         import logging
@@ -914,6 +1227,12 @@ def persist_findings_from_work_item(
         if not title:
             continue
 
+        # Extract CVE id first (needed for dedup below)
+        cve_id: str | None = None
+        cve_raw = str(details.get("cve_id") or "").strip().upper()
+        if cve_raw.startswith("CVE-"):
+            cve_id = cve_raw
+
         # CVE-level dedup: one CVE per target domain, regardless of tool
         if cve_id:
             cve_exists = (
@@ -941,11 +1260,6 @@ def persist_findings_from_work_item(
         )
         if exists:
             continue
-
-        cve_id: str | None = None
-        cve_raw = str(details.get("cve_id") or "").strip().upper()
-        if cve_raw.startswith("CVE-"):
-            cve_id = cve_raw
 
         try:
             cvss_val: float | None = float(details["cvss"])

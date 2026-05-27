@@ -95,6 +95,11 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "nmap-ssh-audit": "nmap_ssh_audit",
     "nmap-ssl-vuln": "nmap_ssl_vuln",
     "nikto": "nikto_basic",
+    # OWASP ZAP profiles
+    "zap-baseline": "zap_baseline",   # passive scan + quick spider
+    "zap-ajax": "zap_ajax_spider",    # AJAX spider for SPAs
+    "zap-active": "zap_active_scan",  # full active scan (OWASP Top 10)
+    "zap-api": "zap_api_scan",        # OpenAPI/Swagger-driven scan
     "shodan-cli": "shodan_lookup",
     "theharvester": "theharvester_passive",
     "h8mail": "h8mail_breach",

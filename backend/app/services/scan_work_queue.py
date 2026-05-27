@@ -27,8 +27,12 @@ HEAVY_TOOLS = {
     "nikto",
     "wpscan",
     "wapiti",
+    "zap-active",   # ZAP active scan — full OWASP Top 10 fuzzing
+    "zap-api",      # ZAP API scan — tests all OpenAPI/Swagger endpoints
 }
 MEDIUM_TOOLS = {
+    "zap-baseline",  # ZAP passive scan + quick spider — low noise, fast
+    "zap-ajax",      # ZAP AJAX spider for SPA/JS-heavy targets
     "nuclei",
     "nuclei-xss",
     "nuclei-sqli",
@@ -65,6 +69,50 @@ MEDIUM_TOOLS = {
 }
 OOB_TOOLS = {"interactsh", "interactsh-client"}
 MANUAL_TOOLS = {"manual_review", "manual_correlation", "manual_http_probe", "report-builder", "manual_scope_review"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High-risk subdomain keywords → prioridade elevada no scanner
+# Estes targets expõem gestão de infra, dados sensíveis ou env de dev.
+# ─────────────────────────────────────────────────────────────────────────────
+HIGH_RISK_SUBDOMAIN_KEYWORDS = {
+    # Gestão de infraestrutura (prioridade máxima)
+    "portainer", "rancher", "k8s", "kubernetes", "consul", "vault",
+    "jenkins", "gitlab", "grafana", "kibana", "elastic", "logstash",
+    "prometheus", "alertmanager", "jaeger", "zipkin",
+    # Message brokers e filas
+    "rabbitmq", "kafka", "activemq", "celery", "flower", "worker",
+    # Monitoramento
+    "zabbix", "nagios", "icinga", "netdata", "datadog", "newrelic",
+    # Serviços internos expostos
+    "internal", "intranet", "private", "mgmt", "management", "admin",
+    "backdoor", "debug", "staging", "homolog", "hml", "dev-",
+    # Segurança / autenticação
+    "auth", "sso", "oauth", "saml", "token", "secret", "credential",
+    "key-manager", "kms", "hsm", "pki", "cert",
+    # Dados sensíveis
+    "crm", "erp", "bi-", "dashboard", "analytics", "report",
+    "database", "db-", "redis", "mongo", "postgres", "mysql",
+    # Comunicação
+    "mail", "smtp", "imap", "exchange", "mattermost", "rocketchat",
+    # IoT / telecom
+    "scada", "iot", "telecom", "gateway", "vpn", "bastion",
+}
+
+# Boost de prioridade para subdomínios de alto risco (menor número = maior prioridade)
+HIGH_RISK_PRIORITY_BOOST = -30   # sobe 30 posições na fila
+
+
+def _high_risk_priority_boost(target: str) -> int:
+    """Retorna boost negativo de prioridade se o target for de alto risco."""
+    t = target.lower()
+    # Extract subdomain prefix (before first dot)
+    subdomain = t.split(".")[0] if "." in t else t
+    full = t  # also check full string
+    for kw in HIGH_RISK_SUBDOMAIN_KEYWORDS:
+        if kw in subdomain or kw in full:
+            return HIGH_RISK_PRIORITY_BOOST
+    return 0
+
 
 PHASE_PRIORITY = {
     "P02": 10,
@@ -184,6 +232,8 @@ def enqueue_scan_work_items(
                     existing += 1
                     continue
                 rc = resource_class_for_tool(tool)
+                base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
+                risk_boost = _high_risk_priority_boost(target)
                 item = ScanWorkItem(
                     scan_job_id=job.id,
                     phase_id=phase_id,
@@ -191,10 +241,10 @@ def enqueue_scan_work_items(
                     tool_name=tool[:120],
                     profile=_tool_profile(tool)[:120],
                     resource_class=rc,
-                    priority=PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0),
+                    priority=max(1, base_priority + risk_boost),
                     status="queued",
                     max_attempts=2,
-                    item_metadata={"source": source, "engine": "capacity_work_queue"},
+                    item_metadata={"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0},
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow(),
                 )
@@ -316,6 +366,35 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             db.commit()
         except Exception:
             db.rollback()
+
+
+def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no_http") -> int:
+    """
+    Chamada quando httpx/naabu confirma que um target está morto (sem HTTP, sem TCP).
+    Cancela todos os work items queued/retry desse target, exceto P18 (relatório).
+    Retorna quantidade de itens cancelados.
+    """
+    # Fases que ainda fazem sentido para targets mortos (relatório, exposição passiva)
+    KEEP_PHASES = {"P18", "P01"}
+    cancelled = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.target == target,
+            ScanWorkItem.status.in_(["queued", "retry"]),
+            ~ScanWorkItem.phase_id.in_(list(KEEP_PHASES)),
+        )
+        .all()
+    )
+    count = 0
+    for item in cancelled:
+        item.status = "skipped"
+        item.result = {"skipped_reason": f"target_triage:{reason}", "triage_at": datetime.utcnow().isoformat()}
+        item.updated_at = datetime.utcnow()
+        count += 1
+    if count:
+        db.commit()
+    return count
 
 
 def has_pending_work(db: Session, scan_id: int) -> bool:

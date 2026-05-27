@@ -17,6 +17,7 @@ import os
 import ipaddress
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import threading
@@ -184,23 +185,103 @@ def _load_job_from_disk(job_id: str) -> dict[str, Any] | None:
     return data
 
 
+def _kill_orphaned_process(pid: int, pgid: int | None = None) -> bool:
+    """
+    Kill a process (and its process group) left over from a previous runner session.
+    Returns True if something was killed.
+    """
+    killed = False
+    try:
+        # Try to kill the whole process group first (catches sublist3r threads, etc.)
+        if pgid and pgid > 1:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                killed = True
+                print(f"[cleanup] killed orphaned process group pgid={pgid}")
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Also kill the direct PID as fallback
+        if pid and pid > 1:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed = True
+                print(f"[cleanup] killed orphaned process pid={pid}")
+            except (ProcessLookupError, PermissionError):
+                pass
+    except Exception as exc:
+        print(f"[cleanup] error killing pid={pid}: {exc}")
+    return killed
+
+
 def _load_persisted_jobs() -> dict[str, dict[str, Any]]:
     jobs: dict[str, dict[str, Any]] = {}
+    orphans_killed = 0
     for path in sorted(JOBS_DIR.glob("*.json")):
         job = _load_job_from_disk(path.stem)
         if not job:
             continue
         if job.get("status") in VOLATILE_JOB_STATES:
+            # ── Cleanup orphaned processes from previous runner session ────────
+            pid = job.get("subprocess_pid")
+            pgid = job.get("subprocess_pgid")
+            if pid:
+                try:
+                    pid = int(pid)
+                except (TypeError, ValueError):
+                    pid = None
+            if pgid:
+                try:
+                    pgid = int(pgid)
+                except (TypeError, ValueError):
+                    pgid = None
+            if pid or pgid:
+                if _kill_orphaned_process(pid or 0, pgid):
+                    orphans_killed += 1
             job["status"] = "failed"
             job["error"] = job.get("error") or "runner_restarted_before_job_finished"
             job["finished_at"] = job.get("finished_at") or datetime.utcnow().isoformat()
             _persist_job_record(job)
         jobs[str(job["job_id"])] = job
+    if orphans_killed:
+        print(f"[cleanup] killed {orphans_killed} orphaned processes from previous session")
     return jobs
 
 
 _JOBS: dict[str, dict[str, Any]] = _load_persisted_jobs()
 print(f"[jobs] loaded {len(_JOBS)} persisted jobs")
+
+
+def _shutdown_handler(signum: int, frame: Any) -> None:
+    """
+    SIGTERM handler — kill all active child process groups before exiting.
+    This prevents the 'orphaned process' problem where runner restarts leave
+    zombie sublist3r/nmap/nuclei processes behind.
+    """
+    print(f"[runner] received signal {signum}, killing active child processes...")
+    with _JOBS_LOCK:
+        for job in list(_JOBS.values()):
+            if job.get("status") not in VOLATILE_JOB_STATES:
+                continue
+            pid = job.get("subprocess_pid")
+            pgid = job.get("subprocess_pgid")
+            if pgid:
+                try:
+                    os.killpg(int(pgid), signal.SIGKILL)
+                    print(f"[runner] killed pgid={pgid} (job {job.get('job_id')})")
+                except Exception:
+                    pass
+            elif pid:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    print(f"[runner] killed pid={pid} (job {job.get('job_id')})")
+                except Exception:
+                    pass
+    print("[runner] cleanup complete, exiting")
+    os._exit(0)
+
+
+# Register SIGTERM handler so Docker's graceful shutdown kills child processes
+signal.signal(signal.SIGTERM, _shutdown_handler)
 
 
 def _parse_iso_ts(value: Any) -> float | None:
@@ -254,11 +335,15 @@ def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
         job = _JOBS[job_id]
         job.update(fields)
         snapshot = dict(job)
-    # Write to disk only for terminal state, stdout arrival, or finished_at
-    # (the final bookkeeping write).  All other intermediate updates (running,
-    # workdir, command) stay in-memory — keeps crash-recovery intact while
-    # eliminating ~8 of the 11 disk writes per job.
-    if fields.get("status") in TERMINAL_STATES or "stdout" in fields or "finished_at" in fields:
+    # Write to disk for terminal state, stdout arrival, finished_at,
+    # or when subprocess_pid changes (critical for orphan-cleanup on restart).
+    # All other intermediate updates stay in-memory.
+    if (
+        fields.get("status") in TERMINAL_STATES
+        or "stdout" in fields
+        or "finished_at" in fields
+        or "subprocess_pid" in fields
+    ):
         _persist_job_record(snapshot)
     return snapshot
 
@@ -544,6 +629,28 @@ def _parse_output(profile: dict[str, Any], stdout: str) -> Any:
         return out
     if parser == "lines":
         return [l for l in stdout.splitlines() if l.strip()]
+    if parser == "zap_json":
+        # Extract the JSON block between [ZAP-REPORT-START] and [ZAP-REPORT-END]
+        try:
+            start_marker = "[ZAP-REPORT-START]"
+            end_marker = "[ZAP-REPORT-END]"
+            start_idx = stdout.find(start_marker)
+            end_idx = stdout.find(end_marker)
+            if start_idx != -1 and end_idx != -1:
+                json_block = stdout[start_idx + len(start_marker):end_idx].strip()
+                return json.loads(json_block)
+            # Fallback: try to find raw JSON in the output
+            for line in stdout.splitlines():
+                line = line.strip()
+                if line.startswith("{") and "alerts" in line:
+                    try:
+                        return json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            pass
+        # Return raw lines if JSON extraction fails
+        return {"alerts": [], "raw_output": stdout[:5000], "error": "zap_json parse failed"}
     return None
 
 
@@ -644,16 +751,40 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         command = " ".join(shlex.quote(a) for a in argv)
         _set_job_fields(job_id, stage="executing", command=command)
 
-        proc = subprocess.run(
+        # ── Launch with Popen to capture PID for orphan-cleanup tracking ────────
+        # start_new_session=True puts each tool in its own process group so we
+        # can kill the whole group (incl. grandchildren) on cleanup/timeout.
+        stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
-            text=True,
-            input=stdin_text,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_bytes else None,
+            start_new_session=True,   # own process group → pgid == pid at spawn
             cwd=str(workdir),
         )
-        stdout, stderr = proc.stdout or "", proc.stderr or ""
+        # Store PID and PGID in job record immediately so cleanup works on crash
+        try:
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            pgid = proc.pid
+        _set_job_fields(job_id, subprocess_pid=proc.pid, subprocess_pgid=pgid)
+
+        try:
+            raw_stdout, raw_stderr = proc.communicate(input=stdin_bytes, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill process group (catches all children) then drain remaining output
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            raw_stdout, raw_stderr = proc.communicate()
+            _set_job_fields(job_id, subprocess_pid=None, subprocess_pgid=None)
+            raise
+
+        _set_job_fields(job_id, subprocess_pid=None, subprocess_pgid=None)
+        stdout = raw_stdout.decode("utf-8", errors="replace") if raw_stdout else ""
+        stderr = raw_stderr.decode("utf-8", errors="replace") if raw_stderr else ""
         return_code = proc.returncode
 
         (workdir / "stdout.txt").write_text(stdout, encoding="utf-8", errors="replace")

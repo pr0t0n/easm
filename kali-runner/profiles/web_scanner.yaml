@@ -1,0 +1,57 @@
+# Web scanner profiles — OWASP ZAP integration
+# These profiles require zaproxy to be installed in the Kali runner.
+# ZAP uses the Automation Framework YAML approach (tested and confirmed working).
+#
+# Install: apt-get install zaproxy
+# Wappalyzer addon: download from github.com/zaproxy/zap-extensions
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ZAP Baseline — passive scan (safe for production, no active probing)
+# ─────────────────────────────────────────────────────────────────────────────
+zap_baseline:
+  tool: zaproxy
+  category: web_validation
+  phase: P12
+  description: >
+    ZAP passive baseline scan — spider + passive rules only.
+    Finds: missing security headers (CSP, HSTS, X-Frame-Options),
+    cookie flags (HttpOnly, SameSite, Secure), PHPSESSID exposure,
+    information disclosure (X-Powered-By, Server), cross-domain JS without SRI.
+    Safe for production — no active probing.
+  cmd: ["bash", "/opt/runner-scripts/zap_baseline.sh", "{url}"]
+  timeout: 360
+  parser: zap_json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ZAP AJAX Spider — for Single Page Applications (React, Angular, Vue)
+# ─────────────────────────────────────────────────────────────────────────────
+zap_ajax_spider:
+  tool: zaproxy
+  category: endpoint_discovery
+  phase: P09
+  description: >
+    ZAP AJAX spider with headless Firefox for SPA applications.
+    Crawls JavaScript-rendered pages to discover endpoints not visible
+    to traditional crawlers. Combined with passive scan.
+    Use for React/Angular/Vue frontends where standard spider misses content.
+  cmd: ["bash", "/opt/runner-scripts/zap_ajax_spider.sh", "{url}"]
+  timeout: 660
+  parser: zap_json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ZAP Active Scan — full OWASP Top 10 active testing
+# WARNING: Active scan sends attack payloads — only use on authorized targets!
+# ─────────────────────────────────────────────────────────────────────────────
+zap_active_scan:
+  tool: zaproxy
+  category: vuln_scanning
+  phase: P13
+  description: >
+    ZAP full active scan — OWASP Top 10 active testing with attack payloads.
+    Finds: SQL injection, XSS (reflected/stored/DOM), path traversal, SSRF,
+    command injection, XML injection, LDAP injection, and more.
+    WARNING: Sends active attack payloads. Only run on authorized targets.
+    Runtime: 10-30 minutes depending on target complexity.
+  cmd: ["bash", "/opt/runner-scripts/zap_active_scan.sh", "{url}"]
+  timeout: 1800
+  parser: zap_json

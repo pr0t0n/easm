@@ -1249,6 +1249,31 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             )
         ))
         
+        # ── Post-processing intelligence (correlação + consolidação) ──────────
+        try:
+            from app.services.finding_intelligence import run_all_intelligence as _intel
+            _intel_result = _intel(db, job.id)
+            db.add(ScanLog(
+                scan_job_id=job.id, source="intelligence", level="INFO",
+                message=f"Post-processing intelligence: {_intel_result}",
+            ))
+        except Exception as _ie:
+            import logging as _ilog
+            _ilog.getLogger(__name__).warning("finding_intelligence failed: %s", _ie)
+
+        # ── CVE enrichment (descrição + reprodução + payload) ─────────────────
+        try:
+            from app.services.cve_enricher import enrich_scan_cves as _enrich_cves
+            _enriched_cve_count = _enrich_cves(db, job.id, limit=200)
+            if _enriched_cve_count:
+                db.add(ScanLog(
+                    scan_job_id=job.id, source="cve_enricher", level="INFO",
+                    message=f"CVE enrichment: {_enriched_cve_count} findings enriquecidos com descrição e reprodução",
+                ))
+        except Exception as _ce:
+            import logging as _clog
+            _clog.getLogger(__name__).warning("cve_enricher failed: %s", _ce)
+
         db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message=f"Execucao [{scan_mode}] finalizada"))
         log_audit(
             db,
@@ -1780,6 +1805,27 @@ def poll_scan_work_item(item_id: int):
                     "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
                 )
 
+        # ── JS endpoint extraction + high-value probe seeding ───────────────
+        if item.status == "completed" and job and item.tool_name in (
+            "katana", "katana-js", "gospider", "hakrawler",
+        ):
+            try:
+                from app.services.js_endpoint_extractor import process_crawl_result as _crawl_proc
+                _crawl_summary = _crawl_proc(db, job.id, item.target, item.tool_name, dict(item.result or {}))
+                if _crawl_summary.get("probes_seeded", 0) > 0 or _crawl_summary.get("high_value_found", 0) > 0:
+                    import logging as _jlog
+                    _jlog.getLogger(__name__).info(
+                        "js_endpoint_extractor: target=%s urls=%d api_paths=%d high_value=%d probes=%d",
+                        item.target,
+                        _crawl_summary.get("urls", 0),
+                        _crawl_summary.get("api_paths", 0),
+                        _crawl_summary.get("high_value_found", 0),
+                        _crawl_summary.get("probes_seeded", 0),
+                    )
+            except Exception as _je:
+                import logging as _jlog2
+                _jlog2.getLogger(__name__).debug("js_endpoint_extractor failed: %s", _je)
+
         # ── Technology → CVE correlation (async Celery task) ─────────────────
         if item.status == "completed" and job and item.tool_name in (
             "httpx", "whatweb", "whatweb-basic", "nmap", "nmap-http", "nmap-ssl", "nmap-vuln",
@@ -1793,6 +1839,36 @@ def poll_scan_work_item(item_id: int):
                 )
             except Exception:
                 pass
+
+        # ── Target triage: se httpx ou naabu confirma target morto, cancela fila ──
+        if item.status == "completed" and item.tool_name in ("httpx", "naabu") and job:
+            try:
+                _result = dict(item.result or {})
+                _parsed = _result.get("parsed_result")
+                _stdout = str(_result.get("stdout_preview") or "")
+                _is_dead = False
+                # httpx: parsed_result é lista; se vazia ou todos failed=true → morto
+                if item.tool_name == "httpx":
+                    if isinstance(_parsed, list):
+                        live = [r for r in _parsed if isinstance(r, dict) and not r.get("failed")]
+                        _is_dead = len(live) == 0 and len(_parsed) > 0
+                    elif not _parsed and not _stdout.strip():
+                        _is_dead = True
+                # naabu: sem portas abertas em output → host pode estar morto/filtrado
+                elif item.tool_name == "naabu":
+                    _is_dead = not _stdout.strip() or "no ports found" in _stdout.lower()
+                if _is_dead:
+                    from app.services.scan_work_queue import triage_dead_target as _triage
+                    _cancelled = _triage(db, job.id, item.target, reason=f"{item.tool_name}_no_response")
+                    if _cancelled:
+                        import logging as _log2
+                        _log2.getLogger(__name__).info(
+                            "target_triage: cancelled %d items for dead target %s (tool=%s)",
+                            _cancelled, item.target, item.tool_name
+                        )
+            except Exception as _te:
+                import logging as _log3
+                _log3.getLogger(__name__).debug("triage check failed: %s", _te)
 
         if job:
             counts = work_queue_counts(db, item.scan_job_id)

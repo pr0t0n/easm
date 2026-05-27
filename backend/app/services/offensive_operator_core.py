@@ -507,6 +507,15 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("nuclei-spoofing", "nuclei_spoofing", ["email_spoofing", "dns_security"], "nuclei_parser"),
         # Subdomain Takeover (nuclei templates) — 49 reports: complement subjack
         entry("nuclei-takeover", "nuclei_takeover", ["subdomain_takeover", "passive_recon"], "nuclei_parser"),
+        # === OWASP ZAP — web application scanner ===
+        # ZAP Baseline: passive scan + quick spider (no active attacks), low noise, fast
+        entry("zap-baseline", "zap_baseline", ["web_validation", "passive_scan", "header_audit"], "zap_parser"),
+        # ZAP AJAX Spider: headless browser crawl for SPAs (React/Vue/Angular) — discovers routes
+        entry("zap-ajax", "zap_ajax_spider", ["endpoint_discovery", "crawling", "spa_crawl"], "zap_parser"),
+        # ZAP Active Scan: active fuzzing for OWASP Top 10 (SQLi, XSS, command injection, etc.)
+        entry("zap-active", "zap_active_scan", ["web_validation", "vuln_scanning", "active_scan"], "zap_parser"),
+        # ZAP API Scan: scans all endpoints discovered via OpenAPI/Swagger schema
+        entry("zap-api", "zap_api_scan", ["api_validation", "openapi_scan", "vuln_scanning"], "zap_parser"),
     ]
 
 
