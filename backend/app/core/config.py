@@ -73,15 +73,15 @@ class Settings(BaseSettings):
     scan_parallel_target_batch_size: int = 1024
     scan_parallel_wait_seconds: int = 60
     scan_work_queue_enabled: bool = True
-    scan_work_queue_dispatch_limit: int = 96
+    scan_work_queue_dispatch_limit: int = 300
     scan_work_queue_lease_seconds: int = 1800
-    # Capacidade por classe de recurso — alinhadas com KALI_MAX_PARALLEL=24.
-    # Com 2 scans simultâneos, total = 2 × (12+8+3+2) = 50, aceitável para
-    # kali_runner com 24 workers (overflow fica na fila interna do kali).
-    scan_work_queue_cap_light: int = 12
-    scan_work_queue_cap_medium: int = 8
-    scan_work_queue_cap_heavy: int = 3
-    scan_work_queue_cap_oob: int = 2
+    # Capacidade por classe de recurso — alinhadas com KALI_MAX_PARALLEL=100.
+    # Com 1 scan, total = 50+30+12+8 = 100, saturando os 100 workers do kali.
+    # Com 2 scans simultâneos, total = 2 × 50 = 100, ainda dentro dos limites.
+    scan_work_queue_cap_light: int = 50
+    scan_work_queue_cap_medium: int = 30
+    scan_work_queue_cap_heavy: int = 12
+    scan_work_queue_cap_oob: int = 8
 
 
 settings = Settings()
