@@ -76,11 +76,13 @@ class Settings(BaseSettings):
     scan_work_queue_dispatch_limit: int = 300
     scan_work_queue_lease_seconds: int = 1800
     # Capacidade por classe de recurso — alinhadas com KALI_MAX_PARALLEL=100.
-    # Com 1 scan, total = 50+30+12+8 = 100, saturando os 100 workers do kali.
-    # Com 2 scans simultâneos, total = 2 × 50 = 100, ainda dentro dos limites.
-    scan_work_queue_cap_light: int = 50
-    scan_work_queue_cap_medium: int = 30
-    scan_work_queue_cap_heavy: int = 12
+    # cap_light=60: httpx/whatweb/subfinder — leves, I/O-bound, escalam bem.
+    # cap_medium=40: nuclei/ffuf/dalfox — CPU+net moderado.
+    # cap_heavy=24: nmap/wapiti/sqlmap — CPU pesado; 24 = ~4 ondas para 50 targets.
+    # cap_oob=8:   interactsh — callbacks externos, limitado por upstream.
+    scan_work_queue_cap_light: int = 60
+    scan_work_queue_cap_medium: int = 40
+    scan_work_queue_cap_heavy: int = 24
     scan_work_queue_cap_oob: int = 8
 
 

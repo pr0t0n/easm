@@ -1651,6 +1651,12 @@ def execute_scan_work_item(item_id: int):
         if _is_batch:
             execution["targets"] = _batch_targets
 
+        # ── Adaptive timeout: respect per-item override (wapiti/sqlmap port-scaled) ──
+        _timeout_override = _item_meta.get("timeout_override")
+        if _timeout_override:
+            execution["arguments"]["timeout"] = int(_timeout_override)
+            execution["timeout_hint"] = int(_timeout_override)
+
         response = requests.post(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/submit",
             json=execution,
@@ -1851,6 +1857,26 @@ def poll_scan_work_item(item_id: int):
                 _log.getLogger(__name__).warning(
                     "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
                 )
+
+        # ── P09 triage: cancela wapiti/sqlmap/dalfox para targets sem findings ──
+        # Após o nuclei (P09) completar, qualquer target sem achados medium/high/critical
+        # não merece teste de injeção ativo. Reduz de 50 → N targets para P10/P12.
+        if item.status == "completed" and job and item.phase_id == "P09" and item.tool_name.startswith("nuclei"):
+            try:
+                from app.services.scan_work_queue import triage_post_p09_injection as _triage_p09
+                _triage_result = _triage_p09(db, job.id)
+                if _triage_result.get("cancelled", 0) > 0:
+                    import logging as _trilog
+                    _trilog.getLogger(__name__).info(
+                        "triage_post_p09 scan=%d cancelled=%d kept=%d targets_with_findings=%d",
+                        job.id,
+                        _triage_result["cancelled"],
+                        _triage_result["kept"],
+                        len(_triage_result.get("targets_with_findings", [])),
+                    )
+            except Exception as _triage_err:
+                import logging as _trilog2
+                _trilog2.getLogger(__name__).debug("triage_post_p09 failed: %s", _triage_err)
 
         # ── JS endpoint extraction + high-value probe seeding ───────────────
         if item.status == "completed" and job and item.tool_name in (

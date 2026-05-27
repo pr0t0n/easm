@@ -257,17 +257,29 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
 
 
 # ── T4: Batch-capable tools — run once for ALL targets instead of N serial jobs ─
-# naabu/nmap/httpx/dnsx/nuclei support -iL (targets file), so we create ONE
-# work item with target="__batch__" and item_metadata["batch_targets"]=[...].
-# This drops e.g. 279 nuclei items → 1 item; the executor passes targets list
-# to execute_via_kali which already handles batch dispatch.
+# Tools that support -l / --input-file / stdin list mode get ONE work item with
+# target="__batch__" and item_metadata["batch_targets"]=[...].
+# The MCP server writes a targets file and passes it to the tool natively.
+#
+# Nuclei: -l targets.txt  → 1 item replaces 50; runs templates against ALL targets in one process
+# naabu:  -iL targets.txt → 1 port-scan job for all hosts
+# httpx:  -l targets.txt  → 1 probe for all hosts
+# whatweb: --input-file   → 1 fingerprint job for all hosts
+# All nuclei-* variants share the same nuclei binary → all batch equally well
 BATCH_CAPABLE_TOOLS: frozenset[str] = frozenset({
-    "naabu", "nmap", "httpx", "dnsx", "nuclei",
-    "nmap-vulscan", "subjack",
-    # nuclei variants also batch well
+    # Core network tools
+    "naabu", "nmap", "nmap-vulscan", "httpx", "dnsx", "subjack",
+    # Fingerprinting (support --input-file or equivalent)
+    "whatweb", "whatweb-basic",
+    # Nuclei + every variant — all use nuclei -l under the hood
+    "nuclei",
     "nuclei-cves", "nuclei-headers", "nuclei-exposure", "nuclei-takeover",
     "nuclei-cors", "nuclei-crlf", "nuclei-redirect", "nuclei-spoofing",
     "nuclei-graphql", "nuclei-jwt", "nuclei-cloud",
+    "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
+    "nuclei-ssti", "nuclei-xxe", "nuclei-idor", "nuclei-csrf",
+    "nuclei-race", "nuclei-rce", "nuclei-auth",
+    "nuclei-deserialization", "nuclei-clickjacking",
 })
 
 
@@ -368,6 +380,25 @@ def enqueue_scan_work_items(
             db.rollback()
             skipped += 1
 
+    # ── Slow tools that get adaptive timeout based on preflight port count ────
+    # wapiti/sqlmap are heavy tools that scale linearly with open ports.
+    # Port count 0–1 → 120s; 2–3 → 240s; 4–6 → 360s; 7+ → 600s (max).
+    _ADAPTIVE_TIMEOUT_TOOLS = {"wapiti", "sqlmap", "nikto"}
+
+    def _adaptive_timeout(tool: str, target: str) -> int | None:
+        if tool not in _ADAPTIVE_TIMEOUT_TOOLS:
+            return None
+        target_preflight = ((state.get("preflight") or {}).get("targets") or {}).get(target) or {}
+        _ports = target_preflight.get("ports") or target_preflight.get("open_ports") or []
+        _port_count = len(_ports) if isinstance(_ports, (list, tuple)) else 0
+        if _port_count <= 1:
+            return 120
+        if _port_count <= 3:
+            return 240
+        if _port_count <= 6:
+            return 360
+        return 600
+
     # ── Pass 3: create individual items for non-batch tools ───────────────────
     for (phase_id, tool, target) in single_items:
         already = db.query(ScanWorkItem.id).filter(
@@ -382,6 +413,10 @@ def enqueue_scan_work_items(
         rc = resource_class_for_tool(tool)
         base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
         risk_boost = _high_risk_priority_boost(target)
+        _item_meta: dict[str, Any] = {"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0}
+        _to = _adaptive_timeout(tool, target)
+        if _to is not None:
+            _item_meta["timeout_override"] = _to
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
@@ -392,7 +427,7 @@ def enqueue_scan_work_items(
             priority=max(1, base_priority + risk_boost),
             status="queued",
             max_attempts=2,
-            item_metadata={"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0},
+            item_metadata=_item_meta,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -544,6 +579,111 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
     if count:
         db.commit()
     return count
+
+
+def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
+    """Cancela P10/P12/P13 para targets SEM findings críticos/altos do nuclei (P09).
+
+    Lógica: se o nuclei não encontrou nada interessante num target, rodar wapiti/sqlmap/dalfox
+    nele é desperdício de 8–15 min/target. Mantemos apenas:
+      - Targets com achados HIGH ou CRITICAL do nuclei/P09
+      - Crown Jewels (independente de findings — merecem teste completo)
+      - Batch items (target="__batch__") — deixa o executor decidir
+
+    Chamada após qualquer item de P09 (nuclei batch) ser concluído.
+    """
+    from app.models.models import Finding
+
+    _P09_TOOLS = {
+        "nuclei", "nuclei-cves", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
+        "nuclei-ssti", "nuclei-rce", "nuclei-exposure", "nuclei-idor", "nuclei-takeover",
+        "nuclei-headers", "nuclei-cors", "nuclei-auth",
+    }
+    _HIGH_SEV = {"critical", "high", "medium"}
+    _INJECTION_PHASES = {"P10", "P12", "P13"}
+    _HIGH_COST_TOOLS = {"wapiti", "sqlmap", "dalfox", "nikto", "wpscan", "zap-active", "zap-api"}
+
+    # 1. Subdomínios com achados medium/high/critical de ferramentas P09
+    finding_rows = (
+        db.query(Finding.subdomain, Finding.domain)
+        .filter(
+            Finding.scan_job_id == scan_id,
+            Finding.severity.in_(list(_HIGH_SEV)),
+            Finding.tool.in_(list(_P09_TOOLS)),
+        )
+        .distinct()
+        .all()
+    )
+    targets_with_findings: set[str] = set()
+    for row in finding_rows:
+        if row.subdomain:
+            targets_with_findings.add(str(row.subdomain))
+        if row.domain:
+            targets_with_findings.add(str(row.domain))
+
+    # 2. Crown Jewels sempre mantidos — alto valor independe de findings
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if job:
+        _cj_list = (dict(job.state_data or {})).get("crown_jewels") or []
+        for cj in _cj_list:
+            t = cj.get("target") or cj.get("subdomain") or ""
+            if t:
+                targets_with_findings.add(str(t))
+
+    # 3. Cancela itens individuais (não-batch) de P10/P12/P13 sem evidência
+    items_to_cancel = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.phase_id.in_(list(_INJECTION_PHASES)),
+            ScanWorkItem.tool_name.in_(list(_HIGH_COST_TOOLS)),
+            ScanWorkItem.status.in_(["queued", "retry"]),
+            ScanWorkItem.target != "__batch__",
+            ~ScanWorkItem.target.in_(list(targets_with_findings)) if targets_with_findings else text("true"),
+        )
+        .all()
+    )
+
+    cancelled = 0
+    now = datetime.utcnow()
+    for wi in items_to_cancel:
+        wi.status = "skipped"
+        wi.result = {
+            "skipped_reason": "triage_post_p09_no_p09_findings",
+            "targets_with_findings_count": len(targets_with_findings),
+            "triage_at": now.isoformat(),
+        }
+        wi.updated_at = now
+        cancelled += 1
+
+    if cancelled:
+        db.add(ScanLog(
+            scan_job_id=scan_id,
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"triage_post_p09 scan={scan_id} "
+                f"targets_with_findings={len(targets_with_findings)} "
+                f"cancelled={cancelled}"
+            ),
+        ))
+        db.commit()
+
+    kept = (
+        db.query(func.count(ScanWorkItem.id))
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.phase_id.in_(list(_INJECTION_PHASES)),
+            ScanWorkItem.status.in_(["queued", "retry", "submitted", "running", "dispatched"]),
+        )
+        .scalar() or 0
+    )
+
+    return {
+        "cancelled": cancelled,
+        "kept": int(kept),
+        "targets_with_findings": sorted(targets_with_findings),
+    }
 
 
 def has_pending_work(db: Session, scan_id: int) -> bool:
