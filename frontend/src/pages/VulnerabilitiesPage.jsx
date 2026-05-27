@@ -111,19 +111,6 @@ function deriveIntelligence(item) {
   return { mitre, owasp, iso, cis, pci, discoveryMethod, realProblem, envImpact };
 }
 
-function extractBas(item) {
-  const details = item?.details && typeof item.details === "object" ? item.details : {};
-  const technique = details.adversary_technique && typeof details.adversary_technique === "object" ? details.adversary_technique : {};
-  const pack = details.detection_proof_pack && typeof details.detection_proof_pack === "object" ? details.detection_proof_pack : {};
-  const expected = Array.isArray(details.expected_telemetry) ? details.expected_telemetry : [];
-  return {
-    id: sanitizeText(technique.id || details.adversary_technique_id || ""),
-    name: sanitizeText(technique.name || details.adversary_technique_name || ""),
-    status: sanitizeText(pack.detection_status || details.detection_status || "unknown"),
-    sources: expected.map((s) => sanitizeText(s?.source || "")).filter(Boolean),
-  };
-}
-
 function locationForFinding(item) {
   const details = item?.details && typeof item.details === "object" ? item.details : {};
   const nested = details.details && typeof details.details === "object" ? details.details : {};
@@ -159,12 +146,6 @@ function locationForFinding(item) {
   return { primary: primary || "—", secondary };
 }
 
-const DETECTION_TONE = {
-  detected: "b-low",
-  partial: "b-medium",
-  gap: "b-critical",
-  unknown: "b-neutral",
-};
 
 export default function VulnerabilitiesPage() {
   const [rows, setRows] = useState([]);
@@ -291,7 +272,7 @@ export default function VulnerabilitiesPage() {
         <div className="t-head">
           <div>
             <h3>Vulnerabilidades</h3>
-            <div className="sub">base real de findings coletados pelos scans · severidade, FAIR, AGE e BAS</div>
+            <div className="sub">base real de findings coletados pelos scans · severidade, FAIR e AGE</div>
           </div>
           <div className="t-tools">
             <select value={targetQuery} onChange={(e) => setTargetQuery(e.target.value)}
@@ -363,14 +344,11 @@ export default function VulnerabilitiesPage() {
                   <th>Severidade</th>
                   <th>Alvo</th>
                   <th>Ferramenta</th>
-                  <th>BAS</th>
-                  <th>Detecção</th>
                   <th>Data</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((item) => {
-                  const bas = extractBas(item);
                   const isExpanded = expandedId === item.id;
                   const repro = item.details?.reproduction || {};
                   const toolEvidence = Array.isArray(item.details?.tool_evidence) ? item.details.tool_evidence : [];
@@ -402,26 +380,13 @@ export default function VulnerabilitiesPage() {
                         )}
                       </td>
                       <td className="mono-sm" style={{ color: "var(--brand-700)" }}>{item.tool || item.details?.tool || "—"}</td>
-                      <td style={{ maxWidth: 200 }}>
-                        {bas.id || bas.name ? (
-                          <div>
-                            <div className="mono-sm" style={{ color: "var(--sev-info-text)" }}>{bas.id || "—"}</div>
-                            <div className="mono-sm muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={bas.name}>
-                              {bas.name || ""}
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td><span className={`b ${DETECTION_TONE[bas.status] || "b-neutral"}`}>{bas.status}</span></td>
                       <td className="mono-sm muted" style={{ whiteSpace: "nowrap" }}>
                         {item.created_at ? new Date(item.created_at).toLocaleDateString("pt-BR") : "—"}
                       </td>
                     </tr>
                     {isExpanded && intel && (
                       <tr>
-                        <td colSpan={11} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
+                        <td colSpan={9} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 18, fontSize: 13 }}>
 
                             {/* ── How it was discovered ─────────────────────── */}

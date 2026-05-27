@@ -1445,19 +1445,108 @@ body {
     overflow: visible;
   }
 
+  /* ── Cada grupo de vulnerabilidades: sem quebra interna forçada ── */
   .vuln-group {
     page-break-inside: auto;
     break-inside: auto;
   }
 
-  .vuln-card {
-    page-break-inside: avoid;
-    break-inside: avoid;
-    margin-bottom: 6mm;
+  /* ── Cabeçalho de grupo: junto com o primeiro card ── */
+  .vuln-group-header {
+    page-break-after: avoid;
+    break-after: avoid;
   }
 
-  .vuln-card-body { display: block !important; }
+  /* ── Cada card = exatamente 1 página A4 ──────────────────────────
+     O conteúdo visível (main) cabe dentro dos ~257mm de altura útil
+     (297mm - 20mm margin page - 20mm padding page = 257mm).
+     O corpo técnico (forensic) fica oculto para não exceder a página.
+  ────────────────────────────────────────────────────────────────── */
+  .vuln-card {
+    page-break-before: always;
+    break-before: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin: 0;
+    padding: 0;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    /* ocupa toda a página */
+    min-height: calc(277mm - 28mm);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Oculta detalhes forenses (reprodução, evidência bruta, frameworks) no PDF
+     — mantém só o conteúdo resolutivo que cabe numa página */
+  .vuln-card-body { display: none !important; }
   .vuln-toggle { display: none; }
+
+  /* ── Compacta fontes/espaçamentos para caber em A4 ── */
+  .vuln-card-header {
+    padding: 10px 14px !important;
+  }
+  .vuln-card-main {
+    padding: 0 14px 14px !important;
+    gap: 10px !important;
+    flex: 1;
+  }
+  .vuln-cve-block,
+  .vuln-affected-block,
+  .vuln-explanation-exec,
+  .vuln-resolution-block,
+  .vuln-explanation-tech {
+    padding: 9px 12px !important;
+  }
+  .vuln-section-label {
+    font-size: 0.68rem !important;
+    margin-bottom: 5px !important;
+  }
+  .vuln-explanation-text,
+  .vuln-resolution-text {
+    font-size: 0.78rem !important;
+    line-height: 1.45 !important;
+  }
+  .vuln-explanation-tech-text {
+    font-size: 0.72rem !important;
+    line-height: 1.4 !important;
+  }
+  .vuln-resolution-list {
+    font-size: 0.76rem !important;
+    line-height: 1.5 !important;
+    margin-top: 5px !important;
+  }
+  .vuln-cve-desc {
+    font-size: 0.75rem !important;
+  }
+  .vuln-title {
+    font-size: 0.95rem !important;
+  }
+  .affected-pill {
+    font-size: 0.68rem !important;
+    padding: 2px 7px !important;
+  }
+
+  /* ── Benchmark WEF: mantém a seção inteira numa só página ── */
+  #page-vulnerabilities {
+    page-break-before: always;
+    break-before: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .benchmark-cri-detail,
+  .benchmark-average-box,
+  .benchmark-segment-box {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .method-table,
+  .cri-calc-table {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    font-size: 0.78rem !important;
+  }
+
   .handoff-grid,
   .framework-grid { grid-template-columns: 1fr; }
 
@@ -1468,7 +1557,6 @@ body {
   .exec-intro,
   .kpi-grid,
   .category-table-wrap,
-  .method-table,
   .glossary-grid,
   .report-footer-box {
     page-break-inside: avoid;
