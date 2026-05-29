@@ -632,6 +632,43 @@ def generate_pentest_report(
           {'<div style="background:#fff5f5;padding:10px;border-radius:6px"><strong style="font-size:12px;color:#c0392b">🛡 Blue Team:</strong><p style="font-size:12px;margin-top:4px">' + recommendation + '</p></div>' if recommendation else ''}
         </div>"""
 
+    # ── Candidatos HIGH/CRITICAL aguardando validação P21 ────────────────────
+    # These were detected but not yet confirmed by sandbox — may be FPs or real.
+    # Shown as "Pending Validation" so the Blue Team knows what's in the queue.
+    _hc_candidates = [
+        f for f in candidate_list
+        if str(f.severity or "").lower() in ("critical", "high")
+        and not dict(f.details or {}).get("chain_finding")
+    ]
+    candidates_section = ""
+    if _hc_candidates:
+        _cand_rows = "".join(
+            f'<tr>'
+            f'<td style="font-size:12px;max-width:300px">{_f.title[:100] if _f.title else ""}</td>'
+            f'<td><span style="background:{(_sev_color(_f.severity or "info"))};color:white;'
+            f'padding:1px 6px;border-radius:3px;font-size:10px">{(_f.severity or "").upper()}</span></td>'
+            f'<td style="font-size:11px;color:#666">{str(_f.tool or "")[:30]}</td>'
+            f'<td style="font-size:11px;color:#666;max-width:200px;overflow:hidden;text-overflow:ellipsis">'
+            f'{str(_f.url or _f.domain or "")[:80]}</td>'
+            f'<td style="font-size:11px;color:#f39c12;font-weight:600">⏳ Aguardando P21</td>'
+            f'</tr>'
+            for _f in _hc_candidates[:25]
+        )
+        candidates_section = (
+            '<div class="section" style="border-top:4px solid #f39c12">'
+            f'<h2 style="color:#f39c12">⏳ HIGH/CRITICAL Aguardando Validação P21 ({len(_hc_candidates)} findings)</h2>'
+            '<p style="font-size:12px;color:#666;margin-bottom:12px">'
+            'Estas vulnerabilidades foram detectadas mas ainda <strong>não tiveram PoC de sandbox executado</strong>. '
+            'Podem ser falsos positivos — aguardam execução do P21 para promoção a Confirmado ou descarte como Refutado. '
+            'Não inclua estas no relatório executivo até confirmação.</p>'
+            '<table class="findings-table">'
+            '<thead><tr><th>Vulnerabilidade</th><th>Severidade</th><th>Ferramenta</th><th>Alvo</th><th>Status</th></tr></thead>'
+            f'<tbody>{_cand_rows}</tbody>'
+            '</table>'
+            + (f'<p style="font-size:11px;color:#999;margin-top:8px">… e mais {len(_hc_candidates) - 25} findings não exibidos.</p>' if len(_hc_candidates) > 25 else '')
+            + '</div>'
+        )
+
     # ── Pentest sections ──────────────────────────────────────────────────────
     pentest_confirmed_section = ""
     if confirmed_list:
@@ -954,6 +991,9 @@ def generate_pentest_report(
 
   <!-- BLUETEAM: ACTION MATRIX -->
   {blueteam_section}
+
+  <!-- CANDIDATES AWAITING P21 VALIDATION -->
+  {candidates_section}
 
   <!-- PER-TARGET RISK MATRIX -->
   {target_risk_section}
