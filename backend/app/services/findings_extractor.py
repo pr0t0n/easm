@@ -1500,6 +1500,19 @@ def persist_findings_from_work_item(
             except Exception:
                 pass
 
+        # ── PoC Sandbox Execution (DeepAudit pattern) ─────────────────────────
+        # HIGH/CRITICAL candidates → schedule P21 validation item.
+        # Eliminates false positives: each HIGH/CRITICAL requires proof-of-concept
+        # execution before appearing in the pentest report as confirmed.
+        # P21 item completes → T1 block (tasks.py:2335) promotes to 'confirmed'.
+        # P21 item fails    → T1 block marks as 'refuted' (FP suppressed).
+        if severity in ("critical", "high") and v_status != "confirmed":
+            try:
+                from app.services.poc_validator import schedule_poc_validation as _schedule_poc
+                _schedule_poc(db, finding, job)
+            except Exception:
+                pass
+
     if created:
         db.commit()
 

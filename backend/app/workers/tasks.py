@@ -2059,6 +2059,34 @@ def poll_scan_work_item(item_id: int):
                                 job.id, item.phase_id, len(_unblock_targets), _unblocked,
                             )
                             db.flush()
+
+                        # ── PoC Batch Scheduler: P09 → P21 ──────────────────────
+                        # After P09 (reconnaissance triage) gate unblocks exploitation
+                        # phases, bulk-schedule PoC validation items for any HIGH/CRITICAL
+                        # candidate findings accumulated during P01-P09.
+                        # This catches findings created before poc_validator was wired in,
+                        # and ensures ALL reconnaissance findings get a validation chance
+                        # before the pentest report is generated.
+                        if item.phase_id == "P09":
+                            try:
+                                from app.services.poc_validator import batch_schedule_poc_validations as _batch_poc
+                                _poc_result = _batch_poc(db, job.id, max_findings=30)
+                                if _poc_result.get("scheduled", 0) > 0:
+                                    import logging as _poclog
+                                    _poclog.getLogger(__name__).info(
+                                        "poc_batch_scheduler: scan=%d scheduled=%d "
+                                        "skipped_confirmed=%d skipped_cap=%d skipped_no_tool=%d",
+                                        job.id,
+                                        _poc_result.get("scheduled", 0),
+                                        _poc_result.get("skipped_confirmed", 0),
+                                        _poc_result.get("skipped_cap", 0),
+                                        _poc_result.get("skipped_no_tool", 0),
+                                    )
+                            except Exception as _pocbatch_err:
+                                import logging as _pocbatchlog
+                                _pocbatchlog.getLogger(__name__).debug(
+                                    "poc_batch_scheduler failed scan=%d: %s", job.id, _pocbatch_err
+                                )
             except Exception as _gate_err:
                 import logging as _gatelog2
                 _gatelog2.getLogger(__name__).debug("phase_gate_unblock failed: %s", _gate_err)
