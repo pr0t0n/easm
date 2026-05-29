@@ -1219,6 +1219,33 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.flush()
         # ───────────────────────────────────────────────────────────────────────
 
+        # ── Guard: only mark completed when the work queue is truly done ─────────
+        # The LangGraph engine reaches this point when the graph finishes, but the
+        # capacity_work_queue engine may still have active or blocked items running
+        # asynchronously. Marking 'completed' here while blocked items exist causes
+        # the scan to appear done while P08-P22 phases are still queued.
+        _wq_engine_active = str(final_state.get("parallel_engine") or "") == "capacity_work_queue"
+        if _wq_engine_active:
+            try:
+                from app.services.scan_work_queue import has_pending_work as _hpw
+                if _hpw(db, job.id):
+                    # Work queue still has items — checkpoint and let the dispatcher
+                    # mark completion when everything truly finishes.
+                    import logging as _wq_guard_log
+                    _wq_guard_log.getLogger(__name__).info(
+                        "langgraph_completion_guard: scan=%d work_queue not empty — "
+                        "deferring completion to dispatcher", job.id
+                    )
+                    job.current_step = "5. ExecutiveAnalysis"
+                    job.state_data = final_state
+                    db.commit()
+                    return {"checkpointed": True, "reason": "work_queue_still_active"}
+            except Exception as _guard_exc:
+                import logging as _wq_guard_log2
+                _wq_guard_log2.getLogger(__name__).debug(
+                    "langgraph_completion_guard failed: %s", _guard_exc
+                )
+
         progress_ctx["computed_progress"] = progress
         progress_ctx["ui_progress"] = 100
         final_state["mission_progress_context"] = progress_ctx
@@ -1631,6 +1658,41 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
 
         for item_id in item_ids:
             execute_scan_work_item.delay(item_id)
+
+        # ── Auto-retry timed-out items that haven't exceeded max_attempts ────────
+        # Items with status='timeout' are NOT automatically retried — they stay
+        # terminal and block their downstream gate phases indefinitely.
+        # Here we re-queue them (resetting lease) if attempts < max_attempts so
+        # the dispatch loop picks them up on the next cycle.
+        try:
+            from app.models.models import ScanWorkItem as _SWI_retry
+            from datetime import datetime as _dt_retry
+            _retried = 0
+            _timeout_items = (
+                db.query(_SWI_retry)
+                .filter(
+                    _SWI_retry.scan_job_id == scan_id,
+                    _SWI_retry.status == "timeout",
+                    _SWI_retry.attempts < _SWI_retry.max_attempts,
+                )
+                .limit(200)
+                .all()
+            )
+            for _ti in _timeout_items:
+                _ti.status = "queued"
+                _ti.lease_until = None
+                _ti.last_error = f"[auto-retry after timeout attempt {_ti.attempts}]"
+                _ti.updated_at = _dt_retry.utcnow()
+                _retried += 1
+            if _retried:
+                import logging as _retry_log
+                _retry_log.getLogger(__name__).info(
+                    "auto_retry_timeouts: scan=%d requeued=%d items", scan_id, _retried
+                )
+        except Exception as _retry_exc:
+            import logging as _retry_log2
+            _retry_log2.getLogger(__name__).debug("auto_retry_timeouts failed: %s", _retry_exc)
+
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
         state["work_queue_counts"] = counts

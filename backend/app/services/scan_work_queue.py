@@ -303,6 +303,11 @@ PHASE_GATE: dict[str, str | None] = {
 _BLOCKED_AT_CREATE: frozenset[str] = frozenset(
     ph for ph, gate in PHASE_GATE.items() if gate is not None
 )
+# Invariant: phases with gate=None must NOT be in _BLOCKED_AT_CREATE.
+# P02 and P18 start immediately — never created as 'blocked'.
+# Violation would cause items to stall indefinitely (no gate fires to unblock them).
+assert "P02" not in _BLOCKED_AT_CREATE, "P02 has gate=None but is in _BLOCKED_AT_CREATE"
+assert "P18" not in _BLOCKED_AT_CREATE, "P18 has gate=None but is in _BLOCKED_AT_CREATE"
 
 # Mapa inverso: qual fase ao completar deve desbloquear quais fases?
 _GATE_UNLOCKS: dict[str, list[str]] = {}
