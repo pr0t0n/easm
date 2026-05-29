@@ -803,11 +803,18 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
 
 
 def has_pending_work(db: Session, scan_id: int) -> bool:
+    """Return True if there is any work left to do — active OR blocked.
+
+    'blocked' items are waiting for their gate phase to complete.
+    They are NOT terminal — they will become 'queued' once their gate
+    fires. Including them prevents premature scan completion when the
+    active queue temporarily drains while blocked items wait.
+    """
     now = datetime.utcnow()
     return db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,
         or_(
-            ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted"]),
+            ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted", "blocked"]),
             and_(ScanWorkItem.status.in_(["dispatched", "running", "submitted"]), ScanWorkItem.lease_until <= now),
         ),
     ).first() is not None
