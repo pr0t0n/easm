@@ -616,6 +616,27 @@ def _extract_nuclei_findings(
         cve_match = re.search(r"CVE-\d{4}-\d+", template_id + " " + " ".join(tags), re.IGNORECASE)
         cve_id = cve_match.group(0).upper() if cve_match else None
 
+        # ── CVSS score from nuclei classification block ────────────────────────
+        # Nuclei templates include CVSS in info.classification.cvss-score
+        # Example: {"info": {"classification": {"cvss-score": 9.8, "cvss-metrics": "CVSS:3.1/AV:N/..."}}}
+        cvss_score: float | None = None
+        try:
+            _cls = dict(info.get("classification") or {})
+            _cs_raw = (
+                _cls.get("cvss-score")
+                or _cls.get("cvss_score")
+                or info.get("cvss-score")
+                or info.get("cvss_score")
+            )
+            if _cs_raw is not None:
+                cvss_score = float(_cs_raw)
+        except (ValueError, TypeError):
+            pass
+
+        # ── Extracted result fields (matched content, curl output, etc.) ──────
+        extracted_results = dict(row.get("extracted-results") or row.get("extracted_results") or {})
+        curl_command = str(row.get("curl-command") or row.get("curl_command") or "").strip()
+
         findings.append({
             "title": name or template_id,
             "severity": severity,
@@ -635,6 +656,9 @@ def _extract_nuclei_findings(
                 "cve_id": cve_id,
                 "matched_at": matched_at,
                 "owasp_category": _nuclei_tags_to_owasp(tags),
+                "cvss": cvss_score,
+                "curl_command": curl_command or None,
+                "extracted_results": extracted_results or None,
             },
         })
 

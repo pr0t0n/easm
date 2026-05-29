@@ -455,6 +455,47 @@ def generate_pentest_report(
     conf_high = categorized.get("total_confirmed_high", 0)
     conf_medium = sum(1 for f in confirmed_list if f.severity == "medium")
 
+    # ── P21 PoC sandbox validation stats ─────────────────────────────────────
+    p21_total = p21_confirmed = p21_refuted = p21_pending = 0
+    try:
+        from app.models.models import ScanWorkItem as _SWI_rpt
+        _p21_items = (
+            db.query(_SWI_rpt)
+            .filter(_SWI_rpt.scan_job_id == scan_id, _SWI_rpt.phase_id == "P21")
+            .all()
+        )
+        p21_total = len(_p21_items)
+        p21_confirmed = sum(1 for _i in _p21_items if _i.status in ("completed", "done"))
+        p21_refuted = sum(1 for _i in _p21_items if _i.status == "failed")
+        p21_pending = sum(1 for _i in _p21_items if _i.status not in ("completed", "done", "failed"))
+    except Exception:
+        pass
+
+    # ── Kill chain phase coverage ─────────────────────────────────────────────
+    # Query phase completion rates for the scan progress strip
+    phase_coverage: dict[str, dict[str, int]] = {}
+    try:
+        from app.models.models import ScanWorkItem as _SWI_ph
+        import sqlalchemy as _sa
+        _ph_rows = (
+            db.query(_SWI_ph.phase_id, _SWI_ph.status, _sa.func.count(_SWI_ph.id))
+            .filter(_SWI_ph.scan_job_id == scan_id)
+            .group_by(_SWI_ph.phase_id, _SWI_ph.status)
+            .all()
+        )
+        for _ph_id, _ph_status, _ph_cnt in _ph_rows:
+            if _ph_id not in phase_coverage:
+                phase_coverage[_ph_id] = {"total": 0, "completed": 0, "failed": 0, "queued": 0}
+            phase_coverage[_ph_id]["total"] += _ph_cnt
+            if _ph_status in ("completed", "done"):
+                phase_coverage[_ph_id]["completed"] += _ph_cnt
+            elif _ph_status == "failed":
+                phase_coverage[_ph_id]["failed"] += _ph_cnt
+            else:
+                phase_coverage[_ph_id]["queued"] += _ph_cnt
+    except Exception:
+        pass
+
     # ── Helpers ───────────────────────────────────────────────────────────────
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
     domains_str = job.target_query or str(scan_id)
@@ -487,18 +528,60 @@ def generate_pentest_report(
         sev = str(f.severity or "info")
         cve_str = f'<code style="color:#e74c3c;font-size:11px">{f.cve}</code>' if f.cve else ""
         conf_str = f'<span style="color:#666;font-size:11px">Confiança: {f.confidence_score}%</span>' if f.confidence_score else ""
+        curl_cmd = str(det.get("curl_command") or "").strip()
 
-        # Reproduction command (tool-specific)
+        # ── Pull real P21 sandbox validation output ───────────────────────────
+        # Query the P21 ScanWorkItem that verified this exact finding.
+        # If found and complete, display actual tool output as evidence — not a template.
+        poc_evidence_html = ""
+        try:
+            from app.models.models import ScanWorkItem as _SWI_block
+            _poc = (
+                db.query(_SWI_block)
+                .filter(
+                    _SWI_block.scan_job_id == job.id,
+                    _SWI_block.phase_id == "P21",
+                    _SWI_block.item_metadata["verifies_finding_id"].astext == str(f.id),
+                )
+                .first()
+            )
+            if _poc:
+                _pr = dict(_poc.result or {})
+                _poc_out = str(
+                    _pr.get("stdout_full") or _pr.get("stdout_preview") or ""
+                )[:1200].strip()
+                _poc_status = str(_poc.status or "")
+                _poc_tool = str(_poc.tool_name or tool_name)
+                _is_done = _poc_status in ("completed", "done")
+                _is_fail = _poc_status == "failed"
+                _poc_icon = "✅" if _is_done else ("❌" if _is_fail else "⏳")
+                _poc_label = "PoC Confirmado" if _is_done else ("PoC Refutado — revisão manual" if _is_fail else "PoC em andamento")
+                _border_color = "#27ae60" if _is_done else ("#c0392b" if _is_fail else "#f39c12")
+                if _poc_out:
+                    _safe = _poc_out.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    poc_evidence_html = f'''<div style="margin-top:10px;border-left:3px solid {_border_color};padding-left:10px">
+              <strong style="font-size:12px">{_poc_icon} Evidência Sandbox — {_poc_tool} ({_poc_label}):</strong>
+              <pre style="background:#0d0d1a;color:#00e676;padding:10px;border-radius:6px;font-size:10px;overflow:auto;max-height:200px;margin-top:6px;font-family:monospace">{_safe}</pre>
+            </div>'''
+                elif _poc_status in ("completed", "done"):
+                    poc_evidence_html = f'<p style="font-size:11px;color:#27ae60;margin-top:6px">{_poc_icon} {_poc_tool} executou e confirmou a vulnerabilidade (sem saída de texto capturada).</p>'
+        except Exception:
+            pass
+
+        # ── Reproduction command template (HOW to reproduce manually) ─────────
         repro = ""
         target_url = matched_at or str(f.domain or job.target_query or "TARGET")
-        if tool_name == "sqlmap":
+        # Prefer nuclei curl-command when available (exact proof request)
+        if curl_cmd:
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">{curl_cmd[:600]}</pre>'
+        elif tool_name == "sqlmap":
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">sqlmap -u "{target_url}" --forms --level=3 --risk=2 --batch --dump</pre>'
         elif tool_name == "dalfox":
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">dalfox url "{target_url}" --skip-bav --silence</pre>'
         elif tool_name in ("gitleaks", "trufflehog"):
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">curl -s "{target_url}/.git/config" | grep -i "url|remote"</pre>'
         elif tool_name == "jwt_tool":
-            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto"># Capture JWT token from {target_url}\n# python3 jwt_tool.py TOKEN -X a  (alg:none attack)\n# python3 jwt_tool.py TOKEN -X s  (key confusion attack)</pre>'
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto"># Capture JWT token from {target_url}\njwt_tool TOKEN -X a  # alg:none attack\njwt_tool TOKEN -X s  # key confusion attack</pre>'
         elif tool_name.startswith("nuclei"):
             template_id = str(det.get("template_id") or tool_name)
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">nuclei -u "{target_url}" -t {template_id} -v</pre>'
@@ -522,6 +605,7 @@ def generate_pentest_report(
           {'<p style="font-size:12px;color:#666;margin-bottom:8px">🎯 Alvo: <code style="background:#f8f9fa;padding:2px 6px;border-radius:3px">' + matched_at + '</code></p>' if matched_at else ''}
           {'<p style="font-size:11px;color:#666;margin-bottom:4px">📋 ' + owasp + '</p>' if owasp else ''}
           {'<div style="margin:10px 0"><strong style="font-size:12px">▶ Reprodução:</strong>' + repro + '</div>' if repro else ''}
+          {poc_evidence_html}
           <div style="background:#fff5f5;padding:10px;border-radius:6px;margin-top:8px">
             <strong style="font-size:12px;color:#c0392b">🛡 Blue Team — Ação Obrigatória:</strong>
             <p style="font-size:12px;margin-top:4px">{remediation}</p>
@@ -624,6 +708,64 @@ def generate_pentest_report(
                        ("#e67e22" if conf_high > 0 else
                         ("#f39c12" if conf_medium > 0 else "#27ae60")))
 
+    # ── P21 sandbox stats strip HTML ─────────────────────────────────────────
+    poc_strip_html = ""
+    if p21_total > 0:
+        poc_strip_html = (
+            '<div style="background:#0d1117;color:#e6edf3;border-radius:8px;'
+            'padding:14px 20px;margin-bottom:20px;display:flex;align-items:center;'
+            'gap:20px;flex-wrap:wrap">'
+            '<span style="font-size:13px;font-weight:700;color:#58a6ff">🔬 P21 Sandbox PoC</span>'
+            f'<span style="font-size:12px"><span style="color:#3fb950;font-weight:700">{p21_confirmed}</span> confirmados</span>'
+            f'<span style="font-size:12px"><span style="color:#f85149;font-weight:700">{p21_refuted}</span> refutados (FP suprimidos)</span>'
+            f'<span style="font-size:12px"><span style="color:#d29922;font-weight:700">{p21_pending}</span> em andamento</span>'
+            f'<span style="font-size:11px;color:#8b949e;margin-left:auto">{p21_total} validações agendadas'
+            ' — somente confirmados aparecem como HIGH/CRITICAL</span>'
+            '</div>'
+        )
+
+    # ── Kill chain phase coverage HTML ───────────────────────────────────────
+    phase_coverage_html = ""
+    if phase_coverage:
+        _PHASE_ORDER = [
+            "P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08",
+            "P09", "P10", "P11", "P12", "P13", "P14", "P15", "P16",
+            "P17", "P18", "P19", "P20", "P21", "P22",
+        ]
+        pills: list[str] = []
+        for _pid in _PHASE_ORDER:
+            _ph = phase_coverage.get(_pid, {})
+            _comp = _ph.get("completed", 0)
+            _fail = _ph.get("failed", 0)
+            _queued = _ph.get("queued", 0)
+            _in_scan = bool(_ph)
+            if _comp > 0:
+                _bg, _fg = "#27ae60", "white"
+            elif _fail > 0 and _comp == 0:
+                _bg, _fg = "#e74c3c", "white"
+            elif _queued > 0:
+                _bg, _fg = "#f39c12", "white"
+            else:
+                _bg, _fg = "#eee", "#999"
+            _title = f"{_pid}: {_comp} ok {_fail} fail {_queued} queue"
+            pills.append(
+                f'<div style="background:{_bg};color:{_fg};padding:4px 8px;border-radius:4px;'
+                f'font-size:10px;font-weight:700;min-width:36px;text-align:center" title="{_title}">{_pid}</div>'
+            )
+        phase_coverage_html = (
+            '<div style="background:white;border-radius:8px;padding:16px;'
+            'margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)">'
+            '<div style="font-size:13px;font-weight:700;color:#555;margin-bottom:10px">'
+            '⛓ Kill Chain — Cobertura de Fases</div>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:6px">{"".join(pills)}</div>'
+            '<div style="display:flex;gap:16px;margin-top:8px;font-size:10px;color:#666">'
+            '<span><span style="background:#27ae60;color:white;padding:1px 6px;border-radius:3px">■</span> Completo</span>'
+            '<span><span style="background:#f39c12;color:white;padding:1px 6px;border-radius:3px">■</span> Em andamento</span>'
+            '<span><span style="background:#e74c3c;color:white;padding:1px 6px;border-radius:3px">■</span> Com falhas</span>'
+            '<span><span style="background:#eee;padding:1px 6px;border-radius:3px">■</span> Não iniciado</span>'
+            '</div></div>'
+        )
+
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -697,6 +839,12 @@ def generate_pentest_report(
       <div class="lbl">Total Findings</div>
     </div>
   </div>
+
+  <!-- P21 POC SANDBOX STRIP -->
+  {poc_strip_html}
+
+  <!-- KILL CHAIN PHASE COVERAGE -->
+  {phase_coverage_html}
 
   <!-- NO CONFIRMED FINDINGS NOTICE -->
   {'<div class="section" style="border-left:4px solid #27ae60"><h2 style="color:#27ae60">✅ Nenhuma Vulnerabilidade Confirmada com PoC</h2><p style="font-size:13px;color:#666">Nenhuma ferramenta de exploração ativa (sqlmap, dalfox, nuclei-confirmed) confirmou vulnerabilidades exploráveis. Existem ' + str(len(candidate_list)) + ' findings candidatos que requerem verificação manual na fase P17.</p></div>' if not confirmed_list and not chain_findings else ''}
