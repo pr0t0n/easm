@@ -44,9 +44,15 @@ MAX_POC_VALIDATIONS_PER_SCAN = 50
 
 # ── Tools that already prove the finding — no re-validation needed ─────────────
 SELF_VALIDATING_TOOLS = {
+    # Active exploitation — output proves the condition
     "sqlmap", "dalfox", "wapiti", "wpscan", "hydra",
     "gitleaks", "trufflehog", "semgrep", "jwt_tool",
-    "interactsh-client", "exploit_chain_engine",
+    # OOB callback = irrefutable proof of interaction
+    "interactsh-client",
+    # Chain correlation and SAST with high confidence
+    "exploit_chain_engine", "trivy", "bandit",
+    # Prototype pollution analyzer — active test
+    "js_pollution_analyzer",
 }
 
 

@@ -1201,6 +1201,774 @@ def _extract_linkfinder_findings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Subdomain discovery tools (subfinder / findomain / assetfinder / alterx / shuffledns / dnsx)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_subdomain_discovery_findings(
+    stdout: str, target: str, tool_name: str
+) -> list[dict[str, Any]]:
+    """Parse one-subdomain-per-line output from subfinder, findomain, assetfinder, alterx, dnsx, shuffledns."""
+    findings: list[dict[str, Any]] = []
+    subdomains: list[str] = []
+    for line in (stdout or "").splitlines():
+        s = line.strip().lower()
+        if not s or s.startswith("#") or " " in s:
+            continue
+        # Accept hostnames and IPs; reject URLs (have ://)
+        if "://" in s:
+            try:
+                from urllib.parse import urlparse as _up
+                s = _up(s).hostname or ""
+            except Exception:
+                continue
+        if s and "." in s and len(s) < 255:
+            subdomains.append(s)
+
+    if not subdomains:
+        return findings
+
+    root = target.lower().lstrip("*.")
+    new_subs = [s for s in subdomains if s != root and s.endswith(f".{root}")]
+
+    if subdomains:
+        findings.append({
+            "title": f"Subdomínios descobertos ({tool_name}): {len(subdomains)} host(s)",
+            "severity": "info",
+            "risk_score": 2,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": tool_name,
+                "asset": target,
+                "tool": tool_name,
+                "evidence": "\n".join(subdomains[:30]),
+                "discovered_subdomains": subdomains[:500],
+                "count": len(subdomains),
+                "new_subdomains": new_subs[:100],
+            },
+        })
+
+    # High-value subdomain patterns — admin, dev, staging, API surfaces
+    _HV_PATTERNS = re.compile(
+        r"(admin|api|dev|staging|hml|test|internal|intranet|auth|sso|jenkins|"
+        r"gitlab|grafana|kibana|portainer|rancher|vault|consul|redis|mongo|"
+        r"elastic|kafka|rabbitmq|flower|harbor|registry|nexus|jira|confluence)",
+        re.IGNORECASE,
+    )
+    hv = [s for s in subdomains if _HV_PATTERNS.search(s)]
+    if hv:
+        findings.append({
+            "title": f"Subdomínios de alto valor descobertos ({tool_name}): {len(hv)} host(s)",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": tool_name,
+                "asset": target,
+                "tool": tool_name,
+                "evidence": "\n".join(hv[:20]),
+                "high_value_subdomains": hv[:100],
+                "owasp_category": "A05:2021 Security Misconfiguration",
+                "impact": "Subdomínios de infraestrutura expostos podem conter painéis administrativos, serviços internos e interfaces de gestão sem autenticação forte.",
+            },
+        })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameter discovery (arjun / paramspider)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_param_discovery_findings(
+    stdout: str, target: str, tool_name: str
+) -> list[dict[str, Any]]:
+    """Parse arjun JSON output or paramspider one-URL-per-line output."""
+    findings: list[dict[str, Any]] = []
+
+    # arjun JSON: {"https://target.com/path": ["param1", "param2", ...], ...}
+    # or list of {url, params} dicts
+    parsed_json = None
+    try:
+        parsed_json = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    params_by_url: dict[str, list[str]] = {}
+
+    if isinstance(parsed_json, dict):
+        for url, params in parsed_json.items():
+            if isinstance(params, list):
+                params_by_url[str(url)] = [str(p) for p in params]
+    elif isinstance(parsed_json, list):
+        for item in parsed_json:
+            if isinstance(item, dict):
+                url = str(item.get("url") or item.get("endpoint") or "")
+                params = list(item.get("params") or item.get("parameters") or [])
+                if url and params:
+                    params_by_url[url] = [str(p) for p in params]
+
+    # paramspider / text fallback: one URL-with-params per line
+    if not params_by_url:
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line or not line.startswith("http"):
+                continue
+            if "?" in line or "&" in line:
+                from urllib.parse import urlparse as _up2, parse_qs as _pq
+                try:
+                    _p = _up2(line)
+                    _params = list(_pq(_p.query).keys())
+                    if _params:
+                        base = f"{_p.scheme}://{_p.netloc}{_p.path}"
+                        params_by_url.setdefault(base, []).extend(_params)
+                except Exception:
+                    pass
+
+    if not params_by_url:
+        return findings
+
+    all_params: list[str] = []
+    for ps in params_by_url.values():
+        all_params.extend(ps)
+    unique_params = list(dict.fromkeys(all_params))
+
+    # Flag injection-relevant parameters
+    _INJECT_PATTERNS = re.compile(
+        r"^(id|user|uid|username|email|name|search|q|query|url|redirect|"
+        r"file|path|page|lang|locale|callback|return|next|ref|token|key|"
+        r"debug|admin|cmd|exec|input|data|payload|format|type|action|"
+        r"order|sort|filter|limit|offset|start|end|from|to|cat|category)$",
+        re.IGNORECASE,
+    )
+    injectable = [p for p in unique_params if _INJECT_PATTERNS.match(p)]
+
+    findings.append({
+        "title": f"Parâmetros HTTP descobertos ({tool_name}): {len(unique_params)} parâmetros em {len(params_by_url)} endpoints",
+        "severity": "info",
+        "risk_score": 2,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon",
+            "step": tool_name,
+            "asset": target,
+            "tool": tool_name,
+            "evidence": f"{len(unique_params)} parâmetros: {', '.join(unique_params[:20])}",
+            "parameters_by_url": {k: v for k, v in list(params_by_url.items())[:50]},
+            "all_parameters": unique_params[:200],
+            "count": len(unique_params),
+        },
+    })
+
+    if injectable:
+        findings.append({
+            "title": f"Parâmetros injetáveis detectados ({tool_name}): {len(injectable)} candidatos a SQLi/XSS/SSRF",
+            "severity": "medium",
+            "risk_score": 6,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": tool_name,
+                "asset": target,
+                "tool": tool_name,
+                "evidence": f"Parâmetros de alto risco: {', '.join(injectable[:15])}",
+                "injectable_parameters": injectable[:50],
+                "owasp_category": "A03:2021 Injection",
+                "impact": "Parâmetros como id, user, url, redirect, file, cmd são vetores primários de injeção. Requerem testes ativos (sqlmap, dalfox) nas fases P10/P12.",
+                "remediation": "Validar e sanitizar todos os parâmetros de entrada. Usar prepared statements para SQL. Implementar allowlist de valores para parâmetros de redirecionamento.",
+            },
+        })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WPScan — WordPress vulnerability scanner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_wpscan_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse wpscan JSON output (wpscan --format json).
+
+    wpscan JSON structure:
+    {
+      "target_url": "https://...",
+      "version": {"number": "6.4.1", "vulnerabilities": [...]},
+      "plugins": {"plugin-slug": {"vulnerabilities": [...], "version": {...}}},
+      "themes": {"theme-slug": {"vulnerabilities": [...]}},
+      "users": [{"username": "admin", ...}],
+      "interesting_findings": [{"type": "...", "url": "...", "interesting_entries": [...]}]
+    }
+    """
+    findings: list[dict[str, Any]] = []
+
+    data: dict = {}
+    try:
+        data = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        # Try to find JSON block in mixed output
+        m = re.search(r"\{.*\}", stdout or "", re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                pass
+
+    if not data:
+        return findings
+
+    target_url = str(data.get("target_url") or target)
+
+    # WordPress version
+    version_info = dict(data.get("version") or {})
+    wp_version = str(version_info.get("number") or "")
+    if wp_version:
+        wp_vulns = list(version_info.get("vulnerabilities") or [])
+        sev = "high" if wp_vulns else "info"
+        findings.append({
+            "title": f"WordPress {wp_version} detectado{f' ({len(wp_vulns)} CVE(s))' if wp_vulns else ''}",
+            "severity": sev,
+            "risk_score": 7 if wp_vulns else 1,
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "wpscan", "asset": target_url, "tool": "wpscan",
+                "evidence": f"WP {wp_version}" + (f" — {len(wp_vulns)} vulnerabilidades" if wp_vulns else ""),
+                "wordpress_version": wp_version,
+                "version_vulnerabilities": wp_vulns[:10],
+                "owasp_category": "A06:2021 Vulnerable and Outdated Components",
+            },
+        })
+        for vuln in wp_vulns[:20]:
+            cve = str(vuln.get("references", {}).get("cve", [""]) or [""])[0] if isinstance(vuln.get("references", {}).get("cve"), list) else ""
+            findings.append({
+                "title": str(vuln.get("title") or f"WP Core CVE {cve}")[:300],
+                "severity": "high",
+                "risk_score": 8,
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": "wpscan", "asset": target_url, "tool": "wpscan",
+                    "evidence": str(vuln.get("title") or ""),
+                    "cve_id": f"CVE-{cve}" if cve else None,
+                    "fixed_in": str(vuln.get("fixed_in") or ""),
+                    "owasp_category": "A06:2021 Vulnerable and Outdated Components",
+                },
+            })
+
+    # Plugins with vulnerabilities
+    plugins = dict(data.get("plugins") or {})
+    for slug, plug_data in list(plugins.items())[:50]:
+        if not isinstance(plug_data, dict):
+            continue
+        plug_vulns = list(plug_data.get("vulnerabilities") or [])
+        if not plug_vulns:
+            continue
+        plug_version = str((plug_data.get("version") or {}).get("number") or "")
+        for vuln in plug_vulns[:10]:
+            cve_list = (vuln.get("references") or {}).get("cve") or []
+            cve = f"CVE-{cve_list[0]}" if cve_list else None
+            findings.append({
+                "title": str(vuln.get("title") or f"Plugin {slug} vulnerável")[:300],
+                "severity": "high",
+                "risk_score": 8,
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": "wpscan", "asset": target_url, "tool": "wpscan",
+                    "evidence": f"Plugin {slug} {plug_version}: {vuln.get('title', '')}",
+                    "plugin_slug": slug, "plugin_version": plug_version,
+                    "cve_id": cve, "fixed_in": str(vuln.get("fixed_in") or ""),
+                    "owasp_category": "A06:2021 Vulnerable and Outdated Components",
+                },
+            })
+
+    # Usernames (enumeration)
+    users = list(data.get("users") or {})
+    if users:
+        usernames = [str(u.get("username") or u) for u in users if u][:20]
+        findings.append({
+            "title": f"Usernames WordPress enumerados: {', '.join(usernames[:5])}{'…' if len(usernames) > 5 else ''}",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "wpscan", "asset": target_url, "tool": "wpscan",
+                "evidence": f"Usuários descobertos via wpscan: {', '.join(usernames)}",
+                "discovered_users": usernames,
+                "owasp_category": "A07:2021 Identification and Authentication Failures",
+                "impact": "Usernames expostos permitem ataques direcionados de brute-force contra /wp-login.php.",
+            },
+        })
+
+    # Interesting findings (backup files, XML-RPC, readme, etc.)
+    interesting = list(data.get("interesting_findings") or [])
+    for item in interesting[:20]:
+        if not isinstance(item, dict):
+            continue
+        itype = str(item.get("type") or "")
+        iurl = str(item.get("url") or target_url)
+        entries = list(item.get("interesting_entries") or [])
+        sev = "medium" if itype in ("xmlrpc", "backup", "readme") else "low"
+        findings.append({
+            "title": f"WordPress: {itype} exposto em {iurl}",
+            "severity": sev,
+            "risk_score": 5 if sev == "medium" else 2,
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "wpscan", "asset": iurl, "tool": "wpscan",
+                "evidence": "\n".join(str(e) for e in entries[:5]),
+                "finding_type": itype,
+                "url": iurl,
+                "owasp_category": "A05:2021 Security Misconfiguration",
+            },
+        })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TLS/SSL testers (testssl / sslscan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_testssl_findings(
+    stdout: str, target: str, tool_name: str = "testssl"
+) -> list[dict[str, Any]]:
+    """Parse testssl.sh or sslscan text output.
+
+    testssl uses severity labels: CRITICAL, HIGH, MEDIUM, LOW, INFO, OK, WARN
+    sslscan uses: SSLv2, SSLv3, BEAST, POODLE, Heartbleed, etc.
+    """
+    findings: list[dict[str, Any]] = []
+    if not stdout:
+        return findings
+
+    # Try JSON first (testssl --jsonfile or --json flag)
+    try:
+        data = json.loads(stdout.strip())
+        if isinstance(data, dict):
+            for _id, result in (data.get("scanResult") or [{}])[0].items() if isinstance((data.get("scanResult") or [{}])[0], dict) else []:
+                sev_raw = str(result.get("severity") or "").upper()
+                finding_str = str(result.get("finding") or "")
+                if sev_raw in ("CRITICAL", "HIGH") and finding_str and "not vulnerable" not in finding_str.lower():
+                    sev = "critical" if sev_raw == "CRITICAL" else "high"
+                    findings.append({
+                        "title": f"TLS: {_id} — {finding_str[:120]}",
+                        "severity": sev, "risk_score": 9 if sev == "critical" else 7,
+                        "source_worker": "vuln",
+                        "details": {
+                            "node": "vuln", "step": tool_name, "asset": target, "tool": tool_name,
+                            "evidence": finding_str[:500], "testssl_id": _id,
+                            "owasp_category": "A02:2021 Cryptographic Failures",
+                        },
+                    })
+        if findings:
+            return findings
+    except (json.JSONDecodeError, ValueError, IndexError, TypeError):
+        pass
+
+    # Text output parsing
+    # testssl: "VULNERABLE_ID      CRITICAL  finding text"
+    # sslscan headers like "SSLv3 enabled", "BEAST:", "Heartbleed:"
+
+    _SEVERITY_MAP = {"critical": "critical", "high": "high", "medium": "medium", "low": "low", "warn": "low"}
+    _VULN_PATTERNS = [
+        (re.compile(r"HEARTBLEED", re.I), "critical", "Heartbleed (CVE-2014-0160) — informação de memória exposta"),
+        (re.compile(r"POODLE", re.I), "high", "POODLE attack — SSLv3 downgrade"),
+        (re.compile(r"BEAST", re.I), "medium", "BEAST attack — CBC cipher vulnerability"),
+        (re.compile(r"CRIME", re.I), "high", "CRIME attack — TLS compression"),
+        (re.compile(r"BREACH", re.I), "medium", "BREACH attack — HTTP compression"),
+        (re.compile(r"FREAK", re.I), "high", "FREAK attack — export cipher downgrade"),
+        (re.compile(r"LOGJAM", re.I), "high", "LOGJAM attack — DH parameter weakness"),
+        (re.compile(r"ROBOT", re.I), "high", "ROBOT attack — RSA PKCS#1 v1.5 oracle"),
+        (re.compile(r"SSLv2.*enabled|enabled.*SSLv2", re.I), "critical", "SSLv2 habilitado — protocolo obsoleto"),
+        (re.compile(r"SSLv3.*enabled|enabled.*SSLv3", re.I), "high", "SSLv3 habilitado — POODLE attack possível"),
+        (re.compile(r"TLSv1\.0.*enabled|TLS 1\.0.*enabled", re.I), "medium", "TLS 1.0 habilitado — protocolo deprecated"),
+        (re.compile(r"RC4|DES\b|3DES|EXPORT|NULL cipher|ANON", re.I), "high", "Cipher fraco ou inseguro habilitado"),
+        (re.compile(r"self.signed|self signed", re.I), "medium", "Certificado autoassinado"),
+        (re.compile(r"certificate.*expired|expired.*certificate", re.I), "high", "Certificado TLS expirado"),
+        (re.compile(r"OCSP stapling.*not supported", re.I), "low", "OCSP Stapling não suportado"),
+    ]
+
+    seen: set[str] = set()
+    for pattern, sev, title in _VULN_PATTERNS:
+        if pattern.search(stdout):
+            key = title[:50]
+            if key not in seen:
+                seen.add(key)
+                findings.append({
+                    "title": f"TLS/{tool_name}: {title}",
+                    "severity": sev,
+                    "risk_score": {"critical": 9, "high": 7, "medium": 5, "low": 3}.get(sev, 3),
+                    "source_worker": "vuln",
+                    "details": {
+                        "node": "vuln", "step": tool_name, "asset": target, "tool": tool_name,
+                        "evidence": pattern.pattern,
+                        "owasp_category": "A02:2021 Cryptographic Failures",
+                        "remediation": "Desabilitar protocolos e ciphers inseguros. Configurar TLS 1.2+ com ciphers modernos (AES-GCM, ChaCha20-Poly1305).",
+                    },
+                })
+
+    # testssl structured lines: "ID  SEVERITY  finding"
+    line_pattern = re.compile(r"^\s*(\w[\w_-]*)\s+(CRITICAL|HIGH|MEDIUM|WARN|LOW)\s+(.+)$", re.MULTILINE)
+    for m in line_pattern.finditer(stdout):
+        tid, sev_raw, finding = m.group(1), m.group(2).lower(), m.group(3).strip()
+        if "not vulnerable" in finding.lower() or "OK" in finding or finding.startswith("--"):
+            continue
+        sev = _SEVERITY_MAP.get(sev_raw, "low")
+        key = f"{tid}:{finding[:40]}"
+        if key not in seen:
+            seen.add(key)
+            findings.append({
+                "title": f"TLS/{tool_name} [{tid}]: {finding[:150]}",
+                "severity": sev,
+                "risk_score": {"critical": 9, "high": 7, "medium": 5, "low": 3}.get(sev, 3),
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": tool_name, "asset": target, "tool": tool_name,
+                    "evidence": finding[:500], "testssl_id": tid,
+                    "owasp_category": "A02:2021 Cryptographic Failures",
+                },
+            })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JWT Tool parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_jwt_tool_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse jwt_tool output — alg:none, key confusion, weak secrets."""
+    findings: list[dict[str, Any]] = []
+    if not stdout:
+        return findings
+
+    _ATTACK_PATTERNS = [
+        (re.compile(r"alg.*none.*success|none.*attack.*success|\[FOUND\].*none", re.I),
+         "critical", "JWT Algorithm None — autenticação completamente bypassada",
+         "Servidor aceita JWT com alg=none — qualquer token não assinado é válido. "
+         "Atacante pode forjar qualquer identidade sem conhecer a chave secreta.",
+         "CVE-2015-9235"),
+        (re.compile(r"key.*confusion.*success|RS256.*HS256.*success|\[FOUND\].*confusion", re.I),
+         "critical", "JWT Key Confusion (RS256→HS256) — bypass de verificação de assinatura",
+         "Servidor trata chave pública RSA como segredo HMAC. Atacante usa chave pública "
+         "para assinar tokens HS256 válidos.",
+         None),
+        (re.compile(r"weak.*secret.*found|cracked.*secret|\[FOUND\].*secret|jwt.*secret.*found", re.I),
+         "critical", "JWT Secret Fraco — chave descoberta por brute-force",
+         "Segredo HMAC do JWT é fraco e foi descoberto. Atacante pode forjar tokens válidos.",
+         None),
+        (re.compile(r"jwks.*inject|\[FOUND\].*jwks|jku.*inject", re.I),
+         "high", "JWT JKU/JWKS Injection — chave de verificação controlada pelo atacante",
+         "Servidor carrega chave pública do URL no header JWT (jku/x5u). "
+         "Atacante fornece URL próprio com chave controlada.",
+         None),
+        (re.compile(r"kid.*inject|\[FOUND\].*kid|sql.*kid|path.*traversal.*kid", re.I),
+         "high", "JWT Kid Injection — parâmetro kid explorável (SQLi/LFI)",
+         "Campo kid do JWT header não sanitizado — pode ser usado para injeção SQL ou LFI.",
+         None),
+        (re.compile(r"expired.*accepted|exp.*not.*verified|expiry.*bypass", re.I),
+         "high", "JWT Expiry Não Verificado — tokens expirados aceitos",
+         "Servidor não verifica campo exp do JWT. Tokens expirados permanecem válidos indefinidamente.",
+         None),
+    ]
+
+    for pattern, sev, title, impact, cve in _ATTACK_PATTERNS:
+        if pattern.search(stdout):
+            findings.append({
+                "title": title,
+                "severity": sev,
+                "risk_score": 10 if sev == "critical" else 8,
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": "jwt_tool", "asset": target, "tool": "jwt_tool",
+                    "evidence": stdout[:800],
+                    "impact": impact,
+                    "cve_id": cve,
+                    "owasp_category": "A07:2021 Identification and Authentication Failures",
+                    "remediation": "Verificar e forçar algoritmo esperado. Nunca aceitar alg=none. Usar segredos longos e aleatórios (256+ bits). Validar exp, iat, iss em todas as requisições.",
+                },
+            })
+
+    if not findings and stdout.strip():
+        # Generic: jwt_tool ran but no specific attack found — still log as candidate
+        if "vulnerable" in stdout.lower() or "[+]" in stdout or "success" in stdout.lower():
+            findings.append({
+                "title": f"JWT — possível vulnerabilidade detectada pelo jwt_tool",
+                "severity": "high",
+                "risk_score": 7,
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": "jwt_tool", "asset": target, "tool": "jwt_tool",
+                    "evidence": stdout[:600],
+                    "owasp_category": "A07:2021 Identification and Authentication Failures",
+                },
+            })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAST tools (semgrep / bandit / trivy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_semgrep_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse semgrep JSON output."""
+    findings: list[dict[str, Any]] = []
+    try:
+        data = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return findings
+
+    results = list(data.get("results") or [])
+    sev_map = {"error": "high", "warning": "medium", "info": "low"}
+
+    for item in results[:100]:
+        if not isinstance(item, dict):
+            continue
+        check_id = str(item.get("check_id") or "")
+        msg = str(item.get("extra", {}).get("message") or item.get("message") or check_id)
+        sev_raw = str(item.get("extra", {}).get("severity") or item.get("severity") or "warning").lower()
+        sev = sev_map.get(sev_raw, "medium")
+        path = str(item.get("path") or "")
+        line = item.get("start", {}).get("line") or ""
+        findings.append({
+            "title": f"[semgrep] {msg[:200]}",
+            "severity": sev,
+            "risk_score": {"high": 7, "medium": 5, "low": 2}.get(sev, 2),
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "semgrep", "asset": target, "tool": "semgrep",
+                "evidence": f"{path}:{line} — {msg[:300]}",
+                "check_id": check_id, "file_path": path, "line": line,
+                "owasp_category": "A03:2021 Injection",
+            },
+        })
+    return findings
+
+
+def _extract_bandit_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse bandit JSON output (Python SAST)."""
+    findings: list[dict[str, Any]] = []
+    try:
+        data = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return findings
+
+    results = list(data.get("results") or [])
+    sev_map = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
+
+    for item in results[:100]:
+        if not isinstance(item, dict):
+            continue
+        issue_text = str(item.get("issue_text") or "")
+        sev_raw = str(item.get("issue_severity") or "LOW").upper()
+        sev = sev_map.get(sev_raw, "low")
+        test_id = str(item.get("test_id") or "")
+        filename = str(item.get("filename") or "")
+        line_no = item.get("line_number") or ""
+        findings.append({
+            "title": f"[bandit] {test_id}: {issue_text[:180]}",
+            "severity": sev,
+            "risk_score": {"high": 7, "medium": 4, "low": 2}.get(sev, 2),
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "bandit", "asset": target, "tool": "bandit",
+                "evidence": f"{filename}:{line_no} — {issue_text[:400]}",
+                "test_id": test_id, "file_path": filename, "line": line_no,
+                "cwe": str(item.get("issue_cwe", {}).get("id") or ""),
+                "owasp_category": "A03:2021 Injection",
+            },
+        })
+    return findings
+
+
+def _extract_trivy_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse trivy JSON output (container/IaC/package vulnerabilities)."""
+    findings: list[dict[str, Any]] = []
+    try:
+        data = json.loads((stdout or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return findings
+
+    # trivy JSON: {"Results": [{"Target": "...", "Vulnerabilities": [...]}]}
+    results = list(data.get("Results") or data.get("results") or [])
+    sev_map = {"CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        scan_target = str(result.get("Target") or target)
+        vulns = list(result.get("Vulnerabilities") or [])
+        for v in vulns[:50]:
+            if not isinstance(v, dict):
+                continue
+            vuln_id = str(v.get("VulnerabilityID") or "")
+            pkg = str(v.get("PkgName") or "")
+            inst_ver = str(v.get("InstalledVersion") or "")
+            fixed_ver = str(v.get("FixedVersion") or "")
+            title = str(v.get("Title") or vuln_id)
+            sev_raw = str(v.get("Severity") or "LOW").upper()
+            sev = sev_map.get(sev_raw, "low")
+            cvss = None
+            try:
+                cvss = float((v.get("CVSS") or {}).get("nvd", {}).get("V3Score") or 0) or None
+            except (TypeError, ValueError):
+                pass
+
+            findings.append({
+                "title": f"[trivy] {title[:200]}",
+                "severity": sev,
+                "risk_score": {"critical": 10, "high": 8, "medium": 5, "low": 2}.get(sev, 2),
+                "source_worker": "vuln",
+                "details": {
+                    "node": "vuln", "step": "trivy", "asset": scan_target, "tool": "trivy",
+                    "evidence": f"{pkg} {inst_ver} → {vuln_id}" + (f" (fix: {fixed_ver})" if fixed_ver else ""),
+                    "cve_id": vuln_id if vuln_id.startswith("CVE-") else None,
+                    "package": pkg, "installed_version": inst_ver, "fixed_version": fixed_ver,
+                    "cvss": cvss,
+                    "owasp_category": "A06:2021 Vulnerable and Outdated Components",
+                },
+            })
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Port scanners (naabu / masscan)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_naabu_masscan_findings(
+    stdout: str, target: str, tool_name: str
+) -> list[dict[str, Any]]:
+    """Parse naabu (host:port per line) and masscan (text/JSON) output."""
+    findings: list[dict[str, Any]] = []
+    open_ports: list[dict] = []
+
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        # naabu: "host:port" or "ip:port"
+        m = re.match(r"^([\w.\-:]+):(\d+)$", line)
+        if m:
+            host, port = m.group(1), int(m.group(2))
+            open_ports.append({"host": host, "port": port, "proto": "tcp"})
+            continue
+
+        # masscan: "Discovered open port PORT/PROTO on HOST"
+        m2 = re.search(r"open port (\d+)/(tcp|udp) on ([\d.]+)", line, re.I)
+        if m2:
+            open_ports.append({"host": m2.group(3), "port": int(m2.group(1)), "proto": m2.group(2)})
+            continue
+
+        # masscan JSON lines: {"ip": "...", "ports": [{"port": ..., "proto": ...}]}
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line.rstrip(","))
+                if isinstance(obj, dict):
+                    ip = str(obj.get("ip") or "")
+                    for p in obj.get("ports") or []:
+                        if isinstance(p, dict):
+                            open_ports.append({"host": ip, "port": int(p.get("port") or 0), "proto": str(p.get("proto") or "tcp")})
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    if not open_ports:
+        return findings
+
+    interesting = [p for p in open_ports if p["port"] not in (80, 443, 8080, 8443)]
+    all_ports_str = ", ".join(f"{p['host']}:{p['port']}" for p in open_ports[:20])
+
+    findings.append({
+        "title": f"Portas abertas ({tool_name}): {len(open_ports)} porta(s) em {target}",
+        "severity": "medium" if interesting else "info",
+        "risk_score": 4 if interesting else 1,
+        "source_worker": "recon",
+        "details": {
+            "node": "recon", "step": tool_name, "asset": target, "tool": tool_name,
+            "evidence": all_ports_str,
+            "open_ports": open_ports[:200],
+            "interesting_ports": interesting[:50],
+            "count": len(open_ports),
+            "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
+        },
+    })
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactsh-client — OOB callback receiver
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_interactsh_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse interactsh-client output — OOB DNS/HTTP/SMTP callbacks.
+
+    interactsh-client JSON line format:
+    {"unique-id": "...", "full-id": "...", "q-type": "A", "raw-request": "...",
+     "remote-address": "1.2.3.4", "timestamp": "...", "protocol": "dns"}
+    """
+    findings: list[dict[str, Any]] = []
+    callbacks: list[dict] = []
+
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict) and obj.get("protocol"):
+                callbacks.append(obj)
+        except (json.JSONDecodeError, ValueError):
+            # Plain text: "Got interaction from X.X.X.X"
+            m = re.search(r"interaction.*?(\d+\.\d+\.\d+\.\d+)", line, re.I)
+            if m:
+                callbacks.append({"protocol": "dns", "remote-address": m.group(1), "raw": line})
+
+    if not callbacks:
+        return findings
+
+    for cb in callbacks[:20]:
+        proto = str(cb.get("protocol") or "dns").upper()
+        remote = str(cb.get("remote-address") or "")
+        raw_req = str(cb.get("raw-request") or cb.get("raw") or "")[:300]
+        unique_id = str(cb.get("unique-id") or cb.get("full-id") or "")
+
+        vuln_type = {
+            "DNS": "SSRF/Blind SSRF confirmado via callback DNS OOB",
+            "HTTP": "SSRF/RCE confirmado via callback HTTP OOB",
+            "SMTP": "SSRF confirmado via callback SMTP OOB",
+        }.get(proto, f"OOB callback {proto} recebido")
+
+        findings.append({
+            "title": f"{vuln_type} — IP {remote}",
+            "severity": "critical",
+            "risk_score": 10,
+            "source_worker": "vuln",
+            "details": {
+                "node": "vuln", "step": "interactsh-client", "asset": target, "tool": "interactsh-client",
+                "evidence": f"Callback {proto} recebido de {remote}: {raw_req}",
+                "oob_callback": {"protocol": proto.lower(), "remote_address": remote, "interaction_id": unique_id},
+                "owasp_category": "A10:2021 Server-Side Request Forgery",
+                "impact": f"Callback OOB confirma que o servidor está realizando requisições externas. {proto} callback de {remote} prova execução do payload.",
+                "verification_status": "confirmed",
+            },
+        })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1305,6 +2073,43 @@ def extract_findings_from_work_item(
         elif tool in ("zap-baseline", "zap_baseline", "zap-ajax", "zap_ajax_spider",
                       "zap-active", "zap_active_scan", "zap-api", "zap_api_scan"):
             findings = _extract_zap_findings(parsed, stdout, target, tool)
+
+        # ── Subdomain discovery tools ──────────────────────────────────────
+        elif tool in ("subfinder", "findomain", "assetfinder", "alterx",
+                      "shuffledns", "dnsx", "sublist3r"):
+            findings = _extract_subdomain_discovery_findings(stdout, target, tool)
+
+        # ── Parameter discovery ────────────────────────────────────────────
+        elif tool in ("arjun", "paramspider"):
+            findings = _extract_param_discovery_findings(stdout, target, tool)
+
+        # ── WordPress scanner ──────────────────────────────────────────────
+        elif tool == "wpscan":
+            findings = _extract_wpscan_findings(stdout, target)
+
+        # ── TLS/SSL testers ────────────────────────────────────────────────
+        elif tool in ("testssl", "sslscan", "testssl.sh"):
+            findings = _extract_testssl_findings(stdout, target, tool)
+
+        # ── JWT tool ───────────────────────────────────────────────────────
+        elif tool == "jwt_tool":
+            findings = _extract_jwt_tool_findings(stdout, target)
+
+        # ── SAST tools ─────────────────────────────────────────────────────
+        elif tool == "semgrep":
+            findings = _extract_semgrep_findings(stdout, target)
+        elif tool == "bandit":
+            findings = _extract_bandit_findings(stdout, target)
+        elif tool == "trivy":
+            findings = _extract_trivy_findings(stdout, target)
+
+        # ── Port scanners (modern) ─────────────────────────────────────────
+        elif tool in ("naabu", "masscan"):
+            findings = _extract_naabu_masscan_findings(stdout, target, tool)
+
+        # ── OOB callback receiver ──────────────────────────────────────────
+        elif tool == "interactsh-client":
+            findings = _extract_interactsh_findings(stdout, target)
 
     except Exception as exc:  # noqa: BLE001
         # Never let parser failure crash the work queue
@@ -1463,17 +2268,34 @@ def persist_findings_from_work_item(
             "nuclei-default-credentials": 82,  # Default cred confirmed
             "nuclei-auth-bypass": 78,           # Auth bypass template
             "jwt_tool": 85,         # JWT tool — confirms JWT flaw
-            "interactsh-client": 82, # OOB callback confirmed
+            "interactsh-client": 95, # OOB callback = confirmed interaction = highest confidence
             "theharvester": 55,     # OSINT — unverified
             "h8mail": 50,           # Email breach — no direct verification
             "amass": 70,            # DNS/OSINT enumeration
             "subfinder": 72,        # Subdomain discovery
+            "findomain": 72,        # Subdomain discovery
+            "assetfinder": 70,      # Subdomain discovery
+            "alterx": 65,           # Permutation-based — may not exist
+            "shuffledns": 73,       # Bruteforce + resolution confirmed
+            "dnsx": 80,             # DNS resolution — host exists = fact
+            "sublist3r": 68,        # Mixed sources — moderate reliability
+            "arjun": 75,            # Parameter discovery — params confirmed present
+            "paramspider": 68,      # URL parameter crawl — moderate
+            "wpscan": 85,           # WP scanner — CVE+version confirmed
+            "testssl": 82,          # TLS probe — cipher facts
+            "testssl.sh": 82,
+            "sslscan": 80,          # TLS probe
+            "naabu": 80,            # Port scanner — open port confirmed
+            "masscan": 75,          # Fast port scanner — some FPs possible
+            "semgrep": 72,          # SAST — static analysis
+            "trivy": 78,            # Container/supply chain scanning
+            "bandit": 65,           # Python SAST
             "katana": 65,           # Web crawler
             "linkfinder": 68,       # JS endpoint extractor
-            "semgrep": 72,          # SAST — static analysis
-            "trivy": 75,            # Container/supply chain scanning
-            "bandit": 65,           # Python SAST
             "exploit_chain_engine": 88,  # Chain correlation
+            "js_pollution_analyzer": 80, # Prototype pollution — active test
+            "wfuzz": 65,            # Fuzzer — path found ≠ vuln
+            "crackmapexec": 78,     # SMB/AD — credential confirmed
         }
 
         # Prefix match for nuclei-* variants not listed
@@ -1515,25 +2337,26 @@ def persist_findings_from_work_item(
             db.rollback()
             continue
 
-        # ── T1: Evidence gate stage 2 ─────────────────────────────────────────
-        # candidate findings → seed a verification ScanWorkItem that re-runs
-        # a targeted check to confirm or refute the finding.
-        if v_status in ("candidate", "hypothesis"):
-            try:
-                _seed_verification_work_item(db, job, item, finding, tool, finding_url)
-            except Exception:
-                pass
-
         # ── PoC Sandbox Execution (DeepAudit pattern) ─────────────────────────
         # HIGH/CRITICAL candidates → schedule P21 validation item.
-        # Eliminates false positives: each HIGH/CRITICAL requires proof-of-concept
-        # execution before appearing in the pentest report as confirmed.
-        # P21 item completes → T1 block (tasks.py:2335) promotes to 'confirmed'.
+        # P21 item completes → T1 block (tasks.py) promotes to 'confirmed'.
         # P21 item fails    → T1 block marks as 'refuted' (FP suppressed).
+        # Only HIGH/CRITICAL get P21; MEDIUM/LOW/INFO get T1 stage-2 below.
+        _poc_scheduled = False
         if severity in ("critical", "high") and v_status != "confirmed":
             try:
                 from app.services.poc_validator import schedule_poc_validation as _schedule_poc
-                _schedule_poc(db, finding, job)
+                _poc_scheduled = _schedule_poc(db, finding, job)
+            except Exception:
+                pass
+
+        # ── T1: Evidence gate stage 2 ─────────────────────────────────────────
+        # MEDIUM/LOW/INFO candidates → seed a lightweight verification item.
+        # HIGH/CRITICAL that already have a P21 item skip this to avoid
+        # creating two competing verification items for the same finding.
+        if v_status in ("candidate", "hypothesis") and not _poc_scheduled:
+            try:
+                _seed_verification_work_item(db, job, item, finding, tool, finding_url)
             except Exception:
                 pass
 
