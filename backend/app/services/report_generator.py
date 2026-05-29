@@ -1,13 +1,21 @@
 """
-report_generator.py — Gerador de relatório executivo EASM.
+report_generator.py — Gerador de relatório de Pentest Automatizado.
 
 Gera HTML rico com:
-  - Sumário executivo por domínio raiz
-  - Breakdown de severidades com gráficos CSS
-  - Superfície de ataque de alto risco (infra ops, dev envs, APIs sensíveis)
-  - Achados por categoria OWASP
+  SEÇÃO PENTEST (prioridade — o que o cliente pagou para saber):
+  - Sumário executivo: vulnerabilidades confirmadas com PoC
+  - Chains de ataque: sequências de exploração provadas
+  - Vulnerabilidades críticas com passos de reprodução
+  - Matriz de risco confirmado por alvo
+  - Ações obrigatórias para o Blue Team (com criticidade e prazo)
+
+  SEÇÃO EASM (contexto — o que está exposto):
+  - Superfície de ataque: subdomínios, portas, tecnologias
+  - Achados de descoberta por severidade (com status de verificação)
+  - Distribuição OWASP Top 10
+  - Inventário de ativos de alto risco (infra, dev, APIs sensíveis)
+  - Delta vs scan anterior (novos findings)
   - Recomendações priorizadas
-  - Delta vs scan anterior (quando disponível)
 """
 
 from __future__ import annotations
@@ -119,6 +127,32 @@ def generate_executive_report(
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
     domains_str = ", ".join(root_domains)
 
+    # ── Recommendation builder helper (avoids inline f-string with escapes) ──
+    def _build_reco_html(flist: list) -> str:
+        items_with_reco = [
+            x for x in flist
+            if getattr(x, "recommendation", None) or dict(getattr(x, "details", None) or {}).get("remediation")
+        ]
+        items_sorted = sorted(items_with_reco, key=lambda x: _severity_order(x.severity or "info"))[:15]
+        parts = []
+        for item in items_sorted:
+            sev = item.severity or "info"
+            det = dict(item.details or {}) if item.details else {}
+            text = item.recommendation or det.get("remediation") or item.title or ""
+            parts.append(
+                f'<div class="reco-item {sev}">'
+                f'<strong>[{sev.upper()}]</strong> {text}'
+                f"</div>"
+            )
+        parts.append(
+            '<div class="reco-item" style="background:#f0f7ff;border-color:#3498db">'
+            "<strong>Geral:</strong> Implementar WAF + proteção de origem. "
+            "Configurar HSTS, CSP e X-Frame-Options no nível do load balancer/CDN. "
+            f"Revisar subdomínios de desenvolvimento ({len(high_risk_targets.get('dev_environment', []))} encontrados)."
+            "</div>"
+        )
+        return "".join(parts)
+
     # ── CSS Severity bars ─────────────────────────────────────────────────────
     def sev_bar(label: str, count: int, color: str) -> str:
         if count == 0:
@@ -188,9 +222,17 @@ def generate_executive_report(
         if not by_owasp:
             return ""
         rows = sorted(by_owasp.items(), key=lambda x: -len(x[1]))
+
+        def _owasp_sev_badges(flist: list) -> str:
+            badges = []
+            for f in sorted(flist, key=lambda f: _severity_order(f.severity or "info"))[:3]:
+                sev = f.severity or "info"
+                c = _severity_color(sev)
+                badges.append(f'<span class="sev-badge" style="background:{c}">{sev.upper()}</span>')
+            return "".join(badges)
+
         items = "".join(
-            f'<tr><td>{cat}</td><td>{len(flist)}</td>'
-            f'<td>{"".join(f"<span class=\"sev-badge\" style=\"background:{_severity_color(f.severity or \"info\")}\">{(f.severity or \"info\").upper()}</span>" for f in sorted(flist, key=lambda f: _severity_order(f.severity or "info"))[:3])}</td></tr>'
+            f'<tr><td>{cat}</td><td>{len(flist)}</td><td>{_owasp_sev_badges(flist)}</td></tr>'
             for cat, flist in rows[:10]
         )
         return f"""
@@ -335,16 +377,7 @@ def generate_executive_report(
   <!-- RECOMMENDATIONS -->
   <div class="section">
     <h2>✅ Recomendações Prioritárias</h2>
-    {"".join(
-        f'<div class="reco-item {f.severity or \"\"}">'
-        f'<strong>[{(f.severity or "info").upper()}]</strong> '
-        f'{f.recommendation or dict(f.details or {}).get("remediation") or f.title}'
-        f'</div>'
-        for f in sorted(
-            [x for x in findings if x.recommendation or (dict(x.details or {}).get("remediation"))],
-            key=lambda x: _severity_order(x.severity or "info")
-        )[:15]
-    )}
+    {_build_reco_html(findings)}
     <div class="reco-item" style="background:#f0f7ff;border-color:#3498db">
       <strong>Geral:</strong> Implementar WAF + proteção de origem (restringir acesso direto ao IP do servidor).
       Configurar HSTS, CSP e X-Frame-Options no nível do load balancer/CDN para herança automática.
@@ -354,9 +387,340 @@ def generate_executive_report(
 
   <!-- FOOTER -->
   <div class="footer">
-    Relatório gerado pela plataforma EASM &nbsp;|&nbsp; {now} &nbsp;|&nbsp;
+    Relatório de Pentest Automatizado &nbsp;|&nbsp; {now} &nbsp;|&nbsp;
     Este relatório é confidencial e destinado exclusivamente ao uso interno.
+    &nbsp;|&nbsp; Conteúdo: superfície de ataque + vulnerabilidades confirmadas com PoC.
   </div>
+
+</div>
+</body>
+</html>"""
+
+    return html
+
+
+def generate_pentest_report(
+    db: "Session",
+    scan_id: int,
+    previous_scan_id: int | None = None,
+) -> str:
+    """Gera relatório completo de Pentest: seção pentest (confirmados + chains)
+    seguida da seção EASM (superfície + exposições).
+
+    Este é o relatório primário da plataforma — combina prova de exploração
+    com inventário completo de superfície de ataque.
+    """
+    from app.models.models import Finding, ScanJob
+
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        return "<h1>Scan não encontrado</h1>"
+
+    all_findings = (
+        db.query(Finding)
+        .filter(Finding.scan_job_id == scan_id, Finding.is_false_positive.is_(False))
+        .order_by(Finding.id)
+        .all()
+    )
+
+    # ── Categorize by verification status ────────────────────────────────────
+    try:
+        from app.services.exploitation_gate import filter_report_ready_findings
+        categorized = filter_report_ready_findings(all_findings)
+    except Exception:
+        confirmed_findings = [f for f in all_findings if getattr(f, "verification_status", "") == "confirmed"]
+        categorized = {
+            "confirmed": confirmed_findings,
+            "candidates": [f for f in all_findings if getattr(f, "verification_status", "") == "candidate"],
+            "hypotheses": [f for f in all_findings if getattr(f, "verification_status", "") == "hypothesis"],
+            "total_confirmed_critical": sum(1 for f in confirmed_findings if f.severity == "critical"),
+            "total_confirmed_high": sum(1 for f in confirmed_findings if f.severity == "high"),
+        }
+
+    confirmed_list = categorized.get("confirmed") or []
+    candidate_list = categorized.get("candidates") or []
+    hypothesis_list = categorized.get("hypotheses") or []
+
+    # ── Exploit chains from state_data ───────────────────────────────────────
+    state_data = dict(job.state_data or {})
+    chain_findings = [
+        f for f in all_findings
+        if dict(f.details or {}).get("chain_finding")
+    ]
+
+    # ── Aggregate counts ──────────────────────────────────────────────────────
+    total_all = len(all_findings)
+    total_confirmed = len(confirmed_list)
+    conf_critical = categorized.get("total_confirmed_critical", 0)
+    conf_high = categorized.get("total_confirmed_high", 0)
+    conf_medium = sum(1 for f in confirmed_list if f.severity == "medium")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    domains_str = job.target_query or str(scan_id)
+
+    def _sev_color(s: str) -> str:
+        return {"critical": "#c0392b", "high": "#e67e22",
+                "medium": "#f39c12", "low": "#3498db", "info": "#95a5a6"}.get(s.lower(), "#95a5a6")
+
+    def _sev_badge(s: str) -> str:
+        c = _sev_color(s)
+        return f'<span style="background:{c};color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700">{s.upper()}</span>'
+
+    def _status_badge(vs: str) -> str:
+        cfg = {
+            "confirmed":  ("#27ae60", "✓ CONFIRMADO"),
+            "candidate":  ("#f39c12", "⚠ CANDIDATO"),
+            "hypothesis": ("#95a5a6", "? HIPÓTESE"),
+        }
+        color, label = cfg.get(vs, ("#95a5a6", vs.upper()))
+        return f'<span style="background:{color};color:#fff;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">{label}</span>'
+
+    def _confirmed_finding_block(f: Any, idx: int) -> str:
+        det = dict(f.details or {})
+        evidence = str(det.get("evidence") or "")[:500]
+        remediation = str(f.recommendation or det.get("remediation") or det.get("blue_team_action") or "Corrigir conforme OWASP Top 10.")[:600]
+        tool_name = str(f.tool or "")
+        owasp = str(det.get("owasp_category") or "")
+        matched_at = str(det.get("matched_at") or det.get("matched-at") or f.url or f.domain or "")
+        cvss_str = f"CVSS {f.cvss:.1f}" if f.cvss else ""
+        sev = str(f.severity or "info")
+        cve_str = f'<code style="color:#e74c3c;font-size:11px">{f.cve}</code>' if f.cve else ""
+        conf_str = f'<span style="color:#666;font-size:11px">Confiança: {f.confidence_score}%</span>' if f.confidence_score else ""
+
+        # Reproduction command (tool-specific)
+        repro = ""
+        target_url = matched_at or str(f.domain or job.target_query or "TARGET")
+        if tool_name == "sqlmap":
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">sqlmap -u "{target_url}" --forms --level=3 --risk=2 --batch --dump</pre>'
+        elif tool_name == "dalfox":
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">dalfox url "{target_url}" --skip-bav --silence</pre>'
+        elif tool_name in ("gitleaks", "trufflehog"):
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">curl -s "{target_url}/.git/config" | grep -i "url|remote"</pre>'
+        elif tool_name == "jwt_tool":
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto"># Capture JWT token from {target_url}\n# python3 jwt_tool.py TOKEN -X a  (alg:none attack)\n# python3 jwt_tool.py TOKEN -X s  (key confusion attack)</pre>'
+        elif tool_name.startswith("nuclei"):
+            template_id = str(det.get("template_id") or tool_name)
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">nuclei -u "{target_url}" -t {template_id} -v</pre>'
+        elif tool_name == "exploit_chain_engine":
+            chain_narrative = str(det.get("chain_narrative") or "Ver passos da chain acima")
+            repro = f'<div style="background:#fff8f0;padding:10px;border-radius:6px;font-size:12px;border-left:3px solid #e67e22">{chain_narrative}</div>'
+        elif evidence:
+            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">{evidence[:300]}</pre>'
+
+        return f"""
+        <div style="background:#fff;border-left:4px solid {_sev_color(sev)};padding:16px;margin-bottom:16px;border-radius:0 8px 8px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <span style="font-size:13px;font-weight:700;color:#555">#{idx}</span>
+            {_sev_badge(sev)}
+            {_status_badge("confirmed")}
+            {cve_str}
+            {conf_str}
+            <span style="font-size:11px;color:#999;margin-left:auto">{cvss_str} &nbsp; {tool_name}</span>
+          </div>
+          <h4 style="font-size:14px;font-weight:700;color:#2c3e50;margin-bottom:6px">{f.title}</h4>
+          {'<p style="font-size:12px;color:#666;margin-bottom:8px">🎯 Alvo: <code style="background:#f8f9fa;padding:2px 6px;border-radius:3px">' + matched_at + '</code></p>' if matched_at else ''}
+          {'<p style="font-size:11px;color:#666;margin-bottom:4px">📋 ' + owasp + '</p>' if owasp else ''}
+          {'<div style="margin:10px 0"><strong style="font-size:12px">▶ Reprodução:</strong>' + repro + '</div>' if repro else ''}
+          <div style="background:#fff5f5;padding:10px;border-radius:6px;margin-top:8px">
+            <strong style="font-size:12px;color:#c0392b">🛡 Blue Team — Ação Obrigatória:</strong>
+            <p style="font-size:12px;margin-top:4px">{remediation}</p>
+          </div>
+        </div>"""
+
+    def _chain_block(f: Any, idx: int) -> str:
+        det = dict(f.details or {})
+        matched = ", ".join(det.get("matched_tags") or [])
+        narrative = str(det.get("chain_narrative") or det.get("chain_description") or "")
+        recommendation = str(det.get("recommendation") or det.get("blue_team_action") or "")
+        cvss_str = f"CVSS {f.cvss:.1f}" if f.cvss else ""
+        sev = str(f.severity or "high")
+        return f"""
+        <div style="background:#fff8f0;border:2px solid {_sev_color(sev)};padding:16px;margin-bottom:16px;border-radius:8px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:18px">⛓</span>
+            {_sev_badge(sev)}
+            <strong style="font-size:14px">Chain #{idx}: {f.title.replace("[EXPLOIT CHAIN] ","")}</strong>
+            <span style="font-size:11px;color:#999;margin-left:auto">{cvss_str}</span>
+          </div>
+          {'<p style="font-size:12px;margin-bottom:8px;line-height:1.6"><strong>Sequência de Ataque:</strong> ' + narrative + '</p>' if narrative else ''}
+          {'<p style="font-size:11px;color:#666;margin-bottom:8px">🏷 Tags de evidência: <code>' + matched + '</code></p>' if matched else ''}
+          {'<div style="background:#fff5f5;padding:10px;border-radius:6px"><strong style="font-size:12px;color:#c0392b">🛡 Blue Team:</strong><p style="font-size:12px;margin-top:4px">' + recommendation + '</p></div>' if recommendation else ''}
+        </div>"""
+
+    # ── Pentest sections ──────────────────────────────────────────────────────
+    pentest_confirmed_section = ""
+    if confirmed_list:
+        blocks = "".join(_confirmed_finding_block(f, i + 1) for i, f in enumerate(confirmed_list[:20]))
+        pentest_confirmed_section = f"""
+  <div class="section" style="border-top:4px solid #c0392b">
+    <h2 style="color:#c0392b">🔴 Vulnerabilidades Confirmadas com PoC ({len(confirmed_list)} total)</h2>
+    <p style="font-size:12px;color:#666;margin-bottom:16px">
+      Estas vulnerabilidades foram <strong>comprovadas por exploração ativa</strong>.
+      Cada uma inclui passos de reprodução e ação obrigatória para o Blue Team.
+    </p>
+    {blocks}
+  </div>"""
+
+    pentest_chains_section = ""
+    if chain_findings:
+        blocks = "".join(_chain_block(f, i + 1) for i, f in enumerate(chain_findings[:10]))
+        pentest_chains_section = f"""
+  <div class="section" style="border-top:4px solid #e67e22">
+    <h2 style="color:#e67e22">⛓ Chains de Ataque Detectadas ({len(chain_findings)} chains)</h2>
+    <p style="font-size:12px;color:#666;margin-bottom:16px">
+      Sequências de vulnerabilidades encadeadas que permitem escalação de impacto.
+      Cada chain representa um caminho de ataque completo — cada passo deve ser
+      corrigido individualmente para quebrar a chain.
+    </p>
+    {blocks}
+  </div>"""
+
+    # ── BlueTeam matrix ───────────────────────────────────────────────────────
+    blueteam_items: list[tuple[str, str, str, str]] = []  # (priority, title, target, action)
+    for f in confirmed_list[:15]:
+        det = dict(f.details or {})
+        action = str(f.recommendation or det.get("remediation") or "Corrigir imediatamente")[:200]
+        priority = {"critical": "P1 - IMEDIATO (24h)", "high": "P2 - URGENTE (72h)",
+                    "medium": "P3 - IMPORTANTE (7d)", "low": "P4 - PLANEJADO (30d)"}.get(
+            str(f.severity or "medium").lower(), "P3"
+        )
+        target = str(f.url or f.domain or "")[:80]
+        blueteam_items.append((priority, str(f.title or "")[:100], target, action))
+
+    blueteam_section = ""
+    if blueteam_items:
+        rows = "".join(f"""
+          <tr>
+            <td><span style="background:#c0392b;color:#fff;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700">{p}</span></td>
+            <td style="font-size:12px">{t}</td>
+            <td style="font-size:11px;color:#666;max-width:150px;overflow:hidden;text-overflow:ellipsis">{tgt}</td>
+            <td style="font-size:11px">{a[:120]}</td>
+          </tr>""" for p, t, tgt, a in blueteam_items)
+        blueteam_section = f"""
+  <div class="section" style="border-top:4px solid #3498db">
+    <h2 style="color:#3498db">🛡 Matriz de Ação — Blue Team</h2>
+    <p style="font-size:12px;color:#666;margin-bottom:12px">
+      Ações ordenadas por criticidade. Baseadas exclusivamente em vulnerabilidades confirmadas.
+    </p>
+    <table class="findings-table">
+      <thead><tr><th>Prioridade</th><th>Vulnerabilidade</th><th>Alvo</th><th>Ação Requerida</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>"""
+
+    # ── EASM sections (full existing report) ─────────────────────────────────
+    easm_html = generate_executive_report(db, scan_id, previous_scan_id)
+    # Extract body content from EASM report (strip <html><head><body> wrapper)
+    _body_start = easm_html.find('<div class="page">')
+    _body_end = easm_html.rfind("</div>") + 6
+    easm_body = easm_html[_body_start:_body_end] if _body_start > 0 else ""
+
+    # ── Executive summary for the full pentest report ─────────────────────────
+    exec_risk_label = ("CRÍTICO" if conf_critical > 0 else
+                       ("ALTO" if conf_high > 0 else
+                        ("MÉDIO" if conf_medium > 0 else "BAIXO")))
+    exec_risk_color = ("#c0392b" if conf_critical > 0 else
+                       ("#e67e22" if conf_high > 0 else
+                        ("#f39c12" if conf_medium > 0 else "#27ae60")))
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Relatório de Pentest — {domains_str}</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: #f8f9fa; color: #2c3e50; line-height: 1.5; }}
+    .page {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
+    .pentest-header {{ background: linear-gradient(135deg, #1a1a2e 0%, #c0392b 100%);
+               color: white; padding: 32px; border-radius: 12px; margin-bottom: 24px; }}
+    .pentest-header h1 {{ font-size: 26px; font-weight: 700; margin-bottom: 4px; }}
+    .pentest-header .meta {{ font-size: 13px; color: #ffd0d0; margin-top: 8px; }}
+    .score-badge {{ display: inline-block; background: {exec_risk_color};
+                   color: white; padding: 6px 18px; border-radius: 20px;
+                   font-size: 14px; font-weight: 700; margin-top: 12px; border: 2px solid rgba(255,255,255,0.3); }}
+    .pentest-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }}
+    .stat-card {{ background: white; border-radius: 8px; padding: 16px;
+                 text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+    .stat-card .num {{ font-size: 32px; font-weight: 800; }}
+    .stat-card .lbl {{ font-size: 11px; color: #666; margin-top: 4px; }}
+    .section {{ background: white; border-radius: 8px; padding: 24px;
+               box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 20px; }}
+    .section h2 {{ font-size: 17px; font-weight: 700; margin-bottom: 16px;
+                  padding-bottom: 8px; border-bottom: 2px solid #eee; }}
+    .findings-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    .findings-table th {{ background: #f8f9fa; padding: 8px 10px; text-align: left;
+                         font-weight: 600; border-bottom: 2px solid #dee2e6; }}
+    .findings-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f0f0;
+                         vertical-align: top; }}
+    .easm-section-divider {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                             color: white; padding: 16px 24px; border-radius: 8px;
+                             margin: 32px 0 16px 0; font-size: 14px; font-weight: 600; }}
+    .footer {{ text-align: center; font-size: 11px; color: #aaa; margin-top: 32px; padding-bottom: 24px; }}
+    @media (max-width: 700px) {{ .pentest-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- PENTEST HEADER -->
+  <div class="pentest-header">
+    <h1>🔴 Relatório de Pentest Automatizado</h1>
+    <div class="meta">
+      Alvos: <strong>{domains_str}</strong> &nbsp;|&nbsp;
+      Gerado: {now} &nbsp;|&nbsp;
+      Scan ID: #{scan_id}
+      {f'&nbsp;|&nbsp; Scan anterior: #{previous_scan_id}' if previous_scan_id else ''}
+    </div>
+    <div class="score-badge">Risco Confirmado: {exec_risk_label}</div>
+  </div>
+
+  <!-- PENTEST STATS -->
+  <div class="pentest-grid">
+    <div class="stat-card" style="border-top:3px solid #c0392b">
+      <div class="num" style="color:#c0392b">{conf_critical}</div>
+      <div class="lbl">Critical Confirmados</div>
+    </div>
+    <div class="stat-card" style="border-top:3px solid #e67e22">
+      <div class="num" style="color:#e67e22">{conf_high}</div>
+      <div class="lbl">High Confirmados</div>
+    </div>
+    <div class="stat-card" style="border-top:3px solid #f39c12">
+      <div class="num" style="color:#f39c12">{len(chain_findings)}</div>
+      <div class="lbl">Chains de Ataque</div>
+    </div>
+    <div class="stat-card" style="border-top:3px solid #3498db">
+      <div class="num" style="color:#3498db">{total_all}</div>
+      <div class="lbl">Total Findings</div>
+    </div>
+  </div>
+
+  <!-- NO CONFIRMED FINDINGS NOTICE -->
+  {'<div class="section" style="border-left:4px solid #27ae60"><h2 style="color:#27ae60">✅ Nenhuma Vulnerabilidade Confirmada com PoC</h2><p style="font-size:13px;color:#666">Nenhuma ferramenta de exploração ativa (sqlmap, dalfox, nuclei-confirmed) confirmou vulnerabilidades exploráveis. Existem ' + str(len(candidate_list)) + ' findings candidatos que requerem verificação manual na fase P17.</p></div>' if not confirmed_list and not chain_findings else ''}
+
+  <!-- PENTEST: CONFIRMED VULNERABILITIES -->
+  {pentest_confirmed_section}
+
+  <!-- PENTEST: EXPLOIT CHAINS -->
+  {pentest_chains_section}
+
+  <!-- BLUETEAM: ACTION MATRIX -->
+  {blueteam_section}
+
+  <!-- DIVIDER: EASM SECTION -->
+  <div class="easm-section-divider">
+    📊 SEÇÃO 2 — SUPERFÍCIE DE ATAQUE E EXPOSIÇÕES (EASM)
+    &nbsp;|&nbsp; {total_all} findings totais &nbsp;|&nbsp;
+    {len(confirmed_list)} confirmados &nbsp;|&nbsp;
+    {len(candidate_list)} candidatos &nbsp;|&nbsp;
+    {len(hypothesis_list)} hipóteses
+  </div>
+
+  <!-- EASM BODY (full existing report content) -->
+  {easm_body}
 
 </div>
 </body>

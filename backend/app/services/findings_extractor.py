@@ -1071,6 +1071,112 @@ def _zap_cwe_to_owasp(cwe_id: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LinkFinder parser — JS endpoint extractor
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_linkfinder_findings(
+    stdout: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse linkfinder output — extracts API endpoints from JS bundles.
+
+    LinkFinder outputs one URL/path per line, with optional context:
+      /api/v1/users
+      /api/v2/admin/config
+      https://internal.example.com/api/token
+    """
+    findings: list[dict[str, Any]] = []
+    if not stdout:
+        return findings
+
+    endpoints: list[str] = []
+    sensitive_endpoints: list[str] = []
+    api_endpoints: list[str] = []
+
+    _sensitive_patterns = re.compile(
+        r"(admin|config|secret|token|key|auth|login|password|internal|private|debug|test|upload|webhook|graphql)",
+        re.IGNORECASE,
+    )
+    _api_patterns = re.compile(r"/api/|/v\d+/|/rest/|/graphql|/swagger|/openapi", re.IGNORECASE)
+
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Accept paths (/api/...) and full URLs
+        if line.startswith("/") or line.startswith("http"):
+            endpoints.append(line)
+            if _sensitive_patterns.search(line):
+                sensitive_endpoints.append(line)
+            if _api_patterns.search(line):
+                api_endpoints.append(line)
+
+    if endpoints:
+        findings.append({
+            "title": f"JS Endpoint Analysis: {len(endpoints)} endpoints extraídos de bundles JS",
+            "severity": "info",
+            "risk_score": 2,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": "linkfinder",
+                "asset": target,
+                "tool": "linkfinder",
+                "evidence": f"{len(endpoints)} endpoints encontrados em bundles JS do target",
+                "discovered_endpoints": endpoints[:200],
+                "count": len(endpoints),
+                "owasp_category": "A01:2021 Broken Access Control",
+            },
+        })
+
+    if sensitive_endpoints:
+        findings.append({
+            "title": f"Endpoints Sensíveis em JS: {len(sensitive_endpoints)} rotas com padrões críticos",
+            "severity": "medium",
+            "risk_score": 6,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": "linkfinder",
+                "asset": target,
+                "tool": "linkfinder",
+                "evidence": "\n".join(sensitive_endpoints[:10]),
+                "sensitive_endpoints": sensitive_endpoints[:50],
+                "impact": (
+                    "Endpoints com padrões sensíveis (admin, token, key, secret) descobertos em "
+                    "bundles JS de produção — podem revelar rotas não documentadas ou "
+                    "endpoints de administração acessíveis sem autenticação."
+                ),
+                "owasp_category": "A05:2021 Security Misconfiguration",
+                "remediation": (
+                    "Remover rotas sensíveis de bundles JS de produção. "
+                    "Verificar se endpoints /api/admin/* exigem autenticação. "
+                    "Considerar split code loading para ocultar rotas administrativas."
+                ),
+            },
+        })
+
+    if api_endpoints:
+        findings.append({
+            "title": f"API Endpoints Descobertos em JS: {len(api_endpoints)} rotas de API",
+            "severity": "low",
+            "risk_score": 3,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": "linkfinder",
+                "asset": target,
+                "tool": "linkfinder",
+                "evidence": "\n".join(api_endpoints[:10]),
+                "api_endpoints": api_endpoints[:100],
+                "impact": "Mapa de superfície de API extraído — usar como input para P16 (API Input Review).",
+                "owasp_category": "A01:2021 Broken Access Control",
+            },
+        })
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1158,6 +1264,13 @@ def extract_findings_from_work_item(
 
         elif tool in ("gospider", "hakrawler"):
             findings = _extract_gospider_hakrawler_findings(stdout, target, tool)
+
+        elif tool == "linkfinder":
+            findings = _extract_linkfinder_findings(stdout, target)
+
+        elif tool in ("nuclei-js-secrets", "nuclei-js-analysis"):
+            # Route through nuclei parser — these are nuclei templates targeting JS files
+            findings = _extract_nuclei_findings(None, stdout, target, tool_name=tool)
 
         elif tool in ("gitleaks", "trufflehog"):
             findings = _extract_gitleaks_trufflehog_findings(stdout, target, tool)
@@ -1284,6 +1397,77 @@ def persist_findings_from_work_item(
             or ""
         )[:2000] or None
 
+        # ── Confidence score: derived from tool reliability + verification status ──
+        # TOOL_CONFIDENCE: base confidence per tool (0-100)
+        # Replaces hardcoded 50 — now each tool contributes its known FP rate
+        _TOOL_CONFIDENCE: dict[str, int] = {
+            # Exploitation tools — direct proof
+            "sqlmap": 90,           # SQL injection confirmed with payload
+            "dalfox": 88,           # XSS confirmed with callback
+            "wapiti": 75,           # Active exploitation attempt
+            "wpscan": 80,           # Plugin version + CVE confirmed
+            "gitleaks": 82,         # Pattern match in secret
+            "trufflehog": 80,       # Entropy + pattern match
+            "hydra": 85,            # Credential confirmed
+            # Nuclei — depends on template type
+            "nuclei": 70,           # Generic nuclei (matcher varies)
+            # Discovery / recon tools
+            "httpx": 85,            # HTTP probe — fact, not opinion
+            "nmap": 75,             # Port scan — open port is fact
+            "nmap-ssl": 78,         # SSL probe — cipher fact
+            "nmap-http": 70,        # HTTP scripts — moderate reliability
+            "nmap-vuln": 35,        # nmap vuln scripts — moderate FP rate
+            "nmap-vulscan": 5,      # CVE version-match only, no exploit
+            "nikto": 35,            # High FP rate historically
+            "shodan-cli": 60,       # Passive intel — no direct test
+            "curl-headers": 72,     # Header presence is fact; risk is opinion
+            "wafw00f": 80,          # WAF detection — fairly reliable
+            "whatweb": 75,          # Tech fingerprint — reliable
+            "ffuf": 65,             # Directory brute — path found ≠ vuln
+            "gobuster": 65,         # Same as ffuf
+            "feroxbuster": 68,      # Slightly better status filtering
+            "nuclei-sqli": 78,      # Nuclei SQLi template
+            "nuclei-xss": 75,       # Nuclei XSS template
+            "nuclei-ssrf": 72,      # Nuclei SSRF template
+            "nuclei-rce": 80,       # Nuclei RCE template — high confidence
+            "nuclei-auth": 75,      # Nuclei auth template
+            "nuclei-lfi": 75,       # Nuclei LFI template
+            "nuclei-exposure": 70,  # Nuclei exposure template
+            "nuclei-jwt": 78,       # JWT template
+            "nuclei-cors": 70,      # CORS template
+            "nuclei-graphql": 76,   # GraphQL template
+            "nuclei-default-credentials": 82,  # Default cred confirmed
+            "nuclei-auth-bypass": 78,           # Auth bypass template
+            "jwt_tool": 85,         # JWT tool — confirms JWT flaw
+            "interactsh-client": 82, # OOB callback confirmed
+            "theharvester": 55,     # OSINT — unverified
+            "h8mail": 50,           # Email breach — no direct verification
+            "amass": 70,            # DNS/OSINT enumeration
+            "subfinder": 72,        # Subdomain discovery
+            "katana": 65,           # Web crawler
+            "linkfinder": 68,       # JS endpoint extractor
+            "semgrep": 72,          # SAST — static analysis
+            "trivy": 75,            # Container/supply chain scanning
+            "bandit": 65,           # Python SAST
+            "exploit_chain_engine": 88,  # Chain correlation
+        }
+
+        # Prefix match for nuclei-* variants not listed
+        _base_confidence = _TOOL_CONFIDENCE.get(tool_col, 0)
+        if _base_confidence == 0 and tool_col.startswith("nuclei-"):
+            _base_confidence = 70  # default nuclei variant
+        if _base_confidence == 0:
+            _base_confidence = 50  # fallback
+
+        # Adjust by verification status
+        _v_multiplier = {
+            "confirmed": 1.15,
+            "candidate": 1.0,
+            "hypothesis": 0.6,
+        }.get(v_status, 1.0)
+
+        confidence_score = min(99, max(1, int(_base_confidence * _v_multiplier)))
+
         finding = Finding(
             scan_job_id=job.id,
             title=title,
@@ -1293,7 +1477,7 @@ def persist_findings_from_work_item(
             domain=domain_col,
             tool=tool_col,
             risk_score=risk_score,
-            confidence_score=50,
+            confidence_score=confidence_score,
             details=details,
             verification_status=v_status,
             url=finding_url,

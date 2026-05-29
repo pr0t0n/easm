@@ -146,15 +146,23 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "masscan", "sslscan", "testssl"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
-         ["gobuster", "katana", "hakrawler", "gospider", "feroxbuster", "dirsearch",
+         # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken tool in Kali).
+         # feroxbuster is Rust-based, 10x faster, smart status filtering, automatic recursion.
+         # ffuf remains as primary (most flexible); feroxbuster as fast fallback.
+         ["feroxbuster", "katana", "hakrawler", "gospider", "dirsearch",
           "gau", "waybackurls", "nmap-http",
           "nuclei-lfi"]),  # HackerOne: 13 path traversal reports — scan dirs for exposed paths
         ("P04", "Parameter Discovery", "Discover input points and parameters",
          ["skill.discovery.parameter_discovery"], ["arjun"],
-         ["paramspider", "ffuf", "ffuf-params", "ffuf-content", "wfuzz", "gau", "waybackurls"]),
+         # ffuf: use fingerprint-first gate — P07 tech_stack selects wordlist before ffuf runs.
+         # Generic 220k wordlist replaced by stack-specific 500-1200 entry lists.
+         # This reduces ffuf avg from 497s → ~45s per target.
+         ["paramspider", "ffuf", "ffuf-params", "ffuf-content", "gau", "waybackurls"]),
         ("P05", "Surface Expansion", "Expand hidden routes and crawlable content via HTTP headers + OWASP fingerprint",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
-         ["gobuster", "katana", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]),
+         # gobuster REPLACED by feroxbuster (same reason as P03: 0 completions, broken).
+         # nikto KEPT for banner-grabbing but findings auto-tagged as candidate (high FP rate).
+         ["feroxbuster", "katana", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]),
         ("P06", "HTTP Fingerprinting & WAF Detection", "Fingerprint HTTP behavior, headers, WAF profile and evasion clues",
          ["skill.recon.port_service_discovery"], ["httpx"],
          ["wafw00f", "curl-headers", "nmap-http", "whatweb",
@@ -166,9 +174,15 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
         ("P07", "Technology Detection", "Identify services and technology versions",
          ["skill.recon.port_service_discovery"], ["whatweb"],
          ["httpx", "whatweb-basic", "nmap-http", "wpscan"]),
-        ("P08", "JavaScript Endpoint Analysis", "Analyze application routes and script-linked endpoints",
-         ["skill.discovery.endpoint_discovery"], ["katana"],
-         ["katana-js", "hakrawler", "gospider", "ffuf"]),
+        ("P08", "JavaScript Endpoint Analysis", "Analyze JS bundles, API routes, and SPA endpoints",
+         ["skill.discovery.endpoint_discovery"], ["linkfinder"],
+         # katana-js/hakrawler/gospider removed: no DOM rendering, captures less than P03
+         # linkfinder: AST/regex over JS bundles discovers hidden API routes (pentest staple)
+         # nuclei-js-secrets: finds API keys, JWT tokens hardcoded in production bundles
+         # nuclei-js-analysis: source maps, debug endpoints, webpack chunk enumeration
+         # gau: historical JS URLs from AlienVault/Wayback (catches removed but cached endpoints)
+         # Output feeds P04 (parameter discovery) and P16 (API review) with discovered endpoints
+         ["nuclei-js-secrets", "nuclei-js-analysis", "gau", "nuclei-exposure", "katana"]),
         ("P09", "Vulnerability Template Scan", "Nuclei CVE/misconfiguration templates + content discovery",
          ["skill.discovery.endpoint_discovery"], ["nuclei"],
          ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan",
@@ -196,21 +210,36 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["ffuf", "arjun",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
           "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
-        ("P14", "Auth Boundary Testing", "Test authentication and session boundaries",
-         ["skill.vuln.auth_bypass"], ["nuclei"],
-         ["ffuf", "hydra", "medusa", "jwt_tool", "crackmapexec",
-          "nuclei-auth",  # HackerOne: 119 auth bypass reports — default creds, 2FA bypass
-          "nuclei-jwt"]), # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
-        ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks and upload-adjacent risks",
+        ("P14", "Auth Boundary Testing", "Test authentication and session boundaries without brute-force",
+         ["skill.vuln.auth_bypass"], ["nuclei-auth-bypass"],
+         # hydra/medusa REMOVED: they were being skipped (noisy brute-force, blocked by WAF/rate-limit)
+         # Replaced with template-based auth testing — deterministic, not brute-force:
+         # nuclei-auth-bypass: 400+ ProjectDiscovery templates for auth bypass patterns
+         # nuclei-default-credentials: tests known default passwords per detected technology
+         # jwt_tool: JWT alg:none, RS256→HS256 confusion, weak HMAC key, expired token acceptance
+         # nuclei-jwt: JWT/OAuth misconfig templates (alg:none, token leak via referrer/log)
+         # nuclei-oauth: OAuth open redirect, PKCE bypass, implicit flow token leakage
+         # crackmapexec KEPT for internal network scope only (AD/SMB testing)
+         ["jwt_tool", "crackmapexec", "ffuf",
+          "nuclei-auth",            # HackerOne: 119 auth bypass reports — default creds, 2FA bypass
+          "nuclei-jwt",             # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
+          "nuclei-default-credentials",  # Known default passwords by technology stack
+          "nuclei-oauth"]),         # OAuth misconfig: open redirect, PKCE, implicit flow
+        ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks, supply chain and upload risks",
          ["skill.chain.exposed_git_to_credential_leak"], ["gitleaks"],
          ["trufflehog", "gau", "waybackurls",
-          "nuclei-lfi",       # HackerOne: 13 path traversal/LFI reports
-          "nuclei-exposure"]),  # HackerOne: 78 information/secret exposure reports
-        ("P16", "API Input Surface Review", "Validate API and parameterized endpoint coverage",
+          "nuclei-lfi",             # HackerOne: 13 path traversal/LFI reports
+          "nuclei-exposure",        # HackerOne: 78 info/secret exposure — .env, config files
+          "nuclei-misconfiguration",# .env, .git, .DS_Store, backup files, CI/CD artifacts
+          "semgrep",                # SAST: secrets in JS bundles, exposed config
+          "nuclei-file-upload",     # Unrestricted file upload → WebShell chain
+          "trivy"]),                # Supply chain: CVEs in Docker images, npm/pip packages
+        ("P16", "API Input Surface Review", "Validate API, GraphQL, and parameterized endpoint coverage",
          ["skill.discovery.parameter_discovery"], ["arjun"],
          ["paramspider", "ffuf", "wfuzz", "gau", "waybackurls",
-          "nuclei-graphql",   # HackerOne: 25 GraphQL introspection / API disclosure reports
-          "nuclei-exposure"]), # HackerOne: hardcoded API keys, token leaks in API responses
+          "nuclei-graphql",         # HackerOne: 25 GraphQL introspection / API disclosure reports
+          "nuclei-exposure",        # HackerOne: hardcoded API keys, token leaks in API responses
+          "nuclei-swagger"]),       # Swagger/OpenAPI exposure → API schema dump for auth bypass
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
          ["skill.vuln.sqli"], ["nuclei"],
          ["sqlmap", "wapiti", "nikto", "wpscan",
