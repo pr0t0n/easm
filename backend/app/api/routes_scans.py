@@ -7470,18 +7470,59 @@ def get_phase_breakdown(
         "P22": "Reporting",
     }
 
+    # ── Cross-reference with phase_ledger_v2 ─────────────────────────────────
+    # Phases executed via the LangGraph engine have no scan_work_items rows.
+    # phase_ledger_v2 (stored in job.state_data) has their status.
+    # Build a map: phase_id → ledger_status ("completed"|"partial"|"failed"|...)
+    ledger_status_map: dict[str, str] = {}
+    try:
+        state_data = dict(job.state_data or {})
+        phase_ledger = state_data.get("phase_ledger_v2") or []
+        if isinstance(phase_ledger, list):
+            for entry in phase_ledger:
+                if not isinstance(entry, dict):
+                    continue
+                pid_l = str(entry.get("phase_id") or "").upper().strip()
+                st_l  = str(entry.get("status") or "").lower()
+                if pid_l and st_l:
+                    # Keep the "best" status: completed > partial > failed
+                    prev = ledger_status_map.get(pid_l, "")
+                    if st_l == "completed" or (st_l == "partial" and prev != "completed"):
+                        ledger_status_map[pid_l] = st_l
+                    elif not prev:
+                        ledger_status_map[pid_l] = st_l
+        elif isinstance(phase_ledger, dict):
+            for pid_l, entry in phase_ledger.items():
+                st_l = str((entry.get("status") if isinstance(entry, dict) else entry) or "").lower()
+                if st_l:
+                    ledger_status_map[str(pid_l).upper()] = st_l
+    except Exception:
+        pass
+
     # Build ordered result for P01-P22
     result = []
     for pid in [f"P{i:02d}" for i in range(1, 23)]:
         p = phase_map.get(pid)
         if p is None:
-            # Phase not in work queue at all
+            # No work-queue items — check ledger for LangGraph-executed phases
+            ledger_st = ledger_status_map.get(pid, "")
+            if ledger_st in ("completed",):
+                phase_status = "done"
+            elif ledger_st in ("partial", "partial_coverage"):
+                phase_status = "partial"
+            elif ledger_st in ("failed", "attempted_failed"):
+                phase_status = "failed"
+            else:
+                phase_status = "empty"
+
             result.append({
                 "phase_id": pid,
                 "name": PHASE_NAMES.get(pid, pid),
                 "total": 0, "completed": 0, "failed": 0,
                 "running": 0, "queued": 0, "blocked": 0,
-                "pct": 0, "status": "empty",
+                "pct": 100 if phase_status == "done" else 0,
+                "status": phase_status,
+                "ledger": ledger_st or None,
             })
             continue
 
@@ -7520,6 +7561,7 @@ def get_phase_breakdown(
             "blocked": blocked,
             "pct": pct,
             "status": phase_status,
+            "ledger": ledger_status_map.get(pid) or None,
         })
 
     # Summary stats
