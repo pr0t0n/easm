@@ -693,6 +693,103 @@ def generate_pentest_report(
     </table>
   </div>"""
 
+    # ── Per-target risk matrix ────────────────────────────────────────────────
+    # Shows which targets have the most confirmed HIGH/CRITICAL findings —
+    # helps Blue Team triage: patch the riskiest targets first.
+    target_risk_section = ""
+    try:
+        from collections import Counter as _Counter
+        _target_scores: dict[str, dict[str, int]] = {}
+        for _f in all_findings:
+            _dom = str(_f.domain or "").strip()
+            _sev = str(_f.severity or "").lower()
+            _vs = str(getattr(_f, "verification_status", "") or "")
+            if not _dom:
+                continue
+            if _dom not in _target_scores:
+                _target_scores[_dom] = {"critical": 0, "high": 0, "medium": 0, "total": 0}
+            _target_scores[_dom]["total"] += 1
+            if _sev in ("critical", "high") and _vs == "confirmed":
+                _target_scores[_dom][_sev] += 1
+
+        # Only include targets with at least one confirmed HIGH or CRITICAL
+        _risky = {k: v for k, v in _target_scores.items() if v["critical"] + v["high"] > 0}
+        if _risky:
+            # Sort by critical desc, then high desc
+            _sorted_targets = sorted(_risky.items(), key=lambda x: (-x[1]["critical"], -x[1]["high"]))[:20]
+            _target_rows = []
+            for _dn, _sc in _sorted_targets:
+                _risk_num = _sc["critical"] * 10 + _sc["high"] * 5
+                _risk_color = "#c0392b" if _sc["critical"] > 0 else "#e67e22"
+                _target_rows.append(
+                    f'<tr>'
+                    f'<td style="font-size:12px;font-weight:600">{_dn}</td>'
+                    f'<td style="text-align:center"><span style="background:#c0392b;color:white;padding:2px 8px;border-radius:3px;font-size:11px">{_sc["critical"]}</span></td>'
+                    f'<td style="text-align:center"><span style="background:#e67e22;color:white;padding:2px 8px;border-radius:3px;font-size:11px">{_sc["high"]}</span></td>'
+                    f'<td style="text-align:center;font-size:11px;color:#666">{_sc["total"]}</td>'
+                    f'<td><div style="background:{_risk_color};height:8px;border-radius:4px;width:{min(100, _risk_num * 5)}%"></div></td>'
+                    f'</tr>'
+                )
+            target_risk_section = (
+                '<div class="section" style="border-top:4px solid #9b59b6">'
+                '<h2 style="color:#9b59b6">🎯 Matriz de Risco por Alvo</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:12px">'
+                'Alvos com vulnerabilidades confirmadas ordenados por criticidade. '
+                'Patch priority: começar pelo topo.</p>'
+                '<table class="findings-table">'
+                '<thead><tr>'
+                '<th>Alvo / Domínio</th>'
+                '<th style="text-align:center">Critical</th>'
+                '<th style="text-align:center">High</th>'
+                '<th style="text-align:center">Total</th>'
+                '<th>Risk Score</th>'
+                '</tr></thead>'
+                f'<tbody>{"".join(_target_rows)}</tbody>'
+                '</table></div>'
+            )
+    except Exception:
+        pass
+
+    # ── Cross-scan delta (new findings vs previous scan) ─────────────────────
+    delta_section = ""
+    if previous_scan_id:
+        try:
+            from app.models.models import Finding as _FindingDelta
+            _prev_titles = set(
+                str(t) for (t,) in
+                db.query(_FindingDelta.title)
+                .filter(_FindingDelta.scan_job_id == previous_scan_id)
+                .all()
+            )
+            _new_findings = [
+                _f for _f in confirmed_list
+                if str(_f.title or "") not in _prev_titles
+            ]
+            _fixed_count = len(_prev_titles) - (len(all_findings) - len(_new_findings))
+            if _new_findings:
+                _delta_rows = "".join(
+                    f'<tr>'
+                    f'<td style="font-size:12px">{_f.title[:80]}</td>'
+                    f'<td><span style="background:{_sev_color(_f.severity or "info")};color:white;padding:1px 6px;border-radius:3px;font-size:10px">{(_f.severity or "").upper()}</span></td>'
+                    f'<td style="font-size:11px;color:#666">{str(_f.domain or "")[:60]}</td>'
+                    f'</tr>'
+                    for _f in _new_findings[:15]
+                )
+                delta_section = (
+                    '<div class="section" style="border-top:4px solid #e74c3c">'
+                    f'<h2 style="color:#e74c3c">🆕 Novos Findings vs Scan #{previous_scan_id} ({len(_new_findings)} novos confirmados)</h2>'
+                    '<p style="font-size:12px;color:#666;margin-bottom:12px">'
+                    f'Vulnerabilidades confirmadas que não existiam no scan anterior. '
+                    f'{"Atenção: superfície de ataque cresceu." if len(_new_findings) > 5 else "Superfície relativamente estável."}'
+                    '</p>'
+                    '<table class="findings-table">'
+                    '<thead><tr><th>Vulnerabilidade</th><th>Severidade</th><th>Domínio</th></tr></thead>'
+                    f'<tbody>{_delta_rows}</tbody>'
+                    '</table></div>'
+                )
+        except Exception:
+            pass
+
     # ── EASM sections (full existing report) ─────────────────────────────────
     easm_html = generate_executive_report(db, scan_id, previous_scan_id)
     # Extract body content from EASM report (strip <html><head><body> wrapper)
@@ -857,6 +954,12 @@ def generate_pentest_report(
 
   <!-- BLUETEAM: ACTION MATRIX -->
   {blueteam_section}
+
+  <!-- PER-TARGET RISK MATRIX -->
+  {target_risk_section}
+
+  <!-- CROSS-SCAN DELTA (new confirmed findings vs previous scan) -->
+  {delta_section}
 
   <!-- DIVIDER: EASM SECTION -->
   <div class="easm-section-divider">
