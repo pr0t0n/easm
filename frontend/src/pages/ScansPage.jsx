@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 import MissionProgress from "../components/MissionProgress";
-import PhaseBreakdown from "../components/PhaseBreakdown";
 
 // Formats a UTC date string to São Paulo timezone (America/Sao_Paulo, UTC-3)
 function fmtDateTimeSP(value) {
@@ -904,14 +903,6 @@ export default function ScansPage({ embedded = false }) {
               {/* Mission Progress */}
               {selected && (
                 <MissionProgress scan={selected} scanStatus={scanStatus} />
-              )}
-
-              {/* Phase Breakdown — Kill Chain progress */}
-              {selected && (
-                <PhaseBreakdown
-                  scanId={selected.id}
-                  scanStatus={selected.status}
-                />
               )}
 
               {/* Status Details */}

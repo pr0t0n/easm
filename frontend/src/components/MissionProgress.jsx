@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import client from "../api/client";
 
 const STATUS_META = {
@@ -110,9 +110,82 @@ function KillChainStrip({ killChain }) {
   );
 }
 
+// ── Phase breakdown status config (design system tokens) ─────────────────────
+const PHASE_STATUS_CFG = {
+  done:    { bar: "var(--sev-low-solid)",      text: "var(--sev-low-text)",      bg: "var(--sev-low-bg)",      border: "var(--sev-low-border)",      label: "Concluída"  },
+  running: { bar: "var(--sev-high-solid,#fe7b02)", text: "var(--sev-high-text)", bg: "var(--sev-high-bg)",     border: "var(--sev-high-border)",     label: "Executando" },
+  partial: { bar: "var(--sev-medium-solid)",   text: "var(--sev-medium-text)",   bg: "var(--sev-medium-bg)",   border: "var(--sev-medium-border)",   label: "Parcial"    },
+  queued:  { bar: "var(--sev-info-solid)",     text: "var(--sev-info-text)",     bg: "var(--sev-info-bg)",     border: "var(--sev-info-border)",     label: "Na fila"    },
+  blocked: { bar: "var(--line-strong)",        text: "var(--ink-muted)",         bg: "var(--surface-soft)",    border: "var(--line)",                label: "Bloqueada"  },
+  failed:  { bar: "var(--sev-critical-solid)", text: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", border: "var(--sev-critical-border)", label: "Falhou"     },
+  empty:   { bar: "var(--line)",               text: "var(--ink-muted)",         bg: "var(--surface-soft)",    border: "var(--line-soft)",           label: "—"          },
+};
+
+function PhaseRow({ phase }) {
+  const cfg = PHASE_STATUS_CFG[phase.status] || PHASE_STATUS_CFG.empty;
+  const hasItems = phase.total > 0;
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "38px 1fr 34px 110px",
+      alignItems: "center",
+      gap: 8,
+      padding: "4px 0",
+      borderBottom: "1px solid var(--line-soft)",
+    }}>
+      {/* Phase pill */}
+      <span className="mono-sm" style={{
+        color: cfg.text, background: cfg.bg,
+        border: `1px solid ${cfg.border}`,
+        borderRadius: 5, padding: "1px 4px",
+        fontWeight: 800, fontSize: 9, textAlign: "center",
+      }}>
+        {phase.phase_id}
+      </span>
+      {/* Bar */}
+      <div style={{ height: 6, borderRadius: 99, background: "var(--bg-muted)", overflow: "hidden", position: "relative" }}>
+        {hasItems && (
+          <div style={{
+            position: "absolute", left: 0, top: 0, bottom: 0,
+            width: `${phase.pct}%`, background: cfg.bar, borderRadius: 99,
+            transition: "width 0.5s ease",
+          }} />
+        )}
+      </div>
+      {/* Pct */}
+      <span className="mono-sm" style={{ color: hasItems ? cfg.text : "var(--ink-muted)", fontWeight: 700, textAlign: "right", fontSize: 10 }}>
+        {hasItems ? `${phase.pct}%` : "—"}
+      </span>
+      {/* Chips */}
+      <div style={{ display: "flex", gap: 3, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        {hasItems ? (
+          <>
+            <span className="mono-sm" style={{ color: "var(--ink-muted)", fontSize: 9 }}>{phase.completed}/{phase.total}</span>
+            {phase.running > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-high-text)", background: "var(--sev-high-bg)", border: "1px solid var(--sev-high-border)", padding: "0 4px", borderRadius: 4 }}>{phase.running}▶</span>}
+            {phase.queued  > 0 && phase.status !== "done" && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-info-text)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", padding: "0 4px", borderRadius: 4 }}>{phase.queued}q</span>}
+            {phase.blocked > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--ink-muted)", background: "var(--surface-soft)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 4 }}>{phase.blocked}⊘</span>}
+            {phase.failed  > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-critical-text)", background: "var(--sev-critical-bg)", border: "1px solid var(--sev-critical-border)", padding: "0 4px", borderRadius: 4 }}>{phase.failed}✕</span>}
+          </>
+        ) : (
+          <span className="mono-sm" style={{ color: "var(--line-strong)", fontSize: 9 }}>aguardando</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function MissionProgress({ scan, scanStatus }) {
   const [phaseData, setPhaseData] = useState(null);
+  const [breakdown, setBreakdown] = useState(null);
   const [error, setError] = useState("");
+
+  const loadBreakdown = useCallback(async (id) => {
+    if (!id) return;
+    try {
+      const { data } = await client.get(`/api/scans/${id}/phase-breakdown`, { _skipToast: true });
+      setBreakdown(data);
+    } catch { /* non-critical */ }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +201,7 @@ export default function MissionProgress({ scan, scanStatus }) {
           setError("Phase monitor indisponivel; exibindo contrato das 22 fases.");
         }
       }
+      if (!cancelled) loadBreakdown(scan?.id);
     };
     load();
     const active = ["queued", "running", "retrying"].includes(String(scan?.status || "").toLowerCase());
@@ -137,7 +211,7 @@ export default function MissionProgress({ scan, scanStatus }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [scan?.id, scan?.status]);
+  }, [scan?.id, scan?.status, loadBreakdown]);
 
   const view = useMemo(() => {
     const phases = Array.isArray(phaseData?.phases) && phaseData.phases.length ? phaseData.phases : DEFAULT_PHASES;
@@ -249,17 +323,52 @@ export default function MissionProgress({ scan, scanStatus }) {
 
       {error && <div className="mono-sm" style={{ color: "var(--sev-high-text)", marginBottom: 10 }}>{error}</div>}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))", gap: 8 }}>
-        {view.phases.map((phase) => (
-          <PhaseCard key={phase.id} phase={phase} active={phase.id === view.currentId} />
-        ))}
-      </div>
+      {/* Phase breakdown rows — P01-P22 com barras de progresso */}
+      {breakdown?.phases?.length > 0 ? (
+        <>
+          <div style={{ borderTop: "1px solid var(--line-soft)", paddingTop: 10 }}>
+            {breakdown.phases.map(phase => (
+              <PhaseRow key={phase.phase_id} phase={phase} />
+            ))}
+          </div>
 
-      <KillChainStrip killChain={phaseData?.kill_chain} />
+          {/* P21 strip */}
+          {breakdown.summary?.p21_total > 0 && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+              padding: "6px 10px", borderRadius: 8, marginTop: 10,
+              background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)",
+            }}>
+              <span className="mono-sm" style={{ color: "var(--sev-info-text)", fontWeight: 800 }}>🔬 P21 Sandbox</span>
+              <span className="mono-sm" style={{ color: "var(--sev-low-text)" }}>✓ {breakdown.summary.p21_confirmed}</span>
+              <span className="mono-sm" style={{ color: "var(--sev-critical-text)" }}>✕ {breakdown.summary.p21_refuted}</span>
+              {breakdown.summary.p21_pending > 0 && (
+                <span className="mono-sm" style={{ color: "var(--sev-high-text)" }}>⏳ {breakdown.summary.p21_pending}</span>
+              )}
+              <span className="mono-sm muted" style={{ marginLeft: "auto" }}>{breakdown.summary.p21_total} validações</span>
+            </div>
+          )}
 
-      <div className="mt-4 pt-4 border-t border-slate-700/50 text-xs text-slate-400">
-        Kali Runner, MCP, workers e validadores sao acompanhados no Centro Operacional.
-      </div>
+          {/* Legend */}
+          <div style={{ display: "flex", gap: 10, marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--line-soft)", flexWrap: "wrap" }}>
+            {[["done","Concluída"],["running","Executando"],["queued","Na fila"],["blocked","Bloqueada"],["failed","Falhou"]].map(([k, lbl]) => (
+              <span key={k} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: PHASE_STATUS_CFG[k].bar, display: "inline-block" }} />
+                <span className="mono-sm muted">{lbl}</span>
+              </span>
+            ))}
+          </div>
+        </>
+      ) : (
+        // Fallback: trabalho ainda não populado
+        <div style={{ borderTop: "1px solid var(--line-soft)", paddingTop: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))", gap: 8 }}>
+            {view.phases.slice(0, 22).map((phase) => (
+              <PhaseCard key={phase.id} phase={phase} active={phase.id === view.currentId} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
