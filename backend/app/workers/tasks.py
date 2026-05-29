@@ -2387,6 +2387,20 @@ def poll_scan_work_item(item_id: int):
                             _orig_details["refuted_by_tool"] = item.tool_name
                             _orig.details = _orig_details
                         db.flush()
+
+                        # ── P21 confirmation → re-correlate exploit chains ────────
+                        # A newly-confirmed finding may complete a chain pattern
+                        # (e.g., SQLi confirmed + admin panel → full takeover chain).
+                        # Re-run correlate_chains() so chains reflect live confirmed state.
+                        if item.status in ("completed", "done") and item.phase_id == "P21":
+                            try:
+                                from app.services.exploit_chain import correlate_chains as _cc_p21
+                                _cc_p21(db, job.id)
+                            except Exception as _cc_p21_err:
+                                import logging as _cc21log
+                                _cc21log.getLogger(__name__).debug(
+                                    "p21_chain_recorr failed: %s", _cc_p21_err
+                                )
             except Exception as _ve:
                 import logging as _vlog
                 _vlog.getLogger(__name__).debug("evidence gate stage2 update failed: %s", _ve)

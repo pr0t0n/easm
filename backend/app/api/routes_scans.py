@@ -55,6 +55,12 @@ vector_store = FalsePositiveVectorStore()
 def _effective_mission_progress(job: ScanJob) -> int:
     progress = int(job.mission_progress or 0)
     state = dict(job.state_data or {})
+
+    # If mission_progress is already 100 (set by work_queue_dispatcher on completion),
+    # trust it unconditionally — don't cap it back to 99.
+    if progress >= 100:
+        return 100
+
     raw = state.get("phase_ledger_v2") or state.get("phase_ledger") or []
     if isinstance(raw, dict):
         entries = [dict(value or {}) for value in raw.values()]
@@ -62,10 +68,22 @@ def _effective_mission_progress(job: ScanJob) -> int:
         entries = [dict(item or {}) for item in raw if isinstance(item, dict)]
     else:
         entries = []
-    counted = sum(
-        1 for entry in entries
-        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked", "failed"}
-    )
+    # "blocked" e "failed" não indicam progresso real — fase ainda pode ser re-tentada.
+    # Só "completed" e "partial" contam para o cálculo de progresso.
+    # Além disso, phase_ledger_v2 pode ter múltiplas entradas por fase (uma por target);
+    # deduplica por phase_id antes de contar para evitar over-counting.
+    if isinstance(raw, list):
+        _seen: dict[str, str] = {}
+        for entry in entries:
+            _pid = str(entry.get("phase_id") or entry.get("id") or "")
+            if _pid:
+                _seen[_pid] = str(entry.get("status") or "").lower()
+        counted = sum(1 for s in _seen.values() if s in {"completed", "partial"})
+    else:
+        counted = sum(
+            1 for entry in entries
+            if str(entry.get("status") or "").lower() in {"completed", "partial"}
+        )
     if counted:
         progress = max(progress, round((counted / 22) * 100))
 
@@ -154,16 +172,43 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
     for row in stale_rows:
         if row.id in active_scan_ids:
             continue
-        row.status = "failed"
-        row.current_step = "Scan encerrado por reconciliacao de orfao"
-        row.last_error = "Scan marcado como falho por estar running sem task ativa no worker"
-        row.next_retry_at = None
+
+        # Check if all work items are in terminal states → completed, not failed
+        from app.models.models import ScanWorkItem as _SWI
+        _terminal = {"completed", "done", "failed", "timeout", "skipped", "blocked"}
+        _non_terminal = (
+            db.query(_SWI)
+            .filter(
+                _SWI.scan_job_id == row.id,
+                _SWI.status.notin_(list(_terminal)),
+            )
+            .count()
+        )
+        _total_items = db.query(_SWI).filter(_SWI.scan_job_id == row.id).count()
+
+        if _total_items > 0 and _non_terminal == 0:
+            # All work items terminal → scan completed, not orphaned
+            row.status = "completed"
+            row.mission_progress = 100
+            row.last_error = None
+            row.next_retry_at = None
+            msg = f"Scan completed via reconciliador — todos os {_total_items} work items terminais"
+            level = "INFO"
+        else:
+            # Genuine orphan: task desapareceu, items ainda pendentes
+            row.status = "failed"
+            row.current_step = "Scan encerrado por reconciliacao de orfao"
+            row.last_error = "Scan marcado como falho por estar running sem task ativa no worker"
+            row.next_retry_at = None
+            msg = "Scan running/retrying sem task ativa; status corrigido para failed"
+            level = "WARNING"
+
         db.add(
             ScanLog(
                 scan_job_id=row.id,
                 source="reconciler",
-                level="WARNING",
-                message="Scan running/retrying sem task ativa; status corrigido para failed",
+                level=level,
+                message=msg,
             )
         )
         fixed += 1
@@ -3270,18 +3315,22 @@ def domains_overview(
 
     wq_by_target: dict[tuple[int, str], dict] = {}
     if latest_scan_ids:
+        _ACTIVE_ST = ["dispatched", "running", "submitted", "retry"]
+        _QUEUED_ST = ["queued", "blocked"]
+        _TERM_ST   = ["completed", "done", "failed", "timeout", "skipped"]
+
         wq_rows = (
             db.query(
                 ScanWorkItem.scan_job_id,
                 ScanWorkItem.target,
                 func.sum(
-                    sa_case((ScanWorkItem.status.in_(["dispatched", "submitted", "retry"]), 1), else_=0)
+                    sa_case((ScanWorkItem.status.in_(_ACTIVE_ST), 1), else_=0)
                 ).label("active"),
                 func.sum(
-                    sa_case((ScanWorkItem.status == "queued", 1), else_=0)
+                    sa_case((ScanWorkItem.status.in_(_QUEUED_ST), 1), else_=0)
                 ).label("queued"),
                 func.sum(
-                    sa_case((ScanWorkItem.status.in_(["completed", "done", "failed", "timeout", "blocked", "skipped"]), 1), else_=0)
+                    sa_case((ScanWorkItem.status.in_(_TERM_ST), 1), else_=0)
                 ).label("terminal"),
             )
             .filter(ScanWorkItem.scan_job_id.in_(latest_scan_ids))
@@ -3296,26 +3345,68 @@ def domains_overview(
                 "terminal": int(r.terminal or 0),
             }
 
+        # ── Batch items: expandir para os targets constituintes ───────────────
+        # Items com target="__batch__" cobrem múltiplos subdomínios via
+        # item_metadata.batch_targets. Sem essa expansão, subdomínios que só
+        # têm batch items aparecem como "not_started" mesmo estando em análise.
+        batch_rows = (
+            db.query(
+                ScanWorkItem.scan_job_id,
+                ScanWorkItem.status,
+                ScanWorkItem.item_metadata,
+            )
+            .filter(
+                ScanWorkItem.scan_job_id.in_(latest_scan_ids),
+                ScanWorkItem.target == "__batch__",
+            )
+            .all()
+        )
+        for br in batch_rows:
+            bt = (br.item_metadata or {}).get("batch_targets") or []
+            if not bt:
+                continue
+            is_active   = br.status in set(_ACTIVE_ST)
+            is_queued   = br.status in set(_QUEUED_ST)
+            is_terminal = br.status in set(_TERM_ST)
+            for raw_t in bt:
+                norm_t = _host_from_domain_value(raw_t) or str(raw_t).strip().lower()
+                key = (br.scan_job_id, norm_t)
+                existing = wq_by_target.setdefault(key, {"active": 0, "queued": 0, "terminal": 0})
+                if is_active:
+                    existing["active"] += 1
+                elif is_queued:
+                    existing["queued"] += 1
+                elif is_terminal:
+                    existing["terminal"] += 1
+
     def _subdomain_analysis_status(
         scan_id: int | None, name: str
     ) -> tuple[str, int, int, int]:
         """Returns (status, active, queued, done) for a subdomain.
         status: 'done' | 'analyzing' | 'waiting' | 'not_started'
+
+        Com batch items expandidos, um subdomain pode ter muitos terminal +
+        alguns queued (de fases tardias ainda pendentes). Considera 'done'
+        quando a maioria dos itens são terminais E nenhum está ativo.
         """
         if not scan_id:
             return "not_started", 0, 0, 0
         wq = wq_by_target.get((scan_id, name))
         if not wq:
             return "not_started", 0, 0, 0
-        active = wq["active"]
-        queued = wq["queued"]
+        active   = wq["active"]
+        queued   = wq["queued"]
         terminal = wq["terminal"]
+        total    = active + queued + terminal
         if active > 0:
             return "analyzing", active, queued, terminal
+        # "done" quando: nenhum item ativo E (sem queued OU terminal domina ≥ 60% do total)
+        if terminal > 0 and queued == 0:
+            return "done", 0, 0, terminal
+        if terminal > 0 and total > 0 and (terminal / total) >= 0.6:
+            return "done", 0, queued, terminal
         if queued > 0:
             return "waiting", 0, queued, terminal
-        if terminal > 0:
-            return "done", 0, 0, terminal
         return "not_started", 0, 0, 0
 
     result = []
@@ -7282,6 +7373,78 @@ def get_executive_report(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pentest Report — combined pentest + EASM HTML report
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/scans/{scan_id}/pentest-report", response_class=Response)
+def get_pentest_report(
+    scan_id: int,
+    previous_scan_id: int | None = Query(default=None, description="Scan anterior para delta"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Gera o relatório completo de Pentest Automatizado (HTML).
+
+    Inclui:
+      Seção 1 — PENTEST (confirmados com PoC):
+        - Sumário executivo com risco confirmado
+        - P21 sandbox stats (confirmados / FP suprimidos / pendentes)
+        - Kill chain phase coverage (P01-P22 visual)
+        - Vulnerabilidades confirmadas com evidência real do sandbox
+        - Chains de ataque detectadas
+        - Matriz Blue Team com SLA (P1=24h, P2=72h, P3=7d, P4=30d)
+        - Matriz de risco por alvo
+        - Delta vs scan anterior (se previous_scan_id fornecido)
+      Seção 2 — EASM (superfície de ataque):
+        - Subdomínios, portas, tecnologias
+        - Findings por severidade com status de verificação
+        - Distribuição OWASP Top 10
+    """
+    from app.models.models import ScanJob
+    from app.services.report_generator import generate_pentest_report
+
+    # Allow access: owner or admin
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter(
+            (ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids))
+        )
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    # Pre-report: run CVE enrichment and intelligence pass
+    try:
+        from app.services.cve_enrichment_service import enrichment_service as _enrich_svc
+        _enrich_svc.enrich_scan_findings(db, scan_id)
+    except Exception:
+        pass
+    try:
+        from app.services.finding_intelligence import run_all_intelligence
+        run_all_intelligence(db, scan_id)
+    except Exception:
+        pass
+    # Re-correlate exploit chains to pick up any newly-confirmed findings
+    try:
+        from app.services.exploit_chain import correlate_chains as _cc
+        _cc(db, scan_id)
+    except Exception:
+        pass
+
+    html = generate_pentest_report(db, scan_id, previous_scan_id=previous_scan_id)
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Content-Disposition": f'inline; filename="pentest-report-scan{scan_id}.html"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @router.post("/scans/{scan_id}/run-intelligence")
 def run_scan_intelligence(
     scan_id: int,
@@ -7436,6 +7599,141 @@ def run_business_logic_analysis(
 
     result = run_business_logic_scan(db, scan_id, target_domains=domains)
     return {"scan_id": scan_id, **result}
+
+
+@router.get("/scans/{scan_id}/js-pollution")
+def get_js_pollution_results(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retorna resultados de análise de JS Prototype Pollution + HPP para o scan.
+
+    Inclui:
+    - Canary reflection detection (JSON body + query string)
+    - Gadget chain probing (child_process, lodash, Kibana CVE-2019-7609)
+    - Cross-request persistence test (global process pollution)
+    - HTTP Parameter Pollution (WAF/validation bypass)
+    """
+    from app.models.models import Finding, ScanJob
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    findings = (
+        db.query(Finding)
+        .filter(
+            Finding.scan_job_id == scan_id,
+            Finding.tool == "js_pollution_analyzer",
+        )
+        .order_by(Finding.severity.desc(), Finding.created_at.desc())
+        .all()
+    )
+
+    items = []
+    for f in findings:
+        det = dict(f.details or {})
+        items.append({
+            "id": f.id,
+            "title": f.title,
+            "severity": f.severity,
+            "domain": f.domain,
+            "test_type": det.get("test_type"),
+            "pollution_type": det.get("pollution_type"),
+            "gadget_chain": det.get("gadget_chain"),
+            "canary": det.get("canary"),
+            "evidence": f.evidence,
+            "cvss_estimate": det.get("cvss_estimate"),
+            "reproduction_steps": det.get("reproduction_steps", []),
+            "business_impact": det.get("business_impact"),
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        })
+
+    state = dict(job.state_data or {})
+    return {
+        "scan_id": scan_id,
+        "total": len(items),
+        "findings": items,
+        "auto_triggered": bool(state.get("jsp_triggered")),
+        "summary": {
+            "rce": sum(1 for i in items if i.get("gadget_chain") and "rce" in str(i.get("gadget_chain", "")).lower()),
+            "auth_bypass": sum(1 for i in items if "auth_bypass" in str(i.get("pollution_type", "")).lower()),
+            "info_disclosure": sum(1 for i in items if "info" in str(i.get("pollution_type", "")).lower()),
+            "hpp": sum(1 for i in items if i.get("test_type") == "http_parameter_pollution"),
+        },
+    }
+
+
+@router.post("/scans/{scan_id}/js-pollution")
+def run_js_pollution_analysis(
+    scan_id: int,
+    domains: list[str] | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Executa análise de JS Prototype Pollution + HTTP Parameter Pollution nos domínios.
+
+    Payloads de teste:
+    - __proto__ / constructor.prototype via JSON body e query string
+    - Gadget chains: child_process, lodash, Kibana CVE-2019-7609, commander.js
+    - Cross-request persistence (global state pollution)
+    - Duplicate params (HPP para bypass de WAF/validação)
+    """
+    from app.models.models import ScanJob
+    from app.services.js_pollution_analyzer import run_js_pollution_scan
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    result = run_js_pollution_scan(db, scan_id, target_domains=domains)
+    return {"scan_id": scan_id, **result}
+
+
+@router.get("/scans/{scan_id}/exploit-chains")
+def get_exploit_chains(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retorna correntes de exploit correlacionadas para o scan.
+
+    Identifica:
+    - Caminhos de ataque multi-etapa (ex: enum → SSRF → RCE)
+    - CVSS composite estimado por chain
+    - Mapeamento MITRE ATT&CK + LGPD Art. 46/47
+    - Referências CVE (CVE-2019-7609, CVE-2022-24999, etc.)
+    """
+    from app.models.models import ScanJob
+    from app.services.exploit_chain import correlate_chains
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    chains = correlate_chains(db, scan_id)
+    state = dict(job.state_data or {})
+
+    return {
+        "scan_id": scan_id,
+        "chains": chains if isinstance(chains, list) else [],
+        "total_chains": len(chains) if isinstance(chains, list) else 0,
+        "correlated_automatically": bool(state.get("exploit_chains_correlated")),
+        "attack_graph_nodes": state.get("attack_graph_nodes", 0),
+    }
 
 
 @router.post("/scans/{scan_id}/supply-chain")
