@@ -1228,7 +1228,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         _final_state_snapshot = dict(job.state_data or {})
         completed_work = set(_final_state_snapshot.get("completed_work") or completed_work)
         phase_ledgers = list(_final_state_snapshot.get("phase_ledger_v2") or phase_ledgers)
-        if _final_state_snapshot.get("parallel_engine") == "capacity_work_queue":
+        _wq_engine = _final_state_snapshot.get("parallel_engine") == "capacity_work_queue"
+        _wq_all_done = False
+        if _wq_engine:
             from app.services.scan_work_queue import has_pending_work, work_queue_counts
             if has_pending_work(db, job.id):
                 _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
@@ -1247,7 +1249,18 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 _dispatch_wq.delay(job.id)
                 _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
                 return {"checkpointed": True, "work_queue_counts": _final_state_snapshot["work_queue_counts"]}
-        _pending_parallel = _pending_parallel_targets(_final_state_snapshot, completed_work, allowed_phases)
+            else:
+                # work_queue tem itens mas nenhum está ativo → tudo terminal, prosseguir para conclusão
+                _wq_all_done = True
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="work-queue",
+                    level="INFO",
+                    message="work_queue_complete — todos os items terminais, finalizando scan",
+                ))
+                db.commit()
+        # Skip _pending_parallel check when work_queue handled everything
+        _pending_parallel = [] if _wq_all_done else _pending_parallel_targets(_final_state_snapshot, completed_work, allowed_phases)
         if _pending_parallel:
             _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
             _final_state_snapshot["parallel_pending_targets"] = _pending_parallel

@@ -198,7 +198,9 @@ services:
     # Dedicated worker for per-target subtasks (run_scan_target_subset).
     # Isolated from scan.unit so subtasks never compete with the main scan task.
     # --pool=threads: safe; each thread has its own _AUTH_LOCAL via threading.local().
-    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=16
+    # Concurrency reduced to 8: each thread holds an HTTP connection + DB session
+    # (~100-150 MB each); 16 threads was causing OOM kills.
+    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=8
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]

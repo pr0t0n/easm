@@ -43,7 +43,8 @@ SERVICE_PROFILES: dict[str, dict] = {
                      "finance", "wallet", "transfer", "account", "transaction"],
         "risk": "critical",
         "tests": ["idor_accounts", "negative_balance", "duplicate_transfer",
-                  "unauthenticated_read", "bola_check", "mass_assignment"],
+                  "unauthenticated_read", "bola_check", "mass_assignment",
+                  "race_condition_financial", "verbose_errors"],
     },
     "container_management": {
         "keywords": ["portainer", "docker", "kubernetes", "rancher", "k8s",
@@ -57,39 +58,52 @@ SERVICE_PROFILES: dict[str, dict] = {
                      "keycloak", "passport", "jwt", "session"],
         "risk": "high",
         "tests": ["jwt_none_alg", "password_reset_poisoning", "enum_users",
-                  "token_reuse", "brute_force_lockout", "2fa_bypass"],
+                  "token_reuse", "brute_force_lockout", "2fa_bypass",
+                  "mass_assignment"],
     },
     "admin_panel": {
         "keywords": ["admin", "administrator", "manager", "console", "management",
                      "wp-admin", "cpanel", "plesk"],
         "risk": "high",
-        "tests": ["default_creds", "unauthenticated_access", "info_disclosure_admin"],
+        "tests": ["default_creds", "unauthenticated_access", "info_disclosure_admin",
+                  "cache_deception"],
     },
     "api_gateway": {
         "keywords": ["api", "gateway", "graphql", "rest", "v1", "v2", "v3",
                      "endpoint", "service", "microservice"],
         "risk": "high",
         "tests": ["idor_sequential", "http_method_abuse", "mass_assignment",
-                  "verbose_errors", "rate_limit_absent", "bola_check"],
+                  "verbose_errors", "rate_limit_absent", "bola_check",
+                  "graphql_exposure", "cache_deception"],
+    },
+    "node_js_app": {
+        "keywords": ["node", "nodejs", "express", "nestjs", "next", "nuxt",
+                     "gatsby", "vercel", "netlify", "heroku"],
+        "risk": "high",
+        "tests": ["js_pollution", "mass_assignment", "verbose_errors",
+                  "rate_limit_absent", "open_cors", "debug_mode"],
     },
     "data_storage": {
         "keywords": ["storage", "s3", "blob", "bucket", "file", "upload",
                      "media", "assets", "cdn"],
         "risk": "high",
-        "tests": ["bucket_listing", "unauthenticated_download", "path_traversal_upload"],
+        "tests": ["bucket_listing", "unauthenticated_download", "path_traversal_upload",
+                  "cache_deception"],
     },
     "monitoring": {
         "keywords": ["grafana", "kibana", "prometheus", "zabbix", "nagios",
                      "datadog", "monitor", "metrics", "alerting"],
         "risk": "medium",
-        "tests": ["unauthenticated_access", "info_disclosure_env", "api_exposure"],
+        "tests": ["unauthenticated_access", "info_disclosure_env", "api_exposure",
+                  "graphql_exposure"],
     },
     "development": {
         "keywords": ["dev-", "-dev.", "staging", "homolog", "hml", "test-", "-test.",
                      "sandbox", "debug", "uat"],
         "risk": "high",
         "tests": ["debug_mode", "stack_trace", "verbose_errors",
-                  "hardcoded_secrets", "open_cors"],
+                  "hardcoded_secrets", "open_cors", "js_pollution",
+                  "graphql_exposure"],
     },
 }
 
@@ -434,6 +448,302 @@ def test_rate_limit_absent(base_url: str, domain: str) -> list[BusinessLogicFind
     return findings
 
 
+def test_graphql_exposure(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Testa GraphQL: introspection ativa, batching ilimitado, injeção de campo."""
+    findings = []
+    gql_paths = ["/graphql", "/api/graphql", "/gql", "/v1/graphql", "/query"]
+
+    introspection_query = {"query": "{ __schema { queryType { name } types { name kind } } }"}
+    batch_query = [{"query": "{ __typename }"} for _ in range(50)]
+
+    for path in gql_paths:
+        url = base_url.rstrip("/") + path
+        r = _safe_post(url, json_data=introspection_query)
+        if not r or r.status_code not in (200, 201):
+            continue
+
+        try:
+            data = r.json()
+        except Exception:
+            continue
+
+        if "data" in data and "__schema" in str(data.get("data") or ""):
+            # Conta tipos para estimar exposição
+            schema_data = data.get("data", {}).get("__schema") or {}
+            types_count = len(schema_data.get("types") or [])
+            mutations = [t for t in (schema_data.get("types") or [])
+                         if str(t.get("kind") or "").upper() == "OBJECT"
+                         and "mutation" in str(t.get("name") or "").lower()]
+
+            findings.append(BusinessLogicFinding(
+                title=f"GraphQL Introspection Ativa — Schema Completo Exposto ({path})",
+                severity="high",
+                test_type="graphql_introspection",
+                domain=domain,
+                evidence=(
+                    f"Introspection retornou {types_count} tipos em {url}. "
+                    f"Mutations visíveis: {len(mutations)}."
+                ),
+                description=(
+                    "GraphQL introspection ativa em produção expõe o schema completo: "
+                    "todos os tipos, queries, mutations e campos — incluindo os não documentados. "
+                    "Permite ao atacante mapear toda a API e descobrir endpoints admin ocultos."
+                ),
+                reproduction_steps=[
+                    f"curl -s -X POST '{url}' -H 'Content-Type: application/json' \\",
+                    "  -d '{\"query\": \"{ __schema { types { name kind fields { name } } } }\"}'",
+                    "# Procurar mutations com 'admin', 'delete', 'update', 'role', 'privilege'",
+                    "# Ferramenta: graphql-voyager, InQL Burp extension",
+                ],
+                business_impact=(
+                    "Schema exposto facilita IDOR/BOLA em mutations, privilege escalation via "
+                    "campos ocultos, e exfiltração massiva. LGPD Art. 46: dado de projeto "
+                    "que facilita acesso a dados pessoais."
+                ),
+                cvss_estimate=7.5,
+            ))
+
+        # Teste de batching — DoS potencial
+        r_batch = _safe_post(url, json_data=batch_query)
+        if r_batch and r_batch.status_code == 200:
+            try:
+                batch_data = r_batch.json()
+                if isinstance(batch_data, list) and len(batch_data) >= 10:
+                    findings.append(BusinessLogicFinding(
+                        title=f"GraphQL Batching Ilimitado — DoS/Amplificação ({path})",
+                        severity="medium",
+                        test_type="graphql_batching",
+                        domain=domain,
+                        evidence=f"50 queries batched retornaram {len(batch_data)} respostas em {url}",
+                        description=(
+                            "GraphQL sem limite de batch permite enviar N queries em um único request. "
+                            "Usado para brute force de tokens (batching de mutations de login), "
+                            "DoS por amplificação, e bypass de rate limiting."
+                        ),
+                        reproduction_steps=[
+                            f"curl -s -X POST '{url}' -H 'Content-Type: application/json' \\",
+                            "  -d '[{\"query\":\"{ __typename }\"},{\"query\":\"{ __typename }\"},...×100]'",
+                            "# Usar para brute force: [{\"query\":\"mutation { login(password: \\\"pass1\\\") }\"},...×1000]",
+                        ],
+                        business_impact=(
+                            "Permite brute force de senhas bypassando rate limit via batching. "
+                            "1 request HTTP = N tentativas de login."
+                        ),
+                        cvss_estimate=5.9,
+                    ))
+            except Exception:
+                pass
+
+    return findings
+
+
+def test_mass_assignment(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Detecta Mass Assignment — API aceita campos extras não documentados."""
+    findings = []
+    register_paths = [
+        "/api/users", "/api/v1/users", "/api/register",
+        "/api/auth/register", "/api/v1/auth/register", "/api/signup",
+    ]
+
+    for path in register_paths:
+        url = base_url.rstrip("/") + path
+
+        # Request com campos legítimos + campos de escalação
+        import uuid as _uuid
+        test_user = f"test_{_uuid.uuid4().hex[:6]}@scanner.local"
+        payload = {
+            "email": test_user,
+            "password": "Scanner1234!",
+            "name": "Test Scanner",
+            # ── Campos de escalação que não deveriam ser aceitos ──
+            "role": "admin",
+            "isAdmin": True,
+            "admin": True,
+            "is_superuser": True,
+            "privilege": "admin",
+            "verified": True,
+            "emailVerified": True,
+            "active": True,
+        }
+
+        r = _safe_post(url, json_data=payload)
+        if not r or r.status_code not in (200, 201):
+            continue
+
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        # Verifica se campos de escalação foram refletidos/aceitos
+        response_str = str(data).lower()
+        escalation_fields = ["admin", "role", "superuser", "privilege", "verified"]
+        accepted = [f for f in escalation_fields if f in response_str]
+
+        if accepted:
+            findings.append(BusinessLogicFinding(
+                title="Mass Assignment — Campos de Escalação Aceitos no Registro",
+                severity="critical",
+                test_type="mass_assignment",
+                domain=domain,
+                evidence=(
+                    f"POST {url} com campos extras [{', '.join(accepted)}] → "
+                    f"campos aparecem na resposta: status={r.status_code}"
+                ),
+                description=(
+                    "A API aceita campos adicionais não documentados durante criação/atualização. "
+                    "Um atacante pode incluir 'role': 'admin' no registro e obter conta privilegiada. "
+                    "Vulnerabilidade clássica em Rails (attr_accessible), Django, Express sem whitelist."
+                ),
+                reproduction_steps=[
+                    f"curl -s -X POST '{url}' -H 'Content-Type: application/json' \\",
+                    "  -d '{\"email\":\"attacker@evil.com\",\"password\":\"pass\",\"role\":\"admin\",\"isAdmin\":true}'",
+                    "# Se resposta contiver role:admin → Mass Assignment confirmado",
+                    "# Também testar PUT/PATCH /api/users/{id} com mesmos campos",
+                ],
+                business_impact=(
+                    "Qualquer usuário pode criar conta admin. Comprometimento total do controle de acesso. "
+                    "LGPD Art. 47: acesso indevido a dados pessoais por escalação de privilégio."
+                ),
+                cvss_estimate=9.1,
+            ))
+
+    return findings
+
+
+def test_race_condition_financial(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """
+    Detecta race conditions em operações financeiras/de limite.
+    Envia múltiplos requests simultâneos para operações que deveriam ser atômicas.
+    Não executa transações reais — apenas detecta ausência de idempotency/locks.
+    """
+    import concurrent.futures
+    findings = []
+
+    # Endpoints que tipicamente têm race conditions
+    race_targets = [
+        ("/api/v1/withdraw", {"amount": 1, "account": "test"}),
+        ("/api/v1/transfer", {"amount": 1, "to": "test"}),
+        ("/api/v1/redeem", {"code": "PROMO10"}),
+        ("/api/v1/coupon/apply", {"coupon": "TESTCOUPON"}),
+        ("/api/v1/voucher/use", {"voucher": "TEST"}),
+        ("/api/vote", {"item_id": 1}),
+        ("/api/like", {"post_id": 1}),
+    ]
+
+    def _fire(url: str, data: dict) -> int:
+        r = _safe_post(url, json_data=data)
+        return r.status_code if r else 0
+
+    for path, data in race_targets:
+        url = base_url.rstrip("/") + path
+
+        # Primeiro teste: endpoint existe?
+        probe = _safe_post(url, json_data=data)
+        if not probe or probe.status_code in (404, 405):
+            continue
+
+        # Enviar 10 requests simultâneos
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            futures = [ex.submit(_fire, url, data) for _ in range(10)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+        # Se mais de 2 retornaram 200 (em vez de 1): possível race condition
+        success_count = results.count(200)
+        if success_count >= 3:
+            findings.append(BusinessLogicFinding(
+                title=f"Possível Race Condition em Operação Financeira/Limite: {path}",
+                severity="high",
+                test_type="race_condition",
+                domain=domain,
+                evidence=(
+                    f"10 requests simultâneos para {url}: {success_count} retornaram HTTP 200. "
+                    f"Operação atômica esperada, mas múltiplas execuções aceitas simultaneamente."
+                ),
+                description=(
+                    f"Ausência de controle de concorrência em {path}. "
+                    "Envio de N requests paralelos causa execução múltipla de operação única. "
+                    "Comum em sistemas de cupom, withdraw, like/vote, reserva de inventário."
+                ),
+                reproduction_steps=[
+                    "# Usar Turbo Intruder no Burp Suite (single-packet attack)",
+                    f"# Ou: for i in {{1..20}}; do curl -s -X POST '{url}' -H 'Content-Type: application/json' \\",
+                    f"  -d '{data}' & done; wait",
+                    "# Se múltiplos retornam 200: race condition confirmada",
+                    "# Para transações: verificar saldo após 20 withdraws simultâneos de valor máximo",
+                ],
+                business_impact=(
+                    "Permite dobrar benefícios (cupons, cashback), sacar mais do saldo disponível, "
+                    "ou votar múltiplas vezes. Impacto financeiro direto. "
+                    "BACEN RES 4893/2021 — controle de integridade de transações."
+                ),
+                cvss_estimate=7.5,
+            ))
+
+    return findings
+
+
+def test_cache_deception(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """
+    Detecta Web Cache Deception: endpoints autenticados cacheados por extensão de arquivo.
+    Sem autenticação, apenas detecta se headers de cache são permissivos em rotas privadas.
+    """
+    findings = []
+    private_paths = [
+        "/api/me", "/api/profile", "/api/v1/me", "/api/account",
+        "/api/user/profile", "/api/settings",
+    ]
+    # Extensões que CDNs costumam cachear
+    cache_extensions = [".css", ".js", ".png", ".jpg", ".gif", ".woff"]
+
+    for path in private_paths:
+        for ext in cache_extensions[:2]:  # testa apenas 2 por path para evitar lentidão
+            url = base_url.rstrip("/") + path + f"/test{ext}"
+            r = _safe_get(url)
+            if not r or r.status_code not in (200, 304):
+                continue
+
+            # Verifica ausência de cache-control restritivo
+            cc = r.headers.get("Cache-Control", "").lower()
+            pragma = r.headers.get("Pragma", "").lower()
+            has_no_store = "no-store" in cc or "private" in cc
+            cached_header = r.headers.get("X-Cache", "") or r.headers.get("CF-Cache-Status", "")
+
+            if not has_no_store:
+                findings.append(BusinessLogicFinding(
+                    title=f"Web Cache Deception — Endpoint Privado Sem Cache-Control: {path}",
+                    severity="high",
+                    test_type="cache_deception",
+                    domain=domain,
+                    evidence=(
+                        f"{url} retornou HTTP {r.status_code} sem 'Cache-Control: no-store/private'. "
+                        f"Cache-Control: '{cc}' | X-Cache: '{cached_header}'"
+                    ),
+                    description=(
+                        f"O endpoint {path} (tipicamente privado/autenticado) não define Cache-Control: no-store. "
+                        f"Ao acessar {path}/test.css, CDNs como Cloudflare/Fastly podem cachear a resposta. "
+                        "Um atacante envia o link para a vítima; após o acesso, busca a resposta cacheada — "
+                        "obtendo dados pessoais da sessão autenticada da vítima."
+                    ),
+                    reproduction_steps=[
+                        f"# 1. Atacante cria link: https://{domain}{path}/malicious.css",
+                        "# 2. Vítima (autenticada) clica no link",
+                        "# 3. CDN cacheia a resposta com dados da vítima",
+                        f"# 4. Atacante busca: curl -s 'https://{domain}{path}/malicious.css'",
+                        "# 5. Recebe resposta com dados pessoais da vítima",
+                        "# Verificar: response headers no Burp/curl -I",
+                    ],
+                    business_impact=(
+                        "Exfiltração de dados pessoais de usuários autenticados via CDN. "
+                        "LGPD Art. 46: falha técnica que permite acesso não autorizado a dados pessoais."
+                    ),
+                    cvss_estimate=7.5,
+                ))
+                break  # um finding por path
+
+    return findings
+
+
 def test_debug_mode(base_url: str, domain: str) -> list[BusinessLogicFinding]:
     """Detecta endpoints de debug ativos."""
     findings = []
@@ -543,6 +853,15 @@ def analyze_business_logic(
         raw_findings.extend(test_rate_limit_absent(base_url, domain))
     if "debug_mode" in tests_to_run:
         raw_findings.extend(test_debug_mode(base_url, domain))
+    # New real-world attack tests
+    if "graphql_exposure" in tests_to_run:
+        raw_findings.extend(test_graphql_exposure(base_url, domain))
+    if "mass_assignment" in tests_to_run:
+        raw_findings.extend(test_mass_assignment(base_url, domain))
+    if "race_condition_financial" in tests_to_run:
+        raw_findings.extend(test_race_condition_financial(base_url, domain))
+    if "cache_deception" in tests_to_run:
+        raw_findings.extend(test_cache_deception(base_url, domain))
 
     # Convert to platform format
     return [

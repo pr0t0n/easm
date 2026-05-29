@@ -266,11 +266,100 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
 # httpx:  -l targets.txt  → 1 probe for all hosts
 # whatweb: --input-file   → 1 fingerprint job for all hosts
 # All nuclei-* variants share the same nuclei binary → all batch equally well
+# ── Phase dependency gates — fases que devem aguardar prerequisito ────────────
+# Fases criadas como status='blocked'; são desbloqueadas (→ 'queued') quando o
+# prerequisito completa para aquele target via unblock_phase_items().
+#
+# Diagrama de dependência:
+#   P02 (port scan)       → criada como queued — ponto de partida
+#   P18 (OSINT)           → criada como queued — não depende de HTTP
+#   P03-P07, P15          → blocked; desbloqueadas quando P02 completa
+#   P08, P09, P16         → blocked; desbloqueadas quando P06 completa
+#   P10-P14, P17, P19-P20 → blocked; desbloqueadas pós-triage de P09
+#
+PHASE_GATE: dict[str, str | None] = {
+    "P02": None,   # queued imediatamente
+    "P18": None,   # queued imediatamente (OSINT independente)
+    "P03": "P02",  # crawl depende de saber que porta existe
+    "P04": "P02",
+    "P05": "P02",
+    "P06": "P02",  # fingerprint depende de port scan
+    "P07": "P02",
+    "P15": "P02",  # waybackurls/gau não precisam de HTTP mas de resolução
+    "P08": "P06",  # JS crawl depende de fingerprint HTTP
+    "P09": "P06",  # nuclei depende de saber o serviço
+    "P16": "P06",
+    "P10": "P09",  # injeção ativa só após nuclei
+    "P11": "P09",
+    "P12": "P09",
+    "P13": "P09",
+    "P14": "P09",
+    "P17": "P09",
+    "P19": "P09",
+    "P20": "P09",
+}
+
+# Fases que RECEBEM items como 'blocked' (aguardam gate)
+_BLOCKED_AT_CREATE: frozenset[str] = frozenset(
+    ph for ph, gate in PHASE_GATE.items() if gate is not None
+)
+
+# Mapa inverso: qual fase ao completar deve desbloquear quais fases?
+_GATE_UNLOCKS: dict[str, list[str]] = {}
+for _ph, _gate in PHASE_GATE.items():
+    if _gate:
+        _GATE_UNLOCKS.setdefault(_gate, []).append(_ph)
+
+
+def unblock_phase_items(
+    db: Session,
+    scan_id: int,
+    targets: list[str],
+    gate_phase: str,
+) -> int:
+    """
+    Desbloqueia items de fases que dependem de gate_phase para os targets dados.
+    Ex: gate_phase='P02' → desbloqueia P03/P04/P05/P06/P07/P15 para esses targets.
+    Retorna quantos items foram desbloqueados.
+    """
+    phases_to_unlock = _GATE_UNLOCKS.get(gate_phase, [])
+    if not phases_to_unlock or not targets:
+        return 0
+
+    now = datetime.utcnow()
+    # Inclui batch items cujos batch_targets intersectam com os targets dados
+    # Para batch: target='__batch__', batch_targets em item_metadata
+    updated = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.phase_id.in_(phases_to_unlock),
+            ScanWorkItem.status == "blocked",
+            or_(
+                ScanWorkItem.target.in_(targets),
+                ScanWorkItem.target == "__batch__",
+            ),
+        )
+        .update(
+            {"status": "queued", "updated_at": now},
+            synchronize_session=False,
+        )
+    )
+    if updated:
+        db.flush()
+    return int(updated)
+
+
 BATCH_CAPABLE_TOOLS: frozenset[str] = frozenset({
-    # Core network tools
-    "naabu", "nmap", "nmap-vulscan", "httpx", "dnsx", "subjack",
+    # Core network tools (support -iL / --input-file host list)
+    "naabu", "nmap", "nmap-vulscan", "nmap-ssl", "nmap-vuln", "nmap-http",
+    "httpx", "dnsx", "subjack",
+    # Crawlers (support -list / --sites / stdin)
+    "katana", "katana-js", "hakrawler", "gospider",
     # Fingerprinting (support --input-file or equivalent)
     "whatweb", "whatweb-basic",
+    # Passive recon (accept domain list)
+    "gau", "waybackurls",
     # Nuclei + every variant — all use nuclei -l under the hood
     "nuclei",
     "nuclei-cves", "nuclei-headers", "nuclei-exposure", "nuclei-takeover",
@@ -334,8 +423,8 @@ def enqueue_scan_work_items(
         ).first()
 
         if existing_batch:
-            # If still queued/retry, merge in any new targets
-            if existing_batch.status in ("queued", "retry"):
+            # If still queued/retry/blocked, merge in any new targets
+            if existing_batch.status in ("queued", "retry", "blocked"):
                 old_meta = dict(existing_batch.item_metadata or {})
                 existing_tgts = set(old_meta.get("batch_targets") or [])
                 merged = sorted(existing_tgts | tset)
@@ -352,6 +441,7 @@ def enqueue_scan_work_items(
         # Batch item gets best priority of all targets in the set
         best_boost = min(_high_risk_priority_boost(t) for t in sorted_targets) if sorted_targets else 0
 
+        _batch_status = "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
@@ -360,7 +450,7 @@ def enqueue_scan_work_items(
             profile=_tool_profile(tool)[:120],
             resource_class=rc,
             priority=max(1, base_priority + best_boost),
-            status="queued",
+            status=_batch_status,
             max_attempts=2,
             item_metadata={
                 "source": source,
@@ -417,6 +507,7 @@ def enqueue_scan_work_items(
         _to = _adaptive_timeout(tool, target)
         if _to is not None:
             _item_meta["timeout_override"] = _to
+        _single_status = "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
@@ -425,7 +516,7 @@ def enqueue_scan_work_items(
             profile=_tool_profile(tool)[:120],
             resource_class=rc,
             priority=max(1, base_priority + risk_boost),
-            status="queued",
+            status=_single_status,
             max_attempts=2,
             item_metadata=_item_meta,
             created_at=datetime.utcnow(),
@@ -471,6 +562,29 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         return []
 
     try:
+        # ── Semaphore reconciliation ──────────────────────────────────────────
+        # Lease expiry (bulk UPDATE below) changes dispatched/running/submitted →
+        # retry/failed WITHOUT calling kali_inflight_release. Over time this
+        # causes the Redis counter to drift above the real DB in-flight count.
+        # Fix: compare DB reality vs Redis and correct the overshoot atomically.
+        try:
+            _r = _redis_client()
+            for _rc in caps:
+                _db_inflight = (
+                    db.query(func.count(ScanWorkItem.id))
+                    .filter(
+                        ScanWorkItem.status.in_(["dispatched", "running", "submitted"]),
+                        ScanWorkItem.resource_class == _rc,
+                    )
+                    .scalar() or 0
+                )
+                _redis_key = f"kali:inflight:{_rc}"
+                _redis_val = max(0, int(_r.get(_redis_key) or 0))
+                if _redis_val > _db_inflight:
+                    _r.set(_redis_key, _db_inflight)
+        except Exception:
+            pass  # fail-open — reconciliation is best-effort
+
         db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
@@ -565,7 +679,7 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.target == target,
-            ScanWorkItem.status.in_(["queued", "retry"]),
+            ScanWorkItem.status.in_(["queued", "retry", "blocked"]),
             ~ScanWorkItem.phase_id.in_(list(KEEP_PHASES)),
         )
         .all()
@@ -631,13 +745,15 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
                 targets_with_findings.add(str(t))
 
     # 3. Cancela itens individuais (não-batch) de P10/P12/P13 sem evidência
+    # Inclui "blocked" — items que ainda não foram desbloqueados também devem
+    # ser cancelados se o target não possui findings suficientes do nuclei (P09).
     items_to_cancel = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.phase_id.in_(list(_INJECTION_PHASES)),
             ScanWorkItem.tool_name.in_(list(_HIGH_COST_TOOLS)),
-            ScanWorkItem.status.in_(["queued", "retry"]),
+            ScanWorkItem.status.in_(["queued", "retry", "blocked"]),
             ScanWorkItem.target != "__batch__",
             ~ScanWorkItem.target.in_(list(targets_with_findings)) if targets_with_findings else text("true"),
         )

@@ -378,11 +378,18 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             if str(p.get("ledger_mcp_status") or "").lower() in {"failed", "timeout", "unreachable"}
         ),
     }
+    # "blocked" = phase aguardando gate — NÃO conta como concluída para o progresso.
+    # Só "completed" e "partial" indicam trabalho real realizado.
     ledger_completed_count = sum(
         1 for entry in phase_ledger.values()
-        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked"}
+        if str(entry.get("status") or "").lower() in {"completed", "partial"}
     )
+    # Para scans ainda em andamento, o progress é calculado sobre o ledger (per-phase),
+    # mas nunca pode ultrapassar 99% — 100% é reservado para scan status=completed.
+    _scan_running = str(scan.status or "").lower() in ("running", "queued", "retrying")
     computed_progress = round((ledger_completed_count / max(1, len(PENTEST_PHASES))) * 100)
+    if _scan_running:
+        computed_progress = min(99, computed_progress)
 
     # ── Capability summary ────────────────────────────────────────────────────
     capabilities: list[dict[str, Any]] = []
@@ -620,7 +627,16 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "scan_id": scan.id,
         "status": scan.status,
         "current_step": scan.current_step,
-        "mission_progress": max(int(scan.mission_progress or 0), int(computed_progress or 0)),
+        # Scans work_queue (capacity_work_queue engine) têm mission_progress
+        # calculado item-a-item em tasks.py — é mais preciso que o ledger,
+        # pois o ledger marca "completed" quando apenas 1 target processou a fase.
+        # Para esses scans, usamos scan.mission_progress diretamente (cap 99% se running).
+        # Scans legado (sem work items) usam computed_progress do ledger como fallback.
+        "mission_progress": (
+            min(99, int(scan.mission_progress or 0))
+            if _scan_running and int(scan.mission_progress or 0) > 0
+            else max(int(scan.mission_progress or 0), int(computed_progress or 0))
+        ),
         "objective_met": objective_met,
         "termination_reason": termination_reason,
         # ── Pentest phase execution state ──────────────────────────────────
