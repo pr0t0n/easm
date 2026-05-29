@@ -150,6 +150,29 @@ function locationForFinding(item) {
 }
 
 
+// ── Verification status config ────────────────────────────────────────────────
+const VSTATUS_CFG = {
+  confirmed:  { label: "✅ Confirmado",  color: "#15803d", bg: "#dcfce7", title: "Ferramenta provou a condição diretamente" },
+  candidate:  { label: "⚠️ Candidato",   color: "#b45309", bg: "#fef3c7", title: "Precisa de verificação secundária" },
+  hypothesis: { label: "💭 Hipótese",    color: "#6b7280", bg: "var(--surface-soft)", title: "Correlação passiva — não testou a condição" },
+  refuted:    { label: "❌ Refutado",    color: "#dc2626", bg: "#fee2e2", title: "Verificação concluiu que é falso positivo" },
+};
+
+function VerificationBadge({ status }) {
+  const cfg = VSTATUS_CFG[status];
+  if (!cfg) return null;
+  return (
+    <span title={cfg.title} style={{
+      display: "inline-flex", alignItems: "center",
+      padding: "2px 7px", borderRadius: 4, fontSize: 10.5,
+      fontWeight: 600, color: cfg.color, background: cfg.bg,
+      whiteSpace: "nowrap",
+    }}>
+      {cfg.label}
+    </span>
+  );
+}
+
 export default function VulnerabilitiesPage() {
   const [rows, setRows] = useState([]);
   const [targets, setTargets] = useState([]);
@@ -164,6 +187,8 @@ export default function VulnerabilitiesPage() {
   const [scanFilter, setScanFilter] = useState("");
   const [sortMode, setSortMode] = useState("severity");
   const [expandedId, setExpandedId] = useState(null);
+  // New: verification status filter — null = all, otherwise "confirmed"|"candidate"|"hypothesis"
+  const [vstatus, setVstatus] = useState(null);
 
   const loadTargets = async () => {
     try {
@@ -198,6 +223,7 @@ export default function VulnerabilitiesPage() {
       }
       if (targetQuery.trim()) params.target = targetQuery.trim();
       if (scanFilter) params.scan_id = scanFilter;
+      if (vstatus) params.verification_status = vstatus;
 
       const { data } = await client.get("/api/findings/page", { params });
       const items = Array.isArray(data?.items) ? data.items : [];
@@ -227,11 +253,11 @@ export default function VulnerabilitiesPage() {
 
   useEffect(() => {
     setPage((p) => ({ ...p, offset: 0 }));
-  }, [severitiesFilter, statusFilter, targetQuery, scanFilter, sortMode]);
+  }, [severitiesFilter, statusFilter, targetQuery, scanFilter, sortMode, vstatus]);
 
   useEffect(() => {
     load();
-  }, [severitiesFilter, statusFilter, page.offset, targetQuery, scanFilter, sortMode]);
+  }, [severitiesFilter, statusFilter, page.offset, targetQuery, scanFilter, sortMode, vstatus]);
 
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
@@ -329,6 +355,33 @@ export default function VulnerabilitiesPage() {
           })}
         </div>
 
+        {/* ── Verification status filter ─────────────────────────────────── */}
+        <div style={{ display: "flex", gap: 8, padding: "10px 22px", borderBottom: "1px solid var(--line)", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "var(--ink-muted)", fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", marginRight: 4 }}>
+            Verificação
+          </span>
+          {[null, "confirmed", "candidate", "hypothesis"].map((v) => {
+            const cfg = v ? VSTATUS_CFG[v] : null;
+            const label = cfg ? cfg.label : "Todas";
+            const active = vstatus === v;
+            return (
+              <button
+                key={v ?? "all"}
+                onClick={() => setVstatus(v)}
+                style={{
+                  padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: active ? 700 : 500,
+                  border: active ? `1.5px solid ${cfg?.color || "var(--brand-500)"}` : "1px solid var(--line)",
+                  background: active ? (cfg?.bg || "var(--brand-50)") : "transparent",
+                  color: active ? (cfg?.color || "var(--brand-700)") : "var(--ink-muted)",
+                  cursor: "pointer",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
         {loading && (
           <div className="state"><div><div className="spin" /><p className="st-title">Carregando vulnerabilidades…</p></div></div>
         )}
@@ -345,6 +398,7 @@ export default function VulnerabilitiesPage() {
                   <th>CVE</th>
                   <th>CVSS</th>
                   <th>Severidade</th>
+                  <th>Verificação</th>
                   <th>Alvo</th>
                   <th>Ferramenta</th>
                   <th>Data</th>
@@ -362,10 +416,15 @@ export default function VulnerabilitiesPage() {
                     <tr onClick={() => setExpandedId(isExpanded ? null : item.id)} style={{ cursor: "pointer" }}>
                       <td className="mono-id">{isExpanded ? "▼ " : "▶ "}{item.id}</td>
                       <td className="mono-sm" style={{ color: "var(--brand-700)" }}>#{item.scan_job_id || "—"}</td>
-                      <td style={{ maxWidth: 280 }}>
+                      <td style={{ maxWidth: 260 }}>
                         <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {sanitizeText(item.title)}
                         </div>
+                        {item.url && (
+                          <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            🔗 {item.url}
+                          </div>
+                        )}
                       </td>
                       <td className="mono-sm" style={{ minWidth: 160 }}>
                         {item.cve ? (
@@ -382,7 +441,23 @@ export default function VulnerabilitiesPage() {
                       <td className="mono-sm" style={{ color: "var(--sev-medium-text)" }}>
                         {item.cvss != null ? Number(item.cvss).toFixed(1) : "—"}
                       </td>
-                      <td><span className={`b ${SEV_CLASS[item.severity] || "b-low"}`}>{item.severity}</span></td>
+                      <td>
+                        <span className={`b ${SEV_CLASS[item.severity] || "b-low"}`}>{item.severity}</span>
+                        {/* Business impact: show adjusted vs base score when different */}
+                        {item.details?.adjusted_risk_score != null && item.details?.base_risk_score != null &&
+                         item.details.adjusted_risk_score !== item.details.base_risk_score && (
+                          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 2 }}>
+                            risco {item.details.base_risk_score}→<b style={{ color: "var(--sev-high-text)" }}>{item.details.adjusted_risk_score}</b>
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <VerificationBadge status={item.verification_status} />
+                        {/* Stage-2 verification pending indicator */}
+                        {item.details?.needs_verification && item.verification_status !== "confirmed" && (
+                          <div style={{ fontSize: 9.5, color: "var(--ink-muted)", marginTop: 2 }}>verificação pendente</div>
+                        )}
+                      </td>
                       <td className="mono-sm" style={{ minWidth: 200, wordBreak: "break-all" }}>
                         <div style={{ fontWeight: 650 }}>
                           {location.primary}
@@ -400,8 +475,43 @@ export default function VulnerabilitiesPage() {
                     </tr>
                     {isExpanded && intel && (
                       <tr>
-                        <td colSpan={9} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
+                        <td colSpan={10} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 18, fontSize: 13 }}>
+
+                            {/* ── Evidence gate + Business impact ────────────── */}
+                            {(item.verification_status || item.details?.impact_reason || item.url) && (
+                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                {item.verification_status && (
+                                  <div style={{ background: VSTATUS_CFG[item.verification_status]?.bg || "var(--canvas-soft)", borderRadius: 8, padding: "8px 14px", minWidth: 160 }}>
+                                    <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", marginBottom: 4 }}>Status de Verificação</div>
+                                    <VerificationBadge status={item.verification_status} />
+                                    {item.details?.verified_by && (
+                                      <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4 }}>por: {item.details.verified_by}</div>
+                                    )}
+                                    {item.details?.verification_note && item.verification_status !== "confirmed" && (
+                                      <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4, maxWidth: 260, lineHeight: 1.4 }}>{item.details.verification_note}</div>
+                                    )}
+                                    {item.details?.oob_callback && (
+                                      <div style={{ fontSize: 10.5, color: "var(--sev-low-text)", marginTop: 4 }}>
+                                        🔗 OOB callback: {item.details.oob_callback.protocol} de {item.details.oob_callback.remote_address}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {item.url && (
+                                  <div style={{ background: "var(--canvas-soft)", borderRadius: 8, padding: "8px 14px", flex: 1, minWidth: 200 }}>
+                                    <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", marginBottom: 4 }}>Endpoint Afetado</div>
+                                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, wordBreak: "break-all", color: "var(--brand-700)" }}>{item.url}</div>
+                                    {item.details?.impact_reason && item.details?.impact_reason !== "padrão" && (
+                                      <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4 }}>impacto: {item.details.impact_reason}</div>
+                                    )}
+                                    {item.details?.score_adjustment && (
+                                      <div style={{ fontSize: 10.5, color: "var(--sev-high-text)", marginTop: 2 }}>score: {item.details.score_adjustment}</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
 
                             {/* ── How it was discovered ─────────────────────── */}
                             <div style={{ borderLeft: "3px solid var(--brand-500)", paddingLeft: 12 }}>

@@ -154,6 +154,55 @@ function formatService(service) {
     .trim() || "—";
 }
 
+// ── Crown jewel label colors ──────────────────────────────────────────────────
+const CROWN_LABEL_COLOR = {
+  "identity/auth": "#7c3aed",
+  "payment/financial": "#b45309",
+  "admin_panel": "#dc2626",
+  "data_store": "#1d4ed8",
+  "cicd": "#0f766e",
+  "api_gateway": "#065f46",
+  "secrets_mgmt": "#7c3aed",
+  "internal_service": "#1e40af",
+  "customer_app": "#64748b",
+};
+
+function CrownJewelBadge({ label }) {
+  const color = CROWN_LABEL_COLOR[label] || "#6b7280";
+  return (
+    <span title={`Crown Jewel: ${label}`} style={{
+      display: "inline-flex", alignItems: "center", gap: 2,
+      padding: "1px 5px", borderRadius: 3, fontSize: 9.5,
+      fontWeight: 700, color, border: `1px solid ${color}`,
+      flexShrink: 0,
+    }}>
+      ⭐ {label.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// Aggregate confirmation quality across all findings of a subdomain
+function VerificationQualityBar({ findings = [] }) {
+  if (!findings.length) return null;
+  const confirmed  = findings.filter((f) => f.verification_status === "confirmed").length;
+  const candidate  = findings.filter((f) => f.verification_status === "candidate").length;
+  const hypothesis = findings.filter((f) => f.verification_status === "hypothesis").length;
+  const total = findings.length;
+  if (total === 0) return null;
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ fontSize: 10, color: "var(--ink-muted)", marginBottom: 2 }}>
+        qualidade de evidência: {confirmed} confirmados · {candidate} candidatos · {hypothesis} hipóteses
+      </div>
+      <div style={{ display: "flex", height: 4, borderRadius: 2, overflow: "hidden", background: "var(--line)" }}>
+        <div style={{ width: `${(confirmed / total) * 100}%`, background: "#16a34a" }} title={`Confirmados: ${confirmed}`} />
+        <div style={{ width: `${(candidate / total) * 100}%`, background: "#f59e0b" }} title={`Candidatos: ${candidate}`} />
+        <div style={{ width: `${(hypothesis / total) * 100}%`, background: "#9ca3af" }} title={`Hipóteses: ${hypothesis}`} />
+      </div>
+    </div>
+  );
+}
+
 export default function DomainsPage() {
   const [domains, setDomains] = useState([]);
   const [selectedDomain, setSelectedDomain] = useState("");
@@ -162,6 +211,9 @@ export default function DomainsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  // New: crown jewels + OSINT per scan
+  const [crownJewels, setCrownJewels] = useState([]);
+  const [osintData, setOsintData] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -187,6 +239,21 @@ export default function DomainsPage() {
     load();
     return () => { active = false; };
   }, [refreshKey]);
+
+  // Load crown jewels + OSINT when domain changes (uses latest scan)
+  useEffect(() => {
+    const dom = domains.find((d) => d.domain === selectedDomain);
+    const scanId = dom?.latest_scan_id;
+    if (!scanId) return;
+    let active = true;
+    client.get(`/api/scans/${scanId}/crown-jewels`).then(({ data }) => {
+      if (active) setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []);
+    }).catch(() => {});
+    client.get(`/api/scans/${scanId}/osint`).then(({ data }) => {
+      if (active) setOsintData(data?.osint || null);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [selectedDomain, domains]);
 
   const domain = useMemo(
     () => domains.find((item) => item.domain === selectedDomain) || domains[0] || null,
@@ -218,6 +285,11 @@ export default function DomainsPage() {
 
   const totals = domain?.severity_counts || {};
   const ports = domain?.ports || [];
+
+  // Map subdomain → crown jewel label
+  const crownMap = Object.fromEntries(
+    crownJewels.map((cj) => [String(cj.target || "").toLowerCase(), cj.label])
+  );
 
   return (
     <main className="domains-page">
@@ -301,6 +373,69 @@ export default function DomainsPage() {
               <SeverityPills counts={totals} />
             </div>
           </div>
+
+          {/* ── OSINT Phase Zero panel ──────────────────────────────────── */}
+          {osintData && (
+            <div style={{ margin: "12px 0", padding: "14px 18px", background: "var(--canvas-soft)", borderRadius: 10, border: "1px solid var(--line)" }}>
+              <div style={{ fontWeight: 700, fontSize: 12, color: "var(--ink)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                🔍 OSINT Phase Zero
+              </div>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                {/* HIBP */}
+                {osintData.hibp && !osintData.hibp.skipped && (
+                  <div style={{ flex: 1, minWidth: 140, padding: "8px 12px", background: "#fff", borderRadius: 8, border: `1px solid ${osintData.hibp.emails_breached > 0 ? "#fca5a5" : "var(--line)"}` }}>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)", fontWeight: 600 }}>HIBP Breaches</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: osintData.hibp.emails_breached > 0 ? "#dc2626" : "#16a34a", marginTop: 2 }}>
+                      {osintData.hibp.emails_breached || 0}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>emails em vazamentos</div>
+                  </div>
+                )}
+                {/* GitHub dork */}
+                {osintData.github_dork && !osintData.github_dork.skipped && (
+                  <div style={{ flex: 1, minWidth: 140, padding: "8px 12px", background: "#fff", borderRadius: 8, border: `1px solid ${osintData.github_dork.results_count > 0 ? "#fde68a" : "var(--line)"}` }}>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)", fontWeight: 600 }}>GitHub Expostos</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: osintData.github_dork.results_count > 0 ? "#b45309" : "#16a34a", marginTop: 2 }}>
+                      {osintData.github_dork.results_count || 0}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>resultados secrets/env</div>
+                  </div>
+                )}
+                {/* Shodan ASN */}
+                {osintData.shodan_asn && !osintData.shodan_asn.skipped && (
+                  <div style={{ flex: 1, minWidth: 180, padding: "8px 12px", background: "#fff", borderRadius: 8, border: "1px solid var(--line)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)", fontWeight: 600 }}>Shodan ASN {osintData.shodan_asn.asn}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "var(--brand-700)", marginTop: 2 }}>{osintData.shodan_asn.org || "—"}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>
+                      {osintData.shodan_asn.total_hosts_in_asn?.toLocaleString("pt-BR") || 0} IPs no ASN ·{" "}
+                      {(osintData.shodan_asn.discovered_ips || []).filter((ip) => ip.vulns?.length > 0).length} com CVEs conhecidos
+                    </div>
+                  </div>
+                )}
+                {/* Crown jewels summary */}
+                {crownJewels.length > 0 && (
+                  <div style={{ flex: 2, minWidth: 200, padding: "8px 12px", background: "#fff", borderRadius: 8, border: "1px solid var(--line)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-muted)", fontWeight: 600, marginBottom: 6 }}>⭐ Crown Jewels ({crownJewels.length})</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {crownJewels.slice(0, 6).map((cj) => (
+                        <span key={cj.target} title={cj.target} style={{
+                          padding: "2px 6px", borderRadius: 4, fontSize: 10.5, fontWeight: 600,
+                          color: CROWN_LABEL_COLOR[cj.label] || "#6b7280",
+                          border: `1px solid ${CROWN_LABEL_COLOR[cj.label] || "#6b7280"}20`,
+                          background: `${CROWN_LABEL_COLOR[cj.label] || "#6b7280"}08`,
+                        }}>
+                          {String(cj.target).split(".")[0]}
+                        </span>
+                      ))}
+                      {crownJewels.length > 6 && (
+                        <span style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>+{crownJewels.length - 6}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* ── Ports table ──────────────────────────────────────────────── */}
           {ports.length > 0 && (
@@ -389,8 +524,11 @@ export default function DomainsPage() {
                     onClick={() => setSelectedSubdomain(item.name)}
                   >
                     <span className="subdomain-name">{item.name}</span>
-                    <span className="subdomain-meta" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span className="subdomain-meta" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <AnalysisStatusBadge status={item.analysis_status} />
+                      {crownMap[String(item.name || "").toLowerCase()] && (
+                        <CrownJewelBadge label={crownMap[String(item.name || "").toLowerCase()]} />
+                      )}
                       Scan #{item.scan_id || "—"} · {fmtDate(item.scan_created_at)}
                     </span>
                     {/* Show ports in subdomain row when port filter is active */}
@@ -407,6 +545,7 @@ export default function DomainsPage() {
                       </div>
                     )}
                     <SeverityPills counts={item.severity_counts} />
+                    <VerificationQualityBar findings={item.findings || []} />
                   </button>
                 ))}
               </div>
@@ -428,6 +567,7 @@ export default function DomainsPage() {
                       <th>Vulnerabilidade</th>
                       <th>Criticidade</th>
                       <th>CVE / CVSS</th>
+                      <th>Verificação</th>
                       <th>Status</th>
                     </tr>
                   </thead>
@@ -460,6 +600,17 @@ export default function DomainsPage() {
                                 <span style={{ color: "var(--ink-muted)", fontSize: 11, marginLeft: 4 }}>· {Number(finding.cvss).toFixed(1)}</span>
                               )}
                             </>
+                          ) : "—"}
+                        </td>
+                        <td>
+                          {finding.verification_status ? (
+                            <span style={{
+                              padding: "2px 5px", borderRadius: 3, fontSize: 9.5, fontWeight: 600,
+                              color: finding.verification_status === "confirmed" ? "#15803d" : finding.verification_status === "hypothesis" ? "#6b7280" : "#b45309",
+                              background: finding.verification_status === "confirmed" ? "#dcfce7" : finding.verification_status === "hypothesis" ? "#f3f4f6" : "#fef3c7",
+                            }}>
+                              {finding.verification_status === "confirmed" ? "✅" : finding.verification_status === "hypothesis" ? "💭" : "⚠️"} {finding.verification_status}
+                            </span>
                           ) : "—"}
                         </td>
                         <td>

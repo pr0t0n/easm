@@ -1,5 +1,5 @@
 // ReportsPage: relatório único por scan ou por alvo/subdomínio.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
 
 function resolveApiBaseUrl() {
@@ -64,6 +64,12 @@ export default function ReportsPage() {
   const [mode, setMode] = useState("scan");
   const [scans, setScans] = useState([]);
   const [selectedId, setSelectedId] = useState("");
+  // Narrative state
+  const [narrative, setNarrative] = useState("");
+  const [narrativeMethod, setNarrativeMethod] = useState("");
+  const [generatingNarrative, setGeneratingNarrative] = useState(false);
+  const [narrativeError, setNarrativeError] = useState("");
+  const [showNarrative, setShowNarrative] = useState(false);
   const [loadingScans, setLoadingScans] = useState(true);
   const [targets, setTargets] = useState([]);
   const [loadingTargets, setLoadingTargets] = useState(false);
@@ -177,6 +183,32 @@ export default function ReportsPage() {
     const f = document.getElementById("report-iframe");
     if (f?.contentWindow) { f.contentWindow.focus(); f.contentWindow.print(); }
   };
+
+  // Load narrative when scan changes
+  useEffect(() => {
+    if (!selectedId) return;
+    setNarrative("");
+    setNarrativeMethod("");
+    client.get(`/api/scans/${selectedId}/attack-narrative`)
+      .then(({ data }) => { setNarrative(data.narrative || ""); setNarrativeMethod(data.method || ""); })
+      .catch(() => {});
+  }, [selectedId]);
+
+  const generateNarrative = useCallback(async () => {
+    if (!selectedId) return;
+    setGeneratingNarrative(true);
+    setNarrativeError("");
+    try {
+      const { data } = await client.post(`/api/scans/${selectedId}/generate-narrative`);
+      setNarrative(data.narrative || "");
+      setNarrativeMethod(data.method || "");
+      setShowNarrative(true);
+    } catch (err) {
+      setNarrativeError(err?.response?.data?.detail || "Falha ao gerar narrativa.");
+    } finally {
+      setGeneratingNarrative(false);
+    }
+  }, [selectedId]);
 
   const selectedScan = scans.find((s) => String(s.id) === String(selectedId));
 
@@ -302,6 +334,99 @@ export default function ReportsPage() {
           <span><strong style={{ color: "var(--ink)" }}>Alvo:</strong> {selectedScan.target_query || "—"}</span>
           <span><strong style={{ color: "var(--ink)" }}>Status:</strong> <span style={{ color: selectedScan.status === "completed" ? "var(--sev-low-text)" : selectedScan.status === "failed" ? "var(--sev-critical-text)" : "var(--sev-medium-text)", fontWeight: 600 }}>{selectedScan.status}</span></span>
           <span><strong style={{ color: "var(--ink)" }}>Criado em:</strong> {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "—"}</span>
+        </div>
+      )}
+
+      {/* ── Attack Narrative Panel ──────────────────────────────────────────── */}
+      {scanId && (
+        <div style={{ ...reportCard }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>
+                📖 Narrativa de Ataque
+                {narrativeMethod && (
+                  <span style={{ fontWeight: 400, fontSize: 11, color: "var(--ink-muted)", marginLeft: 6 }}>
+                    via {narrativeMethod}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 2 }}>
+                Relatório em linguagem natural gerado por LLM — kill chain, achados críticos, remediações
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {narrative && (
+                <button
+                  type="button"
+                  onClick={() => setShowNarrative((v) => !v)}
+                  style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid var(--line)", background: "transparent", fontSize: 12, cursor: "pointer", color: "var(--ink-soft)" }}
+                >
+                  {showNarrative ? "▲ Ocultar" : "▼ Mostrar narrativa"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={generateNarrative}
+                disabled={generatingNarrative || !scanId}
+                style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "var(--brand-500)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: generatingNarrative ? 0.6 : 1 }}
+              >
+                {generatingNarrative ? "⟳ Gerando…" : narrative ? "↻ Regenerar" : "⚡ Gerar Narrativa"}
+              </button>
+            </div>
+          </div>
+          {narrativeError && <div style={{ color: "#dc2626", fontSize: 12, marginTop: 8 }}>{narrativeError}</div>}
+          {showNarrative && narrative && (
+            <div style={{
+              marginTop: 14,
+              fontFamily: "var(--font-mono)", fontSize: 12.5, lineHeight: 1.7,
+              whiteSpace: "pre-wrap", maxHeight: 520, overflowY: "auto",
+              background: "#0f172a", color: "#e2e8f0",
+              padding: "16px 18px", borderRadius: 8,
+            }}>
+              {narrative}
+            </div>
+          )}
+          {!narrative && !generatingNarrative && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--ink-muted)" }}>
+              Narrativa não gerada ainda para este scan. Clique em "⚡ Gerar Narrativa" para criar.
+              Requer Ollama rodando com <code>llama3.2:3b</code> ou configure <code>LLM_OPERATOR_ENABLED=true</code>.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Pentest Report direct link ─────────────────────────────────────── */}
+      {scanId && (
+        <div style={{ ...reportCard, background: "linear-gradient(135deg,#1a1a2e 0%,#2d1b3d 100%)", border: "1px solid #4a1942", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#ffffff" }}>
+              🔴 Relatório de Pentest Automatizado
+            </div>
+            <div style={{ fontSize: 12, color: "#c8a4e0", marginTop: 3 }}>
+              Vulnerabilidades confirmadas com PoC · Kill chain · Evidência sandbox P21 · Matriz Blue Team · CVSS · Delta cross-scan
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <a
+              href={`${apiUrl}/api/scans/${scanId}/pentest-report${compareScanId ? `?previous_scan_id=${compareScanId}` : ""}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ padding: "8px 18px", borderRadius: 8, background: "#c0392b", color: "#fff", fontWeight: 700, fontSize: 13, textDecoration: "none", border: "none", display: "inline-block", cursor: "pointer" }}
+            >
+              Abrir Relatório Pentest
+            </a>
+            <a
+              href={`${apiUrl}/api/scans/${scanId}/pentest-report${compareScanId ? `?previous_scan_id=${compareScanId}` : ""}`}
+              download={`pentest-scan${scanId}.html`}
+              style={{ padding: "8px 18px", borderRadius: 8, background: "transparent", color: "#c8a4e0", fontWeight: 600, fontSize: 13, textDecoration: "none", border: "1px solid #6a3060", display: "inline-block", cursor: "pointer" }}
+            >
+              Baixar HTML
+            </a>
+          </div>
+          <div style={{ fontSize: 11, color: "#8a6080", width: "100%", marginTop: -4 }}>
+            Scan #{scanId} · Endpoint: /api/scans/{scanId}/pentest-report
+            {compareScanId ? ` · Delta vs #${compareScanId}` : ""}
+          </div>
         </div>
       )}
 
