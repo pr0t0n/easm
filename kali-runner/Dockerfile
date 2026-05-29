@@ -135,6 +135,14 @@ RUN TRIVY_VER=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases
     rm /tmp/trivy.tar.gz && \
     trivy --version
 
+# ── Layer 5b: LinkFinder — JavaScript endpoint extractor ────────────────────
+RUN pip install --break-system-packages --no-cache-dir linkfinder 2>/dev/null || \
+    (git clone --depth 1 https://github.com/GerbenJavado/LinkFinder.git /opt/LinkFinder && \
+     pip install --break-system-packages --no-cache-dir -r /opt/LinkFinder/requirements.txt && \
+     printf '#!/bin/sh\nexec python3 /opt/LinkFinder/linkfinder.py "$@"\n' \
+       > /usr/local/bin/linkfinder && \
+     chmod +x /usr/local/bin/linkfinder) || true
+
 # ── Layer 6: Tools only available as source/git clones ───────────────────────
 # jwt_tool (JWT audit — post_exploitation profile)
 RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && \
@@ -193,7 +201,7 @@ RUN set -eux; \
       hydra medusa crackmapexec \
       dnsrecon dnsenum sublist3r findomain \
       sslscan testssl.sh \
-      jwt_tool paramspider wpscan xsstrike \
+      jwt_tool paramspider wpscan xsstrike linkfinder \
       semgrep bandit retire; \
     do command -v "$tool" || echo "WARN: $tool not found"; done; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt; \
