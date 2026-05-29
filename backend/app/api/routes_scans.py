@@ -7374,6 +7374,182 @@ def get_executive_report(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase Breakdown — work-queue statistics per kill-chain phase
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/scans/{scan_id}/phase-breakdown")
+def get_phase_breakdown(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns per-phase work-queue statistics for the scan.
+
+    Each phase entry contains:
+      phase_id, total, completed, failed, running, queued, blocked,
+      pct (0-100), status (done|running|queued|blocked|failed|empty)
+
+    Used by the PhaseBreakdown component in the scan detail sidebar.
+    """
+    from app.models.models import ScanJob, ScanWorkItem
+    import sqlalchemy as _sa
+
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed = [g.id for g in current_user.groups]
+        query = query.filter(
+            (ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed))
+        )
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    # Query work_items grouped by phase_id + status in one pass
+    rows = (
+        db.query(
+            ScanWorkItem.phase_id,
+            ScanWorkItem.status,
+            _sa.func.count(ScanWorkItem.id).label("cnt"),
+        )
+        .filter(ScanWorkItem.scan_job_id == scan_id)
+        .group_by(ScanWorkItem.phase_id, ScanWorkItem.status)
+        .all()
+    )
+
+    # Aggregate per phase
+    phase_map: dict[str, dict] = {}
+    for phase_id, status, cnt in rows:
+        if phase_id not in phase_map:
+            phase_map[phase_id] = {
+                "phase_id": phase_id,
+                "total": 0, "completed": 0, "failed": 0,
+                "running": 0, "queued": 0, "blocked": 0,
+                "timeout": 0, "skipped": 0,
+            }
+        p = phase_map[phase_id]
+        p["total"] += cnt
+        if status in ("completed", "done"):
+            p["completed"] += cnt
+        elif status == "failed":
+            p["failed"] += cnt
+        elif status in ("dispatched", "running", "submitted"):
+            p["running"] += cnt
+        elif status == "queued":
+            p["queued"] += cnt
+        elif status == "blocked":
+            p["blocked"] += cnt
+        elif status == "timeout":
+            p["timeout"] += cnt
+        elif status == "skipped":
+            p["skipped"] += cnt
+
+    # Phase metadata (id → name) aligned with PENTEST_PHASES
+    PHASE_NAMES = {
+        "P01": "Subdomain Enumeration",
+        "P02": "Port Scan",
+        "P03": "Endpoint Discovery",
+        "P04": "Parameter Discovery",
+        "P05": "Technology Fingerprint",
+        "P06": "HTTP Fingerprint",
+        "P07": "OSINT",
+        "P08": "JS Endpoint Analysis",
+        "P09": "Web App Scanning (nuclei)",
+        "P10": "SQL Injection",
+        "P11": "XSS / Injection",
+        "P12": "Active Exploitation",
+        "P13": "Command Injection",
+        "P14": "Auth Boundary Testing",
+        "P15": "Historical Recon",
+        "P16": "API Attack Surface",
+        "P17": "Business Logic",
+        "P18": "OSINT Extended",
+        "P19": "Supply Chain",
+        "P20": "Post-Exploitation",
+        "P21": "PoC Validation (Sandbox)",
+        "P22": "Reporting",
+    }
+
+    # Build ordered result for P01-P22
+    result = []
+    for pid in [f"P{i:02d}" for i in range(1, 23)]:
+        p = phase_map.get(pid)
+        if p is None:
+            # Phase not in work queue at all
+            result.append({
+                "phase_id": pid,
+                "name": PHASE_NAMES.get(pid, pid),
+                "total": 0, "completed": 0, "failed": 0,
+                "running": 0, "queued": 0, "blocked": 0,
+                "pct": 0, "status": "empty",
+            })
+            continue
+
+        total = p["total"]
+        completed = p["completed"]
+        failed = p["failed"]
+        running = p["running"]
+        queued = p["queued"]
+        blocked = p["blocked"]
+
+        pct = int(completed / total * 100) if total > 0 else 0
+
+        if total == 0:
+            phase_status = "empty"
+        elif completed == total:
+            phase_status = "done"
+        elif running > 0:
+            phase_status = "running"
+        elif failed > 0 and completed == 0 and running == 0 and queued == 0:
+            phase_status = "failed"
+        elif blocked == total:
+            phase_status = "blocked"
+        elif queued > 0 or blocked > 0:
+            phase_status = "queued"
+        else:
+            phase_status = "partial"
+
+        result.append({
+            "phase_id": pid,
+            "name": PHASE_NAMES.get(pid, pid),
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "running": running,
+            "queued": queued,
+            "blocked": blocked,
+            "pct": pct,
+            "status": phase_status,
+        })
+
+    # Summary stats
+    total_items = sum(p["total"] for p in result)
+    total_done = sum(p["completed"] for p in result)
+    total_running = sum(p["running"] for p in result)
+    total_failed = sum(p["failed"] for p in result)
+    p21 = phase_map.get("P21", {})
+
+    return {
+        "scan_id": scan_id,
+        "scan_status": str(job.status or ""),
+        "phases": result,
+        "summary": {
+            "total_items": total_items,
+            "total_done": total_done,
+            "total_running": total_running,
+            "total_failed": total_failed,
+            "phases_active": len([p for p in result if p["status"] in ("running", "queued", "partial")]),
+            "phases_done": len([p for p in result if p["status"] == "done"]),
+            "phases_blocked": len([p for p in result if p["status"] == "blocked"]),
+            "p21_total": p21.get("total", 0),
+            "p21_confirmed": p21.get("completed", 0),
+            "p21_refuted": p21.get("failed", 0),
+            "p21_pending": p21.get("queued", 0) + p21.get("running", 0),
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Pentest Report — combined pentest + EASM HTML report
 # ─────────────────────────────────────────────────────────────────────────────
 
