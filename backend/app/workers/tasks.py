@@ -2566,8 +2566,14 @@ def poll_scan_work_item(item_id: int):
             _done_items = sum(counts.get(s, 0) for s in _terminal_statuses)
             if _total_items > 0:
                 _pct = min(99, int(_done_items / _effective_total * 99))
-                # Só avança — nunca regrida (ex: novos items adicionados pelo correlator)
-                if _pct > int(job.mission_progress or 0):
+                _current_pct = int(job.mission_progress or 0)
+                # Always apply the real work-queue progress.
+                # The old "never regress" rule caused the bug: when the LangGraph
+                # engine prematurely set mission_progress=100, it would never
+                # be corrected by subsequent WQ completions (WQ pct < 100).
+                # Now we always write the real pct unless the scan is already
+                # marked completed (where 100% is correct and final).
+                if job.status == "running" and abs(_pct - _current_pct) > 1:
                     job.mission_progress = _pct
 
             db.add(ScanLog(
