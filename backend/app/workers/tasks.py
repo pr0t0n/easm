@@ -1847,10 +1847,18 @@ def execute_scan_work_item(item_id: int):
         result = dict(response.json())
         raw_status = str(result.get("status") or "").lower()
         if raw_status != "submitted":
-            item.status = "retry" if item.attempts < item.max_attempts else (raw_status or "failed")
+            # 'skipped' = terminal, non-retryable (e.g. tool/profile genuinely
+            # missing). Don't burn retries — mark terminal so the phase completes
+            # and its gate fires. Other non-submit statuses retry up to max.
+            if raw_status == "skipped":
+                item.status = "skipped"
+                item.lease_until = None
+                item.finished_at = datetime.utcnow()
+            else:
+                item.status = "retry" if item.attempts < item.max_attempts else (raw_status or "failed")
+                item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
+                item.finished_at = datetime.utcnow() if item.status != "retry" else None
             item.last_error = str(result.get("error") or "mcp_submit_failed")[:2000]
-            item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
-            item.finished_at = datetime.utcnow() if item.status != "retry" else None
         else:
             timeout = int(result.get("timeout") or 300)
             item.status = "submitted"

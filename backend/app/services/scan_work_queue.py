@@ -623,6 +623,43 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         )
         db.flush()
 
+        # ── Zombie reaper: queued/retry items that exhausted attempts ─────────
+        # CRITICAL stall fix: an item with status='queued'/'retry' but
+        # attempts >= max_attempts can NEVER be claimed (the claim query requires
+        # attempts < max_attempts). It sits forever as 'queued', so its phase
+        # never reaches 100% terminal → the gate (P06→P08/P09 etc) never fires →
+        # all downstream phases stay blocked → scan stalls. Mark them failed
+        # (terminal) so the phase can complete and the gate opens.
+        _reaped = db.query(ScanWorkItem).filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(["queued", "retry"]),
+            ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
+        ).update(
+            {
+                "status": "failed",
+                "lease_until": None,
+                "finished_at": now,
+                "updated_at": now,
+                "last_error": "max_attempts_exhausted_while_queued",
+            },
+            synchronize_session=False,
+        )
+        if _reaped:
+            db.flush()
+
+        # ── Fair-share: count how many active scans are competing for capacity ──
+        # Prevent one scan from monopolizing all slots of a resource class when
+        # other scans are also running. Each scan gets at most 75% of capacity.
+        # With 2 active scans: each gets max 50%. With 1 scan: full capacity.
+        try:
+            _active_scan_count = (
+                db.query(func.count(ScanJob.id))
+                .filter(ScanJob.status.in_(["running", "queued", "retrying"]))
+                .scalar() or 1
+            )
+        except Exception:
+            _active_scan_count = 1
+
         for rc, cap in caps.items():
             # ── Global cap via Redis semaphore ────────────────────────────────
             # kali_inflight_get retorna quantas tarefas estão em voo globalmente
@@ -630,6 +667,32 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             # Se Redis estiver down, fail-open (retorna 0).
             global_inflight = kali_inflight_get(rc)
             available = max(0, cap - global_inflight)
+            if available <= 0:
+                continue
+
+            # ── Fair-share per scan ───────────────────────────────────────────
+            # When multiple scans compete, limit this scan's share.
+            # 1 scan  → can use up to 100% of remaining capacity
+            # 2 scans → can use up to 60% each (ensures neither starves)
+            # 3+ scans → can use up to 40% each
+            if _active_scan_count >= 3:
+                _share_pct = 0.40
+            elif _active_scan_count == 2:
+                _share_pct = 0.60
+            else:
+                _share_pct = 1.0
+            _this_scan_inflight = (
+                db.query(func.count(ScanWorkItem.id))
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.resource_class == rc,
+                    ScanWorkItem.status.in_(["dispatched", "running", "submitted"]),
+                )
+                .scalar() or 0
+            )
+            _fair_share_limit = max(1, int(cap * _share_pct))
+            _this_scan_available = max(0, _fair_share_limit - _this_scan_inflight)
+            available = min(available, _this_scan_available)
             if available <= 0:
                 continue
             room = max(0, dispatch_limit - len(claimed))

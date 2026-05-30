@@ -501,12 +501,52 @@ def _base_contract(request: MCPExecutionRequest, mcp_request_id: str | None = No
     }
 
 
+def _candidate_profile_names(request: MCPExecutionRequest) -> list[str]:
+    """Ordered candidate profile names to try against kali_profiles.
+
+    The phase contracts use hyphenated tool names (nuclei-rce, nuclei-headers)
+    while the Kali profiles are keyed with underscores (nuclei_rce). This
+    bridges the two naming conventions and provides sane fallbacks so a missing
+    exact match doesn't stall the whole phase/gate.
+    """
+    raw_profile = str(request.profile or "").strip()
+    raw_tool = str(request.tool_name or "").strip()
+    cands: list[str] = []
+
+    def _add(name: str) -> None:
+        n = str(name or "").strip()
+        if n and n not in cands:
+            cands.append(n)
+
+    # 1. Exact as-given
+    _add(raw_profile)
+    _add(raw_tool)
+    # 2. Alias table
+    _add(tool_aliases.get(raw_tool, ""))
+    _add(tool_aliases.get(raw_profile, ""))
+    # 3. Hyphen→underscore normalization (nuclei-rce → nuclei_rce)
+    _add(raw_profile.replace("-", "_"))
+    _add(raw_tool.replace("-", "_"))
+    # 4. Underscore→hyphen (defensive, opposite convention)
+    _add(raw_profile.replace("_", "-"))
+    _add(raw_tool.replace("_", "-"))
+    # 5. Base "nuclei" (no specific template) → the broad CVE template set
+    for base in (raw_profile, raw_tool):
+        if base in ("nuclei", "nuclei-base"):
+            _add("nuclei_cves")
+    return cands
+
+
 async def _resolve_profile_name(request: MCPExecutionRequest) -> str | None:
-    profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
-    if profile_name not in kali_profiles:
-        await _refresh_kali_catalog()
-        profile_name = request.profile if request.profile in kali_profiles else tool_aliases.get(request.tool_name, request.profile)
-    return profile_name if profile_name in kali_profiles else None
+    for name in _candidate_profile_names(request):
+        if name in kali_profiles:
+            return name
+    # Catalog may be stale — refresh once and retry the candidates.
+    await _refresh_kali_catalog()
+    for name in _candidate_profile_names(request):
+        if name in kali_profiles:
+            return name
+    return None
 
 
 async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) -> dict[str, Any]:
@@ -558,7 +598,12 @@ async def submit_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
             return contract
         profile_name = await _resolve_profile_name(request)
         if not profile_name:
-            contract.update(status="blocked", error=f"tool_or_profile_not_found:{request.tool_name}")
+            # Profile genuinely doesn't exist in Kali (e.g. a tool that was never
+            # installed). Return 'skipped' — a TERMINAL status — NOT 'blocked'.
+            # 'blocked' is non-terminal and would stall the phase forever (the
+            # gate waits for all phase items to be terminal), freezing every
+            # downstream phase. 'skipped' lets the phase complete and the gate fire.
+            contract.update(status="skipped", error=f"tool_or_profile_not_found:{request.tool_name}")
             return contract
         raw = await _submit_kali_profile(profile_name, request)
         contract.update(
