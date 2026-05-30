@@ -794,6 +794,112 @@ def _seed_targeted_nuclei(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ITEM 3 — HackerOne learnings → runtime technique selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Tools/profiles the work-queue can actually dispatch as targeted items.
+# Learnings recommend many tool names; we only seed ones that resolve to a
+# real Kali profile (nuclei-* tags resolve via the MCP hyphen→underscore fix).
+_LEARNING_SEEDABLE = {
+    "nuclei", "nuclei-sqli", "nuclei-xss", "nuclei-ssrf", "nuclei-lfi", "nuclei-rce",
+    "nuclei-ssti", "nuclei-xxe", "nuclei-cors", "nuclei-idor", "nuclei-csrf",
+    "nuclei-redirect", "nuclei-exposure", "nuclei-auth", "nuclei-jwt", "nuclei-graphql",
+    "nuclei-takeover", "nuclei-crlf", "sqlmap", "dalfox", "wapiti", "wpscan",
+    "jwt_tool", "arjun", "ffuf", "nikto",
+}
+
+# Vulnerability-type (from learnings attack-index) → nuclei tag tool name.
+_VULNTYPE_TO_TOOL = {
+    "xss": "nuclei-xss", "cross-site scripting": "nuclei-xss",
+    "sql": "nuclei-sqli", "sqli": "nuclei-sqli", "injection": "nuclei-sqli",
+    "ssrf": "nuclei-ssrf", "lfi": "nuclei-lfi", "path traversal": "nuclei-lfi",
+    "rce": "nuclei-rce", "command": "nuclei-rce", "ssti": "nuclei-ssti",
+    "xxe": "nuclei-xxe", "cors": "nuclei-cors", "idor": "nuclei-idor",
+    "csrf": "nuclei-csrf", "redirect": "nuclei-redirect", "exposure": "nuclei-exposure",
+    "auth": "nuclei-auth", "jwt": "nuclei-jwt", "graphql": "nuclei-graphql",
+    "takeover": "nuclei-takeover", "crlf": "nuclei-crlf",
+}
+
+
+def _seed_learning_driven_techniques(
+    db: Session, scan_id: int, target: str, tech_stack: list[str], phase_id: str = "P09",
+) -> int:
+    """Seed targeted work items driven by the 10k HackerOne learnings (ITEM 3).
+
+    Consults build_runtime_learning_playbook(tech_stack) — which relevance-ranks
+    accepted HackerOne learnings against the detected technology — and seeds the
+    nuclei tags / tools those reports prove are exploitable for this stack.
+    This realizes 'procurar vulnerabilidades baseadas no que encontramos, usando
+    o aprendizado HackerOne'. Returns count of work items created.
+    """
+    from app.models.models import ScanWorkItem
+    from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+
+    try:
+        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+        playbook = build_runtime_learning_playbook(phase="threat_intel", limit=10, tech_stack=tech_stack)
+    except Exception as exc:
+        logger.debug("learning playbook unavailable: %s", exc)
+        return 0
+    if not playbook:
+        return 0
+
+    # Collect candidate tools: explicit recommended_tools + vuln-type → tool mapping
+    wanted: set[str] = set()
+    for t in (playbook.get("recommended_tools") or []):
+        tl = str(t or "").strip().lower()
+        if tl in _LEARNING_SEEDABLE:
+            wanted.add(tl)
+    for tech in (playbook.get("techniques") or [])[:12]:
+        vt = str(tech.get("vulnerability_type") or tech.get("name") or "").lower()
+        for kw, tool in _VULNTYPE_TO_TOOL.items():
+            if kw in vt:
+                wanted.add(tool)
+    if not wanted:
+        return 0
+
+    seeded = 0
+    for tool_name in sorted(wanted)[:8]:  # cap: top 8 learning-driven techniques
+        tname = tool_name[:120]
+        already = (
+            db.query(ScanWorkItem.id).filter(
+                ScanWorkItem.scan_job_id == scan_id,
+                ScanWorkItem.phase_id == phase_id,
+                ScanWorkItem.tool_name == tname,
+                ScanWorkItem.target == target[:500],
+            ).first()
+        )
+        if already:
+            continue
+        rc = resource_class_for_tool(tname)
+        pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
+        db.add(ScanWorkItem(
+            scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
+            tool_name=tname, profile=tname, resource_class=rc,
+            priority=pri - 8,  # learning-driven = higher priority (HackerOne-proven)
+            status="queued", max_attempts=2,
+            item_metadata={
+                "source": "hackerone_learnings",
+                "engine": "learning_playbook",
+                "tech_stack": tech_stack,
+                "rationale": "HackerOne-proven technique for detected tech stack",
+            },
+            created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        ))
+        try:
+            db.flush()
+            seeded += 1
+        except Exception:
+            db.rollback()
+    if seeded:
+        logger.info(
+            "learning_seeder: scan=%d target=%s tech=%s seeded=%d HackerOne-driven items",
+            scan_id, target, ",".join(tech_stack[:3]), seeded,
+        )
+    return seeded
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -927,6 +1033,13 @@ def correlate_tech_vulns(
         # Implementa o ponto #2: WordPress → wpscan; Django → nuclei-django-debug;
         # GraphQL → nuclei-graphql-introspection; Tomcat → CVE específico; etc.
         nuclei_queued += _seed_attack_profile_for_tech(db, scan_id, target, product)
+
+    # ── 7. ITEM 3: HackerOne learnings → técnicas dirigidas por aprendizado ────
+    # Usa o stack detectado para puxar do playbook (10k learnings, relevance-ranked)
+    # as técnicas/tools que reports HackerOne provam ser exploráveis nesse stack.
+    _tech_stack = [str(t.get("product") or "").strip() for t in techs if t.get("product")]
+    if _tech_stack:
+        nuclei_queued += _seed_learning_driven_techniques(db, scan_id, target, _tech_stack, phase_id="P09")
 
     # ── Persist all collected findings through the single gated path ──────────
     # evidence_gate + verification_status cap + P21 for any HIGH/CRIT that the
