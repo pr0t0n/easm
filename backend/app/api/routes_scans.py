@@ -6768,6 +6768,7 @@ def get_easm_vulnerabilities(
 
     result = []
     for vuln in vulns:
+        _md = dict(vuln.vulnerability_metadata or {})
         result.append({
             "id": vuln.id,
             "asset_id": vuln.asset_id,
@@ -6785,6 +6786,18 @@ def get_easm_vulnerabilities(
             "last_detected": vuln.last_detected.isoformat(),
             "remediated_at": vuln.remediated_at.isoformat() if vuln.remediated_at else None,
             "remediation_notes": vuln.remediation_notes,
+            # ── ITEM 2b: dados completos exigidos pela plataforma ──────────────
+            "description": vuln.description,
+            "how_discovered": _md.get("how_discovered"),
+            "payload": _md.get("payload"),
+            "evidence": _md.get("evidence"),
+            "matched_at": _md.get("matched_at"),
+            "parameter": _md.get("parameter"),
+            "url": _md.get("url"),
+            "owasp_category": _md.get("owasp_category"),
+            "verification_status": _md.get("verification_status"),
+            "confidence_score": _md.get("confidence_score"),
+            "scan_id": _md.get("scan_id"),
         })
 
     return result

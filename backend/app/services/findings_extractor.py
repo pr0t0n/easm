@@ -2327,10 +2327,206 @@ def persist_finding_dicts(
             except Exception:
                 pass
 
+        # ── ITEM 2: Bridge finding → Asset + Vulnerability (EASM inventory) ────
+        # The UI / asset inventory reads the `vulnerabilities` table, but the
+        # work-queue only wrote to `findings`. Mirror actionable findings into
+        # the Vulnerability inventory so they're visible in the platform.
+        # Only severity >= low (info-level coverage/header notes are not vulns).
+        if severity in ("critical", "high", "medium", "low"):
+            try:
+                _bridge_finding_to_vulnerability(db, job, finding, severity, title, cvss_val, confidence_score)
+            except Exception:
+                pass
+
     if created:
         db.commit()
 
     return created
+
+
+# ── ITEM 2: findings → Vulnerability inventory bridge ──────────────────────────
+
+def _severity_to_cvss(severity: str) -> float:
+    return {"critical": 9.2, "high": 8.1, "medium": 5.6, "low": 3.1, "info": 0.0}.get(
+        str(severity or "").lower(), 0.0
+    )
+
+
+# Remediation fallback by OWASP category — used when a parser didn't supply one,
+# so every vulnerability in the inventory has actionable guidance (ITEM 2b).
+_REMEDIATION_BY_OWASP: dict[str, str] = {
+    "A01:2021": "Implementar controle de acesso server-side com deny-by-default; validar autorização por objeto/função em cada requisição.",
+    "A02:2021": "Usar TLS 1.2+ com ciphers fortes; nunca transmitir/armazenar segredos em claro; rotacionar chaves expostas.",
+    "A03:2021": "Usar prepared statements/queries parametrizadas; validar e sanitizar toda entrada; aplicar output encoding contextual.",
+    "A04:2021": "Aplicar threat modeling e padrões seguros de design; limitar taxa e validar fluxos de negócio.",
+    "A05:2021": "Endurecer configuração: remover defaults, desabilitar serviços/headers desnecessários, aplicar least-privilege.",
+    "A06:2021": "Atualizar componentes para versão suportada sem CVEs conhecidos; manter inventário e pipeline de patch.",
+    "A07:2021": "Forçar MFA, política de senha forte, bloqueio de brute-force e gestão segura de sessão/JWT.",
+    "A08:2021": "Verificar integridade (assinaturas) de pacotes/CI-CD; nunca desserializar dados não confiáveis.",
+    "A09:2021": "Habilitar logging/alerting de eventos de segurança e monitorar tentativas de exploração.",
+    "A10:2021": "Validar/allowlist destinos de requisições server-side; bloquear acesso a metadata/IPs internos.",
+}
+
+
+def _build_discovery_and_payload(details: dict, tool: str, title: str = "") -> tuple[str, str | None, str | None]:
+    """Extract (how-discovered, payload, remediation) from a finding's details.
+
+    Returns the discovery narrative, the reproduction payload (curl/param/template),
+    and a remediation string (parser-supplied or OWASP-category fallback).
+    """
+    step = str(details.get("step") or details.get("node") or "")
+    evidence = str(details.get("evidence") or "")
+    discovery = f"Descoberto por {tool}" + (f" ({step})" if step else "")
+    if evidence:
+        discovery += f" — {evidence[:300]}"
+
+    # Payload / reproduction proof — prefer the exact request when available
+    payload = (
+        str(details.get("curl_command") or "").strip()
+        or str(details.get("payload") or "").strip()
+        or None
+    )
+    if not payload:
+        _tmpl = str(details.get("template_id") or "").strip()
+        _matched = str(details.get("matched_at") or details.get("matched-at") or "").strip()
+        _param = str(details.get("parameter") or details.get("param") or "").strip()
+        if _tmpl and _matched:
+            payload = f"nuclei -t {_tmpl} -u {_matched}"
+        elif _param and _matched:
+            payload = f"Parâmetro injetável '{_param}' em {_matched}"
+        elif _matched:
+            payload = _matched
+
+    # Remediation: parser-supplied (várias chaves), else OWASP-category, else título.
+    remediation = str(
+        details.get("remediation")
+        or details.get("blue_team_action")
+        or details.get("recommendation")
+        or ""
+    ).strip()
+    if not remediation:
+        owasp = str(details.get("owasp_category") or "")
+        for prefix, rem in _REMEDIATION_BY_OWASP.items():
+            if owasp.startswith(prefix):
+                remediation = rem
+                break
+    if not remediation:
+        # Fallback por palavra-chave no título/evidência (headers, config comuns)
+        blob = (str(title or "") + " " + str(details.get("evidence") or "") + " " + str(details.get("step") or "")).lower()
+        _kw = [
+            ("x-frame-options", "Adicionar header X-Frame-Options: DENY (ou CSP frame-ancestors 'none') p/ prevenir clickjacking."),
+            ("clickjacking", "Adicionar X-Frame-Options: DENY e Content-Security-Policy frame-ancestors 'none'."),
+            ("x-content-type", "Adicionar header X-Content-Type-Options: nosniff."),
+            ("content-security-policy", "Definir uma Content-Security-Policy restritiva (default-src 'self')."),
+            ("strict-transport", "Adicionar Strict-Transport-Security: max-age=31536000; includeSubDomains."),
+            ("referrer-policy", "Adicionar Referrer-Policy: strict-origin-when-cross-origin."),
+            ("permissions-policy", "Definir Permissions-Policy restringindo APIs sensíveis do browser."),
+            ("cors", "Restringir CORS a origens conhecidas; nunca refletir Origin sem allowlist."),
+            ("cookie", "Marcar cookies com Secure, HttpOnly e SameSite."),
+            ("waf", "Bloquear no firewall da origem todo tráfego que não venha dos ranges do WAF; rotacionar IP de origem."),
+            ("port", "Restringir portas expostas a least-privilege; fechar serviços desnecessários e usar firewall."),
+        ]
+        for key, rem in _kw:
+            if key in blob:
+                remediation = rem
+                break
+    return discovery, payload, (remediation or None)
+
+
+def _bridge_finding_to_vulnerability(
+    db: Session, job: Any, finding: Any, severity: str, title: str,
+    cvss_val: float | None, confidence_score: int,
+) -> None:
+    """Upsert an Asset + Vulnerability record mirroring a persisted Finding.
+
+    The `vulnerabilities` table is the EASM inventory the UI reads. Without this
+    bridge, work-queue scans populated `findings` but `vulnerabilities` stayed
+    empty → the platform showed no vulnerabilities. Idempotent: dedups by
+    (asset_id, title); updates last_detected + detection_count on re-detection.
+    """
+    from app.models.models import Asset, Vulnerability
+    from datetime import datetime as _dt
+
+    domain = str(getattr(finding, "domain", "") or "").strip()[:255]
+    if not domain:
+        return
+    _now = _dt.utcnow()
+    details = dict(getattr(finding, "details", None) or {})
+
+    # Upsert Asset by (owner, domain)
+    asset = db.query(Asset).filter(
+        Asset.owner_id == job.owner_id,
+        Asset.domain_or_ip == domain,
+    ).first()
+    if not asset:
+        asset = Asset(
+            owner_id=job.owner_id,
+            domain_or_ip=domain,
+            asset_type="domain",
+            first_seen=_now,
+            last_seen=_now,
+            last_scan_id=job.id,
+            scan_count=1,
+        )
+        db.add(asset)
+        db.flush()
+    else:
+        asset.last_seen = _now
+        asset.last_scan_id = job.id
+
+    cvss = cvss_val if cvss_val is not None else _severity_to_cvss(severity)
+    cve_id = getattr(finding, "cve", None)
+
+    # Dedup by (asset, title) OR (asset, cve)
+    q = db.query(Vulnerability).filter(Vulnerability.asset_id == asset.id)
+    if cve_id:
+        existing = q.filter(Vulnerability.cve_id == cve_id).first()
+    else:
+        existing = q.filter(Vulnerability.title == title[:255]).first()
+
+    if existing:
+        # Re-detected → bump recency + count, keep first_detected for AGE factor.
+        existing.last_detected = _now
+        existing.detection_count = (existing.detection_count or 1) + 1
+        if cvss and not existing.cvss_score:
+            existing.cvss_score = cvss
+        return
+
+    _tool = str(getattr(finding, "tool", "") or "")[:100] or "scan"
+    discovery, payload, remediation = _build_discovery_and_payload(details, _tool, title)
+    _desc = str(details.get("description") or details.get("evidence") or "")[:2000] or discovery[:2000]
+
+    vuln = Vulnerability(
+        asset_id=asset.id,
+        finding_id=getattr(finding, "id", None),
+        tool_source=_tool,
+        cve_id=cve_id,
+        severity=severity,
+        cvss_score=cvss,
+        title=title[:255],
+        description=_desc,
+        first_detected=_now,
+        last_detected=_now,
+        detection_count=1,
+        ra_score=round(float(cvss) * (max(1, confidence_score) / 100.0), 2),
+        remediation_notes=remediation,
+        vulnerability_metadata={
+            "scan_id": job.id,
+            "verification_status": str(getattr(finding, "verification_status", "") or ""),
+            "confidence_score": confidence_score,
+            "url": str(getattr(finding, "url", "") or ""),
+            "owasp_category": details.get("owasp_category"),
+            # ITEM 2b — campos exigidos pela plataforma:
+            "how_discovered": discovery,
+            "payload": payload,           # request/prova de reprodução
+            "remediation": remediation,
+            "cve": cve_id,
+            "matched_at": details.get("matched_at") or details.get("matched-at"),
+            "parameter": details.get("parameter") or details.get("param"),
+            "evidence": str(details.get("evidence") or "")[:1000] or None,
+        },
+    )
+    db.add(vuln)
 
 
 def persist_findings_from_work_item(
