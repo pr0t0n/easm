@@ -160,11 +160,12 @@ function PhaseRow({ phase }) {
       <div style={{ display: "flex", gap: 3, justifyContent: "flex-end", flexWrap: "wrap" }}>
         {hasItems ? (
           <>
-            <span className="mono-sm" style={{ color: "var(--ink-muted)", fontSize: 9 }}>{phase.completed}/{phase.total}</span>
+            <span className="mono-sm" style={{ color: "var(--sev-low-text)", fontSize: 9 }} title="concluídos com sucesso">{phase.completed}✓</span>
+            {phase.skipped > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--ink-muted)", background: "var(--surface-soft)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 4 }} title="ferramenta não-aplicável (n/a)">{phase.skipped}∅</span>}
             {phase.running > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-high-text)", background: "var(--sev-high-bg)", border: "1px solid var(--sev-high-border)", padding: "0 4px", borderRadius: 4 }}>{phase.running}▶</span>}
-            {phase.queued  > 0 && phase.status !== "done" && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-info-text)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", padding: "0 4px", borderRadius: 4 }}>{phase.queued}q</span>}
+            {phase.queued  > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-info-text)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", padding: "0 4px", borderRadius: 4 }}>{phase.queued}q</span>}
             {phase.blocked > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--ink-muted)", background: "var(--surface-soft)", border: "1px solid var(--line)", padding: "0 4px", borderRadius: 4 }}>{phase.blocked}⊘</span>}
-            {phase.failed  > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-critical-text)", background: "var(--sev-critical-bg)", border: "1px solid var(--sev-critical-border)", padding: "0 4px", borderRadius: 4 }}>{phase.failed}✕</span>}
+            {((phase.failed||0)+(phase.timeout||0)) > 0 && <span style={{ fontSize: 9, fontWeight: 700, color: "var(--sev-critical-text)", background: "var(--sev-critical-bg)", border: "1px solid var(--sev-critical-border)", padding: "0 4px", borderRadius: 4 }} title="falha/timeout">{(phase.failed||0)+(phase.timeout||0)}✕</span>}
           </>
         ) : (
           <span className="mono-sm" style={{ color: "var(--line-strong)", fontSize: 9 }}>aguardando</span>

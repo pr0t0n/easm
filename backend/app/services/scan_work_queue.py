@@ -476,8 +476,12 @@ def enqueue_scan_work_items(
             skipped += 1
 
     # ── Slow tools that get adaptive timeout based on preflight port count ────
-    # wapiti/sqlmap are heavy tools that scale linearly with open ports.
-    # Port count 0–1 → 120s; 2–3 → 240s; 4–6 → 360s; 7+ → 600s (max).
+    # wapiti/sqlmap/nikto are heavy deep tools. They only run on the FEW targets
+    # that survived P09 triage (had findings), so a generous floor is affordable.
+    # IMPORTANT: the old 120s floor GUARANTEED timeout — Cloudflare-fronted targets
+    # show 0 ports via naabu, so port_count=0 → 120s → tool killed before its own
+    # internal -maxtime (nikto 240s) could finish → status='timeout' (not completed).
+    # Floor raised to 300s so these tools exit cleanly within budget.
     _ADAPTIVE_TIMEOUT_TOOLS = {"wapiti", "sqlmap", "nikto"}
 
     def _adaptive_timeout(tool: str, target: str) -> int | None:
@@ -487,11 +491,11 @@ def enqueue_scan_work_items(
         _ports = target_preflight.get("ports") or target_preflight.get("open_ports") or []
         _port_count = len(_ports) if isinstance(_ports, (list, tuple)) else 0
         if _port_count <= 1:
-            return 120
+            return 300
         if _port_count <= 3:
-            return 240
+            return 420
         if _port_count <= 6:
-            return 360
+            return 540
         return 600
 
     # ── Pass 3: create individual items for non-batch tools ───────────────────

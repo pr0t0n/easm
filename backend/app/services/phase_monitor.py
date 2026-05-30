@@ -146,7 +146,8 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         )
         for _pid, _st, _cnt in _wq_rows:
             slot = wq_by_phase.setdefault(_pid, {
-                "total": 0, "done": 0, "running": 0, "queued": 0, "blocked": 0, "failed": 0,
+                "total": 0, "done": 0, "running": 0, "queued": 0, "blocked": 0,
+                "failed": 0, "skipped": 0, "timeout": 0,
             })
             slot["total"] += _cnt
             if _st in ("completed", "done"):
@@ -157,7 +158,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
                 slot["queued"] += _cnt
             elif _st == "blocked":
                 slot["blocked"] += _cnt
-            elif _st in ("failed", "timeout"):
+            elif _st == "skipped":
+                slot["skipped"] += _cnt
+            elif _st == "timeout":
+                slot["timeout"] += _cnt
+                slot["failed"] += _cnt
+            elif _st == "failed":
                 slot["failed"] += _cnt
     except Exception:
         wq_by_phase = {}
@@ -346,7 +352,17 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         _wq_running = _wq.get("running", 0)
         _wq_queued = _wq.get("queued", 0)
         _wq_blocked = _wq.get("blocked", 0)
-        _wq_pct = int(_wq_done / _wq_total * 100) if _wq_total > 0 else None
+        _wq_skipped = _wq.get("skipped", 0)
+        _wq_timeout = _wq.get("timeout", 0)
+        _wq_failed = _wq.get("failed", 0)
+        # Phase completion % = terminal/total. A phase is 100% when every item
+        # reached a terminal state (done/skipped/failed/timeout). A skipped tool
+        # (not applicable to this target — no .git, no API key, etc.) is a
+        # LEGITIMATE completion, not a gap, so it counts toward 100%. The
+        # success quality (how many actually succeeded) is exposed separately
+        # via the done/skipped/failed counts so the UI can show green vs gray.
+        _wq_terminal = _wq_done + _wq_skipped + _wq_failed
+        _wq_pct = int(_wq_terminal / _wq_total * 100) if _wq_total > 0 else None
 
         if normalized_ledger_status:
             status_label = normalized_ledger_status
@@ -402,13 +418,18 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "tools_missing_uninstalled": tools_missing_uninstalled,
             "tools_missing_unused": tools_missing_unused,
             # Work-queue truth (authoritative per-phase progress across ALL targets)
+            # pct = terminal/total (phase finished). success_pct = done/total (quality).
             "work_queue": {
                 "total": _wq_total,
                 "done": _wq_done,
                 "running": _wq_running,
                 "queued": _wq_queued,
                 "blocked": _wq_blocked,
+                "skipped": _wq_skipped,
+                "timeout": _wq_timeout,
+                "failed": _wq_failed,
                 "pct": _wq_pct,
+                "success_pct": int(_wq_done / _wq_total * 100) if _wq_total > 0 else None,
             },
             # Ledger enrichment
             "ledger_status": ledger_status,
@@ -463,8 +484,10 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         _wq_blocked_all = sum(s.get("blocked", 0) for s in wq_by_phase.values())
         _wq_done_all = sum(s.get("done", 0) for s in wq_by_phase.values())
         _wq_failed_all = sum(s.get("failed", 0) for s in wq_by_phase.values())
+        _wq_skipped_all = sum(s.get("skipped", 0) for s in wq_by_phase.values())
         _effective = max(1, _wq_total_all - _wq_blocked_all)
-        _terminal = _wq_done_all + _wq_failed_all
+        # terminal = done + failed(inc. timeout) + skipped — all "phase finished" states
+        _terminal = _wq_done_all + _wq_failed_all + _wq_skipped_all
         computed_progress = int(_terminal / _effective * 100)
         if _scan_running:
             computed_progress = min(99, computed_progress)

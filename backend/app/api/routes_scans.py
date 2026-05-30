@@ -7520,7 +7520,9 @@ def get_phase_breakdown(
                 "name": PHASE_NAMES.get(pid, pid),
                 "total": 0, "completed": 0, "failed": 0,
                 "running": 0, "queued": 0, "blocked": 0,
+                "skipped": 0, "timeout": 0,
                 "pct": 100 if phase_status == "done" else 0,
+                "success_pct": 100 if phase_status == "done" else 0,
                 "status": phase_status,
                 "ledger": ledger_st or None,
             })
@@ -7532,17 +7534,24 @@ def get_phase_breakdown(
         running = p["running"]
         queued = p["queued"]
         blocked = p["blocked"]
+        skipped = p["skipped"]
+        timeout = p["timeout"]
 
-        pct = int(completed / total * 100) if total > 0 else 0
+        # pct = terminal/total. A phase is 100% when every item reached a terminal
+        # state (done/skipped/failed/timeout). Skip of a non-applicable tool
+        # (no .git exposed, no API key) is a LEGITIMATE completion, not a gap.
+        # success_pct = done/total exposes the real success quality separately.
+        terminal = completed + failed + timeout + skipped
+        pct = int(terminal / total * 100) if total > 0 else 0
+        success_pct = int(completed / total * 100) if total > 0 else 0
 
         if total == 0:
             phase_status = "empty"
-        elif completed == total:
-            phase_status = "done"
+        elif terminal == total:
+            # Phase finished. Quality nuance: full success vs partial vs mostly-skipped.
+            phase_status = "done" if completed == total else "partial"
         elif running > 0:
             phase_status = "running"
-        elif failed > 0 and completed == 0 and running == 0 and queued == 0:
-            phase_status = "failed"
         elif blocked == total:
             phase_status = "blocked"
         elif queued > 0 or blocked > 0:
@@ -7559,7 +7568,10 @@ def get_phase_breakdown(
             "running": running,
             "queued": queued,
             "blocked": blocked,
+            "skipped": skipped,
+            "timeout": timeout,
             "pct": pct,
+            "success_pct": success_pct,
             "status": phase_status,
             "ledger": ledger_status_map.get(pid) or None,
         })

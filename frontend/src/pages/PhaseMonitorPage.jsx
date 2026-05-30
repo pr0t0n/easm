@@ -16,18 +16,34 @@ const STATUS_STYLES = {
   skipped:                        { className: "ds-badge",                   label: "Ignorada" },
 };
 
-// Inline work-queue progress bar (done/total across all targets)
+// Inline work-queue progress bar across all targets.
+// pct = terminal/total (phase finished). The bar is segmented to show quality:
+// green = succeeded (done), gray = skipped (tool n/a), red = failed/timeout.
 function WqProgress({ wq }) {
   if (!wq || !wq.total) return <span style={{ fontSize: 11, color: "var(--ink-muted)" }}>—</span>;
-  const pct = wq.pct ?? 0;
-  const color = pct === 100 ? "var(--sev-low-solid)" : wq.running > 0 ? "var(--sev-high-solid,#fe7b02)" : wq.blocked > 0 ? "var(--line-strong)" : "var(--sev-info-solid)";
+  const total = wq.total || 1;
+  const done = wq.done || 0;
+  const skipped = wq.skipped || 0;
+  const failed = wq.failed || 0;        // inclui timeout
+  const blocked = wq.blocked || 0;
+  const running = wq.running || 0;
+  const queued = wq.queued || 0;
+  const pct = wq.pct ?? 0;               // terminal/total
+  const seg = (n) => `${(n / total) * 100}%`;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 130 }}>
-      <div style={{ flex: 1, height: 6, borderRadius: 99, background: "var(--bg-muted)", overflow: "hidden" }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 99 }} />
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 150 }}>
+      <div style={{ flex: 1, height: 7, borderRadius: 99, background: "var(--bg-muted)", overflow: "hidden", display: "flex" }}>
+        <div style={{ width: seg(done), height: "100%", background: "var(--sev-low-solid)" }} title={`${done} ok`} />
+        <div style={{ width: seg(skipped), height: "100%", background: "var(--line-strong)" }} title={`${skipped} n/a`} />
+        <div style={{ width: seg(failed), height: "100%", background: "var(--sev-critical-solid)" }} title={`${failed} falha/timeout`} />
+        <div style={{ width: seg(running), height: "100%", background: "var(--sev-high-solid,#fe7b02)" }} title={`${running} rodando`} />
+        <div style={{ width: seg(queued + blocked), height: "100%", background: "transparent" }} />
       </div>
-      <span style={{ fontSize: 10, color: "var(--ink-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>
-        {wq.done}/{wq.total}{wq.blocked > 0 ? ` ·${wq.blocked}⊘` : ""}
+      <span style={{ fontSize: 10, color: pct === 100 ? "var(--sev-low-text)" : "var(--ink-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap", fontWeight: pct === 100 ? 700 : 400 }}>
+        {pct}%
+      </span>
+      <span style={{ fontSize: 9, color: "var(--ink-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>
+        {done}✓{skipped > 0 ? ` ${skipped}∅` : ""}{failed > 0 ? ` ${failed}✕` : ""}{blocked > 0 ? ` ${blocked}⊘` : ""}/{total}
       </span>
     </div>
   );

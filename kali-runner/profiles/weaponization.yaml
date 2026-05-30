@@ -132,9 +132,12 @@ nikto_basic:
   # log lines that overflowed the 100K runner stdout cap and pushed real findings
   # (lines starting with `+`) out of the parser window. Default display already
   # prints `+` finding lines.
-  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "480s",
+  # -maxtime 240s: self-cap well within the work-queue adaptive budget (>=300s)
+  # so nikto exits cleanly with partial results (status 'completed') instead of
+  # being killed by the wrapper (status 'timeout'). It scans the header/CGI side.
+  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "240s",
         "-Tuning", "123bde", "-Plugins", "@@DEFAULT;-update"]
-  timeout: 900
+  timeout: 300
   parser: raw
   allowed_return_codes: [0, 1]
 
