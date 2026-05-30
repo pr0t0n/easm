@@ -2505,30 +2505,33 @@ def poll_scan_work_item(item_id: int):
                 _vlog.getLogger(__name__).debug("evidence gate stage2 update failed: %s", _ve)
 
         # ── Target triage: se httpx ou naabu confirma target morto, cancela fila ──
-        if item.status == "completed" and item.tool_name in ("httpx", "naabu") and job:
+        # ── Target liveness triage — ONLY httpx is authoritative ─────────────────
+        # CRITICAL: naabu (SYN port scan) is routinely filtered by Cloudflare/AWS
+        # WAF/firewalls. "no ports found" from naabu does NOT mean the target is
+        # dead — it usually responds fine on HTTP 443 behind the edge. Killing all
+        # HTTP phases (P03-P20, including whatweb/httpx tech detection) based on
+        # naabu was skipping live targets en masse. Only httpx (which actually
+        # speaks HTTP) can declare a target dead for web-scanning purposes.
+        if item.status == "completed" and item.tool_name == "httpx" and job:
             try:
                 _result = dict(item.result or {})
                 _parsed = _result.get("parsed_result")
                 _stdout = str(_result.get("stdout_preview") or "")
                 _is_dead = False
-                # httpx: parsed_result é lista; se vazia ou todos failed=true → morto
-                if item.tool_name == "httpx":
-                    if isinstance(_parsed, list):
-                        live = [r for r in _parsed if isinstance(r, dict) and not r.get("failed")]
-                        _is_dead = len(live) == 0 and len(_parsed) > 0
-                    elif not _parsed and not _stdout.strip():
-                        _is_dead = True
-                # naabu: sem portas abertas em output → host pode estar morto/filtrado
-                elif item.tool_name == "naabu":
-                    _is_dead = not _stdout.strip() or "no ports found" in _stdout.lower()
+                # httpx: parsed_result é lista; vazia OU todos failed=true → morto
+                if isinstance(_parsed, list):
+                    live = [r for r in _parsed if isinstance(r, dict) and not r.get("failed")]
+                    _is_dead = len(live) == 0 and len(_parsed) > 0
+                elif not _parsed and not _stdout.strip():
+                    _is_dead = True
                 if _is_dead:
                     from app.services.scan_work_queue import triage_dead_target as _triage
-                    _cancelled = _triage(db, job.id, item.target, reason=f"{item.tool_name}_no_response")
+                    _cancelled = _triage(db, job.id, item.target, reason="httpx_no_http_response")
                     if _cancelled:
                         import logging as _log2
                         _log2.getLogger(__name__).info(
-                            "target_triage: cancelled %d items for dead target %s (tool=%s)",
-                            _cancelled, item.target, item.tool_name
+                            "target_triage: cancelled %d items for dead target %s (httpx confirmed no HTTP)",
+                            _cancelled, item.target
                         )
             except Exception as _te:
                 import logging as _log3
