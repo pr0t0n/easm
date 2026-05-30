@@ -2136,26 +2136,77 @@ def extract_findings_from_work_item(
 # DB persistence
 # ─────────────────────────────────────────────────────────────────────────────
 
-def persist_findings_from_work_item(
+# Base confidence per tool (0-100) — each tool contributes its known FP rate.
+# Module-level so it's not rebuilt on every finding (was a per-iteration dict).
+_TOOL_CONFIDENCE: dict[str, int] = {
+    # Exploitation tools — direct proof
+    "sqlmap": 90, "dalfox": 88, "wapiti": 75, "wpscan": 85,
+    "gitleaks": 82, "trufflehog": 80, "hydra": 85,
+    # Nuclei — depends on template type
+    "nuclei": 70,
+    # Discovery / recon tools
+    "httpx": 85, "nmap": 75, "nmap-ssl": 78, "nmap-http": 70,
+    "nmap-vuln": 35, "nmap-vulscan": 5, "nikto": 35, "shodan-cli": 60,
+    "curl-headers": 72, "wafw00f": 80, "whatweb": 75,
+    "ffuf": 65, "gobuster": 65, "feroxbuster": 68,
+    "nuclei-sqli": 78, "nuclei-xss": 75, "nuclei-ssrf": 72, "nuclei-rce": 80,
+    "nuclei-auth": 75, "nuclei-lfi": 75, "nuclei-exposure": 70, "nuclei-jwt": 78,
+    "nuclei-cors": 70, "nuclei-graphql": 76, "nuclei-default-credentials": 82,
+    "nuclei-auth-bypass": 78,
+    "jwt_tool": 85,
+    "interactsh-client": 95,
+    "theharvester": 55, "h8mail": 50, "amass": 70, "subfinder": 72,
+    "findomain": 72, "assetfinder": 70, "alterx": 65, "shuffledns": 73,
+    "dnsx": 80, "sublist3r": 68, "arjun": 75, "paramspider": 68,
+    "testssl": 82, "testssl.sh": 82, "sslscan": 80,
+    "naabu": 80, "masscan": 75, "semgrep": 72, "trivy": 78, "bandit": 65,
+    "katana": 65, "linkfinder": 68, "exploit_chain_engine": 88,
+    "js_pollution_analyzer": 80, "wfuzz": 65, "crackmapexec": 78,
+    # Service-based scanners (run via dedicated containers/services, not Kali CLI)
+    "zap-baseline": 80, "zap-ajax": 75, "zap-active": 85, "zap-api": 82,
+    "tech_correlator": 45,       # version→CVE correlation, no active test → hypothesis-tier
+    "waf_origin_discovery": 70,  # origin IP behind WAF — network fact
+    "multi_identity_tester": 85, # BOLA/BFLA confirmed by differential response
+}
+
+
+def _confidence_for(tool_col: str, v_status: str) -> int:
+    """Compute confidence score from tool reliability × verification status."""
+    base = _TOOL_CONFIDENCE.get(tool_col, 0)
+    if base == 0 and tool_col.startswith("nuclei-"):
+        base = 70
+    if base == 0:
+        base = 50
+    mult = {"confirmed": 1.15, "candidate": 1.0, "hypothesis": 0.6}.get(v_status, 1.0)
+    return min(99, max(1, int(base * mult)))
+
+
+def persist_finding_dicts(
     db: Session,
-    item: Any,  # ScanWorkItem
-    job: Any,   # ScanJob
+    job: Any,                      # ScanJob
+    raw_findings: list[dict[str, Any]],
+    *,
+    default_tool: str,
+    default_target: str,
+    source_item: Any = None,       # ScanWorkItem | None — None for service-based findings
 ) -> int:
-    """
-    Extract findings from a completed work item and persist them to the DB.
-    Deduplicates by (scan_job_id, title, domain, tool).
-    Returns the number of new findings created.
+    """Persist a list of finding dicts through the FULL quality pipeline.
+
+    This is the single gated path used by EVERY finding source:
+      - work queue tools (via persist_findings_from_work_item)
+      - service scanners (zap_scanner, tech_correlator, waf_origin, multi_identity)
+
+    Pipeline per finding:
+      1. evidence_gate.enrich_finding_with_gate → verification_status
+      2. CVE + generic dedup
+      3. confidence_score from tool reliability × verification status
+      4. Finding() persisted
+      5. HIGH/CRITICAL candidate → schedule_poc_validation (P21)
+      6. MEDIUM/LOW candidate (with source_item) → T1 stage-2 verification
+
+    Returns count of new findings created.
     """
     from app.models.models import Finding
-
-    result = dict(item.result or {})
-    tool = str(item.tool_name or "")
-    target = str(item.target or "")
-    phase_id = str(item.phase_id or "")
-
-    raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
-    if not raw_findings:
-        return 0
 
     created = 0
     for f in raw_findings:
@@ -2172,8 +2223,8 @@ def persist_findings_from_work_item(
         severity = str(f.get("severity") or "info").lower()
         risk_score = int(f.get("risk_score") or 1)
         details = dict(f.get("details") or {})
-        tool_col = str(details.get("tool") or tool)[:100]
-        domain_col = str(details.get("asset") or target)[:255]
+        tool_col = str(details.get("tool") or default_tool)[:100]
+        domain_col = str(details.get("asset") or default_target)[:255]
 
         if not title:
             continue
@@ -2226,93 +2277,8 @@ def persist_findings_from_work_item(
             or ""
         )[:2000] or None
 
-        # ── Confidence score: derived from tool reliability + verification status ──
-        # TOOL_CONFIDENCE: base confidence per tool (0-100)
-        # Replaces hardcoded 50 — now each tool contributes its known FP rate
-        _TOOL_CONFIDENCE: dict[str, int] = {
-            # Exploitation tools — direct proof
-            "sqlmap": 90,           # SQL injection confirmed with payload
-            "dalfox": 88,           # XSS confirmed with callback
-            "wapiti": 75,           # Active exploitation attempt
-            "wpscan": 80,           # Plugin version + CVE confirmed
-            "gitleaks": 82,         # Pattern match in secret
-            "trufflehog": 80,       # Entropy + pattern match
-            "hydra": 85,            # Credential confirmed
-            # Nuclei — depends on template type
-            "nuclei": 70,           # Generic nuclei (matcher varies)
-            # Discovery / recon tools
-            "httpx": 85,            # HTTP probe — fact, not opinion
-            "nmap": 75,             # Port scan — open port is fact
-            "nmap-ssl": 78,         # SSL probe — cipher fact
-            "nmap-http": 70,        # HTTP scripts — moderate reliability
-            "nmap-vuln": 35,        # nmap vuln scripts — moderate FP rate
-            "nmap-vulscan": 5,      # CVE version-match only, no exploit
-            "nikto": 35,            # High FP rate historically
-            "shodan-cli": 60,       # Passive intel — no direct test
-            "curl-headers": 72,     # Header presence is fact; risk is opinion
-            "wafw00f": 80,          # WAF detection — fairly reliable
-            "whatweb": 75,          # Tech fingerprint — reliable
-            "ffuf": 65,             # Directory brute — path found ≠ vuln
-            "gobuster": 65,         # Same as ffuf
-            "feroxbuster": 68,      # Slightly better status filtering
-            "nuclei-sqli": 78,      # Nuclei SQLi template
-            "nuclei-xss": 75,       # Nuclei XSS template
-            "nuclei-ssrf": 72,      # Nuclei SSRF template
-            "nuclei-rce": 80,       # Nuclei RCE template — high confidence
-            "nuclei-auth": 75,      # Nuclei auth template
-            "nuclei-lfi": 75,       # Nuclei LFI template
-            "nuclei-exposure": 70,  # Nuclei exposure template
-            "nuclei-jwt": 78,       # JWT template
-            "nuclei-cors": 70,      # CORS template
-            "nuclei-graphql": 76,   # GraphQL template
-            "nuclei-default-credentials": 82,  # Default cred confirmed
-            "nuclei-auth-bypass": 78,           # Auth bypass template
-            "jwt_tool": 85,         # JWT tool — confirms JWT flaw
-            "interactsh-client": 95, # OOB callback = confirmed interaction = highest confidence
-            "theharvester": 55,     # OSINT — unverified
-            "h8mail": 50,           # Email breach — no direct verification
-            "amass": 70,            # DNS/OSINT enumeration
-            "subfinder": 72,        # Subdomain discovery
-            "findomain": 72,        # Subdomain discovery
-            "assetfinder": 70,      # Subdomain discovery
-            "alterx": 65,           # Permutation-based — may not exist
-            "shuffledns": 73,       # Bruteforce + resolution confirmed
-            "dnsx": 80,             # DNS resolution — host exists = fact
-            "sublist3r": 68,        # Mixed sources — moderate reliability
-            "arjun": 75,            # Parameter discovery — params confirmed present
-            "paramspider": 68,      # URL parameter crawl — moderate
-            "wpscan": 85,           # WP scanner — CVE+version confirmed
-            "testssl": 82,          # TLS probe — cipher facts
-            "testssl.sh": 82,
-            "sslscan": 80,          # TLS probe
-            "naabu": 80,            # Port scanner — open port confirmed
-            "masscan": 75,          # Fast port scanner — some FPs possible
-            "semgrep": 72,          # SAST — static analysis
-            "trivy": 78,            # Container/supply chain scanning
-            "bandit": 65,           # Python SAST
-            "katana": 65,           # Web crawler
-            "linkfinder": 68,       # JS endpoint extractor
-            "exploit_chain_engine": 88,  # Chain correlation
-            "js_pollution_analyzer": 80, # Prototype pollution — active test
-            "wfuzz": 65,            # Fuzzer — path found ≠ vuln
-            "crackmapexec": 78,     # SMB/AD — credential confirmed
-        }
-
-        # Prefix match for nuclei-* variants not listed
-        _base_confidence = _TOOL_CONFIDENCE.get(tool_col, 0)
-        if _base_confidence == 0 and tool_col.startswith("nuclei-"):
-            _base_confidence = 70  # default nuclei variant
-        if _base_confidence == 0:
-            _base_confidence = 50  # fallback
-
-        # Adjust by verification status
-        _v_multiplier = {
-            "confirmed": 1.15,
-            "candidate": 1.0,
-            "hypothesis": 0.6,
-        }.get(v_status, 1.0)
-
-        confidence_score = min(99, max(1, int(_base_confidence * _v_multiplier)))
+        # ── Confidence score: tool reliability × verification status ──────────
+        confidence_score = _confidence_for(tool_col, v_status)
 
         finding = Finding(
             scan_job_id=job.id,
@@ -2354,9 +2320,10 @@ def persist_findings_from_work_item(
         # MEDIUM/LOW/INFO candidates → seed a lightweight verification item.
         # HIGH/CRITICAL that already have a P21 item skip this to avoid
         # creating two competing verification items for the same finding.
-        if v_status in ("candidate", "hypothesis") and not _poc_scheduled:
+        # Only when there's a source work item (service-based findings skip this).
+        if source_item is not None and v_status in ("candidate", "hypothesis") and not _poc_scheduled:
             try:
-                _seed_verification_work_item(db, job, item, finding, tool, finding_url)
+                _seed_verification_work_item(db, job, source_item, finding, tool_col, finding_url)
             except Exception:
                 pass
 
@@ -2364,6 +2331,32 @@ def persist_findings_from_work_item(
         db.commit()
 
     return created
+
+
+def persist_findings_from_work_item(
+    db: Session,
+    item: Any,  # ScanWorkItem
+    job: Any,   # ScanJob
+) -> int:
+    """Extract findings from a completed work item and persist them.
+
+    Thin wrapper: extract raw findings, then delegate to persist_finding_dicts
+    (the single quality-gated persistence path). Deduplicates by
+    (scan_job_id, title, domain, tool). Returns count of new findings created.
+    """
+    result = dict(item.result or {})
+    tool = str(item.tool_name or "")
+    target = str(item.target or "")
+    phase_id = str(item.phase_id or "")
+
+    raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
+    if not raw_findings:
+        return 0
+
+    return persist_finding_dicts(
+        db, job, raw_findings,
+        default_tool=tool, default_target=target, source_item=item,
+    )
 
 
 # ── T1: Evidence gate stage 2 helpers ─────────────────────────────────────────

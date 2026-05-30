@@ -2275,6 +2275,43 @@ def poll_scan_work_item(item_id: int):
                 import logging as _jsplog2
                 _jsplog2.getLogger(__name__).debug("js_pollution_analyzer failed: %s", _jsp_err)
 
+        # ── ZAP: OWASP ZAP baseline scan — after HTTP fingerprint confirms target ──
+        # ZAP runs as a separate container (zap:8090), not via Kali CLI, so it's
+        # triggered as a post-processing hook (like js_pollution/multi_identity).
+        # After P06 (httpx/whatweb) confirms a target speaks HTTP, run ZAP baseline
+        # (passive spider + alerts). Findings go through the same gated path.
+        # One ZAP run per target per scan (guarded by state key).
+        if item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and item.target != "__batch__":
+            try:
+                _state_zap = dict(job.state_data or {})
+                _zap_key = f"zap_done_{item.target}"
+                # Cap: ZAP is heavy (1-2 min/target) — limit to first 15 live targets.
+                _zap_count = int(_state_zap.get("zap_run_count") or 0)
+                if not _state_zap.get(_zap_key) and _zap_count < 15:
+                    from app.services.zap_scanner import run_zap_baseline as _zap_baseline, is_zap_available as _zap_avail
+                    if _zap_avail():
+                        _tgt = item.target
+                        _zap_url = _tgt if str(_tgt).startswith("http") else f"https://{_tgt}"
+                        _zap_res = _zap_baseline(_zap_url)
+                        _zap_findings = _zap_res.get("findings") or []
+                        _state_zap[_zap_key] = True
+                        _state_zap["zap_run_count"] = _zap_count + 1
+                        job.state_data = _state_zap
+                        if _zap_findings:
+                            from app.services.findings_extractor import persist_finding_dicts as _persist_zap
+                            _zap_created = _persist_zap(
+                                db, job, _zap_findings,
+                                default_tool="zap-baseline", default_target=_tgt, source_item=None,
+                            )
+                            import logging as _zaplog
+                            _zaplog.getLogger(__name__).info(
+                                "zap_baseline scan=%d target=%s alerts=%d findings_created=%d",
+                                job.id, _tgt, _zap_res.get("alert_count", 0), _zap_created,
+                            )
+            except Exception as _zap_err:
+                import logging as _zaplog2
+                _zaplog2.getLogger(__name__).debug("zap_baseline failed: %s", _zap_err)
+
         # ── EXC: Attack Graph + Exploit Chain correlation — post-exploitation ────
         # Runs after P12, P13, P17 or P20 items complete (exploitation phases).
         # P17 (Exploit Validation) and P20 (Attack Path Correlation) are the primary

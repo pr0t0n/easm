@@ -2370,19 +2370,37 @@ def _persist_origin_finding(db, job: ScanJob, target: str, origin: dict[str, Any
         "owasp_top10": ["A05:2021 Security Misconfiguration"],
         "kill_chain_stage": "Reconnaissance",
     }
-    finding = Finding(
-        scan_job_id=job.id,
-        title=title[:255],
-        severity=severity,
-        domain=str(target)[:255],
-        tool="waf_origin_discovery",
-        recommendation=recommendation,
-        confidence_score=confidence,
-        risk_score=max(1, confidence // 10),
-        details=details,
-    )
-    db.add(finding)
-    db.commit()
+    # WAF origin discovery is a network-fact finding (IP divergence + DNS mining),
+    # but it is NOT an actively-confirmed exploit — the origin still needs a
+    # Host-header verification request. Route it through the gated path as a
+    # 'candidate' so HIGH severity triggers a P21 validation (curl Host-header
+    # check) before it appears as confirmed in the report.
+    details["asset"] = str(target)
+    details["tool"] = "waf_origin_discovery"
+    details["recommendation"] = recommendation
+    details["verification_status"] = "candidate"
+    _waf_raw = [{
+        "title": title[:255],
+        "severity": severity,
+        "risk_score": max(1, confidence // 10),
+        "details": details,
+    }]
+    try:
+        from app.services.findings_extractor import persist_finding_dicts
+        persist_finding_dicts(
+            db, job, _waf_raw,
+            default_tool="waf_origin_discovery", default_target=str(target), source_item=None,
+        )
+    except Exception:
+        # Fallback to direct persist if gated path unavailable
+        db.add(Finding(
+            scan_job_id=job.id, title=title[:255], severity=severity,
+            domain=str(target)[:255], tool="waf_origin_discovery",
+            recommendation=recommendation, confidence_score=confidence,
+            risk_score=max(1, confidence // 10), details=details,
+            verification_status="candidate",
+        ))
+        db.commit()
 
 
 def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, Any]], targets: list[str]) -> None:

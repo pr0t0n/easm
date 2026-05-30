@@ -827,6 +827,10 @@ def correlate_tech_vulns(
 
     findings_created = 0
     nuclei_queued = 0
+    # Collect findings as dicts → persist through the single gated path
+    # (evidence_gate + verification_status + P21). tech_correlator findings are
+    # version→CVE correlations with NO active test → hypothesis-tier (capped MEDIUM).
+    _tech_raw: list[dict[str, Any]] = []
 
     for tech in techs:
         product = str(tech.get("product") or "").strip()
@@ -853,62 +857,31 @@ def correlate_tech_vulns(
 
         all_cves = local_cves + nvd_cves
 
-        # ── 3. Persist technology finding if not already present ──────────────
+        # ── 3. Technology finding dict (info-level) ───────────────────────────
         tech_title = f"Tecnologia detectada: {product}" + (f" {version}" if version else "")
-        tech_exists = (
-            db.query(Finding.id)
-            .filter(
-                Finding.scan_job_id == scan_id,
-                Finding.title == tech_title,
-                Finding.domain == target[:255],
-            )
-            .first()
-        )
-        if not tech_exists:
-            db.add(Finding(
-                scan_job_id=scan_id,
-                title=tech_title,
-                severity="info",
-                risk_score=1,
-                domain=target[:255],
-                tool=source[:100],
-                confidence_score=70,
-                details={
-                    "node": "recon",
-                    "step": "tech_correlator",
-                    "asset": target,
-                    "tool": source,
-                    "product": product,
-                    "version": version,
-                    "phase_id": str(item.phase_id),
-                    "evidence": f"{source} detected {product}" + (f" {version}" if version else ""),
-                    "owasp_category": "A06:2021 Vulnerable and Outdated Components" if version else "",
-                },
-                created_at=datetime.utcnow(),
-            ))
-            try:
-                db.flush()
-                findings_created += 1
-            except Exception:
-                db.rollback()
+        _tech_raw.append({
+            "title": tech_title,
+            "severity": "info",
+            "risk_score": 1,
+            "details": {
+                "node": "recon",
+                "step": "tech_correlator",
+                "asset": target,
+                "tool": "tech_correlator",
+                "product": product,
+                "version": version,
+                "phase_id": str(item.phase_id),
+                "evidence": f"{source} detected {product}" + (f" {version}" if version else ""),
+                "owasp_category": "A06:2021 Vulnerable and Outdated Components" if version else "",
+                # version-detection fact, not a vuln → confirmed (it IS present)
+                "verification_status": "confirmed",
+            },
+        })
 
-        # ── 4. Persist CVE findings ───────────────────────────────────────────
+        # ── 4. CVE finding dicts (hypothesis-tier: version-match, no active test) ─
         for cve_info in all_cves:
             cve_id = str(cve_info.get("cve") or "").upper()
             if not cve_id.startswith("CVE-"):
-                continue
-
-            # Dedup: one CVE per target domain
-            cve_exists = (
-                db.query(Finding.id)
-                .filter(
-                    Finding.scan_job_id == scan_id,
-                    Finding.cve == cve_id,
-                    Finding.domain == target[:255],
-                )
-                .first()
-            )
-            if cve_exists:
                 continue
 
             sev_raw = str(cve_info.get("severity") or "high").lower()
@@ -922,22 +895,15 @@ def correlate_tech_vulns(
             title = str(cve_info.get("title") or cve_id)
             remediation = str(cve_info.get("remediation") or "").strip() or None
 
-            db.add(Finding(
-                scan_job_id=scan_id,
-                title=title[:500],
-                severity=severity,
-                cve=cve_id,
-                cvss=cvss,
-                risk_score=int(round(float(cvss or 7.0))),
-                domain=target[:255],
-                tool=source[:100],
-                recommendation=remediation,
-                confidence_score=60,
-                details={
+            _tech_raw.append({
+                "title": title[:500],
+                "severity": severity,
+                "risk_score": int(round(float(cvss or 7.0))),
+                "details": {
                     "node": "vuln",
                     "step": "tech_correlator",
                     "asset": target,
-                    "tool": source,
+                    "tool": "tech_correlator",
                     "product": product,
                     "version": version,
                     "cve_id": cve_id,
@@ -948,15 +914,11 @@ def correlate_tech_vulns(
                     "owasp_category": "A06:2021 Vulnerable and Outdated Components",
                     "impact": "Componente com CVE conhecido permite exploração remota se versão vulnerável confirmada.",
                     "remediation": remediation or f"Verificar versão de {product} e aplicar patches relevantes",
-                    "validation_status": "hypothesis",  # needs manual confirmation
+                    # version-match only → hypothesis. exploitation_gate caps at MEDIUM
+                    # until P09 nuclei / P21 actively confirms it.
+                    "verification_status": "hypothesis",
                 },
-                created_at=datetime.utcnow(),
-            ))
-            try:
-                db.flush()
-                findings_created += 1
-            except Exception:
-                db.rollback()
+            })
 
         # ── 5. Queue targeted nuclei scan (genérico) ──────────────────────────
         nuclei_queued += _seed_targeted_nuclei(db, scan_id, target, product, phase_id="P09")
@@ -965,6 +927,19 @@ def correlate_tech_vulns(
         # Implementa o ponto #2: WordPress → wpscan; Django → nuclei-django-debug;
         # GraphQL → nuclei-graphql-introspection; Tomcat → CVE específico; etc.
         nuclei_queued += _seed_attack_profile_for_tech(db, scan_id, target, product)
+
+    # ── Persist all collected findings through the single gated path ──────────
+    # evidence_gate + verification_status cap + P21 for any HIGH/CRIT that the
+    # exploitation_gate would still allow (none here — all hypothesis-tier).
+    if _tech_raw:
+        try:
+            from app.services.findings_extractor import persist_finding_dicts
+            findings_created = persist_finding_dicts(
+                db, job, _tech_raw,
+                default_tool="tech_correlator", default_target=target, source_item=None,
+            )
+        except Exception as _persist_err:
+            logger.warning("tech_correlator persist failed: %s", _persist_err)
 
     try:
         db.commit()
