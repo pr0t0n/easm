@@ -355,6 +355,16 @@ paramspider_mining:
   timeout: 180
   parser: lines
 
+linkfinder_js:
+  tool: linkfinder
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Extrai endpoints/rotas de API de bundles JS (P08)."
+  # -i aceita URL; -o cli imprime endpoints (um por linha) no stdout.
+  cmd: ["linkfinder", "-i", "{url}", "-o", "cli"]
+  timeout: 180
+  parser: lines
+
 curl_headers:
   tool: curl-headers
   category: recon

@@ -274,6 +274,27 @@ async def _refresh_kali_catalog() -> None:
             command = list(spec.get("command") or [])
             if command:
                 aliases[str(command[0])] = profile_name
+
+        # ── Contract-name → closest existing profile (vuln tags sem profile próprio) ──
+        # Os contratos de fase referenciam nomes que não têm profile 1:1 no Kali.
+        # Mapear para a capability existente mais próxima evita skip de
+        # tool_or_profile_not_found e mantém a cobertura de detecção.
+        _CONTRACT_ALIASES = {
+            "nuclei-auth-bypass": "nuclei_auth",
+            "nuclei-auth": "nuclei_auth",
+            "nuclei-js-secrets": "nuclei_exposure",
+            "nuclei-js-analysis": "nuclei_exposure",
+            "nuclei-default-credentials": "nuclei_auth",
+            "nuclei-oauth": "nuclei_auth",
+            "nuclei-jwt": "nuclei_jwt",
+            "nuclei-misconfiguration": "nuclei_exposure",
+            "nuclei-file-upload": "nuclei_exposure",
+            "nuclei-swagger": "nuclei_exposure",
+            "nuclei-redirect": "nuclei_open_redirect",
+        }
+        for _cname, _target in _CONTRACT_ALIASES.items():
+            if _cname not in aliases and _target in profiles:
+                aliases[_cname] = _target
         tool_aliases = aliases
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load Kali profiles: %s", exc)
