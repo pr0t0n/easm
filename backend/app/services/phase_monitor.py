@@ -129,6 +129,39 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     capability_ledger = infer_capability_ledger(state)
     phase_ledger = _phase_ledger_map(state.get("phase_ledger") or state.get("phase_ledger_v2"))
 
+    # ── Work-queue truth per phase ────────────────────────────────────────────
+    # The ledger marks a phase "executed" after a SINGLE target completes — it
+    # over-reports progress. The work_queue holds the real per-phase counts
+    # (done/total across ALL targets). Query it once and use it as the
+    # authoritative progress source so the UI reflects reality, not the ledger.
+    wq_by_phase: dict[str, dict[str, int]] = {}
+    try:
+        from app.models.models import ScanWorkItem as _SWI_pm
+        import sqlalchemy as _sa_pm
+        _wq_rows = (
+            db.query(_SWI_pm.phase_id, _SWI_pm.status, _sa_pm.func.count(_SWI_pm.id))
+            .filter(_SWI_pm.scan_job_id == scan.id)
+            .group_by(_SWI_pm.phase_id, _SWI_pm.status)
+            .all()
+        )
+        for _pid, _st, _cnt in _wq_rows:
+            slot = wq_by_phase.setdefault(_pid, {
+                "total": 0, "done": 0, "running": 0, "queued": 0, "blocked": 0, "failed": 0,
+            })
+            slot["total"] += _cnt
+            if _st in ("completed", "done"):
+                slot["done"] += _cnt
+            elif _st in ("dispatched", "running", "submitted"):
+                slot["running"] += _cnt
+            elif _st == "queued":
+                slot["queued"] += _cnt
+            elif _st == "blocked":
+                slot["blocked"] += _cnt
+            elif _st in ("failed", "timeout"):
+                slot["failed"] += _cnt
+    except Exception:
+        wq_by_phase = {}
+
     obs_by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for obs in autonomy_obs:
         node = str(dict(obs or {}).get("node") or dict(obs or {}).get("capability") or "")
@@ -306,6 +339,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         ledger_status = str(ledger_entry.get("status") or "")
         normalized_ledger_status = _normalized_ledger_status(ledger_status)
 
+        # ── Work-queue per-phase progress (authoritative) ─────────────────────
+        _wq = wq_by_phase.get(pid) or {}
+        _wq_total = _wq.get("total", 0)
+        _wq_done = _wq.get("done", 0)
+        _wq_running = _wq.get("running", 0)
+        _wq_queued = _wq.get("queued", 0)
+        _wq_blocked = _wq.get("blocked", 0)
+        _wq_pct = int(_wq_done / _wq_total * 100) if _wq_total > 0 else None
+
         if normalized_ledger_status:
             status_label = normalized_ledger_status
         elif not effective_node_visited:
@@ -320,6 +362,23 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             status_label = "attempted_failed"
         else:
             status_label = "node_visited_no_tools"
+
+        # Override with work-queue truth when the queue has items for this phase.
+        # The ledger over-reports ("executed" after 1 target); the queue knows if
+        # work is still running/queued/blocked across ALL targets. Exhaustive:
+        if _wq_total > 0:
+            if _wq_done == _wq_total:
+                status_label = "executed"               # all targets done
+            elif _wq_running > 0 or _wq_queued > 0:
+                status_label = "executing" if _wq_done > 0 else "in_progress"
+            elif _wq_blocked > 0 and _wq_done == 0:
+                status_label = "blocked"                # nothing done, all gated
+            elif _wq_blocked > 0:
+                status_label = "partial_coverage"       # some done, rest gated/stuck
+            elif _wq_done > 0:
+                status_label = "partial_coverage"       # some done, rest failed
+            else:
+                status_label = "attempted_failed"       # total>0 but none done
 
         phase_row = {
             "id": pid,
@@ -342,6 +401,15 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "tools_missing": tools_missing,
             "tools_missing_uninstalled": tools_missing_uninstalled,
             "tools_missing_unused": tools_missing_unused,
+            # Work-queue truth (authoritative per-phase progress across ALL targets)
+            "work_queue": {
+                "total": _wq_total,
+                "done": _wq_done,
+                "running": _wq_running,
+                "queued": _wq_queued,
+                "blocked": _wq_blocked,
+                "pct": _wq_pct,
+            },
             # Ledger enrichment
             "ledger_status": ledger_status,
             "ledger_exit_criteria_met": bool(ledger_entry.get("exit_criteria_met")),
@@ -384,12 +452,27 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         1 for entry in phase_ledger.values()
         if str(entry.get("status") or "").lower() in {"completed", "partial"}
     )
-    # Para scans ainda em andamento, o progress é calculado sobre o ledger (per-phase),
-    # mas nunca pode ultrapassar 99% — 100% é reservado para scan status=completed.
     _scan_running = str(scan.status or "").lower() in ("running", "queued", "retrying")
-    computed_progress = round((ledger_completed_count / max(1, len(PENTEST_PHASES))) * 100)
-    if _scan_running:
-        computed_progress = min(99, computed_progress)
+
+    # ── Progress from work-queue (authoritative) with ledger fallback ─────────
+    # Work-queue engine: real progress = terminal / (total - blocked), since
+    # blocked items are pending (awaiting gate), not done. The ledger fallback
+    # is only for legacy scans without work items.
+    _wq_total_all = sum(s.get("total", 0) for s in wq_by_phase.values())
+    if _wq_total_all > 0:
+        _wq_blocked_all = sum(s.get("blocked", 0) for s in wq_by_phase.values())
+        _wq_done_all = sum(s.get("done", 0) for s in wq_by_phase.values())
+        _wq_failed_all = sum(s.get("failed", 0) for s in wq_by_phase.values())
+        _effective = max(1, _wq_total_all - _wq_blocked_all)
+        _terminal = _wq_done_all + _wq_failed_all
+        computed_progress = int(_terminal / _effective * 100)
+        if _scan_running:
+            computed_progress = min(99, computed_progress)
+    else:
+        # Legacy: ledger-based per-phase progress.
+        computed_progress = round((ledger_completed_count / max(1, len(PENTEST_PHASES))) * 100)
+        if _scan_running:
+            computed_progress = min(99, computed_progress)
 
     # ── Capability summary ────────────────────────────────────────────────────
     capabilities: list[dict[str, Any]] = []
@@ -627,14 +710,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         "scan_id": scan.id,
         "status": scan.status,
         "current_step": scan.current_step,
-        # Scans work_queue (capacity_work_queue engine) têm mission_progress
-        # calculado item-a-item em tasks.py — é mais preciso que o ledger,
-        # pois o ledger marca "completed" quando apenas 1 target processou a fase.
-        # Para esses scans, usamos scan.mission_progress diretamente (cap 99% se running).
-        # Scans legado (sem work items) usam computed_progress do ledger como fallback.
+        # mission_progress source of truth:
+        #  - work_queue scans: computed_progress (terminal/effective from the queue,
+        #    computed above) — NOT scan.mission_progress which can stall stale.
+        #  - completed scans: 100%.
+        #  - legacy scans: computed_progress from ledger.
         "mission_progress": (
-            min(99, int(scan.mission_progress or 0))
-            if _scan_running and int(scan.mission_progress or 0) > 0
+            100 if str(scan.status or "").lower() == "completed"
+            else int(computed_progress or 0) if _wq_total_all > 0
             else max(int(scan.mission_progress or 0), int(computed_progress or 0))
         ),
         "objective_met": objective_met,

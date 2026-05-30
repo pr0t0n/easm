@@ -3,6 +3,9 @@ import client from "../api/client";
 
 const STATUS_STYLES = {
   executed:                       { className: "ds-badge ds-badge--low",     label: "Executado" },
+  executing:                      { className: "ds-badge ds-badge--high",    label: "Executando" },
+  in_progress:                    { className: "ds-badge ds-badge--info",    label: "Em progresso" },
+  blocked:                        { className: "ds-badge",                   label: "Bloqueada" },
   partial_coverage:               { className: "ds-badge ds-badge--high",    label: "Parcial" },
   attempted_failed:               { className: "ds-badge ds-badge--critical", label: "Falhou" },
   node_completed_tools_skipped:   { className: "ds-badge ds-badge--info",     label: "Tools puladas" },
@@ -12,6 +15,23 @@ const STATUS_STYLES = {
   pending:                        { className: "ds-badge",                   label: "Pendente" },
   skipped:                        { className: "ds-badge",                   label: "Ignorada" },
 };
+
+// Inline work-queue progress bar (done/total across all targets)
+function WqProgress({ wq }) {
+  if (!wq || !wq.total) return <span style={{ fontSize: 11, color: "var(--ink-muted)" }}>—</span>;
+  const pct = wq.pct ?? 0;
+  const color = pct === 100 ? "var(--sev-low-solid)" : wq.running > 0 ? "var(--sev-high-solid,#fe7b02)" : wq.blocked > 0 ? "var(--line-strong)" : "var(--sev-info-solid)";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 130 }}>
+      <div style={{ flex: 1, height: 6, borderRadius: 99, background: "var(--bg-muted)", overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 99 }} />
+      </div>
+      <span style={{ fontSize: 10, color: "var(--ink-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>
+        {wq.done}/{wq.total}{wq.blocked > 0 ? ` ·${wq.blocked}⊘` : ""}
+      </span>
+    </div>
+  );
+}
 
 const SEVERITY_COLORS = {
   critical: "#b03333",
@@ -325,6 +345,7 @@ export default function PhaseMonitorPage() {
                       <th style={th}>ID</th>
                       <th style={th}>Phase</th>
                       <th style={th}>Status</th>
+                      <th style={th}>Progresso (alvos)</th>
                       <th style={th}>Tools used</th>
                       <th style={th}>Pendências de tools</th>
                     </tr>
@@ -335,6 +356,7 @@ export default function PhaseMonitorPage() {
                         <td style={td}><code style={codeStyle}>{p.id}</code></td>
                         <td style={td}>{p.title}</td>
                         <td style={td}><StatusBadge status={p.status} /></td>
+                        <td style={td}><WqProgress wq={p.work_queue} /></td>
                         <td style={td}>
                           {p.tools_used.length > 0 ? (
                             <span>
