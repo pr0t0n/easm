@@ -1609,6 +1609,77 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not job:
             return {"error": f"scan {scan_id} not found"}
+
+        # ── Gate reconciler (self-healing) ───────────────────────────────────────
+        # The per-item gate-unblock hook lives in poll_scan_work_item, but items
+        # marked terminal at SUBMIT time (e.g. MCP returns 'skipped' for a missing
+        # tool) never get polled → the hook never fires → the gate stays closed →
+        # downstream phases stall forever. This periodic reconciler is idempotent
+        # and catches ALL cases: for each gate phase that is fully terminal, unblock
+        # its dependents. Runs every dispatch cycle (~30s) so the flow self-heals.
+        try:
+            from app.services.scan_work_queue import (
+                unblock_phase_items as _gr_unblock,
+                _GATE_UNLOCKS as _gr_unlocks,
+                triage_post_p09_injection as _gr_triage,
+            )
+            from app.models.models import ScanWorkItem as _GR_SWI
+            from sqlalchemy import func as _gr_func
+            _GR_TERM = ["completed", "done", "failed", "timeout", "skipped"]
+            _gr_targets = [
+                r[0] for r in db.query(_GR_SWI.target)
+                .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target != "__batch__")
+                .distinct().all()
+            ] + ["__batch__"]
+            for _gate_pid in ("P02", "P06", "P09"):
+                # Is this gate phase fully terminal (and has items)?
+                _gp = dict(
+                    db.query(_GR_SWI.status, _gr_func.count(_GR_SWI.id))
+                    .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.phase_id == _gate_pid)
+                    .group_by(_GR_SWI.status).all()
+                )
+                _gp_total = sum(_gp.values())
+                if _gp_total == 0:
+                    continue
+                _gp_pending = sum(v for k, v in _gp.items() if k not in _GR_TERM)
+                if _gp_pending > 0:
+                    continue  # gate not done yet
+                # Are dependents still blocked? (avoid redundant work)
+                _deps = _gr_unlocks.get(_gate_pid, [])
+                if not _deps:
+                    continue
+                _blocked_deps = (
+                    db.query(_gr_func.count(_GR_SWI.id))
+                    .filter(
+                        _GR_SWI.scan_job_id == scan_id,
+                        _GR_SWI.phase_id.in_(_deps),
+                        _GR_SWI.status == "blocked",
+                    ).scalar() or 0
+                )
+                if _blocked_deps == 0:
+                    continue
+                # P09 gate: triage first (skip exploitation on targets w/o findings)
+                _unb_targets = _gr_targets
+                if _gate_pid == "P09":
+                    try:
+                        _tr = _gr_triage(db, scan_id)
+                        _twf = _tr.get("targets_with_findings") or []
+                        if _twf:
+                            _unb_targets = _twf + ["__batch__"]
+                    except Exception:
+                        pass
+                _n = _gr_unblock(db, scan_id, _unb_targets, _gate_pid)
+                if _n:
+                    db.commit()
+                    import logging as _grlog
+                    _grlog.getLogger(__name__).info(
+                        "gate_reconciler: scan=%d gate=%s fully-terminal → unblocked %d deps",
+                        scan_id, _gate_pid, _n,
+                    )
+        except Exception as _gr_err:
+            import logging as _grlog2
+            _grlog2.getLogger(__name__).debug("gate_reconciler failed: %s", _gr_err)
+
         item_ids = claim_work_items(db, scan_id, limit=limit)
 
         # ── Target priority scoring: exploitation phases first for targets with findings ──
