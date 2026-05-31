@@ -580,7 +580,12 @@ export default function DomainsPage() {
                     {(selectedSub?.findings || []).map((finding) => (
                       <tr key={`${finding.id}-${finding.scan_id}`}>
                         <td>
-                          <strong>{finding.title || "Finding sem título"}</strong>
+                          {(finding.vuln_family_label || finding.vuln_family) && (
+                            <span style={{ display: "inline-block", fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--brand-700)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", borderRadius: 4, padding: "1px 6px", marginBottom: 3 }}>
+                              {finding.vuln_family_label || finding.vuln_family}
+                            </span>
+                          )}
+                          <strong style={{ display: "block" }}>{finding.title || "Finding sem título"}</strong>
                           {(finding.url || finding.path) && (
                             <span style={{ display: "block", fontSize: 11, color: "var(--ink-muted)", wordBreak: "break-all", marginTop: 2 }}>
                               {finding.url || finding.path}

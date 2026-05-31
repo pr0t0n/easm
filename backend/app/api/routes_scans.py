@@ -3286,6 +3286,12 @@ def domains_overview(
                 ports_map[pk]["service"] = service
             ports_map[pk]["count"] += 1
 
+        from app.services.vuln_family import classify_family as _cf_d, family_label as _fl_d
+        _fam_d = _cf_d(
+            title=finding.title, tool=finding.tool,
+            owasp=str((finding.details or {}).get("owasp_category") or ""), cve=finding.cve,
+            learning_family=((finding.details or {}).get("learning_source") or {}).get("vuln_family"),
+        )
         sub_item["findings"].append(
             {
                 "id": finding.id,
@@ -3293,6 +3299,8 @@ def domains_overview(
                 "scan_status": scan.status if scan else None,
                 "scan_created_at": scan.created_at if scan else None,
                 "title": finding.title,
+                "vuln_family": _fam_d,
+                "vuln_family_label": _fl_d(_fam_d),
                 "severity": finding.severity,
                 "risk_score": finding.risk_score,
                 "cve": finding.cve,
