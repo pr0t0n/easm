@@ -732,7 +732,14 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         # ── Scan metadata ──────────────────────────────────────────────────
         "scan_id": scan.id,
         "status": scan.status,
-        "current_step": scan.current_step,
+        # current_step: em scans work_queue, scan.current_step fica obsoleto
+        # ("Iniciando grafo"). Usa a fase pentest ativa real quando disponível.
+        "current_step": (
+            current_pentest_phase_id
+            if (_wq_total_all > 0 and current_pentest_phase_id
+                and str(scan.status or "").lower() not in ("completed", "done", "finished"))
+            else scan.current_step
+        ),
         # mission_progress source of truth:
         #  - work_queue scans: computed_progress (terminal/effective from the queue,
         #    computed above) — NOT scan.mission_progress which can stall stale.

@@ -4324,12 +4324,68 @@ def scan_runtime_feed(
             "tools": tools_runtime,
         })
 
+    # ── Progresso e fase atual AUTORITATIVOS (work_queue real, não o ledger) ──
+    # O phase_ledger (LangGraph) fica obsoleto em scans work_queue e reporta
+    # 100%/P01. A verdade é a razão terminal/efetivo da fila de work items.
+    from app.models.models import ScanWorkItem as _SWI_rt
+    _TERMINAL = {"completed", "done", "skipped", "failed", "timeout"}
+    _wq_rows = (
+        db.query(_SWI_rt.phase_id, _SWI_rt.status, func.count(_SWI_rt.id))
+        .filter(_SWI_rt.scan_job_id == scan_id)
+        .group_by(_SWI_rt.phase_id, _SWI_rt.status)
+        .all()
+    )
+    _per_phase: dict[str, dict] = {}
+    _total = _terminal = _blocked = 0
+    for _ph, _st, _cnt in _wq_rows:
+        _ph = str(_ph or "?")
+        _st = str(_st or "")
+        slot = _per_phase.setdefault(_ph, {"phase_id": _ph, "total": 0, "terminal": 0, "blocked": 0, "active": 0})
+        slot["total"] += _cnt
+        _total += _cnt
+        if _st in _TERMINAL:
+            slot["terminal"] += _cnt
+            _terminal += _cnt
+        elif _st == "blocked":
+            slot["blocked"] += _cnt
+            _blocked += _cnt
+        else:
+            slot["active"] += _cnt
+    # progresso real: terminal / (total - blocked); cap 99 enquanto rodando
+    _effective = max(1, _total - _blocked)
+    if job.status in ("completed", "done", "finished"):
+        _wq_progress = 100
+    elif _total == 0:
+        _wq_progress = int(job.mission_progress or 0)
+    else:
+        _wq_progress = min(99, int(_terminal / _effective * 100))
+    # fase atual = menor phase_id (ordem) com itens ativos (não-terminais/não-bloqueados);
+    # se nenhuma ativa, a menor com itens bloqueados (aguardando gate).
+    _active_phases = sorted(p for p, s in _per_phase.items() if s["active"] > 0)
+    _blocked_phases = sorted(p for p, s in _per_phase.items() if s["blocked"] > 0)
+    if _active_phases:
+        _current_phase = _active_phases[0]
+    elif _blocked_phases:
+        _current_phase = _blocked_phases[0]
+    else:
+        _current_phase = "—"
+    _phase_progress = [
+        {**v, "pct": int(v["terminal"] / max(1, v["total"] - v["blocked"]) * 100) if (v["total"] - v["blocked"]) > 0 else 0}
+        for v in sorted(_per_phase.values(), key=lambda x: x["phase_id"])
+    ]
+
     return {
         "scan_id": scan_id,
         "target_query": job.target_query,
         "status": job.status,
-        "current_step": job.current_step,
-        "mission_progress": job.mission_progress or 0,
+        # current_step/mission_progress agora refletem o work_queue real
+        "current_step": _current_phase if _total > 0 else job.current_step,
+        "mission_progress": _wq_progress,
+        "work_queue": {
+            "total": _total, "terminal": _terminal, "blocked": _blocked,
+            "active": _total - _terminal - _blocked, "progress_pct": _wq_progress,
+            "current_phase": _current_phase, "by_phase": _phase_progress,
+        },
         "phases": runtime,
     }
 
