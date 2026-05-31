@@ -205,11 +205,14 @@ services:
     # Dedicated worker for per-target subtasks (run_scan_target_subset).
     # Isolated from scan.unit so subtasks never compete with the main scan task.
     # --pool=threads: safe; each thread has its own _AUTH_LOCAL via threading.local().
-    # Concurrency reduced to 8: each thread holds an HTTP connection + DB session
-    # (~100-150 MB each); 16 threads was causing OOM kills.
-    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=8
+    # Concurrency reduced to 4: além da conexão HTTP + sessão DB por thread, o
+    # onnxruntime (embedding semântico, Frente A) carrega arenas de memória no
+    # worker; 8 threads + onnxruntime causava OOM (exit 137). OMP_NUM_THREADS=1
+    # mantém o onnxruntime enxuto; mem_limit contém picos.
+    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=4
     env_file: *optional_env_file
-    environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
+    environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo, OMP_NUM_THREADS: "1", ONNXRUNTIME_INTRA_OP_NUM_THREADS: "1" }
+    mem_limit: 5g
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro"]

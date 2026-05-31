@@ -40,7 +40,10 @@ def _get_model():
                 os.makedirs(cache_dir, exist_ok=True)
             except Exception:
                 cache_dir = None
-            _model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=cache_dir)
+            # threads=1: o onnxruntime, por padrão, cria arenas de memória/threads
+            # dimensionadas pelos núcleos da CPU — nos workers (pool=threads) isso
+            # inflava a memória e causava OOM. 1 thread mantém o footprint enxuto.
+            _model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=cache_dir, threads=1)
             return _model
         except Exception:
             _load_failed = True
