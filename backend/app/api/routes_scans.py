@@ -7461,6 +7461,29 @@ def get_learning_usage(
         if t in by_tool:
             by_tool[t]["findings"] = by_tool[t].get("findings", 0) + 1
 
+    # Por CLASSE de vulnerabilidade (família) — utilização + acertividade
+    by_family: dict[str, dict] = {}
+    for i in seeded:
+        fam = str(dict(i.item_metadata or {}).get("vuln_family") or "outros")
+        slot = by_family.setdefault(fam, {
+            "family": fam, "seeded": 0, "completed": 0, "findings": 0,
+            "confirmed": 0, "learning_count": int(dict(i.item_metadata or {}).get("learning_count") or 0),
+        })
+        slot["seeded"] += 1
+        if i.status in _TERM_DONE:
+            slot["completed"] += 1
+    for f in learning_findings:
+        ls = dict(f.details or {}).get("learning_source") or {}
+        fam = str(ls.get("vuln_family") or "outros")
+        if fam in by_family:
+            by_family[fam]["findings"] += 1
+            if str(f.verification_status or "") == "confirmed":
+                by_family[fam]["confirmed"] += 1
+    # acertividade por família = findings / completed
+    for slot in by_family.values():
+        comp = slot["completed"]
+        slot["accuracy_pct"] = int(min(100, slot["findings"] / comp * 100)) if comp else 0
+
     # Tech stacks que dispararam o aprendizado (why used)
     tech_stacks: dict[str, int] = {}
     for i in seeded:
@@ -7483,6 +7506,7 @@ def get_learning_usage(
             "confirm_rate_pct": confirm_rate,      # % dos achados que foram confirmados
         },
         "by_tool": sorted(by_tool.values(), key=lambda x: -x.get("seeded", 0)),
+        "by_family": sorted(by_family.values(), key=lambda x: -x.get("learning_count", 0)),
         "tech_stacks": [{"tech": k, "count": v} for k, v in sorted(tech_stacks.items(), key=lambda x: -x[1])],
         "rationale": (
             "Os aprendizados HackerOne são consultados após a detecção de tecnologia (P07): "

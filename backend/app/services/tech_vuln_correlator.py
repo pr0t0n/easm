@@ -797,103 +797,132 @@ def _seed_targeted_nuclei(
 # ITEM 3 — HackerOne learnings → runtime technique selection
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Tools/profiles the work-queue can actually dispatch as targeted items.
-# Learnings recommend many tool names; we only seed ones that resolve to a
-# real Kali profile (nuclei-* tags resolve via the MCP hyphen→underscore fix).
-_LEARNING_SEEDABLE = {
-    "nuclei", "nuclei-sqli", "nuclei-xss", "nuclei-ssrf", "nuclei-lfi", "nuclei-rce",
-    "nuclei-ssti", "nuclei-xxe", "nuclei-cors", "nuclei-idor", "nuclei-csrf",
-    "nuclei-redirect", "nuclei-exposure", "nuclei-auth", "nuclei-jwt", "nuclei-graphql",
-    "nuclei-takeover", "nuclei-crlf", "sqlmap", "dalfox", "wapiti", "wpscan",
-    "jwt_tool", "arjun", "ffuf", "nikto",
+# Família de vulnerabilidade (attack-index dos 10k learnings) → técnica concreta
+# que o work-queue consegue despachar. CADA classe é testada com sua técnica
+# específica (XSS via dalfox/nuclei-xss, SQLi via sqlmap/nuclei-sqli, regras de
+# negócio via wapiti, etc.) — não mais um tool genérico só.
+_FAMILY_TECHNIQUES: dict[str, list[str]] = {
+    "xss": ["nuclei-xss", "dalfox"],
+    "sqli": ["nuclei-sqli", "sqlmap"],
+    "csrf": ["nuclei-csrf"],
+    "ssrf": ["nuclei-ssrf"],
+    "lfri": ["nuclei-lfi"],
+    "path_traversal": ["nuclei-lfi"],
+    "rce": ["nuclei-rce"],
+    "xxe": ["nuclei-xxe"],
+    "idor": ["nuclei-idor"],
+    "broken_access_control": ["nuclei-idor"],
+    "open_redirect": ["nuclei-redirect"],
+    "cors": ["nuclei-cors"],
+    "jwt_oauth": ["nuclei-jwt"],
+    "auth_bypass": ["nuclei-auth"],
+    "graphql_api": ["nuclei-graphql"],
+    "info_exposure": ["nuclei-exposure"],
+    "security_headers": ["nuclei-headers"],
+    "subdomain_takeover": ["nuclei-takeover"],
+    "race_condition": ["nuclei-race"],
+    "header_injection": ["nuclei-crlf"],
+    "business_logic": ["wapiti"],           # regras de negócio — scanner amplo
+    "file_upload": ["nuclei-exposure"],
+    "deserialization": ["nuclei-rce"],
+    "vulnerable_dependency": ["nuclei"],    # templates de CVE
 }
 
-# Vulnerability-type (from learnings attack-index) → nuclei tag tool name.
-_VULNTYPE_TO_TOOL = {
-    "xss": "nuclei-xss", "cross-site scripting": "nuclei-xss",
-    "sql": "nuclei-sqli", "sqli": "nuclei-sqli", "injection": "nuclei-sqli",
-    "ssrf": "nuclei-ssrf", "lfi": "nuclei-lfi", "path traversal": "nuclei-lfi",
-    "rce": "nuclei-rce", "command": "nuclei-rce", "ssti": "nuclei-ssti",
-    "xxe": "nuclei-xxe", "cors": "nuclei-cors", "idor": "nuclei-idor",
-    "csrf": "nuclei-csrf", "redirect": "nuclei-redirect", "exposure": "nuclei-exposure",
-    "auth": "nuclei-auth", "jwt": "nuclei-jwt", "graphql": "nuclei-graphql",
-    "takeover": "nuclei-takeover", "crlf": "nuclei-crlf",
-}
+# Famílias por fase: P09 (template scan) recebe a maioria; exploit-validation
+# (injeção/XSS/etc.) idealmente em P10-P14, mas seedamos em P09 (gate já aberto).
+
+
+def _get_learning_family_priority(db: Session, scan_id: int) -> list[tuple[str, int]]:
+    """Retorna [(family_id, accepted_learnings)] ordenado por volume, cacheado no
+    state_data do scan (evita re-query dos 10k learnings a cada target)."""
+    from app.models.models import ScanJob
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        return []
+    state = dict(job.state_data or {})
+    cached = state.get("learning_family_priority")
+    if cached:
+        return [(str(x[0]), int(x[1])) for x in cached]
+    try:
+        from app.services.vulnerability_learning_service import vulnerability_learning_attack_index
+        idx = vulnerability_learning_attack_index(db)
+        fam = [
+            (it["id"], int(it.get("accepted_learnings") or 0))
+            for it in (idx.get("items") or [])
+            if it.get("accepted_learnings", 0) > 0 and it["id"] in _FAMILY_TECHNIQUES
+        ]
+        fam.sort(key=lambda x: -x[1])
+        state["learning_family_priority"] = fam
+        job.state_data = state
+        db.commit()
+        return fam
+    except Exception as exc:
+        logger.debug("attack_index unavailable: %s", exc)
+        return []
 
 
 def _seed_learning_driven_techniques(
     db: Session, scan_id: int, target: str, tech_stack: list[str], phase_id: str = "P09",
 ) -> int:
-    """Seed targeted work items driven by the 10k HackerOne learnings (ITEM 3).
+    """Semeia técnicas por CLASSE de vulnerabilidade, dirigidas pelos 10k learnings.
 
-    Consults build_runtime_learning_playbook(tech_stack) — which relevance-ranks
-    accepted HackerOne learnings against the detected technology — and seeds the
-    nuclei tags / tools those reports prove are exploitable for this stack.
-    This realizes 'procurar vulnerabilidades baseadas no que encontramos, usando
-    o aprendizado HackerOne'. Returns count of work items created.
+    Usa o attack-index (32 famílias com contagem de reports HackerOne aceitos) para
+    testar CADA classe relevante — XSS, SQLi, IDOR, CSRF, SSRF, auth, regras de
+    negócio, etc. — com a técnica específica daquela classe. Realiza de fato
+    'usar o aprendizado HackerOne para procurar as vulnerabilidades'.
+    Returns count of work items created.
     """
     from app.models.models import ScanWorkItem
     from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
 
-    try:
-        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
-        playbook = build_runtime_learning_playbook(phase="threat_intel", limit=10, tech_stack=tech_stack)
-    except Exception as exc:
-        logger.debug("learning playbook unavailable: %s", exc)
-        return 0
-    if not playbook:
+    fam_priority = _get_learning_family_priority(db, scan_id)
+    if not fam_priority:
         return 0
 
-    # Collect candidate tools: explicit recommended_tools + vuln-type → tool mapping
-    wanted: set[str] = set()
-    for t in (playbook.get("recommended_tools") or []):
-        tl = str(t or "").strip().lower()
-        if tl in _LEARNING_SEEDABLE:
-            wanted.add(tl)
-    for tech in (playbook.get("techniques") or [])[:12]:
-        vt = str(tech.get("vulnerability_type") or tech.get("name") or "").lower()
-        for kw, tool in _VULNTYPE_TO_TOOL.items():
-            if kw in vt:
-                wanted.add(tool)
-    if not wanted:
-        return 0
-
+    # Top 14 famílias por volume de aprendizado → cobre as principais classes.
     seeded = 0
-    for tool_name in sorted(wanted)[:8]:  # cap: top 8 learning-driven techniques
-        tname = tool_name[:120]
-        already = (
-            db.query(ScanWorkItem.id).filter(
-                ScanWorkItem.scan_job_id == scan_id,
-                ScanWorkItem.phase_id == phase_id,
-                ScanWorkItem.tool_name == tname,
-                ScanWorkItem.target == target[:500],
-            ).first()
-        )
-        if already:
-            continue
-        rc = resource_class_for_tool(tname)
-        pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
-        db.add(ScanWorkItem(
-            scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
-            tool_name=tname, profile=tname, resource_class=rc,
-            priority=pri - 8,  # learning-driven = higher priority (HackerOne-proven)
-            status="queued", max_attempts=2,
-            item_metadata={
-                "source": "hackerone_learnings",
-                "engine": "learning_playbook",
-                "tech_stack": tech_stack,
-                "rationale": "HackerOne-proven technique for detected tech stack",
-            },
-            created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
-        ))
-        try:
-            db.flush()
-            seeded += 1
-        except Exception:
-            db.rollback()
+    for family_id, accepted in fam_priority[:14]:
+        tools = _FAMILY_TECHNIQUES.get(family_id) or []
+        for tname in tools[:1]:  # técnica primária por classe (1 work item/classe/target)
+            tname = tname[:120]
+            already = (
+                db.query(ScanWorkItem.id).filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.phase_id == phase_id,
+                    ScanWorkItem.tool_name == tname,
+                    ScanWorkItem.target == target[:500],
+                ).first()
+            )
+            if already:
+                continue
+            rc = resource_class_for_tool(tname)
+            pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
+            db.add(ScanWorkItem(
+                scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
+                tool_name=tname, profile=tname, resource_class=rc,
+                priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
+                status="queued", max_attempts=2,
+                item_metadata={
+                    "source": "hackerone_learnings",
+                    "engine": "attack_index",
+                    "vuln_family": family_id,
+                    "learning_count": accepted,
+                    "tech_stack": tech_stack,
+                    "rationale": (
+                        f"Classe '{family_id}' testada — {accepted} reports HackerOne "
+                        f"comprovam esta vulnerabilidade; técnica {tname} priorizada."
+                    ),
+                },
+                    created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+            ))
+            try:
+                db.flush()
+                seeded += 1
+            except Exception:
+                db.rollback()
     if seeded:
         logger.info(
-            "learning_seeder: scan=%d target=%s tech=%s seeded=%d HackerOne-driven items",
+            "learning_seeder: scan=%d target=%s tech=%s seeded=%d HackerOne-driven items (por classe)",
             scan_id, target, ",".join(tech_stack[:3]), seeded,
         )
     return seeded

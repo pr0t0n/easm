@@ -480,16 +480,16 @@ export default function VulnerabilitiesPage() {
 
                             {/* ── Uso do aprendizado HackerOne (P3b) ────────── */}
                             {item.details?.learning_source && (
-                              <div style={{ background: "linear-gradient(135deg,#0f172a,#1e1b4b)", borderRadius: 8, padding: "10px 14px", color: "#e2e8f0" }}>
+                              <div style={{ background: "var(--sev-info-bg)", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--sev-info-border)" }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#a5b4fc" }}>🧠 Aprendizado HackerOne aplicado</span>
+                                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--sev-info-text)" }}>🧠 Aprendizado HackerOne aplicado</span>
                                   {Array.isArray(item.details.learning_source.tech_stack) && item.details.learning_source.tech_stack.length > 0 && (
-                                    <span style={{ fontSize: 10.5, color: "#c7d2fe" }}>
+                                    <span style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>
                                       stack: {item.details.learning_source.tech_stack.slice(0, 4).join(", ")}
                                     </span>
                                   )}
                                 </div>
-                                <div style={{ fontSize: 11, color: "#cbd5e1", marginTop: 4, lineHeight: 1.5 }}>
+                                <div style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 4, lineHeight: 1.5 }}>
                                   {item.details.learning_source.rationale || "Técnica priorizada com base em reports HackerOne reais para o stack detectado."}
                                 </div>
                               </div>

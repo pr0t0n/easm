@@ -2601,6 +2601,8 @@ def persist_findings_from_work_item(
     if str(_im.get("source") or "") == "hackerone_learnings":
         _prov = {
             "source": "hackerone_learnings",
+            "vuln_family": _im.get("vuln_family"),
+            "learning_count": _im.get("learning_count"),
             "tech_stack": _im.get("tech_stack") or [],
             "rationale": _im.get("rationale") or "Técnica recomendada pelos aprendizados HackerOne para o stack detectado",
         }
