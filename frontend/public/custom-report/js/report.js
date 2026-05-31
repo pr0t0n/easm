@@ -105,29 +105,25 @@ function setText(id, value) {
   if (el) el.textContent = value == null ? '-' : String(value);
 }
 
-function computeDisplayedSummary(v2Summary, vulnerabilityTable) {
-  const rows = Array.isArray(vulnerabilityTable) ? vulnerabilityTable : [];
-  if (!rows.length) {
-    return {
-      total: Number(v2Summary?.total || 0),
-      critical: Number(v2Summary?.critical || 0),
-      high: Number(v2Summary?.high || 0),
-      medium: Number(v2Summary?.medium || 0),
-      low: Number(v2Summary?.low || 0),
-      info: Number(v2Summary?.info || 0),
-    };
-  }
-
-  const acc = { total: rows.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const row of rows) {
-    const sev = String(row?.severity || "info").toLowerCase();
-    if (sev === "critical") acc.critical += 1;
-    else if (sev === "high") acc.high += 1;
-    else if (sev === "medium") acc.medium += 1;
-    else if (sev === "low") acc.low += 1;
-    else acc.info += 1;
-  }
-  return acc;
+function computeDisplayedSummary(v2Summary, vulnerabilityTable, authoritative) {
+  // FONTE ÚNICA: sempre usar a contagem autoritativa do scan inteiro
+  // (calc.severity_counts ou v2.summary) — NUNCA contar a vulnerability_table,
+  // que é paginada/priorizada (prioritized_limit) e produziria números menores
+  // que a página de Vulnerabilidades. Garante report == VulnerabilitiesPage.
+  const auth = authoritative && typeof authoritative === "object" ? authoritative : {};
+  const s = (v2Summary && typeof v2Summary === "object") ? v2Summary : {};
+  const pick = (k) => {
+    const a = Number(auth[k] || 0);
+    if (a > 0) return a;
+    return Number(s[k] || 0);
+  };
+  const critical = pick("critical");
+  const high = pick("high");
+  const medium = pick("medium");
+  const low = pick("low");
+  const info = pick("info");
+  const total = Number(s.total || 0) || (critical + high + medium + low + info);
+  return { total, critical, high, medium, low, info };
 }
 
 function filteredSummaryFromRows(rows) {
@@ -1165,7 +1161,8 @@ async function ensureAccessToken() {
 function applyTopVariables(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
   const summary = v2.summary || {};
-  const displayed = computeDisplayedSummary(summary, v2.vulnerability_table);
+  const calcSev = ((v2.segment_benchmark || {}).calculation || {}).severity_counts || {};
+  const displayed = computeDisplayedSummary(summary, v2.vulnerability_table, calcSev);
 
   const org = resolveReportTarget(report, v2);
   const createdAt = report?.created_at || new Date().toISOString();

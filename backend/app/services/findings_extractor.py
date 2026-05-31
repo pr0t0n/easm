@@ -2405,7 +2405,11 @@ def _build_discovery_and_payload(details: dict, tool: str, title: str = "") -> t
     if evidence:
         discovery += f" — {evidence[:300]}"
 
-    # Payload / reproduction proof — prefer the exact request when available
+    # Payload / reproduction proof — SEMPRE produz um comando de reprodução.
+    # Prioridade: request exato capturado > template nuclei > parâmetro >
+    # comando de verificação por tipo (CVE/header/porta/genérico).
+    _url = str(details.get("url") or details.get("matched_at") or details.get("matched-at")
+               or details.get("asset") or "").strip()
     payload = (
         str(details.get("curl_command") or "").strip()
         or str(details.get("payload") or "").strip()
@@ -2413,14 +2417,29 @@ def _build_discovery_and_payload(details: dict, tool: str, title: str = "") -> t
     )
     if not payload:
         _tmpl = str(details.get("template_id") or "").strip()
-        _matched = str(details.get("matched_at") or details.get("matched-at") or "").strip()
+        _matched = str(details.get("matched_at") or details.get("matched-at") or _url or "").strip()
         _param = str(details.get("parameter") or details.get("param") or "").strip()
+        _cve = str(details.get("cve_id") or details.get("cve") or "").strip().upper()
+        _blob = (str(title or "") + " " + str(details.get("evidence") or "") + " " + str(details.get("step") or "")).lower()
         if _tmpl and _matched:
             payload = f"nuclei -t {_tmpl} -u {_matched}"
         elif _param and _matched:
-            payload = f"Parâmetro injetável '{_param}' em {_matched}"
+            payload = f"# Parâmetro injetável '{_param}' em {_matched}\nsqlmap -u '{_matched}' -p {_param} --batch"
+        elif _cve.startswith("CVE-") and _matched:
+            payload = f"nuclei -id {_cve} -u {_matched}   # confirma {_cve} no alvo"
+        elif _cve.startswith("CVE-"):
+            payload = f"nuclei -id {_cve} -u https://{str(details.get('asset') or '')}".strip()
+        elif any(k in _blob for k in ("header", "x-frame", "x-content", "hsts", "csp", "content-security", "referrer", "permissions-policy")) and _matched:
+            payload = f"curl -sSI '{_matched}'   # inspecionar headers de resposta ausentes"
+        elif any(k in _blob for k in ("cors",)) and _matched:
+            payload = f"curl -sSI -H 'Origin: https://evil.example' '{_matched}'   # checar Access-Control-Allow-Origin"
+        elif any(k in _blob for k in ("tls", "ssl", "cipher", "cert")) and _matched:
+            payload = f"testssl.sh '{_matched}'   # validar protocolo/cipher"
+        elif any(k in _blob for k in ("port", "exposed", "exposto", "service", "origin", "waf")) and (_matched or details.get('asset')):
+            _h = _matched or str(details.get('asset') or '')
+            payload = f"nmap -sV -Pn {_h}   # confirmar serviço/porta exposta"
         elif _matched:
-            payload = _matched
+            payload = f"curl -k -i '{_matched}'   # reproduzir requisição"
 
     # Remediation: parser-supplied (várias chaves), else OWASP-category, else título.
     remediation = str(
