@@ -6798,6 +6798,7 @@ def get_easm_vulnerabilities(
             "verification_status": _md.get("verification_status"),
             "confidence_score": _md.get("confidence_score"),
             "scan_id": _md.get("scan_id"),
+            "learning_source": _md.get("learning_source"),
         })
 
     return result
@@ -7389,6 +7390,115 @@ def get_executive_report(
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase Breakdown — work-queue statistics per kill-chain phase
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/scans/{scan_id}/learning-usage")
+def get_learning_usage(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Uso e acertividade dos aprendizados HackerOne neste scan (P3a).
+
+    Mede: quantas técnicas foram semeadas pelos 10k learnings, quantas
+    completaram, quantas produziram achados (acertividade), por que foram
+    usadas (tech stacks) e o detalhe por ferramenta/técnica.
+    """
+    from app.models.models import ScanJob, ScanWorkItem, Finding
+    import sqlalchemy as _sa
+
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    if not current_user.is_admin and job.owner_id != current_user.id:
+        allowed = [g.id for g in current_user.groups]
+        if job.access_group_id not in allowed:
+            raise HTTPException(status_code=403, detail="Sem acesso")
+
+    # Work items semeados pelo aprendizado (metadata.source = hackerone_learnings)
+    seeded = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.item_metadata["source"].astext == "hackerone_learnings",
+        )
+        .all()
+    )
+    total_seeded = len(seeded)
+    _TERM_DONE = {"completed", "done"}
+    completed = sum(1 for i in seeded if i.status in _TERM_DONE)
+    failed = sum(1 for i in seeded if i.status in ("failed", "timeout", "skipped"))
+    running = sum(1 for i in seeded if i.status in ("queued", "retry", "dispatched", "running", "submitted", "blocked"))
+
+    # Achados produzidos por work items de aprendizado (details.learning_source)
+    learning_findings = (
+        db.query(Finding)
+        .filter(
+            Finding.scan_job_id == scan_id,
+            Finding.details["learning_source"].isnot(None),
+        )
+        .all()
+    )
+    findings_produced = len(learning_findings)
+    confirmed_produced = sum(1 for f in learning_findings if str(f.verification_status or "") == "confirmed")
+    hc_produced = sum(1 for f in learning_findings if str(f.severity or "").lower() in ("critical", "high"))
+
+    # Acertividade = % de técnicas semeadas (que completaram) que geraram achado.
+    # Aproximação: findings_produced / completed (cap 100). Tech que confirma = bônus.
+    accuracy_pct = int(min(100, (findings_produced / completed * 100))) if completed else 0
+    confirm_rate = int(min(100, (confirmed_produced / findings_produced * 100))) if findings_produced else 0
+
+    # Por ferramenta/técnica
+    by_tool: dict[str, dict] = {}
+    for i in seeded:
+        t = str(i.tool_name or "")
+        slot = by_tool.setdefault(t, {"tool": t, "seeded": 0, "completed": 0})
+        slot["seeded"] += 1
+        if i.status in _TERM_DONE:
+            slot["completed"] += 1
+    # findings por tool de aprendizado
+    for f in learning_findings:
+        t = str(f.tool or "")
+        if t in by_tool:
+            by_tool[t]["findings"] = by_tool[t].get("findings", 0) + 1
+
+    # Tech stacks que dispararam o aprendizado (why used)
+    tech_stacks: dict[str, int] = {}
+    for i in seeded:
+        for ts in (dict(i.item_metadata or {}).get("tech_stack") or []):
+            k = str(ts)
+            tech_stacks[k] = tech_stacks.get(k, 0) + 1
+
+    return {
+        "scan_id": scan_id,
+        "learning_base_size": _learning_base_count(db),
+        "summary": {
+            "total_seeded": total_seeded,
+            "completed": completed,
+            "failed": failed,
+            "running": running,
+            "findings_produced": findings_produced,
+            "confirmed_produced": confirmed_produced,
+            "high_critical_produced": hc_produced,
+            "accuracy_pct": accuracy_pct,          # % das técnicas que geraram achado
+            "confirm_rate_pct": confirm_rate,      # % dos achados que foram confirmados
+        },
+        "by_tool": sorted(by_tool.values(), key=lambda x: -x.get("seeded", 0)),
+        "tech_stacks": [{"tech": k, "count": v} for k, v in sorted(tech_stacks.items(), key=lambda x: -x[1])],
+        "rationale": (
+            "Os aprendizados HackerOne são consultados após a detecção de tecnologia (P07): "
+            "o stack detectado é cruzado (relevance-ranked) contra a base de reports reais e as "
+            "técnicas comprovadamente exploráveis nesse stack são semeadas com prioridade alta."
+        ),
+    }
+
+
+def _learning_base_count(db) -> int:
+    try:
+        from sqlalchemy import text as _t
+        return db.execute(_t("SELECT COUNT(*) FROM vulnerability_learnings WHERE status='accepted'")).scalar() or 0
+    except Exception:
+        return 0
+
 
 @router.get("/scans/{scan_id}/phase-breakdown")
 def get_phase_breakdown(

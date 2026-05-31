@@ -45,6 +45,7 @@ function IntelligenceView() {
   const [narrativeMethod, setNarrativeMethod] = useState("");
   const [generatingNarrative, setGeneratingNarrative] = useState(false);
   const [narrativeError, setNarrativeError] = useState("");
+  const [learning, setLearning] = useState(null);
 
   useEffect(() => {
     client.get("/api/scans", { params: { limit: 50 } }).then(({ data }) => {
@@ -65,6 +66,9 @@ function IntelligenceView() {
     client.get(`/api/scans/${selectedScan}/attack-narrative`)
       .then(({ data }) => { setNarrative(data.narrative || ""); setNarrativeMethod(data.method || ""); })
       .catch(() => { setNarrative(""); setNarrativeMethod(""); });
+    client.get(`/api/scans/${selectedScan}/learning-usage`)
+      .then(({ data }) => setLearning(data || null))
+      .catch(() => setLearning(null));
   }, [selectedScan]);
 
   const generateNarrative = async () => {
@@ -99,6 +103,64 @@ function IntelligenceView() {
             <option key={s.id} value={s.id}>#{s.id} · {String(s.target_query || "").slice(0, 50)}</option>
           ))}
         </select>
+      </div>
+
+      {/* ── Aprendizado HackerOne: uso + acertividade (P3a) ── */}
+      <div style={{ padding: "16px 20px", background: "linear-gradient(135deg,#0f172a,#1e1b4b)", borderRadius: 10, color: "#e2e8f0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>🧠 Aprendizado HackerOne — Uso & Acertividade</span>
+          {learning && <span style={{ fontSize: 11, color: "#a5b4fc" }}>base: {Number(learning.learning_base_size || 0).toLocaleString()} learnings aceitos</span>}
+        </div>
+        {!learning || (learning.summary?.total_seeded || 0) === 0 ? (
+          <div style={{ fontSize: 12, color: "#94a3b8" }}>
+            Nenhuma técnica de aprendizado semeada ainda neste scan (ocorre após detecção de tecnologia em P07).
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 12 }}>
+              {[
+                ["Técnicas semeadas", learning.summary.total_seeded, "#a5b4fc"],
+                ["Completadas", learning.summary.completed, "#7dd3fc"],
+                ["Achados gerados", learning.summary.findings_produced, "#86efac"],
+                ["Acertividade", `${learning.summary.accuracy_pct}%`, "#fbbf24"],
+                ["Taxa confirmação", `${learning.summary.confirm_rate_pct}%`, "#fca5a5"],
+              ].map(([lbl, val, color]) => (
+                <div key={lbl} style={{ background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: "10px 12px", textAlign: "center" }}>
+                  <div style={{ fontSize: 22, fontWeight: 800, color }}>{val}</div>
+                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>{lbl}</div>
+                </div>
+              ))}
+            </div>
+            {/* Por que foi usado: tech stacks */}
+            {(learning.tech_stacks || []).length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Por que foi usado — stacks detectados que dispararam o aprendizado:</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {learning.tech_stacks.slice(0, 10).map((t) => (
+                    <span key={t.tech} style={{ fontSize: 11, background: "rgba(165,180,252,0.15)", color: "#c7d2fe", padding: "2px 8px", borderRadius: 10 }}>{t.tech} ×{t.count}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Por técnica/ferramenta */}
+            {(learning.by_tool || []).length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Por técnica (semeadas → achados):</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {learning.by_tool.slice(0, 8).map((t) => (
+                    <div key={t.tool} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                      <span style={{ color: "#cbd5e1" }}>{t.tool}</span>
+                      <span style={{ color: "#94a3b8" }}>{t.seeded} semeadas · {t.completed} ok · <b style={{ color: "#86efac" }}>{t.findings || 0} achados</b></span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div style={{ fontSize: 10.5, color: "#94a3b8", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 8, lineHeight: 1.5 }}>
+              {learning.rationale}
+            </div>
+          </>
+        )}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>

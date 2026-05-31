@@ -478,6 +478,23 @@ export default function VulnerabilitiesPage() {
                         <td colSpan={10} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 18, fontSize: 13 }}>
 
+                            {/* ── Uso do aprendizado HackerOne (P3b) ────────── */}
+                            {item.details?.learning_source && (
+                              <div style={{ background: "linear-gradient(135deg,#0f172a,#1e1b4b)", borderRadius: 8, padding: "10px 14px", color: "#e2e8f0" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#a5b4fc" }}>🧠 Aprendizado HackerOne aplicado</span>
+                                  {Array.isArray(item.details.learning_source.tech_stack) && item.details.learning_source.tech_stack.length > 0 && (
+                                    <span style={{ fontSize: 10.5, color: "#c7d2fe" }}>
+                                      stack: {item.details.learning_source.tech_stack.slice(0, 4).join(", ")}
+                                    </span>
+                                  )}
+                                </div>
+                                <div style={{ fontSize: 11, color: "#cbd5e1", marginTop: 4, lineHeight: 1.5 }}>
+                                  {item.details.learning_source.rationale || "Técnica priorizada com base em reports HackerOne reais para o stack detectado."}
+                                </div>
+                              </div>
+                            )}
+
                             {/* ── Evidence gate + Business impact ────────────── */}
                             {(item.verification_status || item.details?.impact_reason || item.url) && (
                               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>

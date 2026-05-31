@@ -2568,6 +2568,8 @@ def _bridge_finding_to_vulnerability(
             "matched_at": details.get("matched_at") or details.get("matched-at"),
             "parameter": details.get("parameter") or details.get("param"),
             "evidence": str(details.get("evidence") or "")[:1000] or None,
+            # P3b — uso do aprendizado HackerOne neste achado (caixa na UI)
+            "learning_source": details.get("learning_source"),
         },
     )
     db.add(vuln)
@@ -2592,6 +2594,20 @@ def persist_findings_from_work_item(
     raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
     if not raw_findings:
         return 0
+
+    # ── P3b: provenance de aprendizado — se o work item foi semeado pelos 10k
+    # learnings HackerOne, marca cada finding p/ a UI mostrar a caixa de uso. ──
+    _im = dict(item.item_metadata or {})
+    if str(_im.get("source") or "") == "hackerone_learnings":
+        _prov = {
+            "source": "hackerone_learnings",
+            "tech_stack": _im.get("tech_stack") or [],
+            "rationale": _im.get("rationale") or "Técnica recomendada pelos aprendizados HackerOne para o stack detectado",
+        }
+        for _rf in raw_findings:
+            _d = dict(_rf.get("details") or {})
+            _d["learning_source"] = _prov
+            _rf["details"] = _d
 
     return persist_finding_dicts(
         db, job, raw_findings,
