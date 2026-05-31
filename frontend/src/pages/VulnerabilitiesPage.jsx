@@ -495,6 +495,34 @@ export default function VulnerabilitiesPage() {
                               </div>
                             )}
 
+                            {/* ── Frente B: exploração ativa + PoC + actions-on-objectives ── */}
+                            {item.details?.exploitation?.actively_validated && (
+                              <div style={{ background: "var(--sev-high-bg)", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--sev-high-text)" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                  <span style={{ fontSize: 12, fontWeight: 800, color: "var(--sev-high-text)", textTransform: "uppercase", letterSpacing: "0.03em" }}>⚔️ Explorado — validado ativamente</span>
+                                  {item.details.exploitation.validator_tool && (
+                                    <span style={{ fontSize: 10.5, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}>
+                                      via {item.details.exploitation.validator_tool}
+                                    </span>
+                                  )}
+                                  {item.details.exploitation.oob_confirmed && (
+                                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--sev-low-text)", background: "var(--sev-low-bg)", borderRadius: 4, padding: "1px 6px" }}>OOB ✓</span>
+                                  )}
+                                </div>
+                                {item.details.actions_on_objectives?.capability_narrative && (
+                                  <div style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 5, lineHeight: 1.5 }}>
+                                    <b style={{ color: "var(--ink)" }}>Capacidade:</b> {item.details.actions_on_objectives.capability_narrative}
+                                  </div>
+                                )}
+                                {item.details.poc?.command && (
+                                  <div style={{ marginTop: 6 }}>
+                                    <div style={{ fontSize: 10, color: "var(--ink-muted)", marginBottom: 2 }}>PoC reproduzível (prova segura, sem extração):</div>
+                                    <code style={{ display: "block", fontSize: 10.5, fontFamily: "var(--font-mono)", background: "var(--canvas-soft, var(--canvas))", border: "1px solid var(--line)", borderRadius: 6, padding: "6px 8px", color: "var(--ink-soft)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{item.details.poc.command}</code>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
                             {/* ── Evidence gate + Business impact ────────────── */}
                             {(item.verification_status || item.details?.impact_reason || item.url) && (
                               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>

@@ -2556,6 +2556,24 @@ def poll_scan_work_item(item_id: int):
                             _orig_details["verified_by_item_id"] = item.id
                             _orig_details["verified_by_tool"] = item.tool_name
                             _orig_details["needs_verification"] = False
+                            # ── Frente B: validação ativa (P21) → PoC reproduzível
+                            # + evidência de actions-on-objectives (segura, sem
+                            # extração/shell). Mantém status="confirmed".
+                            if item.phase_id == "P21":
+                                try:
+                                    from app.services.exploitation_evidence import (
+                                        enrich_confirmed_finding,
+                                        propagate_to_vulnerability,
+                                    )
+                                    _orig.details = _orig_details  # base p/ enrich
+                                    _orig_details = enrich_confirmed_finding(_orig, item)
+                                    _orig.details = _orig_details
+                                    propagate_to_vulnerability(db, _orig, _orig_details)
+                                except Exception as _ee:
+                                    import logging as _eelog
+                                    _eelog.getLogger(__name__).debug(
+                                        "exploitation_evidence failed: %s", _ee
+                                    )
                             _orig.details = _orig_details
                         else:
                             # Verification tool failed to reproduce → refuted
@@ -2578,6 +2596,24 @@ def poll_scan_work_item(item_id: int):
                                 import logging as _cc21log
                                 _cc21log.getLogger(__name__).debug(
                                     "p21_chain_recorr failed: %s", _cc_p21_err
+                                )
+                            # ── Frente B: ingere callbacks OOB (interactsh) e
+                            # confirma SSRF/RCE/XXE cego via interação out-of-band.
+                            try:
+                                from app.services.interactsh_callback import (
+                                    check_and_confirm_oob_findings as _oob_confirm,
+                                )
+                                _oob_n = _oob_confirm(db, job.id)
+                                if _oob_n:
+                                    import logging as _ooblog
+                                    _ooblog.getLogger(__name__).info(
+                                        "oob: %d finding(s) confirmados por callback OOB (scan=%d)",
+                                        _oob_n, job.id,
+                                    )
+                            except Exception as _oob_err:
+                                import logging as _ooblog2
+                                _ooblog2.getLogger(__name__).debug(
+                                    "oob_confirm failed: %s", _oob_err
                                 )
             except Exception as _ve:
                 import logging as _vlog

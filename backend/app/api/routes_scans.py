@@ -6799,6 +6799,11 @@ def get_easm_vulnerabilities(
             "confidence_score": _md.get("confidence_score"),
             "scan_id": _md.get("scan_id"),
             "learning_source": _md.get("learning_source"),
+            # ── Frente B: evidência de exploração (PoC + actions-on-objectives) ──
+            "actively_exploited": bool(_md.get("actively_exploited")),
+            "poc": _md.get("poc"),
+            "exploitation": _md.get("exploitation"),
+            "actions_on_objectives": _md.get("actions_on_objectives"),
         })
 
     return result
