@@ -7464,12 +7464,24 @@ def get_learning_usage(
     # Por CLASSE de vulnerabilidade (família) — utilização + acertividade
     by_family: dict[str, dict] = {}
     for i in seeded:
-        fam = str(dict(i.item_metadata or {}).get("vuln_family") or "outros")
+        md = dict(i.item_metadata or {})
+        fam = str(md.get("vuln_family") or "outros")
         slot = by_family.setdefault(fam, {
             "family": fam, "seeded": 0, "completed": 0, "findings": 0,
-            "confirmed": 0, "learning_count": int(dict(i.item_metadata or {}).get("learning_count") or 0),
+            "confirmed": 0, "learning_count": int(md.get("learning_count") or 0),
+            "engine": md.get("engine") or "attack_index",
+            "similarity_pct": 0, "matched_reports": [],
         })
         slot["seeded"] += 1
+        # Proveniência semântica: melhor similaridade + reports que motivaram.
+        sim = int(md.get("similarity_pct") or 0)
+        if sim > slot["similarity_pct"]:
+            slot["similarity_pct"] = sim
+        if md.get("engine"):
+            slot["engine"] = md.get("engine")
+        for rep in (md.get("matched_reports") or []):
+            if rep and rep not in slot["matched_reports"] and len(slot["matched_reports"]) < 5:
+                slot["matched_reports"].append(rep)
         if i.status in _TERM_DONE:
             slot["completed"] += 1
     for f in learning_findings:

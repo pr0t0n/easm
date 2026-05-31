@@ -861,69 +861,188 @@ def _get_learning_family_priority(db: Session, scan_id: int) -> list[tuple[str, 
         return []
 
 
-def _seed_learning_driven_techniques(
-    db: Session, scan_id: int, target: str, tech_stack: list[str], phase_id: str = "P09",
-) -> int:
-    """Semeia técnicas por CLASSE de vulnerabilidade, dirigidas pelos 10k learnings.
-
-    Usa o attack-index (32 famílias com contagem de reports HackerOne aceitos) para
-    testar CADA classe relevante — XSS, SQLi, IDOR, CSRF, SSRF, auth, regras de
-    negócio, etc. — com a técnica específica daquela classe. Realiza de fato
-    'usar o aprendizado HackerOne para procurar as vulnerabilidades'.
-    Returns count of work items created.
-    """
+def _add_learning_work_item(
+    db, scan_id: int, phase_id: str, target: str, tname: str, family_id: str, metadata: dict,
+) -> bool:
+    """Cria um ScanWorkItem learning-driven (dedup por tool+target). True se criou."""
     from app.models.models import ScanWorkItem
     from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
 
+    tname = tname[:120]
+    already = (
+        db.query(ScanWorkItem.id).filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.phase_id == phase_id,
+            ScanWorkItem.tool_name == tname,
+            ScanWorkItem.target == target[:500],
+        ).first()
+    )
+    if already:
+        return False
+    rc = resource_class_for_tool(tname)
+    pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
+    db.add(ScanWorkItem(
+        scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
+        tool_name=tname, profile=tname, resource_class=rc,
+        priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
+        status="queued", max_attempts=2,
+        item_metadata=metadata,
+        created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+    ))
+    try:
+        db.flush()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
+def _discovered_endpoints(db: Session, scan_id: int, limit: int = 20) -> list[str]:
+    """Coleta paths/URLs descobertos no scan para enriquecer a query semântica."""
+    try:
+        from app.models.models import Finding
+
+        rows = (
+            db.query(Finding.details)
+            .filter(Finding.scan_job_id == scan_id)
+            .limit(400)
+            .all()
+        )
+    except Exception:
+        return []
+    seen: list[str] = []
+    for (details,) in rows:
+        if not isinstance(details, dict):
+            continue
+        url = details.get("matched_at") or details.get("url") or details.get("endpoint")
+        if not url:
+            continue
+        u = str(url)[:200]
+        if u not in seen:
+            seen.append(u)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _seed_semantic_learning_techniques(
+    db: Session, scan_id: int, target: str, tech_stack: list[str], phase_id: str,
+    endpoints: list[str] | None = None, params: list[str] | None = None,
+) -> int:
+    """Semeia técnicas dirigidas por SIMILARIDADE SEMÂNTICA ao contexto do alvo.
+
+    Embeda o contexto do alvo (tech-stack + endpoints/params descobertos) e
+    recupera os aprendizados HackerOne mais similares. As famílias/ferramentas
+    semeadas são as RELEVANTES àquele alvo (não as de maior contagem global),
+    com proveniência dos reports que motivaram cada teste.
+    Returns count of work items created (0 se embeddings/Ollama indisponível).
+    """
+    from app.services.learning_semantic_index import (
+        build_target_query, semantic_search_learnings,
+    )
+
+    query = build_target_query(target, tech_stack, endpoints, params)
+    matches = semantic_search_learnings(db, query, top_k=60)
+    if not matches:
+        return 0
+
+    # Agrega por família: conta matches, guarda melhor similaridade e amostra de reports.
+    by_family: dict[str, dict] = {}
+    for m in matches:
+        fam = m.get("family")
+        if not fam or fam not in _FAMILY_TECHNIQUES:
+            continue
+        slot = by_family.setdefault(fam, {"count": 0, "top_sim": 0.0, "reports": [], "types": set()})
+        slot["count"] += 1
+        slot["top_sim"] = max(slot["top_sim"], m.get("similarity") or 0.0)
+        if m.get("source_report_id") and len(slot["reports"]) < 5:
+            slot["reports"].append(m["source_report_id"])
+        if m.get("vulnerability_type"):
+            slot["types"].add(m["vulnerability_type"])
+
+    if not by_family:
+        return 0
+
+    # Prioriza famílias por relevância (top_sim primeiro, depois nº de matches).
+    ranked = sorted(by_family.items(), key=lambda kv: (-kv[1]["top_sim"], -kv[1]["count"]))
+    seeded = 0
+    for family_id, info in ranked[:14]:
+        tname = (_FAMILY_TECHNIQUES.get(family_id) or [None])[0]
+        if not tname:
+            continue
+        sim_pct = int(round(info["top_sim"] * 100))
+        types_sample = ", ".join(sorted(info["types"])[:3])
+        meta = {
+            "source": "hackerone_learnings",
+            "engine": "semantic_match",
+            "vuln_family": family_id,
+            "learning_count": info["count"],
+            "similarity_pct": sim_pct,
+            "matched_reports": info["reports"],
+            "tech_stack": tech_stack,
+            "rationale": (
+                f"Classe '{family_id}' priorizada por SIMILARIDADE ao alvo "
+                f"(top {sim_pct}%): {info['count']} aprendizados HackerOne semelhantes"
+                + (f" [{types_sample}]" if types_sample else "")
+                + (f" — reports {', '.join(info['reports'])}" if info["reports"] else "")
+                + f". Técnica {tname}."
+            ),
+        }
+        if _add_learning_work_item(db, scan_id, phase_id, target, tname, family_id, meta):
+            seeded += 1
+    if seeded:
+        logger.info(
+            "semantic_seeder: scan=%d target=%s tech=%s seeded=%d (similaridade-dirigido)",
+            scan_id, target, ",".join(tech_stack[:3]), seeded,
+        )
+    return seeded
+
+
+def _seed_learning_driven_techniques(
+    db: Session, scan_id: int, target: str, tech_stack: list[str], phase_id: str = "P09",
+    endpoints: list[str] | None = None, params: list[str] | None = None,
+) -> int:
+    """Semeia técnicas dirigidas pelos 10k learnings HackerOne.
+
+    Prefere matching SEMÂNTICO (relevância ao alvo). Se os embeddings/Ollama
+    estiverem indisponíveis, cai no fallback por CONTAGEM de família (attack
+    index). Em ambos os casos testa CADA classe relevante — XSS, SQLi, IDOR,
+    CSRF, SSRF, auth, regras de negócio, etc.
+    Returns count of work items created.
+    """
+    # 1) Semântico (target-aware) — o diferencial.
+    seeded = _seed_semantic_learning_techniques(
+        db, scan_id, target, tech_stack, phase_id, endpoints, params,
+    )
+    if seeded:
+        return seeded
+
+    # 2) Fallback: top famílias por volume global de aprendizado.
     fam_priority = _get_learning_family_priority(db, scan_id)
     if not fam_priority:
         return 0
-
-    # Top 14 famílias por volume de aprendizado → cobre as principais classes.
-    seeded = 0
     for family_id, accepted in fam_priority[:14]:
         tools = _FAMILY_TECHNIQUES.get(family_id) or []
-        for tname in tools[:1]:  # técnica primária por classe (1 work item/classe/target)
-            tname = tname[:120]
-            already = (
-                db.query(ScanWorkItem.id).filter(
-                    ScanWorkItem.scan_job_id == scan_id,
-                    ScanWorkItem.phase_id == phase_id,
-                    ScanWorkItem.tool_name == tname,
-                    ScanWorkItem.target == target[:500],
-                ).first()
-            )
-            if already:
-                continue
-            rc = resource_class_for_tool(tname)
-            pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
-            db.add(ScanWorkItem(
-                scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
-                tool_name=tname, profile=tname, resource_class=rc,
-                priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
-                status="queued", max_attempts=2,
-                item_metadata={
-                    "source": "hackerone_learnings",
-                    "engine": "attack_index",
-                    "vuln_family": family_id,
-                    "learning_count": accepted,
-                    "tech_stack": tech_stack,
-                    "rationale": (
-                        f"Classe '{family_id}' testada — {accepted} reports HackerOne "
-                        f"comprovam esta vulnerabilidade; técnica {tname} priorizada."
-                    ),
-                },
-                    created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
-            ))
-            try:
-                db.flush()
-                seeded += 1
-            except Exception:
-                db.rollback()
+        if not tools:
+            continue
+        tname = tools[0]
+        meta = {
+            "source": "hackerone_learnings",
+            "engine": "attack_index",
+            "vuln_family": family_id,
+            "learning_count": accepted,
+            "tech_stack": tech_stack,
+            "rationale": (
+                f"Classe '{family_id}' testada — {accepted} reports HackerOne "
+                f"comprovam esta vulnerabilidade; técnica {tname} priorizada."
+            ),
+        }
+        if _add_learning_work_item(db, scan_id, phase_id, target, tname, family_id, meta):
+            seeded += 1
     if seeded:
         logger.info(
-            "learning_seeder: scan=%d target=%s tech=%s seeded=%d HackerOne-driven items (por classe)",
-            scan_id, target, ",".join(tech_stack[:3]), seeded,
+            "learning_seeder(fallback): scan=%d target=%s seeded=%d (por contagem de classe)",
+            scan_id, target, seeded,
         )
     return seeded
 
@@ -1068,7 +1187,10 @@ def correlate_tech_vulns(
     # as técnicas/tools que reports HackerOne provam ser exploráveis nesse stack.
     _tech_stack = [str(t.get("product") or "").strip() for t in techs if t.get("product")]
     if _tech_stack:
-        nuclei_queued += _seed_learning_driven_techniques(db, scan_id, target, _tech_stack, phase_id="P09")
+        _endpoints = _discovered_endpoints(db, scan_id)
+        nuclei_queued += _seed_learning_driven_techniques(
+            db, scan_id, target, _tech_stack, phase_id="P09", endpoints=_endpoints,
+        )
 
     # ── Persist all collected findings through the single gated path ──────────
     # evidence_gate + verification_status cap + P21 for any HIGH/CRIT that the

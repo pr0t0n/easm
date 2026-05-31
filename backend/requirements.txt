@@ -41,6 +41,9 @@ ollama==0.6.1
 # Vector DB
 chromadb==0.5.23
 
+# Embeddings semânticos dos aprendizados HackerOne (ONNX CPU, sem torch)
+fastembed==0.4.2
+
 # HTTP & Utilities
 httpx==0.28.1
 requests==2.32.3

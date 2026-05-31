@@ -145,18 +145,29 @@ function IntelligenceView() {
             {/* Por CLASSE de vulnerabilidade (família) — utilização + acertividade */}
             {(learning.by_family || []).length > 0 && (
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 6 }}>Por classe de vulnerabilidade (aprendizado → utilização → acertividade):</div>
+                <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 6 }}>Por classe de vulnerabilidade (similaridade ao alvo → utilização → acertividade):</div>
                 <div style={{ display: "grid", gap: 4 }}>
                   {learning.by_family.map((fam) => {
                     const acc = Number(fam.accuracy_pct || 0);
                     const accColor = acc >= 50 ? "var(--sev-low-text)" : acc > 0 ? "var(--sev-medium-text)" : "var(--ink-muted)";
+                    const sim = Number(fam.similarity_pct || 0);
+                    const isSemantic = fam.engine === "semantic_match";
+                    const reports = fam.matched_reports || [];
                     return (
-                      <div key={fam.family} style={{ display: "grid", gridTemplateColumns: "130px 1fr 150px", gap: 8, alignItems: "center", fontSize: 11, padding: "4px 8px", background: "#fff", borderRadius: 6, border: "1px solid var(--line)" }}>
-                        <span style={{ fontWeight: 700, color: "var(--ink)", textTransform: "uppercase", letterSpacing: "0.03em" }}>{String(fam.family).replace(/_/g, " ")}</span>
-                        <span style={{ color: "var(--ink-muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
-                          {Number(fam.learning_count || 0).toLocaleString()} reports · {fam.seeded} semeadas · {fam.completed} ok · <b style={{ color: "var(--sev-low-text)" }}>{fam.findings} achados</b>
-                        </span>
-                        <span style={{ textAlign: "right", fontWeight: 800, color: accColor }}>{acc}% acertividade</span>
+                      <div key={fam.family} style={{ padding: "5px 8px", background: "#fff", borderRadius: 6, border: "1px solid var(--line)" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 150px", gap: 8, alignItems: "center", fontSize: 11 }}>
+                          <span style={{ fontWeight: 700, color: "var(--ink)", textTransform: "uppercase", letterSpacing: "0.03em" }}>{String(fam.family).replace(/_/g, " ")}</span>
+                          <span style={{ color: "var(--ink-muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+                            {sim > 0 && <b style={{ color: "var(--sev-info-text)" }}>{sim}% similar</b>}{sim > 0 ? " · " : ""}
+                            {Number(fam.learning_count || 0).toLocaleString()} aprend. · {fam.seeded} semeadas · {fam.completed} ok · <b style={{ color: "var(--sev-low-text)" }}>{fam.findings} achados</b>
+                          </span>
+                          <span style={{ textAlign: "right", fontWeight: 800, color: accColor }}>{acc}% acertividade</span>
+                        </div>
+                        {(isSemantic && reports.length > 0) && (
+                          <div style={{ marginTop: 3, fontSize: 9.5, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}>
+                            ↳ matched por similaridade aos reports HackerOne #{reports.join(", #")}
+                          </div>
+                        )}
                       </div>
                     );
                   })}

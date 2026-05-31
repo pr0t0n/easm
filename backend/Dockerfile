@@ -41,6 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
+# Pré-baixa o modelo de embedding (fastembed/ONNX, ~130MB) para dentro da
+# imagem — sem download em runtime, funciona offline. Usado no matching
+# semântico dos aprendizados HackerOne.
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/app/.fastembed_cache')"
+
 # Non-root runtime user
 RUN groupadd -r appgroup && useradd -r -g appgroup -u 1000 appuser && \
     chown -R appuser:appgroup /app
