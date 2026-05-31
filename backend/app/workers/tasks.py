@@ -2371,7 +2371,15 @@ def poll_scan_work_item(item_id: int):
                     if _zap_avail():
                         _tgt = item.target
                         _zap_url = _tgt if str(_tgt).startswith("http") else f"https://{_tgt}"
-                        _zap_res = _zap_baseline(_zap_url)
+                        # Scan AUTENTICADO: injeta credenciais do scan (auth_config)
+                        # nos cabeçalhos do ZAP → alcança endpoints pós-login.
+                        _zap_auth = {}
+                        try:
+                            from app.services.scan_intelligence import auth_headers_from_state
+                            _zap_auth = auth_headers_from_state(_state_zap) or {}
+                        except Exception:
+                            _zap_auth = {}
+                        _zap_res = _zap_baseline(_zap_url, auth_headers=_zap_auth or None)
                         _zap_findings = _zap_res.get("findings") or []
                         _state_zap[_zap_key] = True
                         _state_zap["zap_run_count"] = _zap_count + 1

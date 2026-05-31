@@ -74,6 +74,45 @@ def is_zap_available() -> bool:
         return False
 
 
+def _apply_auth_headers(auth_headers: dict[str, str] | None) -> list[str]:
+    """Configura scan autenticado: injeta cabeçalhos em TODA requisição do ZAP.
+
+    Usa a extensão Replacer do ZAP (regras REQ_HEADER) — funciona para spider,
+    AJAX e active scan. Retorna a lista de descrições de regra criadas (para
+    posterior limpeza). Falha graciosamente.
+    """
+    created: list[str] = []
+    if not auth_headers:
+        return created
+    for name, value in auth_headers.items():
+        if not name or value is None:
+            continue
+        desc = f"easm-auth-{name}"
+        try:
+            # matchType REQ_HEADER + matchString=<header> + replacement=<value>
+            _zap_post("/JSON/replacer/action/addRule/", {
+                "description": desc,
+                "enabled": "true",
+                "matchType": "REQ_HEADER",
+                "matchString": str(name),
+                "matchRegex": "false",
+                "replacement": str(value),
+            })
+            created.append(desc)
+        except Exception as exc:
+            logger.debug("ZAP replacer addRule falhou para %s: %s", name, exc)
+    return created
+
+
+def _clear_auth_headers(descriptions: list[str]) -> None:
+    """Remove as regras de auth criadas (evita vazar credenciais entre alvos)."""
+    for desc in descriptions or []:
+        try:
+            _zap_post("/JSON/replacer/action/removeRule/", {"description": desc})
+        except Exception:
+            pass
+
+
 def _wait_for_spider(scan_id: str, max_wait: int = _SPIDER_MAX_WAIT) -> None:
     """Aguarda o spider ZAP completar."""
     deadline = time.time() + max_wait
@@ -215,44 +254,55 @@ def _alerts_to_findings(alerts: list[dict], target: str) -> list[dict]:
 # Scan entry points
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_zap_baseline(target: str) -> dict[str, Any]:
+def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """
     ZAP Baseline: passive scan + quick spider.
     Não faz ataques ativos. Baixo ruído, rápido (1-2 min).
     Ideal para: todos os alvos HTTP/HTTPS descobertos.
+
+    auth_headers: se fornecido, faz scan AUTENTICADO (injeta os cabeçalhos em
+    toda requisição do ZAP, alcançando endpoints pós-login).
     """
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
-    # Access target to populate ZAP proxy (baseline access)
+    _auth_rules = _apply_auth_headers(auth_headers)
     try:
-        _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "true"})
-    except Exception as exc:
-        logger.debug("ZAP accessUrl error: %s", exc)
+        # Access target to populate ZAP proxy (baseline access)
+        try:
+            _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "true"})
+        except Exception as exc:
+            logger.debug("ZAP accessUrl error: %s", exc)
 
-    # Start passive spider
-    try:
-        spider_data = _zap_post("/JSON/spider/action/scan/", {
-            "url": target,
-            "maxChildren": "0",
-            "recurse": "true",
-            "contextName": "",
-            "subtreeOnly": "false",
-        })
-        scan_id = str(spider_data.get("scan") or "0")
-        _wait_for_spider(scan_id, max_wait=_SPIDER_MAX_WAIT)
-    except Exception as exc:
-        logger.warning("ZAP spider error: %s", exc)
+        # Start passive spider
+        try:
+            spider_data = _zap_post("/JSON/spider/action/scan/", {
+                "url": target,
+                "maxChildren": "0",
+                "recurse": "true",
+                "contextName": "",
+                "subtreeOnly": "false",
+            })
+            scan_id = str(spider_data.get("scan") or "0")
+            _wait_for_spider(scan_id, max_wait=_SPIDER_MAX_WAIT)
+        except Exception as exc:
+            logger.warning("ZAP spider error: %s", exc)
 
-    alerts = _get_alerts(target)
+        alerts = _get_alerts(target)
+    finally:
+        _clear_auth_headers(_auth_rules)
+
     findings = _alerts_to_findings(alerts, target)
     for f in findings:
         f["details"]["zap_scan_type"] = "baseline"
+        if auth_headers:
+            f["details"]["authenticated_scan"] = True
 
     return {
         "scan_type": "zap-baseline",
         "target": target,
         "alert_count": len(alerts),
+        "authenticated": bool(auth_headers),
         "findings": findings,
     }
 
@@ -302,49 +352,59 @@ def run_zap_ajax_spider(target: str, max_duration_mins: int = 3) -> dict[str, An
     }
 
 
-def run_zap_active_scan(target: str) -> dict[str, Any]:
+def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """
     ZAP Active Scan: fuzzing ativo para OWASP Top 10.
     Detecta: SQLi, XSS, SSRF, Path Traversal, Command Injection, etc.
     Pode ser lento (até 30 min para targets grandes).
+
+    auth_headers: scan autenticado (alcança endpoints pós-login).
     """
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
-    # Spider first to populate sitemap
+    _auth_rules = _apply_auth_headers(auth_headers)
     try:
-        spider_data = _zap_post("/JSON/spider/action/scan/", {
-            "url": target, "recurse": "true", "subtreeOnly": "false",
-        })
-        scan_id = str(spider_data.get("scan") or "0")
-        _wait_for_spider(scan_id, max_wait=120)
-    except Exception:
-        pass
+        # Spider first to populate sitemap
+        try:
+            spider_data = _zap_post("/JSON/spider/action/scan/", {
+                "url": target, "recurse": "true", "subtreeOnly": "false",
+            })
+            scan_id = str(spider_data.get("scan") or "0")
+            _wait_for_spider(scan_id, max_wait=120)
+        except Exception:
+            pass
 
-    # Active scan
-    try:
-        ascan_data = _zap_post("/JSON/ascan/action/scan/", {
-            "url": target,
-            "recurse": "true",
-            "inScopeOnly": "false",
-            "scanPolicyName": "",
-            "method": "",
-            "postData": "",
-        })
-        ascan_id = str(ascan_data.get("scan") or "0")
-        _wait_for_active_scan(ascan_id, max_wait=_ACTIVE_MAX_WAIT)
-    except Exception as exc:
-        logger.warning("ZAP active scan error: %s", exc)
+        # Active scan
+        try:
+            ascan_data = _zap_post("/JSON/ascan/action/scan/", {
+                "url": target,
+                "recurse": "true",
+                "inScopeOnly": "false",
+                "scanPolicyName": "",
+                "method": "",
+                "postData": "",
+            })
+            ascan_id = str(ascan_data.get("scan") or "0")
+            _wait_for_active_scan(ascan_id, max_wait=_ACTIVE_MAX_WAIT)
+        except Exception as exc:
+            logger.warning("ZAP active scan error: %s", exc)
 
-    alerts = _get_alerts(target)
+        alerts = _get_alerts(target)
+    finally:
+        _clear_auth_headers(_auth_rules)
+
     findings = _alerts_to_findings(alerts, target)
     for f in findings:
         f["details"]["zap_scan_type"] = "active"
+        if auth_headers:
+            f["details"]["authenticated_scan"] = True
 
     return {
         "scan_type": "zap-active",
         "target": target,
         "alert_count": len(alerts),
+        "authenticated": bool(auth_headers),
         "findings": findings,
     }
 
@@ -408,20 +468,24 @@ def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, A
     }
 
 
-def run_zap_scan(tool_name: str, target: str, item_metadata: dict | None = None) -> dict[str, Any]:
+def run_zap_scan(tool_name: str, target: str, item_metadata: dict | None = None,
+                 auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """
     Entry point principal — roteador de scan ZAP baseado no tool_name.
     Chamado pelo poll_scan_work_item quando tool_name começa com 'zap-'.
+
+    auth_headers pode vir explícito ou dentro de item_metadata['auth_headers'].
     """
     tool = tool_name.lower().strip()
     meta = item_metadata or {}
+    auth = auth_headers or meta.get("auth_headers") or None
 
     if tool == "zap-baseline":
-        return run_zap_baseline(target)
+        return run_zap_baseline(target, auth_headers=auth)
     elif tool == "zap-ajax":
         return run_zap_ajax_spider(target)
     elif tool == "zap-active":
-        return run_zap_active_scan(target)
+        return run_zap_active_scan(target, auth_headers=auth)
     elif tool == "zap-api":
         openapi_url = meta.get("openapi_url") or meta.get("swagger_url")
         return run_zap_api_scan(target, openapi_url=openapi_url)
