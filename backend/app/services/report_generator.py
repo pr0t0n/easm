@@ -455,6 +455,20 @@ def generate_pentest_report(
     conf_high = categorized.get("total_confirmed_high", 0)
     conf_medium = sum(1 for f in confirmed_list if f.severity == "medium")
 
+    # ── PROCESSO ÚNICO DE VISIBILIDADE (FIX B) ────────────────────────────────
+    # Contagem canônica de "vulnerabilidades" = findings actionable (severity>=low,
+    # não-FP) — EXATAMENTE o que vai p/ a tabela vulnerabilities e a UI. Garante
+    # que report, dashboard e VulnerabilitiesPage mostrem o MESMO número.
+    _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    vuln_findings = [f for f in all_findings if _SEV_RANK.get(str(f.severity or "").lower(), 0) >= 1]
+    vuln_count = len(vuln_findings)
+    vuln_by_sev = {s: sum(1 for f in vuln_findings if str(f.severity or "").lower() == s)
+                   for s in ("critical", "high", "medium", "low")}
+    info_count = total_all - vuln_count  # coverage/headers info-level
+
+    # ── Crown Jewels (FIX C) — ativos de alto valor identificados ─────────────
+    crown_jewels = list(state_data.get("crown_jewels") or [])
+
     # ── P21 PoC sandbox validation stats ─────────────────────────────────────
     p21_total = p21_confirmed = p21_refuted = p21_pending = 0
     try:
@@ -900,6 +914,38 @@ def generate_pentest_report(
             '</div></div>'
         )
 
+    # ── Crown Jewels HTML (FIX C) ─────────────────────────────────────────────
+    crown_jewels_html = ""
+    if crown_jewels:
+        _cj_rows = []
+        for cj in crown_jewels[:12]:
+            _t = str(cj.get("target") or cj.get("subdomain") or "")
+            _lbl = str(cj.get("label") or "ativo crítico").replace("_", " ")
+            _hc = sum(1 for f in vuln_findings
+                      if _t and (_t in str(f.domain or "") or _t in str(f.url or ""))
+                      and str(f.severity or "").lower() in ("critical", "high"))
+            _badge = (f'<span style="background:#c0392b;color:#fff;padding:1px 7px;border-radius:10px;'
+                      f'font-size:10px;font-weight:700">{_hc} H/C</span>') if _hc else \
+                     ('<span style="background:#7f8c8d;color:#fff;padding:1px 7px;border-radius:10px;'
+                      'font-size:10px">sem crítico</span>')
+            _cj_rows.append(
+                f'<tr><td style="font-size:12px;font-weight:600">⭐ {_t}</td>'
+                f'<td style="font-size:11px;color:#8e44ad">{_lbl}</td>'
+                f'<td style="text-align:center">{_badge}</td></tr>'
+            )
+        crown_jewels_html = (
+            '<div class="section" style="border-top:4px solid #8e44ad">'
+            f'<h2 style="color:#8e44ad">⭐ Joias da Coroa ({len(crown_jewels)})</h2>'
+            '<p style="font-size:12px;color:#666;margin-bottom:12px">'
+            'Ativos de maior valor — autenticação, pagamento, dados, administração e infraestrutura. '
+            'Concentram a prioridade de teste e de defesa: uma falha aqui compromete todo o ambiente. '
+            'Controles fortes (MFA, segmentação, least-privilege, WAF, monitoramento) são desproporcionalmente '
+            'importantes nestes alvos.</p>'
+            '<table class="findings-table">'
+            '<thead><tr><th>Ativo</th><th>Classificação</th><th style="text-align:center">Achados</th></tr></thead>'
+            f'<tbody>{"".join(_cj_rows)}</tbody></table></div>'
+        )
+
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -968,10 +1014,18 @@ def generate_pentest_report(
       <div class="num" style="color:#f39c12">{len(chain_findings)}</div>
       <div class="lbl">Chains de Ataque</div>
     </div>
-    <div class="stat-card" style="border-top:3px solid #3498db">
-      <div class="num" style="color:#3498db">{total_all}</div>
-      <div class="lbl">Total Findings</div>
+    <div class="stat-card" style="border-top:3px solid #8e44ad">
+      <div class="num" style="color:#8e44ad">{len(crown_jewels)}</div>
+      <div class="lbl">Joias da Coroa</div>
     </div>
+  </div>
+
+  <!-- VULN COUNT — fonte única (igual UI/dashboard): severity>=low -->
+  <div style="display:flex;gap:10px;align-items:center;background:#fff;border-radius:8px;padding:12px 16px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.08);flex-wrap:wrap">
+    <span style="font-size:22px;font-weight:800;color:#2c3e50">{vuln_count}</span>
+    <span style="font-size:12px;color:#666;font-weight:600">vulnerabilidades</span>
+    <span style="font-size:11px;color:#999">(🔴 {vuln_by_sev['critical']} · 🟠 {vuln_by_sev['high']} · 🟡 {vuln_by_sev['medium']} · 🔵 {vuln_by_sev['low']})</span>
+    <span style="font-size:10px;color:#bbb;margin-left:auto">+ {info_count} itens informativos (headers/cobertura) · contagem idêntica ao inventário e dashboard</span>
   </div>
 
   <!-- P21 POC SANDBOX STRIP -->
@@ -979,6 +1033,9 @@ def generate_pentest_report(
 
   <!-- KILL CHAIN PHASE COVERAGE -->
   {phase_coverage_html}
+
+  <!-- CROWN JEWELS -->
+  {crown_jewels_html}
 
   <!-- NO CONFIRMED FINDINGS NOTICE -->
   {'<div class="section" style="border-left:4px solid #27ae60"><h2 style="color:#27ae60">✅ Nenhuma Vulnerabilidade Confirmada com PoC</h2><p style="font-size:13px;color:#666">Nenhuma ferramenta de exploração ativa (sqlmap, dalfox, nuclei-confirmed) confirmou vulnerabilidades exploráveis. Existem ' + str(len(candidate_list)) + ' findings candidatos que requerem verificação manual na fase P17.</p></div>' if not confirmed_list and not chain_findings else ''}
@@ -1004,10 +1061,11 @@ def generate_pentest_report(
   <!-- DIVIDER: EASM SECTION -->
   <div class="easm-section-divider">
     📊 SEÇÃO 2 — SUPERFÍCIE DE ATAQUE E EXPOSIÇÕES (EASM)
-    &nbsp;|&nbsp; {total_all} findings totais &nbsp;|&nbsp;
-    {len(confirmed_list)} confirmados &nbsp;|&nbsp;
-    {len(candidate_list)} candidatos &nbsp;|&nbsp;
-    {len(hypothesis_list)} hipóteses
+    &nbsp;|&nbsp; {vuln_count} vulnerabilidades &nbsp;|&nbsp;
+    {len(confirmed_list)} confirmadas &nbsp;|&nbsp;
+    {len(candidate_list)} candidatas &nbsp;|&nbsp;
+    {len(hypothesis_list)} hipóteses &nbsp;|&nbsp;
+    {info_count} informativos
   </div>
 
   <!-- EASM BODY (full existing report content) -->

@@ -194,31 +194,87 @@ def generate_structural_narrative(
     target: str,
     findings: list[dict],
     tech_stack: list[dict],
+    crown_jewels: list[dict] | None = None,
 ) -> str:
     """Generate a structured narrative without LLM (deterministic fallback).
 
+    Visão executiva + risco + joias da coroa + importância de controles.
     Used when Ollama is unavailable or narrative generation fails.
     """
+    crown_jewels = crown_jewels or []
     confirmed = [f for f in findings if f.get("verification_status") == "confirmed"]
     candidate = [f for f in findings if f.get("verification_status") == "candidate"]
+
+    def _sev(f):
+        return str(f.get("severity") or "").lower()
+    sev_counts = {s: sum(1 for f in findings if _sev(f) == s) for s in ("critical", "high", "medium", "low", "info")}
+    crit_high = sev_counts["critical"] + sev_counts["high"]
+
+    # Postura de risco geral (executiva)
+    if sev_counts["critical"] > 0:
+        posture, posture_txt = "CRÍTICO", "exposição crítica — exploração ativa provável; ação imediata requerida"
+    elif sev_counts["high"] > 0:
+        posture, posture_txt = "ALTO", "vulnerabilidades de alto impacto presentes; remediação prioritária em 72h"
+    elif sev_counts["medium"] > 0:
+        posture, posture_txt = "MÉDIO", "fraquezas de configuração que reduzem a resiliência do perímetro"
+    else:
+        posture, posture_txt = "BAIXO", "superfície relativamente endurecida; manter monitoramento contínuo"
 
     kill_chain = _group_findings_by_kill_chain(findings)
 
     lines = [
         f"# Relatório de Ataque — {target}",
         "",
-        "## Resumo Executivo",
+        "## Sumário Executivo",
         "",
-        f"O scan de {target} identificou **{len(findings)} descobertas** totais, "
-        f"sendo **{len(confirmed)} confirmadas** e **{len(candidate)} candidatas** a confirmação.",
+        f"**Postura de risco: {posture}** — {posture_txt}.",
+        "",
+        f"A avaliação ofensiva de `{target}` produziu **{len(findings)} descobertas** "
+        f"(**{len(confirmed)} confirmadas com prova de exploração**, {len(candidate)} candidatas a validação). "
+        f"Distribuição por severidade: "
+        f"🔴 {sev_counts['critical']} críticas · 🟠 {sev_counts['high']} altas · "
+        f"🟡 {sev_counts['medium']} médias · 🔵 {sev_counts['low']} baixas.",
+        "",
+        f"Para o negócio: {crit_high} vulnerabilidade(s) de severidade crítica/alta representam "
+        f"risco direto de comprometimento — acesso não autorizado, vazamento de dados ou "
+        f"interrupção de serviço. O tempo de exposição (age) eleva a probabilidade de exploração "
+        f"ativa; priorize a correção das críticas antes que sejam encadeadas com outras fraquezas.",
         "",
     ]
+
+    # ── Joias da Coroa (Crown Jewels) — ativos de maior valor ─────────────────
+    if crown_jewels:
+        lines.append("## ⭐ Joias da Coroa (Ativos Críticos)")
+        lines.append("")
+        lines.append(
+            f"Foram identificados **{len(crown_jewels)} ativos de alto valor** — sistemas cujo "
+            f"comprometimento causa o maior impacto ao negócio (autenticação, pagamento, dados, "
+            f"administração, infraestrutura). Estes concentram a prioridade de teste e de defesa:"
+        )
+        lines.append("")
+        for cj in crown_jewels[:10]:
+            t = cj.get("target") or cj.get("subdomain") or ""
+            lbl = str(cj.get("label") or "ativo crítico").replace("_", " ")
+            # findings nesse ativo
+            cj_finds = [f for f in findings if t and (t in str(f.get("domain") or "") or t in str(f.get("url") or ""))]
+            cj_hc = sum(1 for f in cj_finds if _sev(f) in ("critical", "high"))
+            risk_note = f" — {cj_hc} achado(s) crítico/alto" if cj_hc else " — sem achados críticos confirmados (manter vigilância)"
+            lines.append(f"- ⭐ **`{t}`** ({lbl}){risk_note}")
+        lines.append("")
+        lines.append(
+            "> **Por que importa:** controles fortes nesses ativos (MFA, segmentação de rede, "
+            "least-privilege, WAF, monitoramento de acesso) são desproporcionalmente importantes — "
+            "uma única falha aqui compromete a confidencialidade/integridade de todo o ambiente."
+        )
+        lines.append("")
 
     # Critical findings
     critical = [f for f in confirmed if str(f.get("severity") or "").lower() in ("critical", "high")]
     if critical:
-        lines.append(f"**{len(critical)} descobertas críticas/high** foram confirmadas diretamente por ferramentas ativas.")
-        for f in critical[:3]:
+        lines.append("## Vulnerabilidades Confirmadas de Maior Impacto")
+        lines.append("")
+        lines.append(f"**{len(critical)} descobertas críticas/altas** comprovadas diretamente por ferramentas ativas:")
+        for f in critical[:5]:
             cve_str = f" ({f['cve']})" if f.get("cve") else ""
             lines.append(f"- **{f['title']}**{cve_str} em `{f.get('domain', target)}`")
         lines.append("")
@@ -258,6 +314,36 @@ def generate_structural_narrative(
         lines.append(f"{i}. **{f['title']}**{cve_str}")
         if f.get("recommendation"):
             lines.append(f"   → {f['recommendation']}")
+    lines.append("")
+
+    # ── Importância dos Controles (visão de defesa) ───────────────────────────
+    lines.append("## Importância dos Controles")
+    lines.append("")
+    # Deriva controles relevantes a partir das classes de achado presentes
+    blob = " ".join(str(f.get("title") or "").lower() for f in findings)
+    controls: list[str] = []
+    if any(k in blob for k in ("sql", "xss", "inje", "ssti", "rce", "command")):
+        controls.append("**Validação de entrada & WAF** — prepared statements, output encoding e WAF em frente aos ativos web cortam a maior classe de exploração (injeção).")
+    if any(k in blob for k in ("header", "hsts", "csp", "clickjack", "x-frame", "cors")):
+        controls.append("**Hardening de headers HTTP** — HSTS, CSP, X-Frame-Options reduzem clickjacking, downgrade e roubo de sessão a custo quase zero.")
+    if any(k in blob for k in ("auth", "jwt", "credential", "default", "senha", "password")):
+        controls.append("**Autenticação forte** — MFA, bloqueio de brute-force e gestão segura de JWT/sessão protegem os ativos de identidade (joias da coroa).")
+    if any(k in blob for k in ("ssl", "tls", "cert", "cipher")):
+        controls.append("**Criptografia em trânsito** — TLS 1.2+ com ciphers modernos impede interceptação MITM de dados sensíveis.")
+    if any(k in blob for k in ("port", "exposed", "exposto", "service", "waf-bypass", "origin")):
+        controls.append("**Segmentação de rede & exposição mínima** — fechar serviços internos e proteger a origem atrás do WAF reduz drasticamente a superfície de ataque.")
+    if any(k in blob for k in ("cve", "outdated", "version", "desatualiz")):
+        controls.append("**Gestão de patches** — manter componentes atualizados elimina CVEs conhecidos (A06:2021), a via mais explorada por atacantes oportunistas.")
+    if not controls:
+        controls.append("**Monitoramento contínuo** — manter logging/alerting de eventos de segurança e reavaliação periódica da superfície exposta.")
+    for c in controls:
+        lines.append(f"- {c}")
+    lines.append("")
+    if crown_jewels:
+        lines.append(
+            f"> A priorização de defesa deve seguir o valor do ativo: os **{len(crown_jewels)} "
+            f"ativos críticos** acima recebem os controles mais rígidos primeiro."
+        )
 
     return "\n".join(lines)
 
@@ -325,7 +411,8 @@ def run_attack_narrative(db, job) -> dict[str, Any]:
             logger.debug("LLM narrative failed, using structural: %s", e)
 
     if not narrative.strip():
-        narrative = generate_structural_narrative(target, findings_dicts, tech_stack)
+        _cj = list(state.get("crown_jewels") or [])
+        narrative = generate_structural_narrative(target, findings_dicts, tech_stack, crown_jewels=_cj)
 
     # Store in state_data
     state["attack_narrative"] = narrative

@@ -227,16 +227,17 @@ function EvolutionInfraView() {
 const modules = [
   { id: "runtime", label: "RedTeam Runtime", hint: "fase, comandos, saidas e comunicacao", component: WorkerLogsPage },
   { id: "phases_agents", label: "Fases & Agentes", hint: "phase monitor + fluxo de agentes", component: PhasesAgentsView },
-  { id: "infra", label: "Evolução & Infra", hint: "attack evolution, workers e job registry", component: EvolutionInfraView },
   { id: "intel", label: "Inteligência", hint: "crown jewels, OSINT, LLM chains, narrativa", component: IntelligenceView },
 ];
 
+// "infra" (Evolução & Infra) removido a pedido — aliases antigos caem no runtime.
 const MODULE_ALIASES = {
   phases: "phases_agents",
   agents: "phases_agents",
-  evolution: "infra",
-  workers: "infra",
-  jobs: "infra",
+  evolution: "runtime",
+  workers: "runtime",
+  jobs: "runtime",
+  infra: "runtime",
 };
 
 export default function OperationsCenterPage() {

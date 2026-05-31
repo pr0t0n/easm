@@ -2229,6 +2229,31 @@ def persist_finding_dicts(
         if not title:
             continue
 
+        # ── FONTE ÚNICA: enriquece details com discovery/payload/remediation ───
+        # O frontend (VulnerabilitiesPage) lê details.discovery_method +
+        # details.reproduction.{discovery_method,payloads}; o bridge p/ a tabela
+        # vulnerabilities lê os mesmos campos. Centralizar aqui garante que TODA
+        # finding (incl. tech_correlator/CVE) mostre "Como foi descoberto" e
+        # payload de forma consistente — sem '—' vazio.
+        try:
+            _disc, _payload, _rem = _build_discovery_and_payload(details, tool_col, title)
+            if _disc and not details.get("discovery_method"):
+                details["discovery_method"] = _disc
+            if _rem and not details.get("remediation"):
+                details["remediation"] = _rem
+            _repro = dict(details.get("reproduction") or {})
+            _repro.setdefault("discovery_method", _disc)
+            if _payload:
+                _pls = list(_repro.get("payloads") or [])
+                if _payload not in _pls:
+                    _pls.append(_payload)
+                _repro["payloads"] = _pls
+            if _rem and not _repro.get("remediation"):
+                _repro["remediation"] = _rem
+            details["reproduction"] = _repro
+        except Exception:
+            pass
+
         # Extract CVE id first (needed for dedup below)
         cve_id: str | None = None
         cve_raw = str(details.get("cve_id") or "").strip().upper()
