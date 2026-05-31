@@ -37,6 +37,51 @@ SENSITIVE_API_KEYWORDS = {"auth", "sso", "token", "api-", "api.", "internal", "i
                           "crm", "erp", "bi-", "card", "bank", "invoice", "customer"}
 
 
+def _md_to_html(md: str) -> str:
+    """Conversor Markdown→HTML mínimo (headers, bold, code, listas, parágrafos).
+
+    Suficiente para a narrativa de ataque (gerada em Markdown). Faz escape de
+    HTML antes de aplicar a formatação, evitando injeção.
+    """
+    import re as _re
+
+    def esc(s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    out: list[str] = []
+    in_list = False
+    for raw in str(md or "").split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            continue
+        e = esc(line.strip())
+        # inline: **bold** e `code`
+        e = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", e)
+        e = _re.sub(r"`(.+?)`", r'<code style="background:#f1f1f4;padding:1px 5px;border-radius:3px;font-size:12px">\1</code>', e)
+        if line.startswith("### "):
+            out.append(f'<h4 style="font-size:13px;margin:10px 0 4px;color:#34495e">{e[4:]}</h4>')
+        elif line.startswith("## "):
+            out.append(f'<h3 style="font-size:15px;margin:14px 0 6px;color:#c0392b">{e[3:]}</h3>')
+        elif line.startswith("# "):
+            out.append(f'<h2 style="font-size:17px;margin:16px 0 8px">{e[2:]}</h2>')
+        elif line.lstrip().startswith(("- ", "* ")):
+            if not in_list:
+                out.append('<ul style="margin:4px 0 8px 20px">')
+                in_list = True
+            out.append(f"<li style='margin-bottom:3px'>{e[2:]}</li>")
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f'<p style="margin-bottom:8px">{e}</p>')
+    if in_list:
+        out.append("</ul>")
+    return "".join(out)
+
+
 def _classify_domain(domain: str) -> str:
     d = domain.lower()
     sub = d.split(".")[0] if "." in d else d
@@ -938,9 +983,26 @@ def generate_pentest_report(
         for cj in crown_jewels[:12]:
             _t = str(cj.get("target") or cj.get("subdomain") or "")
             _lbl = str(cj.get("label") or "ativo crítico").replace("_", " ")
-            _hc = sum(1 for f in vuln_findings
-                      if _t and (_t in str(f.domain or "") or _t in str(f.url or ""))
-                      and str(f.severity or "").lower() in ("critical", "high"))
+            _on_asset = [f for f in vuln_findings
+                         if _t and (_t in str(f.domain or "") or _t in str(f.url or ""))]
+            _hc = sum(1 for f in _on_asset if str(f.severity or "").lower() in ("critical", "high"))
+            # ── Frente D: impacto de NEGÓCIO por joia — capacidade comprovada
+            # (actions-on-objectives da validação ativa) no ativo crítico.
+            _exploited = [f for f in _on_asset
+                          if (dict(f.details or {}).get("exploitation") or {}).get("actively_validated")]
+            _impact_cell = "—"
+            if _exploited:
+                _caps = []
+                for _ef in _exploited[:2]:
+                    _aoo = dict(_ef.details or {}).get("actions_on_objectives") or {}
+                    _cap = str(_aoo.get("capability_narrative") or "")
+                    if _cap:
+                        _caps.append(_cap)
+                _impact_cell = (
+                    '<span style="background:#c0392b;color:#fff;padding:1px 6px;border-radius:4px;'
+                    f'font-size:9px;font-weight:700">⚔️ EXPLORADO</span> '
+                    + (f'<span style="font-size:10px;color:#666">{_caps[0][:90]}</span>' if _caps else "")
+                )
             _badge = (f'<span style="background:#c0392b;color:#fff;padding:1px 7px;border-radius:10px;'
                       f'font-size:10px;font-weight:700">{_hc} H/C</span>') if _hc else \
                      ('<span style="background:#7f8c8d;color:#fff;padding:1px 7px;border-radius:10px;'
@@ -948,7 +1010,8 @@ def generate_pentest_report(
             _cj_rows.append(
                 f'<tr><td style="font-size:12px;font-weight:600">⭐ {_t}</td>'
                 f'<td style="font-size:11px;color:#8e44ad">{_lbl}</td>'
-                f'<td style="text-align:center">{_badge}</td></tr>'
+                f'<td style="text-align:center">{_badge}</td>'
+                f'<td style="font-size:11px">{_impact_cell}</td></tr>'
             )
         crown_jewels_html = (
             '<div class="section" style="border-top:4px solid #8e44ad">'
@@ -956,12 +1019,34 @@ def generate_pentest_report(
             '<p style="font-size:12px;color:#666;margin-bottom:12px">'
             'Ativos de maior valor — autenticação, pagamento, dados, administração e infraestrutura. '
             'Concentram a prioridade de teste e de defesa: uma falha aqui compromete todo o ambiente. '
-            'Controles fortes (MFA, segmentação, least-privilege, WAF, monitoramento) são desproporcionalmente '
-            'importantes nestes alvos.</p>'
+            'A coluna <strong>Impacto</strong> mostra a capacidade que um atacante teria '
+            '(comprovada por validação ativa), sempre como possibilidade — sem execução destrutiva.</p>'
             '<table class="findings-table">'
-            '<thead><tr><th>Ativo</th><th>Classificação</th><th style="text-align:center">Achados</th></tr></thead>'
+            '<thead><tr><th>Ativo</th><th>Classificação</th><th style="text-align:center">Achados</th><th>Impacto comprovado</th></tr></thead>'
             f'<tbody>{"".join(_cj_rows)}</tbody></table></div>'
         )
+
+    # ── Frente D: Narrativa do Ataque embutida ───────────────────────────────
+    # A história recon→exploração→objetivos. Gerada no scan (state_data) ou
+    # sob demanda aqui. Convertida de Markdown para HTML.
+    attack_narrative_html = ""
+    try:
+        _narr = str(state_data.get("attack_narrative") or "")
+        if not _narr.strip():
+            from app.services.attack_narrative import run_attack_narrative as _run_narr
+            _res = _run_narr(db, job)
+            _narr = str((_res or {}).get("narrative") or "")
+        if _narr.strip():
+            attack_narrative_html = (
+                '<div class="section" style="border-top:4px solid #c0392b">'
+                '<h2 style="color:#c0392b">🎯 Narrativa do Ataque</h2>'
+                '<div style="font-size:13px;line-height:1.7;color:#2c3e50">'
+                + _md_to_html(_narr) +
+                '</div></div>'
+            )
+    except Exception as _narr_err:
+        import logging as _nlog
+        _nlog.getLogger(__name__).debug("attack_narrative embed failed: %s", _narr_err)
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1047,6 +1132,9 @@ def generate_pentest_report(
 
   <!-- P21 POC SANDBOX STRIP -->
   {poc_strip_html}
+
+  <!-- ATTACK NARRATIVE (Frente D) -->
+  {attack_narrative_html}
 
   <!-- KILL CHAIN PHASE COVERAGE -->
   {phase_coverage_html}
