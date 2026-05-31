@@ -39,6 +39,93 @@ tool_aliases: dict[str, str] = {}
 knowledge_store: dict[str, dict[str, Any]] = {}
 
 
+# ---------------------------------------------------------------------------
+# GUARDRAIL — espelho da deny-list de backend/app/services/guardrail_policy.py.
+# Gateway final antes do kali: ataques de impacto (extração de dados, shell,
+# escrita/defacement, DoS, brute-force massivo) são removidos dos argumentos.
+# Mantenha em sincronia com o módulo de política do backend.
+# ---------------------------------------------------------------------------
+import re as _re
+
+_GUARDRAIL_BY_TOOL: dict[str, list[str]] = {
+    "sqlmap": [
+        r"^--dump(?:-all)?$", r"^--passwords$", r"^--sql-query.*$", r"^--sql-shell$",
+        r"^--os-shell$", r"^--os-pwn$", r"^--os-cmd.*$", r"^--os-smbrelay$",
+        r"^--file-read.*$", r"^--file-write.*$", r"^--file-dest.*$",
+        r"^--reg-read$", r"^--reg-add$", r"^--reg-del$", r"^--eval.*$", r"^--priv-esc$",
+    ],
+    "ghauri": [
+        r"^--dump(?:-all)?$", r"^--os-shell$", r"^--sql-shell$",
+        r"^--file-read.*$", r"^--file-write.*$",
+    ],
+}
+_GUARDRAIL_GLOBAL = [
+    r"(?i)^--dump(?:-all)?$", r"(?i)^--os-shell$", r"(?i)^--file-write.*$", r"(?i)^--exfil.*$",
+]
+_GUARDRAIL_NUCLEI_TAGS = {"dos", "fuzzing-dos", "intrusive"}
+_GUARDRAIL_THREAD_CAPS = {"hydra": 8, "medusa": 8}
+
+_GUARDRAIL_COMPILED = {t: [_re.compile(p) for p in ps] for t, ps in _GUARDRAIL_BY_TOOL.items()}
+_GUARDRAIL_COMPILED_GLOBAL = [_re.compile(p) for p in _GUARDRAIL_GLOBAL]
+
+
+def _apply_guardrail(tool: str, args: list[str]) -> list[str]:
+    """Remove flags de ataque de impacto. Falha fechando (remove em dúvida)."""
+    if not args:
+        return []
+    tool_l = str(tool or "").strip().lower()
+    pats = _GUARDRAIL_COMPILED.get(tool_l, []) + _GUARDRAIL_COMPILED_GLOBAL
+    clean: list[str] = []
+    removed: list[str] = []
+    skip_next = False
+    for i, raw in enumerate(args):
+        if skip_next:
+            skip_next = False
+            removed.append(str(raw))
+            continue
+        a = str(raw)
+        if tool_l == "nuclei" and _re.match(r"(?i)^-?-?tags?(=.*)?$", a):
+            val = a.split("=", 1)[1] if "=" in a else (str(args[i + 1]) if i + 1 < len(args) else "")
+            if any(t in val.lower() for t in _GUARDRAIL_NUCLEI_TAGS):
+                removed.append(a)
+                if "=" not in a:
+                    skip_next = True
+                continue
+        if any(p.match(a) for p in pats):
+            removed.append(a)
+            continue
+        clean.append(a)
+    cap = _GUARDRAIL_THREAD_CAPS.get(tool_l)
+    if cap:
+        clean = _guardrail_cap_threads(clean, cap)
+    if removed:
+        try:
+            print(f"[guardrail] tool={tool_l} blocked={removed}", flush=True)
+        except Exception:
+            pass
+    return clean
+
+
+def _guardrail_cap_threads(args: list[str], cap: int) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        m = _re.match(r"^(-t|-T|--threads?)(=)?(\d+)?$", a)
+        if m and m.group(3) and int(m.group(3)) > cap:
+            out.append(f"{m.group(1)}{'=' if m.group(2) else ''}{cap}")
+            i += 1
+            continue
+        if m and not m.group(3) and i + 1 < len(args) and str(args[i + 1]).isdigit() and int(args[i + 1]) > cap:
+            out.append(a)
+            out.append(str(cap))
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
 class Document(BaseModel):
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -462,11 +549,14 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "timeout": timeout,
             "auth_headers": parameters.get("auth_headers") or {},
-            "extra_args": [
-                str(arg)
-                for arg in list(parameters.get("extra_args") or [])
-                if str(arg).strip()
-            ],
+            "extra_args": _apply_guardrail(
+                (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
+                [
+                    str(arg)
+                    for arg in list(parameters.get("extra_args") or [])
+                    if str(arg).strip()
+                ],
+            ),
         },
     )
     response.raise_for_status()
@@ -591,11 +681,14 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "timeout": timeout,
             "auth_headers": request.arguments.get("auth_headers") or {},
-            "extra_args": [
-                str(arg)
-                for arg in list(request.arguments.get("extra_args") or [])
-                if str(arg).strip()
-            ],
+            "extra_args": _apply_guardrail(
+                (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
+                [
+                    str(arg)
+                    for arg in list(request.arguments.get("extra_args") or [])
+                    if str(arg).strip()
+                ],
+            ),
         },
     )
     response.raise_for_status()

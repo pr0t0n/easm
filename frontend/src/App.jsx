@@ -17,6 +17,7 @@ import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import DomainsPage from "./pages/DomainsPage";
 import LearningPage from "./pages/LearningPage";
+import GuardrailsPage from "./pages/GuardrailsPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -97,6 +98,7 @@ export default function App() {
                     <Route path="/worker-logs" element={<Navigate to="/operacional?module=runtime" replace />} />
                     <Route path="/agent-flow" element={<Navigate to="/operacional?module=phases_agents" replace />} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
+                    <Route path="/guardrails" element={<AdminOnly><GuardrailsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
                   </RoutedBoundary>

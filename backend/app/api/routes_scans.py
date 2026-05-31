@@ -8273,3 +8273,18 @@ def get_verification_stats(
             counts["none"] += int(cnt)
         total += int(cnt)
     return {"counts": counts, "total": total}
+
+
+@router.get("/guardrails")
+def get_guardrails(
+    current_user: User = Depends(get_current_user),
+):
+    """Política de guardrail — ataques de impacto desativados/restritos.
+
+    Fonte única da verdade: app.services.guardrail_policy. A mesma deny-list
+    é aplicada na execução (MCP + backend) para que nenhum ataque destrutivo
+    seja executado de fato.
+    """
+    from app.services.guardrail_policy import guardrail_policy_payload
+
+    return guardrail_policy_payload()
