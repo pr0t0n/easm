@@ -2542,6 +2542,17 @@ def poll_scan_work_item(item_id: int):
                 # Certificado: extrai SANs → novos subdomínios in-scope
                 if _tool_lower in {"sslscan", "testssl"}:
                     propagate_certificate_sans(db, job.id, item.target, item.tool_name, _full_result, job)
+
+                # ── Frente E: expansão de superfície (crawl/fuzz → loop) ───────
+                # Crawler/spider/fuzzing descobriu páginas → abre, extrai segredos
+                # e endpoints, e REINJETA os in-scope como novos alvos de teste.
+                if _tool_lower in {
+                    "ffuf", "ffuf-content", "ffuf-params", "ffuf-values", "ffuf-post",
+                    "feroxbuster", "gobuster", "dirsearch", "katana", "gospider",
+                    "hakrawler", "gau", "waybackurls", "linkfinder", "paramspider",
+                } and item.target and item.target != "__batch__":
+                    from app.services.endpoint_discovery import expand_attack_surface
+                    expand_attack_surface(db, job.id, item.target, item.tool_name, _full_result, job)
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
