@@ -31,3 +31,6 @@ backend/celerybeat-schedule
 # Scan output artifacts (do not commit raw target dumps)
 backend/ar*.txt
 backend/*.tmp
+
+# fastembed model cache (baixado em runtime; embutido na imagem via Dockerfile)
+backend/.fastembed_cache/
