@@ -417,6 +417,17 @@ export default function VulnerabilitiesPage() {
                       <td className="mono-id">{isExpanded ? "▼ " : "▶ "}{item.id}</td>
                       <td className="mono-sm" style={{ color: "var(--brand-700)" }}>#{item.scan_job_id || "—"}</td>
                       <td style={{ maxWidth: 260 }}>
+                        {(item.vuln_family_label || item.vuln_family) && (
+                          <div style={{
+                            display: "inline-block", fontSize: 9.5, fontWeight: 800,
+                            textTransform: "uppercase", letterSpacing: "0.04em",
+                            color: "var(--brand-700)", background: "var(--sev-info-bg)",
+                            border: "1px solid var(--sev-info-border)", borderRadius: 4,
+                            padding: "1px 6px", marginBottom: 3,
+                          }}>
+                            {item.vuln_family_label || item.vuln_family}
+                          </div>
+                        )}
                         <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {sanitizeText(item.title)}
                         </div>
@@ -477,6 +488,16 @@ export default function VulnerabilitiesPage() {
                       <tr>
                         <td colSpan={10} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 18, fontSize: 13 }}>
+
+                            {/* ── Classe / família da vulnerabilidade (lidera) ── */}
+                            {(item.vuln_family_label || item.vuln_family) && (
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 10.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Classe da vulnerabilidade</span>
+                                <span style={{ fontSize: 13, fontWeight: 800, color: "var(--brand-700)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", borderRadius: 6, padding: "3px 10px" }}>
+                                  {item.vuln_family_label || item.vuln_family}
+                                </span>
+                              </div>
+                            )}
 
                             {/* ── Uso do aprendizado HackerOne (P3b) ────────── */}
                             {item.details?.learning_source && (

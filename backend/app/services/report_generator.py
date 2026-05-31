@@ -531,6 +531,21 @@ def generate_pentest_report(
         color, label = cfg.get(vs, ("#95a5a6", vs.upper()))
         return f'<span style="background:{color};color:#fff;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">{label}</span>'
 
+    def _family_badge(f: Any, det: dict) -> str:
+        """Selo da CLASSE/FAMÍLIA — lidera toda vulnerabilidade no relatório."""
+        try:
+            from app.services.vuln_family import classify_family, family_label
+            fam = classify_family(
+                title=getattr(f, "title", ""), tool=getattr(f, "tool", ""),
+                owasp=str(det.get("owasp_category") or ""), cve=getattr(f, "cve", None),
+                learning_family=(det.get("learning_source") or {}).get("vuln_family"),
+            )
+            return (f'<span style="font-size:10px;font-weight:800;text-transform:uppercase;'
+                    f'letter-spacing:.04em;color:#2c3e50;background:#eef2ff;border:1px solid #c7d2fe;'
+                    f'border-radius:4px;padding:2px 7px">{family_label(fam)}</span>')
+        except Exception:
+            return ""
+
     def _confirmed_finding_block(f: Any, idx: int) -> str:
         det = dict(f.details or {})
         evidence = str(det.get("evidence") or "")[:500]
@@ -609,6 +624,7 @@ def generate_pentest_report(
         <div style="background:#fff;border-left:4px solid {_sev_color(sev)};padding:16px;margin-bottom:16px;border-radius:0 8px 8px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
             <span style="font-size:13px;font-weight:700;color:#555">#{idx}</span>
+            {_family_badge(f, det)}
             {_sev_badge(sev)}
             {_status_badge("confirmed")}
             {cve_str}
@@ -658,7 +674,8 @@ def generate_pentest_report(
     if _hc_candidates:
         _cand_rows = "".join(
             f'<tr>'
-            f'<td style="font-size:12px;max-width:300px">{_f.title[:100] if _f.title else ""}</td>'
+            f'<td style="font-size:10px;font-weight:700;color:#3730a3">{_family_badge(_f, dict(_f.details or {}))}</td>'
+            f'<td style="font-size:12px;max-width:280px">{_f.title[:100] if _f.title else ""}</td>'
             f'<td><span style="background:{(_sev_color(_f.severity or "info"))};color:white;'
             f'padding:1px 6px;border-radius:3px;font-size:10px">{(_f.severity or "").upper()}</span></td>'
             f'<td style="font-size:11px;color:#666">{str(_f.tool or "")[:30]}</td>'
@@ -676,7 +693,7 @@ def generate_pentest_report(
             'Podem ser falsos positivos — aguardam execução do P21 para promoção a Confirmado ou descarte como Refutado. '
             'Não inclua estas no relatório executivo até confirmação.</p>'
             '<table class="findings-table">'
-            '<thead><tr><th>Vulnerabilidade</th><th>Severidade</th><th>Ferramenta</th><th>Alvo</th><th>Status</th></tr></thead>'
+            '<thead><tr><th>Classe</th><th>Vulnerabilidade</th><th>Severidade</th><th>Ferramenta</th><th>Alvo</th><th>Status</th></tr></thead>'
             f'<tbody>{_cand_rows}</tbody>'
             '</table>'
             + (f'<p style="font-size:11px;color:#999;margin-top:8px">… e mais {len(_hc_candidates) - 25} findings não exibidos.</p>' if len(_hc_candidates) > 25 else '')

@@ -4003,13 +4003,24 @@ def list_findings_paginated(
     total = len(rows)
 
     # Severity breakdown BEFORE pagination — espelha exatamente o que o relatório faz
+    from app.services.vuln_family import classify_family as _cf_count, family_label as _fl_count
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    family_counts: dict[str, dict] = {}
     for _f in rows:
         _sev = str(_f.severity or "info").lower()
         if _sev in severity_counts:
             severity_counts[_sev] += 1
+        _d = _f.details or {}
+        _famc = _cf_count(
+            title=_f.title, tool=_f.tool, owasp=str(_d.get("owasp_category") or ""),
+            cve=_f.cve, learning_family=(_d.get("learning_source") or {}).get("vuln_family"),
+        )
+        _slot = family_counts.setdefault(_famc, {"family": _famc, "label": _fl_count(_famc), "count": 0})
+        _slot["count"] += 1
 
     rows = rows[offset:offset + limit]
+
+    from app.services.vuln_family import classify_family, family_label
 
     items = []
     for finding in rows:
@@ -4017,6 +4028,13 @@ def list_findings_paginated(
         loc = _extract_finding_location(finding)
         age = compute_age_metrics(finding.created_at, details)
         fair = compute_fair_metrics(finding.severity, finding.confidence_score, details, age)
+        _fam = classify_family(
+            title=finding.title,
+            tool=finding.tool,
+            owasp=str(details.get("owasp_category") or ""),
+            cve=finding.cve,
+            learning_family=(details.get("learning_source") or {}).get("vuln_family"),
+        )
         items.append(
             {
                 "id": finding.id,
@@ -4024,6 +4042,8 @@ def list_findings_paginated(
                 "target_query": finding.scan_job.target_query if finding.scan_job else None,
                 "scan_status": finding.scan_job.status if finding.scan_job else None,
                 "title": finding.title,
+                "vuln_family": _fam,
+                "vuln_family_label": family_label(_fam),
                 "severity": finding.severity,
                 "risk_score": finding.risk_score,
                 "confidence_score": finding.confidence_score,
@@ -4063,6 +4083,7 @@ def list_findings_paginated(
         "sort": normalized_sort,
         "scan_id": scan_id,
         "severity_counts": severity_counts,
+        "family_counts": sorted(family_counts.values(), key=lambda x: -x["count"]),
     }
 
 
@@ -6766,15 +6787,24 @@ def get_easm_vulnerabilities(
 
     vulns = query.order_by(Vulnerability.first_detected.desc()).limit(100).all()
 
+    from app.services.vuln_family import classify_family as _cf_v, family_label as _fl_v
+
     result = []
     for vuln in vulns:
         _md = dict(vuln.vulnerability_metadata or {})
+        _famv = _cf_v(
+            title=vuln.title, tool=vuln.tool_source,
+            owasp=str(_md.get("owasp_category") or ""), cve=vuln.cve_id,
+            learning_family=(_md.get("learning_source") or {}).get("vuln_family"),
+        )
         result.append({
             "id": vuln.id,
             "asset_id": vuln.asset_id,
             "asset_name": vuln.asset.domain_or_ip if vuln.asset else "",
             "cve_id": vuln.cve_id,
             "title": vuln.title,
+            "vuln_family": _famv,
+            "vuln_family_label": _fl_v(_famv),
             "severity": vuln.severity,
             "cvss_score": vuln.cvss_score,
             "tool_source": vuln.tool_source,
