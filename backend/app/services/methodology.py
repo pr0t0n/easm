@@ -20,7 +20,8 @@ METHODOLOGY_FAMILIES: list[str] = [
     "file_upload", "deserialization", "subdomain_takeover", "cors",
     "header_injection", "race_condition", "graphql_api", "business_logic",
     "info_exposure", "secrets", "security_headers", "tls_ssl", "vulnerable_dependency",
-    "nosql_injection", "websocket",
+    "nosql_injection", "websocket", "mass_assignment", "bola_bfla",
+    "excessive_data_exposure", "prototype_pollution", "type_juggling",
 ]
 
 

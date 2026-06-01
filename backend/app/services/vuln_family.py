@@ -38,11 +38,26 @@ FAMILY_LABELS: dict[str, str] = {
     "secrets": "Segredos Expostos",
     "misconfiguration": "Misconfiguração",
     "dos": "Negação de Serviço (DoS)",
+    # ── Fase 1: lacunas web/API in-scope (ingestão Anthropic-Cybersecurity-Skills)
+    "nosql_injection": "NoSQL Injection",
+    "websocket": "WebSocket — Auth Bypass / Injeção",
+    "mass_assignment": "Mass Assignment (API)",
+    "bola_bfla": "BOLA / BFLA — Autorização de Objeto/Função (API)",
+    "excessive_data_exposure": "Exposição Excessiva de Dados (API)",
+    "prototype_pollution": "Prototype Pollution (JS)",
+    "type_juggling": "Type Juggling (PHP)",
     "outros": "Outros",
 }
 
 # Regras por SUBSTRING no texto (título + tipo). Ordem importa — primeira vence.
 _KEYWORD_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("nosql injection", "nosql", "mongodb injection", "$where", "$ne"), "nosql_injection"),
+    (("websocket", "ws://", "wss://"), "websocket"),
+    (("mass assignment", "autobind", "over-posting"), "mass_assignment"),
+    (("bola", "bfla", "broken object level", "broken function level", "object level authorization"), "bola_bfla"),
+    (("excessive data exposure", "over-fetch", "excessive data"), "excessive_data_exposure"),
+    (("prototype pollution", "__proto__", "constructor.prototype"), "prototype_pollution"),
+    (("type juggling", "loose comparison", "php type"), "type_juggling"),
     (("cross-site scripting", "xss"), "xss"),
     (("sql injection", "sqli", "sql-injection"), "sqli"),
     (("remote code execution", "command injection", "rce", "code execution", "os command"), "rce"),

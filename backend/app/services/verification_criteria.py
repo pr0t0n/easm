@@ -100,6 +100,42 @@ VERIFICATION: dict[str, dict] = {
         "confirming_tools": ["nuclei-headers", "curl-headers"],
         "method": "Inspeção direta dos headers da resposta.",
     },
+    # ── Fase 1: web/API in-scope ──────────────────────────────────────────────
+    "nosql_injection": {
+        "signal": "Resposta diferencial a operadores NoSQL ([$ne], [$gt], $where) — bypass de auth ou retorno alterado.",
+        "confirming_tools": ["nosql_probe", "nuclei"],
+        "method": "Enviar operadores NoSQL inócuos e comparar resposta; sem extrair conteúdo.",
+    },
+    "websocket": {
+        "signal": "Handshake WS sem validação de Origin / aceita mensagem não-autenticada.",
+        "confirming_tools": ["ws_probe"],
+        "method": "Abrir WS com Origin forjada e checar aceitação — sem ação destrutiva.",
+    },
+    "mass_assignment": {
+        "signal": "API aceita campo extra privilegiado (ex.: role/isAdmin) no payload e reflete a mudança.",
+        "confirming_tools": ["api_probe"],
+        "method": "Enviar campo extra benigno e checar aceitação na resposta; sem persistir privilégio.",
+    },
+    "bola_bfla": {
+        "signal": "Objeto/função de OUTRO usuário acessível com a sessão atual (200 com dado de terceiro).",
+        "confirming_tools": ["bola_probe", "curl"],
+        "method": "Autenticado: trocar ID/escopo e comparar acesso cruzado — somente leitura, sem alterar dado.",
+    },
+    "excessive_data_exposure": {
+        "signal": "Endpoint retorna campos sensíveis além do necessário (PII, hashes, tokens).",
+        "confirming_tools": ["api_probe"],
+        "method": "Inspecionar o corpo da resposta da API por campos sensíveis expostos.",
+    },
+    "prototype_pollution": {
+        "signal": "Reflexão de propriedade poluída (__proto__) altera comportamento/canário.",
+        "confirming_tools": ["js_pollution_analyzer"],
+        "method": "Injetar canário via __proto__ e confirmar poluição — sem impacto.",
+    },
+    "type_juggling": {
+        "signal": "Comparação frouxa (==) aceita tipo inesperado, contornando autenticação.",
+        "confirming_tools": ["api_probe", "curl"],
+        "method": "Enviar tipo alternativo (array/0e...) e checar bypass — sem persistir acesso.",
+    },
 }
 
 # Default para famílias sem critério específico.

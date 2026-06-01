@@ -94,6 +94,16 @@ FAMILY_ATTACK: dict[str, dict] = {
                         "tactic": "TA0001", "d3fend": "D3-IV Input Validation"},
     "websocket": {"technique": "T1190", "technique_name": "Exploit Public-Facing Application (WebSocket)",
                   "tactic": "TA0001", "d3fend": "D3-IV Input Validation"},
+    "mass_assignment": {"technique": "T1190", "technique_name": "Exploit Public-Facing Application (Mass Assignment)",
+                        "tactic": "TA0001", "d3fend": "D3-IV Input Validation"},
+    "bola_bfla": {"technique": "T1190", "technique_name": "API Authorization Bypass (BOLA/BFLA)",
+                  "tactic": "TA0001", "d3fend": "D3-UAC User Account Control"},
+    "excessive_data_exposure": {"technique": "T1213", "technique_name": "Data from Information Repositories",
+                                "tactic": "TA0009", "d3fend": "D3-DENCR Disk Encryption"},
+    "prototype_pollution": {"technique": "T1059.007", "technique_name": "Command and Scripting Interpreter: JavaScript",
+                            "tactic": "TA0002", "d3fend": "D3-IV Input Validation"},
+    "type_juggling": {"technique": "T1078", "technique_name": "Valid Accounts (Type Juggling Auth Bypass)",
+                      "tactic": "TA0001", "d3fend": "D3-MFA Multi-factor Authentication"},
 }
 
 
@@ -125,8 +135,10 @@ FAMILY_CSF: dict[str, str] = {
     "race_condition": "PR.PS-06", "business_logic": "PR.PS-06", "open_redirect": "PR.PS-06",
     "file_upload": "PR.PS-06", "path_traversal": "PR.PS-06", "lfri": "PR.PS-06",
     "nosql_injection": "PR.PS-06", "websocket": "PR.PS-06",
+    "mass_assignment": "PR.PS-06", "prototype_pollution": "PR.PS-06",
     "idor": "PR.AA-05", "broken_access_control": "PR.AA-05", "auth_bypass": "PR.AA-05",
-    "jwt_oauth": "PR.AA-05",
+    "jwt_oauth": "PR.AA-05", "bola_bfla": "PR.AA-05", "type_juggling": "PR.AA-05",
+    "excessive_data_exposure": "PR.DS-01",
     "secrets": "PR.DS-01", "info_exposure": "PR.DS-01",
     "tls_ssl": "PR.DS-02",
     "security_headers": "PR.PS-01", "misconfiguration": "PR.PS-01",
