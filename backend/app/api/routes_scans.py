@@ -4029,6 +4029,7 @@ def list_findings_paginated(
     rows = rows[offset:offset + limit]
 
     from app.services.vuln_family import classify_family, family_label
+    from app.services.framework_mapping import attack_for_family
 
     items = []
     for finding in rows:
@@ -4052,6 +4053,7 @@ def list_findings_paginated(
                 "title": finding.title,
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
+                "mitre_attack": attack_for_family(_fam),
                 "severity": finding.severity,
                 "risk_score": finding.risk_score,
                 "confidence_score": finding.confidence_score,
@@ -6852,6 +6854,7 @@ def get_easm_vulnerabilities(
     vulns = query.order_by(Vulnerability.first_detected.desc()).limit(100).all()
 
     from app.services.vuln_family import classify_family as _cf_v, family_label as _fl_v
+    from app.services.framework_mapping import attack_for_family as _attack_v
 
     result = []
     for vuln in vulns:
@@ -6869,6 +6872,7 @@ def get_easm_vulnerabilities(
             "title": vuln.title,
             "vuln_family": _famv,
             "vuln_family_label": _fl_v(_famv),
+            "mitre_attack": _attack_v(_famv),
             "severity": vuln.severity,
             "cvss_score": vuln.cvss_score,
             "tool_source": vuln.tool_source,

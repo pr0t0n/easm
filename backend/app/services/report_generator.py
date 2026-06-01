@@ -576,18 +576,29 @@ def generate_pentest_report(
         color, label = cfg.get(vs, ("#95a5a6", vs.upper()))
         return f'<span style="background:{color};color:#fff;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">{label}</span>'
 
+    def _family_of(f: Any, det: dict) -> str:
+        from app.services.vuln_family import classify_family
+        return classify_family(
+            title=getattr(f, "title", ""), tool=getattr(f, "tool", ""),
+            owasp=str(det.get("owasp_category") or ""), cve=getattr(f, "cve", None),
+            learning_family=(det.get("learning_source") or {}).get("vuln_family"),
+        )
+
     def _family_badge(f: Any, det: dict) -> str:
-        """Selo da CLASSE/FAMÍLIA — lidera toda vulnerabilidade no relatório."""
+        """Selo da CLASSE + técnica MITRE ATT&CK — lidera toda vulnerabilidade."""
         try:
-            from app.services.vuln_family import classify_family, family_label
-            fam = classify_family(
-                title=getattr(f, "title", ""), tool=getattr(f, "tool", ""),
-                owasp=str(det.get("owasp_category") or ""), cve=getattr(f, "cve", None),
-                learning_family=(det.get("learning_source") or {}).get("vuln_family"),
-            )
-            return (f'<span style="font-size:10px;font-weight:800;text-transform:uppercase;'
-                    f'letter-spacing:.04em;color:#2c3e50;background:#eef2ff;border:1px solid #c7d2fe;'
-                    f'border-radius:4px;padding:2px 7px">{family_label(fam)}</span>')
+            from app.services.vuln_family import family_label
+            from app.services.framework_mapping import attack_for_family
+            fam = _family_of(f, det)
+            badge = (f'<span style="font-size:10px;font-weight:800;text-transform:uppercase;'
+                     f'letter-spacing:.04em;color:#2c3e50;background:#eef2ff;border:1px solid #c7d2fe;'
+                     f'border-radius:4px;padding:2px 7px">{family_label(fam)}</span>')
+            atk = attack_for_family(fam)
+            if atk:
+                badge += (f' <span style="font-size:10px;font-weight:700;color:#7c3aed;'
+                          f'background:#f5f3ff;border:1px solid #ddd6fe;border-radius:4px;padding:2px 7px" '
+                          f'title="{atk["technique_name"]}">🎯 {atk["technique"]} · {atk["tactic_name"]}</span>')
+            return badge
         except Exception:
             return ""
 
@@ -1026,6 +1037,39 @@ def generate_pentest_report(
             f'<tbody>{"".join(_cj_rows)}</tbody></table></div>'
         )
 
+    # ── #3: Progressão de táticas MITRE ATT&CK (linguagem padrão de pentest) ──
+    attack_progression_html = ""
+    try:
+        from app.services.vuln_family import classify_family as _cf_atk
+        from app.services.framework_mapping import tactic_progression
+        _fams_seen = []
+        for _f in vuln_findings:
+            _d = dict(_f.details or {})
+            _fams_seen.append(_cf_atk(
+                title=_f.title, tool=_f.tool, owasp=str(_d.get("owasp_category") or ""),
+                cve=_f.cve, learning_family=(_d.get("learning_source") or {}).get("vuln_family"),
+            ))
+        _prog = tactic_progression(_fams_seen)
+        if _prog:
+            _steps = " <span style='color:#c7d2fe'>→</span> ".join(
+                f'<span style="display:inline-block;background:#f5f3ff;border:1px solid #ddd6fe;'
+                f'border-radius:6px;padding:4px 10px;margin:2px;font-size:11px">'
+                f'<b style="color:#7c3aed">{p["tactic_name"]}</b> '
+                f'<span style="color:#999;font-size:10px">{", ".join(p["techniques"][:4])}</span></span>'
+                for p in _prog
+            )
+            attack_progression_html = (
+                '<div class="section" style="border-top:4px solid #7c3aed">'
+                f'<h2 style="color:#7c3aed">🎯 Progressão MITRE ATT&CK ({len(_prog)} táticas observadas)</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:12px">A cadeia de ataque mapeada às '
+                'táticas ATT&CK Enterprise — da esquerda (entrada) à direita (impacto). Cada classe de '
+                'vulnerabilidade confirmada corresponde a uma técnica validada.</p>'
+                f'<div style="line-height:2.2">{_steps}</div></div>'
+            )
+    except Exception as _atk_err:
+        import logging as _atklog
+        _atklog.getLogger(__name__).debug("attack_progression failed: %s", _atk_err)
+
     # ── Frente D: Narrativa do Ataque embutida ───────────────────────────────
     # A história recon→exploração→objetivos. Gerada no scan (state_data) ou
     # sob demanda aqui. Convertida de Markdown para HTML.
@@ -1135,6 +1179,9 @@ def generate_pentest_report(
 
   <!-- ATTACK NARRATIVE (Frente D) -->
   {attack_narrative_html}
+
+  <!-- MITRE ATT&CK TACTIC PROGRESSION (#3) -->
+  {attack_progression_html}
 
   <!-- KILL CHAIN PHASE COVERAGE -->
   {phase_coverage_html}
