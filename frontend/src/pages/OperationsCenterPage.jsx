@@ -7,6 +7,7 @@ import JobsRegistryPage from "./JobsRegistryPage";
 import PhaseMonitorPage from "./PhaseMonitorPage";
 import WorkerLogsPage from "./WorkerLogsPage";
 import WorkersPage from "./WorkersPage";
+import PlatformHealthPage from "./PlatformHealthPage";
 import client from "../api/client";
 
 function SubTabs({ tabs, activeId, onSelect }) {
@@ -322,6 +323,7 @@ const modules = [
   { id: "runtime", label: "RedTeam Runtime", hint: "fase, comandos, saidas e comunicacao", component: WorkerLogsPage },
   { id: "phases_agents", label: "Fases & Agentes", hint: "phase monitor + fluxo de agentes", component: PhasesAgentsView },
   { id: "intel", label: "Inteligência", hint: "crown jewels, OSINT, LLM chains, narrativa", component: IntelligenceView },
+  { id: "health", label: "Saúde da Plataforma", hint: "status/health dos containers + alertas + último erro", component: PlatformHealthPage },
 ];
 
 // "infra" (Evolução & Infra) removido a pedido — aliases antigos caem no runtime.

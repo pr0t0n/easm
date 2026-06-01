@@ -8437,6 +8437,17 @@ def get_methodology_coverage(
     return compute_methodology_coverage(db, scan_id)
 
 
+@router.get("/platform/health")
+def get_platform_health_endpoint(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Saúde de toda a plataforma (visão Docker): status/health por container,
+    alerta quando algo está fora e último log/erro para validar."""
+    from app.services.platform_health import get_platform_health
+    return get_platform_health(db)
+
+
 @router.get("/guardrails")
 def get_guardrails(
     current_user: User = Depends(get_current_user),

@@ -177,9 +177,15 @@ services:
     ports:
       - "${BACKEND_HOST_PORT:-8001}:8000"
     profiles: ["dev"]
+    # group_add 0 (root group): permite ao processo non-root (uid 1000) LER o
+    # docker.sock (root:root 660) sem virar root — só p/ a visão de saúde.
+    group_add: ["0"]
     volumes:
       - ./backend:/app
       - ./skills:/app/skills:ro
+      # Visão de saúde dos containers (Centro Operacional). Socket read-only:
+      # o backend lê status/health/logs via Docker API. Não inicia/para nada.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   # ─────────────────────────────────────────────────────────────────
   # Cyber Kill Chain workers — all offensive execution happens in kali_runner
