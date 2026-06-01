@@ -99,6 +99,28 @@ _compiled: dict[str, list[re.Pattern]] = {
 _compiled_global = [re.compile(p) for p in _GLOBAL_FORBIDDEN]
 
 
+# ---------------------------------------------------------------------------
+# PROVA SEGURA de RCE: um único comando READ-ONLY, allowlisted, para CONFIRMAR
+# execução sem impacto (whoami/id/dir...). Tudo fora do allowlist é bloqueado.
+# Isto NÃO afrouxa o guardrail destrutivo — apenas permite a prova mínima de
+# pentest (provar que o RCE existe), sob autorização do operador.
+# ---------------------------------------------------------------------------
+SAFE_RCE_PROOF_COMMANDS: dict[str, str] = {
+    "whoami": "linux/windows", "id": "linux", "hostname": "linux/windows",
+    "uname -a": "linux", "pwd": "linux", "dir": "windows", "ver": "windows",
+    "echo easm-poc": "linux/windows",
+}
+_FORBIDDEN_CMD_CHARS = re.compile(r"[;|&`$><\n\r]|\$\(|&&|\|\|")
+
+
+def is_safe_proof_command(cmd: str) -> bool:
+    """True só se ``cmd`` for um comando de prova benigno e sem encadeamento."""
+    c = str(cmd or "").strip()
+    if not c or _FORBIDDEN_CMD_CHARS.search(c):
+        return False
+    return c.lower() in SAFE_RCE_PROOF_COMMANDS
+
+
 def sanitize_tool_args(tool: str, args: list[str] | None) -> tuple[list[str], list[str]]:
     """Remove flags proibidas de ``args`` para ``tool``.
 
@@ -245,12 +267,15 @@ DISABLED_ATTACKS: list[dict] = [
         "category": "Execução",
         "status": "restricted",
         "impact_if_executed": "Controle total do servidor (comprometimento).",
-        "what_we_do": "Confirmamos a POSSIBILIDADE de RCE de forma segura "
-                      "(ex.: callback out-of-band via interactsh).",
-        "what_we_never_do": "Nunca abrimos shell interativo nem executamos "
-                            "comandos de SO no alvo.",
-        "enforcement": "Flags --os-shell, --os-cmd, --os-pwn, --os-smbrelay "
-                       "removidas; sem framework de C2/payload de shell.",
+        "what_we_do": "Confirmamos o RCE com PROVA mínima: um único comando "
+                      "read-only allowlisted (whoami/id/hostname/dir/ver) ou "
+                      "callback out-of-band (interactsh). A saída prova a execução.",
+        "what_we_never_do": "Nunca abrimos shell interativo, encadeamos comandos, "
+                            "escrevemos/baixamos arquivos nem rodamos comando "
+                            "destrutivo. Só o comando de prova benigno.",
+        "enforcement": "Comando de prova restrito ao allowlist (sem ;|&`$ etc.); "
+                       "flags --os-shell/--os-cmd/--os-pwn de tools removidas; "
+                       "sem framework de C2/payload de shell.",
         "tools": ["sqlmap", "interactsh (somente prova)"],
     },
     {
