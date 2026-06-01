@@ -417,17 +417,28 @@ export default function VulnerabilitiesPage() {
                       <td className="mono-id">{isExpanded ? "▼ " : "▶ "}{item.id}</td>
                       <td className="mono-sm" style={{ color: "var(--brand-700)" }}>#{item.scan_job_id || "—"}</td>
                       <td style={{ maxWidth: 260 }}>
-                        {(item.vuln_family_label || item.vuln_family) && (
-                          <div style={{
-                            display: "inline-block", fontSize: 9.5, fontWeight: 800,
-                            textTransform: "uppercase", letterSpacing: "0.04em",
-                            color: "var(--brand-700)", background: "var(--sev-info-bg)",
-                            border: "1px solid var(--sev-info-border)", borderRadius: 4,
-                            padding: "1px 6px", marginBottom: 3,
-                          }}>
-                            {item.vuln_family_label || item.vuln_family}
-                          </div>
-                        )}
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 3 }}>
+                          {(item.vuln_family_label || item.vuln_family) && (
+                            <span style={{
+                              display: "inline-block", fontSize: 9.5, fontWeight: 800,
+                              textTransform: "uppercase", letterSpacing: "0.04em",
+                              color: "var(--brand-700)", background: "var(--sev-info-bg)",
+                              border: "1px solid var(--sev-info-border)", borderRadius: 4,
+                              padding: "1px 6px",
+                            }}>
+                              {item.vuln_family_label || item.vuln_family}
+                            </span>
+                          )}
+                          {item.mitre_attack?.technique && (
+                            <span title={item.mitre_attack.technique_name} style={{
+                              display: "inline-block", fontSize: 9.5, fontWeight: 700,
+                              color: "#7c3aed", background: "#f5f3ff",
+                              border: "1px solid #ddd6fe", borderRadius: 4, padding: "1px 6px",
+                            }}>
+                              🎯 {item.mitre_attack.technique} · {item.mitre_attack.tactic_name}
+                            </span>
+                          )}
+                        </div>
                         <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {sanitizeText(item.title)}
                         </div>
@@ -496,6 +507,22 @@ export default function VulnerabilitiesPage() {
                                 <span style={{ fontSize: 13, fontWeight: 800, color: "var(--brand-700)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", borderRadius: 6, padding: "3px 10px" }}>
                                   {item.vuln_family_label || item.vuln_family}
                                 </span>
+                              </div>
+                            )}
+
+                            {/* ── #4: Critério de verificação (padrão de prova) ── */}
+                            {item.verification_criteria && (
+                              <div style={{ background: "var(--canvas-soft, var(--canvas))", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--line)" }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>
+                                  🔬 Critério de verificação {item.mitre_attack?.technique ? `· ${item.mitre_attack.technique} ${item.mitre_attack.tactic_name}` : ""}
+                                </div>
+                                <div style={{ fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>
+                                  <b>Sinal de confirmação:</b> {item.verification_criteria.signal}<br />
+                                  <b>Como provamos (seguro):</b> {item.verification_criteria.method}
+                                  {Array.isArray(item.verification_criteria.confirming_tools) && (
+                                    <span style={{ color: "var(--ink-muted)" }}> · ferramentas: {item.verification_criteria.confirming_tools.join(", ")}</span>
+                                  )}
+                                </div>
                               </div>
                             )}
 

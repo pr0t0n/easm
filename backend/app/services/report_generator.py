@@ -1037,6 +1037,67 @@ def generate_pentest_report(
             f'<tbody>{"".join(_cj_rows)}</tbody></table></div>'
         )
 
+    # ── #2/#6: Caminhos de ataque rumo às Joias da Coroa (objetivo) ───────────
+    attack_paths_html = ""
+    try:
+        from app.services.attack_path import build_attack_paths
+        _ap = build_attack_paths(db, scan_id, job=job)
+        if _ap["paths"]:
+            _cards = []
+            for p in _ap["paths"][:8]:
+                _chain = " <span style='color:#c7d2fe'>→</span> ".join(
+                    f'<span style="display:inline-block;background:#fff;border:1px solid {_sev_color(s["severity"])};'
+                    f'border-radius:6px;padding:3px 8px;margin:2px;font-size:10.5px">'
+                    f'<b style="color:#7c3aed">{s["tactic_name"]}</b>: {s["family_label"]}'
+                    f'{" ✅" if s["confirmed"] else ""}</span>'
+                    for s in p["steps"][:8]
+                ) or '<span style="color:#999;font-size:11px">sem passos mapeados</span>'
+                _flag = ('<span style="background:#c0392b;color:#fff;padding:1px 8px;border-radius:10px;'
+                         'font-size:10px;font-weight:700">OBJETIVO ALCANÇÁVEL</span>'
+                         if p["objective_reachable"] else
+                         '<span style="background:#7f8c8d;color:#fff;padding:1px 8px;border-radius:10px;'
+                         'font-size:10px">parcial</span>')
+                _cards.append(
+                    f'<div style="background:#faf9ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px;margin-bottom:10px">'
+                    f'<div style="margin-bottom:6px"><b style="font-size:13px;color:#2c3e50">⭐ {p["objective"]}</b> '
+                    f'<span style="font-size:11px;color:#8e44ad">{p["label"]}</span> &nbsp; {_flag}</div>'
+                    f'<div style="line-height:2">{_chain}</div></div>'
+                )
+            attack_paths_html = (
+                '<div class="section" style="border-top:4px solid #7c3aed">'
+                f'<h2 style="color:#7c3aed">🗺 Caminhos de Ataque rumo ao Objetivo '
+                f'({_ap["objectives_reachable"]}/{_ap["paths_with_findings"]} joias alcançáveis)</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:12px">Sequência de passos por joia da coroa, '
+                'ordenada pelas táticas MITRE ATT&CK (entrada → escalada → impacto). ✅ = passo confirmado por '
+                'validação ativa. Isto é um pentest: caminho rumo a um objetivo, não uma lista solta.</p>'
+                f'{"".join(_cards)}</div>'
+            )
+    except Exception as _ap_err:
+        import logging as _aplog
+        _aplog.getLogger(__name__).debug("attack_paths failed: %s", _ap_err)
+
+    # ── #5: Scorecard de cobertura de metodologia ────────────────────────────
+    methodology_html = ""
+    try:
+        from app.services.methodology import compute_methodology_coverage
+        _cov = compute_methodology_coverage(db, scan_id)
+        _cov_color = "#27ae60" if _cov["coverage_pct"] >= 70 else ("#f39c12" if _cov["coverage_pct"] >= 40 else "#c0392b")
+        _untested = ", ".join(u["label"] for u in _cov["untested"][:14]) or "—"
+        methodology_html = (
+            '<div class="section" style="border-top:4px solid #16a085">'
+            f'<h2 style="color:#16a085">📋 Cobertura de Metodologia — {_cov["coverage_pct"]}%</h2>'
+            '<p style="font-size:12px;color:#666;margin-bottom:10px">'
+            f'Classes de vulnerabilidade exercitadas: <b style="color:{_cov_color}">{_cov["tested_count"]}/{_cov["total_families"]}</b> '
+            f'({_cov["produced_count"]} com achados). Transparência de pentest: o que foi testado e o que não foi.</p>'
+            '<div style="background:#eee;border-radius:6px;height:14px;overflow:hidden;margin-bottom:10px">'
+            f'<div style="width:{_cov["coverage_pct"]}%;height:100%;background:{_cov_color}"></div></div>'
+            f'<p style="font-size:11px;color:#888"><b>Não testado neste scan:</b> {_untested}</p>'
+            '</div>'
+        )
+    except Exception as _cov_err:
+        import logging as _covlog
+        _covlog.getLogger(__name__).debug("methodology_coverage failed: %s", _cov_err)
+
     # ── #3: Progressão de táticas MITRE ATT&CK (linguagem padrão de pentest) ──
     attack_progression_html = ""
     try:
@@ -1182,6 +1243,12 @@ def generate_pentest_report(
 
   <!-- MITRE ATT&CK TACTIC PROGRESSION (#3) -->
   {attack_progression_html}
+
+  <!-- ATTACK PATHS TO OBJECTIVE (#2/#6) -->
+  {attack_paths_html}
+
+  <!-- METHODOLOGY COVERAGE SCORECARD (#5) -->
+  {methodology_html}
 
   <!-- KILL CHAIN PHASE COVERAGE -->
   {phase_coverage_html}

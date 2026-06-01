@@ -4030,6 +4030,7 @@ def list_findings_paginated(
 
     from app.services.vuln_family import classify_family, family_label
     from app.services.framework_mapping import attack_for_family
+    from app.services.verification_criteria import verification_for
 
     items = []
     for finding in rows:
@@ -4054,6 +4055,7 @@ def list_findings_paginated(
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
                 "mitre_attack": attack_for_family(_fam),
+                "verification_criteria": verification_for(_fam),
                 "severity": finding.severity,
                 "risk_score": finding.risk_score,
                 "confidence_score": finding.confidence_score,
@@ -8388,6 +8390,31 @@ def get_verification_stats(
             counts["none"] += int(cnt)
         total += int(cnt)
     return {"counts": counts, "total": total}
+
+
+@router.get("/scans/{scan_id}/attack-paths")
+def get_attack_paths(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Caminhos de ataque rumo às joias da coroa (objetivo), ordenados por tática ATT&CK."""
+    from app.services.attack_path import build_attack_paths
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return build_attack_paths(db, scan_id, job=job)
+
+
+@router.get("/scans/{scan_id}/methodology-coverage")
+def get_methodology_coverage(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Scorecard de cobertura de metodologia (classes testadas vs catálogo)."""
+    from app.services.methodology import compute_methodology_coverage
+    return compute_methodology_coverage(db, scan_id)
 
 
 @router.get("/guardrails")
