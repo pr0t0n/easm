@@ -10,6 +10,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: scriptkiddo_postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-scriptkiddo}"
       POSTGRES_USER: "${POSTGRES_USER:-scriptkiddo}"
@@ -30,6 +31,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: scriptkiddo_redis
+    restart: unless-stopped
     # Tier 1-F: maxmemory cap prevents OOM crash when tasks/results accumulate.
     # allkeys-lru evicts least-recently-used keys first — safe for Celery broker
     # because visibility_timeout redelivers unacknowledged tasks automatically.
@@ -43,6 +45,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: scriptkiddo_ollama
+    restart: unless-stopped
     ports:
       - "${OLLAMA_HOST_PORT:-11434}:11434"
     profiles: ["dev", "prod"]
@@ -68,6 +71,7 @@ services:
       context: ./mcp-server
       dockerfile: Dockerfile
     container_name: scriptkiddo_mcp_server
+    restart: unless-stopped
     profiles: ["dev", "prod"]
     environment:
       MCP_PORT: "${MCP_PORT:-3000}"
@@ -97,6 +101,7 @@ services:
       context: ./kali-runner
       dockerfile: Dockerfile
     container_name: scriptkiddo_kali_runner
+    restart: unless-stopped
     profiles: ["dev", "prod"]
     environment:
       KALI_WORKSPACE: /workspace
@@ -144,6 +149,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: scriptkiddo_backend
+    restart: unless-stopped
     command: >
       sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     env_file: *optional_env_file
@@ -194,6 +200,7 @@ services:
   worker_scope:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_scope
+    restart: unless-stopped
     # scan.unit: main scan tasks (run_scan_job_unit + continuations).
     # scan.scheduled: scheduled scan tasks.
     # scan.parallel is intentionally NOT here — it goes to worker_parallel.
@@ -208,6 +215,7 @@ services:
   worker_parallel:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_parallel
+    restart: unless-stopped
     # Dedicated worker for per-target subtasks (run_scan_target_subset).
     # Isolated from scan.unit so subtasks never compete with the main scan task.
     # --pool=threads: safe; each thread has its own _AUTH_LOCAL via threading.local().
@@ -226,6 +234,7 @@ services:
   worker_recon:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_recon
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.reconnaissance,worker.scheduled.reconnaissance,worker.unit.reconhecimento,worker.scheduled.reconhecimento -n recon@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -236,6 +245,7 @@ services:
   worker_weaponization:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_weaponization
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.weaponization,worker.scheduled.weaponization,worker.unit.osint,worker.scheduled.osint -n weaponization@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -246,6 +256,7 @@ services:
   worker_delivery:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_delivery
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.delivery,worker.scheduled.delivery -n delivery@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -256,6 +267,7 @@ services:
   worker_exploitation:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_exploitation
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.exploitation,worker.scheduled.exploitation,worker.unit.analise_vulnerabilidade,worker.scheduled.analise_vulnerabilidade -n exploitation@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -266,6 +278,7 @@ services:
   worker_installation:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_installation
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.installation,worker.scheduled.installation,worker.unit.exploit,worker.scheduled.exploit -n installation@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -276,6 +289,7 @@ services:
   worker_c2:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_c2
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.command_control,worker.scheduled.command_control,worker.unit.api,worker.scheduled.api -n c2@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -286,6 +300,7 @@ services:
   worker_actions:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_actions
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.actions_on_objectives,worker.scheduled.actions_on_objectives,worker.unit.code,worker.scheduled.code -n actions@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -296,6 +311,7 @@ services:
   worker_reporting:
     build: { context: ./backend, dockerfile: Dockerfile }
     container_name: scriptkiddo_worker_reporting
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.reporting,worker.scheduled.reporting -n reporting@%h --pool=threads --concurrency=16
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
@@ -308,6 +324,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: scriptkiddo_celery_beat
+    restart: unless-stopped
     command: celery -A app.workers.celery_app.celery beat -l info
     env_file: *optional_env_file
     environment:
@@ -338,6 +355,9 @@ services:
     image: ghcr.io/zaproxy/zaproxy:stable
     container_name: scriptkiddo_zap
     profiles: ["dev", "prod"]
+    # Auto-recuperação: se o ZAP cair (ex.: OOM ao spiderar site JS-pesado),
+    # o Docker reinicia sozinho. Antes ficava morto (sem restart policy).
+    restart: unless-stopped
     command: >
       zap.sh -daemon
         -host 0.0.0.0
@@ -363,7 +383,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
+          memory: 4g
         reservations:
           memory: 512m
 
@@ -379,6 +399,7 @@ services:
         NODE_IMAGE: "${FRONTEND_NODE_IMAGE:-node:20-alpine}"
         INSTALL_DEPS: "${FRONTEND_INSTALL_DEPS:-true}"
     container_name: scriptkiddo_frontend
+    restart: unless-stopped
     environment:
       VITE_API_URL: "${VITE_API_URL:-}"
       TZ: America/Sao_Paulo
