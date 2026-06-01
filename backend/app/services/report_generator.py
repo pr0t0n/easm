@@ -602,6 +602,19 @@ def generate_pentest_report(
         except Exception:
             return ""
 
+    def _d3fend_html(f: Any, det: dict) -> str:
+        """Contramedida D3FEND correlacionada à técnica ATT&CK (ofensa→defesa)."""
+        try:
+            from app.services.framework_mapping import attack_for_family
+            atk = attack_for_family(_family_of(f, det))
+            if atk and atk.get("d3fend"):
+                csf = f' · NIST CSF {atk["nist_csf"]}' if atk.get("nist_csf") else ""
+                return (f'<p style="font-size:11px;margin-top:6px;color:#2980b9">'
+                        f'🛡 Contramedida D3FEND: <b>{atk["d3fend"]}</b>{csf}</p>')
+        except Exception:
+            pass
+        return ""
+
     def _confirmed_finding_block(f: Any, idx: int) -> str:
         det = dict(f.details or {})
         evidence = str(det.get("evidence") or "")[:500]
@@ -695,6 +708,7 @@ def generate_pentest_report(
           <div style="background:#fff5f5;padding:10px;border-radius:6px;margin-top:8px">
             <strong style="font-size:12px;color:#c0392b">🛡 Blue Team — Ação Obrigatória:</strong>
             <p style="font-size:12px;margin-top:4px">{remediation}</p>
+            {_d3fend_html(f, det)}
           </div>
         </div>"""
 
@@ -1037,6 +1051,45 @@ def generate_pentest_report(
             f'<tbody>{"".join(_cj_rows)}</tbody></table></div>'
         )
 
+    # ── ATLAS / NIST AI RMF: ameaças de IA/LLM (se houve teste de LLM) ────────
+    ai_threats_html = ""
+    try:
+        from app.services.framework_mapping import atlas_for_llm
+        _llm = dict(state_data.get("llm_risk_report") or {})
+        _llm_findings = _llm.get("findings") or []
+        if _llm.get("enabled") and _llm_findings:
+            _by_strat: dict[str, dict] = {}
+            for r in _llm_findings:
+                strat = str(r.get("strategy") or "")
+                atk = atlas_for_llm(strat)
+                if not atk:
+                    continue
+                slot = _by_strat.setdefault(atk["atlas"], {**atk, "count": 0, "hits": 0})
+                slot["count"] += 1
+                if str(r.get("severity") or "").lower() in ("critical", "high", "medium") or r.get("vulnerable"):
+                    slot["hits"] += 1
+            if _by_strat:
+                _rows = "".join(
+                    f'<tr><td style="font-size:11px;font-weight:700;color:#b8860b">{a["atlas"]}</td>'
+                    f'<td style="font-size:12px">{a["atlas_name"]}</td>'
+                    f'<td style="font-size:11px;color:#666">{a["genai_risk"]}</td>'
+                    f'<td style="font-size:11px;color:#666">{a["nist_ai_rmf"]}</td>'
+                    f'<td style="text-align:center;font-size:11px">{a["hits"]}/{a["count"]}</td></tr>'
+                    for a in _by_strat.values()
+                )
+                ai_threats_html = (
+                    '<div class="section" style="border-top:4px solid #b8860b">'
+                    f'<h2 style="color:#b8860b">🤖 Ameaças de IA — MITRE ATLAS ({len(_by_strat)} técnicas testadas)</h2>'
+                    '<p style="font-size:12px;color:#666;margin-bottom:10px">Avaliação do endpoint de IA/LLM mapeada '
+                    'ao MITRE ATLAS (adversarial AI) e ao NIST AI RMF. hits/total = probes com resposta vulnerável.</p>'
+                    '<table class="findings-table"><thead><tr><th>ATLAS</th><th>Técnica</th>'
+                    '<th>GenAI Risk</th><th>NIST AI RMF</th><th style="text-align:center">Hits</th></tr></thead>'
+                    f'<tbody>{_rows}</tbody></table></div>'
+                )
+    except Exception as _ai_err:
+        import logging as _ailog
+        _ailog.getLogger(__name__).debug("ai_threats failed: %s", _ai_err)
+
     # ── #2/#6: Caminhos de ataque rumo às Joias da Coroa (objetivo) ───────────
     attack_paths_html = ""
     try:
@@ -1097,6 +1150,40 @@ def generate_pentest_report(
     except Exception as _cov_err:
         import logging as _covlog
         _covlog.getLogger(__name__).debug("methodology_coverage failed: %s", _cov_err)
+
+    # ── NIST CSF 2.0 rollup (compliance) ──────────────────────────────────────
+    nist_csf_html = ""
+    try:
+        from app.services.vuln_family import classify_family as _cf_csf
+        from app.services.framework_mapping import csf_for_family
+        _csf_count: dict[str, dict] = {}
+        for _f in vuln_findings:
+            _d = dict(_f.details or {})
+            _fam = _cf_csf(title=_f.title, tool=_f.tool, owasp=str(_d.get("owasp_category") or ""),
+                           cve=_f.cve, learning_family=(_d.get("learning_source") or {}).get("vuln_family"))
+            _csf = csf_for_family(_fam)
+            if _csf:
+                slot = _csf_count.setdefault(_csf["subcategory"], {"name": _csf["name"], "count": 0})
+                slot["count"] += 1
+        if _csf_count:
+            _csf_rows = "".join(
+                f'<tr><td style="font-size:11px;font-weight:700;color:#2980b9">{sub}</td>'
+                f'<td style="font-size:12px">{v["name"]}</td>'
+                f'<td style="text-align:center;font-size:12px;font-weight:700">{v["count"]}</td></tr>'
+                for sub, v in sorted(_csf_count.items(), key=lambda x: -x[1]["count"])
+            )
+            nist_csf_html = (
+                '<div class="section" style="border-top:4px solid #2980b9">'
+                f'<h2 style="color:#2980b9">📑 Alinhamento NIST CSF 2.0 ({len(_csf_count)} subcategorias)</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:10px">Achados mapeados às subcategorias do '
+                'NIST Cybersecurity Framework 2.0 — para avaliação de maturidade e compliance regulatório.</p>'
+                '<table class="findings-table"><thead><tr><th>Subcategoria</th><th>Função · Categoria</th>'
+                '<th style="text-align:center">Achados</th></tr></thead>'
+                f'<tbody>{_csf_rows}</tbody></table></div>'
+            )
+    except Exception as _csf_err:
+        import logging as _csflog
+        _csflog.getLogger(__name__).debug("nist_csf failed: %s", _csf_err)
 
     # ── #3: Progressão de táticas MITRE ATT&CK (linguagem padrão de pentest) ──
     attack_progression_html = ""
@@ -1244,11 +1331,17 @@ def generate_pentest_report(
   <!-- MITRE ATT&CK TACTIC PROGRESSION (#3) -->
   {attack_progression_html}
 
+  <!-- AI/LLM THREATS — MITRE ATLAS / NIST AI RMF -->
+  {ai_threats_html}
+
   <!-- ATTACK PATHS TO OBJECTIVE (#2/#6) -->
   {attack_paths_html}
 
   <!-- METHODOLOGY COVERAGE SCORECARD (#5) -->
   {methodology_html}
+
+  <!-- NIST CSF 2.0 COMPLIANCE ROLLUP -->
+  {nist_csf_html}
 
   <!-- KILL CHAIN PHASE COVERAGE -->
   {phase_coverage_html}

@@ -97,17 +97,100 @@ FAMILY_ATTACK: dict[str, dict] = {
 }
 
 
+# ── MITRE ATLAS + NIST AI RMF (ameaças de IA/LLM) ────────────────────────────
+# Mapeia as estratégias do llm_risk_service para técnicas ATLAS v5.4 + AI RMF.
+ATLAS_FOR_STRATEGY: dict[str, dict] = {
+    "prompt-injection": {"atlas": "AML.T0051", "atlas_name": "LLM Prompt Injection",
+                         "nist_ai_rmf": "MEASURE-2.7", "genai_risk": "Prompt Injection"},
+    "jailbreak": {"atlas": "AML.T0054", "atlas_name": "LLM Jailbreak",
+                  "nist_ai_rmf": "MEASURE-2.6", "genai_risk": "Obscene/harmful content"},
+    "jailbreak:composite": {"atlas": "AML.T0054", "atlas_name": "LLM Jailbreak (composite)",
+                            "nist_ai_rmf": "MEASURE-2.6", "genai_risk": "Obscene/harmful content"},
+    "exfiltration": {"atlas": "AML.T0057", "atlas_name": "LLM Data Leakage",
+                     "nist_ai_rmf": "MANAGE-2.2", "genai_risk": "Data Privacy / Info Disclosure"},
+}
+
+
+def atlas_for_llm(strategy: str | None) -> dict | None:
+    """Mapeamento ATLAS/AI RMF de uma estratégia de teste de LLM."""
+    s = str(strategy or "").strip().lower()
+    return ATLAS_FOR_STRATEGY.get(s) or ATLAS_FOR_STRATEGY.get(s.split(":")[0])
+
+
+# ── NIST CSF 2.0 por família (compliance: "uma vuln, um checkbox") ────────────
+FAMILY_CSF: dict[str, str] = {
+    "xss": "PR.PS-06", "sqli": "PR.PS-06", "rce": "PR.PS-06", "command_injection": "PR.PS-06",
+    "ssrf": "PR.PS-06", "xxe": "PR.PS-06", "ssti": "PR.PS-06", "deserialization": "PR.PS-06",
+    "csrf": "PR.PS-06", "cors": "PR.PS-06", "header_injection": "PR.PS-06", "graphql_api": "PR.PS-06",
+    "race_condition": "PR.PS-06", "business_logic": "PR.PS-06", "open_redirect": "PR.PS-06",
+    "file_upload": "PR.PS-06", "path_traversal": "PR.PS-06", "lfri": "PR.PS-06",
+    "nosql_injection": "PR.PS-06", "websocket": "PR.PS-06",
+    "idor": "PR.AA-05", "broken_access_control": "PR.AA-05", "auth_bypass": "PR.AA-05",
+    "jwt_oauth": "PR.AA-05",
+    "secrets": "PR.DS-01", "info_exposure": "PR.DS-01",
+    "tls_ssl": "PR.DS-02",
+    "security_headers": "PR.PS-01", "misconfiguration": "PR.PS-01",
+    "vulnerable_dependency": "ID.RA-01", "subdomain_takeover": "ID.AM-02",
+    "dos": "PR.IR-04",
+}
+_CSF_NAME: dict[str, str] = {
+    "PR.PS-06": "Protect · Secure Software Development",
+    "PR.PS-01": "Protect · Configuration Management",
+    "PR.AA-05": "Protect · Access Permissions & Least Privilege",
+    "PR.DS-01": "Protect · Data-at-Rest Protection",
+    "PR.DS-02": "Protect · Data-in-Transit Protection",
+    "ID.RA-01": "Identify · Vulnerabilities Identified",
+    "ID.AM-02": "Identify · Asset Inventory",
+    "PR.IR-04": "Protect · Resource Capacity (Availability)",
+}
+
+
+def csf_for_family(family_id: str | None) -> dict | None:
+    sub = FAMILY_CSF.get(str(family_id or ""))
+    if not sub:
+        return None
+    return {"subcategory": sub, "name": _CSF_NAME.get(sub, sub), "function": sub.split(".")[0]}
+
+
+# ── Export de camada MITRE ATT&CK Navigator ──────────────────────────────────
+def build_navigator_layer(scan_name: str, family_ids: list[str]) -> dict:
+    """Gera uma layer oficial do ATT&CK Navigator a partir das técnicas observadas."""
+    from collections import Counter
+    techs = Counter()
+    for fam in family_ids:
+        m = FAMILY_ATTACK.get(str(fam or ""))
+        if m:
+            techs[m["technique"]] += 1
+    max_c = max(techs.values(), default=1)
+    techniques = [
+        {"techniqueID": tid, "score": cnt, "color": "",
+         "comment": f"{cnt} achado(s)", "enabled": True}
+        for tid, cnt in techs.items()
+    ]
+    return {
+        "name": f"EASM Pentest — {scan_name}",
+        "versions": {"attack": "16", "navigator": "5.1.0", "layer": "4.5"},
+        "domain": "enterprise-attack",
+        "description": "Técnicas MITRE ATT&CK observadas no pentest automatizado (EASM).",
+        "gradient": {"colors": ["#ffe0e0", "#ff6b6b", "#c0392b"], "minValue": 0, "maxValue": max_c},
+        "techniques": techniques,
+    }
+
+
 def attack_for_family(family_id: str | None) -> dict | None:
     """Retorna o mapeamento ATT&CK de uma família, com nomes de tática resolvidos."""
     m = FAMILY_ATTACK.get(str(family_id or ""))
     if not m:
         return None
+    csf = csf_for_family(family_id)
     return {
         "technique": m["technique"],
         "technique_name": m["technique_name"],
         "tactic": m["tactic"],
         "tactic_name": _TACTIC_NAME.get(m["tactic"], m["tactic"]),
         "d3fend": m.get("d3fend"),
+        "nist_csf": csf["subcategory"] if csf else None,
+        "nist_csf_name": csf["name"] if csf else None,
     }
 
 

@@ -8392,6 +8392,26 @@ def get_verification_stats(
     return {"counts": counts, "total": total}
 
 
+@router.get("/scans/{scan_id}/attack-navigator")
+def get_attack_navigator(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Camada oficial do MITRE ATT&CK Navigator com as técnicas observadas no scan."""
+    from app.services.vuln_family import classify_family as _cf_nav
+    from app.services.framework_mapping import build_navigator_layer
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    fams = []
+    for f in db.query(Finding).filter(Finding.scan_job_id == scan_id).all():
+        d = dict(f.details or {})
+        fams.append(_cf_nav(title=f.title, tool=f.tool, owasp=str(d.get("owasp_category") or ""),
+                            cve=f.cve, learning_family=(d.get("learning_source") or {}).get("vuln_family")))
+    return build_navigator_layer(str(job.target_query or f"scan-{scan_id}"), fams)
+
+
 @router.get("/scans/{scan_id}/attack-paths")
 def get_attack_paths(
     scan_id: int,
