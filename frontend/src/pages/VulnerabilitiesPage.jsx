@@ -500,6 +500,24 @@ export default function VulnerabilitiesPage() {
                         <td colSpan={10} style={{ background: "var(--canvas)", padding: "20px 24px" }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 18, fontSize: 13 }}>
 
+                            {/* ── Contexto de rede canônico (host↔IP↔porta↔origem) ── */}
+                            {item.network && (item.network.resolved_ip || item.network.host || (item.network.ports||[]).length > 0) && (
+                              <div style={{ background: "var(--canvas-soft, var(--canvas))", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--line)" }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink)", marginBottom: 5 }}>🌐 Contexto de rede</div>
+                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 6, fontSize: 11.5, color: "var(--ink-soft)", fontFamily: "var(--font-mono)" }}>
+                                  {item.network.host && <div><span style={{ color: "var(--ink-muted)" }}>host:</span> {item.network.host}</div>}
+                                  {item.network.resolved_ip && <div><span style={{ color: "var(--ink-muted)" }}>IP:</span> <b>{item.network.resolved_ip}</b>{item.network.ip_owner ? ` (${item.network.ip_owner})` : ""}</div>}
+                                  {(item.network.ports || []).length > 0 && <div><span style={{ color: "var(--ink-muted)" }}>portas:</span> {item.network.ports.join(", ")}</div>}
+                                  {item.network.url && <div style={{ gridColumn: "1 / -1", wordBreak: "break-all" }}><span style={{ color: "var(--ink-muted)" }}>url:</span> {item.network.url}</div>}
+                                </div>
+                                {Array.isArray(item.network.source_findings) && item.network.source_findings.length > 0 && (
+                                  <div style={{ marginTop: 5, fontSize: 10.5, color: "var(--ink-muted)" }}>
+                                    ↳ correlação derivada dos findings: {item.network.source_findings.map((s) => `#${s.finding_id}`).join(", ")}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
                             {/* ── Classe / família da vulnerabilidade (lidera) ── */}
                             {(item.vuln_family_label || item.vuln_family) && (
                               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>

@@ -1955,6 +1955,73 @@ def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
     }
 
 
+_IP_RE = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
+
+
+def _finding_network_context(finding: Finding, loc: dict) -> dict:
+    """Contexto de rede CANÔNICO que toda vulnerabilidade carrega (formato único).
+
+    Resolve, de forma consistente entre TODOS os tipos de finding: o host real,
+    o IP resolvido + dono, as portas, e a cadeia de origem (para correlações).
+    Corrige o trânsito de informação — antes cada tool enfiava campos diferentes
+    no details e a página perdia o contexto (host↔IP↔porta).
+    """
+    d = finding.details if isinstance(finding.details, dict) else {}
+    nested = d.get("details") if isinstance(d.get("details"), dict) else {}
+
+    def pick(*keys):
+        for src in (d, nested):
+            for k in keys:
+                v = src.get(k)
+                if v not in (None, "", [], {}):
+                    return v
+        return None
+
+    # IP resolvido (vários nomes) ou extraído da evidência.
+    ip = pick("resolved_ip", "bypass_ip", "ip", "host_ip", "ip_address", "origin_ip")
+    if not ip:
+        ev = str(pick("evidence", "description") or "")
+        m = _IP_RE.search(ev)
+        ip = m.group(1) if m else None
+
+    # dono do IP / ASN (shodan costuma colocar em evidence "IP x (Org/Org)")
+    ip_owner = pick("ip_owner", "asn_org", "org", "isp")
+    if not ip_owner:
+        ev = str(pick("evidence") or "")
+        mo = re.search(r"\d{1,3}(?:\.\d{1,3}){3}\s*\(([^)]+)\)", ev)
+        if mo:
+            ip_owner = mo.group(1).split("/")[0].strip()
+
+    # portas
+    ports = pick("all_open_ports", "open_ports", "sensitive_ports", "ports")
+    if isinstance(ports, (int, str)):
+        ports = [ports]
+    if isinstance(ports, list):
+        ports = [str(p) for p in ports][:20]
+    else:
+        ports = []
+
+    # cadeia de origem (correlações apontam para os findings-fonte)
+    source = []
+    for k in ("shodan_finding_id", "waf_bypass_finding_id", "verifies_finding_id",
+              "source_finding_id", "chain_finding_id"):
+        v = d.get(k)
+        if v:
+            source.append({"field": k, "finding_id": v})
+    reports = d.get("matched_reports") or (d.get("learning_source") or {}).get("matched_reports") or []
+
+    return {
+        "host": loc.get("target"),
+        "resolved_ip": str(ip) if ip else None,
+        "ip_owner": str(ip_owner) if ip_owner else None,
+        "ports": ports,
+        "url": loc.get("url"),
+        "path": loc.get("path"),
+        "source_findings": source or None,
+        "hackerone_reports": [str(r) for r in reports][:6] or None,
+    }
+
+
 def _infer_asset_type(name: str) -> str:
     value = str(name or "").strip().lower()
     if not value:
@@ -4073,6 +4140,7 @@ def list_findings_paginated(
                 "target": loc.get("target"),
                 "subdomain": loc.get("subdomain"),
                 "path": loc.get("path"),
+                "network": _finding_network_context(finding, loc),
                 "url": loc.get("url"),
                 "tool": finding.tool,
                 "recommendation": finding.recommendation,
