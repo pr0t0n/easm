@@ -8392,6 +8392,20 @@ def get_verification_stats(
     return {"counts": counts, "total": total}
 
 
+@router.post("/scans/{scan_id}/verify-bola")
+def verify_bola_endpoint(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Roda o teste autenticado de BOLA/BFLA (acesso cruzado de objeto/função)."""
+    from app.services.bola_probe import run_bola_for_scan
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return run_bola_for_scan(db, job)
+
+
 @router.get("/scans/{scan_id}/attack-navigator")
 def get_attack_navigator(
     scan_id: int,

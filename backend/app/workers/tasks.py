@@ -2553,6 +2553,22 @@ def poll_scan_work_item(item_id: int):
                 } and item.target and item.target != "__batch__":
                     from app.services.endpoint_discovery import expand_attack_surface
                     expand_attack_surface(db, job.id, item.target, item.tool_name, _full_result, job)
+
+                # ── Fase 2: BOLA/BFLA autenticado (API #1/#5) ─────────────────
+                # Só roda se o scan é AUTENTICADO (auth_config) e após a API/IDOR
+                # ter sido mapeada. Uma vez por scan (flag no state).
+                if item.phase_id in ("P16", "P19", "P09") and item.status == "completed":
+                    _st_b = dict(job.state_data or {})
+                    if _st_b.get("auth_config") and not _st_b.get("bola_done"):
+                        from app.services.bola_probe import run_bola_for_scan
+                        _br = run_bola_for_scan(db, job)
+                        _st_b = dict(job.state_data or {})
+                        _st_b["bola_done"] = True
+                        job.state_data = _st_b
+                        if _br.get("findings_created"):
+                            import logging as _blog
+                            _blog.getLogger(__name__).info(
+                                "bola_probe scan=%d confirmados=%d", job.id, _br["findings_created"])
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
