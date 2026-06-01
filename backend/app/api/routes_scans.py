@@ -8392,6 +8392,20 @@ def get_verification_stats(
     return {"counts": counts, "total": total}
 
 
+@router.post("/scans/{scan_id}/verify-nosql")
+def verify_nosql_endpoint(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Roda o teste de NoSQL injection (injeção de operador read-only)."""
+    from app.services.nosql_probe import run_nosql_for_scan
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return run_nosql_for_scan(db, job)
+
+
 @router.post("/scans/{scan_id}/verify-bola")
 def verify_bola_endpoint(
     scan_id: int,

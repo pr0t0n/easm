@@ -2554,6 +2554,21 @@ def poll_scan_work_item(item_id: int):
                     from app.services.endpoint_discovery import expand_attack_surface
                     expand_attack_surface(db, job.id, item.target, item.tool_name, _full_result, job)
 
+                # ── Fase 2: NoSQL injection (testável sem auth) ───────────────
+                # Após descoberta de endpoints com parâmetro. Uma vez por scan.
+                if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
+                    _st_n = dict(job.state_data or {})
+                    if not _st_n.get("nosql_done") and (_st_n.get("discovered_endpoints")):
+                        from app.services.nosql_probe import run_nosql_for_scan
+                        _nr = run_nosql_for_scan(db, job)
+                        _st_n = dict(job.state_data or {})
+                        _st_n["nosql_done"] = True
+                        job.state_data = _st_n
+                        if _nr.get("findings_created"):
+                            import logging as _nlog
+                            _nlog.getLogger(__name__).info(
+                                "nosql_probe scan=%d confirmados=%d", job.id, _nr["findings_created"])
+
                 # ── Fase 2: BOLA/BFLA autenticado (API #1/#5) ─────────────────
                 # Só roda se o scan é AUTENTICADO (auth_config) e após a API/IDOR
                 # ter sido mapeada. Uma vez por scan (flag no state).
