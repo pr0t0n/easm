@@ -1955,71 +1955,16 @@ def _extract_finding_location(finding: Finding) -> dict[str, str | None]:
     }
 
 
-_IP_RE = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
-
-
 def _finding_network_context(finding: Finding, loc: dict) -> dict:
-    """Contexto de rede CANÔNICO que toda vulnerabilidade carrega (formato único).
-
-    Resolve, de forma consistente entre TODOS os tipos de finding: o host real,
-    o IP resolvido + dono, as portas, e a cadeia de origem (para correlações).
-    Corrige o trânsito de informação — antes cada tool enfiava campos diferentes
-    no details e a página perdia o contexto (host↔IP↔porta).
-    """
+    """Contexto de rede canônico — prefere o bloco PERSISTIDO na criação
+    (details.network); senão recomputa via o builder único (fonte única)."""
     d = finding.details if isinstance(finding.details, dict) else {}
-    nested = d.get("details") if isinstance(d.get("details"), dict) else {}
-
-    def pick(*keys):
-        for src in (d, nested):
-            for k in keys:
-                v = src.get(k)
-                if v not in (None, "", [], {}):
-                    return v
-        return None
-
-    # IP resolvido (vários nomes) ou extraído da evidência.
-    ip = pick("resolved_ip", "bypass_ip", "ip", "host_ip", "ip_address", "origin_ip")
-    if not ip:
-        ev = str(pick("evidence", "description") or "")
-        m = _IP_RE.search(ev)
-        ip = m.group(1) if m else None
-
-    # dono do IP / ASN (shodan costuma colocar em evidence "IP x (Org/Org)")
-    ip_owner = pick("ip_owner", "asn_org", "org", "isp")
-    if not ip_owner:
-        ev = str(pick("evidence") or "")
-        mo = re.search(r"\d{1,3}(?:\.\d{1,3}){3}\s*\(([^)]+)\)", ev)
-        if mo:
-            ip_owner = mo.group(1).split("/")[0].strip()
-
-    # portas
-    ports = pick("all_open_ports", "open_ports", "sensitive_ports", "ports")
-    if isinstance(ports, (int, str)):
-        ports = [ports]
-    if isinstance(ports, list):
-        ports = [str(p) for p in ports][:20]
-    else:
-        ports = []
-
-    # cadeia de origem (correlações apontam para os findings-fonte)
-    source = []
-    for k in ("shodan_finding_id", "waf_bypass_finding_id", "verifies_finding_id",
-              "source_finding_id", "chain_finding_id"):
-        v = d.get(k)
-        if v:
-            source.append({"field": k, "finding_id": v})
-    reports = d.get("matched_reports") or (d.get("learning_source") or {}).get("matched_reports") or []
-
-    return {
-        "host": loc.get("target"),
-        "resolved_ip": str(ip) if ip else None,
-        "ip_owner": str(ip_owner) if ip_owner else None,
-        "ports": ports,
-        "url": loc.get("url"),
-        "path": loc.get("path"),
-        "source_findings": source or None,
-        "hackerone_reports": [str(r) for r in reports][:6] or None,
-    }
+    persisted = d.get("network")
+    if isinstance(persisted, dict) and persisted.get("host"):
+        return persisted
+    from app.services.network_context import build_network_context
+    return build_network_context(d, host=loc.get("target"), url=loc.get("url"),
+                                 path=loc.get("path"), resolve_dns=False)
 
 
 def _infer_asset_type(name: str) -> str:
@@ -6925,6 +6870,7 @@ def get_easm_vulnerabilities(
 
     from app.services.vuln_family import classify_family as _cf_v, family_label as _fl_v
     from app.services.framework_mapping import attack_for_family as _attack_v
+    from app.services.network_context import build_network_context as _bnc_v
 
     result = []
     for vuln in vulns:
@@ -6943,6 +6889,8 @@ def get_easm_vulnerabilities(
             "vuln_family": _famv,
             "vuln_family_label": _fl_v(_famv),
             "mitre_attack": _attack_v(_famv),
+            "network": (_md.get("network") if isinstance(_md.get("network"), dict)
+                        else _bnc_v(_md, host=(vuln.asset.domain_or_ip if vuln.asset else None), resolve_dns=False)),
             "severity": vuln.severity,
             "cvss_score": vuln.cvss_score,
             "tool_source": vuln.tool_source,

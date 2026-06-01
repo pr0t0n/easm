@@ -2254,6 +2254,27 @@ def persist_finding_dicts(
         except Exception:
             pass
 
+        # ── FONTE ÚNICA (integridade do fluxo): contexto de rede canônico +
+        # OWASP por família, gravados NA CRIAÇÃO. Antes cada tool gravava campos
+        # ad-hoc e a info (host↔IP↔porta↔url↔owasp) se perdia/divergia. Agora
+        # TODA finding nasce com o mesmo formato.
+        try:
+            from app.services.network_context import build_network_context, owasp_for_family
+            from app.services.vuln_family import classify_family as _cf_net
+            _cve_net = str(details.get("cve_id") or "").upper()
+            _fam_net = _cf_net(
+                title=title, tool=tool_col, owasp=str(details.get("owasp_category") or ""),
+                cve=_cve_net if _cve_net.startswith("CVE-") else None,
+                learning_family=(details.get("learning_source") or {}).get("vuln_family"),
+            )
+            details["network"] = build_network_context(details, host=domain_col)
+            if not details.get("owasp_category"):
+                _ow = owasp_for_family(_fam_net)
+                if _ow:
+                    details["owasp_category"] = _ow
+        except Exception:
+            pass
+
         # Extract CVE id first (needed for dedup below)
         cve_id: str | None = None
         cve_raw = str(details.get("cve_id") or "").strip().upper()

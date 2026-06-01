@@ -254,10 +254,27 @@ def correlate_waf_shodan(db: Session, scan_id: int) -> int:
             if not sensitive_open:
                 continue
 
-            domain = str(wf.domain or "")
+            # ── ACURÁCIA: o IP pertence ao host onde o Shodan o achou (pode ser
+            # um SUBDOMÍNIO de terceiro, ex.: comunicacao.valid.com/Salesforce),
+            # NÃO necessariamente a origem web do alvo. E porta de E-MAIL (25/465/
+            # 587) NÃO é "bypass de WAF web". Sem isso, viram falsos-positivos.
+            _ip_host = str(getattr(shodan_match, "domain", "") or wf.domain or "")
+            _ip_owner = str(sdet.get("org") or sdet.get("isp") or sdet.get("asn_org") or "")
+            _EMAIL_PORTS = {25, 465, 587, 110, 143, 993, 995}
+            _SAAS_OWNER = re.compile(r"(salesforce|sendgrid|mailgun|mailchimp|outlook|google|"
+                                     r"amazonses|sparkpost|zendesk|cloudflare|akamai|fastly)", re.I)
+            _web_ports = [p for p in sensitive_open if p not in _EMAIL_PORTS]
+            _is_saas = bool(_SAAS_OWNER.search(_ip_owner))
+            # Se só há portas de e-mail OU o IP é de SaaS de terceiro → NÃO é
+            # bypass de origem web. Pula (evita o falso-positivo do 96.43.154.16).
+            if not _web_ports or _is_saas:
+                continue
+
+            sensitive_open = _web_ports
+            domain = _ip_host or str(wf.domain or "")
             title = (
-                f"[CORRELAÇÃO CRÍTICA] Origem WAF exposta com portas sensíveis: "
-                f"{ip} ({', '.join(str(p) for p in sensitive_open[:5])})"
+                f"[CORRELAÇÃO] Origem possivelmente exposta atrás do WAF: "
+                f"{_ip_host or ip} → {ip} ({', '.join(str(p) for p in sensitive_open[:5])})"
             )
 
             # Verificar se já existe
@@ -304,11 +321,15 @@ def correlate_waf_shodan(db: Session, scan_id: int) -> int:
                     "sensitive_ports": sensitive_open,
                     "all_open_ports": open_ports,
                     "risk_notes": risk_notes,
+                    "resolved_ip": ip,
+                    "ip_owner": _ip_owner or None,
+                    "ip_host": _ip_host or None,
                     "evidence": (
-                        f"IP {ip} aparece como bypass candidate do WAF de {domain} "
-                        f"E tem portas sensíveis abertas no Shodan: {sensitive_open}. "
-                        f"Isso significa que o servidor de origem pode ser acessado diretamente, "
-                        f"contornando o WAF/CDN."
+                        f"IP {ip}" + (f" ({_ip_owner})" if _ip_owner else "") +
+                        f", do host {_ip_host or domain}, tem portas WEB sensíveis abertas no "
+                        f"Shodan: {sensitive_open} — a origem pode ser acessível diretamente, "
+                        f"contornando o WAF/CDN. (Validar manualmente: confirmar que é a origem "
+                        f"web do alvo, não serviço de terceiro.)"
                     ),
                     "owasp_category": "A05:2021 Security Misconfiguration",
                     "remediation": (

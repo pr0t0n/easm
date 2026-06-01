@@ -615,6 +615,22 @@ def generate_pentest_report(
             pass
         return ""
 
+    def _network_line(det: dict) -> str:
+        """Linha de contexto de rede (host↔IP↔porta) no relatório."""
+        n = det.get("network") if isinstance(det.get("network"), dict) else None
+        if not n:
+            return ""
+        bits = []
+        if n.get("resolved_ip"):
+            bits.append(f"IP <b>{n['resolved_ip']}</b>" + (f" ({n['ip_owner']})" if n.get("ip_owner") else ""))
+        if n.get("ports"):
+            bits.append("portas " + ", ".join(str(p) for p in n["ports"]))
+        if n.get("source_findings"):
+            bits.append("origem: " + ", ".join(f"#{s['finding_id']}" for s in n["source_findings"]))
+        if not bits:
+            return ""
+        return ('<p style="font-size:11px;color:#666;margin-bottom:6px">🌐 ' + " · ".join(bits) + '</p>')
+
     def _confirmed_finding_block(f: Any, idx: int) -> str:
         det = dict(f.details or {})
         evidence = str(det.get("evidence") or "")[:500]
@@ -702,6 +718,7 @@ def generate_pentest_report(
           </div>
           <h4 style="font-size:14px;font-weight:700;color:#2c3e50;margin-bottom:6px">{f.title}</h4>
           {'<p style="font-size:12px;color:#666;margin-bottom:8px">🎯 Alvo: <code style="background:#f8f9fa;padding:2px 6px;border-radius:3px">' + matched_at + '</code></p>' if matched_at else ''}
+          {_network_line(det)}
           {'<p style="font-size:11px;color:#666;margin-bottom:4px">📋 ' + owasp + '</p>' if owasp else ''}
           {'<div style="margin:10px 0"><strong style="font-size:12px">▶ Reprodução:</strong>' + repro + '</div>' if repro else ''}
           {poc_evidence_html}
