@@ -8392,6 +8392,34 @@ def get_verification_stats(
     return {"counts": counts, "total": total}
 
 
+@router.post("/scans/{scan_id}/analyze-js")
+def analyze_js_endpoint(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Análise estática de JS: endpoints, params, sinks (eval/proto), segredos."""
+    from app.services.js_analyzer import run_js_analysis_for_scan
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return run_js_analysis_for_scan(db, job)
+
+
+@router.post("/scans/{scan_id}/verify-api-exposure")
+def verify_api_exposure_endpoint(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Excessive Data Exposure (API3) + risco de Mass Assignment (API6)."""
+    from app.services.api_probe import run_api_probe_for_scan
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return run_api_probe_for_scan(db, job)
+
+
 @router.post("/scans/{scan_id}/verify-nosql")
 def verify_nosql_endpoint(
     scan_id: int,

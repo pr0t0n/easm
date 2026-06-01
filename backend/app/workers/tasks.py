@@ -2554,6 +2554,36 @@ def poll_scan_work_item(item_id: int):
                     from app.services.endpoint_discovery import expand_attack_surface
                     expand_attack_surface(db, job.id, item.target, item.tool_name, _full_result, job)
 
+                # ── Análise estática de JS (endpoints/params/sinks/segredos) ──
+                # Após crawl/JS phases. Uma vez por scan. Realimenta endpoints.
+                if item.phase_id in ("P03", "P08", "P09") and item.status == "completed":
+                    _st_j = dict(job.state_data or {})
+                    if not _st_j.get("js_done") and _st_j.get("discovered_endpoints"):
+                        from app.services.js_analyzer import run_js_analysis_for_scan
+                        _jr = run_js_analysis_for_scan(db, job)
+                        _st_j = dict(job.state_data or {})
+                        _st_j["js_done"] = True
+                        job.state_data = _st_j
+                        if _jr.get("findings_created") or _jr.get("endpoints_reseeded"):
+                            import logging as _jlog
+                            _jlog.getLogger(__name__).info(
+                                "js_analyzer scan=%d findings=%s endpoints_reseeded=%s",
+                                job.id, _jr.get("findings_created"), _jr.get("endpoints_reseeded"))
+
+                # ── Fase 2: Excessive Data Exposure / Mass Assignment (API) ───
+                if item.phase_id in ("P09", "P16") and item.status == "completed":
+                    _st_a = dict(job.state_data or {})
+                    if not _st_a.get("api_probe_done") and _st_a.get("discovered_endpoints"):
+                        from app.services.api_probe import run_api_probe_for_scan
+                        _ar = run_api_probe_for_scan(db, job)
+                        _st_a = dict(job.state_data or {})
+                        _st_a["api_probe_done"] = True
+                        job.state_data = _st_a
+                        if _ar.get("findings_created"):
+                            import logging as _alog
+                            _alog.getLogger(__name__).info(
+                                "api_probe scan=%d findings=%d", job.id, _ar["findings_created"])
+
                 # ── Fase 2: NoSQL injection (testável sem auth) ───────────────
                 # Após descoberta de endpoints com parâmetro. Uma vez por scan.
                 if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
