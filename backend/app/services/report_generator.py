@@ -1151,6 +1151,50 @@ def generate_pentest_report(
         import logging as _covlog
         _covlog.getLogger(__name__).debug("methodology_coverage failed: %s", _cov_err)
 
+    # ── Inteligência HackerOne: POR QUE cada classe foi testada ───────────────
+    learning_intel_html = ""
+    try:
+        from app.models.models import ScanWorkItem as _SWI_li2
+        _items = db.query(_SWI_li2).filter(
+            _SWI_li2.scan_job_id == scan_id,
+            _SWI_li2.item_metadata["source"].astext == "hackerone_learnings",
+        ).all()
+        _byfam: dict[str, dict] = {}
+        for _it in _items:
+            _m = dict(_it.item_metadata or {})
+            _fam = str(_m.get("vuln_family") or "outros")
+            _slot = _byfam.setdefault(_fam, {"engine": _m.get("engine"), "sim": 0, "reports": [], "count": 0})
+            _slot["count"] += 1
+            _slot["sim"] = max(_slot["sim"], int(_m.get("similarity_pct") or 0))
+            for _r in (_m.get("matched_reports") or []):
+                if _r and _r not in _slot["reports"] and len(_slot["reports"]) < 6:
+                    _slot["reports"].append(_r)
+        _sem = {k: v for k, v in _byfam.items() if v["engine"] == "semantic_match"}
+        if _sem:
+            _rows_li = "".join(
+                f'<tr><td style="font-size:12px;font-weight:700;text-transform:uppercase">{k.replace("_"," ")}</td>'
+                f'<td style="text-align:center;font-size:12px;color:#16a085;font-weight:700">{v["sim"]}%</td>'
+                f'<td style="text-align:center;font-size:11px">{v["count"]}</td>'
+                f'<td style="font-size:10px;color:#666;font-family:monospace">'
+                + (", ".join("#" + str(r) for r in v["reports"]) or "—") + '</td></tr>'
+                for k, v in sorted(_sem.items(), key=lambda x: -x[1]["sim"])
+            )
+            learning_intel_html = (
+                '<div class="section" style="border-top:4px solid #16a085">'
+                f'<h2 style="color:#16a085">🧠 Inteligência HackerOne — por que cada classe foi testada</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:10px">A plataforma cruzou o perfil do alvo '
+                'contra os ~10.000 reports HackerOne (busca semântica) e priorizou as classes mais '
+                'SEMELHANTES a este alvo. Cada teste foi escolhido porque reports reais comprovam a falha em '
+                'alvos parecidos — não por varredura cega.</p>'
+                '<table class="findings-table"><thead><tr><th>Classe testada</th>'
+                '<th style="text-align:center">Similaridade</th><th style="text-align:center">Testes</th>'
+                '<th>Reports HackerOne que motivaram</th></tr></thead>'
+                f'<tbody>{_rows_li}</tbody></table></div>'
+            )
+    except Exception as _li_err:
+        import logging as _lilog
+        _lilog.getLogger(__name__).debug("learning_intel failed: %s", _li_err)
+
     # ── NIST CSF 2.0 rollup (compliance) ──────────────────────────────────────
     nist_csf_html = ""
     try:
@@ -1339,6 +1383,9 @@ def generate_pentest_report(
 
   <!-- METHODOLOGY COVERAGE SCORECARD (#5) -->
   {methodology_html}
+
+  <!-- HACKERONE LEARNING INTELLIGENCE — why each class was tested -->
+  {learning_intel_html}
 
   <!-- NIST CSF 2.0 COMPLIANCE ROLLUP -->
   {nist_csf_html}
