@@ -49,6 +49,12 @@ celery.conf.update(
             "schedule": crontab(minute="*"),
             "options": {"queue": SCAN_SCHEDULED_QUEUE},
         },
+        # Watchdog: prevê/auto-recupera 'Up mas travado' (kali wedge, stall de scan).
+        "watchdog-tick": {
+            "task": "watchdog.tick",
+            "schedule": crontab(minute="*"),
+            "options": {"queue": SCAN_SCHEDULED_QUEUE},
+        },
     },
     timezone="America/Sao_Paulo",
 )

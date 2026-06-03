@@ -247,6 +247,21 @@ def worker_heartbeat() -> dict[str, Any]:
 
 
 # Executado a cada minuto pelo Celery Beat (já existente)
+@celery.task(name="watchdog.tick", queue=SCAN_SCHEDULED_QUEUE)
+def watchdog_tick():
+    """Watchdog: prevê/auto-recupera 'Up mas travado' (kali wedge, stall de scan)."""
+    db: Session = SessionLocal()
+    try:
+        from app.services.watchdog import run_watchdog
+        return run_watchdog(db)
+    except Exception as exc:
+        import logging as _wlog
+        _wlog.getLogger(__name__).error("watchdog_tick failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
 
 def scheduler_tick():
