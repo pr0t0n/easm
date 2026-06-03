@@ -77,11 +77,20 @@ def run_watchdog(db) -> dict:
         GROUP BY s.id
     """ % _STUCK_MINUTES)).fetchall()
 
+    revived = []
     for sid, queued, active, stuck in rows:
         # stall = há trabalho na fila mas NADA executando (dispatch parou)
         if int(queued or 0) > 0 and int(active or 0) == 0:
             report["stalled_scans"].append({"scan_id": int(sid), "queued": int(queued)})
-            logger.warning("watchdog: scan %s EMPACADO (queued=%s, active=0)", sid, queued)
+            logger.warning("watchdog: scan %s EMPACADO (queued=%s, active=0) → re-disparando dispatcher", sid, queued)
+            # AUTO-RECUPERAÇÃO: re-dispara a task principal (o driver morreu).
+            try:
+                from app.workers.tasks import run_scan_job_unit
+                run_scan_job_unit.delay(int(sid))
+                revived.append(int(sid))
+            except Exception as exc:
+                logger.error("watchdog: falha ao re-disparar scan %s: %s", sid, exc)
+    report["revived_scans"] = revived
         # re-enfileira itens presos em dispatched há muito tempo (kali perdeu o job)
         if int(stuck or 0) > 0:
             res = db.execute(text("""
