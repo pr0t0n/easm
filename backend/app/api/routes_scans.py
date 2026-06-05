@@ -8408,6 +8408,20 @@ def get_verification_stats(
     return {"counts": counts, "total": total}
 
 
+@router.post("/scans/{scan_id}/verify-business-logic")
+def verify_business_logic_endpoint(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Testes de lógica de negócio (tampering de preço/qtd, bypass de fluxo, reuso de cupom)."""
+    from app.services.business_logic_probe import run_business_logic_for_scan
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return run_business_logic_for_scan(db, job)
+
+
 @router.post("/scans/{scan_id}/analyze-js")
 def analyze_js_endpoint(
     scan_id: int,

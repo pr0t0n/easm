@@ -2599,6 +2599,20 @@ def poll_scan_work_item(item_id: int):
                             _alog.getLogger(__name__).info(
                                 "api_probe scan=%d findings=%d", job.id, _ar["findings_created"])
 
+                # ── Lógica de Negócio (tampering/fluxo/cupom) — read-only ─────
+                if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
+                    _st_bl = dict(job.state_data or {})
+                    if not _st_bl.get("bizlogic_done") and _st_bl.get("discovered_endpoints"):
+                        from app.services.business_logic_probe import run_business_logic_for_scan
+                        _blr = run_business_logic_for_scan(db, job)
+                        _st_bl = dict(job.state_data or {})
+                        _st_bl["bizlogic_done"] = True
+                        job.state_data = _st_bl
+                        if _blr.get("findings_created"):
+                            import logging as _bllog
+                            _bllog.getLogger(__name__).info(
+                                "business_logic_probe scan=%d findings=%d", job.id, _blr["findings_created"])
+
                 # ── Fase 2: NoSQL injection (testável sem auth) ───────────────
                 # Após descoberta de endpoints com parâmetro. Uma vez por scan.
                 if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
