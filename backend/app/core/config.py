@@ -80,10 +80,13 @@ class Settings(BaseSettings):
     # cap_medium=40: nuclei/ffuf/dalfox — CPU+net moderado.
     # cap_heavy=24: nmap/wapiti/sqlmap — CPU pesado; 24 = ~4 ondas para 50 targets.
     # cap_oob=8:   interactsh — callbacks externos, limitado por upstream.
-    scan_work_queue_cap_light: int = 60
-    scan_work_queue_cap_medium: int = 40
-    scan_work_queue_cap_heavy: int = 24
-    scan_work_queue_cap_oob: int = 8
+    # Reduzidos p/ varredura EDUCADA: caps antigos (60/40/24) somavam ~132 tools
+    # concorrentes → saturavam o link do operador (internet caía) e geravam os
+    # próprios timeouts. Alinhados ao KALI_MAX_PARALLEL=10 (chokepoint real).
+    scan_work_queue_cap_light: int = 16
+    scan_work_queue_cap_medium: int = 8
+    scan_work_queue_cap_heavy: int = 4
+    scan_work_queue_cap_oob: int = 3
 
 
 settings = Settings()

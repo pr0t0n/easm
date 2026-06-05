@@ -105,7 +105,10 @@ services:
     profiles: ["dev", "prod"]
     environment:
       KALI_WORKSPACE: /workspace
-      KALI_MAX_PARALLEL: "${KALI_MAX_PARALLEL:-100}"
+      # 100 saturava o link do operador (derrubava a internet + causava os
+      # próprios timeouts). 10 = varredura EDUCADA — o kali é o chokepoint onde
+      # TODO tool roda, então este é o cap real de conexões de saída simultâneas.
+      KALI_MAX_PARALLEL: "${KALI_MAX_PARALLEL:-10}"
       SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
       SCAN_AUTH_USERNAME: "${SCAN_AUTH_USERNAME:-}"
       SCAN_AUTH_PASSWORD: "${SCAN_AUTH_PASSWORD:-}"
