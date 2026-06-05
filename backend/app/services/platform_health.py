@@ -178,9 +178,19 @@ def _ping_services() -> list[dict]:
     return out
 
 
+def _adaptive_capacity_view() -> dict | None:
+    """Nível adaptativo de concorrência atual (visibilidade do AIMD)."""
+    try:
+        from app.services.adaptive_capacity import get_level, get_capacity, MIN_L, MAX_L
+        return {"level": get_level(), "min": MIN_L, "max": MAX_L, "capacity": get_capacity()}
+    except Exception:
+        return None
+
+
 def get_platform_health(db=None) -> dict:
     """Visão de saúde da plataforma. Prefere Docker; cai em fallback."""
     view = _docker_view()
-    if view is not None:
-        return view
-    return _fallback_view(db)
+    if view is None:
+        view = _fallback_view(db)
+    view["adaptive_capacity"] = _adaptive_capacity_view()
+    return view

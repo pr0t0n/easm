@@ -61,6 +61,13 @@ def run_watchdog(db) -> dict:
     report = {"kali_functional": True, "kali_restarted": False,
               "stalled_scans": [], "requeued": 0, "checked_at": datetime.utcnow().isoformat()}
 
+    # ── Capacidade ADAPTATIVA (AIMD por saúde): sobe/desce o paralelismo ─────
+    try:
+        from app.services.adaptive_capacity import adjust as _adjust_cap
+        report["adaptive"] = _adjust_cap(db)
+    except Exception as _ac_err:
+        logger.debug("adaptive_capacity failed: %s", _ac_err)
+
     # ── 1. kali funcional? senão, reinicia ──────────────────────────────────
     if not _kali_functional_ok():
         report["kali_functional"] = False
@@ -90,7 +97,6 @@ def run_watchdog(db) -> dict:
                 revived.append(int(sid))
             except Exception as exc:
                 logger.error("watchdog: falha ao re-disparar scan %s: %s", sid, exc)
-    report["revived_scans"] = revived
         # re-enfileira itens presos em dispatched há muito tempo (kali perdeu o job)
         if int(stuck or 0) > 0:
             res = db.execute(text("""
@@ -99,6 +105,7 @@ def run_watchdog(db) -> dict:
                   AND updated_at < now() - interval '%d minutes'
             """ % _STUCK_MINUTES), {"sid": int(sid)})
             report["requeued"] += int(getattr(res, "rowcount", 0) or 0)
+    report["revived_scans"] = revived
 
     if report["requeued"]:
         db.commit()

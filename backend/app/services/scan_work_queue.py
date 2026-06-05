@@ -203,6 +203,15 @@ def resource_class_for_tool(tool_name: str) -> str:
 
 
 def capacity_limits() -> dict[str, int]:
+    # ADAPTATIVO: o cap sobe/desce conforme a saúde do ambiente (AIMD), em vez
+    # de fixo. Fail-safe: se o controlador falhar, usa os caps de config.
+    try:
+        from app.services.adaptive_capacity import get_capacity
+        cap = get_capacity()
+        if cap:
+            return cap
+    except Exception:
+        pass
     return {
         "light": max(1, int(settings.scan_work_queue_cap_light)),
         "medium": max(1, int(settings.scan_work_queue_cap_medium)),
