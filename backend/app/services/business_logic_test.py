@@ -126,13 +126,15 @@ def _finding(cls, status, sev, ep, ev, payload=None):
                         "discovery_method": "teste ativo de business logic (chromium-capture + REST-CRUD + read-back)"}}
 
 
-def _capture(base: str) -> dict:
-    """Chama chromium-capture (CDP) UMA vez. Retorna o dict cru (api_requests +
-    storage: localStorage/sessionStorage/cookies). Reaproveitado por coleções E
-    análise de dados sensíveis client-side."""
+def _capture(base: str, token: str = "") -> dict:
+    """Chama chromium-capture (CDP) UMA vez. Com token (do generic_auth) injeta-o
+    no localStorage → o SPA carrega AUTENTICADO e dispara as XHRs autenticadas
+    (basket/{id}, cupom, etc.), expondo a superfície real. Retorna o dict cru
+    (api_requests + storage). Reaproveitado por coleções, BOLA e dados sensíveis."""
     try:
         from app.services.kali_executor import execute_via_kali
-        res = execute_via_kali("chromium-capture", base, max_wait=80)
+        extra = [token] if token else None
+        res = execute_via_kali("chromium-capture", base, max_wait=80, extra_args=extra)
         return json.loads(res.get("stdout", "{}")) or {}
     except Exception:
         return {}
@@ -168,10 +170,11 @@ _SENSITIVE_KEY_RE = re.compile(r"(?i)(token|jwt|auth|secret|password|senha|apike
                                r"access|refresh|session|credential|bearer|private)")
 
 
-def _sensitive_storage(cap: dict, base: str) -> list[dict]:
+def _sensitive_storage(cap: dict, base: str, injected: str = "") -> list[dict]:
     """Detecta segredos/PII em localStorage/sessionStorage (acessível a qualquer
     JS → exfiltrável via XSS). Observação DIRETA do valor → confirmada. Genérico
-    por padrões/wordlist, sem alvo hardcoded."""
+    por padrões/wordlist, sem alvo hardcoded. Exclui o token que EU injetei na
+    captura autenticada (senão seria FP circular) — só conta o que o APP guarda."""
     out = []
     storage = cap.get("storage") or {}
     for area in ("localStorage", "sessionStorage"):
@@ -188,6 +191,8 @@ def _sensitive_storage(cap: dict, base: str) -> list[dict]:
             if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
                 continue
             key, val = str(pair[0]), str(pair[1])
+            if injected and val == injected:
+                continue   # foi EU que injetei na captura autenticada → não é do app
             hit = None
             for label, pat in _SECRET_PATTERNS:
                 if pat.search(val):
@@ -287,6 +292,202 @@ def _bola_active(c: httpx.Client, collections: list[str], token: str) -> list[di
                     f"ausente (BOLA/IDOR). Baseline: id {oid} não estava na minha listagem.",
                     f"GET {col}/{oid}"))
                 break   # 1 prova por coleção basta — sem extração em massa
+    return out
+
+
+def _bola_single_resource(c: httpx.Client, cap: dict, base: str, token: str) -> list[dict]:
+    """BOLA em recurso ÚNICO (ex.: /rest/basket/{id}) — o que a descoberta por
+    coleção não pega. Pega os GET /<...>/<num> que o PRÓPRIO app fez por mim
+    (esse num é MEU), confirma o campo de dono = meu id, e prova que o vizinho
+    (num±1) devolve objeto de OUTRO dono. Baseline = meu próprio recurso."""
+    out = []
+    my_id = _jwt_self_id(token)
+    if my_id is None:
+        return out
+    my_s = str(my_id)
+    from urllib.parse import urlparse
+    seen_paths = set()
+    for r in (cap.get("api_requests") or []):
+        if str(r.get("method", "GET")).upper() != "GET":
+            continue
+        path = urlparse(r.get("url", "")).path
+        m = re.match(r"^(/(?:rest|api|v\d)/[A-Za-z][A-Za-z0-9_/-]*?)/(\d+)$", path)
+        if not m:
+            continue
+        coll, mine = m.group(1), int(m.group(2))
+        if coll in seen_paths:
+            continue
+        seen_paths.add(coll)
+        # 1) baseline: MEU recurso confirma o campo de dono == meu id
+        try:
+            mineobj = c.get(f"{base}{coll}/{mine}").json().get("data")
+        except Exception:
+            continue
+        if isinstance(mineobj, list):
+            mineobj = mineobj[0] if mineobj else None
+        if not isinstance(mineobj, dict):
+            continue
+        own_field = next((k for k in mineobj if k.lower() in OWNERSHIP_FIELDS), None)
+        if not own_field or str(mineobj.get(own_field)) != my_s:
+            continue        # sem baseline confiável de propriedade → não confirma
+        # 2) vizinho: outro dono acessível?
+        for oid in (mine - 1, mine + 1):
+            if oid <= 0 or oid == mine:
+                continue
+            try:
+                rb = c.get(f"{base}{coll}/{oid}")
+                obj = rb.json().get("data") if rb.status_code == 200 else None
+            except Exception:
+                continue
+            if isinstance(obj, list):
+                obj = obj[0] if obj else None
+            if isinstance(obj, dict) and obj.get(own_field) is not None and str(obj.get(own_field)) != my_s:
+                out.append(_finding(
+                    "idor_bola", "confirmada", "high", f"{base}{coll}/{oid}",
+                    f"Recurso único: meu {coll}/{mine} tem {own_field}={my_s}, mas {coll}/{oid} "
+                    f"devolveu objeto de OUTRO dono ({own_field}={obj.get(own_field)}). "
+                    f"Autorização a nível de objeto ausente (BOLA/IDOR).",
+                    f"GET {coll}/{oid}"))
+                break
+    return out
+
+
+# Endpoints de "quem sou eu" (autenticado) — wordlist genérica p/ baseline.
+WHOAMI_PATHS = ["/rest/user/whoami", "/api/users/me", "/api/user/me", "/api/me", "/me",
+                "/api/account", "/rest/user/me", "/api/v1/me", "/user/profile"]
+LOGOUT_PATHS = ["/rest/user/logout", "/api/logout", "/api/auth/logout", "/logout",
+                "/logout.php", "/api/v1/logout", "/auth/logout", "/api/users/logout"]
+
+
+def _is_html(resp: httpx.Response) -> bool:
+    """SPA catch-all: muitos SPAs (JuiceShop) servem index.html com HTTP 200 p/
+    QUALQUER rota. Isso não é um endpoint de API. Rejeita p/ não criar baseline
+    falso (disciplina anti-FP)."""
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "html" in ct:
+        return True
+    body = (resp.text or "")[:200].lstrip().lower()
+    return body.startswith("<!doctype") or body.startswith("<html")
+
+
+def _identity(resp: httpx.Response) -> str:
+    """Extrai um identificador estável da resposta autenticada (id/email/user).
+    Vazio se for HTML (SPA catch-all). Procura em data/user/profile/account."""
+    if _is_html(resp):
+        return ""
+    try:
+        j = resp.json()
+    except Exception:
+        return ""
+    cands = [j]
+    if isinstance(j, dict):
+        for wrap in ("data", "user", "profile", "account", "result"):
+            if isinstance(j.get(wrap), dict):
+                cands.append(j[wrap])
+    for d in cands:
+        if isinstance(d, dict):
+            for k in ("id", "email", "username", "userId", "user_id"):
+                if d.get(k) not in (None, ""):
+                    return f"{k}={d.get(k)}"
+    return ""
+
+
+def _token_reuse_after_logout(base: str, token: str, cookies: dict) -> list[dict]:
+    """Reuso de token: o token continua válido DEPOIS do logout? FP-guard: só
+    confirma se (a) existe baseline autenticado, (b) o endpoint de logout existe
+    e retorna 2xx (app reconhece o logout) e (c) o MESMO token ainda autentica a
+    mesma identidade. Sem logout server-side de verdade, não afirmamos nada."""
+    if not token:
+        return []
+    out = []
+    headers = {"Authorization": f"Bearer {token}"}
+    with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
+                      headers=headers, cookies=dict(cookies or {})) as c:
+        # (a) baseline autenticado
+        whoami, ident = None, ""
+        for p in WHOAMI_PATHS:
+            try:
+                r = c.get(base + p)
+            except Exception:
+                continue
+            if r.status_code == 200 and _identity(r):
+                whoami, ident = p, _identity(r); break
+        if not whoami:
+            return out          # sem baseline autenticado → não há o que provar
+        # (b) logout reconhecido pelo servidor
+        logout_ok = False
+        for p in LOGOUT_PATHS:
+            for meth in ("POST", "GET"):
+                try:
+                    lr = c.request(meth, base + p)
+                except Exception:
+                    continue
+                # 2xx real (não o HTML do SPA catch-all)
+                if lr.status_code < 300 and not _is_html(lr):
+                    logout_ok = True; break
+            if logout_ok:
+                break
+        if not logout_ok:
+            return out          # app não tem logout server-side → não é "reuso pós-logout"
+        # (c) MESMO token ainda autentica a MESMA identidade?
+        try:
+            r2 = c.get(base + whoami)
+        except Exception:
+            return out
+        if r2.status_code == 200 and _identity(r2) == ident:
+            out.append(_finding(
+                "reuso_token", "confirmada", "medium", base + whoami,
+                f"Token continua VÁLIDO após logout 2xx: {whoami} devolveu a mesma "
+                f"identidade ({ident}) com o mesmo token. Sessão não invalidada server-side.",
+                "GET após logout"))
+    return out
+
+
+def _coupon_brute(c: httpx.Client, cap: dict, base: str) -> list[dict]:
+    """Brute force CONTROLADO de cupom: acha endpoint/param de cupom (captura ou
+    wordlist), manda 1 código claramente inválido (baseline) e uma wordlist curta
+    de códigos comuns. Confirma só se um código difere do baseline inválido."""
+    from urllib.parse import urlparse
+    COMMON = ["WELCOME", "WELCOME10", "DISCOUNT", "DISCOUNT10", "SAVE10", "PROMO",
+              "FREE", "TEST", "OFF10", "NEWUSER", "SUMMER", "BLACKFRIDAY"]
+    BOGUS = "ZZINVALIDZZ999"
+    out = []
+    # localizar um endpoint de cupom nos requests capturados (path/template)
+    cand = None
+    for r in (cap.get("api_requests") or []):
+        path = urlparse(r.get("url", "")).path
+        if re.search(r"(?i)coupon|cupom|voucher|promo|discount", path):
+            cand = re.sub(r"/[^/]*$", "/{CODE}", path) if not path.endswith("/") else path + "{CODE}"
+            break
+    if not cand:
+        return out
+    def _apply(code):
+        url = base + cand.replace("{CODE}", code)
+        for meth in ("PUT", "POST", "GET"):
+            try:
+                rr = c.request(meth, url)
+            except Exception:
+                continue
+            if rr.status_code != 405:
+                return rr
+        return None
+    rb = _apply(BOGUS)
+    if rb is None:
+        return out
+    base_sig = (rb.status_code, len(rb.text or ""))
+    for code in COMMON:
+        rr = _apply(code)
+        if rr is None:
+            continue
+        sig = (rr.status_code, len(rr.text or ""))
+        # aceitação = 2xx E resposta diferente do código inválido (baseline)
+        if rr.status_code < 300 and sig != base_sig and not _VALIDATION.search((rr.text or "")[:1500]):
+            out.append(_finding(
+                "brute_force_cupom", "confirmada", "medium", base + cand.replace("{CODE}", code),
+                f"Cupom '{code}' aceito (HTTP {rr.status_code}, resposta difere do código inválido). "
+                f"Endpoint de cupom enumerável sem rate-limit/validação adequada.",
+                f"coupon={code}"))
+            break   # 1 prova basta — controlado, sem flood
     return out
 
 
@@ -398,11 +599,12 @@ def run_as_tool(target: str) -> dict:
         cookies = auth.get("session_cookies") or {}
         token = auth.get("token")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        # captura client-side UMA vez (endpoints reais do SPA + storage/cookies)
-        cap = _capture(base)
+        # captura client-side UMA vez, AUTENTICADA (token → SPA dispara XHRs
+        # autenticadas: basket/{id}, cupom, etc.) + storage/cookies.
+        cap = _capture(base, token or "")
         collections = _collections_from_capture(cap, base)
-        # dados sensíveis em localStorage/sessionStorage (XSS-exfiltrável)
-        findings += _sensitive_storage(cap, base)
+        # dados sensíveis em localStorage/sessionStorage (exclui meu token injetado)
+        findings += _sensitive_storage(cap, base, token or "")
 
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
                           cookies=cookies, headers=headers) as c:
@@ -424,6 +626,10 @@ def run_as_tool(target: str) -> dict:
 
             # 1b) IDOR/BOLA ativo: acesso a objeto de outro dono (controlado, read-only)
             findings += _bola_active(c, collections, token)
+            # 1c) BOLA em recurso único (ex.: basket/{id}) — baseado na captura
+            findings += _bola_single_resource(c, cap, base, token)
+            # 1d) brute force CONTROLADO de cupom (baseline = código inválido)
+            findings += _coupon_brute(c, cap, base)
 
             # 2) manipulação de valor via GET param (apps onde BL está na query)
             from urllib.parse import urlparse, parse_qs, urlunparse
@@ -454,6 +660,9 @@ def run_as_tool(target: str) -> dict:
                                                  "Campo privilegiado (role=admin/isAdmin) aceito do cliente.", "role=admin"))
                 except Exception:
                     pass
+
+        # 1e) reuso de token pós-logout (cliente próprio — logout pode limpar cookie)
+        findings += _token_reuse_after_logout(base, token, cookies)
 
         summary = {"confirmada": sum(1 for x in findings if "[CONFIRMADA]" in x["title"]),
                    "hipotese": sum(1 for x in findings if "[HIPOTESE]" in x["title"])}
