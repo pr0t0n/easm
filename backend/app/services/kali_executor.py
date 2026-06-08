@@ -118,6 +118,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "sqlmap": "sqlmap_basic",
     "dalfox": "dalfox_xss",
     "browser-xss": "browser_xss",  # headless chromium → dispara XSS client-side (DOM)
+    "chromium-capture": "chromium_capture",  # CDP: captura requisicoes/storage/cookies p/ analise BL
     "wapiti": "wapiti_scan",
     "wpscan": "wpscan_basic",
     "interactsh-client": "interactsh_oob",
