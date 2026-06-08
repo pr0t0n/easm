@@ -119,13 +119,18 @@ class ExecutedToolRun(Base):
     """Rastreia execução de ferramentas para idempotência dentro de uma missão."""
     __tablename__ = "executed_tool_runs"
     __table_args__ = (
-        sa.UniqueConstraint("scan_job_id", "tool_name", "target", name="uq_executed_tool_runs_scan_tool_target"),
+        sa.UniqueConstraint("scan_job_id", "execution_key", name="uq_executed_tool_runs_scan_execution_key"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    phase_id: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     tool_name: Mapped[str] = mapped_column(String(100), index=True)
+    profile: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     target: Mapped[str] = mapped_column(String(500), index=True)  # IP, domain, or URL scanned
+    execution_key: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    arguments_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="success")  # success, failed, skipped
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

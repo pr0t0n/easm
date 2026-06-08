@@ -43,6 +43,7 @@ EXECUTION_MODES = {
     "controlled_pentest",
     "full_authorized_pentest",
 }
+BACKEND_LOCAL_TOOL_NAMES = {"bl-test", "code-analyzer"}
 
 
 def utc_now() -> str:
@@ -52,6 +53,19 @@ def utc_now() -> str:
 def stable_id(prefix: str, payload: Any) -> str:
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
     return f"{prefix}-{digest}"
+
+
+def tool_execution_key(phase_id: str, skill_id: str, tool: dict[str, Any]) -> str:
+    return stable_id(
+        "TR",
+        {
+            "phase_id": phase_id,
+            "skill_id": skill_id,
+            "tool_name": tool.get("tool_name"),
+            "profile": tool.get("profile"),
+            "arguments": tool.get("arguments") or {},
+        },
+    )
 
 
 def _load_skill_tool_map(skills_root: Path | str | None = None) -> dict[str, dict[str, Any]]:
@@ -655,6 +669,13 @@ class ExecutionPolicyEngine:
         )
         if not scope_decision["allowed"]:
             return {"allowed": False, "reason": "", "required_controls": [], "blocked_reason": scope_decision["reason"]}
+        if tool.tool_name in BACKEND_LOCAL_TOOL_NAMES:
+            return {
+                "allowed": True,
+                "reason": "policy_approved_backend_local",
+                "required_controls": ["scope_guard", "backend_local", "evidence"],
+                "blocked_reason": None,
+            }
         if request.get("mcp_available") is False:
             return {"allowed": False, "reason": "", "required_controls": [], "blocked_reason": "mcp_unavailable"}
         return {"allowed": True, "reason": "policy_approved", "required_controls": ["scope_guard", "mcp", "evidence"], "blocked_reason": None}
@@ -1048,7 +1069,7 @@ class SkillToToolPlanCompiler:
             catalog_entry = self.catalog.get(str(name))
             if not catalog_entry:
                 if is_required:
-                    tools.append({
+                    tool_record = {
                         "tool_name": str(name),
                         "profile": "",
                         "required": True,
@@ -1059,7 +1080,14 @@ class SkillToToolPlanCompiler:
                         "rate_limit": 0,
                         "noise_level": "low",
                         "policy_decision": {"allowed": False, "blocked_reason": f"tool_not_in_catalog:{name}"},
-                    })
+                        "execution_backend": "unknown",
+                    }
+                    tool_record["execution_key"] = tool_execution_key(
+                        phase_contract["phase_id"],
+                        skill["skill_id"],
+                        tool_record,
+                    )
+                    tools.append(tool_record)
                 return
             expected_evidence = skill["metadata"].get("evidence_required") or phase_contract.get("minimum_evidence") or []
             policy_decision = self.policy.decide(
@@ -1077,20 +1105,21 @@ class SkillToToolPlanCompiler:
                     "mcp_available": mcp_available,
                 }
             )
-            tools.append(
-                {
-                    "tool_name": catalog_entry.tool_name,
-                    "profile": catalog_entry.profile,
-                    "required": is_required,
-                    "arguments": {"target": target, "timeout": catalog_entry.timeout_policy["default_timeout"]},
-                    "reason": f"{'Required' if is_required else 'Optional'} by {skill['skill_id']}",
-                    "expected_evidence": expected_evidence,
-                    "timeout": catalog_entry.timeout_policy["default_timeout"],
-                    "rate_limit": 50,
-                    "noise_level": catalog_entry.noise_level,
-                    "policy_decision": policy_decision,
-                }
-            )
+            tool_record = {
+                "tool_name": catalog_entry.tool_name,
+                "profile": catalog_entry.profile,
+                "required": is_required,
+                "arguments": {"target": target, "timeout": catalog_entry.timeout_policy["default_timeout"]},
+                "reason": f"{'Required' if is_required else 'Optional'} by {skill['skill_id']}",
+                "expected_evidence": expected_evidence,
+                "timeout": catalog_entry.timeout_policy["default_timeout"],
+                "rate_limit": 50,
+                "noise_level": catalog_entry.noise_level,
+                "policy_decision": policy_decision,
+                "execution_backend": "backend_local" if catalog_entry.tool_name in BACKEND_LOCAL_TOOL_NAMES else "mcp",
+            }
+            tool_record["execution_key"] = tool_execution_key(phase_contract["phase_id"], skill["skill_id"], tool_record)
+            tools.append(tool_record)
 
         # A tool is REQUIRED only if the *phase contract* requires it. A skill
         # shared across phases (e.g. port_service_discovery → P02/P06/P07)
@@ -1142,15 +1171,19 @@ class MCPToolExecutor:
         self.available = available
 
     def _build_execution_record(self, tool: dict[str, Any], tool_plan: dict[str, Any], target: str) -> dict[str, Any]:
+        execution_key = tool.get("execution_key") or tool_execution_key(tool_plan["phase_id"], tool_plan["skill_id"], tool)
         return {
-            "mcp_execution_id": stable_id("MCP", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
-            "mcp_request_id": stable_id("mcp", {"tool_plan_id": tool_plan["tool_plan_id"], "tool": tool["tool_name"]}),
+            "mcp_execution_id": stable_id("MCP", {"tool_plan_id": tool_plan["tool_plan_id"], "execution_key": execution_key}),
+            "mcp_request_id": stable_id("mcp", {"tool_plan_id": tool_plan["tool_plan_id"], "execution_key": execution_key}),
             "tool_plan_id": tool_plan["tool_plan_id"],
+            "execution_key": execution_key,
+            "execution_backend": tool.get("execution_backend") or "mcp",
             "phase_id": tool_plan["phase_id"],
             "skill_id": tool_plan["skill_id"],
             "tool_name": tool["tool_name"],
             "profile": tool["profile"],
             "arguments_hash": stable_id("ARG", tool.get("arguments") or {}),
+            "arguments": dict(tool.get("arguments") or {}),
             "target": target,
             "status": "blocked",
             "stdout_path": "",
@@ -1198,7 +1231,11 @@ class MCPToolExecutor:
         runnable: list[tuple[int, dict[str, Any]]] = []
         for idx, tool in enumerate(tools):
             execution = self._build_execution_record(tool, tool_plan, target)
-            if not self.available or tool["policy_decision"].get("blocked_reason") == "mcp_unavailable":
+            backend_local = (
+                tool.get("execution_backend") == "backend_local"
+                or str(tool.get("tool_name") or "") in BACKEND_LOCAL_TOOL_NAMES
+            )
+            if (not self.available or tool["policy_decision"].get("blocked_reason") == "mcp_unavailable") and not backend_local:
                 execution.update(status="blocked", error="mcp_unavailable", finished_at=utc_now())
                 blocked.append((idx, execution))
             elif not tool["policy_decision"]["allowed"]:
@@ -1228,13 +1265,15 @@ class MCPToolExecutor:
 
 
 class EvidenceCollector:
-    def create(self, execution: dict[str, Any], parsed_json: dict[str, Any] | None = None, payloads: list[str] | None = None) -> dict[str, Any]:
-        strength = self.classify(execution, parsed_json or {})
+    def create(self, execution: dict[str, Any], parsed_json: Any | None = None, payloads: list[str] | None = None) -> dict[str, Any]:
+        strength = self.classify(execution, parsed_json)
         return {
             "evidence_id": stable_id("EV", execution),
             "phase_id": execution["phase_id"],
             "skill_id": execution["skill_id"],
             "tool_name": execution["tool_name"],
+            "execution_key": execution.get("execution_key") or "",
+            "execution_backend": execution.get("execution_backend") or "",
             "mcp_request_id": execution.get("mcp_request_id") or execution["mcp_execution_id"],
             "target": execution["target"],
             "evidence_type": "tool_output",
@@ -1251,14 +1290,15 @@ class EvidenceCollector:
         }
 
     @staticmethod
-    def classify(execution: dict[str, Any], parsed_json: dict[str, Any]) -> str:
+    def classify(execution: dict[str, Any], parsed_json: Any) -> str:
         if execution.get("status") != "success":
             return "none"
-        if parsed_json.get("impact_demonstrated") and parsed_json.get("false_positive_controls_passed"):
+        parsed_dict = parsed_json if isinstance(parsed_json, dict) else {}
+        if parsed_dict.get("impact_demonstrated") and parsed_dict.get("false_positive_controls_passed"):
             return "conclusive"
-        if parsed_json.get("reproducible") and parsed_json.get("request_response_pair"):
+        if parsed_dict.get("reproducible") and parsed_dict.get("request_response_pair"):
             return "strong"
-        if execution.get("stdout_path") or parsed_json:
+        if execution.get("stdout_path") or execution.get("stdout") or parsed_json:
             return "medium"
         return "weak"
 
@@ -1296,6 +1336,9 @@ class PhaseValidator:
             # MCP infrastructure down is a soft block — mark partial so the campaign advances.
             if all(r.get("error") in {"mcp_unavailable", None} for r in required_blocked):
                 return self._decision(phase_contract["phase_id"], "partial", True, "mcp_unavailable_tool_skipped", [])
+            coverage_decision = self._skill_coverage_decision(phase_contract, skill_coverage)
+            if coverage_decision:
+                return coverage_decision
             # Recon/discovery phases run many redundant tools. If the nominally
             # 'required' tool timed out (common behind a WAF) but other tools
             # in the phase still succeeded, the phase produced value — mark it
@@ -1324,18 +1367,9 @@ class PhaseValidator:
         # ficou blocked/partial mas houve execução útil → partial. Se NENHUMA
         # required skill foi coberta → blocked. Sem isso, uma fase virava
         # 'completed' por evidência agregada mesmo com skills required descobertas.
-        required_skills = phase_contract.get("required_skills") or []
-        if skill_coverage and required_skills:
-            _cov = {s: (skill_coverage.get(s) or {}).get("status") for s in required_skills}
-            _blocked = [s for s, st in _cov.items() if st in (None, "blocked")]
-            _partial = [s for s, st in _cov.items() if st == "partial"]
-            _completed = [s for s, st in _cov.items() if st == "completed"]
-            if _blocked and not _completed and not _partial:
-                return self._decision(phase_contract["phase_id"], "blocked", False,
-                                      "no_required_skill_covered", _blocked)
-            if _blocked or _partial:
-                return self._decision(phase_contract["phase_id"], "partial", True,
-                                      "partial_skill_coverage", _blocked + _partial)
+        coverage_decision = self._skill_coverage_decision(phase_contract, skill_coverage)
+        if coverage_decision:
+            return coverage_decision
         return {
             "phase_id": phase_contract["phase_id"],
             "status": "completed",
@@ -1346,6 +1380,21 @@ class PhaseValidator:
             "generated_hypotheses": hypotheses or [],
             "updated_attack_paths": offensive_state.get("attack_paths", []),
         }
+
+    @classmethod
+    def _skill_coverage_decision(cls, phase_contract: dict[str, Any], skill_coverage: dict[str, Any] | None) -> dict[str, Any] | None:
+        required_skills = phase_contract.get("required_skills") or []
+        if not skill_coverage or not required_skills:
+            return None
+        cov = {s: (skill_coverage.get(s) or {}).get("status") for s in required_skills}
+        blocked = [s for s, st in cov.items() if st in (None, "blocked")]
+        partial = [s for s, st in cov.items() if st == "partial"]
+        completed = [s for s, st in cov.items() if st == "completed"]
+        if blocked and not completed and not partial:
+            return cls._decision(phase_contract["phase_id"], "blocked", False, "no_required_skill_covered", blocked)
+        if blocked or partial:
+            return cls._decision(phase_contract["phase_id"], "partial", True, "partial_skill_coverage", blocked + partial)
+        return None
 
     @staticmethod
     def _decision(phase_id: str, status: str, can_advance: bool, reason: str, missing: list[str]) -> dict[str, Any]:
@@ -1365,7 +1414,7 @@ class HypothesisEngine:
     def update_from_evidence(self, phase_id: str, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
         hypotheses: list[dict[str, Any]] = []
         for ev in evidence:
-            parsed = ev.get("parsed_json") or {}
+            parsed = ev.get("parsed_json") if isinstance(ev.get("parsed_json"), dict) else {}
             for parameter in parsed.get("parameters", []):
                 lower = str(parameter).lower()
                 skills = ["skill.idor_object_authorization"]
@@ -1398,7 +1447,7 @@ class AttackPathEngine:
     def correlate(self, evidence: list[dict[str, Any]], hypotheses: list[dict[str, Any]]) -> list[dict[str, Any]]:
         paths: list[dict[str, Any]] = []
         for ev in evidence:
-            parsed = ev.get("parsed_json") or {}
+            parsed = ev.get("parsed_json") if isinstance(ev.get("parsed_json"), dict) else {}
             if parsed.get("exposed_git") or "git" in json.dumps(parsed).lower():
                 paths.append(
                     {
@@ -1417,10 +1466,15 @@ class AttackPathEngine:
 
 class OperationLearningEngine:
     def learn(self, phase_id: str, tool_plan: dict[str, Any], mcp_results: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+        effective_skills = sorted({
+            str(ev.get("skill_id") or "")
+            for ev in evidence
+            if ev.get("evidence_strength") in {"medium", "strong", "conclusive"} and ev.get("skill_id")
+        })
         return {
             "lesson_id": stable_id("TL", {"phase": phase_id, "tool_plan": tool_plan.get("tool_plan_id")}),
             "phase_id": phase_id,
-            "skills_effective": [tool_plan.get("skill_id")] if any(ev.get("evidence_strength") in {"medium", "strong", "conclusive"} for ev in evidence) else [],
+            "skills_effective": effective_skills,
             "tools_effective": [res["tool_name"] for res in mcp_results if res.get("status") == "success"],
             "tool_errors": [res for res in mcp_results if res.get("status") != "success"],
             "created_at": utc_now(),
@@ -1522,12 +1576,10 @@ class OffensiveSkillRuntime:
         )
         selected_skills = [skill["skill_id"] for skill in retrieved["retrieved_skills"]]
         registry_skills = {skill["skill_id"]: skill for skill in self.registry.approved_for_phase(phase_id, execution_mode)}
-        # COMPÓSITO (vale p/ TODAS as fases): uma fase pode declarar VÁRIAS skills
-        # (ex.: P13 = IDOR + business_logic + bola_bfla + csrf + api_security).
-        # Antes só UMA rodava (a 1ª ranqueada pelo RAG) e as demais nunca viravam
-        # tool plan — então skills inteiras ficavam órfãs. Agora rodamos TODAS as
-        # skills aprovadas da fase, ordenadas por relevância do RAG, com DEDUP
-        # GLOBAL de tools (cada tool executa 1x por fase — não roda nuclei 5x).
+        # Composite phase execution: every approved skill for the phase gets a
+        # tool plan. Dedup uses the rich execution_key, not just tool_name, so a
+        # curl/ffuf/nuclei run for one skill cannot create false coverage for
+        # another skill that needs different arguments or reasoning.
         ordered_sids = list(dict.fromkeys(
             [sid for sid in selected_skills if sid in registry_skills]
             + [sid for sid in (contract.get("required_skills") or []) if sid in registry_skills]
@@ -1539,7 +1591,7 @@ class OffensiveSkillRuntime:
             return {"phase_ledger": ledger, "offensive_state": state, "validator_decision": {"status": "blocked", "can_advance": False}}
 
         mcp_results: list[dict[str, Any]] = []
-        executed_tools: set[str] = set()
+        executed_tool_keys: set[str] = set()
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
         for sid in ordered_sids:
@@ -1550,53 +1602,62 @@ class OffensiveSkillRuntime:
                 continue
             tool_plans.append(tp)
             ran_skills.append(sid)
-            # dedup GLOBAL: só despacha tools ainda não executadas nesta fase
-            new_tools = [t for t in tp["tools"] if t["tool_name"] not in executed_tools]
+            new_tools = [t for t in tp["tools"] if t.get("execution_key") not in executed_tool_keys]
             if not new_tools:
                 continue
             for t in new_tools:
-                executed_tools.add(t["tool_name"])
+                executed_tool_keys.add(str(t.get("execution_key") or ""))
             mcp_results.extend(self.executor.execute({**tp, "tools": new_tools}, target))
         if not tool_plans:
             ledger = create_phase_ledger(contract)
             ledger.update(status="blocked", blocking_reason="no_skill_compiled", retrieved_rag_context=retrieved["retrieved_skills"])
             return {"phase_ledger": ledger, "offensive_state": state, "validator_decision": {"status": "blocked", "can_advance": False}}
 
-        # tool_plan combinado (união deduplicada das tools de todas as skills) p/
-        # validator/skill_plan/ledger. chosen = 1ª skill que compilou (compat).
-        chosen = registry_skills[ran_skills[0]]
+        # Combined tool plan for validator/ledger: union by execution_key.
         _combined_tools: list[dict[str, Any]] = []
-        _seen_tn: set[str] = set()
+        _seen_tk: set[str] = set()
         for tp in tool_plans:
             for t in tp["tools"]:
-                if t["tool_name"] not in _seen_tn:
-                    _seen_tn.add(t["tool_name"]); _combined_tools.append(t)
+                key = str(t.get("execution_key") or tool_execution_key(tp["phase_id"], tp["skill_id"], t))
+                if key not in _seen_tk:
+                    _seen_tk.add(key); _combined_tools.append(t)
         tool_plan = {**tool_plans[0], "tools": _combined_tools}
 
-        # ── skill_coverage: atribuição POR SKILL (mesmo com dedup global de tools).
-        # Uma tool roda 1x na fase, mas conta p/ toda skill cujo plano a inclui.
+        # Skill coverage is attributed by execution_key. This keeps coverage
+        # honest for every phase, including phases with multiple skills.
         _ok = {"success", "done"}
-        _status_by_tool = {r["tool_name"]: r.get("status") for r in mcp_results}
+        _status_by_key = {str(r.get("execution_key") or ""): r.get("status") for r in mcp_results}
         _bindings = PHASE_TOOL_BINDINGS.get(phase_id, {})
 
-        def _counts_for(_sid: str, _tn: str) -> bool:
+        def _counts_for(_sid: str, _tool: dict[str, Any]) -> bool:
             # tool com binding só conta cobertura p/ skills ligadas (anti-FP):
             # bl-test não prova csrf/idor mesmo se estiver no plano por herança.
-            b = _bindings.get(_tn)
+            b = _bindings.get(str(_tool.get("tool_name") or ""))
             return b is None or _sid in b
 
         skill_coverage: dict[str, Any] = {}
         for sid, tp in zip(ran_skills, tool_plans):
-            allt = [t["tool_name"] for t in tp["tools"] if _counts_for(sid, t["tool_name"])]
-            req = [t["tool_name"] for t in tp["tools"] if t.get("required") and _counts_for(sid, t["tool_name"])]
-            attempted = [t for t in allt if t in _status_by_tool]
-            succ = [t for t in attempted if _status_by_tool.get(t) in _ok]
-            fail = [t for t in attempted if _status_by_tool.get(t) not in _ok]
-            req_ok = all(_status_by_tool.get(t) in _ok for t in req) if req else bool(succ)
-            s_status = "completed" if (succ and req_ok) else ("partial" if succ else "blocked")
+            allt = [t for t in tp["tools"] if _counts_for(sid, t)]
+            req = [t for t in tp["tools"] if t.get("required") and _counts_for(sid, t)]
+            attempted_items = [t for t in allt if str(t.get("execution_key") or "") in _status_by_key]
+            succ_items = [t for t in attempted_items if _status_by_key.get(str(t.get("execution_key") or "")) in _ok]
+            fail_items = [t for t in attempted_items if _status_by_key.get(str(t.get("execution_key") or "")) not in _ok]
+            req_ok = all(_status_by_key.get(str(t.get("execution_key") or "")) in _ok for t in req) if req else bool(succ_items)
+            s_status = "completed" if (succ_items and req_ok) else ("partial" if succ_items else "blocked")
+            attempted = [str(t.get("tool_name") or "") for t in attempted_items]
+            succ = [str(t.get("tool_name") or "") for t in succ_items]
+            fail = [str(t.get("tool_name") or "") for t in fail_items]
             skill_coverage[sid] = {
-                "status": s_status, "tools_required": req, "tools_attempted": attempted,
-                "tools_success": succ, "tools_failed": fail, "evidence_ids": [],
+                "status": s_status,
+                "tools_required": [str(t.get("tool_name") or "") for t in req],
+                "tools_attempted": attempted,
+                "tools_success": succ,
+                "tools_failed": fail,
+                "tool_execution_keys_required": [str(t.get("execution_key") or "") for t in req],
+                "tool_execution_keys_attempted": [str(t.get("execution_key") or "") for t in attempted_items],
+                "tool_execution_keys_success": [str(t.get("execution_key") or "") for t in succ_items],
+                "tool_execution_keys_failed": [str(t.get("execution_key") or "") for t in fail_items],
+                "evidence_ids": [],
                 "blocking_reason": None if s_status != "blocked" else "tools_not_executed_or_blocked",
             }
         # required skills do contrato SEMPRE aparecem no plano — uma ausente/reprovada
@@ -1609,7 +1670,12 @@ class OffensiveSkillRuntime:
                           else "required_skill_not_available")
                 skill_coverage[sid] = {
                     "status": "blocked", "tools_required": [], "tools_attempted": [],
-                    "tools_success": [], "tools_failed": [], "evidence_ids": [],
+                    "tools_success": [], "tools_failed": [],
+                    "tool_execution_keys_required": [],
+                    "tool_execution_keys_attempted": [],
+                    "tool_execution_keys_success": [],
+                    "tool_execution_keys_failed": [],
+                    "evidence_ids": [],
                     "blocking_reason": reason,
                 }
         skills_success = [s for s, c in skill_coverage.items() if c["status"] == "completed"]
@@ -1617,7 +1683,7 @@ class OffensiveSkillRuntime:
         skills_blocked = [s for s, c in skill_coverage.items() if c["status"] == "blocked"]
 
         evidence = [
-            self.collector.create(result, parsed_json={"request_response_pair": bool(result.get("stdout_path")), "reproducible": True})
+            self.collector.create(result, parsed_json=result.get("parsed_result"))
             for result in mcp_results
             if result.get("status") == "success"
         ]
@@ -1650,6 +1716,9 @@ class OffensiveSkillRuntime:
             tools_attempted=[result["tool_name"] for result in mcp_results],
             tools_success=[result["tool_name"] for result in mcp_results if result["status"] == "success"],
             tools_failed=[result["tool_name"] for result in mcp_results if result["status"] not in {"success"}],
+            tool_execution_keys_attempted=[str(result.get("execution_key") or "") for result in mcp_results],
+            tool_execution_keys_success=[str(result.get("execution_key") or "") for result in mcp_results if result["status"] == "success"],
+            tool_execution_keys_failed=[str(result.get("execution_key") or "") for result in mcp_results if result["status"] not in {"success"}],
             mcp_executions=[result["mcp_execution_id"] for result in mcp_results],
             evidence_ids=[ev["evidence_id"] for ev in evidence],
             hypotheses_created=[h["hypothesis_id"] for h in generated_hypotheses],
@@ -1668,7 +1737,14 @@ class OffensiveSkillRuntime:
                     "objective": tool_plan["objective"],
                     "offensive_questions": [],
                     "tool_requirements": [
-                        {"tool": tool["tool_name"], "required": tool["required"], "reason": tool["reason"]}
+                        {
+                            "tool": tool["tool_name"],
+                            "profile": tool.get("profile"),
+                            "required": tool["required"],
+                            "reason": tool["reason"],
+                            "execution_key": tool.get("execution_key"),
+                            "execution_backend": tool.get("execution_backend"),
+                        }
                         for tool in tool_plan["tools"]
                     ],
                     "payload_strategy": {},
@@ -1703,6 +1779,9 @@ def create_phase_ledger(contract: dict[str, Any]) -> dict[str, Any]:
         "tools_attempted": [],
         "tools_success": [],
         "tools_failed": [],
+        "tool_execution_keys_attempted": [],
+        "tool_execution_keys_success": [],
+        "tool_execution_keys_failed": [],
         "mcp_executions": [],
         "evidence_ids": [],
         "hypotheses_created": [],

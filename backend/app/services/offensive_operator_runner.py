@@ -16,6 +16,7 @@ import requests
 from app.core.config import settings
 from app.models.models import Finding, ScanJob, ScanLog
 from app.services.offensive_operator_core import (
+    BACKEND_LOCAL_TOOL_NAMES,
     MCPToolExecutor,
     PHASE_CONTRACTS,
     PHASE_ORDER,
@@ -384,7 +385,7 @@ def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[st
 
 # Tools que rodam NO BACKEND (não no kali via MCP). O operator roda no processo
 # backend/celery, então pode chamá-las direto — não há profile kali p/ elas.
-_BACKEND_LOCAL_TOOLS = {"bl-test", "code-analyzer"}
+_BACKEND_LOCAL_TOOLS = BACKEND_LOCAL_TOOL_NAMES
 
 
 def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
@@ -724,16 +725,22 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             for mcp_res in mcp_results:
                 tool_name = mcp_res.get("tool_name", "unknown")
                 status_v = mcp_res.get("status", "unknown")
+                backend_v = str(mcp_res.get("execution_backend") or "mcp")
+                skill_v = str(mcp_res.get("skill_id") or "")
+                profile_v = str(mcp_res.get("profile") or "")
+                key_v = str(mcp_res.get("execution_key") or "")
                 stdout_v = str(mcp_res.get("stdout_path") or mcp_res.get("stdout") or "")[:500]
                 stderr_v = str(mcp_res.get("stderr_path") or mcp_res.get("stderr") or "")[:200]
                 rc = mcp_res.get("exit_code") if mcp_res.get("exit_code") is not None else mcp_res.get("return_code")
                 log_msg = (
-                    f"kali runner tool={tool_name} phase={phase_id} status={status_v}"
+                    f"{backend_v} tool={tool_name} profile={profile_v} phase={phase_id} skill={skill_v} status={status_v}"
+                    f" execution_key={key_v}"
                     f" return_code={rc}"
                     f" stdout={stdout_v!r}"
                     + (f" stderr={stderr_v!r}" if stderr_v else "")
                 )
-                db.add(ScanLog(scan_job_id=job.id, source="kali-runner", level="INFO", message=log_msg))
+                source_v = "backend-local" if backend_v == "backend_local" else "kali-runner"
+                db.add(ScanLog(scan_job_id=job.id, source=source_v, level="INFO", message=log_msg))
 
             phase_status = phase_ledger.get("status", "")
             validator_reason = result["validator_decision"].get("reason", "")
@@ -754,9 +761,13 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     offensive_state["campaign_id"],
                     str(job.id),
                     phase_id,
-                    skill_id=(result.get("skill_plan") or {}).get("selected_skills", [""])[0] if result.get("skill_plan") else "",
+                    skill_id=",".join((result.get("skill_plan") or {}).get("selected_skills") or []),
                     status=result["phase_ledger"].get("status", ""),
-                    details={"reason": result["validator_decision"].get("reason")},
+                    details={
+                        "reason": result["validator_decision"].get("reason"),
+                        "skill_ids": (result.get("skill_plan") or {}).get("selected_skills") or [],
+                        "skill_coverage": result["phase_ledger"].get("skill_coverage") or {},
+                    },
                 )
             )
             state = dict(job.state_data or {})
@@ -779,7 +790,11 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             # strategic_planning needs: supervisor_route, selected_skill, operation_plan, pentest_strategy
             selected_skill_ids = (result.get("skill_plan") or {}).get("selected_skills") or []
             if selected_skill_ids:
-                state["selected_skill"] = selected_skill_ids[0]
+                state["selected_skill"] = selected_skill_ids[0]  # legacy compatibility
+                state["selected_skills"] = selected_skill_ids
+            skill_coverage_state = dict(state.get("skill_coverage") or {})
+            skill_coverage_state[f"{phase_id}:{target}"] = result["phase_ledger"].get("skill_coverage") or {}
+            state["skill_coverage"] = skill_coverage_state
             state["supervisor_route"] = state.get("supervisor_route") or list(state.get("phase_ledger_v2") and [phase_id] or [phase_id])
             state["operation_plan"] = state.get("operation_plan") or {
                 "campaign_id": offensive_state.get("campaign_id"),
@@ -796,9 +811,15 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             mcp_list = result.get("mcp_results") or []
             existing_runs = list(state.get("executed_tool_runs") or [])
             existing_runs.extend([{
+                "execution_key": m.get("execution_key"),
+                "execution_backend": m.get("execution_backend"),
                 "tool": m.get("tool_name"),
+                "profile": m.get("profile"),
                 "phase": phase_id,
+                "skill_id": m.get("skill_id"),
+                "target": m.get("target") or target,
                 "status": m.get("status"),
+                "arguments_hash": m.get("arguments_hash"),
                 "started_at": m.get("started_at"),
                 "finished_at": m.get("finished_at"),
                 "exit_code": m.get("exit_code"),
@@ -967,7 +988,8 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
             state["pentest_hypotheses"] = hypotheses[-200:]
             invocations = list(state.get("skill_invocation") or [])
             if selected_skill_ids:
-                invocations.append({"phase_id": phase_id, "skill_id": selected_skill_ids[0]})
+                for _sid in selected_skill_ids:
+                    invocations.append({"phase_id": phase_id, "skill_id": _sid, "target": target})
             state["skill_invocation"] = invocations[-200:]
             state["tool_selection_contract"] = {
                 "phase_id": phase_id,
@@ -1000,7 +1022,11 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                             cap,
                             source=f"phase_{phase_id}",
                             status="completed",
-                            evidence={"phase_id": phase_id, "skill_id": selected_skill_ids[0] if selected_skill_ids else ""},
+                            evidence={
+                                "phase_id": phase_id,
+                                "skill_id": selected_skill_ids[0] if selected_skill_ids else "",
+                                "skill_ids": selected_skill_ids,
+                            },
                         )
                 state["completed_capabilities"] = completed_caps
 
@@ -2224,14 +2250,28 @@ def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_re
     from app.models.models import ExecutedToolRun
 
     target = str(ledger.get("target") or job.target_query or "")[:500]
-    local_seen: set[tuple[int, str, str]] = set()
+    local_seen: set[tuple[int, str]] = set()
     for mcp_res in mcp_results:
         if not isinstance(mcp_res, dict):
             continue
         tool_name = str(mcp_res.get("tool_name") or "").strip().lower()
         if not tool_name:
             continue
-        key = (int(job.id), tool_name[:100], target)
+        execution_key = str(
+            mcp_res.get("execution_key")
+            or stable_id(
+                "TR",
+                {
+                    "phase_id": ledger.get("phase_id") or mcp_res.get("phase_id"),
+                    "skill_id": mcp_res.get("skill_id"),
+                    "tool_name": tool_name,
+                    "profile": mcp_res.get("profile"),
+                    "arguments_hash": mcp_res.get("arguments_hash"),
+                    "target": mcp_res.get("target") or target,
+                },
+            )
+        )[:160]
+        key = (int(job.id), execution_key)
         if key in local_seen:
             continue
         local_seen.add(key)
@@ -2243,21 +2283,30 @@ def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_re
             db.query(ExecutedToolRun)
             .filter(
                 ExecutedToolRun.scan_job_id == job.id,
-                ExecutedToolRun.tool_name == tool_name[:100],
-                ExecutedToolRun.target == target,
+                ExecutedToolRun.execution_key == execution_key,
             )
             .first()
         )
         if not run:
             run = ExecutedToolRun(
                 scan_job_id=job.id,
+                phase_id=str(ledger.get("phase_id") or mcp_res.get("phase_id") or "")[:10] or None,
+                skill_id=str(mcp_res.get("skill_id") or "")[:120] or None,
                 tool_name=tool_name[:100],
+                profile=str(mcp_res.get("profile") or "")[:120] or None,
                 target=target,
+                execution_key=execution_key,
+                arguments_hash=str(mcp_res.get("arguments_hash") or "")[:80] or None,
                 status=status[:50],
                 created_at=_dt.utcnow(),
             )
             db.add(run)
             db.flush()
+        run.phase_id = str(ledger.get("phase_id") or mcp_res.get("phase_id") or "")[:10] or None
+        run.skill_id = str(mcp_res.get("skill_id") or "")[:120] or None
+        run.profile = str(mcp_res.get("profile") or "")[:120] or None
+        run.execution_key = execution_key
+        run.arguments_hash = str(mcp_res.get("arguments_hash") or "")[:80] or None
         run.status = status[:50]
         run.error_message = str(mcp_res.get("stderr") or mcp_res.get("error") or "")[:2000] or None
         try:
@@ -2363,10 +2412,40 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 cur = dict(job.state_data or {})
                 cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
                 cur["phase_ledger_v2"] = _merge_phase_ledgers(list(cur.get("phase_ledger_v2") or []), [ledger])
+                selected_skill_ids = list(ledger.get("selected_skills") or [])
+                if selected_skill_ids:
+                    cur["selected_skill"] = selected_skill_ids[0]
+                    cur["selected_skills"] = selected_skill_ids
+                skill_coverage_state = dict(cur.get("skill_coverage") or {})
+                skill_coverage_state[f"{phase_id}:{target}"] = ledger.get("skill_coverage") or {}
+                cur["skill_coverage"] = skill_coverage_state
+                existing_runs = list(cur.get("executed_tool_runs") or [])
+                existing_runs.extend([
+                    {
+                        "execution_key": m.get("execution_key"),
+                        "execution_backend": m.get("execution_backend"),
+                        "tool": m.get("tool_name"),
+                        "profile": m.get("profile"),
+                        "phase": phase_id,
+                        "skill_id": m.get("skill_id"),
+                        "target": m.get("target") or target,
+                        "status": m.get("status"),
+                        "arguments_hash": m.get("arguments_hash"),
+                        "started_at": m.get("started_at"),
+                        "finished_at": m.get("finished_at"),
+                        "exit_code": m.get("exit_code"),
+                    }
+                    for m in (result.get("mcp_results") or [])
+                    if isinstance(m, dict)
+                ])
+                cur["executed_tool_runs"] = existing_runs[-500:]
                 job.state_data = cur
                 phase_ledgers = _merge_phase_ledgers(phase_ledgers, [ledger])
                 db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                               message=f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} (parallel)"))
+                               message=(
+                                   f"phase_result phase_id={phase_id} status={ledger.get('status')} target={target} "
+                                   f"skills={selected_skill_ids} (parallel)"
+                               )))
                 db.commit()
             try:
                 _persist_offensive_findings(db, job, phase_ledgers, [target])
@@ -2594,6 +2673,14 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             "tools_attempted": tools_attempted,
             "tools_success": tools_success,
             "tools_failed": ledger.get("tools_failed", []),
+            "selected_skills": ledger.get("selected_skills", []),
+            "skills_success": ledger.get("skills_success", []),
+            "skills_partial": ledger.get("skills_partial", []),
+            "skills_blocked": ledger.get("skills_blocked", []),
+            "skill_coverage": ledger.get("skill_coverage", {}),
+            "tool_execution_keys_attempted": ledger.get("tool_execution_keys_attempted", []),
+            "tool_execution_keys_success": ledger.get("tool_execution_keys_success", []),
+            "tool_execution_keys_failed": ledger.get("tool_execution_keys_failed", []),
             "evidence_ids": ledger.get("evidence_ids", []),
             "hypotheses_created": ledger.get("hypotheses_created", []),
             "attack_paths_updated": ledger.get("attack_paths_updated", []),
