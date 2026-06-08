@@ -1272,6 +1272,7 @@ class PhaseValidator:
         evidence: list[dict[str, Any]],
         hypotheses: list[dict[str, Any]] | None,
         offensive_state: dict[str, Any],
+        skill_coverage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         required_tools = {
             str(tool.get("tool_name") or "")
@@ -1318,6 +1319,23 @@ class PhaseValidator:
         strongest = max((EVIDENCE_STRENGTHS.index(ev.get("evidence_strength", "none")) for ev in evidence), default=0)
         if strongest < EVIDENCE_STRENGTHS.index(min_strength):
             return self._decision(phase_contract["phase_id"], "partial", True, "evidence_strength_too_weak", [])
+        # COBERTURA POR SKILL (vale p/ TODAS as fases multi-skill): a fase só é
+        # 'completed' quando TODAS as required_skills estão completed. Se alguma
+        # ficou blocked/partial mas houve execução útil → partial. Se NENHUMA
+        # required skill foi coberta → blocked. Sem isso, uma fase virava
+        # 'completed' por evidência agregada mesmo com skills required descobertas.
+        required_skills = phase_contract.get("required_skills") or []
+        if skill_coverage and required_skills:
+            _cov = {s: (skill_coverage.get(s) or {}).get("status") for s in required_skills}
+            _blocked = [s for s, st in _cov.items() if st in (None, "blocked")]
+            _partial = [s for s, st in _cov.items() if st == "partial"]
+            _completed = [s for s, st in _cov.items() if st == "completed"]
+            if _blocked and not _completed and not _partial:
+                return self._decision(phase_contract["phase_id"], "blocked", False,
+                                      "no_required_skill_covered", _blocked)
+            if _blocked or _partial:
+                return self._decision(phase_contract["phase_id"], "partial", True,
+                                      "partial_skill_coverage", _blocked + _partial)
         return {
             "phase_id": phase_contract["phase_id"],
             "status": "completed",
@@ -1614,7 +1632,7 @@ class OffensiveSkillRuntime:
         state["open_hypotheses"].extend(generated_hypotheses)
         state["attack_paths"].extend(attack_paths)
         state["next_objectives"] = [item["title"] for item in generated_hypotheses[:3]]
-        decision = self.validator.validate(contract, tool_plan, mcp_results, evidence, generated_hypotheses, state)
+        decision = self.validator.validate(contract, tool_plan, mcp_results, evidence, generated_hypotheses, state, skill_coverage=skill_coverage)
         lesson = self.learning.learn(phase_id, tool_plan, mcp_results, evidence)
         ledger = create_phase_ledger(contract)
         ledger.update(
