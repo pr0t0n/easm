@@ -7,6 +7,9 @@ import websockets
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://juice-shop:3000"
 WAIT = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+# token de sessão (do generic_auth) p/ capturar estado AUTENTICADO. Genérico:
+# injeta em chaves de localStorage comuns a SPAs (token/jwt/access_token).
+TOKEN = sys.argv[3] if len(sys.argv) > 3 else ""
 
 udir = f"/tmp/cdp-{os.getpid()}"
 proc = subprocess.Popen(
@@ -40,6 +43,13 @@ async def main():
         for m in ("Network.enable", "Page.enable", "Runtime.enable"):
             await send(m)
         await send("Page.navigate", {"url": URL})
+        if TOKEN:
+            # estabelece a origin, injeta o token nas chaves comuns, recarrega
+            await asyncio.sleep(3)
+            keys = ["token", "jwt", "access_token", "authentication", "auth_token", "id_token"]
+            expr = ";".join([f"localStorage.setItem('{k}', {json.dumps(TOKEN)})" for k in keys])
+            await send("Runtime.evaluate", {"expression": expr})
+            await send("Page.navigate", {"url": URL})
         end = time.time() + WAIT
         while time.time() < end:
             try:
@@ -78,7 +88,7 @@ async def main():
             k = (r["method"], r["url"].split("?")[0])
             if k not in seen:
                 seen.add(k); api.append(r)
-    print(json.dumps({"api_requests": api, "storage": storage}, indent=2)[:3500])
+    print(json.dumps({"storage": storage, "api_count": len(api), "api_requests": api[:25]}, indent=2))
 
 try:
     asyncio.run(main())
