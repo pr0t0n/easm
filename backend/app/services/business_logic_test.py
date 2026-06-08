@@ -10,6 +10,10 @@ genérica e com guardrail (read-back + REVERTE, sem dump em massa, sem destruiç
     armazenou o valor inválido. Reverte ao valor original.
   - Manipulação de valor (GET param) p/ apps onde a BL está em query string.
   - Mass assignment: campo privilegiado (role/isAdmin/status) aceito do cliente.
+  - IDOR/BOLA ativo: com BASELINE — só confirma se a listagem está escopada a mim
+    mas consigo ler objeto de OUTRO dono por id direto (read-only, controlado).
+  - Exposição de dados sensíveis: JWT/keys/senha/PII em localStorage/sessionStorage
+    capturados via chromium (CDP) — exfiltráveis por XSS.
 
 Despachado via worker_dispatcher (tool 'bl-test'), fase P13.
 """
@@ -122,24 +126,168 @@ def _finding(cls, status, sev, ep, ev, payload=None):
                         "discovery_method": "teste ativo de business logic (chromium-capture + REST-CRUD + read-back)"}}
 
 
-def _collections_from_capture(base: str) -> list[str]:
-    """Descobre coleções REST via chromium-capture (endpoints reais do SPA)."""
-    cols = []
+def _capture(base: str) -> dict:
+    """Chama chromium-capture (CDP) UMA vez. Retorna o dict cru (api_requests +
+    storage: localStorage/sessionStorage/cookies). Reaproveitado por coleções E
+    análise de dados sensíveis client-side."""
     try:
         from app.services.kali_executor import execute_via_kali
         res = execute_via_kali("chromium-capture", base, max_wait=80)
-        data = json.loads(res.get("stdout", "{}"))
-        from urllib.parse import urlparse
-        seen = set()
-        for r in data.get("api_requests", []):
-            path = urlparse(r.get("url", "")).path
-            if _COLLECTION_RE.match(path):
-                u = base.rstrip("/") + "/" + path.strip("/")
-                if u not in seen:
-                    seen.add(u); cols.append(u)
+        return json.loads(res.get("stdout", "{}")) or {}
     except Exception:
-        pass
+        return {}
+
+
+def _collections_from_capture(cap: dict, base: str) -> list[str]:
+    """Extrai coleções REST dos endpoints reais capturados pelo chromium (SPA)."""
+    cols, seen = [], set()
+    from urllib.parse import urlparse
+    for r in (cap.get("api_requests") or []):
+        path = urlparse(r.get("url", "")).path
+        if _COLLECTION_RE.match(path):
+            u = base.rstrip("/") + "/" + path.strip("/")
+            if u not in seen:
+                seen.add(u); cols.append(u)
     return cols
+
+
+# ── Dados sensíveis em storage client-side (XSS-exfiltráveis) ─────────────────
+# Padrões de SEGREDO (genéricos, wordlist→regex). Observação direta = confirmada.
+_SECRET_PATTERNS = [
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}")),
+    ("aws_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("google_api_key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----")),
+    ("bearer_token", re.compile(r"(?i)bearer\s+[A-Za-z0-9._-]{20,}")),
+    ("generic_secret_hex", re.compile(r"\b[a-fA-F0-9]{32,}\b")),
+    ("password", re.compile(r"(?i)\"?(pass(word)?|senha|pwd|secret|apikey|api_key|token)\"?\s*[:=]\s*\"?[^\"\s,}]{4,}")),
+    ("email_pii", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+]
+# Chaves de storage cujo NOME já denuncia material sensível.
+_SENSITIVE_KEY_RE = re.compile(r"(?i)(token|jwt|auth|secret|password|senha|apikey|api_key|"
+                               r"access|refresh|session|credential|bearer|private)")
+
+
+def _sensitive_storage(cap: dict, base: str) -> list[dict]:
+    """Detecta segredos/PII em localStorage/sessionStorage (acessível a qualquer
+    JS → exfiltrável via XSS). Observação DIRETA do valor → confirmada. Genérico
+    por padrões/wordlist, sem alvo hardcoded."""
+    out = []
+    storage = cap.get("storage") or {}
+    for area in ("localStorage", "sessionStorage"):
+        raw = storage.get(area)
+        if not raw:
+            continue
+        try:
+            entries = json.loads(raw) if isinstance(raw, str) else raw  # [["k","v"],...]
+        except Exception:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for pair in entries:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+                continue
+            key, val = str(pair[0]), str(pair[1])
+            hit = None
+            for label, pat in _SECRET_PATTERNS:
+                if pat.search(val):
+                    hit = label; break
+            if not hit and _SENSITIVE_KEY_RE.search(key) and len(val) >= 8:
+                hit = "sensitive_key_name"
+            if hit:
+                out.append(_finding(
+                    "exposicao_dados_sensiveis", "confirmada", "high", f"{base} [{area}.{key}]",
+                    f"Dado sensível ({hit}) em {area} client-side, chave '{key}' "
+                    f"(prefixo: {val[:24]}…). Acessível a qualquer JS no domínio → "
+                    f"exfiltrável via XSS. Não deve residir em storage acessível por script.",
+                    f"{area}.{key}"))
+    return out
+
+
+# ── IDOR / BOLA ativo (object-level authorization) ───────────────────────────
+# Campos que indicam DONO de um objeto (wordlist genérica).
+OWNERSHIP_FIELDS = ["userid", "user_id", "ownerid", "owner_id", "owner", "customerid",
+                    "customer_id", "accountid", "account_id", "tenantid", "tenant_id",
+                    "createdby", "created_by", "author", "uid", "user"]
+
+
+def _jwt_self_id(token: str) -> object:
+    """Decodifica o payload do JWT (sem validar assinatura — só p/ saber QUEM sou)
+    e extrai meu identificador. Genérico: claims comuns + JuiceShop data:{id}."""
+    if not token or token.count(".") < 2:
+        return None
+    import base64
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(p.encode()))
+    except Exception:
+        return None
+    for k in ("id", "userId", "user_id", "uid", "sub"):
+        if k in payload and payload[k] not in (None, ""):
+            return payload[k]
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for k in ("id", "userId", "user_id", "uid"):
+            if k in data:
+                return data[k]
+    return None
+
+
+def _bola_active(c: httpx.Client, collections: list[str], token: str) -> list[dict]:
+    """Acesso indevido a objeto de OUTRO usuário (BOLA/IDOR). Lê meu id no JWT,
+    enumera POUCOS ids (brute force controlado) numa coleção com campo de dono e
+    confirma se um objeto de dono DIFERENTE retorna p/ mim. Somente leitura."""
+    out = []
+    my_id = _jwt_self_id(token)
+    if my_id is None:
+        return out          # sem identidade própria não há como provar cross-user
+    my_s = str(my_id)
+    for col in collections[:10]:
+        try:
+            items = c.get(col).json().get("data")
+        except Exception:
+            continue
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            continue
+        own_field = next((k for k in items[0] if k.lower() in OWNERSHIP_FIELDS), None)
+        if not own_field:
+            continue
+        # BASELINE/controle (disciplina anti-FP): a listagem que EU vejo precisa
+        # estar ESCOPADA só a mim. Se ela já mistura donos, os objetos são públicos
+        # por design (não é BOLA). Só então provo acesso a id de OUTRO dono.
+        owners = {str(it.get(own_field)) for it in items if it.get(own_field) is not None}
+        if my_s not in owners:
+            continue                      # não apareço na listagem → sem baseline
+        if owners - {my_s}:
+            continue                      # listagem mistura donos → dado público, não BOLA
+        my_ids = {it.get("id") for it in items if isinstance(it.get("id"), int)}
+        try:
+            base_id = int(my_id)
+            probe = [i for i in sorted({base_id - 1, base_id + 1, 1, 2, 3}) if i not in my_ids][:6]
+        except Exception:
+            probe = [i for i in (1, 2, 3) if i not in my_ids]
+        for oid in probe:
+            try:
+                rb = c.get(f"{col}/{oid}")
+                obj = (rb.json().get("data") if rb.status_code == 200 else None)
+            except Exception:
+                continue
+            if isinstance(obj, list):
+                obj = obj[0] if obj else None
+            if not isinstance(obj, dict):
+                continue
+            owner = obj.get(own_field)
+            # objeto FORA da minha listagem escopada, de outro dono → BOLA real
+            if owner is not None and str(owner) != my_s:
+                out.append(_finding(
+                    "idor_bola", "confirmada", "high", f"{col}/{oid}",
+                    f"Listagem escopada só a mim (dono={my_s}), mas GET {col}/{oid} devolveu "
+                    f"objeto de OUTRO dono ({own_field}={owner}). Autorização a nível de objeto "
+                    f"ausente (BOLA/IDOR). Baseline: id {oid} não estava na minha listagem.",
+                    f"GET {col}/{oid}"))
+                break   # 1 prova por coleção basta — sem extração em massa
+    return out
 
 
 def _rest_crud_negative(c: httpx.Client, collections: list[str]) -> list[dict]:
@@ -250,8 +398,11 @@ def run_as_tool(target: str) -> dict:
         cookies = auth.get("session_cookies") or {}
         token = auth.get("token")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        # coleções: chromium-capture (endpoints reais) + estático
-        collections = _collections_from_capture(base)
+        # captura client-side UMA vez (endpoints reais do SPA + storage/cookies)
+        cap = _capture(base)
+        collections = _collections_from_capture(cap, base)
+        # dados sensíveis em localStorage/sessionStorage (XSS-exfiltrável)
+        findings += _sensitive_storage(cap, base)
 
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
                           cookies=cookies, headers=headers) as c:
@@ -270,6 +421,9 @@ def run_as_tool(target: str) -> dict:
                     _low.add(k); collections.append(u)
             # 1) manipulação de valor via REST-CRUD (corpo) — a técnica principal
             findings += _rest_crud_negative(c, collections)
+
+            # 1b) IDOR/BOLA ativo: acesso a objeto de outro dono (controlado, read-only)
+            findings += _bola_active(c, collections, token)
 
             # 2) manipulação de valor via GET param (apps onde BL está na query)
             from urllib.parse import urlparse, parse_qs, urlunparse
