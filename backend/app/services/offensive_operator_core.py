@@ -205,9 +205,12 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["wapiti", "nikto",
           "nuclei-xss",   # HackerOne: #1 class (652 reports) — reflected, stored, DOM, blind
           "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
-        ("P13", "Access Control Testing", "Validate object and authorization boundaries",
-         ["skill.idor_object_authorization"], ["nuclei"],
-         ["ffuf", "arjun",
+        ("P13", "Access Control & Business Logic", "Validate object/authorization boundaries and business-logic flows",
+         # FIAÇÃO: skills antes ÓRFÃS agora ligadas à fase — business_logic (chromium-capture),
+         # bola_bfla, csrf, mass-assignment (api_security). Seus tools entram via _resolve_phase_tools.
+         ["skill.idor_object_authorization", "skill.vuln.business_logic",
+          "skill.vuln.bola_bfla", "skill.vuln.csrf", "skill.vuln.api_security"], ["nuclei"],
+         ["ffuf", "arjun", "chromium-capture", "curl",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
           "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries without brute-force",
