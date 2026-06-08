@@ -113,12 +113,19 @@ def _resolve_phase_tools(
         optional.extend(tools.get("optional_tools") or [])
         optional.extend(tools.get("fallback_tools") or [])
 
-    seen: set[str] = set()
-    req_deduped = [t for t in required if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
-    opt_deduped = [t for t in optional if t not in seen and not seen.add(t)]  # type: ignore[func-returns-value]
-
-    if not req_deduped:
-        return fallback_required, fallback_optional or []
+    # fallback_required SEMPRE mesclado (não descartado só porque a skill .md tem
+    # required_tools) — garante que tools transversais da fase (ex.: bl-test) não
+    # somem. Ordem preservada: tools das skills primeiro, fallback depois.
+    req_seen: set[str] = set()
+    req_deduped: list[str] = []
+    for t in list(required) + list(fallback_required or []):
+        if t and t not in req_seen:
+            req_seen.add(t); req_deduped.append(t)
+    opt_seen: set[str] = set(req_seen)
+    opt_deduped: list[str] = []
+    for t in list(optional) + list(fallback_optional or []):
+        if t and t not in opt_seen:
+            opt_seen.add(t); opt_deduped.append(t)
     return req_deduped, opt_deduped
 
 
@@ -302,6 +309,20 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
 
 PHASE_CONTRACTS = default_phase_contracts()
 PHASE_ORDER = list(PHASE_CONTRACTS)
+
+
+# Liga uma tool REQUIRED da fase a skills ESPECÍFICAS — evita FALSA cobertura.
+# Ex.: bl-test cobre business logic / BOLA / mass-assignment, mas NÃO prova CSRF
+# nem IDOR genérico. Uma tool sem binding aqui é phase-global (entra em toda skill).
+PHASE_TOOL_BINDINGS: dict[str, dict[str, list[str]]] = {
+    "P13": {
+        "bl-test": [
+            "skill.vuln.business_logic",
+            "skill.vuln.bola_bfla",
+            "skill.vuln.api_security",
+        ],
+    },
+}
 
 
 def route_next_required_phase(completed_phases: list[str] | None, current_phase: str | None = None) -> str | None:
@@ -1089,11 +1110,16 @@ class SkillToToolPlanCompiler:
             if name not in seen_tools:
                 seen_tools.add(name)
                 _add_tool(name, is_required=(name in phase_required))
-        # Tools REQUERIDAS PELA FASE sempre são despachadas, mesmo que a skill
-        # escolhida pelo RAG não as liste. Sem isso, uma tool transversal da fase
-        # (ex.: P13 → bl-test, chromium-capture) só rodaria quando a skill exata
-        # fosse sorteada — e a "fiação" da fase não viraria execução.
+        # Tools REQUERIDAS PELA FASE entram mesmo que a skill do RAG não as liste —
+        # mas RESPEITANDO os bindings: uma tool ligada a skills específicas (ex.:
+        # bl-test → business_logic/bola_bfla/api_security) NÃO entra em skills não
+        # ligadas (csrf/idor), p/ não gerar FALSA cobertura. Tool sem binding é
+        # phase-global (entra em toda skill).
+        _bindings = PHASE_TOOL_BINDINGS.get(phase_contract["phase_id"], {})
         for name in (phase_contract.get("required_tools") or []):
+            bound_to = _bindings.get(name)
+            if bound_to is not None and skill["skill_id"] not in bound_to:
+                continue  # tool ligada a outras skills — não conta cobertura aqui
             if name not in seen_tools:
                 seen_tools.add(name)
                 _add_tool(name, is_required=True)
@@ -1528,11 +1554,60 @@ class OffensiveSkillRuntime:
                 if t["tool_name"] not in _seen_tn:
                     _seen_tn.add(t["tool_name"]); _combined_tools.append(t)
         tool_plan = {**tool_plans[0], "tools": _combined_tools}
+
+        # ── skill_coverage: atribuição POR SKILL (mesmo com dedup global de tools).
+        # Uma tool roda 1x na fase, mas conta p/ toda skill cujo plano a inclui.
+        _ok = {"success", "done"}
+        _status_by_tool = {r["tool_name"]: r.get("status") for r in mcp_results}
+        _bindings = PHASE_TOOL_BINDINGS.get(phase_id, {})
+
+        def _counts_for(_sid: str, _tn: str) -> bool:
+            # tool com binding só conta cobertura p/ skills ligadas (anti-FP):
+            # bl-test não prova csrf/idor mesmo se estiver no plano por herança.
+            b = _bindings.get(_tn)
+            return b is None or _sid in b
+
+        skill_coverage: dict[str, Any] = {}
+        for sid, tp in zip(ran_skills, tool_plans):
+            allt = [t["tool_name"] for t in tp["tools"] if _counts_for(sid, t["tool_name"])]
+            req = [t["tool_name"] for t in tp["tools"] if t.get("required") and _counts_for(sid, t["tool_name"])]
+            attempted = [t for t in allt if t in _status_by_tool]
+            succ = [t for t in attempted if _status_by_tool.get(t) in _ok]
+            fail = [t for t in attempted if _status_by_tool.get(t) not in _ok]
+            req_ok = all(_status_by_tool.get(t) in _ok for t in req) if req else bool(succ)
+            s_status = "completed" if (succ and req_ok) else ("partial" if succ else "blocked")
+            skill_coverage[sid] = {
+                "status": s_status, "tools_required": req, "tools_attempted": attempted,
+                "tools_success": succ, "tools_failed": fail, "evidence_ids": [],
+                "blocking_reason": None if s_status != "blocked" else "tools_not_executed_or_blocked",
+            }
+        # required skills do contrato SEMPRE aparecem no plano — uma ausente/reprovada
+        # vira blocked com motivo (não some silenciosamente = não mascara cobertura).
+        required_sids = list(contract.get("required_skills") or [])
+        skills_planned = list(dict.fromkeys(required_sids + list(ordered_sids)))
+        for sid in required_sids:
+            if sid not in skill_coverage:
+                reason = ("required_skill_quality_gate_failed" if sid in registry_skills
+                          else "required_skill_not_available")
+                skill_coverage[sid] = {
+                    "status": "blocked", "tools_required": [], "tools_attempted": [],
+                    "tools_success": [], "tools_failed": [], "evidence_ids": [],
+                    "blocking_reason": reason,
+                }
+        skills_success = [s for s, c in skill_coverage.items() if c["status"] == "completed"]
+        skills_partial = [s for s, c in skill_coverage.items() if c["status"] == "partial"]
+        skills_blocked = [s for s, c in skill_coverage.items() if c["status"] == "blocked"]
+
         evidence = [
             self.collector.create(result, parsed_json={"request_response_pair": bool(result.get("stdout_path")), "reproducible": True})
             for result in mcp_results
             if result.get("status") == "success"
         ]
+        # atribui evidência por skill (cada evidência carrega skill_id da execução)
+        for ev in evidence:
+            _sid = ev.get("skill_id")
+            if _sid in skill_coverage:
+                skill_coverage[_sid]["evidence_ids"].append(ev["evidence_id"])
         generated_hypotheses = self.hypotheses.update_from_evidence(phase_id, evidence)
         attack_paths = self.attack_paths.correlate(evidence, generated_hypotheses)
         state["current_phase"] = phase_id
@@ -1546,6 +1621,12 @@ class OffensiveSkillRuntime:
             status=decision["status"],
             finished_at=utc_now(),
             selected_skills=ran_skills,
+            skills_planned=skills_planned,
+            skills_attempted=ran_skills,
+            skills_success=skills_success,
+            skills_partial=skills_partial,
+            skills_blocked=skills_blocked,
+            skill_coverage=skill_coverage,
             retrieved_rag_context=retrieved["retrieved_skills"],
             tools_required=contract["required_tools"],
             tools_attempted=[result["tool_name"] for result in mcp_results],
@@ -1593,6 +1674,12 @@ def create_phase_ledger(contract: dict[str, Any]) -> dict[str, Any]:
         "started_at": utc_now(),
         "finished_at": "",
         "selected_skills": [],
+        "skills_planned": [],
+        "skills_attempted": [],
+        "skills_success": [],
+        "skills_partial": [],
+        "skills_blocked": [],
+        "skill_coverage": {},
         "retrieved_rag_context": [],
         "tools_required": [],
         "tools_attempted": [],
