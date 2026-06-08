@@ -2643,6 +2643,23 @@ def poll_scan_work_item(item_id: int):
                             import logging as _blog
                             _blog.getLogger(__name__).info(
                                 "bola_probe scan=%d confirmados=%d", job.id, _br["findings_created"])
+
+                # ── EXPLORAÇÃO ATIVA (8 skills genéricas, guardrail-aware) ────
+                # Só em alvo AUTORIZADO (state.active_exploit_authorized=True).
+                # Uma vez por scan, após superfície/endpoints descobertos.
+                if item.phase_id in ("P16", "P19", "P09", "P10") and item.status == "completed":
+                    _st_ae = dict(job.state_data or {})
+                    if _st_ae.get("active_exploit_authorized") and not _st_ae.get("active_exploit_done"):
+                        from app.services.active_exploit import run_active_exploitation_for_scan
+                        _aer = run_active_exploitation_for_scan(db, job)
+                        _st_ae = dict(job.state_data or {})
+                        _st_ae["active_exploit_done"] = True
+                        job.state_data = _st_ae
+                        if _aer.get("findings_created"):
+                            import logging as _aelog
+                            _aelog.getLogger(__name__).info(
+                                "active_exploit scan=%d skills=%s confirmados=%d",
+                                job.id, _aer.get("per_skill"), _aer["findings_created"])
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)

@@ -117,6 +117,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "dirsearch": "dirsearch_paths",
     "sqlmap": "sqlmap_basic",
     "dalfox": "dalfox_xss",
+    "browser-xss": "browser_xss",  # headless chromium → dispara XSS client-side (DOM)
     "wapiti": "wapiti_scan",
     "wpscan": "wpscan_basic",
     "interactsh-client": "interactsh_oob",
