@@ -32,6 +32,8 @@ _JS_RE = re.compile(r"""<script\b[^>]*src\s*=\s*['"]([^'"]+\.js)['"]""", re.I)
 # endpoints dentro do JS (SPAs): caminhos de API
 _JS_ENDPOINT_RE = re.compile(r"""['"`](/(?:rest|api|v\d|auth|graphql|user|account|session)/[A-Za-z0-9_\-/]{1,60})['"`]""")
 _LOGINish = re.compile(r"(?i)(login|signin|sign-in|auth|session|token|logon|authenticate)")
+# links que DESTROEM a sessão — NUNCA seguir num crawl autenticado (auto-logout)
+_LOGOUTish = re.compile(r"(?i)(logout|log-out|signout|sign-out|sair|logoff|log-off|deslogar|/exit\b)")
 _PASSWORDish = re.compile(r"(?i)(pass|pwd|senha|secret)")
 _USERish = re.compile(r"(?i)(user|email|login|mail|account|usuario|name)")
 _CSRFish = re.compile(r"(?i)(csrf|token|nonce|authenticity|_token|xsrf)")
@@ -106,6 +108,8 @@ def profile_target(base: str, max_pages: int = 25, max_depth: int = 2,
             # links
             if depth < max_depth:
                 for href in _HREF_RE.findall(html):
+                    if _LOGOUTish.search(href):
+                        continue  # nunca seguir logout — destruiria a sessão autenticada
                     nu = urljoin(url, href)
                     if urlparse(nu).netloc == host and nu.split("#")[0] not in seen:
                         if "?" in nu:
