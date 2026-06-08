@@ -126,15 +126,28 @@ def _finding(cls, status, sev, ep, ev, payload=None):
                         "discovery_method": "teste ativo de business logic (chromium-capture + REST-CRUD + read-back)"}}
 
 
-def _capture(base: str, token: str = "") -> dict:
-    """Chama chromium-capture (CDP) UMA vez. Com token (do generic_auth) injeta-o
-    no localStorage → o SPA carrega AUTENTICADO e dispara as XHRs autenticadas
-    (basket/{id}, cupom, etc.), expondo a superfície real. Retorna o dict cru
-    (api_requests + storage). Reaproveitado por coleções, BOLA e dados sensíveis."""
+# Rotas de negócio comuns em SPAs (hash e path) p/ disparar XHRs autenticadas.
+# Genérico (não é um alvo específico) — cobre cesta/pedido/carteira/conta.
+SPA_BUSINESS_ROUTES = [
+    "/#/basket", "/#/order-history", "/#/wallet", "/#/saved-payment-methods",
+    "/#/address/saved", "/#/order-summary", "/#/account", "/#/profile",
+    "/basket", "/cart", "/orders", "/account", "/profile", "/wallet",
+]
+
+
+def _capture(base: str, token: str = "", creds: dict | None = None) -> dict:
+    """Chama chromium-capture (CDP) UMA vez. Preferência: LOGIN REAL via form
+    (o app grava o próprio storage → finding de storage genuíno); fallback p/
+    injeção de token. Navega rotas de negócio p/ disparar XHRs autenticadas
+    (basket/{id}, cupom…). Retorna o dict cru (api_requests + storage)."""
     try:
         from app.services.kali_executor import execute_via_kali
-        extra = [token] if token else None
-        res = execute_via_kali("chromium-capture", base, max_wait=80, extra_args=extra)
+        user = (creds or {}).get("user", "")
+        pw = (creds or {}).get("pass", "")
+        routes = ",".join(SPA_BUSINESS_ROUTES)
+        # extra_args → argv[3..6] do cdp_capture: token, user, pass, routes
+        extra = [token or "", user or "", pw or "", routes]
+        res = execute_via_kali("chromium-capture", base, max_wait=110, extra_args=extra)
         return json.loads(res.get("stdout", "{}")) or {}
     except Exception:
         return {}
@@ -599,12 +612,15 @@ def run_as_tool(target: str) -> dict:
         cookies = auth.get("session_cookies") or {}
         token = auth.get("token")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        # captura client-side UMA vez, AUTENTICADA (token → SPA dispara XHRs
-        # autenticadas: basket/{id}, cupom, etc.) + storage/cookies.
-        cap = _capture(base, token or "")
+        # captura client-side UMA vez: LOGIN REAL via form (preferível) ou injeção
+        # de token; navega rotas de negócio → SPA dispara XHRs autenticadas.
+        cap = _capture(base, token or "", auth.get("creds"))
         collections = _collections_from_capture(cap, base)
-        # dados sensíveis em localStorage/sessionStorage (exclui meu token injetado)
-        findings += _sensitive_storage(cap, base, token or "")
+        # dados sensíveis em storage. Só excluo o token quando foi INJEÇÃO minha;
+        # com login real, o token no storage foi gravado pelo APP → finding genuíno.
+        login_status = str(cap.get("login_status", ""))
+        injected_tok = (token or "") if "inject" in login_status else ""
+        findings += _sensitive_storage(cap, base, injected_tok)
 
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
                           cookies=cookies, headers=headers) as c:

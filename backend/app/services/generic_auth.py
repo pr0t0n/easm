@@ -149,6 +149,7 @@ def authenticate(base: str, profile: dict, *, try_sqli: bool = False) -> dict:
                     out.update({"authenticated": True, "method": login["kind"],
                                 "where": login["where"], "token": tok,
                                 "session_cookies": dict(c.cookies),
+                                "creds": {"user": user, "pass": pw, "kind": kind},
                                 "evidence": ev})
                     if kind == "sqli":
                         out["sqli_bypass"] = {"login": login["where"], "payload": user, "evidence": ev}
