@@ -382,7 +382,44 @@ def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[st
     return merged
 
 
+# Tools que rodam NO BACKEND (não no kali via MCP). O operator roda no processo
+# backend/celery, então pode chamá-las direto — não há profile kali p/ elas.
+_BACKEND_LOCAL_TOOLS = {"bl-test", "code-analyzer"}
+
+
+def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
+    """Executa uma tool backend-local in-process e devolve um contrato compatível
+    com o que _run_one_tool/_extract_evidence esperam (status/stdout/parsed_result)."""
+    tool = str(execution.get("tool_name") or "").strip().lower()
+    target = execution["target"]
+    try:
+        if tool == "bl-test":
+            from app.services.business_logic_test import run_as_tool as _run
+        elif tool == "code-analyzer":
+            from app.services.code_analyzer import run_as_tool as _run
+        else:
+            return {"status": "blocked", "error": f"unknown_backend_local:{tool}", "exit_code": None}
+        r = _run(target)
+        findings = r.get("findings_extracted") or []
+        parsed = r.get("parsed") or {}
+        parsed = {**parsed, "findings": findings}
+        status = r.get("status") or "done"
+        return {
+            "status": "success" if status in {"done", "success"} else status,
+            "exit_code": r.get("return_code", 0),
+            "stdout": (r.get("stdout") or "")[:10_000],
+            "stderr": r.get("stderr") or "",
+            "parsed": parsed,
+            "command": r.get("command") or f"{tool} {target}",
+            "duration_seconds": r.get("duration_seconds"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "exit_code": None}
+
+
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
+    if str(execution.get("tool_name") or "").strip().lower() in _BACKEND_LOCAL_TOOLS:
+        return _run_backend_local_tool(execution)
     tool_timeout = max(900, int(execution.get("timeout") or 0))
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
@@ -410,6 +447,22 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     )
     response.raise_for_status()
     return response.json()
+
+
+def _call_operator_tool(mcp_available: bool):
+    """Fábrica do call_tool do executor. Tools BACKEND-LOCAL (bl-test, code-analyzer)
+    rodam SEMPRE (não dependem de MCP/kali); tools remotas são bloqueadas quando o
+    MCP está indisponível. Assim o executor é criado com available=True e o gate de
+    MCP fica AQUI — senão o core bloquearia tudo (inclusive backend-local) antes."""
+    def _call(execution: dict[str, Any]) -> dict[str, Any]:
+        tool = str(execution.get("tool_name") or "").strip().lower()
+        if tool in _BACKEND_LOCAL_TOOLS:
+            return _run_backend_local_tool(execution)
+        if not mcp_available:
+            return {"status": "blocked", "error": "mcp_unavailable", "exit_code": None,
+                    "stdout": "", "stderr": ""}
+        return _call_mcp_execution(execution)
+    return _call
 
 
 # ─── Tier 3: Batch phase profiles ───────────────────────────────────────────
@@ -534,7 +587,7 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
                        message="mcp_server unreachable — tools will be skipped; phases will be marked partial"))
         db.commit()
-    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
+    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_operator_tool(mcp_available), available=True))
 
     # Read EASM scan-level (asm/full) from state_data; default = full.
     initial_state = dict(job.state_data or {})
@@ -1645,6 +1698,32 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                else "no critical/high findings" if findings else "no vulnerabilities detected")
         )
 
+    # --- bl-test: business logic (valor/IDOR-BOLA/mass-assignment/dados sensíveis) ---
+    elif tool_lower == "bl-test":
+        bl = parsed.get("findings") if isinstance(parsed, dict) else None
+        bl = bl if isinstance(bl, list) else []
+        norm = []
+        for f in bl:
+            det = (f.get("details") or {}) if isinstance(f, dict) else {}
+            norm.append({
+                "title": f.get("title") if isinstance(f, dict) else str(f),
+                "severity": f.get("severity") if isinstance(f, dict) else "info",
+                "vuln_family": det.get("vuln_family") or "business_logic",
+                "url": det.get("asset") or det.get("matched_at"),
+                "evidence": det.get("evidence"),
+                "payload": det.get("payload"),
+                "verification_status": det.get("verification_status"),
+            })
+        confirmed = [f for f in norm if f.get("verification_status") == "confirmed"]
+        evidence["business_logic_findings"] = norm
+        evidence["vulnerability_count"] = len(norm)
+        evidence["confirmed_count"] = len(confirmed)
+        evidence["finding_summary"] = (
+            f"Business Logic: {len(confirmed)} confirmada(s) de {len(norm)} — "
+            + (", ".join(f.get("title", "?").split("] ", 1)[-1][:50] for f in confirmed[:3]) if confirmed
+               else "nenhuma confirmada" if norm else "nenhuma vulnerabilidade de BL detectada")
+        )
+
     # --- gitleaks / trufflehog: secrets and credentials ---
     elif tool_lower in {"gitleaks", "trufflehog", "trufflehog-filesystem"}:
         secrets = []
@@ -1892,6 +1971,10 @@ def _has_real_evidence(tool_evidences: list[dict[str, Any]]) -> tuple[bool, str]
             strongest = "nuclei_finding"
         if ev.get("secrets_found"):
             return True, "secret_exposed"
+        if ev.get("confirmed_count", 0) > 0:        # bl-test: BL confirmada (read-back/baseline)
+            return True, "business_logic_confirmed"
+        if ev.get("business_logic_findings"):
+            strongest = strongest or "business_logic"
         if ev.get("cve_ids"):
             return True, "cve_identified"
         if ev.get("vulnerability_count", 0) > 0:
@@ -2203,7 +2286,7 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     _set_auth_headers(auth_headers_from_state(state))
 
     mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
-    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_mcp_execution, available=mcp_available))
+    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_operator_tool(mcp_available), available=True))
 
     completed_work: set[str] = set(state.get("completed_work") or [])
     host_ip_map: dict[str, str] = dict(state.get("host_ip_map") or {})

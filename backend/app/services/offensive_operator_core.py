@@ -207,9 +207,13 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
         ("P13", "Access Control & Business Logic", "Validate object/authorization boundaries and business-logic flows",
          # FIAÇÃO: skills antes ÓRFÃS agora ligadas à fase — business_logic (chromium-capture),
-         # bola_bfla, csrf, mass-assignment (api_security). Seus tools entram via _resolve_phase_tools.
+         # bola_bfla, csrf, mass-assignment (api_security).
+         # bl-test é REQUIRED da fase: a P13 escolhe só UMA skill via RAG, mas o
+         # teste de business logic (valor/IDOR-BOLA/mass-assignment/dados sensíveis)
+         # precisa rodar SEMPRE — então entra como required do contrato, não via .md.
+         # bl-test já faz a captura chromium internamente (não duplicar como required).
          ["skill.idor_object_authorization", "skill.vuln.business_logic",
-          "skill.vuln.bola_bfla", "skill.vuln.csrf", "skill.vuln.api_security"], ["nuclei"],
+          "skill.vuln.bola_bfla", "skill.vuln.csrf", "skill.vuln.api_security"], ["bl-test"],
          ["ffuf", "arjun", "chromium-capture", "curl",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
           "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
@@ -407,6 +411,11 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("manual_review", "manual_review", ["evidence_review"], "manual_parser"),
         entry("manual_correlation", "manual_review", ["attack_path_correlation"], "manual_parser"),
         entry("manual_http_probe", "curl_probe", ["http_validation"], "http_parser"),
+        # Análise client-side (CDP) + teste ATIVO de business logic (backend-local).
+        # chromium-capture roda no kali (profile chromium_capture); bl-test é
+        # backend-local (curto-circuitado em _call_mcp_execution, profile sentinela).
+        entry("chromium-capture", "chromium_capture", ["client_side_analysis", "dom_xss", "api_capture"], "generic_json_parser"),
+        entry("bl-test", "business_logic_backend", ["business_logic", "idor_bola", "mass_assignment", "sensitive_data_exposure"], "generic_json_parser"),
         entry("report-builder", "report_builder", ["reporting"], "report_parser"),
         entry("subfinder", "subfinder_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
         entry("subfinder-passive", "subfinder_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
@@ -1080,6 +1089,14 @@ class SkillToToolPlanCompiler:
             if name not in seen_tools:
                 seen_tools.add(name)
                 _add_tool(name, is_required=(name in phase_required))
+        # Tools REQUERIDAS PELA FASE sempre são despachadas, mesmo que a skill
+        # escolhida pelo RAG não as liste. Sem isso, uma tool transversal da fase
+        # (ex.: P13 → bl-test, chromium-capture) só rodaria quando a skill exata
+        # fosse sorteada — e a "fiação" da fase não viraria execução.
+        for name in (phase_contract.get("required_tools") or []):
+            if name not in seen_tools:
+                seen_tools.add(name)
+                _add_tool(name, is_required=True)
         return {
             "tool_plan_id": stable_id("TP", {"phase_id": phase_contract["phase_id"], "skill_id": skill["skill_id"], "target": target}),
             "phase_id": phase_contract["phase_id"],
@@ -1461,24 +1478,56 @@ class OffensiveSkillRuntime:
         )
         selected_skills = [skill["skill_id"] for skill in retrieved["retrieved_skills"]]
         registry_skills = {skill["skill_id"]: skill for skill in self.registry.approved_for_phase(phase_id, execution_mode)}
-        # 1st: prefer RAG-ranked skills that are in the approved registry
-        chosen = next((registry_skills[sid] for sid in selected_skills if sid in registry_skills), None)
-        # 2nd fallback: use any skill declared in the phase contract directly
-        if not chosen:
-            chosen = next(
-                (registry_skills[sid] for sid in (contract.get("required_skills") or []) if sid in registry_skills),
-                None,
-            )
-        # 3rd fallback: use ANY approved skill for the phase (ignore RAG ranking)
-        if not chosen and registry_skills:
-            chosen = next(iter(registry_skills.values()))
-        if not chosen:
+        # COMPÓSITO (vale p/ TODAS as fases): uma fase pode declarar VÁRIAS skills
+        # (ex.: P13 = IDOR + business_logic + bola_bfla + csrf + api_security).
+        # Antes só UMA rodava (a 1ª ranqueada pelo RAG) e as demais nunca viravam
+        # tool plan — então skills inteiras ficavam órfãs. Agora rodamos TODAS as
+        # skills aprovadas da fase, ordenadas por relevância do RAG, com DEDUP
+        # GLOBAL de tools (cada tool executa 1x por fase — não roda nuclei 5x).
+        ordered_sids = list(dict.fromkeys(
+            [sid for sid in selected_skills if sid in registry_skills]
+            + [sid for sid in (contract.get("required_skills") or []) if sid in registry_skills]
+            + list(registry_skills.keys())
+        ))
+        if not ordered_sids:
             ledger = create_phase_ledger(contract)
             ledger.update(status="blocked", blocking_reason="no_approved_skill_resolved", retrieved_rag_context=retrieved["retrieved_skills"])
             return {"phase_ledger": ledger, "offensive_state": state, "validator_decision": {"status": "blocked", "can_advance": False}}
 
-        tool_plan = self.compiler.compile(chosen, contract, target, scope, execution_mode, mcp_available=self.executor.available)
-        mcp_results = self.executor.execute(tool_plan, target)
+        mcp_results: list[dict[str, Any]] = []
+        executed_tools: set[str] = set()
+        ran_skills: list[str] = []
+        tool_plans: list[dict[str, Any]] = []
+        for sid in ordered_sids:
+            skill = registry_skills[sid]
+            try:
+                tp = self.compiler.compile(skill, contract, target, scope, execution_mode, mcp_available=self.executor.available)
+            except Exception:  # noqa: BLE001 — skill que falha quality gate é pulada, não derruba a fase
+                continue
+            tool_plans.append(tp)
+            ran_skills.append(sid)
+            # dedup GLOBAL: só despacha tools ainda não executadas nesta fase
+            new_tools = [t for t in tp["tools"] if t["tool_name"] not in executed_tools]
+            if not new_tools:
+                continue
+            for t in new_tools:
+                executed_tools.add(t["tool_name"])
+            mcp_results.extend(self.executor.execute({**tp, "tools": new_tools}, target))
+        if not tool_plans:
+            ledger = create_phase_ledger(contract)
+            ledger.update(status="blocked", blocking_reason="no_skill_compiled", retrieved_rag_context=retrieved["retrieved_skills"])
+            return {"phase_ledger": ledger, "offensive_state": state, "validator_decision": {"status": "blocked", "can_advance": False}}
+
+        # tool_plan combinado (união deduplicada das tools de todas as skills) p/
+        # validator/skill_plan/ledger. chosen = 1ª skill que compilou (compat).
+        chosen = registry_skills[ran_skills[0]]
+        _combined_tools: list[dict[str, Any]] = []
+        _seen_tn: set[str] = set()
+        for tp in tool_plans:
+            for t in tp["tools"]:
+                if t["tool_name"] not in _seen_tn:
+                    _seen_tn.add(t["tool_name"]); _combined_tools.append(t)
+        tool_plan = {**tool_plans[0], "tools": _combined_tools}
         evidence = [
             self.collector.create(result, parsed_json={"request_response_pair": bool(result.get("stdout_path")), "reproducible": True})
             for result in mcp_results
@@ -1496,7 +1545,7 @@ class OffensiveSkillRuntime:
         ledger.update(
             status=decision["status"],
             finished_at=utc_now(),
-            selected_skills=[chosen["skill_id"]],
+            selected_skills=ran_skills,
             retrieved_rag_context=retrieved["retrieved_skills"],
             tools_required=contract["required_tools"],
             tools_attempted=[result["tool_name"] for result in mcp_results],
@@ -1515,7 +1564,7 @@ class OffensiveSkillRuntime:
             "skill_plan": {
                 "phase_id": phase_id,
                 "target": target,
-                "selected_skills": [chosen["skill_id"]],
+                "selected_skills": ran_skills,
                 "skill_plan": {
                     "objective": tool_plan["objective"],
                     "offensive_questions": [],
