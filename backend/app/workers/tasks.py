@@ -2650,16 +2650,18 @@ def poll_scan_work_item(item_id: int):
                 if item.phase_id in ("P16", "P19", "P09", "P10") and item.status == "completed":
                     _st_ae = dict(job.state_data or {})
                     if _st_ae.get("active_exploit_authorized") and not _st_ae.get("active_exploit_done"):
-                        from app.services.active_exploit import run_active_exploitation_for_scan
-                        _aer = run_active_exploitation_for_scan(db, job)
+                        # Application Pentest GENÉRICO (dirigido por descoberta) — funciona
+                        # em qualquer ambiente; classifica confirmada/hipótese/não-testada.
+                        from app.services.app_pentest import run_app_pentest_for_scan
+                        _aer = run_app_pentest_for_scan(db, job)
                         _st_ae = dict(job.state_data or {})
                         _st_ae["active_exploit_done"] = True
                         job.state_data = _st_ae
                         if _aer.get("findings_created"):
                             import logging as _aelog
                             _aelog.getLogger(__name__).info(
-                                "active_exploit scan=%d skills=%s confirmados=%d",
-                                job.id, _aer.get("per_skill"), _aer["findings_created"])
+                                "app_pentest scan=%d resumo=%s findings=%d",
+                                job.id, _aer.get("summary"), _aer["findings_created"])
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
