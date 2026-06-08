@@ -2044,10 +2044,14 @@ def _consolidate_vulnerability_table(rows: list[dict]) -> list[dict]:
     grouped: _OD = _OD()
 
     for row in rows:
-        key = (
-            str(row.get("name") or "").strip().lower(),
-            str(row.get("severity") or "low").strip().lower(),
-        )
+        _sev = str(row.get("severity") or "low").strip().lower()
+        # Identidade canônica: se há CVE, a MESMA CVE é a MESMA vulnerabilidade
+        # (mesmo que o título varie entre alvos) → dedup robusto multi-alvo.
+        _cve = str(row.get("cve") or "").strip().upper()
+        if _cve:
+            key = (f"cve:{_cve}", _sev)
+        else:
+            key = (str(row.get("name") or "").strip().lower(), _sev)
 
         # asset defaults to "-" when not set — fall through to target/full_url in that case
         _asset_col = str(row.get("asset") or "").strip()
@@ -4110,6 +4114,93 @@ def list_findings_paginated(
         "severity_counts": severity_counts,
         "family_counts": sorted(family_counts.values(), key=lambda x: -x["count"]),
     }
+
+
+@router.get("/findings/export.csv")
+def export_findings_csv(
+    severity: str | None = None,
+    status_filter: str = "all",
+    target: str | None = None,
+    scan_id: int | None = Query(default=None, ge=1),
+    verification_status: str | None = Query(default=None),
+    dedupe: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Exporta vulnerabilidades em CSV: ID, scan, subdomínio, CVSS (criticidade),
+    CVE, recomendação. Respeita os mesmos filtros da página. Por padrão DEDUPLICA
+    vulnerabilidades repetidas (mesma família+host+CVE) entre os alvos/scans."""
+    from app.services.vuln_family import classify_family, family_label
+    query = _authorized_finding_query(db, current_user)
+
+    _VALID_VSTATUS = {"confirmed", "candidate", "hypothesis", "refuted", "none"}
+    if verification_status:
+        _vs = verification_status.strip().lower()
+        if _vs in _VALID_VSTATUS:
+            if _vs == "none":
+                query = query.filter(Finding.verification_status.is_(None))
+            else:
+                query = query.filter(Finding.verification_status == _vs)
+    if severity:
+        severity_values = [
+            item.strip().lower()
+            for item in re.split(r"[,;\s]+", severity)
+            if item.strip().lower() in {"critical", "high", "medium", "low", "info"}
+        ]
+        if severity_values:
+            query = query.filter(Finding.severity.in_(severity_values))
+    if target:
+        query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
+    if scan_id:
+        query = query.filter(Finding.scan_job_id == scan_id)
+
+    rows = query.order_by(Finding.id).all()
+
+    # lifecycle p/ filtro de status
+    if status_filter.strip().lower() in {"open", "closed", "false_positive"}:
+        lc = _build_finding_lifecycle_status_map(rows)
+        rows = [f for f in rows if lc.get(f.id, "open") == status_filter.strip().lower()]
+
+    _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["id", "scan_id", "alvo", "subdominio", "host", "vulnerabilidade",
+                     "familia", "severidade", "cvss", "cve", "verificacao", "url", "recomendacao"])
+
+    seen: set[tuple] = set()
+    deduped = 0
+    for f in rows:
+        loc = _extract_finding_location(f)
+        details = f.details or {}
+        fam = classify_family(
+            title=f.title, tool=f.tool, owasp=str(details.get("owasp_category") or ""),
+            cve=f.cve, learning_family=(details.get("learning_source") or {}).get("vuln_family"),
+        )
+        host = loc.get("subdomain") or loc.get("target") or f.domain or ""
+        if dedupe:
+            key = (fam, str(host).lower(), str(f.cve or "").lower(),
+                   str(f.title or "").strip().lower()[:80])
+            if key in seen:
+                deduped += 1
+                continue
+            seen.add(key)
+        writer.writerow([
+            f.id, f.scan_job_id,
+            (f.scan_job.target_query if f.scan_job else "") or "",
+            loc.get("subdomain") or "", host,
+            (f.title or ""), family_label(fam), (f.severity or ""),
+            (f"{float(f.cvss):.1f}" if f.cvss is not None else ""),
+            (f.cve or ""), (f.verification_status or ""),
+            (loc.get("url") or f.url or ""), (f.recommendation or ""),
+        ])
+
+    csv_text = out.getvalue()
+    scope = f"scan{scan_id}" if scan_id else (re.sub(r"[^a-zA-Z0-9]+", "_", target)[:30] if target else "todos")
+    return Response(
+        content=csv_text, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="vulnerabilidades_{scope}.csv"',
+                 "X-Deduped-Count": str(deduped)},
+    )
 
 
 @router.get("/jobs/registry")

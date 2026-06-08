@@ -246,6 +246,25 @@ export default function VulnerabilitiesPage() {
     }
   };
 
+  const exportCsv = async () => {
+    try {
+      const params = { status_filter: statusFilter, dedupe: true };
+      if (severitiesFilter.length > 0 && severitiesFilter.length < 5) params.severity = severitiesFilter.join(",");
+      if (targetQuery.trim()) params.target = targetQuery.trim();
+      if (scanFilter) params.scan_id = scanFilter;
+      if (vstatus) params.verification_status = vstatus;
+      const res = await client.get("/api/findings/export.csv", { params, responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vulnerabilidades_${scanFilter || targetQuery.trim() || "todos"}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao exportar CSV.");
+    }
+  };
+
   useEffect(() => {
     loadTargets();
     loadScans();
@@ -335,6 +354,11 @@ export default function VulnerabilitiesPage() {
               <option value="target">Alvo</option>
               <option value="tool">Ferramenta</option>
             </select>
+            <button onClick={exportCsv} title="Exportar vulnerabilidades (filtros atuais) em CSV — deduplicado"
+              style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--brand-500)", fontSize: 12.5,
+                       fontWeight: 700, background: "var(--brand-50)", color: "var(--brand-700)", cursor: "pointer" }}>
+              ⬇ CSV
+            </button>
           </div>
         </div>
 
@@ -415,7 +439,14 @@ export default function VulnerabilitiesPage() {
                     <Fragment key={item.id}>
                     <tr onClick={() => setExpandedId(isExpanded ? null : item.id)} style={{ cursor: "pointer" }}>
                       <td className="mono-id">{isExpanded ? "▼ " : "▶ "}{item.id}</td>
-                      <td className="mono-sm" style={{ color: "var(--brand-700)" }}>#{item.scan_job_id || "—"}</td>
+                      <td className="mono-sm" style={{ color: "var(--brand-700)" }} title={item.target_query || ""}>
+                        <div style={{ fontWeight: 700 }}>#{item.scan_job_id || "—"}</div>
+                        {item.target_query && (
+                          <div style={{ fontSize: 9.5, color: "var(--ink-muted)", maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {String(item.target_query).split(",")[0].split(";")[0].trim()}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ maxWidth: 260 }}>
                         <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 3 }}>
                           {(item.vuln_family_label || item.vuln_family) && (
