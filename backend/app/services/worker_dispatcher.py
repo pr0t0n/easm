@@ -67,6 +67,19 @@ def execute_tool_with_workers(
         result.setdefault("worker_group", "asset_discovery")
         return result
 
+    if norm_tool == "bl-test":
+        # Teste ATIVO de business logic — backend-local (descoberta+auth, sem kali).
+        from app.services.business_logic_test import run_as_tool as _bl_run
+        result = _bl_run(target)
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("evidence_required", evidence_required or [])
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend Business Logic Tester")
+        result.setdefault("worker_group", "risk_assessment")
+        return result
+
     if norm_tool not in TOOL_TO_PROFILE:
         return {
             "tool": tool_name,

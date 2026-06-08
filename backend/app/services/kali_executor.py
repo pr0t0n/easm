@@ -142,6 +142,8 @@ TOOL_TO_PROFILE: dict[str, str] = {
     # checked by `worker_dispatcher.execute_tool_with_workers` to short-
     # circuit the dispatch into `app.services.code_analyzer.run_as_tool`.
     "code-analyzer": "code_analyzer_backend",
+    # Backend-local: teste ativo de business logic (worker_dispatcher short-circuit).
+    "bl-test": "business_logic_backend",
 }
 
 
