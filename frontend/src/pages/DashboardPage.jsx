@@ -1199,11 +1199,21 @@ export default function DashboardPage() {
                 {basAgentFlow.length === 0 && <div className="bas-empty">Sem traces de agentes no escopo.</div>}
                 {basAgentFlow.slice(0, 6).map((flow) => {
                   const rate = Number(flow.success_rate || 0);
+                  // latência média por estágio (avg_duration_ms pode ser null quando
+                  // a ferramenta não registrou tempo de execução → mostra "—").
+                  const lat = flow.avg_duration_ms;
+                  const latLabel = (lat === null || lat === undefined)
+                    ? "—"
+                    : (lat >= 1000 ? `${(lat / 1000).toFixed(1)}s` : `${Math.round(lat)}ms`);
                   return (
                     <div key={flow.stage} className="af-tile">
                       <div className="top">
                         <b>{flow.stage}</b>
-                        <span className="ev">{Number(flow.events || 0)} eventos</span>
+                        <span className="ev">
+                          {Number(flow.events || 0)} eventos
+                          <span style={{ marginLeft: 8, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}
+                                title="latência média de execução">· {latLabel}</span>
+                        </span>
                       </div>
                       <div className="bar-row">
                         <div className="progress-line"><div style={{ width: `${rate}%`, background: rate >= 80 ? "var(--sev-low-solid)" : "var(--sev-medium-solid)" }} /></div>

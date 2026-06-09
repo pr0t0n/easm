@@ -6822,6 +6822,36 @@ def dashboard_insights(
                 "avg_duration_ms": round(float(row.get("duration_total") or 0.0) / max(duration_count, 1), 1),
             }
         )
+    # FALLBACK (caminho de PRODUÇÃO): o offensive operator não emite AgentTraceEvent
+    # — só o caminho legado do grafo emite. Sem isso a seção "Fluxo de agentes"
+    # ficava "Sem traces de agentes no escopo". O operator grava ExecutedToolRun
+    # (tool/status/latência reais) — derivamos o fluxo por FERRAMENTA a partir disso
+    # quando não há traces. Eventos/sucesso/latência são dados reais, não inventados.
+    if not agent_flow and executed_runs:
+        run_map: dict[str, dict[str, Any]] = {}
+        for run in executed_runs:
+            key = str(getattr(run, "tool_name", "") or "tool").strip() or "tool"
+            row = run_map.setdefault(key, {"stage": key, "events": 0, "successes": 0, "failures": 0, "duration_total": 0.0, "duration_count": 0})
+            row["events"] += 1
+            st = str(getattr(run, "status", "") or "").lower()
+            if st in {"success", "completed", "done"}:
+                row["successes"] += 1
+            elif st in {"failed", "error", "timeout"}:
+                row["failures"] += 1
+            secs = getattr(run, "execution_time_seconds", None)
+            if secs is not None:
+                row["duration_total"] += float(secs) * 1000.0  # s → ms
+                row["duration_count"] += 1
+        for row in run_map.values():
+            dc = int(row.get("duration_count") or 0)
+            agent_flow.append({
+                "stage": row["stage"],
+                "events": int(row.get("events") or 0),
+                "success_rate": _pct(row.get("successes") or 0, row.get("events") or 0),
+                "failures": int(row.get("failures") or 0),
+                "avg_duration_ms": round(float(row.get("duration_total") or 0.0) / max(dc, 1), 1) if dc else None,
+                "source": "executed_tool_runs",  # marca origem (operator, não grafo)
+            })
     agent_flow.sort(key=lambda item: item["events"], reverse=True)
 
     accepted_learning = [row for row in learning_rows if str(row.status or "").lower() in {"accepted", "approved", "active"}]
