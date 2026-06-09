@@ -129,6 +129,24 @@ def _enqueue_operator_continuation(
     task = run_scan_job_scheduled if mode == "scheduled" else run_scan_job_unit
     group = group_for_phase(next_phase_id)
     queue = phase_queue(next_phase_id, mode=mode)  # type: ignore[arg-type]
+    dedupe_ttl = max(5, int(countdown or 0))
+    dedupe_key = f"operator_continuation:{job.id}:{mode}:{next_phase_id}:{reason}"
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        if not _redis_client().set(dedupe_key, "1", nx=True, ex=dedupe_ttl):
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message=(
+                    f"phase_queue_enqueue_suppressed reason={reason} next_phase={next_phase_id} "
+                    f"group={group} queue={queue} ttl={dedupe_ttl}"
+                ),
+            ))
+            return {"task_id": "", "queue": queue, "group": group, "next_phase_id": next_phase_id, "deduped": True}
+    except Exception:
+        pass
     async_result = task.apply_async(args=[job.id], countdown=max(0, int(countdown or 0)), queue=queue)
     db.add(ScanLog(
         scan_job_id=job.id,

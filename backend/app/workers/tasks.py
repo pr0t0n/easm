@@ -2197,6 +2197,10 @@ def poll_scan_work_item(item_id: int):
             "finished_at": datetime.utcnow().isoformat(),
         }
         item.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(item)
+        if job:
+            db.refresh(job)
 
         run_status = "success" if item.status == "completed" else ("failed" if item.status in {"failed", "timeout", "skipped"} else "timeout")
         try:
@@ -2231,6 +2235,9 @@ def poll_scan_work_item(item_id: int):
             )
             db.execute(_upsert_stmt)
         except Exception:
+            db.rollback()
+            item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+            job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first() if item else None
             pass  # best-effort; skip run tracking on unexpected error
 
         # ── Extract and persist findings from completed tool output ──────────
@@ -2239,12 +2246,23 @@ def poll_scan_work_item(item_id: int):
         if item.status == "completed" and job:
             try:
                 from app.services.findings_extractor import persist_findings_from_work_item as _persist_findings
-                findings_created = _persist_findings(db, item, job)
+                from app.db.session import SessionLocal as _FindingsSession
+                from app.models.models import ScanJob as _FindingsJob, ScanWorkItem as _FindingsItem
+
+                _fdb = _FindingsSession()
+                try:
+                    _f_item = _fdb.query(_FindingsItem).filter(_FindingsItem.id == item.id).first()
+                    _f_job = _fdb.query(_FindingsJob).filter(_FindingsJob.id == job.id).first()
+                    if _f_item and _f_job:
+                        findings_created = _persist_findings(_fdb, _f_item, _f_job)
+                finally:
+                    _fdb.close()
             except Exception as _fe:  # noqa: BLE001
                 import logging as _log
                 _log.getLogger(__name__).warning(
                     "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
                 )
+                db.rollback()
 
         # ── Camada 2: Phase gate unblocking ──────────────────────────────────────
         # Progressive unlock: when a gate phase reaches terminal state for a target,
