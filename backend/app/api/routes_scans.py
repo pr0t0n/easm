@@ -42,7 +42,7 @@ from app.services.risk_service import (
 )
 from app.services.orchestrator import TemporalTracker
 from app.workers.celery_app import celery
-from app.workers.tasks import run_scan_job, run_scan_job_unit
+from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit
 from app.workers.worker_groups import get_worker_groups
 from app.services.adversary_technique_catalog import ADVERSARY_TECHNIQUE_CATALOG
 from app.services.tool_context_registry import dashboard_bas_variables
@@ -89,7 +89,7 @@ def _effective_mission_progress(job: ScanJob) -> int:
 
     # For running scans, modulate by subdomain coverage so progress reflects
     # how many active subdomains have actually been analyzed.
-    if str(job.status or "").lower() in ("running", "queued", "retrying"):
+    if str(job.status or "").lower() in ("running", "queued", "retrying", "paused"):
         cov = state.get("subdomain_coverage") or {}
         active_total = int(cov.get("active_total") or 0)
         scanned = int(cov.get("scanned") or 0)
@@ -127,23 +127,100 @@ def _extract_scan_id_from_task(task: dict) -> int | None:
     return None
 
 
-def _active_scan_task_ids(scan_id: int) -> list[str]:
+SCAN_ACTIVE_STATUSES = {"queued", "running", "retrying"}
+SCAN_PAUSABLE_STATUSES = SCAN_ACTIVE_STATUSES
+SCAN_RESUMABLE_STATUSES = {"paused"}
+SCAN_STOPPABLE_STATUSES = SCAN_ACTIVE_STATUSES | {"paused"}
+SCAN_PAUSE_REQUEUE_ITEM_STATUSES = {"dispatched", "running", "submitted", "retry"}
+
+
+def _active_scan_task_ids(scan_id: int, db: Session | None = None) -> list[str]:
     inspector = celery.control.inspect(timeout=1.5)
     buckets = [inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}]
+    direct_scan_task_names = {
+        "run_scan_job_unit",
+        "run_scan_job_scheduled",
+        "run_scan_target_subset",
+        "dispatch_scan_work_items",
+        "correlate_tech_vulns",
+        "agent.execute_phase",
+        "supervisor.orchestrate_scan",
+    }
+    work_item_task_names = {"execute_scan_work_item", "poll_scan_work_item"}
+    work_item_ids: set[int] = set()
+    if db is not None:
+        try:
+            work_item_ids = {
+                int(row[0])
+                for row in db.query(ScanWorkItem.id).filter(ScanWorkItem.scan_job_id == scan_id).all()
+            }
+        except Exception:
+            work_item_ids = set()
     task_ids: list[str] = []
     for tasks_by_worker in buckets:
         for _, tasks in tasks_by_worker.items():
             for task in tasks or []:
                 name = str(task.get("name") or "")
-                if name not in {"run_scan_job_unit", "run_scan_job_scheduled"}:
+                if name not in direct_scan_task_names and name not in work_item_task_names:
                     continue
-                resolved_scan_id = _extract_scan_id_from_task(task)
-                if resolved_scan_id != scan_id:
+                resolved_id = _extract_scan_id_from_task(task)
+                if name in work_item_task_names:
+                    if resolved_id not in work_item_ids:
+                        continue
+                elif resolved_id != scan_id:
                     continue
                 task_id = str(task.get("id") or "").strip()
                 if task_id:
                     task_ids.append(task_id)
     return list(dict.fromkeys(task_ids))
+
+
+def _requeue_inflight_work_items_for_pause(db: Session, scan_id: int) -> int:
+    items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(list(SCAN_PAUSE_REQUEUE_ITEM_STATUSES)),
+        )
+        .all()
+    )
+    if not items:
+        return 0
+
+    try:
+        from app.services.scan_work_queue import kali_inflight_release
+    except Exception:
+        kali_inflight_release = None
+
+    released_by_class: dict[str, int] = {}
+    now = datetime.utcnow()
+    for item in items:
+        if item.status in {"running", "submitted"}:
+            resource_class = str(item.resource_class or "light")
+            released_by_class[resource_class] = released_by_class.get(resource_class, 0) + 1
+        item.status = "queued"
+        item.lease_until = None
+        item.last_error = "paused_before_completion"
+        item.updated_at = now
+
+    if kali_inflight_release:
+        for resource_class, count in released_by_class.items():
+            try:
+                kali_inflight_release(resource_class, count)
+            except Exception:
+                continue
+    return len(items)
+
+
+def _clear_scan_worker_heartbeat(db: Session, scan_id: int) -> None:
+    db.query(WorkerHeartbeat).filter(WorkerHeartbeat.current_scan_id == scan_id).update(
+        {
+            WorkerHeartbeat.current_scan_id: None,
+            WorkerHeartbeat.status: "idle",
+            WorkerHeartbeat.last_task_name: None,
+        },
+        synchronize_session=False,
+    )
 
 
 def _reconcile_orphan_running_scans(db: Session) -> int:
@@ -2750,7 +2827,7 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
-    if job.status in {"queued", "running", "retrying"}:
+    if job.status in SCAN_ACTIVE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir scan em execucao")
 
     # Evita violacao de FK quando algum heartbeat ainda referencia este scan.
@@ -2816,16 +2893,16 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
 def reset_operational_scans(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     scan_rows = db.query(ScanJob.id, ScanJob.status, ScanJob.mode).all()
     scan_ids = [row.id for row in scan_rows]
-    active_scan_ids = [row.id for row in scan_rows if row.status in {"queued", "running", "retrying"}]
+    active_scan_ids = [row.id for row in scan_rows if row.status in SCAN_ACTIVE_STATUSES]
     # Regra operacional: preservar scans que ainda NAO aconteceram (fila).
     # Limpa apenas execucoes historicas e em andamento.
-    resettable_statuses = {"running", "retrying", "completed", "failed", "stopped", "blocked"}
+    resettable_statuses = {"running", "retrying", "paused", "completed", "failed", "stopped", "blocked"}
     resettable_scan_ids = [row.id for row in scan_rows if row.status in resettable_statuses]
     preserved_queued_scan_ids = [row.id for row in scan_rows if row.status == "queued"]
 
     revoked_task_ids: list[str] = []
     for scan_id in active_scan_ids:
-        task_ids = _active_scan_task_ids(scan_id)
+        task_ids = _active_scan_task_ids(scan_id, db)
         for task_id in task_ids:
             try:
                 celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
@@ -2972,16 +3049,17 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
-    if job.status not in {"queued", "running", "retrying"}:
+    if job.status not in SCAN_STOPPABLE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans em execucao/fila podem ser interrompidos")
 
-    task_ids = _active_scan_task_ids(scan_id)
+    task_ids = _active_scan_task_ids(scan_id, db)
     for task_id in task_ids:
         try:
             celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
         except Exception:
             continue
 
+    _clear_scan_worker_heartbeat(db, scan_id)
     job.status = "stopped"
     job.current_step = "Scan interrompido manualmente"
     job.next_retry_at = None
@@ -3005,13 +3083,138 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
     return {"ok": True, "scan_id": scan_id, "revoked_task_ids": task_ids}
 
 
+@router.post("/scans/{scan_id}/pause")
+def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    if job.status == "paused":
+        return {"ok": True, "scan_id": scan_id, "status": "paused", "revoked_task_ids": [], "requeued_work_items": 0}
+    if job.status not in SCAN_PAUSABLE_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans em execucao/fila podem ser pausados")
+
+    task_ids = _active_scan_task_ids(scan_id, db)
+    previous_step = str(job.current_step or "")
+    requeued_items = _requeue_inflight_work_items_for_pause(db, scan_id)
+    _clear_scan_worker_heartbeat(db, scan_id)
+
+    state = dict(job.state_data or {})
+    pause_control = dict(state.get("pause_control") or {})
+    pause_control.update(
+        {
+            "paused_at": datetime.utcnow().isoformat(),
+            "resume_step": previous_step,
+            "revoked_task_ids": task_ids,
+            "requeued_work_items": requeued_items,
+        }
+    )
+    state["pause_control"] = pause_control
+    job.state_data = state
+    job.status = "paused"
+    job.current_step = "Scan pausado manualmente"
+    job.next_retry_at = None
+    job.last_error = None
+
+    db.add(
+        ScanLog(
+            scan_job_id=scan_id,
+            source="manager",
+            level="WARNING",
+            message=(
+                f"Scan pausado manualmente; operacao em andamento cancelada sem persistir resultado "
+                f"(task_ids={task_ids or ['nao_encontrada']}, requeued_work_items={requeued_items})"
+            ),
+        )
+    )
+    log_audit(
+        db,
+        event_type="scan.paused",
+        message=f"Scan {scan_id} pausado manualmente",
+        actor_user_id=current_user.id,
+        metadata={"scan_id": scan_id, "task_ids": task_ids, "requeued_work_items": requeued_items},
+    )
+    db.commit()
+
+    for task_id in task_ids:
+        try:
+            celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception:
+            continue
+
+    return {
+        "ok": True,
+        "scan_id": scan_id,
+        "status": "paused",
+        "revoked_task_ids": task_ids,
+        "requeued_work_items": requeued_items,
+    }
+
+
+@router.post("/scans/{scan_id}/resume")
+def resume_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    if job.status not in SCAN_RESUMABLE_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans pausados podem ser retomados")
+
+    state = dict(job.state_data or {})
+    pause_control = dict(state.get("pause_control") or {})
+    resume_step = str(pause_control.get("resume_step") or job.current_step or "Retomando scan")
+    pause_control["resumed_at"] = datetime.utcnow().isoformat()
+    state["pause_control"] = pause_control
+    job.state_data = state
+    job.status = "queued"
+    job.current_step = resume_step
+    job.next_retry_at = None
+    job.last_error = None
+
+    db.add(
+        ScanLog(
+            scan_job_id=scan_id,
+            source="manager",
+            level="INFO",
+            message=f"Scan retomado manualmente a partir de: {resume_step}",
+        )
+    )
+    log_audit(
+        db,
+        event_type="scan.resumed",
+        message=f"Scan {scan_id} retomado manualmente",
+        actor_user_id=current_user.id,
+        metadata={"scan_id": scan_id, "resume_step": resume_step},
+    )
+    db.commit()
+
+    task_id = None
+    try:
+        async_result = run_scan_job_scheduled.delay(job.id) if str(job.mode or "").lower() == "scheduled" else run_scan_job_unit.delay(job.id)
+        task_id = getattr(async_result, "id", None)
+    except Exception as exc:
+        log_audit(
+            db,
+            event_type="scan.queue_fallback",
+            message="Fila indisponivel, retomando scan de forma imediata",
+            actor_user_id=current_user.id,
+            scan_job_id=job.id,
+            level="WARNING",
+            metadata={"error": str(exc)},
+        )
+        db.commit()
+        run_scan_job(job.id)
+
+    return {"ok": True, "scan_id": scan_id, "status": "queued", "task_id": task_id}
+
+
 @router.delete("/scans/{scan_id}/report")
 def delete_scan_report(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
-    if job.status in {"queued", "running", "retrying"}:
+    if job.status in SCAN_ACTIVE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir relatorio de scan em execucao")
 
     findings_deleted = db.query(Finding).filter(Finding.scan_job_id == scan_id).delete(synchronize_session=False)
@@ -4272,7 +4475,8 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
     ledger_count = int(row["ledger_count"] or 0)
     if ledger_count:
         raw_progress = max(raw_progress, round((ledger_count / 22) * 100))
-    effective_progress = max(0, min(100, raw_progress))
+    max_progress = 100 if str(row["status"] or "").lower() in {"completed", "done", "finished"} else 99
+    effective_progress = max(0, min(max_progress, raw_progress))
 
     return ScanStatusResponse(
         id=row["id"],
@@ -6288,6 +6492,17 @@ def dashboard_insights(
             technique_set.add(technique)
         detection_counts[status] = int(detection_counts.get(status, 0)) + 1
         observed_sources = detection.get("telemetry_observed") or _telemetry_sources(enriched_payload)
+        if not observed_sources:
+            # O offensive operator (caminho de PRODUÇÃO) não emite expected_telemetry
+            # — só o caminho legado do grafo emite. Sem isso a tabela "Eficácia por
+            # fonte de telemetria" ficava VAZIA. Rotula a fonte pela FASE real do
+            # achado (phase_name = onde o controle deveria enxergar); fallback p/ o
+            # grupo de origem. O status (detected/partial/gap) JÁ vem da evidência
+            # real via classify_detection_outcome — nada de % inventado.
+            _phase_src = str(details.get("phase_name") or nested.get("phase_name") or "").strip()
+            _fallback_src = _phase_src or (src_group.title() if src_group else "")
+            if _fallback_src:
+                observed_sources = [_fallback_src]
         for source in observed_sources:
             row = telemetry_by_source.setdefault(source, {"source": source, "total": 0, "detected": 0, "partial": 0, "gap": 0, "unknown": 0})
             row["total"] += 1
@@ -6642,18 +6857,32 @@ def dashboard_insights(
     telemetry_rows = []
     for row in telemetry_by_source.values():
         total_source = int(row.get("total") or 0)
+        det = int(row.get("detected") or 0)
+        par = int(row.get("partial") or 0)
+        gap = int(row.get("gap") or 0)
+        unk = int(row.get("unknown") or 0)
+        # Eficácia mede ONDE O CONTROLE ENXERGA/PARCIALIZA/FALHA — só faz sentido
+        # sobre eventos DETECTÁVEIS (detected+partial+gap). Eventos 'unknown' são
+        # recon/OSINT passivo (nada a detectar) → não contam como falha (0%); a
+        # fonte vira N/A (effectiveness=None) quando só tem eventos não-detectáveis.
+        detectable = det + par + gap
         telemetry_rows.append(
             {
                 "source": row["source"],
                 "total": total_source,
-                "detected": int(row.get("detected") or 0),
-                "partial": int(row.get("partial") or 0),
-                "gap": int(row.get("gap") or 0),
-                "unknown": int(row.get("unknown") or 0),
-                "effectiveness": _pct(int(row.get("detected") or 0) + (int(row.get("partial") or 0) * 0.5), total_source),
+                "detected": det,
+                "partial": par,
+                "gap": gap,
+                "unknown": unk,
+                "detectable": detectable,
+                "effectiveness": _pct(det + (par * 0.5), detectable) if detectable else None,
             }
         )
-    telemetry_rows.sort(key=lambda item: (item["effectiveness"], item["total"]), reverse=True)
+    # ordena por eficácia (N/A por último), depois por volume detectável e total.
+    telemetry_rows.sort(
+        key=lambda item: (item["effectiveness"] is not None, item["effectiveness"] or 0, item["detectable"], item["total"]),
+        reverse=True,
+    )
 
     bas_command_center = {
         "summary": {

@@ -517,7 +517,7 @@ export default function DashboardPage() {
   }, {});
   const scansRunning = Number(scanStatusCounts.running || 0) + Number(scanStatusCounts.retrying || 0);
   const scansQueued = Number(scanStatusCounts.queued || 0);
-  const scansStopped = Number(scanStatusCounts.stopped || 0);
+  const scansStopped = Number(scanStatusCounts.stopped || 0) + Number(scanStatusCounts.paused || 0);
   const scansCompleted = Number(scanStatusCounts.completed || 0);
   const scansFailed = Number(scanStatusCounts.failed || 0) + Number(scanStatusCounts.blocked || 0);
   const scansExecuting = scansRunning + scansQueued;
@@ -647,7 +647,7 @@ export default function DashboardPage() {
             <div className="scan-state-grid">
               <div className="run"><span>Rodando</span><b>{scansRunning}</b></div>
               <div className="queue"><span>Executando / fila</span><b>{scansExecuting}</b></div>
-              <div className="stop"><span>Parados</span><b>{scansStopped}</b></div>
+              <div className="stop"><span>Parados / pausados</span><b>{scansStopped}</b></div>
               <div className="done"><span>Concluídos</span><b>{scansCompleted}</b></div>
               <div className="fail"><span>Falhos / bloqueados</span><b>{scansFailed}</b></div>
             </div>
@@ -1114,16 +1114,26 @@ export default function DashboardPage() {
                     <tr><td colSpan={3} className="bas-empty">Sem dados BAS suficientes.</td></tr>
                   )}
                   {basTelemetry.map((row) => {
+                    // effectiveness === null → fonte só com eventos passivos
+                    // (recon/OSINT): nada a detectar, não é falha de controle → N/A.
+                    const isNA = row.effectiveness === null || row.effectiveness === undefined;
                     const eff = Number(row.effectiveness || 0);
+                    const detectable = Number(row.detectable || 0);
                     return (
                       <tr key={row.source}>
                         <td><b>{row.source}</b></td>
                         <td>{Number(row.total || 0).toLocaleString("pt-BR")}</td>
                         <td>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontWeight: 600, width: 32, textAlign: "right" }}>{eff.toFixed(0)}%</span>
-                            <div className="progress-line"><div style={{ width: `${eff}%`, background: effColor(eff) }} /></div>
-                          </div>
+                          {isNA ? (
+                            <span title="Recon/OSINT passivo — sem evento detectável para o controle"
+                                  style={{ color: "var(--ink-muted)", fontSize: 12 }}>N/A (passivo)</span>
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}
+                                 title={`${detectable} detectável(is): ${row.detected || 0} detectado · ${row.partial || 0} parcial · ${row.gap || 0} falha`}>
+                              <span style={{ fontWeight: 600, width: 32, textAlign: "right" }}>{eff.toFixed(0)}%</span>
+                              <div className="progress-line"><div style={{ width: `${eff}%`, background: effColor(eff) }} /></div>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
