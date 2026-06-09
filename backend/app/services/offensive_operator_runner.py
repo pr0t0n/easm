@@ -88,6 +88,60 @@ PHASE_TO_CAPABILITIES: dict[str, list[str]] = {
 }
 
 
+def _scan_mode_value(scan_mode: str) -> str:
+    return "scheduled" if str(scan_mode or "").strip().lower() == "scheduled" else "unit"
+
+
+def _next_pending_phase_target(
+    all_targets: list[str],
+    completed_work: set[str],
+    input_target_count: int,
+    allowed_phases: set[str] | None,
+    delegated_targets: set[str] | None = None,
+) -> tuple[str, str] | None:
+    delegated_targets = delegated_targets or set()
+    for target_index, target in enumerate(all_targets):
+        if not target or target in delegated_targets:
+            continue
+        for phase_id in PHASE_ORDER:
+            if allowed_phases is not None and phase_id not in allowed_phases:
+                continue
+            if phase_id == "P01" and target_index >= input_target_count:
+                continue
+            if f"{phase_id}:{target}" not in completed_work:
+                return phase_id, target
+    return None
+
+
+def _enqueue_operator_continuation(
+    db,
+    job: ScanJob,
+    scan_mode: str,
+    next_phase_id: str,
+    *,
+    countdown: int = 0,
+    reason: str = "phase_checkpoint",
+) -> dict[str, Any]:
+    from app.workers.tasks import run_scan_job_scheduled, run_scan_job_unit
+    from app.workers.worker_groups import group_for_phase, phase_queue
+
+    mode = _scan_mode_value(scan_mode)
+    task = run_scan_job_scheduled if mode == "scheduled" else run_scan_job_unit
+    group = group_for_phase(next_phase_id)
+    queue = phase_queue(next_phase_id, mode=mode)  # type: ignore[arg-type]
+    async_result = task.apply_async(args=[job.id], countdown=max(0, int(countdown or 0)), queue=queue)
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="offensive-operator",
+        level="INFO",
+        message=(
+            f"phase_queue_enqueue reason={reason} next_phase={next_phase_id} "
+            f"group={group} queue={queue} countdown={max(0, int(countdown or 0))} task_id={async_result.id}"
+        ),
+    ))
+    return {"task_id": async_result.id, "queue": queue, "group": group, "next_phase_id": next_phase_id}
+
+
 def _parse_targets_from_query(target_query: str) -> list[str]:
     raw = str(target_query or "")
     tokens = [token.strip() for token in re.split(r"[;,\n]", raw) if str(token or "").strip()]
@@ -142,6 +196,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b")
 _URL_PARAM_RE = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_.:-]{0,79})=")
 _BARE_PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,79}$")
+_HALTED_SCAN_STATUSES = {"paused", "stopped"}
+
+
+def _scan_halted(job: ScanJob) -> bool:
+    return str(job.status or "").lower() in _HALTED_SCAN_STATUSES
 
 
 def _clean_tool_text(value: Any) -> str:
@@ -574,7 +633,14 @@ def _dispatch_batch_phase(
         return False
 
 
-def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> dict[str, Any]:
+def run_offensive_operator_scan(
+    db,
+    job: ScanJob,
+    scan_mode: str = "unit",
+    *,
+    phase_queue_enabled: bool = False,
+    phase_task_budget: int | None = None,
+) -> dict[str, Any]:
     """Run deterministic Skill-based P01-P22 campaign and persist every phase."""
     targets = _parse_targets_from_query(str(job.target_query or ""))
     if not targets:
@@ -621,6 +687,45 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
     # host → resolved IP, for IP-grouped network phases (populated after P01)
     host_ip_map: dict[str, str] = dict(initial_state.get("host_ip_map") or {})
     _target_idx = 0
+    _phase_queue_enabled = bool(initial_state.get("offensive_operator_phase_queue_enabled", phase_queue_enabled))
+    _phase_task_budget = max(1, int(initial_state.get("offensive_operator_phase_task_budget") or phase_task_budget or 1))
+    _phase_units_this_task = 0
+
+    if _phase_queue_enabled and not initial_state.get("_operator_phase_queue_started"):
+        _delegated_targets = set(initial_state.get("parallel_delegated_targets") or [])
+        _next_unit = _next_pending_phase_target(
+            all_targets,
+            completed_work,
+            _input_target_count,
+            allowed_phases,
+            _delegated_targets,
+        )
+        if _next_unit:
+            _next_phase, _next_target = _next_unit
+            state = dict(job.state_data or {})
+            state["offensive_operator_phase_queue_enabled"] = True
+            state["offensive_operator_phase_task_budget"] = _phase_task_budget
+            state["_operator_phase_queue_started"] = True
+            state["current_pentest_phase_id"] = _next_phase
+            state["current_pentest_target"] = _next_target
+            job.state_data = state
+            job.current_step = f"queued {_next_phase} {PHASE_CONTRACTS[_next_phase]['name']} ({_next_target})"
+            queued = _enqueue_operator_continuation(
+                db,
+                job,
+                scan_mode,
+                _next_phase,
+                reason="phase_queue_start",
+            )
+            db.commit()
+            return {
+                "checkpointed": True,
+                "phase_queue_started": True,
+                "next_phase_id": _next_phase,
+                "next_target": _next_target,
+                **queued,
+            }
+
     while _target_idx < len(all_targets):
         target = all_targets[_target_idx]
         if not target:
@@ -632,6 +737,17 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
         # invisible and the main task re-executes phases they already finished.
         try:
             db.refresh(job)
+            if _scan_halted(job):
+                db.add(
+                    ScanLog(
+                        scan_job_id=job.id,
+                        source="offensive-operator",
+                        level="WARNING",
+                        message=f"pause_guard target={target} status={job.status}; saindo sem persistir nova fase",
+                    )
+                )
+                db.commit()
+                return {"ok": False, "scan_id": job.id, "halted": job.status}
             _live_state = job.state_data or {}
             for _k in (_live_state.get("completed_work") or []):
                 completed_work.add(_k)
@@ -701,6 +817,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 {
                     "execution_mode": execution_mode,
                     "current_pentest_phase_id": phase_id,
+                    "current_pentest_target": target,
+                    "offensive_operator_phase_queue_enabled": _phase_queue_enabled,
+                    "offensive_operator_phase_task_budget": _phase_task_budget,
                     "offensive_state": offensive_state,
                     "phase_ledger_v2": phase_ledgers,
                     "operation_events": events,
@@ -712,6 +831,24 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+            try:
+                db.refresh(job)
+                if _scan_halted(job):
+                    db.add(
+                        ScanLog(
+                            scan_job_id=job.id,
+                            source="offensive-operator",
+                            level="WARNING",
+                            message=(
+                                f"pause_guard phase_id={phase_id} target={target} status={job.status}; "
+                                "resultado em andamento descartado antes da persistencia"
+                            ),
+                        )
+                    )
+                    db.commit()
+                    return {"ok": False, "scan_id": job.id, "halted": job.status, "phase_id": phase_id, "target": target}
+            except Exception:
+                pass
             offensive_state = result["offensive_state"]
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
@@ -776,6 +913,9 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     "offensive_operator_enabled": True,
                     "execution_mode": execution_mode,
                     "current_pentest_phase_id": phase_id,
+                    "current_pentest_target": target,
+                    "offensive_operator_phase_queue_enabled": _phase_queue_enabled,
+                    "offensive_operator_phase_task_budget": _phase_task_budget,
                     "offensive_state": offensive_state,
                     "phase_ledger_v2": phase_ledgers,
                     "operation_events": events,
@@ -1283,9 +1423,42 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     ),
                 ))
                 db.commit()
-                from app.workers.tasks import run_scan_job_unit as _continue_scan
-                _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
-                return {"checkpointed": True, "parallel_delegated_targets": len(_pending_parallel)}
+                _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
+                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                _next_phase = (_next_unit or ("P02", target))[0]
+                queued = _enqueue_operator_continuation(
+                    db,
+                    job,
+                    scan_mode,
+                    _next_phase,
+                    countdown=_wait_seconds,
+                    reason="parallel_checkpoint_after_p01",
+                )
+                db.commit()
+                return {"checkpointed": True, "parallel_delegated_targets": len(_pending_parallel), **queued}
+            _phase_units_this_task += 1
+            if _phase_queue_enabled and _phase_units_this_task >= _phase_task_budget and not _hard_blocked:
+                _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
+                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                if _next_unit:
+                    _next_phase, _next_target = _next_unit
+                    job.current_step = f"checkpoint: next {_next_phase} {PHASE_CONTRACTS[_next_phase]['name']} ({_next_target})"
+                    queued = _enqueue_operator_continuation(
+                        db,
+                        job,
+                        scan_mode,
+                        _next_phase,
+                        reason=f"phase_task_budget_{_phase_task_budget}",
+                    )
+                    db.commit()
+                    return {
+                        "checkpointed": True,
+                        "phase_queue": True,
+                        "completed_phase_targets": len(completed_work),
+                        "next_phase_id": _next_phase,
+                        "next_target": _next_target,
+                        **queued,
+                    }
             # Re-dispatch before the Celery time limit so deep multi-target
             # scans run effectively unbounded — each (phase,target) is a
             # durable checkpoint, so a continuation resumes exactly here.
@@ -1294,10 +1467,19 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                                message=(f"checkpoint — {len(completed_work)} phase-targets done; "
                                         f"re-dispatching scan to continue")))
                 job.current_step = f"checkpoint: {len(completed_work)} concluídos — continuando"
+                _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
+                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                if _next_unit:
+                    queued = _enqueue_operator_continuation(
+                        db,
+                        job,
+                        scan_mode,
+                        _next_unit[0],
+                        reason="time_checkpoint",
+                    )
+                    db.commit()
+                    return {"checkpointed": True, "completed_phase_targets": len(completed_work), **queued}
                 db.commit()
-                from app.workers.tasks import run_scan_job_unit as _continue_scan
-                _continue_scan.delay(job.id)
-                return {"checkpointed": True, "completed_phase_targets": len(completed_work)}
             if _hard_blocked:
                 break
         _target_idx += 1
@@ -1324,10 +1506,20 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 ))
                 db.commit()
                 from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
-                from app.workers.tasks import run_scan_job_unit as _continue_scan
                 _dispatch_wq.delay(job.id)
-                _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
-                return {"checkpointed": True, "work_queue_counts": _final_state_snapshot["work_queue_counts"]}
+                _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
+                _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
+                _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                queued = _enqueue_operator_continuation(
+                    db,
+                    job,
+                    scan_mode,
+                    _next_unit[0] if _next_unit else "P22",
+                    countdown=_wait_seconds,
+                    reason="work_queue_wait",
+                )
+                db.commit()
+                return {"checkpointed": True, "work_queue_counts": _final_state_snapshot["work_queue_counts"], **queued}
             else:
                 # work_queue tem itens mas nenhum está ativo → tudo terminal, prosseguir para conclusão
                 _wq_all_done = True
@@ -1355,9 +1547,19 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                 ),
             ))
             db.commit()
-            from app.workers.tasks import run_scan_job_unit as _continue_scan
-            _continue_scan.apply_async(args=[job.id], countdown=_wait_seconds)
-            return {"checkpointed": True, "parallel_pending_targets": len(_pending_parallel)}
+            _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
+            _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
+            _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+            queued = _enqueue_operator_continuation(
+                db,
+                job,
+                scan_mode,
+                _next_unit[0] if _next_unit else "P22",
+                countdown=_wait_seconds,
+                reason="parallel_wait",
+            )
+            db.commit()
+            return {"checkpointed": True, "parallel_pending_targets": len(_pending_parallel), **queued}
         if _final_state_snapshot.get("parallel_delegated_targets"):
             _final_state_snapshot["parallel_pending_targets"] = []
             job.state_data = _final_state_snapshot
@@ -1502,6 +1704,22 @@ def run_offensive_operator_scan(db, job: ScanJob, scan_mode: str = "unit") -> di
                     evidence={"easm_rating": state["easm_rating"]})
     mark_capability(state, "executive_analyst", source="report_builder", status="completed",
                     evidence={"summary": state["executive_summary"]})
+
+    try:
+        db.refresh(job)
+        if _scan_halted(job):
+            db.add(
+                ScanLog(
+                    scan_job_id=job.id,
+                    source="offensive-operator",
+                    level="WARNING",
+                    message=f"pause_guard finalizacao status={job.status}; relatorio/finalizacao nao persistidos",
+                )
+            )
+            db.commit()
+            return {"ok": False, "scan_id": job.id, "halted": job.status}
+    except Exception:
+        pass
 
     # ─── Learning loop: extract VulnerabilityLearning seeds from scan results ───
     try:

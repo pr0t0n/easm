@@ -28,6 +28,7 @@ export default function ScansPage({ embedded = false }) {
   const [submitting, setSubmitting] = useState(false);
   const [selectedScans, setSelectedScans] = useState(new Set());
   const ACTIVE_SCAN_STATUS = ["queued", "running", "retrying"];
+  const STOPPABLE_SCAN_STATUS = [...ACTIVE_SCAN_STATUS, "paused"];
 
   // Unified mode selector: "now" | "schedule" | "targets"
   const [mode, setMode] = useState("now");
@@ -130,7 +131,7 @@ export default function ScansPage({ embedded = false }) {
     setLogs(data);
   };
 
-  const TERMINAL_SCAN_STATUSES = new Set(['completed', 'failed', 'blocked', 'cancelled']);
+  const TERMINAL_SCAN_STATUSES = new Set(['completed', 'failed', 'blocked', 'cancelled', 'stopped', 'paused']);
 
   const loadScanStatus = async (scanId) => {
     const { data } = await client.get(`/api/scans/${scanId}/status`);
@@ -358,6 +359,36 @@ export default function ScansPage({ embedded = false }) {
     }
   };
 
+  const pauseScan = async (scanId) => {
+    const confirmed = window.confirm("Deseja pausar este scan agora? A operacao em andamento sera cancelada e retomada depois a partir da ultima acao registrada.");
+    if (!confirmed) return;
+    try {
+      await client.post(`/api/scans/${scanId}/pause`);
+      if (selected?.id === scanId) {
+        await loadScanStatus(scanId);
+        await loadLogs(scanId);
+      }
+      await loadScans();
+      setAuthStatus(`Scan #${scanId} pausado.`);
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || "Falha ao pausar scan.");
+    }
+  };
+
+  const resumeScan = async (scanId) => {
+    try {
+      await client.post(`/api/scans/${scanId}/resume`);
+      if (selected?.id === scanId) {
+        await loadScanStatus(scanId);
+        await loadLogs(scanId);
+      }
+      await loadScans();
+      setAuthStatus(`Scan #${scanId} retomado.`);
+    } catch (err) {
+      setAuthStatus(err?.response?.data?.detail || "Falha ao retomar scan.");
+    }
+  };
+
   const toggleScanSelection = (scanId) => {
     const newSelected = new Set(selectedScans);
     if (newSelected.has(scanId)) {
@@ -414,7 +445,7 @@ export default function ScansPage({ embedded = false }) {
 
   const resetOperationalScans = async () => {
     const confirmed = window.confirm(
-      "Deseja executar o reset operacional? Isso vai interromper/remover execucoes ja ocorridas (running/completed/failed/stopped), mantendo scans em fila e schedules futuros.",
+      "Deseja executar o reset operacional? Isso vai interromper/remover execucoes ja ocorridas (running/paused/completed/failed/stopped), mantendo scans em fila e schedules futuros.",
     );
     if (!confirmed) return;
 
@@ -777,6 +808,7 @@ export default function ScansPage({ embedded = false }) {
                               <span className={`badge text-xs ${
                                 scan.status === 'completed' ? 'badge-success' :
                                 scan.status === 'failed' || scan.status === 'blocked' ? 'badge-danger' :
+                                scan.status === 'paused' ? 'badge-warning' :
                                 scan.status === 'running' ? 'badge-primary' : 'badge-warning'
                               }`}>
                                 {scan.status}
@@ -786,8 +818,8 @@ export default function ScansPage({ embedded = false }) {
                               {/* Progress bar */}
                               {(() => {
                                 const cov = scan.state_data?.subdomain_coverage;
-                                const barColor = scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : '#fb923c';
-                                const textColor = scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : '#fb923c';
+                                const barColor = scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : scan.status === 'paused' ? '#facc15' : '#fb923c';
+                                const textColor = scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : scan.status === 'paused' ? '#fde047' : '#fb923c';
                                 const pct = scan.mission_progress ?? 0;
                                 return (
                                   <>
@@ -835,6 +867,22 @@ export default function ScansPage({ embedded = false }) {
                         </div>
                         <div className="mt-3 flex flex-wrap gap-2">
                           {ACTIVE_SCAN_STATUS.includes(scan.status) && (
+                            <button
+                              onClick={() => pauseScan(scan.id)}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-amber-900/20 text-amber-300 border border-amber-800/50 hover:bg-amber-900/40 transition-colors"
+                            >
+                              Pausar
+                            </button>
+                          )}
+                          {scan.status === "paused" && (
+                            <button
+                              onClick={() => resumeScan(scan.id)}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-emerald-900/20 text-emerald-300 border border-emerald-800/50 hover:bg-emerald-900/40 transition-colors"
+                            >
+                              Retomar
+                            </button>
+                          )}
+                          {STOPPABLE_SCAN_STATUS.includes(scan.status) && (
                             <button
                               onClick={() => stopScan(scan.id)}
                               className="text-xs px-3 py-1.5 rounded-lg bg-red-900/20 text-red-300 border border-red-800/50 hover:bg-red-900/40 transition-colors"

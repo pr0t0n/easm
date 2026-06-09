@@ -18,6 +18,7 @@ const STATUS_LABELS = {
   scheduled: "BackLog",
   running: "Executando",
   retrying: "Executando",
+  paused: "Pausado",
   completed: "Finalizado",
   finished: "Finalizado",
   failed: "Finalizado",

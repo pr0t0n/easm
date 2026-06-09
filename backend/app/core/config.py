@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     mcp_default_top_k: int = 5
     mcp_request_timeout_seconds: int = 1800
     offensive_operator_enabled: bool = True
+    offensive_operator_phase_queue_enabled: bool = True
+    offensive_operator_phase_task_budget: int = 1
     scan_parallelize_default: bool = True
     scan_parallel_target_batch_size: int = 1024
     scan_parallel_wait_seconds: int = 60

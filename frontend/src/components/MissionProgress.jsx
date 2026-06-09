@@ -116,6 +116,7 @@ const PHASE_STATUS_CFG = {
   running: { bar: "var(--sev-high-solid,#fe7b02)", text: "var(--sev-high-text)", bg: "var(--sev-high-bg)",     border: "var(--sev-high-border)",     label: "Executando" },
   partial: { bar: "var(--sev-medium-solid)",   text: "var(--sev-medium-text)",   bg: "var(--sev-medium-bg)",   border: "var(--sev-medium-border)",   label: "Parcial"    },
   queued:  { bar: "var(--sev-info-solid)",     text: "var(--sev-info-text)",     bg: "var(--sev-info-bg)",     border: "var(--sev-info-border)",     label: "Na fila"    },
+  paused:  { bar: "var(--sev-medium-solid)",   text: "var(--sev-medium-text)",   bg: "var(--sev-medium-bg)",   border: "var(--sev-medium-border)",   label: "Pausado"    },
   blocked: { bar: "var(--line-strong)",        text: "var(--ink-muted)",         bg: "var(--surface-soft)",    border: "var(--line)",                label: "Bloqueada"  },
   failed:  { bar: "var(--sev-critical-solid)", text: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", border: "var(--sev-critical-border)", label: "Falhou"     },
   empty:   { bar: "var(--line)",               text: "var(--ink-muted)",         bg: "var(--surface-soft)",    border: "var(--line-soft)",           label: "—"          },

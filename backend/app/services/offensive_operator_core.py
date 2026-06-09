@@ -111,13 +111,17 @@ def _resolve_phase_tools(
     fallback_required: list[str],
     fallback_optional: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Merge required/optional tools from skill metadata; fall back to hardcoded lists.
+    """Resolve phase tools without letting multi-phase skill metadata bleed across phases.
 
-    Required tools come from the skill's required_tools.
-    Optional tools include the skill's optional_tools + fallback_tools (deduplicated).
+    Skill frontmatter is skill-wide today, while these rows are phase-specific. The
+    row's required tools therefore remain authoritative for the phase; skill
+    metadata is used only when no row fallback is available.
     """
+    fallback_required = list(fallback_required or [])
+    fallback_optional = list(fallback_optional or [])
+
     if not skill_map:
-        return fallback_required, fallback_optional or []
+        return fallback_required, fallback_optional
 
     required: list[str] = []
     optional: list[str] = []
@@ -127,19 +131,24 @@ def _resolve_phase_tools(
         optional.extend(tools.get("optional_tools") or [])
         optional.extend(tools.get("fallback_tools") or [])
 
-    # fallback_required SEMPRE mesclado (não descartado só porque a skill .md tem
-    # required_tools) — garante que tools transversais da fase (ex.: bl-test) não
-    # somem. Ordem preservada: tools das skills primeiro, fallback depois.
+    # Phase rows are deliberately narrower than multi-phase skill metadata. If a
+    # row declares a phase primary, keep that primary; otherwise use the skill's
+    # own required tools as the best available source.
+    required_source = fallback_required or required
+    optional_source = fallback_optional or optional
+
     req_seen: set[str] = set()
     req_deduped: list[str] = []
-    for t in list(required) + list(fallback_required or []):
+    for t in required_source:
         if t and t not in req_seen:
-            req_seen.add(t); req_deduped.append(t)
+            req_seen.add(t)
+            req_deduped.append(t)
     opt_seen: set[str] = set(req_seen)
     opt_deduped: list[str] = []
-    for t in list(optional) + list(fallback_optional or []):
+    for t in optional_source:
         if t and t not in opt_seen:
-            opt_seen.add(t); opt_deduped.append(t)
+            opt_seen.add(t)
+            opt_deduped.append(t)
     return req_deduped, opt_deduped
 
 
@@ -467,6 +476,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("gobuster", "gobuster_dir", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("katana-crawl", "katana_crawl", ["endpoint_discovery", "crawling"], "katana_parser"),
         entry("katana-js", "katana_crawl", ["js_analysis"], "katana_parser"),
+        entry("linkfinder", "linkfinder_js", ["js_analysis", "endpoint_discovery"], "katana_parser"),
         entry("httpx-fingerprint", "httpx_probe", ["http_fingerprinting"], "httpx_parser"),
         entry("whatweb-basic", "whatweb_fingerprint", ["technology_detection"], "whatweb_parser"),
         entry("curl", "curl_probe", ["http_validation", "request_response_pair"], "http_parser"),
@@ -475,6 +485,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("wapiti", "wapiti_scan", ["web_validation"], "generic_json_parser"),
         entry("dalfox", "dalfox_xss", ["xss_validation"], "dalfox_parser"),
         entry("interactsh", "interactsh_oob", ["ssrf_oob"], "interactsh_parser"),
+        entry("interactsh-client", "interactsh_oob", ["ssrf_oob"], "interactsh_parser"),
         entry("nuclei", "nuclei_cves", ["template_validation", "vuln_scanning"], "nuclei_parser"),
         entry("hydra", "hydra_wordlist_auth", ["auth_validation"], "generic_json_parser"),
         entry("git", "curl_probe", ["git_exposure_review"], "http_parser"),
@@ -567,8 +578,11 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("nuclei-rce", "nuclei_rce", ["rce_validation", "command_injection"], "nuclei_parser"),
         # Auth/Default Credentials — 119 reports: broken auth, default logins, 2FA bypass
         entry("nuclei-auth", "nuclei_auth", ["auth_validation", "default_credentials"], "nuclei_parser"),
+        entry("nuclei-auth-bypass", "nuclei_auth", ["auth_validation", "auth_bypass"], "nuclei_parser"),
+        entry("nuclei-default-credentials", "nuclei_auth", ["auth_validation", "default_credentials"], "nuclei_parser"),
         # JWT/OAuth — 19 reports: alg:none, weak HS256, token leak, OAuth state bypass
         entry("nuclei-jwt", "nuclei_jwt", ["jwt_audit", "oauth_validation"], "nuclei_parser"),
+        entry("nuclei-oauth", "nuclei_jwt", ["oauth_validation"], "nuclei_parser"),
         # Information/Secret Exposure — 78 reports: API keys, tokens, stack traces, debug
         entry("nuclei-exposure", "nuclei_exposure", ["information_disclosure", "secret_detection"], "nuclei_parser"),
         # Cloud/S3 Exposure — 15 reports: open buckets, AWS metadata, GCP/Azure
@@ -695,45 +709,84 @@ def parse_skill_markdown(path: Path) -> dict[str, Any]:
 def safe_yaml_load(text: str) -> dict[str, Any]:
     if yaml is not None:
         return yaml.safe_load(text) or {}
+    def _next_content(start: int) -> tuple[int, int, str] | None:
+        for idx in range(start, len(lines)):
+            raw = lines[idx]
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            return idx, indent, raw.strip()
+        return None
+
     data: dict[str, Any] = {}
-    stack: list[tuple[int, Any]] = [(-1, data)]
     lines = text.splitlines()
-    for line_index, raw_line in enumerate(lines):
+    line_index = 0
+    while line_index < len(lines):
+        raw_line = lines[line_index]
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            line_index += 1
             continue
         indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent != 0:
+            line_index += 1
+            continue
         line = raw_line.strip()
-        while stack and indent <= stack[-1][0]:
-            stack.pop()
-        parent = stack[-1][1]
-        if line.startswith("- "):
-            value = _parse_scalar(line[2:].strip())
-            if isinstance(parent, list):
-                parent.append(value)
-            continue
         if ":" not in line:
+            line_index += 1
             continue
+
         key, raw_value = line.split(":", 1)
         key = key.strip()
         raw_value = raw_value.strip()
-        if raw_value == "":
-            next_container: Any = [] if _next_content_starts_list(lines, line_index, indent) else {}
-            if isinstance(parent, dict):
-                parent[key] = next_container
-                stack.append((indent, next_container))
+
+        if raw_value:
+            data[key] = _parse_scalar(raw_value)
+            line_index += 1
             continue
-        if isinstance(parent, dict):
-            parent[key] = _parse_scalar(raw_value)
+
+        next_content = _next_content(line_index + 1)
+        if not next_content:
+            data[key] = {}
+            line_index += 1
+            continue
+
+        next_index, _next_indent, next_line = next_content
+        if next_line.startswith("- "):
+            values: list[Any] = []
+            cursor = next_index
+            while cursor < len(lines):
+                item_raw = lines[cursor]
+                if not item_raw.strip() or item_raw.lstrip().startswith("#"):
+                    cursor += 1
+                    continue
+                item_indent = len(item_raw) - len(item_raw.lstrip(" "))
+                item_line = item_raw.strip()
+                if item_indent < indent or not item_line.startswith("- "):
+                    break
+                values.append(_parse_scalar(item_line[2:].strip()))
+                cursor += 1
+            data[key] = values
+            line_index = cursor
+            continue
+
+        nested: dict[str, Any] = {}
+        cursor = next_index
+        while cursor < len(lines):
+            nested_raw = lines[cursor]
+            if not nested_raw.strip() or nested_raw.lstrip().startswith("#"):
+                cursor += 1
+                continue
+            nested_indent = len(nested_raw) - len(nested_raw.lstrip(" "))
+            if nested_indent <= indent:
+                break
+            nested_line = nested_raw.strip()
+            if ":" in nested_line:
+                nested_key, nested_value = nested_line.split(":", 1)
+                nested[nested_key.strip()] = _parse_scalar(nested_value.strip()) if nested_value.strip() else {}
+            cursor += 1
+        data[key] = nested
+        line_index = cursor
     return data
-
-
-def _next_content_starts_list(lines: list[str], line_index: int, current_indent: int) -> bool:
-    for next_line in lines[line_index + 1 :]:
-        if not next_line.strip() or next_line.lstrip().startswith("#"):
-            continue
-        indent = len(next_line) - len(next_line.lstrip(" "))
-        return indent > current_indent and next_line.strip().startswith("- ")
-    return False
 
 
 def _parse_scalar(value: str) -> Any:
@@ -1123,9 +1176,11 @@ class SkillToToolPlanCompiler:
 
         # A tool is REQUIRED only if the *phase contract* requires it. A skill
         # shared across phases (e.g. port_service_discovery → P02/P06/P07)
-        # accumulates required_tools from every phase; using that list directly
-        # would wrongly mark P06's httpx requirement as required for P02.
+        # can accumulate tools from every phase; using that list directly would
+        # run unrelated tools and create noisy or false coverage.
         phase_required = set(phase_contract.get("required_tools") or [])
+        phase_optional = set(phase_contract.get("optional_tools") or [])
+        phase_tool_names = phase_required | phase_optional
         skill_required = list(skill["metadata"].get("required_tools") or [])
         skill_optional = list(skill["metadata"].get("optional_tools") or []) + \
                          list(skill["metadata"].get("fallback_tools") or [])
@@ -1133,9 +1188,20 @@ class SkillToToolPlanCompiler:
         # skill's first required tool as required so the phase still gates.
         if not phase_required and skill_required:
             phase_required = {skill_required[0]}
+            phase_tool_names.update(phase_required)
+
+        _bindings = PHASE_TOOL_BINDINGS.get(phase_contract["phase_id"], {})
+
+        def _tool_belongs_to_skill(name: str) -> bool:
+            bound_to = _bindings.get(name)
+            return bound_to is None or skill["skill_id"] in bound_to
 
         seen_tools: set[str] = set()
         for name in skill_required + skill_optional:
+            if phase_tool_names and name not in phase_tool_names:
+                continue
+            if not _tool_belongs_to_skill(name):
+                continue
             if name not in seen_tools:
                 seen_tools.add(name)
                 _add_tool(name, is_required=(name in phase_required))
@@ -1144,10 +1210,8 @@ class SkillToToolPlanCompiler:
         # bl-test → business_logic/bola_bfla/api_security) NÃO entra em skills não
         # ligadas (csrf/idor), p/ não gerar FALSA cobertura. Tool sem binding é
         # phase-global (entra em toda skill).
-        _bindings = PHASE_TOOL_BINDINGS.get(phase_contract["phase_id"], {})
         for name in (phase_contract.get("required_tools") or []):
-            bound_to = _bindings.get(name)
-            if bound_to is not None and skill["skill_id"] not in bound_to:
+            if not _tool_belongs_to_skill(name):
                 continue  # tool ligada a outras skills — não conta cobertura aqui
             if name not in seen_tools:
                 seen_tools.add(name)
@@ -1572,7 +1636,7 @@ class OffensiveSkillRuntime:
         retrieved = self.rag.retrieve(
             f"{contract['name']} {target} {' '.join(contract['required_skills'])}",
             filters={"phase_id": phase_id, "execution_mode": execution_mode, "status": "approved"},
-            top_k=3,
+            top_k=max(5, len(contract.get("required_skills") or [])),
         )
         selected_skills = [skill["skill_id"] for skill in retrieved["retrieved_skills"]]
         registry_skills = {skill["skill_id"]: skill for skill in self.registry.approved_for_phase(phase_id, execution_mode)}
@@ -1594,11 +1658,14 @@ class OffensiveSkillRuntime:
         executed_tool_keys: set[str] = set()
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
+        required_skill_set = set(contract.get("required_skills") or [])
         for sid in ordered_sids:
             skill = registry_skills[sid]
             try:
                 tp = self.compiler.compile(skill, contract, target, scope, execution_mode, mcp_available=self.executor.available)
             except Exception:  # noqa: BLE001 — skill que falha quality gate é pulada, não derruba a fase
+                continue
+            if not tp.get("tools") and sid not in required_skill_set:
                 continue
             tool_plans.append(tp)
             ran_skills.append(sid)

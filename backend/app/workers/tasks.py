@@ -34,6 +34,13 @@ from app.workers.worker_groups import (
 
 
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
+HALTED_SCAN_STATUSES = {"stopped", "paused"}
+
+
+def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
+    status = str(scan_status or "").lower()
+    error = "scan_paused" if status == "paused" else "scan_stopped"
+    return {"ok": False, "error": error, "retryable": False}
 
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
@@ -485,7 +492,7 @@ def _start_scan_progress_pulse(scan_id: int, scan_mode: ScanMode, interval_secon
                     break
 
                 status = str(job.status or "").lower()
-                if status in {"completed", "failed", "blocked", "stopped"}:
+                if status in {"completed", "failed", "blocked", "stopped", "paused"}:
                     break
 
                 elapsed = int(max(0, time.time() - started_at))
@@ -795,8 +802,8 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if not job:
             return {"ok": False, "error": "scan not found", "retryable": False}
 
-        if job.status == "stopped":
-            return {"ok": False, "error": "scan_stopped", "retryable": False}
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            return _halted_scan_result(job.status)
 
         # Se já completou (via work_queue_dispatcher), não re-inicia
         if job.status == "completed":
@@ -850,8 +857,27 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if settings.offensive_operator_enabled:
             from app.services.offensive_operator_runner import run_offensive_operator_scan
 
-            result = run_offensive_operator_scan(db, job, scan_mode=scan_mode)
+            result = run_offensive_operator_scan(
+                db,
+                job,
+                scan_mode=scan_mode,
+                phase_queue_enabled=bool(settings.offensive_operator_phase_queue_enabled),
+                phase_task_budget=int(settings.offensive_operator_phase_task_budget or 1),
+            )
             _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
+            db.refresh(job)
+            if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+                db.commit()
+                return _halted_scan_result(job.status)
+            if isinstance(result, dict) and result.get("checkpointed"):
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="worker",
+                    level="INFO",
+                    message=f"Execucao offensive_operator checkpointed: {result}",
+                ))
+                db.commit()
+                return {"ok": True, "scan_id": job.id, "offensive_operator": True, "checkpointed": True, "result": result}
             db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message="Execucao offensive_operator finalizada"))
             db.commit()
             return {"ok": job.status == "completed", "scan_id": job.id, "offensive_operator": True, "result": result}
@@ -1007,11 +1033,11 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             )
 
         db.refresh(job)
-        if job.status == "stopped":
-            db.add(ScanLog(scan_job_id=job.id, source="worker", level="WARNING", message="Execucao interrompida apos solicitacao de stop"))
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            db.add(ScanLog(scan_job_id=job.id, source="worker", level="WARNING", message=f"Execucao interrompida apos solicitacao de {job.status}"))
             _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
             db.commit()
-            return {"ok": False, "error": "scan_stopped", "retryable": False}
+            return _halted_scan_result(job.status)
 
         for line in final_state.get("logs_terminais", []):
             db.add(ScanLog(scan_job_id=job.id, source="graph", level="INFO", message=line))
@@ -1352,10 +1378,10 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.rollback()
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if job:
-            if job.status == "stopped":
+            if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
                 _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
                 db.commit()
-                return {"ok": False, "error": "scan_stopped", "retryable": False}
+                return _halted_scan_result(job.status)
             job.status = "failed"
             job.last_error = str(exc)
             db.add(ScanLog(scan_job_id=job.id, source="worker", level="ERROR", message=str(exc)))
@@ -1386,8 +1412,8 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
         if not job:
             return {"ok": False, "error": "scan not found", "retryable": False}
 
-        if job.status == "stopped":
-            return {"ok": False, "error": "scan_stopped", "retryable": False}
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            return _halted_scan_result(job.status)
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:
@@ -1424,8 +1450,8 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
         if not job:
             return result
 
-        if job.status == "stopped":
-            return {"ok": False, "error": "scan_stopped", "retryable": False}
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            return _halted_scan_result(job.status)
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:
@@ -1598,8 +1624,9 @@ def correlate_tech_vulns(scan_id: int, target: str, tool_name: str, work_item_id
 def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
     """Capacity-aware dispatcher for persistent scan_work_items."""
     from app.db.session import SessionLocal
-    from app.models.models import ScanJob, ScanLog
+    from app.models.models import ScanJob, ScanLog, ScanWorkItem
     from app.services.scan_work_queue import claim_work_items, work_queue_counts
+    from app.workers.worker_groups import phase_queue
 
     # ── Distributed lock: prevent concurrent dispatchers for the same scan ──
     # Multiple dispatch chains accumulate after worker restarts, starving poll/execute
@@ -1624,6 +1651,8 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not job:
             return {"error": f"scan {scan_id} not found"}
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            return {"scan_id": scan_id, "status": job.status, "paused": job.status == "paused"}
 
         # ── Gate reconciler (self-healing) ───────────────────────────────────────
         # The per-item gate-unblock hook lives in poll_scan_work_item, but items
@@ -1742,8 +1771,26 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
             except Exception:
                 pass  # Priority scoring failure is non-fatal
 
+        _scan_mode = "scheduled" if str(getattr(job, "mode", "") or "").lower() == "scheduled" else "unit"
+        _phase_by_item = dict(
+            db.query(ScanWorkItem.id, ScanWorkItem.phase_id)
+            .filter(ScanWorkItem.id.in_(item_ids))
+            .all()
+        ) if item_ids else {}
+        _dispatch_queues: dict[str, int] = {}
         for item_id in item_ids:
-            execute_scan_work_item.delay(item_id)
+            _phase_id = str(_phase_by_item.get(item_id) or "")
+            _queue = phase_queue(_phase_id, mode=_scan_mode) if _phase_id else SCAN_PARALLEL_QUEUE
+            _dispatch_queues[_queue] = _dispatch_queues.get(_queue, 0) + 1
+            execute_scan_work_item.apply_async(args=[item_id], queue=_queue)
+        if _dispatch_queues:
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="work-queue",
+                level="INFO",
+                message=f"work_item_dispatch_queues {dict(sorted(_dispatch_queues.items()))}",
+            ))
+            db.commit()
 
         # ── Auto-retry timed-out items that haven't exceeded max_attempts ────────
         # Items with status='timeout' are NOT automatically retried — they stay
@@ -1875,6 +1922,14 @@ def execute_scan_work_item(item_id: int):
             item.finished_at = datetime.utcnow()
             db.commit()
             return {"error": "scan_not_found"}
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            if item.status in {"dispatched", "running", "submitted", "retry"}:
+                item.status = "queued"
+                item.lease_until = None
+                item.last_error = f"{job.status}_before_execution"
+                item.updated_at = datetime.utcnow()
+                db.commit()
+            return {"id": item.id, "status": item.status, "scan_status": job.status}
         if item.status not in {"dispatched", "queued", "retry"}:
             return {"status": item.status}
 
@@ -1931,6 +1986,19 @@ def execute_scan_work_item(item_id: int):
         )
         response.raise_for_status()
         result = dict(response.json())
+        db.refresh(job)
+        if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            try:
+                from app.services.scan_work_queue import kali_inflight_release
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            item.status = "queued"
+            item.lease_until = None
+            item.last_error = f"{job.status}_after_submit"
+            item.updated_at = datetime.utcnow()
+            db.commit()
+            return {"id": item.id, "status": "queued", "scan_status": job.status}
         raw_status = str(result.get("status") or "").lower()
         if raw_status != "submitted":
             # 'skipped' = terminal, non-retryable (e.g. tool/profile genuinely
@@ -2021,6 +2089,18 @@ def poll_scan_work_item(item_id: int):
         if item.status != "submitted":
             return {"id": item.id, "status": item.status}
         job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if job and str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            try:
+                from app.services.scan_work_queue import kali_inflight_release
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            item.status = "queued"
+            item.lease_until = None
+            item.last_error = f"{job.status}_before_poll"
+            item.updated_at = datetime.utcnow()
+            db.commit()
+            return {"id": item.id, "status": "queued", "scan_status": job.status}
         result_state = dict(item.result or {})
         kali_job_id = str(result_state.get("kali_job_id") or result_state.get("dispatch_task_id") or "")
         if not kali_job_id:
@@ -2054,6 +2134,20 @@ def poll_scan_work_item(item_id: int):
         )
         result_response.raise_for_status()
         result = dict(result_response.json())
+        if job:
+            db.refresh(job)
+            if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+                try:
+                    from app.services.scan_work_queue import kali_inflight_release
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                item.status = "queued"
+                item.lease_until = None
+                item.last_error = f"{job.status}_before_result_persist"
+                item.updated_at = datetime.utcnow()
+                db.commit()
+                return {"id": item.id, "status": "queued", "scan_status": job.status}
         exit_code = result.get("return_code", result.get("exit_code"))
         terminal = "completed" if raw_status in {"done", "success"} and exit_code == 0 else raw_status
         if terminal in {"failed", "timeout"} and item.attempts < item.max_attempts:

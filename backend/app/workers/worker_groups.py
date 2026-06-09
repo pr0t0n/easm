@@ -572,6 +572,31 @@ SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(mode="
 
 WORKER_GROUPS = UNIT_WORKER_GROUPS
 
+PHASE_TO_WORKER_GROUP: dict[str, str] = {
+    "P01": "reconnaissance",
+    "P02": "reconnaissance",
+    "P03": "reconnaissance",
+    "P04": "delivery",
+    "P05": "reconnaissance",
+    "P06": "reconnaissance",
+    "P07": "weaponization",
+    "P08": "weaponization",
+    "P09": "weaponization",
+    "P10": "weaponization",
+    "P11": "exploitation",
+    "P12": "exploitation",
+    "P13": "exploitation",
+    "P14": "installation",
+    "P15": "delivery",
+    "P16": "delivery",
+    "P17": "exploitation",
+    "P18": "command_control",
+    "P19": "installation",
+    "P20": "exploitation",
+    "P21": "actions_on_objectives",
+    "P22": "reporting",
+}
+
 
 def get_worker_groups(mode: ScanMode = "unit") -> dict[str, dict[str, Any]]:
     return UNIT_WORKER_GROUPS if mode == "unit" else SCHEDULED_WORKER_GROUPS
@@ -652,6 +677,14 @@ def group_queue(group_name: str, mode: ScanMode = "unit") -> str:
     groups = get_worker_groups(mode)
     group = groups.get(group_name) or groups.get("recon") or next(iter(groups.values()))
     return str(group["queue"])
+
+
+def group_for_phase(phase_id: str) -> str:
+    return PHASE_TO_WORKER_GROUP.get(str(phase_id or "").strip().upper(), "reconnaissance")
+
+
+def phase_queue(phase_id: str, mode: ScanMode = "unit") -> str:
+    return group_queue(group_for_phase(phase_id), mode)
 
 
 def all_queues(mode: ScanMode) -> list[str]:
