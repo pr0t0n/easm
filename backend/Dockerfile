@@ -1,6 +1,6 @@
-# Backend image - pure Python FastAPI + Celery.
-# No analysis/offensive tooling is installed here. Workers dispatch tools to
-# the kali_runner sidecar via HTTP.
+# Backend image - FastAPI + Celery orchestration.
+# Offensive probes dispatch to the kali_runner sidecar. Source-code SAST tools
+# that require local artifacts, such as Semgrep, run backend-local.
 FROM python:3.12-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -30,8 +30,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Runtime-only packages. Offensive scanners and analysis CLIs live exclusively
-# in the Kali runner image.
+# Runtime-only packages. Offensive scanners live in the Kali runner image;
+# backend-local SAST CLIs come from the Python virtualenv.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       libpq5 \

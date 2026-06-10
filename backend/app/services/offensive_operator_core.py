@@ -43,7 +43,7 @@ EXECUTION_MODES = {
     "controlled_pentest",
     "full_authorized_pentest",
 }
-BACKEND_LOCAL_TOOL_NAMES = {"bl-test", "code-analyzer"}
+BACKEND_LOCAL_TOOL_NAMES = {"bl-test", "code-analyzer", "semgrep"}
 
 
 def utc_now() -> str:
@@ -541,7 +541,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # Secret scanning / SAST
         entry("trufflehog", "trufflehog_secrets", ["secret_detection"], "secret_parser"),
         entry("bandit", "bandit_python", ["sast", "secret_detection"], "generic_json_parser"),
-        entry("semgrep", "semgrep_sast", ["sast", "code_analysis"], "generic_json_parser"),
+        entry("semgrep", "semgrep_backend", ["sast", "code_analysis"], "generic_json_parser"),
         entry("trivy", "trivy_fs", ["sca", "vuln_scanning"], "generic_json_parser"),
         entry("retire", "retire_js", ["sca", "js_audit"], "generic_json_parser"),
         # Takeover detection

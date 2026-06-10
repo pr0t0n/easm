@@ -129,7 +129,9 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "medusa": "medusa_smb",
     "crackmapexec": "crackmapexec_smb",
     "jwt_tool": "jwt_tool_audit",
-    "semgrep": "semgrep_sast",
+    # Backend-local SAST. Semgrep needs source/artifact context and should not
+    # be counted as a Kali web target scanner.
+    "semgrep": "semgrep_backend",
     "bandit": "bandit_python",
     "trivy": "trivy_fs",
     "gitleaks": "gitleaks_secrets",

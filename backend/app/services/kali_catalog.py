@@ -1,8 +1,8 @@
-"""Live Kali Runner catalog and worker/skill mapping.
+"""Live execution catalog and worker/skill mapping.
 
-The backend intentionally does not inspect local binaries. A tool is available
-only when the Kali runner exposes a profile for it and the profile executable
-exists inside the Kali container.
+Kali tools are available when the runner exposes a profile and executable.
+Backend-local virtual tools are available through backend adapters and should
+not be reported as missing Kali binaries.
 """
 from __future__ import annotations
 
@@ -18,6 +18,11 @@ from app.services.kali_executor import TOOL_TO_PROFILE
 
 CACHE_TTL_SECONDS = 30
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+BACKEND_LOCAL_PROFILES = {
+    "code_analyzer_backend",
+    "business_logic_backend",
+    "semgrep_backend",
+}
 
 
 def _runner_base() -> str:
@@ -95,18 +100,18 @@ def _profile_binary_candidates(profile: dict[str, Any], tool_name: str) -> set[s
 
 def _tool_availability(tool_name: str, profiles_payload: dict[str, Any], tools_payload: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_tool_name(tool_name)
+    profile_id = TOOL_TO_PROFILE.get(normalized)
     # Backend-local virtual tools: declared in TOOL_TO_PROFILE with a sentinel
     # profile id (e.g. "code_analyzer_backend") but executed inside the backend
     # itself. They are always "available" — no Kali round-trip needed.
-    if normalized == "code-analyzer":
+    if profile_id in BACKEND_LOCAL_PROFILES:
         return {
             "available": True,
             "status": "backend_local",
-            "profile": "code_analyzer_backend",
-            "executable": "code-analyzer",
-            "binary_candidates": ["code-analyzer"],
+            "profile": profile_id,
+            "executable": normalized,
+            "binary_candidates": [normalized],
         }
-    profile_id = TOOL_TO_PROFILE.get(normalized)
     if not profiles_payload.get("reachable") or not tools_payload.get("reachable"):
         return {
             "available": False,
@@ -259,14 +264,15 @@ def build_kali_tool_matrix(*, include_unprofiled: bool = False, limit: int = 500
         if availability.get("available"):
             ready_count += 1
         worker_group = tool_to_group.get(normalized, "unassigned")
+        source = "backend_local" if availability.get("status") == "backend_local" else "kali_runner"
         mapped_tools.append(
             {
                 "name": tool_name,
-                "source": "kali_runner",
+                "source": source,
                 "status": availability.get("status"),
                 "available": bool(availability.get("available")),
-                "profile": profile_id,
-                "profile_tool": profile.get("tool"),
+                "profile": availability.get("profile") or profile_id,
+                "profile_tool": profile.get("tool") or (tool_name if source == "backend_local" else None),
                 "executable": availability.get("executable") or "",
                 "binary_candidates": availability.get("binary_candidates") or [],
                 "category": profile.get("category") or meta.get("category") or "",

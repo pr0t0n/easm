@@ -1,4 +1,5 @@
-# Runtime Python da API/Workers. Ferramentas de analise rodam somente no Kali runner.
+# Runtime Python da API/Workers. Ferramentas ofensivas rodam no Kali runner.
+# SAST que exige artefato local pode rodar backend-local.
 python-slugify==8.0.4
 python-dateutil==2.9.0
 tabulate==0.9.0
@@ -56,3 +57,6 @@ python-dotenv==1.0.0
 # Testing (optional)
 pytest==8.3.5
 pytest-asyncio==0.23.3
+
+# Backend-local SAST adapter. Used only when source/artifact path is available.
+semgrep==1.161.0

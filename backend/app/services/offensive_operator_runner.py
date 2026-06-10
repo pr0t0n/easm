@@ -475,6 +475,8 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
             from app.services.business_logic_test import run_as_tool as _run
         elif tool == "code-analyzer":
             from app.services.code_analyzer import run_as_tool as _run
+        elif tool == "semgrep":
+            from app.services.semgrep_local import run_as_tool as _run
         else:
             return {"status": "blocked", "error": f"unknown_backend_local:{tool}", "exit_code": None}
         r = _run(target)

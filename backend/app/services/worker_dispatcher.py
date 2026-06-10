@@ -45,12 +45,19 @@ def execute_tool_with_workers(
     If MCP cannot proxy to Kali, return a structured failure instead of
     falling back to direct Kali execution and creating a false success trail.
 
-    The `code-analyzer` tool remains intentionally backend-local because it
-    does not execute external offensive tooling.
+    `code-analyzer` and SAST tools with local source requirements remain
+    backend-local because they do not execute external offensive tooling.
     """
     norm_tool = str(tool_name or "").strip().lower()
-    if norm_tool == "code-analyzer":
-        from app.services.code_analyzer import run_as_tool
+    if norm_tool in {"code-analyzer", "semgrep"}:
+        if norm_tool == "code-analyzer":
+            from app.services.code_analyzer import run_as_tool
+            source_agent_name = "Backend Code Analyzer"
+            worker_group = "asset_discovery"
+        else:
+            from app.services.semgrep_local import run_as_tool
+            source_agent_name = "Backend Semgrep SAST"
+            worker_group = "actions_on_objectives"
 
         result = run_as_tool(target)
         if skill_id:
@@ -63,8 +70,8 @@ def execute_tool_with_workers(
             result.setdefault("sub_agent_plan", sub_agent_plan or [])
             result.setdefault("playbook", playbook or "")
         result.setdefault("source_agent_id", "backend")
-        result.setdefault("source_agent_name", "Backend Code Analyzer")
-        result.setdefault("worker_group", "asset_discovery")
+        result.setdefault("source_agent_name", source_agent_name)
+        result.setdefault("worker_group", worker_group)
         return result
 
     if norm_tool == "bl-test":
