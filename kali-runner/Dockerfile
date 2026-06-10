@@ -79,9 +79,7 @@ RUN set -eux; \
       "github.com/hahwul/dalfox/v2@latest" \
       "github.com/ffuf/ffuf/v2@latest" \
       "github.com/jaeles-project/gospider@latest" \
-      "github.com/haccer/subjack@latest" \
-      "github.com/gitleaks/gitleaks/v8@latest" \
-      "github.com/trufflesecurity/trufflehog/v3@latest" ; \
+      "github.com/haccer/subjack@latest" ; \
     do echo "go install $pkg"; go install "$pkg" || echo "WARN: failed $pkg"; done; \
     nuclei -update-templates 2>/dev/null || true; \
     echo "── removing python httpx CLI wrappers (conflict with ProjectDiscovery httpx) ──"; \
@@ -94,6 +92,19 @@ RUN set -eux; \
     done; \
     httpx -version >/dev/null 2>&1 || { echo "FATAL: httpx is not the ProjectDiscovery build"; exit 1; }; \
     if [ -n "$MISSING" ]; then echo "FATAL: missing Go binaries:$MISSING"; exit 1; fi
+
+# Secret scanners are release-sensitive:
+# - gitleaks' module path is still github.com/zricethezav/gitleaks/v8
+# - trufflehog/v3 cannot be reliably installed with `go install @latest`
+#   because upstream go.mod contains replace directives.
+RUN set -eux; \
+    go install github.com/zricethezav/gitleaks/v8@latest; \
+    curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+      | sh -s -- -b /usr/local/bin; \
+    command -v gitleaks; \
+    command -v trufflehog; \
+    gitleaks version || true; \
+    trufflehog --version || true
 
 # ── Layer 4: Python tools (pipx) ─────────────────────────────────────────────
 ENV PIPX_HOME=/opt/pipx \
