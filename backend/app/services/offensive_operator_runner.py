@@ -438,6 +438,33 @@ def _record_preflight_skip(
         db.commit()
 
 
+def _record_direct_url_p01_skip(
+    db,
+    job: ScanJob,
+    phase_ledgers: list[dict[str, Any]],
+    completed_work: set[str],
+    target: str,
+    all_targets: list[str],
+) -> None:
+    _record_preflight_skip(
+        db,
+        job,
+        phase_ledgers,
+        completed_work,
+        "P01",
+        target,
+        "direct_url_target_no_subdomain_enumeration",
+    )
+    state = dict(job.state_data or {})
+    modes = dict(state.get("target_input_modes") or {})
+    modes[target] = "direct_url"
+    state["target_input_modes"] = modes
+    state["direct_url_targets"] = sorted(set(list(state.get("direct_url_targets") or []) + [target]))
+    state["target_set"] = list(all_targets)
+    job.state_data = state
+    db.commit()
+
+
 def _phase_ids_for_target_subset(allowed_phases: set[str] | None) -> list[str]:
     return [
         phase_id for phase_id in PHASE_ORDER
@@ -725,6 +752,10 @@ def run_offensive_operator_scan(
     _phase_task_budget = max(1, int(initial_state.get("offensive_operator_phase_task_budget") or phase_task_budget or 1))
     _phase_units_this_task = 0
 
+    for _input_target in all_targets[:_input_target_count]:
+        if _input_target and not _should_run_subdomain_enumeration(_input_target):
+            _record_direct_url_p01_skip(db, job, phase_ledgers, completed_work, _input_target, all_targets)
+
     if _phase_queue_enabled and not initial_state.get("_operator_phase_queue_started"):
         _delegated_targets = set(initial_state.get("parallel_delegated_targets") or [])
         _next_unit = _next_pending_phase_target(
@@ -813,23 +844,7 @@ def run_offensive_operator_scan(
             if _work_key in completed_work:
                 continue
             if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
-                _record_preflight_skip(
-                    db,
-                    job,
-                    phase_ledgers,
-                    completed_work,
-                    phase_id,
-                    target,
-                    "direct_url_target_no_subdomain_enumeration",
-                )
-                _url_state = dict(job.state_data or {})
-                _modes = dict(_url_state.get("target_input_modes") or {})
-                _modes[target] = "direct_url"
-                _url_state["target_input_modes"] = _modes
-                _url_state["direct_url_targets"] = sorted(set(list(_url_state.get("direct_url_targets") or []) + [target]))
-                _url_state["target_set"] = list(all_targets)
-                job.state_data = _url_state
-                db.commit()
+                _record_direct_url_p01_skip(db, job, phase_ledgers, completed_work, target, all_targets)
                 continue
             if phase_id != "P01":
                 _pf_state = dict(job.state_data or {})
