@@ -198,7 +198,7 @@ def seed_attack_chain_items(
     Returns count of items created.
     """
     from app.models.models import ScanWorkItem, ScanLog
-    from app.services.scan_work_queue import resource_class_for_tool
+    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
     from datetime import datetime
 
     created = 0
@@ -231,11 +231,11 @@ def seed_attack_chain_items(
             priority=int(50 - (priority * 3)),  # priority 10 → work queue priority 20
             status="queued",
             max_attempts=1,
-            item_metadata={
+            item_metadata=apply_phase_tool_metadata({
                 "source": "llm_operator",
                 "rationale": chain.get("rationale", "")[:300],
                 "llm_proposed": True,
-            },
+            }, phase, tool[:120], source="llm_operator"),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )

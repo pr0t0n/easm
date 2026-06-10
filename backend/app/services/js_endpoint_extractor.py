@@ -236,6 +236,8 @@ def seed_high_value_probes(
         if already:
             continue
 
+        from app.services.scan_work_queue import apply_phase_tool_metadata
+
         rc = resource_class_for_tool(tool_name)
         base_pri = PHASE_PRIORITY.get(phase_id, 50)
         item = ScanWorkItem(
@@ -248,12 +250,12 @@ def seed_high_value_probes(
             priority=max(1, base_pri - 10),  # high priority — context-driven
             status="queued",
             max_attempts=2,
-            item_metadata={
+            item_metadata=apply_phase_tool_metadata({
                 "source": "js_endpoint_extractor",
                 "reason": reason,
                 "discovered_paths": (high_value_urls + sensitive_urls)[:10],
                 "api_path_count": len(api_paths),
-            },
+            }, phase_id, tool_name, source="js_endpoint_extractor"),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )

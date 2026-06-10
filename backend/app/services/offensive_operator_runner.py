@@ -950,6 +950,7 @@ def run_offensive_operator_scan(
             if selected_skill_ids:
                 state["selected_skill"] = selected_skill_ids[0]  # legacy compatibility
                 state["selected_skills"] = selected_skill_ids
+            _emit_skill_runtime_telemetry(db, job, phase_id, target, result)
             skill_coverage_state = dict(state.get("skill_coverage") or {})
             skill_coverage_state[f"{phase_id}:{target}"] = result["phase_ledger"].get("skill_coverage") or {}
             state["skill_coverage"] = skill_coverage_state
@@ -2481,6 +2482,117 @@ def _is_actionable_vulnerability(severity: str, tool_evidences: list[dict[str, A
     return bool(reproduction.get("verifiable"))
 
 
+def _emit_skill_runtime_telemetry(
+    db,
+    job: ScanJob,
+    phase_id: str,
+    target: str,
+    result: dict[str, Any],
+) -> None:
+    """Persist supervisor-visible skill consultation/result telemetry.
+
+    The work queue has explicit skill-consultation events; direct operator
+    phases (notably P01) must emit the same model so the platform can measure
+    consultation + usage + positive result consistently.
+    """
+    from datetime import datetime as _dt
+    from app.models.models import AgentTraceEvent, SkillScore
+
+    ledger = result.get("phase_ledger") or {}
+    skill_plan = result.get("skill_plan") or {}
+    selected_skill_ids = list(
+        dict.fromkeys(
+            [str(s) for s in (
+                skill_plan.get("selected_skills")
+                or ledger.get("selected_skills")
+                or []
+            ) if str(s)]
+        )
+    )
+    if not selected_skill_ids:
+        selected_skill_ids = [str(s) for s in (PHASE_CONTRACTS.get(phase_id, {}).get("required_skills") or []) if str(s)]
+    if not selected_skill_ids:
+        return
+
+    mcp_results = [m for m in (result.get("mcp_results") or []) if isinstance(m, dict)]
+    evidence = [e for e in (result.get("evidence") or []) if isinstance(e, dict)]
+    tool_names = list(dict.fromkeys(str(m.get("tool_name") or "") for m in mcp_results if m.get("tool_name")))
+    positive = any(
+        str(ev.get("evidence_strength") or "").lower() in {"medium", "strong", "conclusive"}
+        for ev in evidence
+    ) or any(str(m.get("status") or "").lower() in {"success", "done", "completed"} for m in mcp_results)
+    now = _dt.utcnow()
+
+    for skill_id in selected_skill_ids:
+        base_payload = {
+            "phase_id": phase_id,
+            "target": target,
+            "skill_id": skill_id,
+            "tool_names": tool_names,
+            "skill_coverage": (ledger.get("skill_coverage") or {}).get(skill_id) or {},
+            "result_status": ledger.get("status"),
+            "positive_result": bool(positive),
+            "evidence_count": len(evidence),
+            "source": "offensive_operator",
+            "decision_source": "supervisor_skill_contract+accepted_learning",
+        }
+        for event_type, status in (
+            ("skill_consulted", "selected"),
+            ("skill_execution_result", "positive" if positive else str(ledger.get("status") or "attempted")),
+        ):
+            existing = (
+                db.query(AgentTraceEvent.id)
+                .filter(
+                    AgentTraceEvent.scan_id == job.id,
+                    AgentTraceEvent.event_type == event_type,
+                    AgentTraceEvent.skill_id == skill_id[:120],
+                    AgentTraceEvent.capability == phase_id[:100],
+                )
+                .first()
+            )
+            if not existing:
+                db.add(AgentTraceEvent(
+                    scan_id=job.id,
+                    event_type=event_type,
+                    from_node="supervisor",
+                    to_node="offensive_operator",
+                    skill_id=skill_id[:120],
+                    tool_name=",".join(tool_names)[:100] or None,
+                    capability=phase_id[:100],
+                    status=status[:50],
+                    payload=base_payload,
+                    created_at=now,
+                ))
+
+        successes = len([m for m in mcp_results if str(m.get("status") or "").lower() in {"success", "done", "completed"}])
+        failures = max(0, len(mcp_results) - successes)
+        existing_score = (
+            db.query(SkillScore)
+            .filter(
+                SkillScore.scan_id == job.id,
+                SkillScore.skill_id == skill_id[:120],
+                SkillScore.capability == phase_id[:60],
+            )
+            .first()
+        )
+        if not existing_score:
+            existing_score = SkillScore(
+                scan_id=job.id,
+                skill_id=skill_id[:120],
+                capability=phase_id[:60],
+                created_at=now,
+            )
+            db.add(existing_score)
+        existing_score.library_hits = max(int(existing_score.library_hits or 0), 1)
+        existing_score.tool_attempts = max(int(existing_score.tool_attempts or 0), len(mcp_results))
+        existing_score.tool_successes = max(int(existing_score.tool_successes or 0), successes)
+        existing_score.tool_failures = max(int(existing_score.tool_failures or 0), failures)
+        existing_score.findings_raw = max(int(existing_score.findings_raw or 0), len(evidence))
+        existing_score.findings_promoted = max(int(existing_score.findings_promoted or 0), 1 if positive else 0)
+        existing_score.efficiency_score = round(successes / max(1, len(mcp_results)), 4)
+        existing_score.productivity_score = round((len(evidence) + (1 if positive else 0)) / max(1, len(mcp_results)), 4)
+
+
 def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_results: list[dict[str, Any]]) -> None:
     from datetime import datetime as _dt
     from app.models.models import ExecutedToolRun
@@ -2652,6 +2764,7 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 if selected_skill_ids:
                     cur["selected_skill"] = selected_skill_ids[0]
                     cur["selected_skills"] = selected_skill_ids
+                _emit_skill_runtime_telemetry(db, job, phase_id, target, result)
                 skill_coverage_state = dict(cur.get("skill_coverage") or {})
                 skill_coverage_state[f"{phase_id}:{target}"] = ledger.get("skill_coverage") or {}
                 cur["skill_coverage"] = skill_coverage_state
@@ -2948,6 +3061,24 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             },
             "waf_caveat": waf_caveat,
         }
+        _selected_skills = [str(s) for s in ledger.get("selected_skills", []) if str(s)]
+        details.setdefault("skill_context", {
+            "skill_ids": _selected_skills,
+            "skill_id": _selected_skills[0] if _selected_skills else "",
+            "skill_attribution": "offensive_operator_phase_ledger",
+            "phase_id": phase_id,
+            "skill_coverage": ledger.get("skill_coverage", {}),
+        })
+        details.setdefault("supervisor_validation", {
+            "status": "validated" if tool_evidences and reproduction.get("verifiable") else "needs_review",
+            "reason": "direct_operator_finding_evidence_review",
+            "has_url_or_target": bool(target),
+            "has_tool": bool(tools_success or tools_attempted),
+            "has_recommendation": bool(recommendation),
+            "has_reproduction": bool(reproduction),
+            "evidence_count": len(tool_evidences),
+            "phase_id": phase_id,
+        })
         details = enrich_finding_with_mappings(phase_id, details)
 
         finding = Finding(

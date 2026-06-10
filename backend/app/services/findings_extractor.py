@@ -2169,6 +2169,79 @@ _TOOL_CONFIDENCE: dict[str, int] = {
     "multi_identity_tester": 85, # BOLA/BFLA confirmed by differential response
 }
 
+_INVALID_FINDING_TARGETS = {"", "__batch__", "batch", "all-targets", "all_targets", "unknown", "none", "null"}
+
+
+def _clean_finding_target(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower() in _INVALID_FINDING_TARGETS:
+        return ""
+    if text.startswith(("http://", "https://")):
+        try:
+            from urllib.parse import urlparse as _urlparse
+            host = _urlparse(text).hostname or ""
+            host = host.strip().lower()
+            return "" if host in _INVALID_FINDING_TARGETS else host
+        except Exception:
+            return ""
+    return text.split("/", 1)[0].split(":", 1)[0].strip().lower()
+
+
+def _resolve_finding_target(details: dict[str, Any], default_target: str, source_item: Any = None) -> str:
+    for key in ("asset", "domain", "host", "hostname", "target", "url", "matched_at", "matched-at"):
+        candidate = _clean_finding_target(details.get(key))
+        if candidate:
+            return candidate[:255]
+
+    candidate = _clean_finding_target(default_target)
+    if candidate:
+        return candidate[:255]
+
+    if source_item is not None:
+        metadata = dict(getattr(source_item, "item_metadata", None) or {})
+        batch_targets = [str(t or "").strip() for t in metadata.get("batch_targets") or []]
+        clean_targets = [_clean_finding_target(t) for t in batch_targets]
+        clean_targets = [t for t in clean_targets if t]
+        if len(clean_targets) == 1:
+            return clean_targets[0][:255]
+    return ""
+
+
+def _clean_finding_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in _INVALID_FINDING_TARGETS or "__batch__" in lowered:
+        return ""
+    return text[:2000]
+
+
+def _finding_noise_reason(title: str, details: dict[str, Any]) -> str | None:
+    """Return a reason when a parser emitted command/banner noise, not a vuln."""
+    text = " ".join(
+        [
+            str(title or ""),
+            str(details.get("evidence") or ""),
+            str(details.get("description") or ""),
+            str(details.get("finding_summary") or ""),
+        ]
+    ).strip()
+    lower = text.lower()
+    if not lower:
+        return "empty_finding"
+    if "host(s) tested" in lower:
+        return "tool_summary_not_vulnerability"
+    if "wapiti 3." in lower and ("x-frame-options" not in lower and "content-security-policy" not in lower):
+        return "tool_banner_not_vulnerability"
+    if re.match(r"^_+\s+_+", str(title or "").strip()) and "wapiti" in lower:
+        return "tool_ascii_banner_not_vulnerability"
+    if lower in {"http http/1.1 200 ok", "http http/1.1 404 not found"}:
+        return "http_status_only_not_vulnerability"
+    return None
+
 
 def _confidence_for(tool_col: str, v_status: str) -> int:
     """Compute confidence score from tool reliability × verification status."""
@@ -2210,24 +2283,41 @@ def persist_finding_dicts(
 
     created = 0
     for f in raw_findings:
-        # ── Evidence gate + business impact scoring ────────────────────────
-        # Ponto #4: marca verification_status (confirmed/candidate/hypothesis)
-        # Ponto #5: ajusta risk_score com contexto de endpoint
-        try:
-            from app.services.evidence_gate import enrich_finding_with_gate
-            f = enrich_finding_with_gate(f, tool_name=tool)
-        except Exception:
-            pass
-
         title = str(f.get("title") or "").strip()[:500]
         severity = str(f.get("severity") or "info").lower()
         risk_score = int(f.get("risk_score") or 1)
         details = dict(f.get("details") or {})
         tool_col = str(details.get("tool") or default_tool)[:100]
-        domain_col = str(details.get("asset") or default_target)[:255]
-
-        if not title:
+        domain_col = _resolve_finding_target(details, default_target, source_item)
+        if _finding_noise_reason(title, details):
             continue
+        finding_url = str(
+            _clean_finding_url(
+                f.get("url")
+                or details.get("url")
+                or details.get("matched-at")
+                or details.get("matched_at")
+                or ""
+            )
+        ) or None
+
+        # ── Evidence gate + business impact scoring ────────────────────────
+        # Ponto #4: marca verification_status (confirmed/candidate/hypothesis)
+        # Ponto #5: ajusta risk_score com contexto de endpoint
+        # Antes isto passava `tool` antes de existir e falhava silenciosamente.
+        try:
+            from app.services.evidence_gate import enrich_finding_with_gate
+            f["details"] = details
+            f = enrich_finding_with_gate(f, tool_name=tool_col, url=finding_url)
+            details = dict(f.get("details") or details)
+            severity = str(f.get("severity") or severity).lower()
+            risk_score = int(f.get("risk_score") or risk_score)
+        except Exception:
+            pass
+
+        if not title or not domain_col:
+            continue
+        details["asset"] = domain_col
 
         # ── FONTE ÚNICA: enriquece details com discovery/payload/remediation ───
         # O frontend (VulnerabilitiesPage) lê details.discovery_method +
@@ -2281,6 +2371,21 @@ def persist_finding_dicts(
         if cve_raw.startswith("CVE-"):
             cve_id = cve_raw
 
+        recommendation_text = _finding_recommendation_text(details, severity, cve_id)
+        if recommendation_text:
+            details.setdefault("recommendation", recommendation_text)
+        details.setdefault("verification_status", "candidate")
+        details["supervisor_validation"] = _supervisor_validate_finding(
+            title=title,
+            severity=severity,
+            details=details,
+            tool=tool_col,
+            target=domain_col,
+            url=finding_url,
+            cve_id=cve_id,
+            recommendation=recommendation_text,
+        )
+
         # CVE-level dedup: one CVE per target domain, regardless of tool
         if cve_id:
             cve_exists = (
@@ -2314,14 +2419,8 @@ def persist_finding_dicts(
         except (KeyError, TypeError, ValueError):
             cvss_val = None
 
-        # Pull verification_status / url from enriched details
+        # Pull verification_status from enriched details
         v_status = str(details.get("verification_status") or "candidate")
-        finding_url = str(
-            f.get("url")
-            or details.get("url")
-            or details.get("matched-at")
-            or ""
-        )[:2000] or None
 
         # ── Confidence score: tool reliability × verification status ──────────
         confidence_score = _confidence_for(tool_col, v_status)
@@ -2336,6 +2435,7 @@ def persist_finding_dicts(
             tool=tool_col,
             risk_score=risk_score,
             confidence_score=confidence_score,
+            recommendation=recommendation_text,
             details=details,
             verification_status=v_status,
             url=finding_url,
@@ -2498,6 +2598,160 @@ def _build_discovery_and_payload(details: dict, tool: str, title: str = "") -> t
     return discovery, payload, (remediation or None)
 
 
+def _finding_recommendation_text(details: dict, severity: str, cve_id: str | None = None) -> str | None:
+    """Return a deterministic recommendation suitable for storage on Finding.
+
+    AI recommendations are intentionally generated at report/read time; this
+    storage-time text is the system/CVE baseline that the supervisor can audit.
+    """
+    explicit = str(
+        details.get("recommendation")
+        or details.get("remediation")
+        or details.get("blue_team_action")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit[:2000]
+
+    cve = str(cve_id or details.get("cve_id") or details.get("cve") or "").strip().upper()
+    if cve.startswith("CVE-"):
+        product = str(details.get("product") or details.get("technology") or details.get("service") or "componente afetado").strip()
+        version = str(details.get("version") or "").strip()
+        ver = f" {version}" if version else ""
+        return (
+            f"Validar exposição de {product}{ver} relacionada a {cve}; aplicar patch ou mitigação do fornecedor, "
+            "remover versões vulneráveis do escopo exposto e confirmar a correção com nova varredura autenticada/controle negativo."
+        )[:2000]
+
+    owasp = str(details.get("owasp_category") or "")
+    for prefix, rem in _REMEDIATION_BY_OWASP.items():
+        if owasp.startswith(prefix):
+            return rem
+
+    sev = str(severity or "").lower()
+    if sev in {"critical", "high"}:
+        return "Priorizar validação independente, reduzir exposição do ativo e aplicar correção específica antes de considerar o risco aceito."
+    if sev == "medium":
+        return "Validar o achado, aplicar endurecimento ou correção de configuração e confirmar a mitigação em novo teste."
+    if sev == "low":
+        return "Aplicar hardening conforme o princípio de menor exposição e registrar exceção caso o risco seja aceito."
+    return "Registrar como observação de segurança, monitorar recorrência e aplicar hardening caso o item represente exposição desnecessária."
+
+
+def _supervisor_validate_finding(
+    *,
+    title: str,
+    severity: str,
+    details: dict,
+    tool: str,
+    target: str,
+    url: str | None,
+    cve_id: str | None,
+    recommendation: str | None,
+) -> dict[str, Any]:
+    """Deterministic supervisor quality review for a Finding before persistence."""
+    location = (
+        url
+        or details.get("url")
+        or details.get("matched_at")
+        or details.get("matched-at")
+        or details.get("endpoint")
+        or details.get("asset")
+        or target
+    )
+    reproduction = dict(details.get("reproduction") or {})
+    payloads = list(reproduction.get("payloads") or [])
+    discovery = str(details.get("discovery_method") or reproduction.get("discovery_method") or "").strip()
+    remediation = str(details.get("remediation") or recommendation or "").strip()
+    verification_status = str(details.get("verification_status") or "").strip()
+    cve = str(cve_id or details.get("cve_id") or details.get("cve") or "").strip().upper()
+    recs = dict(details.get("recommendations") or {})
+
+    system_recommendation = {
+        "status": "present" if recommendation else "missing",
+        "text": recommendation or "",
+        "source": "system",
+    }
+    cve_recommendation = {
+        "status": "not_applicable",
+        "cve": cve if cve.startswith("CVE-") else None,
+        "text": "",
+        "source": "cve",
+    }
+    if cve.startswith("CVE-"):
+        cve_text = _finding_recommendation_text(details, severity, cve)
+        cve_recommendation.update(status="present" if cve_text else "missing", text=cve_text or "")
+
+    ai_rec = recs.get("ai") or details.get("recommendation_ai") or details.get("recommendation_llm")
+    ai_recommendation = {
+        "status": "present" if ai_rec else "pending_report_generation",
+        "source": "ai",
+        "note": "" if ai_rec else "Recomendação por IA é gerada na leitura/relatório quando o serviço estiver habilitado.",
+    }
+    if ai_rec:
+        ai_recommendation["text"] = str(ai_rec)[:2000]
+
+    checks = {
+        "has_title": bool(str(title or "").strip()),
+        "has_target": bool(_clean_finding_target(str(target or ""))),
+        "has_location": bool(str(location or "").strip()),
+        "has_tool": bool(str(tool or "").strip()),
+        "has_discovery_method": bool(discovery),
+        "has_reproduction": bool(payloads or str(reproduction.get("payload") or "").strip()),
+        "has_remediation": bool(remediation),
+        "has_system_recommendation": bool(recommendation),
+        "has_ai_recommendation": bool(ai_rec),
+        "has_verification_status": verification_status in {"confirmed", "candidate", "hypothesis", "refuted"},
+    }
+    if cve.startswith("CVE-"):
+        checks.update({
+            "has_cve_id": True,
+            "has_cve_recommendation": cve_recommendation["status"] == "present",
+            "has_cve_context": bool(details.get("cvss") or details.get("description") or details.get("evidence")),
+        })
+
+    required = [
+        "has_title",
+        "has_target",
+        "has_location",
+        "has_tool",
+        "has_discovery_method",
+        "has_remediation",
+        "has_system_recommendation",
+        "has_verification_status",
+    ]
+    if cve.startswith("CVE-"):
+        required.extend(["has_cve_id", "has_cve_recommendation", "has_cve_context"])
+    if str(severity or "").lower() in {"critical", "high", "medium"}:
+        required.append("has_reproduction")
+
+    missing = [name for name in required if not checks.get(name)]
+    status = "complete" if not missing else "incomplete"
+    recommendations = dict(recs)
+    recommendations["system"] = system_recommendation
+    recommendations["cve"] = cve_recommendation
+    recommendations["ai"] = ai_recommendation
+    details["recommendations"] = recommendations
+
+    return {
+        "status": status,
+        "reviewed_by": "deterministic_supervisor",
+        "reviewed_at": datetime.utcnow().isoformat() + "Z",
+        "checks": checks,
+        "missing": missing,
+        "tool": tool,
+        "target": target,
+        "location": str(location or ""),
+        "cve": cve if cve.startswith("CVE-") else None,
+        "decision": "persisted_with_quality_metadata",
+        "notes": (
+            "Achado completo para relatório e inventário."
+            if status == "complete"
+            else "Achado persistido como evidência, mas requer enriquecimento antes de relatório executivo."
+        ),
+    }
+
+
 def _bridge_finding_to_vulnerability(
     db: Session, job: Any, finding: Any, severity: str, title: str,
     cvss_val: float | None, confidence_score: int,
@@ -2513,7 +2767,7 @@ def _bridge_finding_to_vulnerability(
     from datetime import datetime as _dt
 
     domain = str(getattr(finding, "domain", "") or "").strip()[:255]
-    if not domain:
+    if not _clean_finding_target(domain):
         return
     _now = _dt.utcnow()
     details = dict(getattr(finding, "details", None) or {})
@@ -2585,6 +2839,8 @@ def _bridge_finding_to_vulnerability(
             "how_discovered": discovery,
             "payload": payload,           # request/prova de reprodução
             "remediation": remediation,
+            "recommendations": details.get("recommendations"),
+            "supervisor_validation": details.get("supervisor_validation"),
             "cve": cve_id,
             "matched_at": details.get("matched_at") or details.get("matched-at"),
             "parameter": details.get("parameter") or details.get("param"),
@@ -2619,6 +2875,19 @@ def persist_findings_from_work_item(
     # ── P3b: provenance de aprendizado — se o work item foi semeado pelos 10k
     # learnings HackerOne, marca cada finding p/ a UI mostrar a caixa de uso. ──
     _im = dict(item.item_metadata or {})
+    _skill_ids = [str(s) for s in _im.get("skill_ids") or [] if str(s)]
+    _skill_context = {
+        "skill_ids": _skill_ids,
+        "skill_id": _skill_ids[0] if _skill_ids else str(_im.get("skill_id") or ""),
+        "skill_consultation_ids": list(_im.get("skill_consultation_ids") or []),
+        "skill_attribution": _im.get("skill_attribution"),
+        "phase_id": phase_id,
+    }
+    for _rf in raw_findings:
+        _d = dict(_rf.get("details") or {})
+        _d["skill_context"] = _skill_context
+        _rf["details"] = _d
+
     if str(_im.get("source") or "") == "hackerone_learnings":
         _prov = {
             "source": "hackerone_learnings",
@@ -2697,7 +2966,7 @@ def _seed_verification_work_item(
     will update the finding's verification_status to "confirmed" or "refuted".
     """
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import resource_class_for_tool
+    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
 
     if str(tool or "").lower() in _NO_VERIFY_TOOLS:
         return
@@ -2760,7 +3029,7 @@ def _seed_verification_work_item(
         priority=verify_priority,
         status="queued",
         max_attempts=1,  # verification runs once; no retry
-        item_metadata=meta,
+        item_metadata=apply_phase_tool_metadata(meta, phase_id, verify_tool[:120], source="evidence_gate_stage2"),
         created_at=__import__("datetime").datetime.utcnow(),
         updated_at=__import__("datetime").datetime.utcnow(),
     )

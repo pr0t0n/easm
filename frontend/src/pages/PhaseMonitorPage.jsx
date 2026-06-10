@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
 const STATUS_STYLES = {
+  completed:                      { className: "ds-badge ds-badge--low",      label: "Completa" },
+  queued:                         { className: "ds-badge ds-badge--info",     label: "Na fila" },
+  gate_blocked:                   { className: "ds-badge",                    label: "Aguardando gate" },
+  failed:                         { className: "ds-badge ds-badge--critical", label: "Falhou" },
   executed:                       { className: "ds-badge ds-badge--low",     label: "Executado" },
   executing:                      { className: "ds-badge ds-badge--high",    label: "Executando" },
   in_progress:                    { className: "ds-badge ds-badge--info",    label: "Em progresso" },
@@ -131,8 +135,8 @@ export default function PhaseMonitorPage() {
 
   const filteredPhases = useMemo(() => {
     const phases = Array.isArray(data?.phases) ? data.phases : [];
-    if (filter === "issues") return phases.filter((p) => p.status !== "executed");
-    if (filter === "ok") return phases.filter((p) => p.status === "executed");
+    if (filter === "issues") return phases.filter((p) => ["failed"].includes(p.status));
+    if (filter === "ok") return phases.filter((p) => ["completed", "executed"].includes(p.status));
     return phases;
   }, [data, filter]);
 
@@ -364,6 +368,7 @@ export default function PhaseMonitorPage() {
                       <th style={th}>Progresso (alvos)</th>
                       <th style={th}>Tools used</th>
                       <th style={th}>Pendências de tools</th>
+                      <th style={th}>Business Logic</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -405,6 +410,16 @@ export default function PhaseMonitorPage() {
                             </span>
                           )}
                         </td>
+                        <td style={td}>
+                          {p.business_logic ? (
+                            <span style={{ ...chip, ...(p.business_logic.state === "finding" ? chipDanger : p.business_logic.state === "executed_no_finding" ? chipSuccess : chipMuted) }}>
+                              {p.business_logic.label}
+                              {p.business_logic.findings_count ? ` (${p.business_logic.findings_count})` : ""}
+                            </span>
+                          ) : (
+                            <span style={{ color: "#a0958c" }}>—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -420,6 +435,7 @@ export default function PhaseMonitorPage() {
               <thead>
                 <tr style={{ background: "#faf8f4", color: "#3d3d3d" }}>
                   <th style={th}>Tool</th>
+                  <th style={th}>Backend</th>
                   <th style={th}>Attempts</th>
                   <th style={th}>Success</th>
                   <th style={th}>Failed</th>
@@ -434,6 +450,7 @@ export default function PhaseMonitorPage() {
                 {data.tool_inventory.map((t) => (
                   <tr key={t.tool} style={{ background: "#ffffff", borderTop: "1px solid #efe7e0" }}>
                     <td style={td}><code style={codeStyle}>{t.tool}</code></td>
+                    <td style={td}><span style={{ ...chip, ...chipMuted }}>{t.backend || "kali"}</span></td>
                     <td style={td}>{t.attempts}</td>
                     <td style={{ ...td, color: t.success > 0 ? "#1f8a59" : "#a0958c", fontWeight: 600 }}>{t.success}</td>
                     <td style={{ ...td, color: t.failed > 0 ? "#b03333" : "#a0958c", fontWeight: 600 }}>{t.failed}</td>

@@ -19,8 +19,8 @@ from app.core.config import settings
 
 _KEY = "easm:adaptive:concurrency_level"
 MIN_L = int(os.getenv("ADAPTIVE_MIN", "4"))
-MAX_L = int(os.getenv("ADAPTIVE_MAX", "10"))   # teto = KALI_MAX_PARALLEL (chokepoint)
-START_L = int(os.getenv("ADAPTIVE_START", "6"))
+MAX_L = int(os.getenv("ADAPTIVE_MAX", "16"))   # teto lógico; caps por classe ainda limitam o envio real
+START_L = int(os.getenv("ADAPTIVE_START", "10"))
 STEP_UP = int(os.getenv("ADAPTIVE_STEP_UP", "2"))
 _HIGH_TIMEOUT = float(os.getenv("ADAPTIVE_HIGH_TIMEOUT", "0.35"))  # >35% timeout → recua
 _LOW_TIMEOUT = float(os.getenv("ADAPTIVE_LOW_TIMEOUT", "0.10"))    # <10% → avança
@@ -53,10 +53,10 @@ def get_capacity() -> dict[str, int]:
     """Caps por classe derivados do nível adaptativo atual (soma ≈ nível)."""
     L = max(MIN_L, min(MAX_L, get_level()))
     return {
-        "light": max(2, round(L * 0.5)),
-        "medium": max(1, round(L * 0.3)),
-        "heavy": max(1, round(L * 0.2)),
-        "oob": 2,
+        "light": min(max(2, round(L * 0.35)), max(2, int(settings.scan_work_queue_cap_light))),
+        "medium": min(max(2, round(L * 0.55)), max(2, int(settings.scan_work_queue_cap_medium))),
+        "heavy": min(max(1, round(L * 0.15)), max(1, int(settings.scan_work_queue_cap_heavy))),
+        "oob": min(2, max(1, int(settings.scan_work_queue_cap_oob))),
     }
 
 

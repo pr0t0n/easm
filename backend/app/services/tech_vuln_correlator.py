@@ -26,6 +26,35 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+INVALID_TECH_PRODUCTS = {
+    "", "found", "detected", "unknown", "none", "null", "service", "performed",
+    "please", "report", "incorrect", "results", "http", "https",
+}
+INVALID_TECH_VERSIONS = {"", "0", "unknown", "none", "null"}
+INVALID_TARGETS = {"", "__batch__", "batch", "all-targets", "all_targets", "unknown"}
+LOCAL_VERSIONLESS_TECH = {
+    "cloudflare", "google", "hsts", "http", "http/3", "http 3", "react", "wix",
+    "lodash", "tls 1.0", "ssl 3.0",
+}
+
+
+def _valid_target_for_correlation(target: str) -> bool:
+    return str(target or "").strip().lower() not in INVALID_TARGETS
+
+
+def _valid_detected_tech(product: str, version: str = "") -> bool:
+    product_clean = str(product or "").strip().lower()
+    version_clean = str(version or "").strip().lower()
+    if product_clean in INVALID_TECH_PRODUCTS:
+        return False
+    if len(product_clean) < 2:
+        return False
+    if product_clean.isdigit():
+        return False
+    if version_clean in INVALID_TECH_VERSIONS and product_clean not in LOCAL_VERSIONLESS_TECH:
+        return False
+    return True
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Local high-signal CVE lookup table
 # Maps (product_keyword) → list of known critical/high CVEs for quick wins.
@@ -509,6 +538,8 @@ def _extract_technologies(tool_name: str, result: dict[str, Any], target: str) -
     seen: set[str] = set()
     unique: list[dict] = []
     for t in techs:
+        if not _valid_detected_tech(str(t.get("product") or ""), str(t.get("version") or "")):
+            continue
         key = t["product"].lower().strip()
         if key and key not in seen:
             seen.add(key)
@@ -691,6 +722,8 @@ def _seed_attack_profile_for_tech(
             if already:
                 continue
 
+            from app.services.scan_work_queue import apply_phase_tool_metadata
+
             rc = resource_class_for_tool(tool_name)
             base_pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
             item = ScanWorkItem(
@@ -703,12 +736,12 @@ def _seed_attack_profile_for_tech(
                 priority=max(1, base_pri + priority_boost),
                 status="queued",
                 max_attempts=2,
-                item_metadata={
+                item_metadata=apply_phase_tool_metadata({
                     "source": "tech_attack_profile",
                     "detected_tech": product,
                     "tech_keyword": tech_kw,
                     "engine": "tech_vuln_correlator",
-                },
+                }, phase_id, tool_name, source="tech_attack_profile"),
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
@@ -738,7 +771,7 @@ def _seed_targeted_nuclei(
     Returns 1 if created, 0 if already exists.
     """
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
 
     tech_lower = product.lower()
     # Find matching nuclei tag
@@ -776,11 +809,11 @@ def _seed_targeted_nuclei(
         priority=pri - 5,   # slightly higher priority than normal
         status="queued",
         max_attempts=2,
-        item_metadata={
+        item_metadata=apply_phase_tool_metadata({
             "source": "tech_correlator",
             "detected_tech": product,
             "engine": "tech_vuln_correlator",
-        },
+        }, phase_id, tool_name, source="tech_correlator"),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -866,7 +899,7 @@ def _add_learning_work_item(
 ) -> bool:
     """Cria um ScanWorkItem learning-driven (dedup por tool+target). True se criou."""
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
 
     tname = tname[:120]
     already = (
@@ -886,7 +919,7 @@ def _add_learning_work_item(
         tool_name=tname, profile=tname, resource_class=rc,
         priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
         status="queued", max_attempts=2,
-        item_metadata=metadata,
+        item_metadata=apply_phase_tool_metadata(metadata, phase_id, tname, source=str(metadata.get("source") or "learning_work_item")),
         created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
     ))
     try:
@@ -1073,6 +1106,8 @@ def correlate_tech_vulns(
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not item or not job:
         return {"error": "item or job not found"}
+    if not _valid_target_for_correlation(target):
+        return {"techs": 0, "findings": 0, "nuclei_queued": 0, "skipped": "batch_target_without_host_attribution"}
 
     result = dict(item.result or {})
     techs = _extract_technologies(tool_name, result, target)
@@ -1091,19 +1126,20 @@ def correlate_tech_vulns(
         version = str(tech.get("version") or "").strip()
         source = str(tech.get("source") or tool_name)
 
-        if not product:
+        if not _valid_detected_tech(product, version):
             continue
 
         # ── 1. Local CVE table ────────────────────────────────────────────────
         product_lower = product.lower()
         local_cves: list[dict] = []
-        for kw, cves in LOCAL_TECH_CVES.items():
-            if kw in product_lower:
-                local_cves.extend(cves)
+        if version.lower() not in INVALID_TECH_VERSIONS:
+            for kw, cves in LOCAL_TECH_CVES.items():
+                if kw in product_lower:
+                    local_cves.extend(cves)
 
         # ── 2. NVD live lookup (only for products with a version) ─────────────
         nvd_cves: list[dict] = []
-        if version and product_lower not in ("cloudflare", "cdn", "waf"):
+        if version and version.lower() not in INVALID_TECH_VERSIONS and product_lower not in ("cloudflare", "cdn", "waf"):
             try:
                 nvd_cves = _nvd_lookup(product, version, max_results=5)
             except Exception as exc:

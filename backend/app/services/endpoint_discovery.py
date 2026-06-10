@@ -91,7 +91,7 @@ def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: st
 
 def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
 
     already = db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,
@@ -107,7 +107,8 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
         scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
         tool_name=tool_name, profile=tool_name, resource_class=rc,
         priority=pri - 10, status="queued", max_attempts=2,
-        item_metadata=metadata, created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        item_metadata=apply_phase_tool_metadata(metadata, phase_id, tool_name, source=str((metadata or {}).get("source") or "endpoint_discovery")),
+        created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
     ))
     try:
         db.flush()

@@ -175,7 +175,7 @@ def _seed_credential_test(
     """Enfileira teste de credential stuffing para um target que tem auth endpoint."""
     try:
         from app.models.models import ScanWorkItem
-        from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+        from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
 
         tool_name = "nuclei-default-credentials"
         phase_id = "P10"
@@ -205,13 +205,13 @@ def _seed_credential_test(
             priority=max(1, pri),
             status="queued",
             max_attempts=2,
-            item_metadata={
+            item_metadata=apply_phase_tool_metadata({
                 "source": "cross_target_propagator",
                 "source_target": source_target,
                 "cred_count": cred_count,
                 "propagation_type": "credential_stuffing",
                 "engine": "cross_target_propagator",
-            },
+            }, phase_id, tool_name, source="cross_target_propagator"),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -234,7 +234,7 @@ def _seed_version_cve_for_target(
     try:
         from app.models.models import ScanWorkItem
         from app.services.tech_vuln_correlator import TECH_TO_NUCLEI_TAGS
-        from app.services.scan_work_queue import resource_class_for_tool, PHASE_PRIORITY
+        from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
 
         product_lower = product.lower()
         tag: str | None = None
@@ -271,12 +271,12 @@ def _seed_version_cve_for_target(
             priority=max(1, pri),
             status="queued",
             max_attempts=2,
-            item_metadata={
+            item_metadata=apply_phase_tool_metadata({
                 "source": "cross_target_propagator",
                 "product": product,
                 "propagation_type": "shared_version",
                 "engine": "cross_target_propagator",
-            },
+            }, phase_id, tool_name, source="cross_target_propagator"),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )

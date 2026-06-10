@@ -7,6 +7,7 @@ import sys
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
+from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScanWorkItem, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -134,15 +135,115 @@ def _state_duration_seconds(entry: dict) -> float | None:
     return round(max((finish - start).total_seconds(), 0.0), 3)
 
 
+def _work_queue_runtime_state(db: Session, job: ScanJob) -> dict:
+    rows = (
+        db.query(ScanWorkItem.phase_id, ScanWorkItem.status, func.count(ScanWorkItem.id))
+        .filter(ScanWorkItem.scan_job_id == job.id)
+        .group_by(ScanWorkItem.phase_id, ScanWorkItem.status)
+        .all()
+    )
+    if not rows:
+        return {}
+
+    terminal_statuses = {"completed", "done", "skipped", "failed", "timeout"}
+    active_statuses = {"queued", "retry", "submitted", "dispatched", "running"}
+    by_phase: dict[str, dict[str, int]] = {}
+    total = terminal = blocked = 0
+    for phase_id, status_value, count in rows:
+        pid = str(phase_id or "")
+        status_text = str(status_value or "").lower()
+        count_int = int(count or 0)
+        phase = by_phase.setdefault(pid, {"total": 0, "terminal": 0, "active": 0, "blocked": 0})
+        phase["total"] += count_int
+        total += count_int
+        if status_text in terminal_statuses:
+            phase["terminal"] += count_int
+            terminal += count_int
+        elif status_text == "blocked":
+            phase["blocked"] += count_int
+            blocked += count_int
+        elif status_text in active_statuses:
+            phase["active"] += count_int
+        else:
+            phase["active"] += count_int
+
+    scan_status = str(job.status or "").lower()
+    if scan_status in {"completed", "done", "finished"}:
+        progress = 100
+    else:
+        progress = min(99, int(terminal / max(1, total - blocked) * 100))
+
+    active_phases = sorted(pid for pid, phase in by_phase.items() if phase["active"] > 0)
+    blocked_phases = sorted(pid for pid, phase in by_phase.items() if phase["blocked"] > 0)
+    current_phase = active_phases[0] if active_phases else (blocked_phases[0] if blocked_phases else "")
+    return {
+        "current_phase": current_phase,
+        "current_step": current_phase or job.current_step,
+        "mission_progress": max(0, min(100, progress)),
+    }
+
+
+def _work_queue_tool_summary(db: Session, job: ScanJob) -> dict:
+    rows = (
+        db.query(ScanWorkItem.tool_name, ScanWorkItem.status, func.count(ScanWorkItem.id))
+        .filter(ScanWorkItem.scan_job_id == job.id)
+        .group_by(ScanWorkItem.tool_name, ScanWorkItem.status)
+        .all()
+    )
+    summary: dict[str, dict] = {}
+    attempted_statuses = {"completed", "done", "failed", "timeout", "skipped", "submitted", "dispatched", "running", "retry"}
+    for tool_name, status_value, count in rows:
+        tool = str(tool_name or "").strip().lower()
+        if not tool:
+            continue
+        status_text = str(status_value or "").lower()
+        count_int = int(count or 0)
+        bucket = summary.setdefault(
+            tool,
+            {
+                "tool": tool,
+                "executed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "running": 0,
+                "queued": 0,
+                "blocked": 0,
+                "total": 0,
+                "attempted": 0,
+            },
+        )
+        bucket["total"] += count_int
+        if status_text in attempted_statuses:
+            bucket["attempted"] += count_int
+        if status_text in {"completed", "done"}:
+            bucket["executed"] += count_int
+        elif status_text in {"failed", "timeout"}:
+            bucket["failed"] += count_int
+        elif status_text == "skipped":
+            bucket["skipped"] += count_int
+        elif status_text in {"submitted", "dispatched", "running", "retry"}:
+            bucket["running"] += count_int
+        elif status_text == "queued":
+            bucket["queued"] += count_int
+        elif status_text == "blocked":
+            bucket["blocked"] += count_int
+    return {
+        "tools": summary,
+        "total": sum(item.get("attempted", 0) for item in summary.values()),
+    }
+
+
 def _effective_state_progress(job: ScanJob) -> int:
     progress = int(job.mission_progress or 0)
     entries = _state_phase_entries(job)
     counted = sum(
         1 for entry in entries
-        if str(entry.get("status") or "").lower() in {"completed", "partial", "blocked", "failed"}
+        if str(entry.get("status") or "").lower() in {"completed", "partial"}
     )
     if counted:
         progress = max(progress, round((counted / 22) * 100))
+    if str(job.status or "").lower() in {"running", "queued", "retrying"}:
+        progress = min(progress, 99)
     return max(0, min(100, progress))
 
 
@@ -599,8 +700,9 @@ def admin_worker_logs(
     for item in executions:
         t = item.get("tool")
         if t not in tool_summary:
-            tool_summary[t] = {"tool": t, "executed": 0, "failed": 0, "skipped": 0, "total": 0}
+            tool_summary[t] = {"tool": t, "executed": 0, "failed": 0, "skipped": 0, "running": 0, "queued": 0, "blocked": 0, "total": 0, "attempted": 0}
         tool_summary[t]["total"] += 1
+        tool_summary[t]["attempted"] += 1
         s_ = str(item.get("status") or "").lower()
         if s_ in ("success", "executed"):
             tool_summary[t]["executed"] += 1
@@ -609,18 +711,31 @@ def admin_worker_logs(
         elif s_ == "skipped":
             tool_summary[t]["skipped"] += 1
 
+    runtime_state = _work_queue_runtime_state(db, job)
+    work_queue_tools = _work_queue_tool_summary(db, job)
+    for tool_name, wq_item in (work_queue_tools.get("tools") or {}).items():
+        existing = tool_summary.get(tool_name)
+        if not existing:
+            tool_summary[tool_name] = dict(wq_item)
+            continue
+        for key in ("executed", "failed", "skipped", "running", "queued", "blocked", "total", "attempted"):
+            existing[key] = max(int(existing.get(key, 0) or 0), int(wq_item.get(key, 0) or 0))
+    execution_total = max(len(executions), int(work_queue_tools.get("total") or 0))
+
     return {
         "scans": scans_list,
         "scan": {
             "id": job.id,
             "target_query": job.target_query,
             "status": job.status,
-            "current_step": job.current_step,
-            "mission_progress": _effective_state_progress(job),
+            "current_step": runtime_state.get("current_step") or job.current_step,
+            "current_phase": runtime_state.get("current_phase") or None,
+            "mission_progress": int(runtime_state.get("mission_progress") if runtime_state else _effective_state_progress(job)),
             "created_at": job.created_at,
             "updated_at": job.updated_at,
         },
-        "tool_summary": list(tool_summary.values()),
+        "tool_summary": sorted(tool_summary.values(), key=lambda item: str(item.get("tool") or "")),
+        "execution_total": execution_total,
         "executions": executions,
         "logs": logs_list,
         "traces": traces,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -63,7 +65,7 @@ def kali_inflight_release(rc: str, count: int = 1) -> None:
             r.set(key, 0)  # floor
     except Exception:
         pass
-from app.services.offensive_operator_core import PHASE_CONTRACTS, ToolCatalog
+from app.services.offensive_operator_core import PHASE_CONTRACTS, PHASE_TOOL_BINDINGS, ToolCatalog
 
 
 HEAVY_TOOLS = {
@@ -234,6 +236,200 @@ def _phase_tools(phase_id: str) -> list[str]:
     return out
 
 
+def _skill_ids_for_phase_tool(phase_id: str, tool_name: str) -> list[str]:
+    """Return skills that should be credited for a phase/tool work item."""
+    contract = PHASE_CONTRACTS.get(phase_id) or {}
+    skills = [str(s) for s in contract.get("required_skills") or [] if str(s)]
+    tool = str(tool_name or "").strip()
+    bound = (PHASE_TOOL_BINDINGS.get(phase_id) or {}).get(tool)
+    if bound is not None:
+        allowed = {str(s) for s in bound}
+        skills = [s for s in skills if s in allowed]
+    return list(dict.fromkeys(skills))
+
+
+def skill_ids_for_phase_tool(phase_id: str, tool_name: str) -> list[str]:
+    """Public wrapper used by auxiliary schedulers to keep skill attribution consistent."""
+    return _skill_ids_for_phase_tool(phase_id, tool_name)
+
+
+def gate_reason_for_phase(phase_id: str) -> str | None:
+    """Return the explicit gate reason for a newly-blocked phase item."""
+    gate = PHASE_GATE.get(str(phase_id or ""))
+    return f"waiting_for:{gate}" if gate else None
+
+
+def apply_phase_tool_metadata(
+    metadata: dict[str, Any] | None,
+    phase_id: str,
+    tool_name: str,
+    *,
+    source: str = "",
+    decision_source: str = "supervisor_skill_contract+accepted_learning",
+) -> dict[str, Any]:
+    """Attach skill + gate metadata to any work item producer.
+
+    Several services create ScanWorkItem rows outside enqueue_scan_work_items
+    (PoC validation, JS endpoint extraction, tech correlation, etc.). This keeps
+    all of them aligned with the same supervisor model used by the main queue.
+    """
+    result = dict(metadata or {})
+    if source and not result.get("source"):
+        result["source"] = source
+    skill_ids = result.get("skill_ids") or _skill_ids_for_phase_tool(phase_id, tool_name)
+    skill_ids = [str(s) for s in skill_ids if str(s)]
+    result["skill_ids"] = list(dict.fromkeys(skill_ids))
+    result["skill_id"] = str(result.get("skill_id") or (skill_ids[0] if skill_ids else ""))
+    result.setdefault("skill_attribution", "phase_contract_tool_binding")
+    result.setdefault("skill_decision_source", decision_source)
+    reason = gate_reason_for_phase(phase_id)
+    if reason:
+        result.setdefault("gate_reason", reason)
+        result.setdefault("blocked_reason", reason)
+    return result
+
+
+def initial_status_for_phase(phase_id: str) -> str:
+    return "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
+
+
+def initial_last_error_for_phase(phase_id: str) -> str | None:
+    return gate_reason_for_phase(phase_id) if phase_id in _BLOCKED_AT_CREATE else None
+
+
+def _skill_consultations_for_phase(
+    phase_id: str,
+    target: str,
+    selected_tools: list[str],
+    *,
+    state: dict[str, Any],
+    source: str,
+    learning_playbook: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Build deterministic supervisor skill-consultation records for a phase.
+
+    This is the missing bridge between skill library / accepted learning and
+    work queue execution. The queue may still execute tools, but every tool is
+    now traceable back to a consulted skill decision.
+    """
+    contract = PHASE_CONTRACTS.get(phase_id) or {}
+    skill_ids = [str(s) for s in contract.get("required_skills") or [] if str(s)]
+    if not skill_ids:
+        return []
+
+    selected = [str(t) for t in selected_tools if str(t or "").strip()]
+    learning_playbook = dict(learning_playbook or {})
+
+    learning_tools = [str(t) for t in learning_playbook.get("recommended_tools") or [] if str(t)]
+    learning_sources = list(learning_playbook.get("sources") or [])[:8]
+    learning_techniques = list(learning_playbook.get("techniques") or [])[:8]
+    consultations: list[dict[str, Any]] = []
+    for skill_id in skill_ids:
+        bound_tools = {
+            tool for tool in selected
+            if skill_id in _skill_ids_for_phase_tool(phase_id, tool)
+        }
+        if not bound_tools:
+            bound_tools = set(selected)
+        recommended = list(dict.fromkeys(
+            [tool for tool in selected if tool in bound_tools]
+            + [tool for tool in learning_tools if tool in bound_tools]
+        ))
+        matching_techniques = [
+            technique for technique in learning_techniques
+            if not technique.get("affected_skills")
+            or skill_id in {str(s) for s in technique.get("affected_skills") or []}
+        ][:5]
+        consultation_id = "SC-" + hashlib.sha256(
+            json.dumps(
+                {"phase_id": phase_id, "skill_id": skill_id, "target": target, "tools": selected},
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()[:16]
+        consultations.append({
+            "consultation_id": consultation_id,
+            "phase_id": phase_id,
+            "target": target,
+            "skill_id": skill_id,
+            "consulted": True,
+            "selected": True,
+            "source": source,
+            "decision_source": "supervisor_skill_contract+accepted_learning",
+            "contract_required": skill_id in skill_ids,
+            "candidate_tools": selected,
+            "recommended_tools": recommended,
+            "learning_sources": learning_sources,
+            "learning_techniques": matching_techniques,
+            "learning_used": bool(matching_techniques or learning_sources),
+            "reason": (
+                f"Skill {skill_id} consultada para {phase_id}; ferramentas derivadas do contrato da fase "
+                "e reordenadas/enriquecidas por aprendizados aceitos quando aplicável."
+            ),
+            "created_at": datetime.utcnow().isoformat(),
+        })
+    return consultations
+
+
+def _append_skill_consultations_to_state(
+    db: Session,
+    job: ScanJob,
+    consultations: list[dict[str, Any]],
+) -> None:
+    if not consultations:
+        return
+    from app.models.models import AgentTraceEvent
+
+    state = dict(job.state_data or {})
+    existing = list(state.get("skill_consultations") or [])
+    existing_keys = {
+        (str(c.get("phase_id")), str(c.get("target")), str(c.get("skill_id")))
+        for c in existing
+        if isinstance(c, dict)
+    }
+    added = []
+    for consultation in consultations:
+        key = (str(consultation.get("phase_id")), str(consultation.get("target")), str(consultation.get("skill_id")))
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        added.append(consultation)
+        db.add(AgentTraceEvent(
+            scan_id=job.id,
+            event_type="skill_consulted",
+            from_node="supervisor",
+            to_node="work_queue",
+            skill_id=str(consultation.get("skill_id") or "")[:120] or None,
+            tool_name=",".join(consultation.get("recommended_tools") or [])[:100] or None,
+            capability=str(consultation.get("phase_id") or "")[:100],
+            status="selected" if consultation.get("selected") else "consulted",
+            payload=consultation,
+            created_at=datetime.utcnow(),
+        ))
+    if not added:
+        return
+    existing.extend(added)
+    state["skill_consultations"] = existing[-1000:]
+    state["selected_skills"] = list(dict.fromkeys(
+        list(state.get("selected_skills") or []) + [str(c.get("skill_id")) for c in added if c.get("skill_id")]
+    ))
+    state["skill_invocation"] = list(state.get("skill_invocation") or [])[-500:] + [
+        {
+            "phase_id": c.get("phase_id"),
+            "skill_id": c.get("skill_id"),
+            "target": c.get("target"),
+            "source": c.get("decision_source"),
+            "recommended_tools": c.get("recommended_tools") or [],
+            "learning_used": bool(c.get("learning_used")),
+            "created_at": c.get("created_at"),
+        }
+        for c in added
+    ]
+    state["skill_invocation"] = state["skill_invocation"][-1000:]
+    job.state_data = state
+    db.flush()
+
+
 def _tool_profile(tool_name: str) -> str:
     entry = ToolCatalog().get(tool_name)
     return entry.profile if entry else tool_name
@@ -355,7 +551,7 @@ def unblock_phase_items(
             ),
         )
         .update(
-            {"status": "queued", "updated_at": now},
+            {"status": "queued", "last_error": None, "updated_at": now},
             synchronize_session=False,
         )
     )
@@ -405,6 +601,8 @@ def enqueue_scan_work_items(
     from collections import defaultdict
     batch_accumulator: dict[tuple[str, str], set[str]] = defaultdict(set)
     single_items: list[tuple[str, str, str]] = []
+    consultation_by_phase_target: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    learning_playbook_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
 
     clean_targets = [str(t).strip() for t in targets if str(t or "").strip()]
 
@@ -416,11 +614,38 @@ def enqueue_scan_work_items(
             required = list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_tools") or [])
             optional = [tool for tool in tools if tool not in set(required)]
             selected = list(dict.fromkeys(required + optional[:max_optional_per_phase]))
+            learning_key = (phase_id, tuple(selected))
+            if learning_key not in learning_playbook_cache:
+                try:
+                    from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+                    learning_playbook_cache[learning_key] = build_runtime_learning_playbook(
+                        candidate_tools=selected,
+                        phase=phase_id,
+                        limit=8,
+                        tech_stack=list(state.get("detected_tech_stack") or state.get("technologies") or []),
+                    ) or {}
+                except Exception:
+                    learning_playbook_cache[learning_key] = {}
+            consultations = _skill_consultations_for_phase(
+                phase_id,
+                target,
+                selected,
+                state=state,
+                source=source,
+                learning_playbook=learning_playbook_cache.get(learning_key) or {},
+            )
+            consultation_by_phase_target[(phase_id, target)] = consultations
             for tool in selected:
                 if tool in BATCH_CAPABLE_TOOLS:
                     batch_accumulator[(phase_id, tool)].add(target)
                 else:
                     single_items.append((phase_id, tool, target))
+
+    _append_skill_consultations_to_state(
+        db,
+        job,
+        [c for items in consultation_by_phase_target.values() for c in items],
+    )
 
     # ── Pass 2: create / update batch work items ─────────────────────────────
     for (phase_id, tool), tset in batch_accumulator.items():
@@ -442,11 +667,36 @@ def enqueue_scan_work_items(
                 old_meta = dict(existing_batch.item_metadata or {})
                 existing_tgts = set(old_meta.get("batch_targets") or [])
                 merged = sorted(existing_tgts | tset)
+                skill_ids = _skill_ids_for_phase_tool(phase_id, tool)
+                old_meta = apply_phase_tool_metadata(old_meta, phase_id, tool, source=source)
+                existing_consultation_ids = {
+                    str(x) for x in old_meta.get("skill_consultation_ids") or [] if str(x)
+                }
+                new_consultation_ids = {
+                    str(c.get("consultation_id"))
+                    for target in merged
+                    for c in consultation_by_phase_target.get((phase_id, target), [])
+                    if c.get("skill_id") in skill_ids and c.get("consultation_id")
+                }
+                old_meta["skill_consultation_ids"] = sorted(existing_consultation_ids | new_consultation_ids)
+                old_meta["skill_decision_source"] = "supervisor_skill_contract+accepted_learning"
+                old_learning_sources = {str(x) for x in old_meta.get("learning_sources") or [] if str(x)}
+                new_learning_sources = {
+                    str(src.get("id") or src.get("title") or "")
+                    for target in merged
+                    for c in consultation_by_phase_target.get((phase_id, target), [])
+                    if c.get("skill_id") in skill_ids
+                    for src in c.get("learning_sources") or []
+                    if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
+                }
+                old_meta["learning_sources"] = sorted(old_learning_sources | new_learning_sources)[:20]
                 if merged != list(existing_tgts):
                     old_meta["batch_targets"] = merged
-                    existing_batch.item_metadata = old_meta
-                    existing_batch.updated_at = datetime.utcnow()
-                    db.flush()
+                existing_batch.item_metadata = old_meta
+                if existing_batch.status == "blocked" and not existing_batch.last_error:
+                    existing_batch.last_error = initial_last_error_for_phase(phase_id)
+                existing_batch.updated_at = datetime.utcnow()
+                db.flush()
             existing += 1
             continue
 
@@ -455,7 +705,21 @@ def enqueue_scan_work_items(
         # Batch item gets best priority of all targets in the set
         best_boost = min(_high_risk_priority_boost(t) for t in sorted_targets) if sorted_targets else 0
 
-        _batch_status = "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
+        _batch_status = initial_status_for_phase(phase_id)
+        _batch_skill_ids = _skill_ids_for_phase_tool(phase_id, tool)
+        _batch_consultations = [
+            c
+            for target in sorted_targets
+            for c in consultation_by_phase_target.get((phase_id, target), [])
+            if c.get("skill_id") in _batch_skill_ids
+        ]
+        _batch_consultation_ids = sorted({str(c.get("consultation_id")) for c in _batch_consultations if c.get("consultation_id")})
+        _batch_learning_sources = list({
+            str(src.get("id") or src.get("title") or "")
+            for c in _batch_consultations
+            for src in c.get("learning_sources") or []
+            if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
+        })[:20]
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
@@ -465,14 +729,21 @@ def enqueue_scan_work_items(
             resource_class=rc,
             priority=max(1, base_priority + best_boost),
             status=_batch_status,
+            last_error=initial_last_error_for_phase(phase_id),
             max_attempts=2,
-            item_metadata={
+            item_metadata=apply_phase_tool_metadata({
                 "source": source,
                 "engine": "capacity_work_queue",
+                "skill_ids": _batch_skill_ids,
+                "skill_id": (_batch_skill_ids or [""])[0],
+                "skill_attribution": "phase_contract_tool_binding",
+                "skill_decision_source": "supervisor_skill_contract+accepted_learning",
+                "skill_consultation_ids": _batch_consultation_ids,
+                "learning_sources": _batch_learning_sources,
                 "batch_targets": sorted_targets,
                 "batch_count": len(sorted_targets),
                 "high_risk": best_boost < 0,
-            },
+            }, phase_id, tool, source=source),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -521,11 +792,30 @@ def enqueue_scan_work_items(
         rc = resource_class_for_tool(tool)
         base_priority = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
         risk_boost = _high_risk_priority_boost(target)
-        _item_meta: dict[str, Any] = {"source": source, "engine": "capacity_work_queue", "high_risk": risk_boost < 0}
+        _skill_ids = _skill_ids_for_phase_tool(phase_id, tool)
+        _consultations = [c for c in consultation_by_phase_target.get((phase_id, target), []) if c.get("skill_id") in _skill_ids]
+        _consultation_ids = [str(c.get("consultation_id")) for c in _consultations if c.get("consultation_id")]
+        _learning_sources = list({
+            str(src.get("id") or src.get("title") or "")
+            for c in _consultations
+            for src in c.get("learning_sources") or []
+            if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
+        })[:20]
+        _item_meta: dict[str, Any] = {
+            "source": source,
+            "engine": "capacity_work_queue",
+            "high_risk": risk_boost < 0,
+            "skill_ids": _skill_ids,
+            "skill_id": _skill_ids[0] if _skill_ids else "",
+            "skill_attribution": "phase_contract_tool_binding",
+            "skill_decision_source": "supervisor_skill_contract+accepted_learning",
+            "skill_consultation_ids": _consultation_ids,
+            "learning_sources": _learning_sources,
+        }
         _to = _adaptive_timeout(tool, target)
         if _to is not None:
             _item_meta["timeout_override"] = _to
-        _single_status = "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
+        _single_status = initial_status_for_phase(phase_id)
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
@@ -535,8 +825,9 @@ def enqueue_scan_work_items(
             resource_class=rc,
             priority=max(1, base_priority + risk_boost),
             status=_single_status,
+            last_error=initial_last_error_for_phase(phase_id),
             max_attempts=2,
-            item_metadata=_item_meta,
+            item_metadata=apply_phase_tool_metadata(_item_meta, phase_id, tool, source=source),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -566,6 +857,169 @@ def work_queue_counts(db: Session, scan_id: int) -> dict[str, int]:
         .all()
     )
     return {str(status): int(count) for status, count in rows}
+
+
+def work_queue_skill_snapshot(db: Session, scan_id: int) -> dict[str, Any]:
+    """Aggregate work-item skill/tool coverage without changing execution.
+
+    This is the authoritative runtime view while a scan is running. Phase
+    ledgers can be sparse because direct operator phases and queued work items
+    are produced by different paths; this snapshot bridges them for supervisor
+    and UI reporting.
+    """
+    items = (
+        db.query(ScanWorkItem)
+        .filter(ScanWorkItem.scan_job_id == scan_id)
+        .all()
+    )
+    by_phase: dict[str, dict[str, Any]] = {}
+    terminal_ok = {"completed", "done", "success"}
+    terminal_bad = {"failed", "timeout", "skipped"}
+    active = {"queued", "retry", "dispatched", "running", "submitted"}
+
+    for item in items:
+        phase_id = str(item.phase_id or "")
+        if not phase_id:
+            continue
+        phase = by_phase.setdefault(phase_id, {
+            "phase_id": phase_id,
+            "targets": set(),
+            "selected_skills": set(),
+            "tools_attempted": set(),
+            "tools_success": set(),
+            "tools_failed": set(),
+            "tools_blocked": set(),
+            "status_counts": {},
+            "skill_coverage": {},
+            "gate_reasons": set(),
+            "blocked_reasons": set(),
+        })
+        target = str(item.target or "")
+        if target:
+            phase["targets"].add(target)
+        status = str(item.status or "")
+        phase["status_counts"][status] = int(phase["status_counts"].get(status, 0)) + 1
+        tool_name = str(item.tool_name or "")
+        if tool_name:
+            phase["tools_attempted"].add(tool_name)
+            if status in terminal_ok:
+                phase["tools_success"].add(tool_name)
+            elif status in terminal_bad:
+                phase["tools_failed"].add(tool_name)
+            elif status == "blocked":
+                phase["tools_blocked"].add(tool_name)
+
+        meta = dict(item.item_metadata or {})
+        skill_ids = [str(s) for s in meta.get("skill_ids") or [] if str(s)]
+        if not skill_ids and meta.get("skill_id"):
+            skill_ids = [str(meta.get("skill_id"))]
+        if not skill_ids:
+            skill_ids = _skill_ids_for_phase_tool(phase_id, tool_name)
+        gate_reason = str(meta.get("gate_reason") or "")
+        blocked_reason = str(item.last_error or meta.get("blocked_reason") or "")
+        if gate_reason:
+            phase["gate_reasons"].add(gate_reason)
+        if blocked_reason:
+            phase["blocked_reasons"].add(blocked_reason)
+        for skill_id in skill_ids:
+            phase["selected_skills"].add(skill_id)
+            cov = phase["skill_coverage"].setdefault(skill_id, {
+                "status": "queued",
+                "tools_required": set(),
+                "tools_attempted": set(),
+                "tools_success": set(),
+                "tools_failed": set(),
+                "evidence_ids": [],
+                "blocking_reason": None,
+            })
+            if tool_name:
+                cov["tools_attempted"].add(tool_name)
+                if status in terminal_ok:
+                    cov["tools_success"].add(tool_name)
+                elif status in terminal_bad:
+                    cov["tools_failed"].add(tool_name)
+                elif status == "blocked":
+                    cov["blocking_reason"] = blocked_reason or gate_reason or "waiting_for_gate"
+            if status in terminal_ok:
+                cov["status"] = "completed"
+            elif cov["status"] != "completed" and status in terminal_bad:
+                cov["status"] = "partial"
+            elif cov["status"] not in {"completed", "partial"} and status == "blocked":
+                cov["status"] = "gate_blocked" if gate_reason or "waiting_for:" in blocked_reason else "blocked"
+            elif cov["status"] not in {"completed", "partial"} and status in active:
+                cov["status"] = "executing" if status in {"dispatched", "running", "submitted"} else "queued"
+
+    serialised: dict[str, Any] = {}
+    for phase_id, phase in by_phase.items():
+        skill_coverage: dict[str, Any] = {}
+        for skill_id, cov in phase["skill_coverage"].items():
+            skill_coverage[skill_id] = {
+                **cov,
+                "tools_required": sorted(cov["tools_required"]),
+                "tools_attempted": sorted(cov["tools_attempted"]),
+                "tools_success": sorted(cov["tools_success"]),
+                "tools_failed": sorted(cov["tools_failed"]),
+            }
+        serialised[phase_id] = {
+            "phase_id": phase_id,
+            "targets": sorted(phase["targets"]),
+            "selected_skills": sorted(phase["selected_skills"]),
+            "tools_attempted": sorted(phase["tools_attempted"]),
+            "tools_success": sorted(phase["tools_success"]),
+            "tools_failed": sorted(phase["tools_failed"]),
+            "tools_blocked": sorted(phase["tools_blocked"]),
+            "status_counts": dict(sorted(phase["status_counts"].items())),
+            "skill_coverage": skill_coverage,
+            "gate_reasons": sorted(phase["gate_reasons"]),
+            "blocked_reasons": sorted(phase["blocked_reasons"]),
+        }
+    return serialised
+
+
+def enrich_phase_ledgers_from_work_items(db: Session, job: ScanJob) -> dict[str, Any]:
+    """Persist work-queue-derived skill coverage into ScanJob.state_data."""
+    snapshot = work_queue_skill_snapshot(db, int(job.id))
+    state = dict(job.state_data or {})
+    state["work_queue_skill_coverage"] = snapshot
+    ledgers = list(state.get("phase_ledger_v2") or state.get("phase_ledger") or [])
+    changed = False
+    enriched_ledgers: list[dict[str, Any]] = []
+    for ledger in ledgers:
+        if not isinstance(ledger, dict):
+            enriched_ledgers.append(ledger)
+            continue
+        phase_id = str(ledger.get("phase_id") or "")
+        snap = snapshot.get(phase_id)
+        if not snap:
+            enriched_ledgers.append(ledger)
+            continue
+        merged = dict(ledger)
+        for key in ("selected_skills", "tools_attempted", "tools_success", "tools_failed"):
+            existing = [str(x) for x in merged.get(key) or [] if str(x)]
+            incoming = [str(x) for x in snap.get(key) or [] if str(x)]
+            union = list(dict.fromkeys(existing + incoming))
+            if union != existing:
+                merged[key] = union
+                changed = True
+        existing_cov = dict(merged.get("skill_coverage") or {})
+        for skill_id, cov in (snap.get("skill_coverage") or {}).items():
+            if skill_id not in existing_cov:
+                existing_cov[skill_id] = cov
+                changed = True
+        if existing_cov != (merged.get("skill_coverage") or {}):
+            merged["skill_coverage"] = existing_cov
+        merged["work_queue_status_counts"] = snap.get("status_counts") or {}
+        merged["work_queue_gate_reasons"] = snap.get("gate_reasons") or []
+        enriched_ledgers.append(merged)
+    if ledgers:
+        state["phase_ledger_v2"] = enriched_ledgers
+    state["selected_skills"] = list(dict.fromkeys(
+        [str(s) for s in state.get("selected_skills") or [] if str(s)]
+        + [s for snap in snapshot.values() for s in (snap.get("selected_skills") or [])]
+    ))
+    job.state_data = state
+    db.flush()
+    return {"updated_ledgers": int(changed), "phases": len(snapshot)}
 
 
 def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> list[int]:
@@ -769,6 +1223,7 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
     for item in cancelled:
         item.status = "skipped"
         item.result = {"skipped_reason": f"target_triage:{reason}", "triage_at": datetime.utcnow().isoformat()}
+        item.last_error = f"skipped:target_triage:{reason}"
         item.updated_at = datetime.utcnow()
         count += 1
     if count:
@@ -850,6 +1305,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
             "targets_with_findings_count": len(targets_with_findings),
             "triage_at": now.isoformat(),
         }
+        wi.last_error = "skipped:triage_post_p09_no_p09_findings"
         wi.updated_at = now
         cancelled += 1
 

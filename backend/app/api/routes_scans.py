@@ -4593,7 +4593,41 @@ def scan_runtime_feed(
     if not isinstance(ledgers, list):
         ledgers = []
 
-    runtime: list[dict] = []
+    def _tool_backend(tool_name: str, profile: str = "") -> str:
+        tool = str(tool_name or "").strip().lower()
+        prof = str(profile or "").strip().lower()
+        if tool in {"bl-test"} or prof in {"business_logic_backend"}:
+            return "backend_local"
+        if tool in {"manual_review", "manual_scope_review", "manual_correlation"} or tool.startswith("manual_"):
+            return "manual"
+        if tool in {"report-builder"} or prof in {"report_builder"}:
+            return "reporting"
+        return "kali"
+
+    def _phase_runtime_status(counts: dict[str, int], ledger_status: str = "") -> str:
+        total = int(counts.get("total", 0) or 0)
+        terminal = int(counts.get("terminal", 0) or 0)
+        active = int(counts.get("active", 0) or 0)
+        blocked = int(counts.get("blocked", 0) or 0)
+        failed = int(counts.get("failed", 0) or 0)
+        if total > 0:
+            if terminal == total:
+                return "failed" if failed and failed == terminal else "completed"
+            if active > 0:
+                return "executing"
+            if blocked > 0:
+                return "gate_blocked"
+            return "queued"
+        normalized = str(ledger_status or "").lower()
+        if normalized in {"completed", "partial"}:
+            return "completed"
+        if normalized in {"failed", "error"}:
+            return "failed"
+        if normalized == "blocked":
+            return "gate_blocked"
+        return "queued"
+
+    runtime_by_key: dict[tuple[str, str], dict] = {}
     for ledger in ledgers:
         if not isinstance(ledger, dict):
             continue
@@ -4607,9 +4641,12 @@ def scan_runtime_feed(
             if not isinstance(mcp, dict):
                 continue
             stdout_raw = str(mcp.get("stdout") or "")
+            tool_name = str(mcp.get("tool_name") or "")
+            profile = str(mcp.get("profile") or "")
             tools_runtime.append({
-                "tool_name": mcp.get("tool_name") or "",
-                "profile": mcp.get("profile") or "",
+                "tool_name": tool_name,
+                "profile": profile,
+                "backend": _tool_backend(tool_name, profile),
                 "status": mcp.get("status") or "",
                 "command": mcp.get("command") or "",
                 "stdout": stdout_raw[:6000],
@@ -4623,8 +4660,9 @@ def scan_runtime_feed(
                 "error": mcp.get("error"),
                 "parsed_preview": str(mcp.get("parsed_result") or "")[:1500],
                 "artifacts": mcp.get("artifact_paths") or mcp.get("artifacts") or [],
+                "source": "phase_ledger_v2",
             })
-        runtime.append({
+        runtime_by_key[(phase_id, target)] = {
             "phase_id": phase_id,
             "phase_name": phase_name,
             "target": target,
@@ -4634,7 +4672,7 @@ def scan_runtime_feed(
             "tools_failed": ledger.get("tools_failed") or [],
             "blocking_reason": ledger.get("blocking_reason"),
             "tools": tools_runtime,
-        })
+        }
 
     # ── Progresso e fase atual AUTORITATIVOS (work_queue real, não o ledger) ──
     # O phase_ledger (LangGraph) fica obsoleto em scans work_queue e reporta
@@ -4652,17 +4690,118 @@ def scan_runtime_feed(
     for _ph, _st, _cnt in _wq_rows:
         _ph = str(_ph or "?")
         _st = str(_st or "")
-        slot = _per_phase.setdefault(_ph, {"phase_id": _ph, "total": 0, "terminal": 0, "blocked": 0, "active": 0})
+        slot = _per_phase.setdefault(_ph, {"phase_id": _ph, "total": 0, "terminal": 0, "blocked": 0, "active": 0, "failed": 0})
         slot["total"] += _cnt
         _total += _cnt
         if _st in _TERMINAL:
             slot["terminal"] += _cnt
             _terminal += _cnt
+            if _st in {"failed", "timeout"}:
+                slot["failed"] += _cnt
         elif _st == "blocked":
             slot["blocked"] += _cnt
             _blocked += _cnt
         else:
             slot["active"] += _cnt
+
+    _wq_tool_rows = (
+        db.query(
+            _SWI_rt.phase_id,
+            _SWI_rt.tool_name,
+            _SWI_rt.profile,
+            _SWI_rt.status,
+            func.count(_SWI_rt.id),
+            func.max(_SWI_rt.last_error),
+            func.max(_SWI_rt.started_at),
+            func.max(_SWI_rt.finished_at),
+        )
+        .filter(_SWI_rt.scan_job_id == scan_id)
+        .group_by(_SWI_rt.phase_id, _SWI_rt.tool_name, _SWI_rt.profile, _SWI_rt.status)
+        .all()
+    )
+    _phase_names = {
+        "P01": "Subdomain Enumeration",
+        "P02": "Port Service Discovery",
+        "P03": "Endpoint Discovery",
+        "P04": "Parameter Discovery",
+        "P05": "Surface Expansion",
+        "P06": "HTTP Fingerprinting & WAF Detection",
+        "P07": "Technology Detection",
+        "P08": "JavaScript Endpoint Analysis",
+        "P09": "Vulnerability Template Scan",
+        "P10": "Injection Testing",
+        "P11": "SSRF Testing",
+        "P12": "XSS Testing",
+        "P13": "Access Control & Business Logic",
+        "P14": "Auth Boundary Testing",
+        "P15": "File Handling Testing",
+        "P16": "API Input Surface Review",
+        "P17": "Exploit Validation",
+        "P18": "Credential Exposure Boundary",
+        "P19": "Post Exploitation Boundary",
+        "P20": "Attack Path Correlation",
+        "P21": "Evidence Quality Review",
+        "P22": "Campaign Reporting",
+    }
+    for phase_id, tool_name, profile, status_value, count, last_error, started_at, finished_at in _wq_tool_rows:
+        phase_id = str(phase_id or "")
+        target = "all-targets"
+        tool_name = str(tool_name or "")
+        profile = str(profile or "")
+        status_text = str(status_value or "")
+        phase_key = (phase_id, target)
+        phase_row = runtime_by_key.setdefault(
+            phase_key,
+            {
+                "phase_id": phase_id,
+                "phase_name": _phase_names.get(phase_id, phase_id),
+                "target": target,
+                "status": "",
+                "tools_attempted": [],
+                "tools_success": [],
+                "tools_failed": [],
+                "blocking_reason": None,
+                "tools": [],
+            },
+        )
+        normalized_status = {
+            "completed": "success",
+            "done": "success",
+            "submitted": "running",
+            "dispatched": "running",
+            "retry": "running",
+        }.get(status_text, status_text)
+        phase_row["tools"].append({
+            "tool_name": tool_name,
+            "profile": profile,
+            "backend": _tool_backend(tool_name, profile),
+            "status": normalized_status,
+            "command": "",
+            "stdout": "",
+            "stdout_truncated": False,
+            "stdout_path": "",
+            "stderr_path": "",
+            "exit_code": None,
+            "duration_seconds": None,
+            "started_at": started_at.isoformat() if started_at else "",
+            "finished_at": finished_at.isoformat() if finished_at else "",
+            "error": last_error,
+            "parsed_preview": "",
+            "artifacts": [],
+            "source": "scan_work_items",
+            "count": int(count or 0),
+        })
+        if status_text in {"completed", "done", "failed", "timeout", "skipped", "submitted", "dispatched", "running", "retry"}:
+            if tool_name not in phase_row["tools_attempted"]:
+                phase_row["tools_attempted"].append(tool_name)
+        if status_text in {"completed", "done"} and tool_name not in phase_row["tools_success"]:
+            phase_row["tools_success"].append(tool_name)
+        if status_text in {"failed", "timeout"} and tool_name not in phase_row["tools_failed"]:
+            phase_row["tools_failed"].append(tool_name)
+
+    for (phase_id, _target), phase_row in runtime_by_key.items():
+        phase_counts = _per_phase.get(phase_id) or {}
+        phase_row["status"] = _phase_runtime_status(phase_counts, str(phase_row.get("status") or ""))
     # progresso real: terminal / (total - blocked); cap 99 enquanto rodando
     _effective = max(1, _total - _blocked)
     if job.status in ("completed", "done", "finished"):
@@ -4682,9 +4821,14 @@ def scan_runtime_feed(
     else:
         _current_phase = "—"
     _phase_progress = [
-        {**v, "pct": int(v["terminal"] / max(1, v["total"] - v["blocked"]) * 100) if (v["total"] - v["blocked"]) > 0 else 0}
+        {
+            **v,
+            "status": _phase_runtime_status(v),
+            "pct": int(v["terminal"] / max(1, v["total"] - v["blocked"]) * 100) if (v["total"] - v["blocked"]) > 0 else 0,
+        }
         for v in sorted(_per_phase.values(), key=lambda x: x["phase_id"])
     ]
+    runtime = sorted(runtime_by_key.values(), key=lambda item: (str(item.get("phase_id") or ""), str(item.get("target") or "")))
 
     return {
         "scan_id": scan_id,

@@ -194,6 +194,7 @@ def schedule_poc_validation(
     Returns True if a validation item was successfully scheduled.
     """
     from app.models.models import ScanWorkItem
+    from app.services.scan_work_queue import apply_phase_tool_metadata
 
     # ── Guards ────────────────────────────────────────────────────────────────
 
@@ -288,7 +289,7 @@ def schedule_poc_validation(
             priority=30,
             status="queued",
             max_attempts=1,  # PoC gets one shot — fail = refuted
-            item_metadata=meta,
+            item_metadata=apply_phase_tool_metadata(meta, "P21", val_tool, source="poc_validator"),
         )
         db.add(val_item)
         db.flush()

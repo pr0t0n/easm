@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.core.config import settings
 from app.graph.workflow import build_graph, initial_state
-from app.models.models import AppSetting, Asset, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, Vulnerability, WorkerHeartbeat, ScanAuditLog
+from app.models.models import AppSetting, Asset, AgentTraceEvent, ExecutedToolRun, Finding, ScanJob, ScanLog, ScheduledScan, SkillScore, Vulnerability, WorkerHeartbeat, ScanAuditLog
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.cyber_autoagent_alignment import evaluate_execution_quality
@@ -1624,7 +1624,7 @@ def correlate_tech_vulns(scan_id: int, target: str, tool_name: str, work_item_id
 def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
     """Capacity-aware dispatcher for persistent scan_work_items."""
     from app.db.session import SessionLocal
-    from app.models.models import ScanJob, ScanLog, ScanWorkItem
+    from app.models.models import ExecutedToolRun, ScanJob, ScanLog, ScanWorkItem
     from app.services.scan_work_queue import claim_work_items, work_queue_counts
     from app.workers.worker_groups import phase_queue
 
@@ -1828,19 +1828,31 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
 
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
+        try:
+            from app.services.scan_work_queue import enrich_phase_ledgers_from_work_items
+            enrich_phase_ledgers_from_work_items(db, job)
+            state = dict(job.state_data or {})
+        except Exception:
+            pass
+        _prev_dispatch = dict(state.get("work_queue_last_dispatch") or {})
+        _prev_counts = dict(_prev_dispatch.get("counts") or {})
+        _should_log_dispatch = bool(item_ids) or counts != _prev_counts or int(_prev_dispatch.get("claimed") or 0) != len(item_ids)
         state["work_queue_counts"] = counts
         state["work_queue_last_dispatch"] = {
             "claimed": len(item_ids),
             "limit": limit,
             "engine": "capacity_work_queue",
+            "counts": counts,
+            "updated_at": datetime.utcnow().isoformat(),
         }
         job.state_data = state
-        db.add(ScanLog(
-            scan_job_id=scan_id,
-            source="work-queue",
-            level="INFO",
-            message=f"work_queue_dispatch claimed={len(item_ids)} counts={counts}",
-        ))
+        if _should_log_dispatch:
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="work-queue",
+                level="INFO",
+                message=f"work_queue_dispatch claimed={len(item_ids)} counts={counts}",
+            ))
         db.commit()
         _active_statuses = ("queued", "retry", "dispatched", "running", "submitted")
         # "blocked" items are pending (waiting for their gate to open) — keep polling
@@ -1955,11 +1967,17 @@ def execute_scan_work_item(item_id: int):
         _batch_targets: list[str] = list(_item_meta.get("batch_targets") or [])
         _is_batch = item.target == "__batch__" and len(_batch_targets) > 1
         _dispatch_target = _batch_targets[0] if _is_batch else item.target
+        _skill_ids = [str(s) for s in _item_meta.get("skill_ids") or [] if str(s)]
+        if not _skill_ids and _item_meta.get("skill_id"):
+            _skill_ids = [str(_item_meta.get("skill_id"))]
+        _primary_skill_id = _skill_ids[0] if _skill_ids else f"work_queue.{item.phase_id}"
 
         execution = {
             "mcp_request_id": f"wi-{item.id}",
             "phase_id": item.phase_id,
-            "skill_id": f"work_queue.{item.phase_id}",
+            "skill_id": _primary_skill_id,
+            "skill_ids": _skill_ids,
+            "skill_consultation_ids": list(_item_meta.get("skill_consultation_ids") or []),
             "tool_name": item.tool_name,
             "profile": item.profile or item.tool_name,
             "target": _dispatch_target,
@@ -2034,6 +2052,38 @@ def execute_scan_work_item(item_id: int):
             }
             poll_scan_work_item.apply_async(args=[item.id], countdown=5)
         item.updated_at = datetime.utcnow()
+        try:
+            execution_key = f"wi-{item.id}"
+            run = (
+                db.query(ExecutedToolRun)
+                .filter(
+                    ExecutedToolRun.scan_job_id == item.scan_job_id,
+                    ExecutedToolRun.execution_key == execution_key,
+                )
+                .first()
+            )
+            if not run:
+                run = ExecutedToolRun(
+                    scan_job_id=item.scan_job_id,
+                    phase_id=str(item.phase_id or "")[:10] or None,
+                    skill_id=str(_primary_skill_id or "")[:120] or None,
+                    tool_name=str(item.tool_name or "")[:100],
+                    profile=str(item.profile or item.tool_name or "")[:120] or None,
+                    target=str(_dispatch_target or item.target or "")[:500],
+                    execution_key=execution_key,
+                    arguments_hash=str(item.id)[:80],
+                    status=str(item.status or "submitted")[:50],
+                    created_at=datetime.utcnow(),
+                )
+                db.add(run)
+            run.phase_id = str(item.phase_id or "")[:10] or None
+            run.skill_id = str(_primary_skill_id or "")[:120] or None
+            run.profile = str(item.profile or item.tool_name or "")[:120] or None
+            run.target = str(_dispatch_target or item.target or "")[:500]
+            run.status = str(item.status or "submitted")[:50]
+            run.error_message = str(item.last_error or "")[:2000] or None
+        except Exception:
+            pass
 
         counts = work_queue_counts(db, item.scan_job_id)
         state = dict(job.state_data or {})
@@ -2207,12 +2257,21 @@ def poll_scan_work_item(item_id: int):
             # Upsert to avoid UniqueViolation when the same tool+target re-runs
             # (happens after worker restarts reset items to queued)
             from sqlalchemy.dialects.postgresql import insert as _pg_insert
+            import hashlib as _hashlib
+            import json as _json
+            _execution_key = f"wi-{item.id}"
+            _arguments_hash = _hashlib.sha256(_json.dumps(execution.get("arguments") or {}, sort_keys=True, default=str).encode()).hexdigest()[:20]
             _upsert_stmt = (
                 _pg_insert(ExecutedToolRun.__table__)
                 .values(
                     scan_job_id=item.scan_job_id,
+                    phase_id=item.phase_id,
+                    skill_id=_primary_skill_id[:120] if _primary_skill_id else None,
                     tool_name=item.tool_name[:100],
+                    profile=(item.profile or item.tool_name)[:120],
                     target=item.target[:500],
+                    execution_key=_execution_key,
+                    arguments_hash=_arguments_hash,
                     status=run_status,
                     error_message=item.last_error,
                     execution_time_seconds=(
@@ -2222,8 +2281,12 @@ def poll_scan_work_item(item_id: int):
                     created_at=datetime.utcnow(),
                 )
                 .on_conflict_do_update(
-                    constraint="uq_executed_tool_runs_scan_tool_target",
+                    constraint="uq_executed_tool_runs_scan_execution_key",
                     set_={
+                        "phase_id": item.phase_id,
+                        "skill_id": _primary_skill_id[:120] if _primary_skill_id else None,
+                        "profile": (item.profile or item.tool_name)[:120],
+                        "arguments_hash": _arguments_hash,
                         "status": run_status,
                         "error_message": item.last_error,
                         "execution_time_seconds": (
@@ -2263,6 +2326,62 @@ def poll_scan_work_item(item_id: int):
                     "findings_extractor failed for item %s tool=%s: %s", item.id, item.tool_name, _fe
                 )
                 db.rollback()
+
+        # ── Skill feedback loop: skill → tool execution → result quality ──────
+        # This is the operational learning substrate: every work item reports
+        # back to the supervisor which skill(s) it served and whether it yielded
+        # actionable evidence.
+        try:
+            _feedback_meta = dict(item.item_metadata or {})
+            _feedback_skill_ids = [str(s) for s in _feedback_meta.get("skill_ids") or [] if str(s)]
+            if not _feedback_skill_ids and _feedback_meta.get("skill_id"):
+                _feedback_skill_ids = [str(_feedback_meta.get("skill_id"))]
+            _success = 1 if item.status == "completed" else 0
+            _failure = 1 if item.status in {"failed", "timeout"} else 0
+            _promoted = 1 if int(findings_created or 0) > 0 else 0
+            _efficiency = 1.0 if _success else 0.0
+            _productivity = min(1.0, float(findings_created or 0) / 3.0) if _success else 0.0
+            for _sid in _feedback_skill_ids:
+                db.add(SkillScore(
+                    scan_id=item.scan_job_id,
+                    iteration=int(item.attempts or 0),
+                    skill_id=_sid[:120],
+                    capability=str(item.phase_id or ""),
+                    library_hits=len(_feedback_meta.get("learning_sources") or []),
+                    tool_attempts=1,
+                    tool_successes=_success,
+                    tool_failures=_failure,
+                    findings_raw=int(findings_created or 0),
+                    findings_promoted=_promoted,
+                    duration_ms=float(result.get("duration_seconds") or 0.0) * 1000.0,
+                    efficiency_score=_efficiency,
+                    productivity_score=_productivity,
+                    created_at=datetime.utcnow(),
+                ))
+                db.add(AgentTraceEvent(
+                    scan_id=item.scan_job_id,
+                    event_type="skill_execution_result",
+                    from_node="work_queue",
+                    to_node="supervisor",
+                    skill_id=_sid[:120],
+                    tool_name=str(item.tool_name or "")[:100],
+                    capability=str(item.phase_id or "")[:100],
+                    status="positive" if _promoted else ("success" if _success else "failed"),
+                    payload={
+                        "work_item_id": item.id,
+                        "phase_id": item.phase_id,
+                        "target": item.target,
+                        "tool_name": item.tool_name,
+                        "status": item.status,
+                        "findings_created": findings_created,
+                        "skill_consultation_ids": list(_feedback_meta.get("skill_consultation_ids") or []),
+                        "learning_used": bool(_feedback_meta.get("learning_sources")),
+                    },
+                    created_at=datetime.utcnow(),
+                ))
+            db.commit()
+        except Exception:
+            db.rollback()
 
         # ── Camada 2: Phase gate unblocking ──────────────────────────────────────
         # Progressive unlock: when a gate phase reaches terminal state for a target,

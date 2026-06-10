@@ -229,7 +229,8 @@ function RuntimeFeed({ runtime, toolFilter }) {
                 </div>
                 <span className={`text-xs px-2 py-0.5 rounded-md ${
                   phase.status === "completed" ? "bg-emerald-900/30 text-emerald-300" :
-                  phase.status === "partial" ? "bg-amber-900/30 text-amber-300" :
+                  phase.status === "executing" ? "bg-cyan-900/30 text-cyan-300" :
+                  phase.status === "queued" || phase.status === "gate_blocked" ? "bg-amber-900/30 text-amber-300" :
                   "bg-rose-900/30 text-rose-300"
                 }`}>{phase.status}</span>
               </div>
@@ -243,6 +244,12 @@ function RuntimeFeed({ runtime, toolFilter }) {
                         "text-amber-300"
                       }`}>{tool.tool_name}</span>
                       <span className="text-slate-500">[{tool.status}]</span>
+                      {tool.backend && (
+                        <span className="text-slate-500">{tool.backend}</span>
+                      )}
+                      {tool.count > 1 && (
+                        <span className="text-slate-500">x{tool.count}</span>
+                      )}
                       {tool.exit_code !== null && tool.exit_code !== undefined && (
                         <span className="text-slate-500">exit={tool.exit_code}</span>
                       )}
@@ -392,6 +399,7 @@ export default function WorkerLogsPage() {
 
   const scanInfo = data?.scan;
   const executions = data?.executions || [];
+  const executionTotal = data?.execution_total ?? executions.length;
   const logs = data?.logs || [];
   const toolSummary = data?.tool_summary || [];
   const isRunning = ["running", "retrying", "queued"].includes(String(scanInfo?.status || "").toLowerCase());
@@ -496,7 +504,7 @@ export default function WorkerLogsPage() {
 
           <section className="grid-4">
             {metricCard("Progresso", `${pct(scanInfo.mission_progress)}%`, "var(--brand-700)")}
-            {metricCard("Execuções", executions.length, "var(--ink)")}
+            {metricCard("Execuções", executionTotal, "var(--ink)")}
             {metricCard("Falhas", failedExecutions.length + warningLogs.length, failedExecutions.length ? "var(--sev-critical-text)" : "var(--sev-high-text)")}
             {metricCard("Findings", phaseData?.metrics?.findings_total || 0, "var(--sev-low-text)")}
           </section>
