@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.offensive_operator_runner import _next_pending_phase_target
+from app.services.offensive_operator_runner import _should_run_subdomain_enumeration
 from app.workers.worker_groups import group_for_phase, phase_queue
 
 
@@ -28,6 +29,19 @@ def test_next_pending_phase_target_skips_p01_for_discovered_subdomains() -> None
 
     assert _next_pending_phase_target(targets, completed, 1, None) == ("P02", "app.example.com")
     assert _next_pending_phase_target(targets, completed, 1, None, {"app.example.com"}) is None
+
+
+def test_next_pending_phase_target_skips_p01_for_absolute_url_targets() -> None:
+    target = "https://shop.example.com/login?next=/app"
+
+    assert _should_run_subdomain_enumeration(target) is False
+    assert _next_pending_phase_target([target], set(), 1, None) == ("P02", target)
+
+
+def test_subdomain_enumeration_still_runs_for_domain_targets() -> None:
+    assert _should_run_subdomain_enumeration("example.com") is True
+    assert _should_run_subdomain_enumeration("shop.example.com") is True
+    assert _next_pending_phase_target(["shop.example.com"], set(), 1, None) == ("P01", "shop.example.com")
 
 
 def test_work_queue_dispatches_items_to_phase_queues() -> None:

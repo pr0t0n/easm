@@ -108,6 +108,8 @@ def _next_pending_phase_target(
                 continue
             if phase_id == "P01" and target_index >= input_target_count:
                 continue
+            if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
+                continue
             if f"{phase_id}:{target}" not in completed_work:
                 return phase_id, target
     return None
@@ -164,6 +166,18 @@ def _parse_targets_from_query(target_query: str) -> list[str]:
     raw = str(target_query or "")
     tokens = [token.strip() for token in re.split(r"[;,\n]", raw) if str(token or "").strip()]
     return tokens
+
+
+def _is_absolute_http_url(target: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(target or "").strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _should_run_subdomain_enumeration(target: str) -> bool:
+    """P01 is domain enumeration. Full URLs are explicit app targets."""
+    return not _is_absolute_http_url(target)
 
 
 def _scope_from_job(job: ScanJob, target: str, execution_mode: str = "controlled_pentest") -> Scope:
@@ -797,6 +811,25 @@ def run_offensive_operator_scan(
             # RESUME: skip work already completed in a prior checkpoint segment.
             _work_key = f"{phase_id}:{target}"
             if _work_key in completed_work:
+                continue
+            if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
+                _record_preflight_skip(
+                    db,
+                    job,
+                    phase_ledgers,
+                    completed_work,
+                    phase_id,
+                    target,
+                    "direct_url_target_no_subdomain_enumeration",
+                )
+                _url_state = dict(job.state_data or {})
+                _modes = dict(_url_state.get("target_input_modes") or {})
+                _modes[target] = "direct_url"
+                _url_state["target_input_modes"] = _modes
+                _url_state["direct_url_targets"] = sorted(set(list(_url_state.get("direct_url_targets") or []) + [target]))
+                _url_state["target_set"] = list(all_targets)
+                job.state_data = _url_state
+                db.commit()
                 continue
             if phase_id != "P01":
                 _pf_state = dict(job.state_data or {})
