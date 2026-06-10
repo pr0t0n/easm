@@ -23,6 +23,7 @@ BACKEND_LOCAL_PROFILES = {
     "business_logic_backend",
     "semgrep_backend",
 }
+RUNNER_BUILTIN_EXECUTABLES = {"bash", "sh", "python", "python3"}
 
 
 def _runner_base() -> str:
@@ -140,6 +141,15 @@ def _tool_availability(tool_name: str, profiles_payload: dict[str, Any], tools_p
     candidates = sorted(_profile_binary_candidates(profile, normalized))
     tools_by_name = tools_payload.get("tools_by_name") if isinstance(tools_payload.get("tools_by_name"), dict) else {}
     executable = next((candidate for candidate in candidates if candidate in tools_by_name), "")
+    if not executable:
+        executable = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate in RUNNER_BUILTIN_EXECUTABLES or candidate.startswith("/")
+            ),
+            "",
+        )
     return {
         "available": bool(executable),
         "status": "ready" if executable else "missing_kali_binary",
