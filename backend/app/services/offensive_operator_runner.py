@@ -899,13 +899,42 @@ def run_offensive_operator_scan(
                                    message=f"ip_dedup phase={phase_id} target={target} — IP {_host_ip} already scanned, reused"))
                     db.commit()
                     continue
-            job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({target})"
+            # ── P10/P12/P13 target upgrade: prefer parameterized URLs from P03 ──
+            # sqlmap (P10) and dalfox (P12) need a URL with parameters.
+            # If P03 crawlers discovered parameterized URLs, use the best one.
+            _effective_target = target
+            if phase_id in {"P10", "P12", "P13"}:
+                _p03_urls = list(dict(job.state_data or {}).get("discovered_parameterized_urls") or [])
+                if _p03_urls:
+                    # P10 (sqlmap): prefer URLs with `id=` or numeric params (SQLi-likely)
+                    # P12 (dalfox): prefer URLs with text/string params (XSS-likely)
+                    if phase_id == "P10":
+                        _sqli_candidate = next(
+                            (u for u in _p03_urls if "id=" in u.lower() or "news" in u.lower()),
+                            _p03_urls[0]
+                        )
+                        _effective_target = _sqli_candidate
+                    elif phase_id == "P12":
+                        _xss_candidate = next(
+                            (u for u in _p03_urls if any(p in u.lower() for p in ["name=", "q=", "search=", "query=", "newsad="])),
+                            _p03_urls[0]
+                        )
+                        _effective_target = _xss_candidate
+                    else:
+                        _effective_target = _p03_urls[0]
+                    if _effective_target != target:
+                        db.add(ScanLog(
+                            scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                            message=f"target_upgrade phase={phase_id} original={target} → parameterized={_effective_target}",
+                        ))
+
+            job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({_effective_target})"
             state = dict(job.state_data or {})
             state.update(
                 {
                     "execution_mode": execution_mode,
                     "current_pentest_phase_id": phase_id,
-                    "current_pentest_target": target,
+                    "current_pentest_target": _effective_target,
                     "offensive_operator_phase_queue_enabled": _phase_queue_enabled,
                     "offensive_operator_phase_task_budget": _phase_task_budget,
                     "offensive_state": offensive_state,
@@ -914,11 +943,11 @@ def run_offensive_operator_scan(
                 }
             )
             job.state_data = state
-            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"dispatch phase_id={phase_id} tool=kali target={target}"))
+            db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"dispatch phase_id={phase_id} tool=kali target={_effective_target}"))
             db.commit()
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
-            result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+            result = runtime.run_phase(phase_id, _effective_target, scope, execution_mode, offensive_state)
             try:
                 db.refresh(job)
                 if _scan_halted(job):
@@ -1468,6 +1497,52 @@ def run_offensive_operator_scan(
                 except Exception as _oexc:  # noqa: BLE001
                     db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
                                    message=f"waf_origin_discovery_failed error={_oexc!s}"))
+            # ─ P03 post-processing: extract parameterized URLs for attack phases ─
+            # Crawlers (katana, gau, waybackurls) discover URLs with parameters
+            # like Comments.aspx?id=3 and ReadNews.aspx?id=3&NewsAd=...
+            # These are stored in state["discovered_parameterized_urls"] so
+            # P10 (sqlmap) and P12 (dalfox) can target them instead of only
+            # the initial entry URL.
+            if phase_id == "P03" and not _cp_state.get("_p03_url_expansion_done"):
+                try:
+                    _crawler_tools = {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}
+                    _param_urls: list[str] = list(_cp_state.get("discovered_parameterized_urls") or [])
+                    _param_seen: set[str] = set(_param_urls)
+                    for _ev in result.get("tool_evidences") or []:
+                        if not isinstance(_ev, dict):
+                            continue
+                        if str(_ev.get("tool") or "").lower() not in _crawler_tools:
+                            continue
+                        for _u in (_ev.get("parameterized_urls") or []):
+                            if _u and _u not in _param_seen:
+                                _param_seen.add(_u)
+                                _param_urls.append(_u)
+                    # Also scan mcp_results for stdout lines from crawlers
+                    for _res in (result.get("mcp_results") or []):
+                        if not isinstance(_res, dict):
+                            continue
+                        if str(_res.get("tool_name") or "").lower() not in _crawler_tools:
+                            continue
+                        for _line in str(_res.get("stdout") or "").splitlines():
+                            _u = _line.strip()
+                            if _u.startswith("http") and "?" in _u and "=" in _u and _u not in _param_seen:
+                                _param_seen.add(_u)
+                                _param_urls.append(_u)
+                    if _param_urls:
+                        _cp_state["discovered_parameterized_urls"] = _param_urls[:100]
+                        _cp_state["_p03_url_expansion_done"] = True
+                        db.add(ScanLog(
+                            scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                            message=(
+                                f"p03_url_expansion: {len(_param_urls)} parameterized URLs discovered "
+                                f"— feeding P10/P12. Sample: "
+                                + ", ".join(u.split("?")[0].split("/")[-1] + "?" + u.split("?")[1][:30]
+                                            for u in _param_urls[:3])
+                            ),
+                        ))
+                except Exception as _p3e:
+                    pass
+
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
             job.mission_progress = min(100, int(round(len(completed_work) / _total_units * 100)))
@@ -2146,6 +2221,31 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
         evidence["finding_summary"] = (
             "SQLMap injection evidence: " + "; ".join(injections[:3])
             if injections else "No SQL injection found"
+        )
+
+    elif tool_lower in {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}:
+        # Crawlers: extract URLs with query parameters — these seed P10/P12 attack phases.
+        import re as _re
+        _param_re = _re.compile(r"https?://[^\s\"'<>]+\?[^\s\"'<>]+")
+        _all_urls: list[str] = []
+        _param_urls: list[str] = []
+        _seen: set[str] = set()
+        for line in (stdout or "").splitlines():
+            url = line.strip()
+            if not url.startswith("http"):
+                continue
+            if url not in _seen:
+                _seen.add(url)
+                _all_urls.append(url)
+                if "?" in url and "=" in url:
+                    _param_urls.append(url)
+        evidence["discovered_urls"] = _all_urls[:200]
+        evidence["parameterized_urls"] = _param_urls[:50]
+        evidence["url_count"] = len(_all_urls)
+        evidence["param_url_count"] = len(_param_urls)
+        evidence["finding_summary"] = (
+            f"Crawler {tool_name}: {len(_all_urls)} URLs, {len(_param_urls)} with parameters"
+            + (f" — {', '.join(u.split('?')[0].split('/')[-1] for u in _param_urls[:3])}" if _param_urls else "")
         )
 
     else:

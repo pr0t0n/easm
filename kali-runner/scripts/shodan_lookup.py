@@ -76,7 +76,8 @@ def main() -> int:
         "country": result.get("country_name") or "",
         "hostnames": result.get("hostnames") or [],
         "ports": [item.get("port") for item in result.get("data") or [] if item.get("port")],
-        "vulns": list((result.get("vulns") or {}).keys()),
+        "vulns": (list(result["vulns"].keys()) if isinstance(result.get("vulns"), dict)
+                  else list(result.get("vulns") or [])),
         "banners": [
             {
                 "port": item.get("port"),
