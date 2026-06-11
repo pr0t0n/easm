@@ -348,15 +348,16 @@ const MODULE_ALIASES = {
 
 export default function OperationsCenterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeModule, setActiveModule] = useState(() => {
+
+  // Derive activeModule directly from URL so sidebar clicks (external navigation)
+  // immediately update the view without requiring a separate state write.
+  const activeModule = useMemo(() => {
     const m = searchParams.get("module");
     const resolved = MODULE_ALIASES[m] || m;
     return modules.some((mod) => mod.id === resolved) ? resolved : "runtime";
-  });
+  }, [searchParams]);
 
-  useEffect(() => {
-    setSearchParams({ module: activeModule }, { replace: true });
-  }, [activeModule, setSearchParams]);
+  const setActiveModule = (id) => setSearchParams({ module: id }, { replace: true });
 
   const ActiveComponent = useMemo(
     () => modules.find((module) => module.id === activeModule)?.component || WorkerLogsPage,
