@@ -281,7 +281,7 @@ function IntelligenceView() {
   );
 }
 
-function PhasesAgentsView() {
+function FaseJobsView() {
   const [sub, setSub] = useState("phases");
   return (
     <div>
@@ -289,23 +289,6 @@ function PhasesAgentsView() {
         tabs={[
           { id: "phases", label: "Phase Monitor" },
           { id: "agents", label: "Fluxo de Agentes" },
-        ]}
-        activeId={sub}
-        onSelect={setSub}
-      />
-      <ErrorBoundary key={sub}>
-        {sub === "phases" ? <PhaseMonitorPage /> : <AgentFlowPage />}
-      </ErrorBoundary>
-    </div>
-  );
-}
-
-function EvolutionInfraView() {
-  const [sub, setSub] = useState("evolution");
-  return (
-    <div>
-      <SubTabs
-        tabs={[
           { id: "evolution", label: "Attack Evolution" },
           { id: "workers", label: "Workers" },
           { id: "jobs", label: "Job Registry" },
@@ -314,7 +297,30 @@ function EvolutionInfraView() {
         onSelect={setSub}
       />
       <ErrorBoundary key={sub}>
-        {sub === "evolution" ? <AttackEvolutionPage /> : sub === "workers" ? <WorkersPage /> : <JobsRegistryPage />}
+        {sub === "phases" ? <PhaseMonitorPage />
+          : sub === "agents" ? <AgentFlowPage />
+          : sub === "evolution" ? <AttackEvolutionPage />
+          : sub === "workers" ? <WorkersPage />
+          : <JobsRegistryPage />}
+      </ErrorBoundary>
+    </div>
+  );
+}
+
+function IntelAprendizadoView() {
+  const [sub, setSub] = useState("intel");
+  return (
+    <div>
+      <SubTabs
+        tabs={[
+          { id: "intel", label: "Inteligência" },
+          { id: "aprendizado", label: "Aprendizado" },
+        ]}
+        activeId={sub}
+        onSelect={setSub}
+      />
+      <ErrorBoundary key={sub}>
+        {sub === "intel" ? <IntelligenceView /> : <LearningPage />}
       </ErrorBoundary>
     </div>
   );
@@ -322,20 +328,22 @@ function EvolutionInfraView() {
 
 const modules = [
   { id: "runtime", label: "RedTeam Runtime", hint: "fase, comandos, saidas e comunicacao", component: WorkerLogsPage },
-  { id: "phases_agents", label: "Fases & Agentes", hint: "phase monitor + fluxo de agentes", component: PhasesAgentsView },
-  { id: "infra", label: "Workers & Jobs", hint: "workers ao vivo, fila, registro de jobs e evolução", component: EvolutionInfraView },
-  { id: "aprendizado", label: "Aprendizado HackerOne", hint: "treinar técnicas via URLs HackerOne + aceite humano", component: LearningPage },
-  { id: "intel", label: "Inteligência", hint: "crown jewels, OSINT, LLM chains, narrativa", component: IntelligenceView },
-  { id: "health", label: "Saúde da Plataforma", hint: "status/health dos containers + alertas + último erro", component: PlatformHealthPage },
+  { id: "fase_jobs", label: "Fase & Jobs", hint: "phase monitor, fluxo de agentes, workers, fila e registro de jobs", component: FaseJobsView },
+  { id: "intel_aprendizado", label: "Inteligência & Aprendizado", hint: "crown jewels, OSINT, LLM chains, narrativa e aprendizado", component: IntelAprendizadoView },
+  { id: "health", label: "Saúde Plataforma", hint: "status/health dos containers + alertas + último erro", component: PlatformHealthPage },
 ];
 
 const MODULE_ALIASES = {
-  phases: "phases_agents",
-  agents: "phases_agents",
-  evolution: "infra",
-  workers: "infra",
-  jobs: "infra",
-  learning: "aprendizado",
+  phases_agents: "fase_jobs",
+  phases: "fase_jobs",
+  agents: "fase_jobs",
+  infra: "fase_jobs",
+  evolution: "fase_jobs",
+  workers: "fase_jobs",
+  jobs: "fase_jobs",
+  aprendizado: "intel_aprendizado",
+  intel: "intel_aprendizado",
+  learning: "intel_aprendizado",
 };
 
 export default function OperationsCenterPage() {
@@ -393,7 +401,7 @@ export default function OperationsCenterPage() {
           <div>
             <div className="mono-sm muted">agrupamentos</div>
             <strong style={{ display: "block", color: "var(--ink)", marginTop: 4 }}>4 módulos, 7 sub-views</strong>
-            <div className="mono-sm soft" style={{ marginTop: 2 }}>inteligência (crown jewels, OSINT, LLM, narrativa)</div>
+            <div className="mono-sm soft" style={{ marginTop: 2 }}>Runtime · Fase &amp; Jobs · Intel &amp; Aprendizado · Saúde</div>
           </div>
         </div>
       </section>

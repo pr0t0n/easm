@@ -56,7 +56,18 @@ export default function Sidebar() {
             { to: "/agendamento", label: "Agendamento", adminOnly: true },
           ],
         },
-        { to: "/operacional", label: "Centro Operacional", icon: "operations", adminOnly: true },
+        {
+          to: "/operacional",
+          label: "Centro Operacional",
+          icon: "operations",
+          adminOnly: true,
+          sub: [
+            { to: "/operacional?module=runtime",           label: "RedTeam Runtime",         adminOnly: true },
+            { to: "/operacional?module=fase_jobs",         label: "Fase & Jobs",              adminOnly: true },
+            { to: "/operacional?module=intel_aprendizado", label: "Inteligência & Aprendizado", adminOnly: true },
+            { to: "/operacional?module=health",            label: "Saúde Plataforma",        adminOnly: true },
+          ],
+        },
       ],
     },
     {
@@ -98,10 +109,16 @@ export default function Sidebar() {
             <div className="sb-group">{group.title}</div>
             {visibleItems.map((item) => {
               const visibleSub = (item.sub || []).filter((s) => !s.adminOnly || isAdmin);
-              // Sub-menu is visible when on the parent route or any sub route
-              const parentActive = location.pathname === item.to || location.pathname.startsWith(item.to + "/");
-              const anySubActive = visibleSub.some((s) => location.pathname === s.to);
-              const showSub = (parentActive || anySubActive) && visibleSub.length > 0;
+              // A sub is active when the full URL (path + query) matches
+              const anySubActive = visibleSub.some((s) => {
+                const subPath = s.to.split("?")[0];
+                const subSearch = s.to.includes("?") ? "?" + s.to.split("?")[1] : "";
+                return location.pathname === subPath && (subSearch === "" || location.search === subSearch);
+              });
+              // Show sub when on parent path (with or without query) or any sub active
+              const parentPathname = item.to.split("?")[0];
+              const onParent = location.pathname === parentPathname || location.pathname.startsWith(parentPathname + "/");
+              const showSub = (onParent || anySubActive) && visibleSub.length > 0;
               return (
                 <div key={item.to}>
                   <NavLink
@@ -115,16 +132,21 @@ export default function Sidebar() {
                   </NavLink>
                   {showSub && (
                     <div className="sb-sub">
-                      {visibleSub.map((sub) => (
-                        <NavLink
-                          key={sub.to}
-                          to={sub.to}
-                          className={({ isActive }) => `sb-sub-item${isActive ? " active" : ""}`}
-                        >
-                          {sub.label}
-                          {sub.adminOnly && <span className="sb-admin" style={{ marginLeft: 6 }}>ADM</span>}
-                        </NavLink>
-                      ))}
+                      {visibleSub.map((sub) => {
+                        const subPath = sub.to.split("?")[0];
+                        const subSearch = sub.to.includes("?") ? "?" + sub.to.split("?")[1] : "";
+                        const isSubActive = location.pathname === subPath && (subSearch === "" || location.search === subSearch);
+                        return (
+                          <NavLink
+                            key={sub.to}
+                            to={sub.to}
+                            className={() => `sb-sub-item${isSubActive ? " active" : ""}`}
+                          >
+                            {sub.label}
+                            {sub.adminOnly && <span className="sb-admin" style={{ marginLeft: 6 }}>ADM</span>}
+                          </NavLink>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
