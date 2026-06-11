@@ -22,8 +22,8 @@ function SubTabs({ tabs, activeId, onSelect }) {
           style={{
             padding: "4px 14px",
             borderRadius: 6,
-            border: activeId === t.id ? "1px solid var(--accent)" : "1px solid var(--border)",
-            background: activeId === t.id ? "var(--accent)" : "transparent",
+            border: activeId === t.id ? "1px solid var(--brand-600)" : "1px solid var(--border)",
+            background: activeId === t.id ? "var(--brand-600)" : "transparent",
             color: activeId === t.id ? "#fff" : "var(--muted)",
             fontSize: 12,
             fontWeight: 500,

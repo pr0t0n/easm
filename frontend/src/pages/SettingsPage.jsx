@@ -11,7 +11,7 @@ const INPUT = {
 };
 const BTN = (variant = "primary") => ({
   padding: "8px 18px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13,
-  background: variant === "primary" ? "var(--accent)" : "var(--surface-alt)",
+  background: variant === "primary" ? "var(--brand-600)" : "var(--surface-alt)",
   color: variant === "primary" ? "#fff" : "var(--ink)",
 });
 const CHIP = (ok) => ({

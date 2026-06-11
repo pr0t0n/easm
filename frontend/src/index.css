@@ -23,7 +23,7 @@
   --primary-hover: var(--brand-600);
   --primary-light: var(--brand-300);
   --secondary: #4b73ff;
-  --accent: #ff66f4;
+  --accent: var(--brand-600);
 
   /* -------- CANVAS / surfaces (light main) -------- */
   --bg-main: #fcfbf8;
