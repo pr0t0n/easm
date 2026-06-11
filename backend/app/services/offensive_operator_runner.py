@@ -558,6 +558,12 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     _auth = _get_auth_headers()
     if _auth:
         arguments["auth_headers"] = _auth
+    # Forward API keys from environment to kali runner via arguments
+    import os as _os
+    for _env_key in ("SHODAN_API_KEY", "HIBP_API_KEY", "GITHUB_TOKEN"):
+        _env_val = _os.environ.get(_env_key, "").strip()
+        if _env_val:
+            arguments[_env_key] = _env_val
     request = {
         "mcp_request_id": execution.get("mcp_request_id"),
         "phase_id": execution["phase_id"],
@@ -612,8 +618,27 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         result = dict(status_data)
 
-    # Normalise to the shape callers expect (same as /mcp/execute response)
-    result.setdefault("status", status_data.get("status") or "done")
+    # ── Normalise to /mcp/execute response shape ─────────────────────────────
+    # /mcp/execute returned: status="success"/"failed"/"timeout", exit_code,
+    #   stdout (text), stdout_path, parsed_result, execution_key, execution_backend
+    # /mcp/jobs/{id}/result returns: status="done"/"failed"/"timeout",
+    #   return_code, workdir, stdout (text), stderr, parsed (not parsed_result)
+    raw_st = str(result.get("status") or status_data.get("status") or "done").lower()
+    result["status"] = "success" if raw_st in {"done", "success"} and (result.get("return_code") or 0) == 0 else raw_st
+    # exit_code / return_code unification
+    if "exit_code" not in result:
+        result["exit_code"] = result.get("return_code")
+    # stdout_path from workdir (for evidence logging compatibility)
+    if "stdout_path" not in result:
+        result["stdout_path"] = result.get("workdir") or ""
+    # parsed_result from parsed
+    if "parsed_result" not in result and "parsed" in result:
+        result["parsed_result"] = result.get("parsed")
+    # execution_key (deterministic id for de-dup)
+    if "execution_key" not in result:
+        result["execution_key"] = str(job_id)
+    # execution_backend
+    result.setdefault("execution_backend", "mcp")
     result.setdefault("tool_name", execution.get("tool_name"))
     result.setdefault("phase_id", execution.get("phase_id"))
     result.setdefault("target", execution.get("target"))

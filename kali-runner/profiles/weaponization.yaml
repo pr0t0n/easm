@@ -83,10 +83,14 @@ nmap_dns_vuln:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "NSE DNS recursion / cache snooping / zone-transfer / dns-fuzz."
+  # Only useful when port 53 (DNS) is actually open. Without --max-rtt-timeout
+  # on a target without DNS, nmap UDP waits the full timeout per probe.
+  requires_ports: [53]
   cmd: ["nmap", "-sU", "-sV", "-Pn", "-p", "53",
+        "--max-rtt-timeout", "500ms", "--max-retries", "1",
         "--script", "dns-recursion,dns-cache-snoop,dns-zone-transfer,dns-nsid",
         "{host}"]
-  timeout: 300
+  timeout: 120
   parser: raw
   allowed_return_codes: [0, 1]
 
