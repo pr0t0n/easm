@@ -856,117 +856,169 @@ def _extract_testssl_findings(stdout: str, step_name: str, default_target: str) 
     return findings
 
 
-def _extract_wapiti_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Parse wapiti inline warning lines (emitidos durante o scan com -v 1)."""
+def _extract_wapiti_findings(
+    stdout: str,
+    step_name: str,
+    default_target: str,
+    parsed_json: Any = None,
+) -> list[dict[str, Any]]:
+    """Parse wapiti findings — JSON output first, stdout fallback.
+
+    Wapiti runs with -f json so parsed_result carries the full report.
+    Each vulnerability entry becomes its own finding (one per endpoint/param).
+    The old parser deduplicated by title+target, silently dropping all but the
+    first occurrence of each vuln class on multi-endpoint targets.
+    """
     findings: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # (regex, severity, risk_score, title, header_name)
-    _PATTERNS = [
-        (
-            re.compile(r"CSP is not set for URL:\s*(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "Content Security Policy (CSP) ausente",
-            "content-security-policy",
-        ),
-        (
-            re.compile(r"X-Content-Type-Options is not set on\s*(\S+)", re.IGNORECASE),
-            "low", 3,
-            "X-Content-Type-Options ausente",
-            "x-content-type-options",
-        ),
-        (
-            re.compile(r"Host\s+(\S+)\s+serves HTTP content without redirecting to HTTPS", re.IGNORECASE),
-            "medium", 6,
-            "Canal nao cifrado: sem redirecionamento HTTPS",
-            None,
-        ),
-        (
-            re.compile(r"Strict-Transport-Security.*?not set.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "HSTS ausente",
-            "strict-transport-security",
-        ),
-        (
-            re.compile(r"X-Frame-Options.*?not set.*?(\S+)", re.IGNORECASE),
-            "low", 3,
-            "X-Frame-Options ausente (clickjacking)",
-            "x-frame-options",
-        ),
-        (
-            re.compile(r"\[!\].*?SQL\s+injection.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "SQL Injection detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?XSS.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Cross-Site Scripting (XSS) detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?Path\s+Traversal.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Path Traversal detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?SSRF.*?(\S+)", re.IGNORECASE),
-            "high", 8,
-            "Server-Side Request Forgery (SSRF) detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?CRLF\s+Injection.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "CRLF Injection detectado",
-            None,
-        ),
-        (
-            re.compile(r"\[!\].*?Open\s+Redirect.*?(\S+)", re.IGNORECASE),
-            "medium", 5,
-            "Open Redirect detectado",
-            None,
-        ),
-    ]
+    # ── Try structured JSON output first ─────────────────────────────────────
+    report: dict[str, Any] = {}
+    if isinstance(parsed_json, dict):
+        report = parsed_json
+    elif isinstance(parsed_json, str):
+        try:
+            report = json.loads(parsed_json)
+        except Exception:
+            pass
+    # Wapiti also sometimes dumps JSON to stdout
+    if not report:
+        raw = stdout or ""
+        # Find JSON blob in stdout (may be preceded by progress lines)
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                report = json.loads(m.group(0))
+            except Exception:
+                pass
 
+    _VULN_SEVERITY: dict[str, tuple[str, int]] = {
+        "Cross Site Scripting":         ("high", 8),
+        "Reflected Cross Site Scripting": ("high", 8),
+        "Stored Cross Site Scripting":  ("critical", 9),
+        "SQL Injection":                ("high", 8),
+        "Blind SQL Injection":          ("high", 8),
+        "Path Traversal":               ("high", 8),
+        "Server Side Request Forgery":  ("high", 8),
+        "SSRF":                         ("high", 8),
+        "CRLF Injection":               ("medium", 6),
+        "Open Redirect":                ("medium", 5),
+        "XML External Entity":          ("high", 8),
+        "Command Execution":            ("critical", 9),
+        "Backup file":                  ("medium", 5),
+        "Potentially dangerous file":   ("medium", 5),
+        "Content Security Policy Configuration": ("medium", 5),
+        "Secure Flag cookie":           ("low", 3),
+        "HttpOnly Flag cookie":         ("low", 3),
+        "HTTP Strict Transport Security": ("medium", 5),
+        "Content Sniffing":             ("low", 3),
+        "X-Frame-Options Header":       ("low", 3),
+    }
+
+    if report and "vulnerabilities" in report:
+        for vuln_class, entries in (report.get("vulnerabilities") or {}).items():
+            if not isinstance(entries, list):
+                continue
+            sev, risk = _VULN_SEVERITY.get(vuln_class, ("medium", 5))
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                path = str(entry.get("path") or entry.get("url") or "")
+                param = str(entry.get("parameter") or "")
+                method = str(entry.get("method") or "GET").upper()
+                info = str(entry.get("info") or "")
+                payload = str(entry.get("wstg") or entry.get("curl_command") or entry.get("payload") or "")
+
+                url = (default_target.rstrip("/") + path) if path.startswith("/") else (path or default_target)
+                dedup_key = f"{vuln_class}:{url}:{param}"
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                param_str = f" em '{param}'" if param else ""
+                findings.append({
+                    "title": f"{vuln_class}{param_str}",
+                    "severity": sev,
+                    "risk_score": risk,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": url or default_target,
+                        "url": url,
+                        "tool": "wapiti",
+                        "parameter": param,
+                        "method": method,
+                        "evidence": info[:500],
+                        "payload": payload[:500],
+                        "validation_status": "verified",
+                        "owasp_category": "A03:2021 Injection" if "Injection" in vuln_class or "XSS" in vuln_class else "A05:2021 Security Misconfiguration",
+                    },
+                })
+        # Also parse anomalies section (timeouts, unexpected HTTP responses)
+        for anom_class, entries in (report.get("anomalies") or {}).items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                path = str(entry.get("path") or "")
+                url = (default_target.rstrip("/") + path) if path.startswith("/") else (path or default_target)
+                dedup_key = f"anomaly:{anom_class}:{url}"
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                findings.append({
+                    "title": f"Anomalia: {anom_class}",
+                    "severity": "low",
+                    "risk_score": 2,
+                    "source_worker": "analise_vulnerabilidade",
+                    "details": {
+                        "node": "vuln",
+                        "step": step_name,
+                        "asset": url,
+                        "tool": "wapiti",
+                        "evidence": str(entry.get("info") or "")[:300],
+                        "validation_status": "candidate",
+                    },
+                })
+        return findings
+
+    # ── Fallback: parse inline text output ────────────────────────────────────
+    _PATTERNS = [
+        (re.compile(r"CSP is not set for URL:\s*(\S+)", re.IGNORECASE),          "medium", 5, "Content Security Policy (CSP) ausente", "content-security-policy"),
+        (re.compile(r"X-Content-Type-Options is not set on\s*(\S+)", re.IGNORECASE), "low", 3, "X-Content-Type-Options ausente", "x-content-type-options"),
+        (re.compile(r"Host\s+(\S+)\s+serves HTTP content without redirecting", re.IGNORECASE), "medium", 6, "Canal sem HTTPS", None),
+        (re.compile(r"Strict-Transport-Security.*?not set.*?(\S+)", re.IGNORECASE), "medium", 5, "HSTS ausente", "strict-transport-security"),
+        (re.compile(r"X-Frame-Options.*?not set.*?(\S+)", re.IGNORECASE),         "low", 3, "X-Frame-Options ausente", "x-frame-options"),
+        (re.compile(r"\[!\].*?SQL\s+injection.*?(\S+)", re.IGNORECASE),           "high", 8, "SQL Injection detectado (wapiti)", None),
+        (re.compile(r"\[!\].*?XSS.*?(\S+)", re.IGNORECASE),                      "high", 8, "XSS detectado (wapiti)", None),
+        (re.compile(r"\[!\].*?Path\s+Traversal.*?(\S+)", re.IGNORECASE),          "high", 8, "Path Traversal detectado (wapiti)", None),
+        (re.compile(r"\[!\].*?SSRF.*?(\S+)", re.IGNORECASE),                     "high", 8, "SSRF detectado (wapiti)", None),
+        (re.compile(r"\[!\].*?Open\s+Redirect.*?(\S+)", re.IGNORECASE),           "medium", 5, "Open Redirect detectado (wapiti)", None),
+        (re.compile(r"\[!\].*?CRLF.*?(\S+)", re.IGNORECASE),                     "medium", 5, "CRLF Injection detectado (wapiti)", None),
+    ]
     for raw_line in stdout.splitlines():
         line = str(raw_line or "").strip()
         if not line or line.startswith("[*]") or line.startswith("[+]"):
             continue
-
         for pattern, severity, risk_score, title, header_name in _PATTERNS:
             m = pattern.search(line)
             if not m:
                 continue
-            key = f"{title}:{default_target}"
-            if key in seen:
+            url = m.group(1).strip() if m.lastindex and m.group(1) else default_target
+            dedup_key = f"{title}:{url}"
+            if dedup_key in seen:
                 break
-            seen.add(key)
-            details: dict[str, Any] = {
-                "node": "vuln",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "wapiti",
-                "evidence": line[:500],
-            }
-            # Extrai payload se disponível na linha
-            payload_match = re.search(r"payload=([^\s]+)", line)
-            if payload_match:
-                details["payload"] = payload_match.group(1)
+            seen.add(dedup_key)
+            details: dict[str, Any] = {"node": "vuln", "step": step_name, "asset": url, "url": url, "tool": "wapiti", "evidence": line[:500], "validation_status": "candidate"}
+            pm = re.search(r"payload=([^\s]+)", line)
+            if pm:
+                details["payload"] = pm.group(1)
             if header_name:
                 details["header_name"] = header_name
                 details["header_issue"] = "missing"
-            findings.append(
-                {
-                    "title": title,
-                    "severity": severity,
-                    "risk_score": risk_score,
-                    "source_worker": "analise_vulnerabilidade",
-                    "details": details,
-                }
-            )
+            findings.append({"title": title, "severity": severity, "risk_score": risk_score, "source_worker": "analise_vulnerabilidade", "details": details})
             break
 
     return findings
@@ -1035,50 +1087,84 @@ def _extract_sqlmap_findings(stdout: str, step_name: str, default_target: str) -
 
 
 def _extract_dalfox_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
+    """Parse dalfox output into one finding per confirmed XSS vulnerability.
+
+    Dalfox emits one line per XSS vector. The old parser coalesced all into a
+    single finding, suppressing count and losing URL/parameter context.
+    Each [V]/[G] line now becomes its own finding.
+    """
     findings: list[dict[str, Any]] = []
-    lines = [str(line or "").strip() for line in (stdout or "").splitlines() if str(line or "").strip()]
-    if not lines:
-        return []
+    seen_keys: set[str] = set()
 
-    positive_lines = [
-        line for line in lines
-        if re.search(r"(?i)(\[V\]|verified|vulnerable|poc|payload|reflected|stored xss|dom xss|alert\()", line)
-    ]
-    if not positive_lines:
-        return []
+    _COMMON = dict(
+        source_worker="analise_vulnerabilidade",
+        owasp_category="A03:2021 Injection",
+        impact="XSS pode permitir execução de JavaScript no contexto do usuário, roubo de sessão, ações indevidas e pivô para abuso de conta.",
+        remediation="Aplicar encoding contextual, sanitização server-side, validação de entrada e CSP restritiva; evitar confiar somente em validação no frontend.",
+    )
 
-    payloads: list[str] = []
-    for line in positive_lines:
-        payload_match = re.search(r"(?i)payload[:=]\s*(.+)$", line)
-        if payload_match:
-            payloads.append(payload_match.group(1).strip())
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
             continue
-        if "<script" in line.lower() or "alert(" in line.lower():
-            payloads.append(line)
 
-    verified = any(re.search(r"(?i)(\[V\]|verified|vulnerable|poc)", line) for line in positive_lines)
-    severity = "high" if verified else "medium"
-    findings.append(
-        {
-            "title": "Cross-Site Scripting (XSS) validado por dalfox" if verified else "Possível XSS/reflection detectado por dalfox",
+        # [V] = verified (confirmed XSS), [G] = good candidate, [I] = info
+        verified = bool(re.search(r"\[V\]", line))
+        candidate = bool(re.search(r"\[G\]", line))
+        if not (verified or candidate or re.search(r"(?i)(poc|reflected|stored xss|dom xss)", line)):
+            continue
+
+        # Extract URL and parameter from dalfox output:
+        # [V] Verified XSS on https://target/path?q=... ~V[reflected] p[q] > <payload>
+        url_match = re.search(r"(?:on|url)\s+(https?://\S+)", line, re.IGNORECASE)
+        url = url_match.group(1).rstrip("~") if url_match else default_target
+        # Normalise URL to strip dalfox-appended payload
+        url = re.split(r"[~\s]", url)[0]
+
+        param_match = re.search(r"\bp\[([^\]]+)\]", line)
+        param = param_match.group(1) if param_match else ""
+
+        xss_type_match = re.search(r"V\[([^\]]+)\]", line)
+        xss_type = xss_type_match.group(1) if xss_type_match else ("reflected" if verified else "possible")
+
+        # Payload: everything after ">" on the line
+        payload_match = re.search(r">\s*(.+)$", line)
+        payload = payload_match.group(1).strip()[:500] if payload_match else ""
+
+        dedup_key = f"{url}:{param}:{xss_type}"
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        severity = "high" if verified else "medium"
+        title_type = {"reflected": "XSS Refletido", "dom": "DOM XSS", "stored": "XSS Armazenado"}.get(
+            xss_type.lower().split("-")[0], "XSS"
+        )
+        param_str = f" em parâmetro '{param}'" if param else ""
+        title = f"{title_type} confirmado{param_str}" if verified else f"Possível XSS{param_str}"
+
+        findings.append({
+            "title": title,
             "severity": severity,
             "risk_score": 8 if severity == "high" else 5,
-            "source_worker": "analise_vulnerabilidade",
+            "source_worker": _COMMON["source_worker"],
             "details": {
                 "node": "vuln",
                 "step": step_name,
-                "asset": default_target,
+                "asset": url or default_target,
+                "url": url,
                 "tool": "dalfox",
-                "evidence": "\n".join(positive_lines[:16]),
-                "payload": payloads[0][:500] if payloads else "",
-                "payloads": payloads[:8],
-                "validation_status": "verified" if verified else "hypothesis",
-                "owasp_category": "A03:2021 Injection",
-                "impact": "XSS pode permitir execução de JavaScript no contexto do usuário, roubo de sessão, ações indevidas e pivô para abuso de conta.",
-                "remediation": "Aplicar encoding contextual, sanitização server-side, validação de entrada e CSP restritiva; evitar confiar somente em validação no frontend.",
+                "parameter": param,
+                "xss_type": xss_type,
+                "evidence": line[:500],
+                "payload": payload,
+                "validation_status": "verified" if verified else "candidate",
+                "owasp_category": _COMMON["owasp_category"],
+                "impact": _COMMON["impact"],
+                "remediation": _COMMON["remediation"],
             },
-        }
-    )
+        })
+
     return findings
 
 

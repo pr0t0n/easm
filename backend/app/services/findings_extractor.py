@@ -2037,7 +2037,7 @@ def extract_findings_from_work_item(
             findings = _extract_dalfox_findings(stdout, step, target)
 
         elif tool == "wapiti":
-            findings = _extract_wapiti_findings(stdout, step, target)
+            findings = _extract_wapiti_findings(stdout, step, target, parsed_json=parsed)
 
         elif tool == "sqlmap":
             findings = _extract_sqlmap_findings(stdout, step, target)
