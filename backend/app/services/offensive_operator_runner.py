@@ -539,6 +539,15 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
+    """Submit a tool to MCP and poll until completion — async submit+poll.
+
+    Uses /mcp/submit (fire-and-forget) then polls /mcp/jobs/{id} until
+    the job reaches a terminal state. This avoids blocking a worker thread
+    for the entire tool duration (was /mcp/execute which held the thread
+    for up to `timeout` seconds, causing platform-wide timeouts for nikto,
+    wapiti, sqlmap etc. that run for 30+ minutes).
+    """
+    import time as _time
     if str(execution.get("tool_name") or "").strip().lower() in _BACKEND_LOCAL_TOOLS:
         return _run_backend_local_tool(execution)
     tool_timeout = max(900, int(execution.get("timeout") or 0))
@@ -556,18 +565,59 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
         "tool_name": execution["tool_name"],
         "profile": execution["profile"],
         "target": execution["target"],
-        # Tier 3: batch target list — populated for _batch profiles.
         "targets": list(execution.get("targets") or []),
         "arguments": arguments,
         "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
     }
-    response = requests.post(
-        f"{settings.mcp_server_url.rstrip('/')}/mcp/execute",
-        json=request,
-        timeout=max(30, int(settings.mcp_request_timeout_seconds), tool_timeout + 30),
-    )
-    response.raise_for_status()
-    return response.json()
+    base = settings.mcp_server_url.rstrip("/")
+
+    # ── Step 1: submit (non-blocking) ────────────────────────────────────────
+    submit_resp = requests.post(f"{base}/mcp/submit", json=request, timeout=30)
+    submit_resp.raise_for_status()
+    submit_data = dict(submit_resp.json())
+
+    # If the job already has a terminal status (cached/skipped), return immediately
+    _TERMINAL = {"done", "completed", "success", "failed", "timeout", "skipped", "error"}
+    if str(submit_data.get("status") or "").lower() in _TERMINAL:
+        return submit_data
+
+    job_id = str(submit_data.get("kali_job_id") or submit_data.get("dispatch_task_id") or submit_data.get("job_id") or "")
+    if not job_id:
+        # No job_id means MCP handled it synchronously (e.g. backend-local fallback)
+        return submit_data
+
+    # ── Step 2: poll until terminal ───────────────────────────────────────────
+    # Adaptive backoff: 3s for first 30s, grows 2s per minute, cap at 20s.
+    # No hard platform timeout — the tool runs as long as it needs.
+    _start = _time.monotonic()
+    while True:
+        _elapsed = _time.monotonic() - _start
+        _sleep = min(3 + int(_elapsed // 30) * 2, 20)
+        _time.sleep(_sleep)
+        try:
+            status_resp = requests.get(f"{base}/mcp/jobs/{job_id}", timeout=10)
+            status_resp.raise_for_status()
+            status_data = dict(status_resp.json())
+        except Exception:
+            continue
+        _st = str(status_data.get("status") or "").lower()
+        if _st in _TERMINAL:
+            break
+
+    # ── Step 3: fetch result ──────────────────────────────────────────────────
+    try:
+        result_resp = requests.get(f"{base}/mcp/jobs/{job_id}/result", timeout=120)
+        result_resp.raise_for_status()
+        result = dict(result_resp.json())
+    except Exception:
+        result = dict(status_data)
+
+    # Normalise to the shape callers expect (same as /mcp/execute response)
+    result.setdefault("status", status_data.get("status") or "done")
+    result.setdefault("tool_name", execution.get("tool_name"))
+    result.setdefault("phase_id", execution.get("phase_id"))
+    result.setdefault("target", execution.get("target"))
+    return result
 
 
 def _call_operator_tool(mcp_available: bool):
