@@ -698,23 +698,22 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             for item in (profile.get("requires_scheme") or [])
             if str(item).strip()
         }
-        # Auto-promote bare hostnames to https when profile requires a scheme.
-        # The backend sends 'example.com' but TLS tools need 'https://example.com'.
-        if required_schemes and "://" not in str(req.target):
+        # Scheme promotion for TLS tools. The backend may send a bare hostname
+        # OR an http:// URL, but TLS auditors (sslscan/testssl/nmap-ssl) need
+        # https. Most HTTP sites also serve HTTPS on 443, so rewrite the scheme
+        # to https instead of skipping — let the tool itself decide if TLS is up.
+        if required_schemes:
             preferred = "https" if "https" in required_schemes else next(iter(required_schemes))
-            req.target = f"{preferred}://{req.target}"
+            _cur_scheme = _target_context(req.target).get("scheme", "").lower()
+            if _cur_scheme not in required_schemes:
+                if "://" in str(req.target):
+                    # Rewrite the scheme: http://host/path → https://host/path
+                    from urllib.parse import urlparse as _up, urlunparse as _uup
+                    _p = _up(str(req.target))
+                    req.target = _uup((preferred, _p.netloc, _p.path, _p.params, _p.query, _p.fragment))
+                else:
+                    req.target = f"{preferred}://{req.target}"
         _set_job_fields(job_id, stage="materializing_target_scheme")
-        target_scheme = _target_context(req.target).get("scheme", "").lower()
-        if required_schemes and target_scheme not in required_schemes:
-            _set_job_fields(
-                job_id,
-                status="skipped",
-                return_code=0,
-                command=f"{profile.get('tool') or req.profile} <requires_scheme:{','.join(sorted(required_schemes))}>",
-                stdout="",
-                stderr=f"target scheme {target_scheme or '-'} not supported by this profile",
-            )
-            return
 
         _set_job_fields(job_id, stage="validating_target")
         target_error = _target_validation_error(profile, req.target)

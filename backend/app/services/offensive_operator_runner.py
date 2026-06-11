@@ -366,6 +366,15 @@ def _set_auth_headers(headers: dict[str, str]) -> None:
     _AUTH_LOCAL.headers = dict(headers)
 
 
+def _get_discovered_urls() -> list[str]:
+    """Thread-local list of P03-discovered parameterized URLs, for bl-test."""
+    return list(getattr(_AUTH_LOCAL, "discovered_urls", []))
+
+
+def _set_discovered_urls(urls: list[str]) -> None:
+    _AUTH_LOCAL.discovered_urls = list(urls or [])
+
+
 def _preflight_profile_for(state: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
     """Return cached Tier 1 preflight profile; compute it when absent."""
     preflight = dict(state.get("preflight") or {})
@@ -514,6 +523,28 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
     try:
         if tool == "bl-test":
             from app.services.business_logic_test import run_as_tool as _run
+            # Pass P03-discovered parameterized URLs so bl-test tests the real
+            # endpoint surface (Comments.aspx?id=, ReadNews.aspx?NewsAd=) instead
+            # of only re-discovering via chromium+wordlist.
+            _disc = _get_discovered_urls()
+            try:
+                r = _run(target, extra_urls=_disc) if _disc else _run(target)
+            except TypeError:
+                # run_as_tool signature without extra_urls — fall back
+                r = _run(target)
+            findings = r.get("findings_extracted") or []
+            parsed = r.get("parsed") or {}
+            parsed = {**parsed, "findings": findings}
+            status = r.get("status") or "done"
+            return {
+                "status": "success" if status in {"done", "success"} else status,
+                "exit_code": r.get("return_code", 0),
+                "stdout": (r.get("stdout") or "")[:10_000],
+                "stderr": r.get("stderr") or "",
+                "parsed": parsed,
+                "command": r.get("command") or f"{tool} {target}",
+                "duration_seconds": r.get("duration_seconds"),
+            }
         elif tool == "code-analyzer":
             from app.services.code_analyzer import run_as_tool as _run
         elif tool == "semgrep":
@@ -1002,6 +1033,10 @@ def run_offensive_operator_scan(
                             scan_job_id=job.id, source="scan-intelligence", level="INFO",
                             message=f"target_upgrade phase={phase_id} original={target} → parameterized={_effective_target}",
                         ))
+                # P13 (bl-test): expose the full discovered URL list via thread-local
+                # so business logic testing covers every parameterized endpoint.
+                if phase_id == "P13":
+                    _set_discovered_urls(_p03_urls)
 
             job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({_effective_target})"
             state = dict(job.state_data or {})
@@ -1044,6 +1079,55 @@ def run_offensive_operator_scan(
             offensive_state = result["offensive_state"]
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
+
+            # ── Multi-URL attack: run the primary attack tool against EVERY
+            # discovered parameterized URL, not just the one _effective_target.
+            # testaspnet has Comments.aspx?id=, ReadNews.aspx?id=, ReadNews.aspx?NewsAd=
+            # — sqlmap/dalfox must hit ALL of them, not the first match only.
+            if phase_id in {"P10", "P12"}:
+                try:
+                    _all_param_urls = list(dict(job.state_data or {}).get("discovered_parameterized_urls") or [])
+                    if phase_id == "P10":
+                        _attack_urls = [u for u in _all_param_urls if "=" in u]  # any param could be SQLi
+                        _primary_tool, _primary_profile, _primary_skill = "sqlmap", "sqlmap_basic", "skill.vuln.sql_injection"
+                    else:
+                        _attack_urls = [u for u in _all_param_urls if "=" in u]  # any param could reflect
+                        _primary_tool, _primary_profile, _primary_skill = "dalfox", "dalfox_xss", "skill.vuln.xss"
+                    # Skip the one already tested as _effective_target; cap to bound time
+                    _attack_urls = [u for u in _attack_urls if u != _effective_target][:8]
+                    _supp_results: list[dict[str, Any]] = []
+                    for _au in _attack_urls:
+                        _supp_exec = {
+                            "mcp_request_id": f"multiurl-{phase_id}-{abs(hash(_au)) % 10**8}",
+                            "phase_id": phase_id,
+                            "skill_id": _primary_skill,
+                            "tool_name": _primary_tool,
+                            "profile": _primary_profile,
+                            "target": _au,
+                            "arguments": {"target": _au, "scan_id": job.id, "timeout": 3600},
+                            "timeout": 3600,
+                            "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
+                        }
+                        try:
+                            _supp_results.append(_call_mcp_execution(_supp_exec))
+                        except Exception:
+                            continue
+                    if _supp_results:
+                        result["mcp_results"] = list(result.get("mcp_results") or []) + _supp_results
+                        db.add(ScanLog(
+                            scan_job_id=job.id, source="offensive-operator", level="INFO",
+                            message=(
+                                f"multiurl_attack phase={phase_id} tool={_primary_tool} "
+                                f"extra_urls={len(_attack_urls)} (alvos: "
+                                + ", ".join(u.split('/')[-1][:40] for u in _attack_urls[:3]) + ")"
+                            ),
+                        ))
+                        db.commit()
+                except Exception as _mu_err:
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                   message=f"multiurl_attack_failed phase={phase_id} error={_mu_err!s}"))
+                    db.commit()
+
             # Embed mcp_results in the ledger so _persist_offensive_findings can extract evidence.
             # Trim stdout/stderr to _MCP_STDOUT_STATE_CAP before storing in state_data.
             phase_ledger["mcp_results"] = _trim_mcp_stdout(result.get("mcp_results") or [])

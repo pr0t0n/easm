@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     mcp_request_timeout_seconds: int = 1800
     offensive_operator_enabled: bool = True
     offensive_operator_phase_queue_enabled: bool = True
-    offensive_operator_phase_task_budget: int = 1
+    offensive_operator_phase_task_budget: int = 4
     scan_parallelize_default: bool = True
     scan_parallel_target_batch_size: int = 1024
     scan_parallel_wait_seconds: int = 60

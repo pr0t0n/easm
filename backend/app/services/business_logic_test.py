@@ -596,11 +596,14 @@ def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:
     return cols
 
 
-def run_as_tool(target: str) -> dict:
+def run_as_tool(target: str, extra_urls: list[str] | None = None) -> dict:
     from app.services.target_discovery import profile_target
     from app.services.generic_auth import authenticate
     base = (target if str(target).startswith("http") else f"http://{target}").rstrip("/")
     findings = []
+    # P03-discovered parameterized URLs — merged into param-tampering coverage
+    # so bl-test tests the real endpoint surface, not just chromium+wordlist.
+    _extra_param_urls = [u for u in (extra_urls or []) if isinstance(u, str) and "?" in u and "=" in u]
     try:
         prof = profile_target(base, authorized=True)
         auth = authenticate(base, prof, try_sqli=True)
@@ -643,8 +646,12 @@ def run_as_tool(target: str) -> dict:
             findings += _coupon_brute(c, cap, base)
 
             # 2) manipulação de valor via GET param (apps onde BL está na query)
+            # Merge P03-discovered URLs with target_discovery's own param endpoints.
             from urllib.parse import urlparse, parse_qs, urlunparse
-            for u in (prof.get("param_endpoints") or [])[:20]:
+            _param_endpoints = list(dict.fromkeys(
+                (prof.get("param_endpoints") or []) + _extra_param_urls
+            ))
+            for u in _param_endpoints[:40]:
                 pr = urlparse(u); q = parse_qs(pr.query)
                 for pn in q:
                     if not _BIZ_PARAM.search(pn):
