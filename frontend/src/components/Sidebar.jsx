@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useNavigate, useLocation } from "react-router-dom";
 import { authStore } from "../store/auth";
 
 /* ── Ícones Lucide-style (inline SVG, sem dependência) ───────────────────── */
@@ -27,6 +27,7 @@ const ICONS = {
 
 export default function Sidebar() {
   const navigate = useNavigate();
+  const location = useLocation();
   const me = authStore.me;
   const isAdmin = Boolean(me?.is_admin);
 
@@ -46,8 +47,15 @@ export default function Sidebar() {
     {
       title: "Operação",
       items: [
-        { to: "/scan", label: "Scans", icon: "scans", adminOnly: false },
-        { to: "/agendamento", label: "Agendamento", icon: "calendar", adminOnly: true },
+        {
+          to: "/scan",
+          label: "Scans",
+          icon: "scans",
+          adminOnly: false,
+          sub: [
+            { to: "/agendamento", label: "Agendamento", adminOnly: true },
+          ],
+        },
         { to: "/operacional", label: "Centro Operacional", icon: "operations", adminOnly: true },
       ],
     },
@@ -88,18 +96,40 @@ export default function Sidebar() {
         return (
           <div key={group.title}>
             <div className="sb-group">{group.title}</div>
-            {visibleItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                className={({ isActive }) => `sb-item${isActive ? " active" : ""}`}
-              >
-                <span className="sb-ico" aria-hidden>{ICONS[item.icon]}</span>
-                <span className="sb-label">{item.label}</span>
-                {item.adminOnly && <span className="sb-admin">ADM</span>}
-              </NavLink>
-            ))}
+            {visibleItems.map((item) => {
+              const visibleSub = (item.sub || []).filter((s) => !s.adminOnly || isAdmin);
+              // Sub-menu is visible when on the parent route or any sub route
+              const parentActive = location.pathname === item.to || location.pathname.startsWith(item.to + "/");
+              const anySubActive = visibleSub.some((s) => location.pathname === s.to);
+              const showSub = (parentActive || anySubActive) && visibleSub.length > 0;
+              return (
+                <div key={item.to}>
+                  <NavLink
+                    to={item.to}
+                    end={item.to === "/"}
+                    className={({ isActive }) => `sb-item${isActive || anySubActive ? " active" : ""}`}
+                  >
+                    <span className="sb-ico" aria-hidden>{ICONS[item.icon]}</span>
+                    <span className="sb-label">{item.label}</span>
+                    {item.adminOnly && <span className="sb-admin">ADM</span>}
+                  </NavLink>
+                  {showSub && (
+                    <div className="sb-sub">
+                      {visibleSub.map((sub) => (
+                        <NavLink
+                          key={sub.to}
+                          to={sub.to}
+                          className={({ isActive }) => `sb-sub-item${isActive ? " active" : ""}`}
+                        >
+                          {sub.label}
+                          {sub.adminOnly && <span className="sb-admin" style={{ marginLeft: 6 }}>ADM</span>}
+                        </NavLink>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         );
       })}

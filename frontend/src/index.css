@@ -494,9 +494,11 @@ td {
   color: var(--sidebar-hover-text);
 }
 .sb-sub-item.active {
-  background: rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.10);
   color: #fff;
   font-weight: 600;
+  border-left: 2px solid var(--brand-500);
+  padding-left: 10px;
 }
 
 /* ── Card primitive (KPI cards used by Dashboard) ────────────────────────── */
