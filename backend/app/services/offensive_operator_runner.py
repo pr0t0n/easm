@@ -3224,3 +3224,58 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
                     db.add(vuln)
             except Exception:
                 pass
+
+        # ── Per-tool findings: call individual parsers for tools that produce
+        # structured evidence (nikto, wapiti, dalfox, sqlmap, nuclei, testssl…).
+        # The aggregate phase finding above captures the RedTeam narrative;
+        # these produce the granular technical findings (missing headers, XSS
+        # vectors, SQLi parameters, CVEs) visible in the Vulnerabilities page.
+        try:
+            from app.services.findings_extractor import (
+                extract_findings_from_work_item,
+                persist_finding_dicts,
+            )
+            # Tools whose per-tool output yields actionable individual findings.
+            _PER_TOOL_PARSEABLE = {
+                "nikto", "wapiti", "dalfox", "sqlmap", "testssl",
+                "whatweb", "whatweb-basic", "wafw00f", "curl-headers",
+                "gitleaks", "trufflehog", "nuclei",
+            } | {f"nuclei-{v}" for v in (
+                "xss", "sqli", "ssrf", "lfi", "ssti", "xxe", "cors", "crlf",
+                "redirect", "idor", "csrf", "race", "rce", "auth", "jwt",
+                "exposure", "cloud", "deserialization", "clickjacking",
+                "headers", "spoofing", "takeover", "graphql",
+            )}
+            _tool_seen: set[str] = set()
+            for _mcp_res in mcp_results:
+                if not isinstance(_mcp_res, dict):
+                    continue
+                _tname = str(_mcp_res.get("tool_name") or "").strip().lower()
+                if not _tname or _tname in _tool_seen:
+                    continue
+                if _mcp_res.get("status") not in {"success", "done"}:
+                    continue
+                if _tname not in _PER_TOOL_PARSEABLE:
+                    continue
+                _tool_seen.add(_tname)
+
+                # Prefer full stdout; fall back to truncated state copy
+                _stdout = str(_mcp_res.get("stdout") or _mcp_res.get("stdout_preview") or "")
+                _parsed = _mcp_res.get("parsed_result")
+                if not _stdout.strip() and not _parsed:
+                    continue
+
+                _tool_findings = extract_findings_from_work_item(
+                    _tname,
+                    str(target),
+                    str(phase_id),
+                    {"stdout_preview": _stdout, "stdout_full": _stdout, "parsed_result": _parsed},
+                )
+                if _tool_findings:
+                    persist_finding_dicts(
+                        db, job, _tool_findings,
+                        default_tool=_tname,
+                        default_target=str(target),
+                    )
+        except Exception:
+            pass

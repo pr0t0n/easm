@@ -118,26 +118,18 @@ nikto_basic:
   tool: nikto
   category: vuln
   phase: WEAPONIZATION_SIMULATION
-  # Why these flags:
-  #   -ask no           : never prompt for updates (we ignore "Failed to check 403")
-  #   -nointeractive    : also blocks interactive prompts
-  #   -maxtime 480s     : finish before the 900s kali_runner client timeout, leaving
-  #                       slack for parse+upload; longer scans get truncated anyway
-  #   -Tuning 123bde    : 1=Interesting Files, 2=Misconfig, 3=Info Disclosure,
-  #                       b=Software ID, d=Remote File Inclusion, e=Remote Source
-  #                       (intentionally omits 8/9 which target SQLi/XSS — those are
-  #                        done by sqlmap/dalfox; nikto here is for the header/CGI side)
-  #   -Plugins '@@DEFAULT;-update' : skip the slow update check that returns 403
-  # We DO NOT pass `-Display V` — the verbose mode produced 215KB+ of "404 for GET"
-  # log lines that overflowed the 100K runner stdout cap and pushed real findings
-  # (lines starting with `+`) out of the parser window. Default display already
-  # prints `+` finding lines.
-  # -maxtime 240s: self-cap well within the work-queue adaptive budget (>=300s)
-  # so nikto exits cleanly with partial results (status 'completed') instead of
-  # being killed by the wrapper (status 'timeout'). It scans the header/CGI side.
-  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "240s",
-        "-Tuning", "123bde", "-Plugins", "@@DEFAULT;-update"]
-  timeout: 300
+  # Tuning categories (all active):
+  #   1=Interesting Files, 2=Misconfig, 3=Info Disclosure
+  #   4=XSS/Injection (complementar a dalfox — payloads diferentes)
+  #   5=Remote File Retrieval (webroot), 7=Server-wide retrieval
+  #   8=Command Execution, 9=SQL Injection
+  #   a=Auth Bypass, b=Software ID, c=Remote Source Inclusion
+  #   d=WebService, e=Admin Console
+  # -Plugins '@@DEFAULT;-update' : skip slow update check (returns 403)
+  # -maxtime 420s: more time to cover all categories; stays within 600s wrapper
+  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "420s",
+        "-Tuning", "12345789abcde", "-Plugins", "@@DEFAULT;-update"]
+  timeout: 480
   parser: raw
   allowed_return_codes: [0, 1]
 
