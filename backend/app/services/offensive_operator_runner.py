@@ -849,8 +849,28 @@ def run_offensive_operator_scan(
             if phase_id != "P01":
                 _pf_state = dict(job.state_data or {})
                 _profile, _created = _preflight_profile_for(_pf_state, target)
+                # ── Stale-cache rescue: batch phases (P02 naabu, P06 httpx) run via
+                # the Kali runner which has reliable external DNS. If a batch phase
+                # already completed for this target, the host IS reachable — a
+                # stale dns_dead/tcp_closed preflight from a transient backend DNS
+                # failure must not cascade into skipping all downstream phases.
+                _batch_confirmed = (
+                    f"P06:{target}" in completed_work
+                    or f"P02:{target}" in completed_work
+                )
+                if _profile.get("status") in {"dns_dead", "tcp_closed", "invalid"} and _batch_confirmed:
+                    _profile = {
+                        **_profile,
+                        "status": "http_live",
+                        "reason": "http_confirmed_by_p06_batch",
+                        "dns_resolves": True,
+                        "stale_cache_rescued": True,
+                    }
+                    _created = True
                 if _created:
                     _current_state = dict(job.state_data or {})
+                    _pf_state["preflight"] = dict(_pf_state.get("preflight") or {})
+                    _pf_state["preflight"].setdefault("targets", {})[target] = _profile
                     _current_state["preflight"] = _pf_state.get("preflight") or {}
                     job.state_data = _current_state
                     db.add(ScanLog(
