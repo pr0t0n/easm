@@ -92,7 +92,7 @@ export default function App() {
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
                     <Route path="/superficie" element={<AttackSurfacePage />} />
-                    <Route path="/dominios" element={<DomainsPage />} />
+                    <Route path="/dominios" element={<Navigate to="/vulnerabilidades" replace />} />
                     <Route path="/joias" element={<CrownJewelsPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />

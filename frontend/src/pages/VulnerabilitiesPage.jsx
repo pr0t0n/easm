@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 import ScanSelect from "../components/ScanSelect";
+import DomainsPage from "./DomainsPage";
 import "../styles/dashboard.css";
 
 /* Vulnerabilidades — lista → detalhe (dado REAL de /api/findings/page).
@@ -18,6 +19,7 @@ function mitreStr(m) {
 }
 
 export default function VulnerabilitiesPage() {
+  const [activeTab, setActiveTab] = useState("achados");
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
@@ -142,11 +144,32 @@ export default function VulnerabilitiesPage() {
     );
   }
 
+  // ── Por Subdomínio ────────────────────────────────────────────────────────
+  if (activeTab === "subdominios") {
+    return (
+      <main className="dash">
+        <div className="content cockpit-shell">
+          <section className="cockpit-page-head" style={{ paddingBottom: 0 }}>
+            <div>
+              <div className="sk-eyebrow">Vulnerabilidades</div>
+              <h1>Achados do ambiente</h1>
+            </div>
+          </section>
+          <div className="vuln-tabs">
+            <button type="button" className="vuln-tab" onClick={() => setActiveTab("achados")}>Lista de achados</button>
+            <button type="button" className="vuln-tab active">Por Subdomínio</button>
+          </div>
+        </div>
+        <DomainsPage embedded />
+      </main>
+    );
+  }
+
   // ── Lista ─────────────────────────────────────────────────────────────────
   return (
     <main className="dash">
       <div className="content cockpit-shell">
-        <section className="cockpit-page-head">
+        <section className="cockpit-page-head" style={{ paddingBottom: 0 }}>
           <div>
             <div className="sk-eyebrow">Vulnerabilidades</div>
             <h1>Achados do ambiente</h1>
@@ -156,6 +179,11 @@ export default function VulnerabilitiesPage() {
             <ScanSelect value={scanId} onChange={setScanId} />
           </div>
         </section>
+
+        <div className="vuln-tabs">
+          <button type="button" className="vuln-tab active">Lista de achados</button>
+          <button type="button" className="vuln-tab" onClick={() => setActiveTab("subdominios")}>Por Subdomínio</button>
+        </div>
 
         <section className="surface-filter-strip">
           <button className={`surface-chip${sevFilter === "todas" ? " active" : ""}`} onClick={() => setSevFilter("todas")} type="button">Todas</button>

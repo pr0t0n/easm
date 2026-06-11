@@ -204,7 +204,7 @@ function VerificationQualityBar({ findings = [] }) {
   );
 }
 
-export default function DomainsPage() {
+export default function DomainsPage({ embedded = false }) {
   const [domains, setDomains] = useState([]);
   const [selectedDomain, setSelectedDomain] = useState("");
   const [selectedSubdomain, setSelectedSubdomain] = useState("");
@@ -292,10 +292,12 @@ export default function DomainsPage() {
     crownJewels.map((cj) => [String(cj.target || "").toLowerCase(), cj.label])
   );
 
+  const Wrapper = embedded ? "div" : "main";
   return (
-    <main className="domains-page">
+    <Wrapper className="domains-page">
       {error && <div className="err-box">{error}</div>}
 
+      {!embedded && (
       <section className="domains-page-head">
         <div>
           <p className="domain-eyebrow">Inventário vivo</p>
@@ -312,6 +314,7 @@ export default function DomainsPage() {
           Atualizar inventário
         </button>
       </section>
+      )}
 
       <section className="domains-layout">
         <aside className="domains-list">
@@ -656,6 +659,6 @@ export default function DomainsPage() {
           </div>
         </section>
       </section>
-    </main>
+    </Wrapper>
   );
 }
