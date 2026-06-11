@@ -28,6 +28,20 @@ import httpx
 
 _TIMEOUT = httpx.Timeout(connect=6.0, read=15.0, write=8.0, pool=6.0)
 
+_WORDLIST_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "wordlists")
+
+
+def _wl(filename: str, fallback: list[str]) -> list[str]:
+    """Load wordlist file; return fallback if unavailable."""
+    try:
+        path = os.path.join(_WORDLIST_DIR, filename)
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            lines = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+        return lines or fallback
+    except Exception:
+        return fallback
+
+
 # ── WORDLISTS (genéricas, extensíveis — não hardcoded por alvo) ───────────────
 # Nomes de campo de VALOR de negócio (casados por substring no nome do campo).
 BIZ_VALUE_FIELDS = [
@@ -48,19 +62,11 @@ ADVERSARIAL_VALUES = [-1, 0, -999999, 999999999, 0.01]
 # WORDLIST de nomes comuns de COLEÇÕES REST de negócio (singular/plural, casos).
 # Genérica — complementa a descoberta do chromium-capture (que perde coleções
 # autenticadas como cestas/pedidos que só carregam após ação do usuário).
-COLLECTION_WORDLIST = [
-    "basket", "baskets", "basketitem", "basketitems", "cart", "carts", "cartitem", "cartitems",
-    "order", "orders", "invoice", "invoices", "wallet", "wallets", "payment", "payments",
-    "coupon", "coupons", "voucher", "vouchers", "address", "addresses", "card", "cards",
-    "product", "products", "quantity", "quantitys", "quantities", "user", "users",
-    "account", "accounts", "subscription", "subscriptions", "transaction", "transactions",
-    "delivery", "deliverys", "deliveries", "feedback", "feedbacks", "complaint", "complaints",
-    "review", "reviews", "credit", "credits", "balance", "deposit", "withdraw", "membership",
-    # formas PascalCase/compostas comuns em APIs REST (Sequelize/Rails-like)
-    "BasketItems", "CartItems", "OrderItems", "Orders", "Users", "Cards", "Products",
-    "Addresses", "Invoices", "Payments", "Coupons", "Wallets", "Subscriptions",
-    "Transactions", "Quantitys", "Deliveries", "Feedbacks", "LineItems",
-]
+COLLECTION_WORDLIST: list[str] = _wl("rest-collections.txt", [
+    "basket", "baskets", "cart", "carts", "order", "orders", "invoice", "invoices",
+    "wallet", "wallets", "payment", "payments", "coupon", "coupons", "user", "users",
+    "account", "accounts", "product", "products", "transaction", "transactions",
+])
 
 
 def _case_variants(w: str) -> list[str]:
@@ -126,13 +132,12 @@ def _finding(cls, status, sev, ep, ev, payload=None):
                         "discovery_method": "teste ativo de business logic (chromium-capture + REST-CRUD + read-back)"}}
 
 
-# Rotas de negócio comuns em SPAs (hash e path) p/ disparar XHRs autenticadas.
-# Genérico (não é um alvo específico) — cobre cesta/pedido/carteira/conta.
-SPA_BUSINESS_ROUTES = [
-    "/#/basket", "/#/order-history", "/#/wallet", "/#/saved-payment-methods",
-    "/#/address/saved", "/#/order-summary", "/#/account", "/#/profile",
-    "/basket", "/cart", "/orders", "/account", "/profile", "/wallet",
-]
+# SPA business routes — loaded from wordlist so new routes can be added without
+# code changes. Covers hash-mode (Angular/Vue) and history-mode (React) SPAs.
+SPA_BUSINESS_ROUTES: list[str] = _wl("spa-business-routes.txt", [
+    "/#/basket", "/#/order-history", "/#/wallet", "/#/account", "/#/profile",
+    "/basket", "/cart", "/orders", "/account", "/profile",
+])
 
 
 def _capture(base: str, token: str = "", creds: dict | None = None) -> dict:
@@ -562,17 +567,7 @@ def _rest_crud_negative(c: httpx.Client, collections: list[str]) -> list[dict]:
     return out
 
 
-_WORDLIST_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "wordlists")
-
-
-def _load_wordlist(filename: str, fallback: list[str]) -> list[str]:
-    """Carrega wordlist do SecLists (copiada p/ o repo). Fallback embutido."""
-    try:
-        with open(os.path.join(_WORDLIST_DIR, filename), encoding="utf-8", errors="ignore") as fh:
-            lines = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
-        return lines or fallback
-    except Exception:
-        return fallback
+_load_wordlist = _wl  # alias — callers below use _load_wordlist name
 
 
 def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:

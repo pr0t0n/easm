@@ -1,0 +1,40 @@
+# SPA business routes — triggered after auth to capture XHR/API calls
+# Used by business_logic_test._capture() to navigate the SPA and trigger
+# authenticated endpoints (basket, order history, wallet, etc).
+# Format: one path per line (with leading / or /#/).
+# Hash routes cover Angular/Vue/React Router hash mode.
+# Plain path routes cover HTML5 history mode.
+/#/basket
+/#/order-history
+/#/wallet
+/#/saved-payment-methods
+/#/address/saved
+/#/order-summary
+/#/account
+/#/profile
+/#/payment
+/#/checkout
+/#/cart
+/#/wishlist
+/#/rewards
+/#/loyalty
+/#/subscription
+/#/orders
+/#/transactions
+/basket
+/cart
+/orders
+/order-history
+/account
+/profile
+/wallet
+/payment
+/checkout
+/wishlist
+/rewards
+/loyalty
+/subscription
+/transactions
+/me
+/dashboard
+/settings
