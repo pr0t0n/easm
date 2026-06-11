@@ -712,7 +712,70 @@ def validate_skill_applicability(
     elif not ctx["preflight_known"]:
         decision["score"] = 0.7
         decision["reason"] = "insufficient_context_allow_conservative"
+
+    # ── Score real feedback: modulate by within-scan execution history ────────
+    # After ≥2 real runs of skill+tool in this scan, their EMA positive rate
+    # adjusts the score. A tool that never found anything gets a floor reduction;
+    # one that consistently fires findings is boosted.
+    _exec_scores = (state or {}).get("skill_execution_scores") or {}
+    _hist_key = f"{skill_id}:{tool_l}"
+    _hist = _exec_scores.get(_hist_key) or {}
+    if _hist and int(_hist.get("runs") or 0) >= 2:
+        _hist_rate = float(_hist.get("positive_rate") or 0.0)
+        # Blend: 50% static score + 50% historical signal; floor at 0.1
+        _adj = round(max(0.1, float(decision["score"]) * (0.5 + 0.5 * _hist_rate)), 4)
+        decision["score"] = _adj
+        decision["score_history_adjusted"] = True
+        decision["history_positive_rate"] = _hist_rate
+        decision["history_runs"] = int(_hist.get("runs") or 0)
+
     return decision
+
+
+def update_skill_execution_score(
+    state: dict[str, Any],
+    skill_id: str,
+    tool_name: str,
+    result: str,  # "positive" | "negative" | "skipped"
+    findings_count: int = 0,
+) -> dict[str, Any]:
+    """Update the within-scan EMA score for a skill+tool pair.
+
+    Scores are stored in state["skill_execution_scores"] keyed by
+    "{skill_id}:{tool_name_lower}". The caller is responsible for writing
+    the mutated state dict back to the ScanJob.
+
+    Returns the updated score record.
+    """
+    skill_id = str(skill_id or "")
+    tool_key = str(tool_name or "").strip().lower()
+    skey = f"{skill_id}:{tool_key}"
+
+    scores: dict[str, Any] = dict(state.get("skill_execution_scores") or {})
+    cur = dict(scores.get(skey) or {})
+
+    runs = int(cur.get("runs") or 0) + 1
+    used = int(cur.get("used") or 0) + (0 if result == "skipped" else 1)
+    positives = int(cur.get("positives") or 0) + (1 if findings_count > 0 else 0)
+
+    prev_rate = float(cur.get("positive_rate") or 0.5)
+    alpha = min(0.4, 2.0 / (runs + 1))
+    obs = 1.0 if findings_count > 0 else 0.0
+    positive_rate = round(prev_rate * (1 - alpha) + obs * alpha, 4)
+
+    record: dict[str, Any] = {
+        "skill_id": skill_id,
+        "tool_name": tool_key,
+        "runs": runs,
+        "used": used,
+        "positives": positives,
+        "positive_rate": positive_rate,
+        "applicability_score": round(max(0.1, positive_rate), 4),
+        "last_result": result,
+    }
+    scores[skey] = record
+    state["skill_execution_scores"] = scores
+    return record
 
 
 def _tool_applicability_decision(

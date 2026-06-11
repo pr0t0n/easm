@@ -2447,6 +2447,27 @@ def poll_scan_work_item(item_id: int):
                     created_at=datetime.utcnow(),
                 ))
             db.commit()
+
+            # ── Score real: persist EMA into scan state so next dispatch reads it ─
+            # validate_skill_applicability() reads state["skill_execution_scores"]
+            # to modulate future decisions; this closes the feedback loop.
+            try:
+                from app.services.scan_work_queue import update_skill_execution_score as _upd_score
+                if job and _feedback_skill_ids:
+                    _score_state = dict(job.state_data or {})
+                    _score_result = "positive" if _promoted else ("skipped" if item.status == "skipped" else "negative")
+                    for _sid in _feedback_skill_ids:
+                        _upd_score(
+                            _score_state,
+                            _sid,
+                            str(item.tool_name or ""),
+                            _score_result,
+                            findings_count=int(findings_created or 0),
+                        )
+                    job.state_data = _score_state
+                    db.commit()
+            except Exception:
+                pass
         except Exception:
             db.rollback()
 
