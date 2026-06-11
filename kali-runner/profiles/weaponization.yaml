@@ -126,10 +126,11 @@ nikto_basic:
   #   a=Auth Bypass, b=Software ID, c=Remote Source Inclusion
   #   d=WebService, e=Admin Console
   # -Plugins '@@DEFAULT;-update' : skip slow update check (returns 403)
-  # -maxtime 420s: more time to cover all categories; stays within 600s wrapper
-  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive", "-maxtime", "420s",
+  # Sem -maxtime: nikto roda até completar todos os checks. O timeout do wrapper
+  # (3600s) é o único limite — só mata se travar completamente.
+  cmd: ["nikto", "-h", "{url}", "-ask", "no", "-nointeractive",
         "-Tuning", "12345789abcde", "-Plugins", "@@DEFAULT;-update"]
-  timeout: 480
+  timeout: 3600
   parser: raw
   allowed_return_codes: [0, 1]
 
