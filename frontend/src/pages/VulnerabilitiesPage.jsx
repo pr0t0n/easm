@@ -147,21 +147,16 @@ export default function VulnerabilitiesPage() {
   // ── Por Subdomínio ────────────────────────────────────────────────────────
   if (activeTab === "subdominios") {
     return (
-      <main className="dash">
-        <div className="content cockpit-shell">
-          <section className="cockpit-page-head" style={{ paddingBottom: 0 }}>
-            <div>
-              <div className="sk-eyebrow">Vulnerabilidades</div>
-              <h1>Achados do ambiente</h1>
-            </div>
-          </section>
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <div style={{ padding: "24px 40px 0", background: "var(--surface)", borderBottom: "1px solid var(--line)" }}>
+          <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Vulnerabilidades</div>
           <div className="vuln-tabs">
             <button type="button" className="vuln-tab" onClick={() => setActiveTab("achados")}>Lista de achados</button>
             <button type="button" className="vuln-tab active">Por Subdomínio</button>
           </div>
         </div>
         <DomainsPage embedded />
-      </main>
+      </div>
     );
   }
 
@@ -180,7 +175,7 @@ export default function VulnerabilitiesPage() {
           </div>
         </section>
 
-        <div className="vuln-tabs">
+        <div className="vuln-tabs" style={{ marginBottom: 16 }}>
           <button type="button" className="vuln-tab active">Lista de achados</button>
           <button type="button" className="vuln-tab" onClick={() => setActiveTab("subdominios")}>Por Subdomínio</button>
         </div>

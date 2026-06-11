@@ -62,7 +62,7 @@ function IntelligenceView() {
     client.get(`/api/scans/${selectedScan}/crown-jewels`)
       .then(({ data }) => setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []))
       .catch(() => setCrownJewels([]));
-    client.get(`/api/scans/${selectedScan}/osint`)
+    client.get(`/api/scans/${selectedScan}/osint`, { _skipToast: true })
       .then(({ data }) => setOsint(data?.osint || null))
       .catch(() => setOsint(null));
     client.get(`/api/scans/${selectedScan}/attack-narrative`)

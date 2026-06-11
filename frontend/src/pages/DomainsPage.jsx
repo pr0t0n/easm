@@ -250,7 +250,7 @@ export default function DomainsPage({ embedded = false }) {
     client.get(`/api/scans/${scanId}/crown-jewels`).then(({ data }) => {
       if (active) setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []);
     }).catch(() => {});
-    client.get(`/api/scans/${scanId}/osint`).then(({ data }) => {
+    client.get(`/api/scans/${scanId}/osint`, { _skipToast: true }).then(({ data }) => {
       if (active) setOsintData(data?.osint || null);
     }).catch(() => {});
     return () => { active = false; };

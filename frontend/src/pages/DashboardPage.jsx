@@ -428,7 +428,7 @@ export default function DashboardPage() {
     client.get(`/api/scans/${selectedSubdomainScanId}/crown-jewels`)
       .then(({ data }) => setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []))
       .catch(() => setCrownJewels([]));
-    client.get(`/api/scans/${selectedSubdomainScanId}/osint`)
+    client.get(`/api/scans/${selectedSubdomainScanId}/osint`, { _skipToast: true })
       .then(({ data }) => setOsintPhaseZero(data?.osint || null))
       .catch(() => setOsintPhaseZero(null));
   }, [selectedSubdomainScanId]);
