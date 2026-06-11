@@ -2,7 +2,6 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import client from "./api/client";
 import Sidebar from "./components/Sidebar";
-import Navbar from "./components/Navbar";
 import ToastCenter from "./components/ToastCenter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import AccountPage from "./pages/AccountPage";
@@ -11,11 +10,14 @@ import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
 import AttackEvolutionPage from "./pages/AttackEvolutionPage";
 import ReportsPage from "./pages/ReportsPage";
+import RedTeamReportPage from "./pages/RedTeamReportPage";
 import ScanOperationsPage from "./pages/ScanOperationsPage";
 import OperationsCenterPage from "./pages/OperationsCenterPage";
 import UserManagementPage from "./pages/UserManagementPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import DomainsPage from "./pages/DomainsPage";
+import AttackSurfacePage from "./pages/AttackSurfacePage";
+import CrownJewelsPage from "./pages/CrownJewelsPage";
 import LearningPage from "./pages/LearningPage";
 import GuardrailsPage from "./pages/GuardrailsPage";
 import { authStore } from "./store/auth";
@@ -76,18 +78,20 @@ export default function App() {
           path="/*"
           element={
             <Protected>
-              <div className="app-shell" style={{ backgroundColor: "var(--bg-main)" }}>
+              <div className="app-shell sk" style={{ backgroundColor: "var(--bg-main)" }}>
                 <Sidebar />
                 <div className="main-column">
-                  <Navbar />
                   <RoutedBoundary>
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
-                    <Route path="/relatorios" element={<ReportsPage />} />
+                    <Route path="/relatorios" element={<RedTeamReportPage />} />
+                    <Route path="/relatorios-legacy" element={<ReportsPage />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
+                    <Route path="/superficie" element={<AttackSurfacePage />} />
                     <Route path="/dominios" element={<DomainsPage />} />
+                    <Route path="/joias" element={<CrownJewelsPage />} />
                     <Route path="/agendamento" element={<Navigate to="/scan" replace />} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />

@@ -296,10 +296,27 @@ export default function DomainsPage() {
     <main className="domains-page">
       {error && <div className="err-box">{error}</div>}
 
+      <section className="domains-page-head">
+        <div>
+          <p className="domain-eyebrow">Inventário vivo</p>
+          <h1>Superfície de ataque</h1>
+          <p>
+            Domínios, subdomínios, portas, origem da descoberta, joias e findings consolidados por scan.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setRefreshKey((k) => k + 1)}
+          title="Recarregar inventário"
+        >
+          Atualizar inventário
+        </button>
+      </section>
+
       <section className="domains-layout">
         <aside className="domains-list">
           <div className="domains-list-head">
-            <h3>Domínios</h3>
+            <h3>Escopos</h3>
             <span>{domains.length} itens</span>
           </div>
           <div className="domains-scroll">
@@ -324,7 +341,7 @@ export default function DomainsPage() {
         <section className="domain-detail">
           <div className="domain-hero">
             <div>
-              <p className="domain-eyebrow">Superfície por domínio</p>
+              <p className="domain-eyebrow">Superfície por escopo</p>
               <h2>{domain?.domain || "Selecione um domínio"}</h2>
               <div className="domain-hero-meta">
                 Scan #{domain?.latest_scan_id || "—"} · {statusLabel(domain?.latest_scan_status)} · {fmtDate(domain?.latest_scan_at)}

@@ -217,9 +217,14 @@ export default function ReportsPage() {
       <div style={{ ...reportCard, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>Relatório Único de Segurança</div>
+            <div style={{ color: "var(--brand-700)", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: 6 }}>
+              Entrega executiva e técnica
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: "var(--ink)", letterSpacing: 0 }}>
+              O que o Blue Team precisa fazer primeiro
+            </div>
             <div style={{ marginTop: 3, color: "var(--ink-muted)", fontSize: 13 }}>
-              Executivo, técnico, escopo, revisão, BAS/Purple Team, evidências, recomendações e evolução em uma única visão.
+              Relatório único com narrativa, evidências, recomendações, matriz Blue Team, delta entre scans e plano de remediação.
             </div>
           </div>
           <div style={{ color: "var(--ink-muted)", fontSize: 12, textAlign: "right" }}>
@@ -400,7 +405,7 @@ export default function ReportsPage() {
         <div style={{ ...reportCard, background: "linear-gradient(135deg,#1a1a2e 0%,#2d1b3d 100%)", border: "1px solid #4a1942", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <div style={{ fontWeight: 700, fontSize: 14, color: "#ffffff" }}>
-              🔴 Relatório de Pentest Automatizado
+              🔴 Relatório ScriptKidd.o
             </div>
             <div style={{ fontSize: 12, color: "#c8a4e0", marginTop: 3 }}>
               Vulnerabilidades confirmadas com PoC · Kill chain · Evidência sandbox P21 · Matriz Blue Team · CVSS · Delta cross-scan

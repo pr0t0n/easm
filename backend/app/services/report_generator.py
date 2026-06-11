@@ -432,7 +432,7 @@ def generate_executive_report(
 
   <!-- FOOTER -->
   <div class="footer">
-    Relatório de Pentest Automatizado &nbsp;|&nbsp; {now} &nbsp;|&nbsp;
+    Relatório ScriptKidd.o &nbsp;|&nbsp; {now} &nbsp;|&nbsp;
     Este relatório é confidencial e destinado exclusivamente ao uso interno.
     &nbsp;|&nbsp; Conteúdo: superfície de ataque + vulnerabilidades confirmadas com PoC.
   </div>
@@ -1345,7 +1345,7 @@ def generate_pentest_report(
 
   <!-- PENTEST HEADER -->
   <div class="pentest-header">
-    <h1>🔴 Relatório de Pentest Automatizado</h1>
+    <h1>🔴 Relatório ScriptKidd.o</h1>
     <div class="meta">
       Alvos: <strong>{domains_str}</strong> &nbsp;|&nbsp;
       Gerado: {now} &nbsp;|&nbsp;

@@ -15,6 +15,7 @@ const ICONS = {
   operations: svg(<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />),
   bug: svg(<><path d="m8 2 1.88 1.88" /><path d="M14.12 3.88 16 2" /><path d="M9 7.13v-1a3 3 0 1 1 6 0v1" /><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6Z" /><path d="M12 20v-9" /><path d="M6.5 9C4.6 8.8 3 7.1 3 5" /><path d="M6 13H2" /><path d="M3 21c0-2.1 1.7-3.9 3.8-4" /><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4" /><path d="M22 13h-4" /><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" /></>),
   domains: svg(<><circle cx="12" cy="12" r="10" /><path d="M2 12h20" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z" /></>),
+  jewels: svg(<><path d="m2 6 4 12h12l4-12-5.5 5L12 5l-4.5 6L2 6Z" /><path d="M6 18h12" /></>),
   learning: svg(<><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /></>),
   report: svg(<><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M16 13H8" /><path d="M16 17H8" /><path d="M10 9H8" /></>),
   users: svg(<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>),
@@ -29,22 +30,27 @@ export default function Sidebar() {
 
   const navGroups = [
     {
-      title: "Overview",
-      items: [{ to: "/", label: "Início", icon: "dashboard", adminOnly: false }],
+      title: "Comando",
+      items: [{ to: "/", label: "Cockpit", icon: "dashboard", adminOnly: false }],
     },
     {
-      title: "Vulnerability Ops",
+      title: "Superfície",
       items: [
-        { to: "/scan", label: "Scan", icon: "scans", adminOnly: true },
+        { to: "/superficie", label: "Superfície de ataque", icon: "domains", adminOnly: false },
+        { to: "/joias", label: "Joias da Coroa", icon: "jewels", adminOnly: false },
+        { to: "/vulnerabilidades", label: "Vulnerabilidades", icon: "bug", adminOnly: false },
+      ],
+    },
+    {
+      title: "Operação",
+      items: [
+        { to: "/scan", label: "Scans", icon: "scans", adminOnly: false },
         { to: "/operacional", label: "Centro Operacional", icon: "operations", adminOnly: true },
       ],
     },
     {
-      title: "Security",
+      title: "Entrega",
       items: [
-        { to: "/vulnerabilidades", label: "Vulnerabilidades", icon: "bug", adminOnly: false },
-        { to: "/dominios", label: "Domínios", icon: "domains", adminOnly: false },
-        { to: "/aprendizado", label: "Aprendizado", icon: "learning", adminOnly: true },
         { to: "/relatorios", label: "Relatórios", icon: "report", adminOnly: false },
       ],
     },
@@ -53,7 +59,6 @@ export default function Sidebar() {
       items: [
         { to: "/usuarios", label: "Usuários", icon: "users", adminOnly: true },
         { to: "/guardrails", label: "Guardrails", icon: "shield", adminOnly: true },
-        { to: "/conta", label: "Minha Conta", icon: "account", adminOnly: true },
       ],
     },
   ];
@@ -66,10 +71,10 @@ export default function Sidebar() {
   return (
     <aside className="sb">
       <div className="sb-logo">
-        <span className="sb-logo-mark" aria-hidden />
+        <span className="sb-logo-mark" aria-hidden>S</span>
         <div>
           <span className="sb-logo-name">ScriptKidd.o</span>
-          <span className="sb-logo-tag">Vulnerability Analysis</span>
+          <span className="sb-logo-tag">Pentest Automatizado</span>
         </div>
       </div>
 
@@ -87,7 +92,8 @@ export default function Sidebar() {
                 className={({ isActive }) => `sb-item${isActive ? " active" : ""}`}
               >
                 <span className="sb-ico" aria-hidden>{ICONS[item.icon]}</span>
-                {item.label}
+                <span className="sb-label">{item.label}</span>
+                {item.adminOnly && <span className="sb-admin">ADM</span>}
               </NavLink>
             ))}
           </div>
@@ -95,6 +101,10 @@ export default function Sidebar() {
       })}
 
       <div className="sb-foot">
+        <div className="sb-scan-state">
+          <span className="sb-scan-dot" aria-hidden />
+          <span>runtime · ativo</span>
+        </div>
         <strong>{me?.email || "—"}</strong>
         {isAdmin ? "Admin · acesso total" : "Operador"}
         <button

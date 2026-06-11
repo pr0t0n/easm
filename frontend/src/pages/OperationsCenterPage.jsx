@@ -8,6 +8,7 @@ import PhaseMonitorPage from "./PhaseMonitorPage";
 import WorkerLogsPage from "./WorkerLogsPage";
 import WorkersPage from "./WorkersPage";
 import PlatformHealthPage from "./PlatformHealthPage";
+import LearningPage from "./LearningPage";
 import client from "../api/client";
 
 function SubTabs({ tabs, activeId, onSelect }) {
@@ -322,18 +323,19 @@ function EvolutionInfraView() {
 const modules = [
   { id: "runtime", label: "RedTeam Runtime", hint: "fase, comandos, saidas e comunicacao", component: WorkerLogsPage },
   { id: "phases_agents", label: "Fases & Agentes", hint: "phase monitor + fluxo de agentes", component: PhasesAgentsView },
+  { id: "infra", label: "Workers & Jobs", hint: "workers ao vivo, fila, registro de jobs e evolução", component: EvolutionInfraView },
+  { id: "aprendizado", label: "Aprendizado HackerOne", hint: "treinar técnicas via URLs HackerOne + aceite humano", component: LearningPage },
   { id: "intel", label: "Inteligência", hint: "crown jewels, OSINT, LLM chains, narrativa", component: IntelligenceView },
   { id: "health", label: "Saúde da Plataforma", hint: "status/health dos containers + alertas + último erro", component: PlatformHealthPage },
 ];
 
-// "infra" (Evolução & Infra) removido a pedido — aliases antigos caem no runtime.
 const MODULE_ALIASES = {
   phases: "phases_agents",
   agents: "phases_agents",
-  evolution: "runtime",
-  workers: "runtime",
-  jobs: "runtime",
-  infra: "runtime",
+  evolution: "infra",
+  workers: "infra",
+  jobs: "infra",
+  learning: "aprendizado",
 };
 
 export default function OperationsCenterPage() {

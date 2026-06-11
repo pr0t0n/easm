@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
@@ -126,6 +128,40 @@ MEDIUM_TOOLS = {
 }
 OOB_TOOLS = {"interactsh", "interactsh-client"}
 MANUAL_TOOLS = {"manual_review", "manual_correlation", "manual_http_probe", "report-builder", "manual_scope_review"}
+
+WEB_HEAVY_PHASES = {
+    "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10",
+    "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P19",
+}
+HTTP_SURFACE_TOOLS = {
+    "arjun", "paramspider", "ffuf", "ffuf-params", "ffuf-content",
+    "gobuster", "feroxbuster", "dirsearch", "wfuzz", "katana",
+    "katana-js", "hakrawler", "gospider", "curl", "curl-headers",
+    "httpx", "whatweb", "whatweb-basic", "nikto", "wpscan", "wapiti",
+    "dalfox", "sqlmap", "zap-baseline", "zap-ajax", "zap-active",
+    "zap-api", "bl-test", "chromium-capture",
+}
+HTTP_NUCLEI_TOOLS = {
+    "nuclei", "nuclei-cves", "nuclei-headers", "nuclei-exposure",
+    "nuclei-cors", "nuclei-crlf", "nuclei-redirect", "nuclei-graphql",
+    "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
+    "nuclei-ssti", "nuclei-xxe", "nuclei-idor", "nuclei-csrf",
+    "nuclei-race", "nuclei-rce", "nuclei-auth", "nuclei-deserialization",
+    "nuclei-clickjacking", "nuclei-jwt",
+}
+PORT_REQUIRED_TOOLS: dict[str, set[int]] = {
+    "crackmapexec": {139, 445, 389, 636, 5985, 5986},
+    "nmap-smb": {139, 445},
+    "nmap-ssh": {22},
+    "nmap-dns": {53},
+    "sslscan": {443, 8443, 9443, 10443},
+    "testssl": {443, 8443, 9443, 10443},
+    "nmap-ssl": {443, 8443, 9443, 10443},
+}
+TECH_REQUIRED_TOOLS: dict[str, set[str]] = {
+    "wpscan": {"wordpress", "wp-content", "wp-includes"},
+}
+SKILL_SELECTION_THRESHOLD = 0.35
 
 # ─────────────────────────────────────────────────────────────────────────────
 # High-risk subdomain keywords → prioridade elevada no scanner
@@ -335,6 +371,20 @@ def _skill_consultations_for_phase(
             [tool for tool in selected if tool in bound_tools]
             + [tool for tool in learning_tools if tool in bound_tools]
         ))
+        applicability_decisions = [
+            validate_skill_applicability(phase_id, skill_id, tool, target, state, at="enqueue")
+            for tool in recommended
+        ]
+        applicable_tools = [
+            str(decision.get("tool_name"))
+            for decision in applicability_decisions
+            if decision.get("applicable") and decision.get("tool_name")
+        ]
+        best_score = max(
+            (float(decision.get("score") or 0.0) for decision in applicability_decisions),
+            default=0.0,
+        )
+        selected_for_execution = bool(applicable_tools) and best_score >= SKILL_SELECTION_THRESHOLD
         matching_techniques = [
             technique for technique in learning_techniques
             if not technique.get("affected_skills")
@@ -353,18 +403,21 @@ def _skill_consultations_for_phase(
             "target": target,
             "skill_id": skill_id,
             "consulted": True,
-            "selected": True,
+            "selected": selected_for_execution,
+            "selection_threshold": SKILL_SELECTION_THRESHOLD,
+            "applicability_score": round(best_score, 4),
+            "applicability_decisions": applicability_decisions,
             "source": source,
             "decision_source": "supervisor_skill_contract+accepted_learning",
             "contract_required": skill_id in skill_ids,
             "candidate_tools": selected,
-            "recommended_tools": recommended,
+            "recommended_tools": applicable_tools,
             "learning_sources": learning_sources,
             "learning_techniques": matching_techniques,
             "learning_used": bool(matching_techniques or learning_sources),
             "reason": (
-                f"Skill {skill_id} consultada para {phase_id}; ferramentas derivadas do contrato da fase "
-                "e reordenadas/enriquecidas por aprendizados aceitos quando aplicável."
+                f"Skill {skill_id} consultada para {phase_id}; selecionada={selected_for_execution} "
+                f"score={round(best_score, 4)} com ferramentas aplicáveis: {', '.join(applicable_tools) or 'nenhuma'}."
             ),
             "created_at": datetime.utcnow().isoformat(),
         })
@@ -411,7 +464,8 @@ def _append_skill_consultations_to_state(
     existing.extend(added)
     state["skill_consultations"] = existing[-1000:]
     state["selected_skills"] = list(dict.fromkeys(
-        list(state.get("selected_skills") or []) + [str(c.get("skill_id")) for c in added if c.get("skill_id")]
+        list(state.get("selected_skills") or [])
+        + [str(c.get("skill_id")) for c in added if c.get("skill_id") and c.get("selected")]
     ))
     state["skill_invocation"] = list(state.get("skill_invocation") or [])[-500:] + [
         {
@@ -433,6 +487,329 @@ def _append_skill_consultations_to_state(
 def _tool_profile(tool_name: str) -> str:
     entry = ToolCatalog().get(tool_name)
     return entry.profile if entry else tool_name
+
+
+def _target_host(target: str) -> str:
+    raw = str(target or "").strip()
+    if not raw or raw == "__batch__":
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        return (parsed.hostname or raw.split("/")[0].split(":")[0]).lower()
+    except Exception:
+        return raw.split("/")[0].split(":")[0].lower()
+
+
+def _target_type(target: str) -> str:
+    raw = str(target or "").strip()
+    if raw == "__batch__":
+        return "batch"
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+        query = parsed.query or ""
+        if "://" in raw:
+            if query:
+                return "parameterized_endpoint"
+            if "/api" in path.lower():
+                return "api_endpoint"
+            return "url"
+        try:
+            ipaddress.ip_address(host)
+            return "ip"
+        except ValueError:
+            pass
+        return "subdomain" if host.count(".") >= 2 else "domain"
+    except Exception:
+        return "unknown"
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [value]
+
+
+def _extract_ports(*values: Any) -> list[int]:
+    ports: list[int] = []
+    for value in values:
+        for entry in _as_list(value):
+            if isinstance(entry, dict):
+                entry = entry.get("port") or entry.get("number") or entry.get("port_id")
+            try:
+                port = int(entry)
+            except (TypeError, ValueError):
+                continue
+            if 0 < port < 65536:
+                ports.append(port)
+    return sorted(set(ports))
+
+
+def _flatten_tokens(value: Any) -> set[str]:
+    tokens: set[str] = set()
+    if value is None:
+        return tokens
+    if isinstance(value, dict):
+        for nested in value.values():
+            tokens.update(_flatten_tokens(nested))
+        return tokens
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            tokens.update(_flatten_tokens(nested))
+        return tokens
+    raw = str(value or "").lower()
+    for token in raw.replace("/", " ").replace("_", " ").replace("-", " ").split():
+        cleaned = "".join(ch for ch in token if ch.isalnum() or ch in {".", "#", "+"})
+        if len(cleaned) >= 2:
+            tokens.add(cleaned)
+    if raw:
+        tokens.add(raw)
+    return tokens
+
+
+def _preflight_profile_for_target(state: dict[str, Any], target: str) -> dict[str, Any]:
+    preflight_targets = ((state.get("preflight") or {}).get("targets") or {})
+    if not isinstance(preflight_targets, dict):
+        return {}
+    host = _target_host(target)
+    candidates = [target, host, f"http://{host}", f"https://{host}"]
+    for candidate in candidates:
+        if candidate and isinstance(preflight_targets.get(candidate), dict):
+            return dict(preflight_targets[candidate])
+    return {}
+
+
+def _target_context(state: dict[str, Any], target: str) -> dict[str, Any]:
+    profile = _preflight_profile_for_target(state, target)
+    status = str(profile.get("status") or "").lower()
+    http_signals = list(profile.get("http") or [])
+    ports = _extract_ports(
+        profile.get("open_ports"),
+        profile.get("ports"),
+        state.get("preflight_ports"),
+    )
+    tech_tokens = _flatten_tokens(state.get("detected_tech_stack"))
+    tech_tokens.update(_flatten_tokens(state.get("technologies")))
+    tech_tokens.update(_flatten_tokens(state.get("technology_hints")))
+    tech_tokens.update(_flatten_tokens(state.get("tech_stack")))
+    for signal in http_signals:
+        tech_tokens.update(_flatten_tokens(signal))
+    waf_tokens = _flatten_tokens(state.get("waf_fingerprints"))
+    waf_tokens.update(_flatten_tokens(state.get("waf")))
+    has_http = bool(http_signals) or status == "http_live"
+    return {
+        "target": target,
+        "host": _target_host(target),
+        "target_type": _target_type(target),
+        "preflight_known": bool(status),
+        "preflight_status": status,
+        "preflight_reason": profile.get("reason") or "",
+        "open_ports": ports,
+        "ports_known": bool(profile) and ("open_ports" in profile or "ports" in profile),
+        "has_http": has_http,
+        "tech_tokens": sorted(tech_tokens),
+        "tech_known": bool(tech_tokens),
+        "waf_tokens": sorted(waf_tokens),
+    }
+
+
+def _requires_http_surface(phase_id: str, tool_name: str) -> bool:
+    tool = str(tool_name or "").strip().lower()
+    return phase_id in WEB_HEAVY_PHASES or tool in HTTP_SURFACE_TOOLS or tool in HTTP_NUCLEI_TOOLS or tool.startswith("nuclei-")
+
+
+def validate_skill_applicability(
+    phase_id: str,
+    skill_id: str,
+    tool_name: str,
+    target: str,
+    state: dict[str, Any] | None,
+    *,
+    at: str = "enqueue",
+) -> dict[str, Any]:
+    """Return a conservative skill/tool applicability decision.
+
+    Missing reconnaissance is never treated as a hard reject. Hard skips happen
+    only when fresh state proves the tool cannot produce useful evidence.
+    """
+    state = dict(state or {})
+    phase_id = str(phase_id or "")
+    skill_id = str(skill_id or "")
+    tool = str(tool_name or "").strip()
+    tool_l = tool.lower()
+    ctx = _target_context(state, target)
+
+    decision = {
+        "applicable": True,
+        "score": 1.0,
+        "reason": "applicable",
+        "phase_id": phase_id,
+        "skill_id": skill_id,
+        "tool_name": tool,
+        "target": target,
+        "validated_at": at,
+        "context": {
+            "target_type": ctx["target_type"],
+            "preflight_known": ctx["preflight_known"],
+            "preflight_status": ctx["preflight_status"],
+            "has_http": ctx["has_http"],
+            "open_ports": ctx["open_ports"],
+            "tech_known": ctx["tech_known"],
+            "tech_tokens": ctx["tech_tokens"][:20],
+        },
+    }
+
+    if target == "__batch__":
+        decision["reason"] = "batch_item_validated_per_target_at_dispatch"
+        decision["score"] = 0.75
+        return decision
+
+    dead_statuses = {"invalid", "dns_dead", "dead", "unresolved", "no_tcp"}
+    if ctx["preflight_status"] in dead_statuses and phase_id not in {"P18", "P21", "P22"}:
+        decision.update(
+            applicable=False,
+            score=0.0,
+            reason=f"target_not_reachable:{ctx['preflight_status']}",
+        )
+        return decision
+
+    if _requires_http_surface(phase_id, tool) and ctx["preflight_known"]:
+        if ctx["preflight_status"] == "tcp_closed" and not ctx["has_http"]:
+            decision.update(applicable=False, score=0.0, reason="no_http_surface:tcp_closed")
+            return decision
+
+    required_ports = PORT_REQUIRED_TOOLS.get(tool_l)
+    if required_ports and ctx["ports_known"] and ctx["open_ports"]:
+        if not (set(ctx["open_ports"]) & set(required_ports)):
+            decision.update(
+                applicable=False,
+                score=0.0,
+                reason=f"required_port_absent:{','.join(str(p) for p in sorted(required_ports))}",
+            )
+            return decision
+
+    required_tech = TECH_REQUIRED_TOOLS.get(tool_l)
+    if required_tech and ctx["tech_known"]:
+        tech_blob = " ".join(ctx["tech_tokens"])
+        if not any(token in tech_blob for token in required_tech):
+            decision.update(
+                applicable=False,
+                score=0.0,
+                reason=f"required_technology_absent:{','.join(sorted(required_tech))}",
+            )
+            return decision
+
+    if not ctx["preflight_known"] and at == "enqueue":
+        decision["score"] = 0.65
+        decision["reason"] = "insufficient_context_defer_to_dispatch"
+    elif not ctx["preflight_known"]:
+        decision["score"] = 0.7
+        decision["reason"] = "insufficient_context_allow_conservative"
+    return decision
+
+
+def _tool_applicability_decision(
+    phase_id: str,
+    tool_name: str,
+    target: str,
+    state: dict[str, Any],
+    *,
+    at: str,
+) -> dict[str, Any]:
+    skill_ids = _skill_ids_for_phase_tool(phase_id, tool_name)
+    if not skill_ids:
+        skill_ids = [""]
+    decisions = [
+        validate_skill_applicability(phase_id, skill_id, tool_name, target, state, at=at)
+        for skill_id in skill_ids
+    ]
+    applicable = [d for d in decisions if d.get("applicable")]
+    chosen = applicable[0] if applicable else decisions[0]
+    return {
+        **chosen,
+        "applicable": bool(applicable),
+        "skill_decisions": decisions,
+        "skill_ids": [sid for sid in skill_ids if sid],
+    }
+
+
+def work_item_applicability_decision(
+    item: ScanWorkItem,
+    state: dict[str, Any] | None,
+    *,
+    at: str = "dispatch",
+) -> dict[str, Any]:
+    metadata = dict(item.item_metadata or {})
+    if str(item.target or "") != "__batch__":
+        return _tool_applicability_decision(
+            str(item.phase_id or ""),
+            str(item.tool_name or ""),
+            str(item.target or ""),
+            dict(state or {}),
+            at=at,
+        )
+
+    targets = [str(t) for t in metadata.get("batch_targets") or [] if str(t)]
+    if not targets:
+        return {
+            "applicable": False,
+            "score": 0.0,
+            "reason": "batch_without_targets",
+            "phase_id": str(item.phase_id or ""),
+            "tool_name": str(item.tool_name or ""),
+            "target": "__batch__",
+            "validated_at": at,
+            "batch_targets": [],
+            "skipped_batch_targets": [],
+        }
+    decisions = [
+        _tool_applicability_decision(
+            str(item.phase_id or ""),
+            str(item.tool_name or ""),
+            target,
+            dict(state or {}),
+            at=at,
+        )
+        for target in targets
+    ]
+    kept = [str(d.get("target")) for d in decisions if d.get("applicable")]
+    skipped_targets = [
+        {"target": str(d.get("target")), "reason": str(d.get("reason") or "")}
+        for d in decisions
+        if not d.get("applicable")
+    ]
+    if not kept:
+        return {
+            "applicable": False,
+            "score": 0.0,
+            "reason": "no_applicable_batch_targets",
+            "phase_id": str(item.phase_id or ""),
+            "tool_name": str(item.tool_name or ""),
+            "target": "__batch__",
+            "validated_at": at,
+            "batch_targets": [],
+            "skipped_batch_targets": skipped_targets,
+            "target_decisions": decisions[:50],
+        }
+    return {
+        "applicable": True,
+        "score": round(len(kept) / max(1, len(targets)), 4),
+        "reason": "applicable_batch_targets",
+        "phase_id": str(item.phase_id or ""),
+        "tool_name": str(item.tool_name or ""),
+        "target": "__batch__",
+        "validated_at": at,
+        "batch_targets": kept,
+        "skipped_batch_targets": skipped_targets[:100],
+        "target_decisions": decisions[:50],
+    }
 
 
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
@@ -614,6 +991,17 @@ def enqueue_scan_work_items(
             required = list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_tools") or [])
             optional = [tool for tool in tools if tool not in set(required)]
             selected = list(dict.fromkeys(required + optional[:max_optional_per_phase]))
+            applicability_by_tool = {
+                tool: _tool_applicability_decision(phase_id, tool, target, state, at="enqueue")
+                for tool in selected
+            }
+            selected = [
+                tool for tool in selected
+                if applicability_by_tool.get(tool, {}).get("applicable")
+            ]
+            skipped += len([d for d in applicability_by_tool.values() if not d.get("applicable")])
+            if not selected:
+                continue
             learning_key = (phase_id, tuple(selected))
             if learning_key not in learning_playbook_cache:
                 try:
@@ -680,6 +1068,7 @@ def enqueue_scan_work_items(
                 }
                 old_meta["skill_consultation_ids"] = sorted(existing_consultation_ids | new_consultation_ids)
                 old_meta["skill_decision_source"] = "supervisor_skill_contract+accepted_learning"
+                old_meta["applicability"] = _tool_applicability_decision(phase_id, tool, "__batch__", state, at="enqueue")
                 old_learning_sources = {str(x) for x in old_meta.get("learning_sources") or [] if str(x)}
                 new_learning_sources = {
                     str(src.get("id") or src.get("title") or "")
@@ -743,6 +1132,7 @@ def enqueue_scan_work_items(
                 "batch_targets": sorted_targets,
                 "batch_count": len(sorted_targets),
                 "high_risk": best_boost < 0,
+                "applicability": _tool_applicability_decision(phase_id, tool, "__batch__", state, at="enqueue"),
             }, phase_id, tool, source=source),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -811,6 +1201,7 @@ def enqueue_scan_work_items(
             "skill_decision_source": "supervisor_skill_contract+accepted_learning",
             "skill_consultation_ids": _consultation_ids,
             "learning_sources": _learning_sources,
+            "applicability": _tool_applicability_decision(phase_id, tool, target, state, at="enqueue"),
         }
         _to = _adaptive_timeout(tool, target)
         if _to is not None:

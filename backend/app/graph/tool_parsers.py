@@ -614,6 +614,21 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
         if any(token in lowered for token in ignore_tokens):
             continue
 
+        # Linhas informacionais/banner do Nikto — NÃO são vulnerabilidades
+        # (banner do servidor, plataforma, headers recuperados, resumo do scan).
+        content = lowered.lstrip("+ ").strip()
+        is_nikto_noise = (
+            content.startswith("server:")
+            or content.startswith("platform:")
+            or content.startswith("root page")
+            or content.startswith("scan terminated")
+            or (content.startswith("retrieved ") and "header" in content)
+            or ("items reported on the remote host" in content)
+            or bool(re.search(r"\d+\s+requests?:", content))
+        )
+        if is_nikto_noise:
+            continue
+
         if lowered in seen:
             continue
         seen.add(lowered)

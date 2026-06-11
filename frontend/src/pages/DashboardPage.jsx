@@ -105,6 +105,282 @@ function sevLabel(severity) {
   }[normalized] || normalized;
 }
 
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+const SEVERITY_LABELS = {
+  critical: "Crítico",
+  high: "Alto",
+  medium: "Médio",
+  low: "Baixo",
+  info: "Info",
+};
+
+function clampPct(value) {
+  return Math.max(0, Math.min(100, Number(value || 0)));
+}
+
+function formatDateTime(value) {
+  if (!value) return "sem data";
+  try {
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return "sem data";
+  }
+}
+
+function SeverityBadge({ severity }) {
+  const normalized = String(severity || "info").toLowerCase();
+  return (
+    <span className={`sk-badge sk-badge--${normalized}`}>
+      <span className={`sk-dot sk-dot--${normalized}`} />
+      {SEVERITY_LABELS[normalized] || normalized}
+    </span>
+  );
+}
+
+function SeverityBar({ stats = {} }) {
+  const total = SEVERITY_ORDER.reduce((acc, key) => acc + Number(stats?.[key] || 0), 0) || 1;
+  return (
+    <div className="cockpit-severity-bar" aria-label="Distribuição por severidade">
+      {SEVERITY_ORDER.map((key) => {
+        const count = Number(stats?.[key] || 0);
+        if (!count) return null;
+        return (
+          <span
+            key={key}
+            className={`sev-fill sev-fill-${key}`}
+            style={{ width: `${(count / total) * 100}%` }}
+            title={`${SEVERITY_LABELS[key]}: ${count}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function MiniSparkline({ data = [] }) {
+  const values = data
+    .map((item) => Number(item?.rating_score ?? item?.score ?? item ?? 0))
+    .filter((item) => Number.isFinite(item));
+  const series = values.length > 1 ? values.slice(-8) : [0, Number(values[0] || 0)];
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const points = series.map((value, index) => {
+    const x = 4 + (index / Math.max(1, series.length - 1)) * 116;
+    const y = 30 - ((value - min) / Math.max(1, max - min)) * 24;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <svg viewBox="0 0 124 34" className="cockpit-spark" role="img" aria-label="Tendência do rating">
+      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function AttackGraphPanel({ paths = [], jewels = [] }) {
+  const visiblePaths = paths.slice(0, 5);
+  const visibleJewels = jewels.slice(0, 4);
+  // Sem fabricação: só rótulos de dado REAL. Vazio → estado honesto.
+  const jewelLabels = visibleJewels.map((item) => String(item.target || item.subdomain || item.label || "joia"));
+  const surfaceLabels = visiblePaths.map((item) => String(item.target || "-").split("/")[0]).slice(0, 5);
+  const hasGraph = surfaceLabels.length > 0 && jewelLabels.length > 0;
+  const severityFor = (index) => String(visiblePaths[index]?.severity || "medium").toLowerCase();
+
+  return (
+    <div className="cockpit-panel attack-graph-panel">
+      <div className="cockpit-panel-head">
+        <div>
+          <h3>Caminhos de ataque até as joias</h3>
+          <span>grafo operacional do ciclo selecionado</span>
+        </div>
+        <div className="graph-legend">
+          {["critical", "high", "medium"].map((sev) => (
+            <span key={sev}><i className={`line-${sev}`} />{SEVERITY_LABELS[sev]}</span>
+          ))}
+        </div>
+      </div>
+      {!hasGraph ? (
+        <div className="attack-graph-empty">
+          {visibleJewels.length === 0
+            ? "Nenhuma joia da coroa identificada neste ciclo."
+            : "Nenhum caminho de ataque validado até as joias neste ciclo."}
+        </div>
+      ) : (
+      <svg viewBox="0 0 760 360" className="attack-graph" role="img" aria-label="Grafo de caminhos de ataque">
+        <text x="82" y="32">ORIGEM</text>
+        <text x="360" y="32">SUPERFÍCIE</text>
+        <text x="646" y="32">JOIAS</text>
+        {surfaceLabels.map((label, index) => {
+          const y = 74 + index * 58;
+          const jewelY = 80 + (index % jewelLabels.length) * 68;
+          const sev = severityFor(index);
+          return (
+            <g key={`${label}-${index}`}>
+              <path className="graph-line graph-line-low" d={`M 82 188 C 190 188, 210 ${y}, 322 ${y}`} />
+              <path className={`graph-line graph-line-${sev}`} d={`M 398 ${y} C 490 ${y}, 510 ${jewelY}, 612 ${jewelY}`} />
+              <circle cx="360" cy={y} r="21" className="graph-node graph-node-surface" />
+              <text x="360" y={y + 4} className="graph-node-label">{label.slice(0, 13)}</text>
+            </g>
+          );
+        })}
+        <circle cx="82" cy="188" r="28" className="graph-node graph-node-origin" />
+        <text x="82" y="192" className="graph-node-label origin">WAN</text>
+        {jewelLabels.map((label, index) => {
+          const y = 80 + index * 68;
+          return (
+            <g key={`${label}-${index}`}>
+              <circle cx="646" cy={y} r="25" className="graph-node graph-node-jewel" />
+              <text x="646" y={y + 4} className="graph-node-label jewel">{label.slice(0, 10)}</text>
+            </g>
+          );
+        })}
+      </svg>
+      )}
+      <div className="attack-path-chips">
+        {visiblePaths.length === 0 ? (
+          <span>Sem caminho validado no escopo atual.</span>
+        ) : visiblePaths.map((item) => (
+          <span key={item.id || item.title}>
+            <i className={`sk-dot sk-dot--${String(item.severity || "info").toLowerCase()}`} />
+            <b>{item.id || "SK"}</b>
+            {item.title}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const RUNNING_STATES = ["running", "queued", "retrying"];
+
+function MissionFeedPanel({ scans = [], tools = [], flows = [], selectedScan }) {
+  const feed = useMemo(() => [
+    ...scans.slice(0, 3).map((scan) => ({
+      t: formatDateTime(scan.updated_at || scan.created_at),
+      actor: `scan #${scan.id}`,
+      msg: `${scan.target_query || "alvo"} · ${scan.current_step || scan.status || "em execução"}`,
+      sev: String(scan.status || "").toLowerCase() === "failed" ? "critical" : "info",
+    })),
+    ...tools.slice(0, 3).map((tool) => ({
+      t: "tool",
+      actor: tool.tool || "kali",
+      msg: `${Number(tool.attempts || 0)} execuções · ${Number(tool.success_rate || 0).toFixed(0)}% sucesso`,
+      sev: Number(tool.success_rate || 0) >= 70 ? "low" : "medium",
+    })),
+    ...flows.slice(0, 2).map((flow) => ({
+      t: "agent",
+      actor: flow.stage || "supervisor",
+      msg: `${Number(flow.events || 0)} eventos · ${Number(flow.success_rate || 0).toFixed(0)}% sucesso`,
+      sev: "info",
+    })),
+  ].slice(0, 8), [scans, tools, flows]);
+
+  // Feed ao vivo: revela as linhas progressivamente (efeito "chegando agora")
+  const [visible, setVisible] = useState(feed.length || 1);
+  useEffect(() => {
+    if (feed.length <= 1) { setVisible(feed.length); return; }
+    setVisible(1);
+    const iv = setInterval(() => {
+      setVisible((n) => {
+        if (n >= feed.length) { clearInterval(iv); return n; }
+        return n + 1;
+      });
+    }, 1100);
+    return () => clearInterval(iv);
+  }, [feed.length]);
+
+  // Técnica/atividade em execução — dado REAL do scan rodando (current_step + progresso)
+  const runningScan =
+    scans.find((s) => RUNNING_STATES.includes(String(s.status || "").toLowerCase())) ||
+    (RUNNING_STATES.includes(String(selectedScan?.status || "").toLowerCase()) ? selectedScan : null);
+
+  return (
+    <div className="mission-feed">
+      <div className="mission-feed-head">
+        <strong>Acontecendo agora</strong>
+        <span><i />ao vivo</span>
+      </div>
+
+      <div className="mission-technique">
+        {runningScan ? (
+          <>
+            <span className="mission-technique-label">Em execução · scan #{runningScan.id}</span>
+            <strong className="sk-mono">{runningScan.current_step || "iniciando…"}</strong>
+            <div className="mission-progress"><i style={{ width: `${clampPct(runningScan.mission_progress)}%` }} /></div>
+            <span className="mission-technique-meta">{clampPct(runningScan.mission_progress)}% · {runningScan.target_query || "alvo"}</span>
+          </>
+        ) : (
+          <span className="mission-technique-idle">Nenhum scan em execução no momento.</span>
+        )}
+      </div>
+
+      <div className="mission-scan-stack">
+        {scans.slice(0, 3).map((scan) => (
+          <div key={scan.id} className={Number(scan.id) === Number(selectedScan?.id) ? "active" : ""}>
+            <div><b>#{scan.id} {scan.target_query || "alvo"}</b><span>{scan.status}</span></div>
+            <div className="mission-progress"><i style={{ width: `${clampPct(scan.mission_progress)}%` }} /></div>
+          </div>
+        ))}
+      </div>
+      <div className="mission-feed-lines">
+        {feed.length === 0 && <p>Sem eventos recentes para exibir.</p>}
+        {feed.slice(0, visible).map((item, index) => (
+          <div key={`${item.actor}-${index}`} className={index === visible - 1 ? "feed-new" : ""}>
+            <time>{item.t}</time>
+            <b>{item.actor}</b>
+            <span className={`feed-${item.sev}`}>{item.msg}</span>
+          </div>
+        ))}
+        <em>▍</em>
+      </div>
+    </div>
+  );
+}
+
+function SurfaceHeatmap({ rows = [] }) {
+  const columns = ["critical", "high", "medium", "low"];
+  const max = Math.max(1, ...rows.flatMap((row) => columns.map((key) => Number(row?.[key] || 0))));
+  return (
+    <div className="cockpit-panel heatmap-panel">
+      <div className="cockpit-panel-head">
+        <div>
+          <h3>Heatmap · superfície × severidade</h3>
+          <span>onde os achados se acumulam</span>
+        </div>
+      </div>
+      <div className="heatmap-grid">
+        <span />
+        {columns.map((col) => <b key={col}>{SEVERITY_LABELS[col]}</b>)}
+        <b>Total</b>
+        {rows.map((row) => (
+          <div className="heatmap-row" key={row.label}>
+            <strong>{row.label}</strong>
+            {columns.map((col) => {
+              const value = Number(row?.[col] || 0);
+              const intensity = value ? 0.16 + (value / max) * 0.78 : 0;
+              return (
+                <span
+                  key={col}
+                  className={`heat-cell heat-${col}`}
+                  style={{ "--heat-alpha": intensity }}
+                  title={`${row.label} · ${SEVERITY_LABELS[col]}: ${value}`}
+                >
+                  {value || ""}
+                </span>
+              );
+            })}
+            <em>{columns.reduce((acc, col) => acc + Number(row?.[col] || 0), 0)}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -144,6 +420,7 @@ export default function DashboardPage() {
   const [crownJewels, setCrownJewels] = useState([]);
   const [osintPhaseZero, setOsintPhaseZero] = useState(null);
   const [verificationStats, setVerificationStats] = useState({ confirmed: 0, candidate: 0, hypothesis: 0, refuted: 0, none: 0, total: 0 });
+  const [cockpitData, setCockpitData] = useState(null);
 
   // ── Crown Jewels + OSINT Phase Zero (per selected scan) ──────────────────
   useEffect(() => {
@@ -154,6 +431,15 @@ export default function DashboardPage() {
     client.get(`/api/scans/${selectedSubdomainScanId}/osint`)
       .then(({ data }) => setOsintPhaseZero(data?.osint || null))
       .catch(() => setOsintPhaseZero(null));
+  }, [selectedSubdomainScanId]);
+
+  // ── Cockpit consolidado — dado REAL por scan (/api/cockpit): heatmap,
+  //    fila com EPSS+MITRE, joias, score. Sem fabricar nada. ────────────────
+  useEffect(() => {
+    const qs = selectedSubdomainScanId ? `?scan_id=${selectedSubdomainScanId}` : "";
+    client.get(`/api/cockpit${qs}`)
+      .then(({ data }) => setCockpitData(data || null))
+      .catch(() => setCockpitData(null));
   }, [selectedSubdomainScanId]);
 
   // ── Verification status breakdown (T1 Evidence Gate) ─────────────────────
@@ -525,828 +811,289 @@ export default function DashboardPage() {
     .slice()
     .sort((a, b) => Number(a.score || 0) - Number(b.score || 0))
     .slice(0, 4);
-  const attackQueue = redteamFindings.map((item, idx) => ({
-    id: item.finding_id || item.id || idx,
-    title: item.title || item.name || item.problem || "Achado sem titulo",
-    severity: item.severity || "info",
-    target: findingTarget(item),
-    reason: item.operational_reason || item.financial_reason || item.recommendation || `${item.count || 1} ocorrência(s) no ambiente`,
-  }));
+  // Fila de ataque: prioriza dado REAL do /api/cockpit (EPSS FIRST.org, MITRE
+  // derivado, verification_status, flag de joia). Fallback ao insights só
+  // enquanto o cockpit não respondeu — sem inventar EPSS/MITRE.
+  const cockpitFindings = Array.isArray(cockpitData?.findings) ? cockpitData.findings : [];
+  const attackQueue = cockpitFindings.length
+    ? cockpitFindings.map((f) => ({
+        id: f.finding_id || f.id,
+        title: f.title || "Achado sem título",
+        severity: String(f.severity || "info").toLowerCase(),
+        target: f.target || "—",
+        cve: f.cve || "—",
+        cvss: Number(f.cvss || 0),
+        epss: f.epss == null ? 0 : Number(f.epss),
+        mitre: Array.isArray(f.mitre) && f.mitre.length ? f.mitre.map((m) => m.id).join(", ") : "—",
+        status: f.status || "candidato",
+        isJewel: Boolean(f.is_jewel),
+        reason: f.is_jewel
+          ? "↳ atinge joia da coroa"
+          : (f.tool ? `via ${f.tool}` : `${SEVERITY_LABELS[String(f.severity || "info").toLowerCase()] || ""} no ambiente`),
+      }))
+    : redteamFindings.map((item, idx) => ({
+        id: item.finding_id || item.id || idx,
+        title: item.title || item.name || item.problem || "Achado sem titulo",
+        severity: item.severity || "info",
+        target: findingTarget(item),
+        cve: item.cve || item.cve_id || item.cve_ids?.[0] || "—",
+        cvss: Number(item.cvss || item.cvss_score || item.score || 0),
+        epss: null,  // insights não tem EPSS — honesto: "—"
+        mitre: "—",  // insights não tem MITRE por achado — honesto: "—"
+        status: item.supervisor_validation?.status || item.verification_status || item.status || "candidato",
+        reason: item.operational_reason || item.financial_reason || item.recommendation || `${item.count || 1} ocorrência(s) no ambiente`,
+      }));
+
+  // Joias reais do cockpit (escopadas por scan, sempre carregadas via /api/cockpit)
+  const cockpitJewels = Array.isArray(cockpitData?.crown_jewels) && cockpitData.crown_jewels.length
+    ? cockpitData.crown_jewels
+    : crownJewels;
 
   const showEmptyScanNote = Boolean(selectedTarget) && stats && stats.scans === 0;
+  const selectedScan = (
+    scanRows.find((scan) => Number(scan.id) === Number(selectedSubdomainScanId))
+    || scanRows[0]
+    || null
+  );
+  const selectedScanId = selectedSubdomainScanId || selectedScan?.id || "";
+  const cockpitTarget = selectedTarget || selectedScan?.target_query || "todos os alvos";
+  const cockpitScore = Number(stats?.external_rating_score || scopedVulnerabilityRating?.score || 0);
+  const cockpitGrade = stats?.external_rating_grade || scopedVulnerabilityRating?.grade || gradeFromScore(cockpitScore);
+  const cockpitTone = ratingTone(cockpitScore);
+  const activeScanRows = scanRows.filter((scan) => ["running", "queued", "retrying"].includes(String(scan?.status || "").toLowerCase()));
+  const scanOptions = scanRows.slice(0, 80);
+  // Heatmap: dado REAL por finding vindo de /api/cockpit (classificação por
+  // sinal real do achado: domínio, url, ferramenta, título). Sem fabricar
+  // distribuição — se o backend ainda não respondeu, a matriz fica zerada.
+  const HEAT_CATEGORIES = [
+    "Aplicações web",
+    "APIs",
+    "Infraestrutura / IPs",
+    "Painéis & consoles",
+    "DNS / certificados",
+  ];
+  const heatMatrix = cockpitData?.heatmap?.matrix || {};
+  const heatmapRows = (cockpitData?.heatmap?.categories || HEAT_CATEGORIES).map((label) => {
+    const cell = heatMatrix[label] || {};
+    return {
+      label,
+      critical: Number(cell.critical || 0),
+      high: Number(cell.high || 0),
+      medium: Number(cell.medium || 0),
+      low: Number(cell.low || 0),
+    };
+  });
+  const exportSelectedReport = () => {
+    if (selectedScan?.id) {
+      window.open(`/api/scans/${selectedScan.id}/pentest-report`, "_blank", "noopener,noreferrer");
+      return;
+    }
+    window.location.assign("/relatorios");
+  };
+  const handleScanSelect = (event) => {
+    const value = event.target.value;
+    if (!value) {
+      setSelectedSubdomainScanId(null);
+      setSelectedTarget("");
+      setSearchInput("");
+      return;
+    }
+    const scan = scanRows.find((row) => Number(row.id) === Number(value));
+    setSelectedSubdomainScanId(value);
+    if (scan?.target_query) {
+      setSelectedGroup("");
+      setSelectedTarget(scan.target_query);
+      setSearchInput(scan.target_query);
+    }
+  };
 
   return (
     <main className="dash">
-      <div className="content" style={{ padding: "32px 40px 56px" }}>
-
-        {/* ===== Filters ===== */}
-        <section className="filters">
-          <h2>Filtros</h2>
-          <div className="filters-grid">
-            <div className="ctrl">
-              <label>Grupo / Cliente</label>
-              <select
-                value={selectedGroup}
-                onChange={(e) => {
-                  setSelectedGroup(e.target.value);
-                  setSelectedTarget("");
-                  setSearchInput("");
-                }}
-              >
-                <option value="">Todos os grupos</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="ctrl">
-              <label>Domínios</label>
-              <select
-                value={selectedTarget}
-                onChange={(e) => {
-                  const val = String(e.target.value || "");
-                  setSelectedGroup("");
-                  setSelectedTarget(val);
-                  setSearchInput(val);
-                }}
-              >
-                <option value="">Todos os domínios</option>
-                {domainOptions.map((domain) => (
-                  <option key={domain} value={domain}>{domain}</option>
-                ))}
-              </select>
-            </div>
-            <div className="ctrl">
-              <label>Domínio / Alvo</label>
-              <input
-                type="text"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
-                placeholder="Filtrar por domínio…"
-              />
-            </div>
-            <div className="actions">
-              <button className="btn btn-primary" onClick={handleSearch} disabled={loading || isSearching}>
-                {isSearching || loading ? "Buscando…" : "Buscar"}
-              </button>
-              <button className="btn btn-ghost" onClick={clearFilters}>Limpar</button>
-            </div>
+      <div className="content cockpit-shell">
+        <section className="cockpit-page-head">
+          <div>
+            <div className="sk-eyebrow">Cockpit RedTeam</div>
+            <h1>O que atacar primeiro</h1>
+            <p>
+              {cockpitTarget} · {selectedScan ? `scan #${selectedScan.id}` : "visão global"} ·
+              {" "}{aggregationLabel(stats?.aggregation_mode)}
+            </p>
           </div>
+          <div className="cockpit-actions">
+            <select value={selectedScanId || ""} onChange={handleScanSelect} aria-label="Selecionar scan do cockpit">
+              <option value="">Todos os scans</option>
+              {scanOptions.map((scan) => (
+                <option key={scan.id} value={scan.id}>
+                  #{scan.id} · {scan.target_query || "alvo"} · {scan.status}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn btn-ghost" onClick={exportSelectedReport}>Exportar relatório</button>
+            <button type="button" className="btn btn-primary" onClick={() => window.location.assign("/scan")}>Novo scan</button>
+          </div>
+        </section>
 
+        <section className="cockpit-filter-strip">
+          <div className="ctrl">
+            <label>Grupo / Cliente</label>
+            <select
+              value={selectedGroup}
+              onChange={(e) => {
+                setSelectedGroup(e.target.value);
+                setSelectedTarget("");
+                setSearchInput("");
+                setSelectedSubdomainScanId(null);
+              }}
+            >
+              <option value="">Todos os grupos</option>
+              {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+          </div>
+          <div className="ctrl">
+            <label>Alvo</label>
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+              placeholder="domínio, subdomínio ou URL…"
+            />
+          </div>
+          <div className="cockpit-filter-actions">
+            <button type="button" className="btn btn-primary" onClick={handleSearch} disabled={loading || isSearching}>
+              {isSearching || loading ? "Buscando…" : "Buscar"}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={clearFilters}>Limpar</button>
+          </div>
           {!!stats && (
-            <div className="agg-note">
-              <span><b>{aggregationLabel(stats.aggregation_mode)}</b></span>
-              <span><b>{Number(stats.aggregation_targets || 1)} alvo(s)</b> considerados</span>
-            </div>
-          )}
-
-          {showEmptyScanNote && (
-            <div className="scope-empty">
-              Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
+            <div className="cockpit-scope-note">
+              <b>{Number(stats.aggregation_targets || 1)}</b> alvo(s) · {Number(stats.scans || 0)} ciclo(s)
             </div>
           )}
         </section>
 
-        {/* ===== Red Team Cockpit ===== */}
-        <section className="redteam">
-          <div className="redteam-head">
+        {showEmptyScanNote && (
+          <div className="scope-empty">
+            Nenhum scan encontrado com esse domínio. Ele pode não ter análises executadas ainda.
+          </div>
+        )}
+
+        <section className="cockpit-hero">
+          <div className="cockpit-score">
+            <div className="score-ring">
+              <strong>{cockpitScore.toFixed(0)}</strong>
+              <span>rating</span>
+            </div>
             <div>
-              <div className="eb">Red Team Cockpit</div>
-              <h2>O que atacar primeiro, por quê e com qual evidência.</h2>
-            </div>
-            <p>Foco operacional para o executor: riscos exploráveis, alvos com maior retorno, cobertura de ferramenta e lacunas que o Blue Team precisa enxergar.</p>
-          </div>
-
-          <div className="redteam-kpis">
-            <div className="rt-kpi danger">
-              <span>Críticos + Altos</span>
-              <strong>{criticalHighCount}</strong>
-              <small>prioridade de exploração e validação</small>
-            </div>
-            <div className="rt-kpi">
-              <span>Achados abertos</span>
-              <strong>{Number(stats?.findings_open || stats?.vulnerability_findings || 0)}</strong>
-              <small>superfície ainda acionável</small>
-            </div>
-            <div className="rt-kpi warn">
-              <span>Gaps de detecção</span>
-              <strong>{gapCount}</strong>
-              <small>telemetria ausente/parcial</small>
+              <div className={`score-grade ${cockpitTone}`}>
+                <b>{cockpitGrade}</b>
+                <span>{Number(ratingTimeline?.length || 0)} scans no histórico</span>
+              </div>
+              <MiniSparkline data={ratingTimeline} />
             </div>
           </div>
+          <div className="cockpit-kpi danger">
+            <span>Críticos + Altos</span>
+            <strong>{criticalHighCount}</strong>
+            <small>exploráveis ou aguardando validação</small>
+          </div>
+          <div className="cockpit-kpi">
+            <span>Ativos expostos</span>
+            <strong>{Number(selectedSubdomainScan?.subdomain_count || totalDiscoveredSubdomains || stats?.aggregation_targets || 0)}</strong>
+            <small>hosts na superfície analisada</small>
+          </div>
+          <div className="cockpit-kpi warn">
+            <span>Joias em risco</span>
+            <strong>{cockpitJewels.length}</strong>
+            <small>com achado ou caminho correlacionado</small>
+          </div>
+          <div className="cockpit-kpi ok">
+            <span>Resiliência BAS</span>
+            <strong>{resilience.toFixed(0)}%</strong>
+            <small>{gapCount} gap(s) de detecção</small>
+          </div>
+          <div className="cockpit-severity">
+            <span>Severidade</span>
+            <SeverityBar stats={stats} />
+            <small>
+              {Number(stats?.critical || 0)}C · {Number(stats?.high || 0)}A · {Number(stats?.medium || 0)}M · {Number(stats?.low || 0)}B
+            </small>
+          </div>
+        </section>
 
-          <div className="scan-state-card">
-            <div className="scan-state-head">
+        <section className="cockpit-main-grid">
+          <AttackGraphPanel paths={attackQueue} jewels={cockpitJewels} />
+          <MissionFeedPanel scans={activeScanRows.length ? activeScanRows : scanRows} tools={basTools} flows={basAgentFlow} selectedScan={selectedScan} />
+        </section>
+
+        <section className="cockpit-lower-grid">
+          <SurfaceHeatmap rows={heatmapRows} />
+          <div className="cockpit-panel frameworks-panel">
+            <div className="cockpit-panel-head">
               <div>
-                <h3>Estado dos scans</h3>
-                <span>fila operacional agora</span>
+                <h3>Frameworks pressionados</h3>
+                <span>MITRE, OWASP, CIS e controles executivos</span>
               </div>
-              <strong>{scanRows.length}</strong>
             </div>
-            <div className="scan-state-grid">
-              <div className="run"><span>Rodando</span><b>{scansRunning}</b></div>
-              <div className="queue"><span>Executando / fila</span><b>{scansExecuting}</b></div>
-              <div className="stop"><span>Parados / pausados</span><b>{scansStopped}</b></div>
-              <div className="done"><span>Concluídos</span><b>{scansCompleted}</b></div>
-              <div className="fail"><span>Falhos / bloqueados</span><b>{scansFailed}</b></div>
-            </div>
-          </div>
-
-          <div className="subdomain-card">
-            <div className="subdomain-head">
-              <div>
-                <h3>Subdomínios encontrados</h3>
-                <span>{subdomainInventory.length} scans · {totalDiscoveredSubdomains} subdomínios</span>
-              </div>
-              {!!selectedSubdomainScan && <strong>{Number(selectedSubdomainScan.subdomain_count || 0)}</strong>}
-            </div>
-            {subdomainInventory.length === 0 ? (
-              <div className="rt-empty">Nenhum subdomínio descoberto nos scans carregados.</div>
-            ) : (
-              <>
-                <div className="subdomain-tabs">
-                  {subdomainInventory.map((scan) => (
-                    <button
-                      key={scan.scan_id}
-                      className={Number(scan.scan_id) === Number(selectedSubdomainScan?.scan_id) ? "active" : ""}
-                      onClick={() => setSelectedSubdomainScanId(scan.scan_id)}
-                      type="button"
-                    >
-                      <b>#{scan.scan_id}</b>
-                      <em title={scan.target_query || ""}>{scan.target_query || "alvo não informado"}</em>
-                      <span>{Number(scan.subdomain_count || 0)} subs</span>
-                    </button>
-                  ))}
+            {weakFrameworks.map((fw) => {
+              const score = clampPct(fw.score);
+              return (
+                <div key={fw.name} className="framework-row">
+                  <div><b>{fw.name}</b><span>{score.toFixed(0)}%</span></div>
+                  <i><em style={{ width: `${score}%` }} /></i>
                 </div>
-                <div className="subdomain-summary">
-                  <div className="status-descoberto"><span>Descoberto</span><b>{Number(selectedSubdomainScan?.status_counts?.Descoberto || 0)}</b></div>
-                  <div><span>BackLog</span><b>{Number(selectedSubdomainScan?.status_counts?.BackLog || 0)}</b></div>
-                  <div className="status-em-analise"><span>Em Análise</span><b>{Number(selectedSubdomainScan?.status_counts?.["Em Análise"] || 0)}</b></div>
-                  <div className="status-executado"><span>Executado</span><b>{Number(selectedSubdomainScan?.status_counts?.Executado || 0)}</b></div>
-                  <div className="status-finalizado"><span>Finalizado</span><b>{Number(selectedSubdomainScan?.status_counts?.Finalizado || 0)}</b></div>
-                  <div><span>Crítico/Alto</span><b>{Number(selectedSubdomainScan?.severity?.critical || 0) + Number(selectedSubdomainScan?.severity?.high || 0)}</b></div>
-                </div>
-                {selectedSubdomainScan?.subdomain_count > 0 && (() => {
-                  const pct = Number(selectedSubdomainScan?.progress_pct || 0);
-                  const done = Number(selectedSubdomainScan?.status_counts?.Executado || 0) + Number(selectedSubdomainScan?.status_counts?.Finalizado || 0);
-                  const total = Number(selectedSubdomainScan?.subdomain_count || 0);
-                  const createdAt = selectedSubdomainScan?.created_at;
-                  const updatedAt = selectedSubdomainScan?.updated_at;
-                  const scanStatus = selectedSubdomainScan?.scan_status || "";
-                  const isRunning = ["running","queued","retrying"].includes(scanStatus);
-                  const startMs = createdAt ? new Date(createdAt).getTime() : null;
-                  const endMs = !isRunning && updatedAt ? new Date(updatedAt).getTime() : null;
-                  const elapsedMs = startMs ? (endMs || Date.now()) - startMs : null;
-                  const etaMs = isRunning && pct > 0 && pct < 100 && elapsedMs ? (elapsedMs / pct) * (100 - pct) : null;
-                  const fmt = (ms) => {
-                    const s = Math.floor(ms / 1000);
-                    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-                    return h > 0 ? `${h}h ${String(m).padStart(2,"0")}m` : m > 0 ? `${m}m ${String(ss).padStart(2,"0")}s` : `${ss}s`;
-                  };
-                  return (
-                    <div className="subdomain-progress">
-                      <div className="subdomain-progress-bar">
-                        <div className="subdomain-progress-fill" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="subdomain-progress-label">
-                        <strong>{pct.toFixed(1)}%</strong> · {done}/{total} hosts escaneados
-                        {elapsedMs !== null && <> · ⏱ {fmt(elapsedMs)}</>}
-                        {etaMs !== null && <> · ⏳ ~{fmt(etaMs)}</>}
-                        {!isRunning && elapsedMs !== null && <> · ✓ concluído</>}
-                      </span>
-                    </div>
-                  );
-                })()}
-                <div className="subdomain-list">
-                  {selectedSubdomains.length === 0 ? (
-                    <div className="rt-empty">Sem subdomínios detalhados para este scan.</div>
-                  ) : selectedSubdomains.map((row) => {
-                    const statusCls = {
-                      "Descoberto": "status-descoberto",
-                      "Em Análise": "status-em-analise",
-                      "Executado":  "status-executado",
-                      "Finalizado": "status-finalizado",
-                      "BackLog":    "status-backlog",
-                    }[row.status] || "";
-                    return (
-                      <div key={`${selectedSubdomainScan.scan_id}-${row.subdomain}`} className="subdomain-row">
-                        <div>
-                          <b>{row.subdomain}</b>
-                          <span>
-                            <em className={`subdomain-status-badge ${statusCls}`}>{row.status}</em>
-                            &nbsp;·&nbsp;{Number(row.tool_runs || 0)} execuções
-                          </span>
-                        </div>
-                        <div className="sev-mini">
-                          <span className="crit">{Number(row.severity?.critical || 0)}</span>
-                          <span className="high">{Number(row.severity?.high || 0)}</span>
-                          <span className="med">{Number(row.severity?.medium || 0)}</span>
-                          <span className="low">{Number(row.severity?.low || 0)}</span>
-                          <strong>{Number(row.findings_total || 0)}</strong>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="redteam-grid">
-            <div className="rt-card rt-priority">
-              <div className="rt-card-head">
-                <h3>Fila de ataque recomendada</h3>
-                <span>{attackQueue.length} itens</span>
-              </div>
-              {attackQueue.length === 0 ? (
-                <div className="rt-empty">Sem vulnerabilidades priorizadas no escopo atual.</div>
-              ) : attackQueue.map((item, idx) => (
-                <div key={`${item.id}-${idx}`} className="rt-finding">
-                  <div className={`sev-dot sev-${String(item.severity).toLowerCase()}`}>{sevLabel(item.severity)}</div>
-                  <div>
-                    <b>{item.title}</b>
-                    <span>{item.target}</span>
-                    <p>{item.reason}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="rt-card">
-              <div className="rt-card-head">
-                <h3>Frameworks mais pressionados</h3>
-                <span>Blue Team</span>
-              </div>
-              {weakFrameworks.map((fw) => (
-                <div key={fw.name} className="rt-framework">
-                  <div><b>{fw.name}</b><span>{Number(fw.score || 0).toFixed(0)}%</span></div>
-                  <div className="rt-bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(fw.score || 0)))}%` }} /></div>
-                </div>
-              ))}
+              );
+            })}
+            <div className="framework-callout">
+              <b>{gapCount}</b> lacuna(s) de detecção e <b>{Number(basSummary.validated_risk_findings || 0)}</b> risco(s) validados no ciclo.
             </div>
           </div>
         </section>
 
-        {/* ===== Intelligence — Crown Jewels · OSINT · Evidence Gate ===== */}
-        <section className="intel-section">
-          <div className="intel-head">
+        <section className="cockpit-panel attack-queue-panel">
+          <div className="attack-queue-head">
             <div>
-              <div className="eb">Inteligência Ofensiva</div>
-              <h2>Crown Jewels · OSINT Phase Zero · Evidence Gate</h2>
+              <h3>Fila de ataque recomendada</h3>
+              <span>ordenada por severidade, alvo, evidência e valor operacional</span>
             </div>
-            <p>Alvos de alto valor priorizados, exposições passivas detectadas e qualidade de evidência por achado.</p>
+            <b>{attackQueue.length} itens</b>
           </div>
-
-          <div className="intel-grid">
-            {/* ── Crown Jewels widget ── */}
-            <div className="intel-card">
-              <div className="intel-card-head">
-                <h3>⭐ Crown Jewels</h3>
-                <span>{crownJewels.length} alvo(s) crítico(s)</span>
-              </div>
-              {crownJewels.length === 0 ? (
-                <div className="intel-empty">
-                  Nenhum Crown Jewel identificado ainda.
-                  <br /><small>Execute um scan com M1 habilitado para detectar alvos de alto valor.</small>
-                </div>
-              ) : (
-                <div className="cj-list">
-                  {crownJewels.slice(0, 8).map((cj, idx) => {
-                    const label = String(cj.label || cj.type || "high_value");
-                    const colorMap = {
-                      "identity/auth": "#ef4444",
-                      "payment/financial": "#dc2626",
-                      "admin_panel": "#f97316",
-                      "data_store": "#8b5cf6",
-                      "cicd": "#3b82f6",
-                      "secrets_mgmt": "#ec4899",
-                      "api_gateway": "#06b6d4",
-                      "monitoring": "#84cc16",
-                      "mail": "#f59e0b",
-                      "staging_dev": "#6b7280",
-                    };
-                    const color = colorMap[label] || "#64748b";
-                    const delta = Number(cj.priority_delta || 0);
-                    return (
-                      <div key={`cj-${idx}-${cj.target}`} className="cj-row">
-                        <div className="cj-target">
-                          <b>{cj.target || cj.subdomain || "?"}</b>
-                          <span
-                            className="cj-label"
-                            style={{ background: `${color}22`, color, border: `1px solid ${color}55` }}
-                          >
-                            {label.replace(/_/g, " ")}
-                          </span>
-                        </div>
-                        <div className="cj-delta" style={{ color: "#ef4444" }}>
-                          ↑ {Math.abs(delta)} prioridade
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* ── OSINT Phase Zero widget ── */}
-            <div className="intel-card">
-              <div className="intel-card-head">
-                <h3>🔍 OSINT Phase Zero</h3>
-                <span>recon passivo antes do P01</span>
-              </div>
-              {!osintPhaseZero ? (
-                <div className="intel-empty">
-                  OSINT Phase Zero não executado.
-                  <br /><small>Disponível após o próximo scan completo com L1 ativado.</small>
-                </div>
-              ) : (
-                <div className="osint-summary">
-                  {/* HIBP */}
-                  {osintPhaseZero.hibp && (
-                    <div className="osint-block">
-                      <div className="osint-block-head">
-                        <span className="osint-icon">📧</span>
-                        <b>HIBP — Vazamentos de senha</b>
-                      </div>
-                      <div className="osint-stats">
-                        <div>
-                          <span>Emails verificados</span>
-                          <b>{Number(osintPhaseZero.hibp.emails_checked || 0)}</b>
-                        </div>
-                        <div className={Number(osintPhaseZero.hibp.breached_count || 0) > 0 ? "osint-hit" : ""}>
-                          <span>Comprometidos</span>
-                          <b>{Number(osintPhaseZero.hibp.breached_count || 0)}</b>
-                        </div>
-                        <div>
-                          <span>Breaches</span>
-                          <b>{Number(osintPhaseZero.hibp.breach_names?.length || 0)}</b>
-                        </div>
-                      </div>
-                      {Array.isArray(osintPhaseZero.hibp.breach_names) && osintPhaseZero.hibp.breach_names.length > 0 && (
-                        <div className="osint-tags">
-                          {osintPhaseZero.hibp.breach_names.slice(0, 4).map((b) => (
-                            <span key={b} className="osint-tag osint-tag-red">{b}</span>
-                          ))}
-                          {osintPhaseZero.hibp.breach_names.length > 4 && (
-                            <span className="osint-tag">+{osintPhaseZero.hibp.breach_names.length - 4}</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* GitHub Dorks */}
-                  {osintPhaseZero.github_dorks && (
-                    <div className="osint-block">
-                      <div className="osint-block-head">
-                        <span className="osint-icon">🐙</span>
-                        <b>GitHub — Segredos expostos</b>
-                      </div>
-                      <div className="osint-stats">
-                        <div>
-                          <span>Queries executadas</span>
-                          <b>{Number(osintPhaseZero.github_dorks.queries_run || 0)}</b>
-                        </div>
-                        <div className={Number(osintPhaseZero.github_dorks.results_count || 0) > 0 ? "osint-hit" : ""}>
-                          <span>Resultados</span>
-                          <b>{Number(osintPhaseZero.github_dorks.results_count || 0)}</b>
-                        </div>
-                        <div className={Number(osintPhaseZero.github_dorks.high_risk_count || 0) > 0 ? "osint-hit" : ""}>
-                          <span>Alto risco</span>
-                          <b>{Number(osintPhaseZero.github_dorks.high_risk_count || 0)}</b>
-                        </div>
-                      </div>
-                      {Array.isArray(osintPhaseZero.github_dorks.repos_found) && osintPhaseZero.github_dorks.repos_found.length > 0 && (
-                        <div className="osint-tags">
-                          {osintPhaseZero.github_dorks.repos_found.slice(0, 3).map((r) => (
-                            <span key={r} className="osint-tag osint-tag-amber">{String(r).split("/").slice(-1)[0]}</span>
-                          ))}
-                          {osintPhaseZero.github_dorks.repos_found.length > 3 && (
-                            <span className="osint-tag">+{osintPhaseZero.github_dorks.repos_found.length - 3}</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Shodan ASN */}
-                  {osintPhaseZero.shodan && (
-                    <div className="osint-block">
-                      <div className="osint-block-head">
-                        <span className="osint-icon">🌐</span>
-                        <b>Shodan — ASN sweep</b>
-                      </div>
-                      <div className="osint-stats">
-                        <div>
-                          <span>ASN</span>
-                          <b>{osintPhaseZero.shodan.asn || "—"}</b>
-                        </div>
-                        <div>
-                          <span>IPs descobertos</span>
-                          <b>{Number(osintPhaseZero.shodan.ip_count || 0)}</b>
-                        </div>
-                        <div className={Number(osintPhaseZero.shodan.vulns_found || 0) > 0 ? "osint-hit" : ""}>
-                          <span>CVEs expostos</span>
-                          <b>{Number(osintPhaseZero.shodan.vulns_found || 0)}</b>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* ── Evidence Gate — Verification Status Breakdown ── */}
-            <div className="intel-card">
-              <div className="intel-card-head">
-                <h3>🔬 Evidence Gate</h3>
-                <span>{verificationStats.total} achados categorizados</span>
-              </div>
-              {verificationStats.total === 0 ? (
-                <div className="intel-empty">
-                  Nenhum achado com status de verificação.
-                  <br /><small>Os achados serão classificados automaticamente após scans com T1 ativado.</small>
-                </div>
-              ) : (() => {
-                const total = verificationStats.total || 1;
-                const pctConf = Math.round((verificationStats.confirmed / total) * 100);
-                const pctCand = Math.round((verificationStats.candidate / total) * 100);
-                const pctHyp = Math.round((verificationStats.hypothesis / total) * 100);
-                const pctRef = Math.round((verificationStats.refuted / total) * 100);
-                return (
-                  <div className="vgate-breakdown">
-                    {/* stacked bar */}
-                    <div className="vgate-bar">
-                      {verificationStats.confirmed > 0 && (
-                        <div style={{ width: `${pctConf}%`, background: "#10b981" }} title={`Confirmado: ${verificationStats.confirmed}`} />
-                      )}
-                      {verificationStats.candidate > 0 && (
-                        <div style={{ width: `${pctCand}%`, background: "#f59e0b" }} title={`Candidato: ${verificationStats.candidate}`} />
-                      )}
-                      {verificationStats.hypothesis > 0 && (
-                        <div style={{ width: `${pctHyp}%`, background: "#6366f1" }} title={`Hipótese: ${verificationStats.hypothesis}`} />
-                      )}
-                      {verificationStats.refuted > 0 && (
-                        <div style={{ width: `${pctRef}%`, background: "#6b7280" }} title={`Refutado: ${verificationStats.refuted}`} />
-                      )}
-                    </div>
-                    <div className="vgate-legend">
-                      <div className="vgate-item">
-                        <div className="vgate-dot" style={{ background: "#10b981" }} />
-                        <div>
-                          <b>{verificationStats.confirmed}</b>
-                          <span>Confirmado</span>
-                        </div>
-                        <div className="vgate-pct">{pctConf}%</div>
-                      </div>
-                      <div className="vgate-item">
-                        <div className="vgate-dot" style={{ background: "#f59e0b" }} />
-                        <div>
-                          <b>{verificationStats.candidate}</b>
-                          <span>Candidato</span>
-                        </div>
-                        <div className="vgate-pct">{pctCand}%</div>
-                      </div>
-                      <div className="vgate-item">
-                        <div className="vgate-dot" style={{ background: "#6366f1" }} />
-                        <div>
-                          <b>{verificationStats.hypothesis}</b>
-                          <span>Hipótese</span>
-                        </div>
-                        <div className="vgate-pct">{pctHyp}%</div>
-                      </div>
-                      <div className="vgate-item">
-                        <div className="vgate-dot" style={{ background: "#6b7280" }} />
-                        <div>
-                          <b>{verificationStats.refuted}</b>
-                          <span>Refutado</span>
-                        </div>
-                        <div className="vgate-pct">{pctRef}%</div>
-                      </div>
-                      {verificationStats.none > 0 && (
-                        <div className="vgate-item vgate-item-muted">
-                          <div className="vgate-dot" style={{ background: "#d1d5db" }} />
-                          <div>
-                            <b>{verificationStats.none}</b>
-                            <span>Sem status</span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <div className="vgate-summary">
-                      <div className="vgate-quality">
-                        <span>Qualidade de evidência</span>
-                        <b style={{ color: pctConf >= 50 ? "#10b981" : pctConf >= 25 ? "#f59e0b" : "#ef4444" }}>
-                          {pctConf >= 50 ? "Alta" : pctConf >= 25 ? "Média" : "Baixa"}
-                        </b>
-                      </div>
-                      <div className="vgate-quality">
-                        <span>Taxa de confirmação</span>
-                        <b>{pctConf}%</b>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        </section>
-
-        {/* ===== BAS Command Center ===== */}
-        <section className="bas">
-          <div className="bas-head">
-            <div>
-              <div className="eb">BAS Command Center</div>
-              <h2>Visão viva do ambiente, ataques simulados, <em>detecção</em> e aprendizagem.</h2>
-            </div>
-            <p>Consolida execução de scans, fluxo dos agentes, ferramentas Kali/MCP, telemetria esperada, gaps de controle, RAG e risco validado.</p>
-          </div>
-
-          {/* 6 BAS metrics */}
-          <div className="bas-metrics">
-            {basMetrics.map((m) => (
-              <div key={m.label} className={`bas-m ${m.tone}`}>
-                <div className="lbl">{m.label}</div>
-                <div className="val">{m.value}{m.unit && <span className="u">{m.unit}</span>}</div>
-                <div className="sub">{m.sub}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Row 1: Funnel · Telemetry · RAG */}
-          <div className="bas-grid-1">
-            <div className="bas-sect">
-              <div className="bas-sect-head">
-                <div>
-                  <h3>Funil ataque × detecção</h3>
-                  <div className="sh-sub">da técnica planejada ao gap confirmado</div>
-                </div>
-                <span className="sh-meta">{Number(basSummary.techniques_exercised || 0)} técnicas</span>
-              </div>
-              <div className="funnel">
-                {basFunnel.length === 0 && <div className="bas-empty">Sem funil BAS calculado.</div>}
-                {basFunnel.map((item) => {
-                  const value = Number(item.value || 0);
-                  const width = Math.round((value / maxFunnel) * 100);
-                  const isGap = String(item.label || "").toLowerCase().includes("gap");
-                  return (
-                    <div key={item.label} className={`funnel-row${isGap ? " gap" : ""}`}>
-                      <div className="top"><span>{item.label}</span><b>{value}</b></div>
-                      <div className="funnel-bar">
-                        <div style={{ width: `${width}%`, minWidth: value > 0 ? "8px" : 0 }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="bas-sect">
-              <h3>Eficácia por fonte de telemetria</h3>
-              <div className="sh-sub">onde o controle enxerga, parcializa ou falha</div>
-              <table className="basT">
-                <thead>
-                  <tr><th>Fonte</th><th style={{ width: 60 }}>Eventos</th><th style={{ width: 160 }}>Eficácia</th></tr>
-                </thead>
-                <tbody>
-                  {basTelemetry.length === 0 && (
-                    <tr><td colSpan={3} className="bas-empty">Sem dados BAS suficientes.</td></tr>
-                  )}
-                  {basTelemetry.map((row) => {
-                    // effectiveness === null → fonte só com eventos passivos
-                    // (recon/OSINT): nada a detectar, não é falha de controle → N/A.
-                    const isNA = row.effectiveness === null || row.effectiveness === undefined;
-                    const eff = Number(row.effectiveness || 0);
-                    const detectable = Number(row.detectable || 0);
-                    return (
-                      <tr key={row.source}>
-                        <td><b>{row.source}</b></td>
-                        <td>{Number(row.total || 0).toLocaleString("pt-BR")}</td>
-                        <td>
-                          {isNA ? (
-                            <span title="Recon/OSINT passivo — sem evento detectável para o controle"
-                                  style={{ color: "var(--ink-muted)", fontSize: 12 }}>N/A (passivo)</span>
-                          ) : (
-                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}
-                                 title={`${detectable} detectável(is): ${row.detected || 0} detectado · ${row.partial || 0} parcial · ${row.gap || 0} falha`}>
-                              <span style={{ fontWeight: 600, width: 32, textAlign: "right" }}>{eff.toFixed(0)}%</span>
-                              <div className="progress-line"><div style={{ width: `${eff}%`, background: effColor(eff) }} /></div>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="bas-sect">
-              <h3>Aprendizagem e RAG</h3>
-              <div className="sh-sub">reuso de conhecimento em técnicas e skills</div>
-              <div className="rag-stat">
-                <div className="top"><span>Cobertura do catálogo</span><b>{Number(basLearning.coverage_percent || 0).toFixed(1)}%</b></div>
-                <div className="progress-line"><div style={{ width: `${Number(basLearning.coverage_percent || 0)}%`, background: "var(--sev-low-solid)" }} /></div>
-              </div>
-              <div className="rag-stat">
-                <div className="top"><span>Utilização em traces</span><b>{Number(basLearning.utilization_percent || 0).toFixed(1)}%</b></div>
-                <div className="progress-line"><div style={{ width: `${Number(basLearning.utilization_percent || 0)}%`, background: "var(--brand-500)" }} /></div>
-              </div>
-              <div className="rag-grid">
-                <div><div className="lbl">Aceitos</div><div className="vv" style={{ color: "var(--sev-low-text)" }}>{Number(basLearning.accepted || 0)}</div></div>
-                <div><div className="lbl">Revisão</div><div className="vv" style={{ color: "var(--sev-medium-text)" }}>{Number(basLearning.pending || 0)}</div></div>
-                <div><div className="lbl">RAG hits</div><div className="vv" style={{ color: "var(--brand-700)" }}>{Number(basLearning.rag_trace_hits || 0)}</div></div>
-              </div>
-            </div>
-          </div>
-
-          {/* Row 2: Tools · AgentFlow · Workers */}
-          <div className="bas-grid-2">
-            <div className="bas-sect">
-              <div className="bas-sect-head">
-                <div>
-                  <h3>Utilização de ferramentas</h3>
-                  <div className="sh-sub">eficiência, falhas e achados por ferramenta</div>
-                </div>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-muted)" }}>{basTools.length} linhas</span>
-              </div>
-              <table className="basT">
-                <thead>
-                  <tr><th>Ferramenta</th><th>Exec.</th><th>Sucesso</th><th>Achados</th><th>Tempo</th></tr>
-                </thead>
-                <tbody>
-                  {basTools.length === 0 && (
-                    <tr><td colSpan={5} className="bas-empty">Sem execuções de ferramentas no escopo.</td></tr>
-                  )}
-                  {basTools.map((tool) => (
-                    <tr key={tool.tool}>
-                      <td className="tool">{tool.tool}</td>
-                      <td>{Number(tool.attempts || 0).toLocaleString("pt-BR")}</td>
-                      <td><b>{Number(tool.success_rate || 0).toFixed(0)}%</b></td>
-                      <td>{Number(tool.findings || 0)}</td>
-                      <td>{Number(tool.avg_duration_seconds || 0).toFixed(1)}s</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="bas-sect">
-              <h3>Fluxo de agentes</h3>
-              <div className="sh-sub">eventos, sucesso e latência por fase / capability</div>
-              <div style={{ marginTop: 14 }}>
-                {basAgentFlow.length === 0 && <div className="bas-empty">Sem traces de agentes no escopo.</div>}
-                {basAgentFlow.slice(0, 6).map((flow) => {
-                  const rate = Number(flow.success_rate || 0);
-                  // latência média por estágio (avg_duration_ms pode ser null quando
-                  // a ferramenta não registrou tempo de execução → mostra "—").
-                  const lat = flow.avg_duration_ms;
-                  const latLabel = (lat === null || lat === undefined)
-                    ? "—"
-                    : (lat >= 1000 ? `${(lat / 1000).toFixed(1)}s` : `${Math.round(lat)}ms`);
-                  return (
-                    <div key={flow.stage} className="af-tile">
-                      <div className="top">
-                        <b>{flow.stage}</b>
-                        <span className="ev">
-                          {Number(flow.events || 0)} eventos
-                          <span style={{ marginLeft: 8, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}
-                                title="latência média de execução">· {latLabel}</span>
-                        </span>
-                      </div>
-                      <div className="bar-row">
-                        <div className="progress-line"><div style={{ width: `${rate}%`, background: rate >= 80 ? "var(--sev-low-solid)" : "var(--sev-medium-solid)" }} /></div>
-                        <span className="pct">{rate.toFixed(0)}%</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="bas-sect">
-              <h3>Workers</h3>
-              <div className="sh-sub">saúde da execução distribuída</div>
-              <div className="w-mini" style={{ marginTop: 14 }}>
-                <div><div className="lbl">Total</div><div className="vv">{Number(basWorkers.total || 0)}</div></div>
-                <div className="act"><div className="lbl">Ativos</div><div className="vv">{Number(basWorkers.active || 0)}</div></div>
-                <div className="stl"><div className="lbl">Stale</div><div className="vv">{Number(basWorkers.stale || 0)}</div></div>
-              </div>
-              <div className="w-list">
-                {(basWorkers.rows || []).length === 0 && <div className="bas-empty">Sem workers registrados.</div>}
-                {(basWorkers.rows || []).slice(0, 5).map((worker) => (
-                  <div key={worker.name} className="it">
-                    <div className="l">
-                      <b>{worker.name}</b>
-                      <span>{worker.mode} · {worker.last_task_name || "sem tarefa"}</span>
-                    </div>
-                    <span className="st">{worker.status}</span>
-                  </div>
+          <div className="attack-table-wrap">
+            <table className="attack-table">
+              <thead>
+                <tr>
+                  <th>Severidade</th>
+                  <th>Vulnerabilidade</th>
+                  <th>Alvo</th>
+                  <th>CVE</th>
+                  <th>CVSS</th>
+                  <th>EPSS</th>
+                  <th>MITRE</th>
+                  <th>Evidência</th>
+                </tr>
+              </thead>
+              <tbody>
+                {attackQueue.length === 0 && (
+                  <tr><td colSpan={8}>Sem vulnerabilidades priorizadas no escopo atual.</td></tr>
+                )}
+                {attackQueue.map((item, idx) => (
+                  <tr key={`${item.id}-${idx}`}>
+                    <td><SeverityBadge severity={item.severity} /></td>
+                    <td><b>{item.title}</b><small>{item.reason}</small></td>
+                    <td className="mono">{item.target}</td>
+                    <td className="mono">{item.cve}</td>
+                    <td className="num">{item.cvss ? item.cvss.toFixed(1) : "—"}</td>
+                    <td className="num">{item.epss ? `${Math.round(item.epss * 100)}%` : "—"}</td>
+                    <td className="mono">{item.mitre}</td>
+                    <td><span className="evidence-pill">{String(item.status).replace(/_/g, " ")}</span></td>
+                  </tr>
                 ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Row 3: Validated risk + Top vulns */}
-          <div className="bas-grid-3">
-            <div className="bas-sect">
-              <h3>Risco validado por BAS</h3>
-              <div className="sh-sub">achados críticos / altos com evidência operacional</div>
-              <div className="vr-card">
-                <div>
-                  <div className="big">{Number(basSummary.validated_risk_findings || 0)}</div>
-                  <div className="big-sub">riscos críticos / altos</div>
-                </div>
-                <div className="small">
-                  <div className="v">{Number(basSummary.open_findings || 0)}</div>
-                  <div className="v-sub">achados abertos</div>
-                </div>
-              </div>
-            </div>
-
-            <div className="bas-sect">
-              <h3>Top vulnerabilidades e controles</h3>
-              <div className="sh-sub">priorização rápida para engenharia de detecção e correção</div>
-              <div className="tv-grid" style={{ marginTop: 14 }}>
-                {(topVulns || []).length === 0 && <div className="bas-empty">Sem vulnerabilidades recorrentes no escopo.</div>}
-                {(topVulns || []).slice(0, 6).map((vuln) => (
-                  <div key={`${vuln.title}-${vuln.severity}-${findingTargetSummary(vuln)}`} className="it">
-                    <div className="l">
-                      <b>{vuln.title}</b>
-                      <span>{vuln.severity} · {findingTargetSummary(vuln)}</span>
-                    </div>
-                    <span className="ct">{vuln.count}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+              </tbody>
+            </table>
           </div>
         </section>
-
-        {/* ===== Risco, Rating e Maturidade ===== */}
-        <section className="rrm">
-          <div className="rrm-head">
-            <h2>Risco, Rating e Maturidade</h2>
-            <div className="eb">camada executiva após evidências BAS</div>
-          </div>
-
-          <div className="rrm-grid">
-            <div className={`rrm-rating ${ratingTone(scopedVulnerabilityRating.score)}`}>
-              <div className="lbl">Rating atual do alvo</div>
-              <div className="body">
-                <div>
-                  <div className="letter">{scopedVulnerabilityRating.grade || "F"}</div>
-                  <div className="sublabel">Rating</div>
-                </div>
-                <div className="score-num">{Number(scopedVulnerabilityRating.score || 0).toFixed(1)}</div>
-              </div>
-              <div className="bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(scopedVulnerabilityRating.score || 0)))}%` }} /></div>
-            </div>
-
-            <div className={`rrm-rating ${ratingTone(globalVulnerabilityRating.score)}`}>
-              <div className="lbl">Rating atual do grupo</div>
-              <div className="body">
-                <div>
-                  <div className="letter">{globalVulnerabilityRating.grade || "F"}</div>
-                  <div className="sublabel">Rating</div>
-                </div>
-                <div className="score-num">{Number(globalVulnerabilityRating.score || 0).toFixed(1)}</div>
-              </div>
-              <div className="bar"><div style={{ width: `${Math.max(0, Math.min(100, Number(globalVulnerabilityRating.score || 0)))}%` }} /></div>
-            </div>
-
-            <div className="rrm-dist">
-              <div className="head-line">
-                <div>
-                  <h4>Rating distribuído</h4>
-                  <div className="top-sub">top 5 alvos · maior volume de vulnerabilidades</div>
-                </div>
-                <div className="agg">{distributedGrade} <span>{Number(distributedScore || 0).toFixed(1)}</span></div>
-              </div>
-              <table className="distT">
-                <thead>
-                  <tr><th>Alvo</th><th style={{ width: 80 }}>Vulns</th><th style={{ width: 70 }}>Rating</th></tr>
-                </thead>
-                <tbody>
-                  {distributedRows.length === 0 && (
-                    <tr><td colSpan={3} className="bas-empty">Sem dados suficientes para distribuição.</td></tr>
-                  )}
-                  {distributedRows.map((row) => (
-                    <tr key={row.target}>
-                      <td className="hst">{row.target}</td>
-                      <td>{row.vulnCount}</td>
-                      <td><b>{row.grade} · {row.score.toFixed(0)}</b></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-        </section>
-
       </div>
     </main>
   );
+
 }

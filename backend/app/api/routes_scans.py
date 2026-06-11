@@ -7257,6 +7257,7 @@ def get_easm_assets(
     status_filter: str = Query("active", regex="^(active|inactive|archived)$"),
     min_criticality: float = Query(0, ge=0, le=100),
     sort_by: str = Query("last_seen", regex="^(criticality|last_seen|scan_count|rating)$"),
+    scan_id: int | None = Query(None),
 ):
     """
     Lista ativos com rating e criticality
@@ -7280,6 +7281,18 @@ def get_easm_assets(
         Asset.status == status_filter,
         Asset.criticality_score >= min_criticality,
     )
+
+    # Escopo por scan: filtra ativos cujo domínio aparece nos findings do scan
+    if scan_id:
+        domains = {
+            row[0]
+            for row in db.query(Finding.domain)
+            .filter(Finding.scan_job_id == scan_id, Finding.domain.isnot(None))
+            .distinct()
+            .all()
+            if row[0]
+        }
+        query = query.filter(Asset.domain_or_ip.in_(domains)) if domains else query.filter(Asset.id == -1)
 
     if sort_by == "criticality":
         query = query.order_by(Asset.criticality_score.desc())
@@ -8839,6 +8852,226 @@ def get_crown_jewels(
         "scan_id": scan_id,
         "crown_jewels": crown_jewels,
         "analysis_done": state.get("crown_jewel_analysis_done", False),
+    }
+
+
+def _cockpit_host(domain: str = "", url: str = "") -> str:
+    h = str(domain or "").strip().lower()
+    if h:
+        return h
+    u = str(url or "").strip().lower()
+    if not u:
+        return ""
+    import re as _re
+    return _re.sub(r"^[a-z]+://", "", u).split("/", 1)[0].split(":", 1)[0]
+
+
+@router.get("/cockpit")
+def get_cockpit(
+    scan_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Payload consolidado do Cockpit RedTeam — escopado por scan, 100% dado real.
+
+    Junta: lista de scans (dropdown), score/grade/tendência, contagem por
+    severidade, KPIs, heatmap superfície×severidade, joias da coroa e a fila de
+    achados enriquecida com EPSS (FIRST.org), técnica MITRE e flag de joia.
+    """
+    from app.models.models import ScanJob, Finding
+    from app.services.cockpit_heatmap import build_heatmap
+    from app.services.epss_service import get_epss_scores
+    from app.services.attack_graph import _classify_finding, CAPABILITY_TO_ATTACK
+    from app.services.risk_service import _log_exposure_penalty
+    # _score_to_grade é definido neste módulo (linha ~393)
+
+    scan_rows = (
+        db.query(ScanJob)
+        .filter(ScanJob.owner_id == current_user.id)
+        .order_by(ScanJob.id.desc())
+        .limit(50)
+        .all()
+    )
+    scans_dropdown = [
+        {
+            "id": s.id,
+            "target_query": s.target_query,
+            "status": s.status,
+            "current_step": s.current_step,
+            "mission_progress": int(s.mission_progress or 0),
+        }
+        for s in scan_rows
+    ]
+
+    selected = None
+    if scan_id is not None:
+        selected = next((s for s in scan_rows if s.id == scan_id), None) or (
+            db.query(ScanJob)
+            .filter(ScanJob.id == scan_id, ScanJob.owner_id == current_user.id)
+            .first()
+        )
+    if selected is None:
+        selected = scan_rows[0] if scan_rows else None
+
+    if selected is None:
+        return {
+            "scan": None,
+            "scans": scans_dropdown,
+            "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            "score": {"value": 0, "grade": "F", "trend": [], "delta": 0},
+            "kpis": {},
+            "heatmap": build_heatmap([]),
+            "crown_jewels": [],
+            "findings": [],
+        }
+
+    findings = (
+        db.query(Finding)
+        .filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
+        .all()
+    )
+
+    sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for f in findings:
+        k = str(f.severity or "").lower()
+        if k in sev:
+            sev[k] += 1
+
+    score = max(0.0, round(100.0 - _log_exposure_penalty(sev["critical"], sev["high"], sev["medium"], sev["low"]), 1))
+    grade = _score_to_grade(score)
+
+    state = dict(selected.state_data or {})
+    crown = state.get("crown_jewels", []) or []
+    jewel_hosts = set()
+    for j in crown:
+        t = j.get("target") or j.get("asset") or j.get("host") or ""
+        h = _cockpit_host(domain=str(t))
+        if h:
+            jewel_hosts.add(h)
+
+    heatmap = build_heatmap(findings)
+
+    cves = [f.cve for f in findings if f.cve]
+    epss_map = get_epss_scores(cves)
+
+    items = []
+    jewels_with_findings = set()
+    exposed_hosts = set()
+    for f in findings:
+        host = _cockpit_host(domain=str(f.domain or ""), url=str(f.url or ""))
+        if host:
+            exposed_hosts.add(host)
+        caps = _classify_finding(f)
+        mitre = []
+        seen_t = set()
+        for c in caps:
+            for tech in CAPABILITY_TO_ATTACK.get(c.get("capability", ""), []):
+                if tech["id"] not in seen_t:
+                    seen_t.add(tech["id"])
+                    mitre.append(tech)
+        is_jewel = host in jewel_hosts
+        if is_jewel:
+            jewels_with_findings.add(host)
+        ep = epss_map.get(str(f.cve or "").upper()) if f.cve else None
+        items.append({
+            "id": f"SK-{f.id}",
+            "finding_id": f.id,
+            "title": f.title,
+            "target": host or (f.domain or ""),
+            "severity": str(f.severity or "info").lower(),
+            "cve": f.cve or None,
+            "cvss": f.cvss,
+            "epss": (ep["epss"] if ep else None),
+            "epss_percentile": (ep["percentile"] if ep else None),
+            "mitre": mitre,
+            "status": f.verification_status or "hypothesis",
+            "is_jewel": is_jewel,
+            "tool": f.tool or None,
+            "recommendation": f.recommendation or None,
+            "description": (f.details or {}).get("description") or (f.details or {}).get("evidence") or None,
+        })
+
+    sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    items.sort(key=lambda x: (
+        sev_rank.get(x["severity"], 5),
+        -(x["cvss"] or 0),
+        -((x["epss"] or 0)),
+    ))
+
+    # Enriquece joias da coroa com achados reais por host (sem residual)
+    jewel_counts: dict[str, dict] = {}
+    for it in items:
+        h = it["target"]
+        if h in jewel_hosts:
+            jc = jewel_counts.setdefault(h, {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0})
+            s = it["severity"]
+            if s in jc:
+                jc[s] += 1
+            jc["total"] += 1
+    crown_enriched = []
+    for j in crown:
+        t = j.get("target") or j.get("asset") or j.get("host") or ""
+        h = _cockpit_host(domain=str(t))
+        c = jewel_counts.get(h, {})
+        crown_enriched.append({
+            **j,
+            "host": h,
+            "findings_total": c.get("total", 0),
+            "critical": c.get("critical", 0),
+            "high": c.get("high", 0),
+            "medium": c.get("medium", 0),
+            "low": c.get("low", 0),
+        })
+    # ordena por criticidade observada (críticos, depois altos, depois total)
+    crown_enriched.sort(key=lambda x: (-x["critical"], -x["high"], -x["findings_total"]))
+
+    # Tendência: score dos scans recentes do mesmo alvo (dado real por scan)
+    same_target_ids = [s.id for s in scan_rows if s.target_query == selected.target_query][:8]
+    same_target_ids = list(reversed(same_target_ids))  # cronológico
+    trend = []
+    if same_target_ids:
+        rows = (
+            db.query(Finding.scan_job_id, Finding.severity, func.count(Finding.id))
+            .filter(Finding.scan_job_id.in_(same_target_ids), Finding.is_false_positive.is_(False))
+            .group_by(Finding.scan_job_id, Finding.severity)
+            .all()
+        )
+        per_scan = {sid: {"critical": 0, "high": 0, "medium": 0, "low": 0} for sid in same_target_ids}
+        for sid, s_sev, cnt in rows:
+            kk = str(s_sev or "").lower()
+            if kk in per_scan.get(sid, {}):
+                per_scan[sid][kk] = cnt
+        for sid in same_target_ids:
+            c = per_scan[sid]
+            sc = max(0.0, round(100.0 - _log_exposure_penalty(c["critical"], c["high"], c["medium"], c["low"]), 1))
+            trend.append({"scan_id": sid, "rating_score": sc})
+    delta = round(trend[-1]["rating_score"] - trend[0]["rating_score"], 1) if len(trend) >= 2 else 0.0
+
+    kpis = {
+        "critical_high": sev["critical"] + sev["high"],
+        "findings_open": len(findings),
+        "jewels_total": len(crown),
+        "jewels_at_risk": len(jewels_with_findings),
+        "assets_exposed": len(exposed_hosts),
+        "assets_total": int(state.get("subdomain_count") or len(exposed_hosts)),
+    }
+
+    return {
+        "scan": {
+            "id": selected.id,
+            "target_query": selected.target_query,
+            "status": selected.status,
+            "current_step": selected.current_step,
+            "mission_progress": int(selected.mission_progress or 0),
+            "created_at": selected.created_at.isoformat() if selected.created_at else None,
+        },
+        "scans": scans_dropdown,
+        "severity": sev,
+        "score": {"value": score, "grade": grade, "trend": trend, "delta": delta},
+        "kpis": kpis,
+        "heatmap": heatmap,
+        "crown_jewels": crown_enriched,
+        "findings": items,
     }
 
 

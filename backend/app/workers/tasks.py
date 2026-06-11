@@ -1919,8 +1919,8 @@ def execute_scan_work_item(item_id: int):
     import requests
     from app.db.session import SessionLocal
     from app.core.config import settings
-    from app.models.models import ScanJob, ScanLog, ScanWorkItem
-    from app.services.scan_work_queue import work_queue_counts
+    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem
+    from app.services.scan_work_queue import kali_inflight_release, work_item_applicability_decision, work_queue_counts
 
     db = SessionLocal()
     try:
@@ -1944,6 +1944,73 @@ def execute_scan_work_item(item_id: int):
             return {"id": item.id, "status": item.status, "scan_status": job.status}
         if item.status not in {"dispatched", "queued", "retry"}:
             return {"status": item.status}
+
+        _state_for_applicability = dict(job.state_data or {})
+        _applicability = work_item_applicability_decision(item, _state_for_applicability, at="dispatch")
+        _meta_for_applicability = dict(item.item_metadata or {})
+        _meta_for_applicability["applicability_dispatch"] = _applicability
+        if not _applicability.get("applicable"):
+            now = datetime.utcnow()
+            reason = str(_applicability.get("reason") or "not_applicable")
+            item.status = "skipped"
+            item.lease_until = None
+            item.finished_at = now
+            item.updated_at = now
+            item.last_error = f"skipped:applicability:{reason}"[:2000]
+            item.result = {
+                "status": "skipped",
+                "skipped_reason": f"applicability:{reason}",
+                "applicability": _applicability,
+                "finished_at": now.isoformat(),
+            }
+            item.item_metadata = _meta_for_applicability
+            try:
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            for _sid in [str(s) for s in _meta_for_applicability.get("skill_ids") or [] if str(s)]:
+                db.add(AgentTraceEvent(
+                    scan_id=item.scan_job_id,
+                    event_type="skill_execution_result",
+                    from_node="work_queue",
+                    to_node="supervisor",
+                    skill_id=_sid[:120],
+                    tool_name=str(item.tool_name or "")[:100],
+                    capability=str(item.phase_id or "")[:100],
+                    status="skipped",
+                    payload={
+                        "work_item_id": item.id,
+                        "phase_id": item.phase_id,
+                        "target": item.target,
+                        "tool_name": item.tool_name,
+                        "reason": reason,
+                        "applicability": _applicability,
+                    },
+                    created_at=now,
+                ))
+            counts = work_queue_counts(db, item.scan_job_id)
+            state = dict(job.state_data or {})
+            state["work_queue_counts"] = counts
+            job.state_data = state
+            db.add(ScanLog(
+                scan_job_id=item.scan_job_id,
+                source="work-queue",
+                level="INFO",
+                message=(
+                    f"work_item_skip_applicability id={item.id} phase={item.phase_id} "
+                    f"target={item.target} tool={item.tool_name} reason={reason}"
+                ),
+            ))
+            db.commit()
+            return {"id": item.id, "status": "skipped", "reason": reason}
+
+        if item.target == "__batch__" and _applicability.get("batch_targets"):
+            _meta_for_applicability["batch_targets"] = list(_applicability.get("batch_targets") or [])
+            _meta_for_applicability["batch_count"] = len(_meta_for_applicability["batch_targets"])
+            _meta_for_applicability["skipped_batch_targets"] = list(_applicability.get("skipped_batch_targets") or [])
+            item.item_metadata = _meta_for_applicability
+        else:
+            item.item_metadata = _meta_for_applicability
 
         now = datetime.utcnow()
         item.status = "running"
