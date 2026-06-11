@@ -21,7 +21,7 @@ alembic==1.14.0
 
 # Configuration & Security
 pydantic-settings==2.7.0
-pydantic[email]==2.10.6
+pydantic[email]==2.11.0
 email-validator==2.2.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
