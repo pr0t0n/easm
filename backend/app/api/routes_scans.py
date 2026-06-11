@@ -9081,19 +9081,86 @@ def get_osint_results(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Retorna os resultados do OSINT Phase Zero para o scan (L1)."""
-    from app.models.models import ScanJob
+    """Retorna os resultados OSINT para o scan.
+
+    Prioridade:
+    1. state_data["osint_phase_zero"] (LangGraph path)
+    2. Findings de P18 (work-queue path) sintetizados no mesmo formato
+    3. 404 apenas se P18 nunca rodou para este scan
+    """
+    from app.models.models import Finding, ScanJob, ScanWorkItem
     job = db.query(ScanJob).filter(
         ScanJob.id == scan_id,
         ScanJob.owner_id == current_user.id,
     ).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
+
     state = dict(job.state_data or {})
     osint = state.get("osint_phase_zero")
-    if not osint:
+    if osint:
+        return {"scan_id": scan_id, "osint": osint, "source": "phase_zero"}
+
+    # ── Fallback: synthesize from P18 work-queue results ─────────────────────
+    p18_items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.phase_id == "P18",
+        )
+        .all()
+    )
+    if not p18_items:
         raise HTTPException(status_code=404, detail="OSINT não executado ainda.")
-    return {"scan_id": scan_id, "osint": osint}
+
+    p18_tools = {str(i.tool_name or "") for i in p18_items}
+    p18_statuses = {str(i.status or "") for i in p18_items}
+    terminal = {"completed", "done", "skipped", "failed", "timeout"}
+    p18_done = bool(p18_statuses & terminal)
+    p18_pending = bool(p18_statuses - terminal)
+
+    if not p18_done and p18_pending:
+        raise HTTPException(status_code=404, detail="OSINT ainda em execução.")
+
+    # Build a compatible summary from P18 findings
+    p18_findings = (
+        db.query(Finding)
+        .filter(
+            Finding.scan_job_id == scan_id,
+            Finding.tool.in_(list(p18_tools)),
+        )
+        .all()
+    )
+
+    shodan_hosts = [f for f in p18_findings if str(f.tool or "") == "shodan-cli"]
+    harvest_emails = [f for f in p18_findings if str(f.tool or "") == "theharvester"]
+    leaks = [f for f in p18_findings if str(f.tool or "") in {"gitleaks", "trufflehog"}]
+
+    shodan_asn: dict = {}
+    if shodan_hosts:
+        details = dict(shodan_hosts[0].details or {})
+        shodan_asn = {
+            "asn": details.get("asn", ""),
+            "total_hosts_in_asn": len(shodan_hosts),
+            "skipped": False,
+        }
+
+    emails_breached = len({str(f.subdomain or f.url or "") for f in harvest_emails if f.severity not in {"info"}})
+    hibp: dict = {
+        "emails_breached": emails_breached,
+        "skipped": len(harvest_emails) == 0,
+    }
+
+    osint_synthesized = {
+        "source": "work_queue_p18",
+        "tools_ran": sorted(p18_tools),
+        "findings_count": len(p18_findings),
+        "shodan_asn": shodan_asn if shodan_asn else {"skipped": True},
+        "hibp": hibp,
+        "github_dork": {"skipped": True, "results_count": 0},
+        "leaks_count": len(leaks),
+    }
+    return {"scan_id": scan_id, "osint": osint_synthesized, "source": "work_queue_p18"}
 
 
 # ── Evidence gate stats (T1 / M3) ─────────────────────────────────────────────

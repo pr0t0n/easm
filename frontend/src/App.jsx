@@ -20,6 +20,8 @@ import AttackSurfacePage from "./pages/AttackSurfacePage";
 import CrownJewelsPage from "./pages/CrownJewelsPage";
 import LearningPage from "./pages/LearningPage";
 import GuardrailsPage from "./pages/GuardrailsPage";
+import SchedulingPage from "./pages/SchedulingPage";
+import SettingsPage from "./pages/SettingsPage";
 import { authStore } from "./store/auth";
 
 function Protected({ children }) {
@@ -92,7 +94,7 @@ export default function App() {
                     <Route path="/superficie" element={<AttackSurfacePage />} />
                     <Route path="/dominios" element={<DomainsPage />} />
                     <Route path="/joias" element={<CrownJewelsPage />} />
-                    <Route path="/agendamento" element={<Navigate to="/scan" replace />} />
+                    <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
                     <Route path="/operacional" element={<AdminOnly><OperationsCenterPage /></AdminOnly>} />
@@ -103,6 +105,7 @@ export default function App() {
                     <Route path="/agent-flow" element={<Navigate to="/operacional?module=phases_agents" replace />} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
                     <Route path="/guardrails" element={<AdminOnly><GuardrailsPage /></AdminOnly>} />
+                    <Route path="/configuracoes" element={<AdminOnly><SettingsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
                   </RoutedBoundary>
