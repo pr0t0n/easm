@@ -2486,6 +2486,6 @@
 }
 .vuln-tab:hover { color: var(--ink); }
 .vuln-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  color: var(--brand-600);
+  border-bottom-color: var(--brand-600);
 }
