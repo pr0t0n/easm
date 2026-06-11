@@ -874,12 +874,12 @@ export default function ScansPage({ embedded = false }) {
                               Pausar
                             </button>
                           )}
-                          {scan.status === "paused" && (
+                          {["paused", "stopped", "failed"].includes(scan.status) && (
                             <button
                               onClick={() => resumeScan(scan.id)}
                               className="text-xs px-3 py-1.5 rounded-lg bg-emerald-900/20 text-emerald-300 border border-emerald-800/50 hover:bg-emerald-900/40 transition-colors"
                             >
-                              Retomar
+                              {scan.status === "paused" ? "Retomar" : "Continuar"}
                             </button>
                           )}
                           {STOPPABLE_SCAN_STATUS.includes(scan.status) && (

@@ -129,7 +129,7 @@ def _extract_scan_id_from_task(task: dict) -> int | None:
 
 SCAN_ACTIVE_STATUSES = {"queued", "running", "retrying"}
 SCAN_PAUSABLE_STATUSES = SCAN_ACTIVE_STATUSES
-SCAN_RESUMABLE_STATUSES = {"paused"}
+SCAN_RESUMABLE_STATUSES = {"paused", "stopped", "failed"}
 SCAN_STOPPABLE_STATUSES = SCAN_ACTIVE_STATUSES | {"paused"}
 SCAN_PAUSE_REQUEUE_ITEM_STATUSES = {"dispatched", "running", "submitted", "retry"}
 
