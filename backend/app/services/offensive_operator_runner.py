@@ -1086,15 +1086,29 @@ def run_offensive_operator_scan(
             # — sqlmap/dalfox must hit ALL of them, not the first match only.
             if phase_id in {"P10", "P12"}:
                 try:
+                    from urllib.parse import urlparse as _up, parse_qs as _pqs
                     _all_param_urls = list(dict(job.state_data or {}).get("discovered_parameterized_urls") or [])
                     if phase_id == "P10":
-                        _attack_urls = [u for u in _all_param_urls if "=" in u]  # any param could be SQLi
                         _primary_tool, _primary_profile, _primary_skill = "sqlmap", "sqlmap_basic", "skill.vuln.sql_injection"
                     else:
-                        _attack_urls = [u for u in _all_param_urls if "=" in u]  # any param could reflect
                         _primary_tool, _primary_profile, _primary_skill = "dalfox", "dalfox_xss", "skill.vuln.xss"
-                    # Skip the one already tested as _effective_target; cap to bound time
-                    _attack_urls = [u for u in _attack_urls if u != _effective_target][:8]
+                    # Dedupe by injection point = path + sorted param NAMES (ignore values).
+                    # Comments.aspx?id=2 and Comments.aspx?id=1337 are the SAME injection
+                    # point — test it once, not 8 times. Prefer clean (non-payload) values.
+                    _by_point: dict[str, str] = {}
+                    for _u in _all_param_urls:
+                        if "=" not in _u:
+                            continue
+                        try:
+                            _pp = _up(_u)
+                            _pnames = ",".join(sorted(_pqs(_pp.query).keys()))
+                            _point = f"{_pp.path}?{_pnames}"
+                        except Exception:
+                            _point = _u
+                        # Prefer the URL with the shortest query (cleanest values, no injected payloads)
+                        if _point not in _by_point or len(_u) < len(_by_point[_point]):
+                            _by_point[_point] = _u
+                    _attack_urls = [u for u in _by_point.values() if u != _effective_target][:8]
                     _supp_results: list[dict[str, Any]] = []
                     for _au in _attack_urls:
                         _supp_exec = {
