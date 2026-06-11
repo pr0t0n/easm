@@ -1,1013 +1,902 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 import MissionProgress from "../components/MissionProgress";
 
-// Formats a UTC date string to São Paulo timezone (America/Sao_Paulo, UTC-3)
-function fmtDateTimeSP(value) {
-  if (!value) return "-";
+// ─── Fases (prototype style) ────────────────────────────────────────────────
+const FASES_IDS  = ["P01","P02","P03","P04","P05","P06","P07","P08"];
+const FASE_NOMES = {
+  P01: "Recon & OSINT", P02: "Descoberta", P03: "Enumeração",
+  P04: "Exploração",    P05: "Pós-exploração", P06: "Validação",
+  P07: "Aprendizado",   P08: "Relatório",
+};
+
+const LEVEL_MAP = {
+  recon: "Recon", asm: "Recon",
+  standard: "Padrão", full: "Padrão",
+  aggressive: "Agressivo",
+  Recon: "Recon", Standard: "Padrão", Aggressive: "Agressivo",
+};
+
+const ACTIVE_STATUS    = ["queued", "running", "retrying"];
+const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
+const TERMINAL_STATUS  = new Set(["completed", "failed", "cancelled", "stopped"]);
+
+const SCAN_PERFIL = {
+  Recon:     { c: "var(--sev-info-text)",  bg: "var(--sev-info-bg)",  bd: "var(--sev-info-border)",  d: "só descoberta, sem exploração" },
+  Padrão:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "exploração com evidence gate" },
+  Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "pós-exploração habilitada" },
+};
+const CRIT_CSS = {
+  Crítica: { c: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", bd: "var(--sev-critical-border)" },
+  Alta:    { c: "var(--sev-high-text)",     bg: "var(--sev-high-bg)",     bd: "var(--sev-high-border)" },
+  Média:   { c: "var(--sev-medium-text)",   bg: "var(--sev-medium-bg)",   bd: "var(--sev-medium-border)" },
+  Baixa:   { c: "var(--sev-low-text)",      bg: "var(--sev-low-bg)",      bd: "var(--sev-low-border)" },
+};
+const FASE_CSS = {
+  done:    "var(--sev-low-solid)",
+  running: "var(--brand-500)",
+  partial: "var(--sev-medium-solid)",
+  blocked: "var(--sev-critical-solid)",
+  pending: "var(--canvas-muted)",
+};
+const STATUS_CSS = {
+  running: { c: "var(--sev-low-text)",      dot: "var(--sev-low-solid)",      t: "Rodando" },
+  queued:  { c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Na fila" },
+  retrying:{ c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Retentando" },
+  paused:  { c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Pausado" },
+  blocked: { c: "var(--sev-critical-text)", dot: "var(--sev-critical-solid)", t: "Bloqueado" },
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function fmtDateSP(value) {
+  if (!value) return "—";
   const dt = new Date(value);
-  if (Number.isNaN(dt.getTime())) return "-";
-  return dt.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+  if (Number.isNaN(dt.getTime())) return "—";
+  return dt.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function fmtDuration(s, e) {
+  if (!s) return "—";
+  const sec = Math.floor((new Date(e || Date.now()) - new Date(s)) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60);
+  return h > 0 ? `${h}h ${String(m % 60).padStart(2,"0")}m` : `${m}m ${String(sec % 60).padStart(2,"0")}s`;
+}
+function extractPhase(step) {
+  if (!step) return null;
+  const m = String(step).match(/P(\d+)/i);
+  return m ? `P${m[1].padStart(2,"0")}` : null;
+}
+function getPerfil(scan) {
+  return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Padrão";
+}
+function getFaseStates(scan) {
+  const cur = extractPhase(scan.current_step);
+  const curIdx = FASES_IDS.indexOf(cur);
+  return FASES_IDS.map((f, i) => {
+    if (scan.status === "completed") return "done";
+    if (scan.status === "blocked" && f === cur) return "blocked";
+    if (scan.status === "blocked" && i > curIdx) return "pending";
+    if (i < curIdx) return "done";
+    if (f === cur && !TERMINAL_STATUS.has(scan.status) && scan.status !== "paused") return "running";
+    if (f === cur && scan.status === "paused") return "partial";
+    return "pending";
+  });
 }
 
-export default function ScansPage({ embedded = false }) {
-  const [target, setTarget] = useState("");
-  const [accessGroupId, setAccessGroupId] = useState("");
-  const [accessGroupName, setAccessGroupName] = useState("");
-  const [groups, setGroups] = useState([]);
-  const [schedules, setSchedules] = useState([]);
-  const [scans, setScans] = useState([]);
-  const [targets, setTargets] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [logs, setLogs] = useState([]);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [scanStatus, setScanStatus] = useState(null);
-  const [basSummary, setBasSummary] = useState(null);
-  const [authStatus, setAuthStatus] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [selectedScans, setSelectedScans] = useState(new Set());
-  const ACTIVE_SCAN_STATUS = ["queued", "running", "retrying"];
-  const STOPPABLE_SCAN_STATUS = [...ACTIVE_SCAN_STATUS, "paused"];
+// ─── Atoms ───────────────────────────────────────────────────────────────────
+function PerfilBadge({ perfil }) {
+  const p = SCAN_PERFIL[perfil] || SCAN_PERFIL.Padrão;
+  return (
+    <span title={p.d} style={{
+      fontSize: 10, fontWeight: 700, color: p.c, background: p.bg,
+      border: `1px solid ${p.bd}`, padding: "2px 8px", borderRadius: 999,
+      letterSpacing: "0.03em", textTransform: "uppercase",
+    }}>{perfil}</span>
+  );
+}
+function CritBadge({ crit }) {
+  const c = CRIT_CSS[crit] || CRIT_CSS.Baixa;
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 700, color: c.c, background: c.bg,
+      border: `1px solid ${c.bd}`, padding: "2px 8px", borderRadius: 999, letterSpacing: "0.03em",
+    }}>{crit}</span>
+  );
+}
+function StatusDot({ status }) {
+  const s = STATUS_CSS[status] || STATUS_CSS.running;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, color: s.c }}>
+      <span style={{
+        width: 7, height: 7, borderRadius: 99, background: s.dot, flexShrink: 0,
+        boxShadow: status === "running" ? `0 0 0 3px ${s.dot}33` : "none",
+      }} />{s.t}
+    </span>
+  );
+}
+function MiniPipeline({ faseStates }) {
+  return (
+    <div style={{ display: "flex", gap: 3 }}>
+      {faseStates.map((st, i) => (
+        <div key={i} title={`${FASES_IDS[i]} · ${FASE_NOMES[FASES_IDS[i]]} · ${st}`}
+          style={{ flex: 1, height: 6, borderRadius: 99, background: FASE_CSS[st], opacity: st === "pending" ? 0.45 : 1 }} />
+      ))}
+    </div>
+  );
+}
 
-  // Unified mode selector: "now" | "schedule" | "targets"
-  const [mode, setMode] = useState("now");
-  const [scanLevel, setScanLevel] = useState("full"); // 'full' | 'asm'
+// ─── Card de missão ativa ─────────────────────────────────────────────────────
+function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete, onReport, onClick }) {
+  const pct        = scan.mission_progress ?? scan.progress ?? 0;
+  const faseStates = getFaseStates(scan);
+  const perfil     = getPerfil(scan);
+  const curIdx     = faseStates.lastIndexOf("running") >= 0 ? faseStates.lastIndexOf("running") : faseStates.filter(s => s==="done").length;
+  const faseLabel  = FASES_IDS[curIdx] ? `${FASES_IDS[curIdx]} · ${FASE_NOMES[FASES_IDS[curIdx]]}` : "—";
+  const isBlocked  = scan.status === "blocked";
+  const isPaused   = scan.status === "paused";
+  const isRunning  = scan.status === "running" || scan.status === "queued" || scan.status === "retrying";
+  const isStopped  = scan.status === "stopped" || scan.status === "failed";
+
+  const borderColor = isBlocked ? "var(--sev-critical-solid)"
+                    : isPaused  ? "var(--sev-medium-solid)"
+                    : "var(--brand-500)";
+
+  const totalAchados = (scan.open_critical||0)+(scan.open_high||0)+(scan.open_medium||0)+(scan.open_low||0);
+
+  return (
+    <div className="sk-panel" style={{ padding: "16px 18px", borderTop: `3px solid ${borderColor}`, opacity: isBlocked ? 0.85 : 1, cursor: "pointer" }} onClick={onClick}>
+      {/* cabeçalho */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+            <span className="sk-mono" style={{ fontSize: 14, fontWeight: 700 }}>#{scan.id}</span>
+            <PerfilBadge perfil={perfil} />
+          </div>
+          <div className="sk-mono" style={{ fontSize: 12, color: "var(--ink-soft)" }}>{scan.target_query}</div>
+        </div>
+        <StatusDot status={scan.status} />
+      </div>
+
+      {/* pipeline de fases */}
+      <MiniPipeline faseStates={faseStates} />
+
+      {/* fase atual + % + ETA */}
+      <div style={{ marginTop: 8, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>
+            {isBlocked
+              ? <span style={{ color: "var(--sev-critical-text)" }}>Bloqueado por guardrail · escopo</span>
+              : isPaused
+                ? <span style={{ color: "var(--sev-medium-text)" }}>{faseLabel} — pausado</span>
+                : <span>{faseLabel}</span>
+            }
+          </span>
+          <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+            <span className="sk-mono" style={{ fontSize: 13, fontWeight: 700 }}>{pct}%</span>
+            <span className="sk-mono" style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>{fmtDuration(scan.started_at, scan.finished_at)}</span>
+          </div>
+        </div>
+        <div style={{ height: 7, background: "var(--canvas-muted)", borderRadius: 99, overflow: "hidden" }}>
+          <div style={{
+            width: `${pct}%`, height: "100%", borderRadius: 99, transition: "width 500ms ease",
+            background: isBlocked ? "var(--sev-critical-solid)" : isPaused ? "var(--sev-medium-solid)" : "var(--brand-500)",
+          }} />
+        </div>
+        <div className="sk-mono" style={{ fontSize: 9.5, color: "var(--ink-muted)", marginTop: 3 }}>
+          iniciado {fmtDateSP(scan.started_at)}
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 12 }}>
+        {[
+          ["Achados",     totalAchados,      "var(--ink)"],
+          ["Críticos",    scan.open_critical||0, scan.open_critical > 0 ? "var(--sev-critical-text)" : "var(--ink-muted)"],
+          ["Altos",       scan.open_high||0,     scan.open_high > 0 ? "var(--sev-high-text)" : "var(--ink-muted)"],
+          ["Progresso",   `${pct}%`,         "var(--ink)"],
+        ].map(([l, v, c]) => (
+          <div key={l} style={{ textAlign: "center", padding: "7px 2px", background: "var(--surface-soft)", borderRadius: 8, border: "1px solid var(--line-soft)" }}>
+            <div className="sk-mono" style={{ fontSize: 15, fontWeight: 600, color: c }}>{v}</div>
+            <div style={{ fontSize: 8.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: 1 }}>{l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* controles */}
+      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+        {isBlocked ? (
+          <>
+            <button className="sk-btn-ghost" style={{ flex: 1, padding: "7px 0", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
+              onClick={() => onStop(scan.id)}>■ Cancelar</button>
+          </>
+        ) : isPaused ? (
+          <>
+            <button className="sk-btn-primary" style={{ flex: 1, padding: "7px 0", fontSize: 12 }}
+              onClick={() => onResume(scan.id)}>▶ Retomar</button>
+            <button className="sk-btn-ghost" style={{ padding: "7px 14px", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
+              onClick={() => onStop(scan.id)}>■ Parar</button>
+          </>
+        ) : isStopped ? (
+          <>
+            <button className="sk-btn-primary" style={{ flex: 1, padding: "7px 0", fontSize: 12 }}
+              onClick={() => onContinue(scan.id)}>▶ Continuar</button>
+            <button className="sk-btn-ghost" style={{ padding: "7px 14px", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
+              onClick={() => onDelete(scan.id)}>Deletar</button>
+          </>
+        ) : (
+          <>
+            <button className="sk-btn-ghost" style={{ padding: "7px 14px", fontSize: 12 }}
+              onClick={() => onPause(scan.id)}>⏸ Pausar</button>
+            <button className="sk-btn-ghost" style={{ flex: 1, padding: "7px 0", fontSize: 12 }}>Acompanhar</button>
+            <button className="sk-btn-ghost" style={{ padding: "7px 14px", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
+              onClick={() => onStop(scan.id)}>■ Parar</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Compositor de nova missão (inline, como no protótipo) ────────────────────
+function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) {
+  const [perfil,   setPerfil]   = useState("Padrão");
+  const [crit,     setCrit]     = useState("Alta");
+  const [janela,   setJanela]   = useState("imediato");
+  const [target,   setTarget]   = useState("");
   const [authEnabled, setAuthEnabled] = useState(false);
-  const [authConfig, setAuthConfig] = useState({
-    type: "bearer", // bearer | cookie | basic | header
-    token: "",
-    cookie: "",
-    username: "",
-    password: "",
-    headerName: "X-API-Key",
-    headerValue: "",
-  });
-  const [scheduleForm, setScheduleForm] = useState({
-    frequency: "daily",
-    run_time: "00:00",
-    day_of_week: "monday",
-    day_of_month: 1,
-    enabled: true,
-  });
+  const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "" });
+  const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
+  const [submitting, setSubmitting] = useState(false);
 
-  const buildAuthPayload = () => {
+  const LEVEL_REVERSE = { Recon: "asm", Padrão: "full", Agressivo: "aggressive" };
+
+  const buildAuth = () => {
     if (!authEnabled) return null;
     if (authConfig.type === "bearer" && authConfig.token) return { type: "bearer", token: authConfig.token };
     if (authConfig.type === "cookie" && authConfig.cookie) return { type: "cookie", cookie: authConfig.cookie };
-    if (authConfig.type === "basic" && authConfig.username) return { type: "basic", username: authConfig.username, password: authConfig.password };
-    if (authConfig.type === "header" && authConfig.headerName && authConfig.headerValue) {
-      return { type: "header", headers: { [authConfig.headerName]: authConfig.headerValue } };
-    }
+    if (authConfig.type === "basic"  && authConfig.username) return { type: "basic", username: authConfig.username, password: authConfig.password };
+    if (authConfig.type === "header" && authConfig.headerName) return { type: "header", headers: { [authConfig.headerName]: authConfig.headerValue } };
     return null;
   };
 
-  const parseTargets = (raw) => {
-    return String(raw || "")
-      .split(";")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  };
-
-  const fmtDateTime = fmtDateTimeSP;
-
-  const loadScans = async () => {
-    const { data } = await client.get("/api/scans");
-    setScans(data);
-  };
-
-  const loadSchedules = async () => {
-    try {
-      const { data } = await client.get("/api/schedules");
-      setSchedules(data);
-    } catch {
-      setSchedules([]);
-    }
-  };
-
-  const loadTargets = async () => {
-    try {
-      const { data } = await client.get("/api/targets/summary");
-      setTargets(data || []);
-    } catch {
-      setTargets([]);
-    }
-  };
-
-  const createSchedule = async (e) => {
-    e.preventDefault();
-    const parsedTargets = parseTargets(target);
-    if (parsedTargets.length === 0) {
-      setAuthStatus("Informe ao menos um alvo para o agendamento.");
-      return;
-    }
+  const handleLancar = async () => {
+    if (!target.trim()) return;
     setSubmitting(true);
     try {
-      await client.post("/api/schedules", {
-        access_group_id: accessGroupId ? Number(accessGroupId) : null,
-        access_group_name: accessGroupName.trim() || null,
-        targets_text: target,
-        scan_type: "full",
-        frequency: scheduleForm.frequency,
-        run_time: scheduleForm.run_time,
-        day_of_week: scheduleForm.day_of_week,
-        day_of_month: scheduleForm.day_of_month,
-        enabled: scheduleForm.enabled,
-      });
-      setTarget("");
-      setAccessGroupId("");
-      setAccessGroupName("");
-      setAuthStatus(`Agendamento criado para ${parsedTargets.length} alvo(s) com sucesso.`);
-      await loadSchedules();
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao criar agendamento.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const loadLogs = async (scanId) => {
-    const { data } = await client.get(`/api/scans/${scanId}/logs`);
-    setLogs(data);
-  };
-
-  const TERMINAL_SCAN_STATUSES = new Set(['completed', 'failed', 'blocked', 'cancelled', 'stopped', 'paused']);
-
-  const loadScanStatus = async (scanId) => {
-    const { data } = await client.get(`/api/scans/${scanId}/status`);
-    setScanStatus(data);
-    return data;
-  };
-
-  const loadBasSummary = async (scanId) => {
-    try {
-      const { data } = await client.get(`/api/scans/${scanId}/report`, {
-        params: { prioritized_limit: 1, prioritized_offset: 0 },
-        _skipToast: true,
-      });
-      const bas = data?.state_data?.report_v2?.bas_detection_validation || {};
-      setBasSummary(bas.summary || null);
-    } catch {
-      setBasSummary(null);
-    }
-  };
-
-  useEffect(() => {
-    loadScans();
-    loadSchedules();
-    loadTargets();
-    client.get("/api/access-groups").then((res) => setGroups(res.data));
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      loadScans();
-    }, 3000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (!selected) return;
-    setBasSummary(null);
-    loadLogs(selected.id);
-    loadScanStatus(selected.id);
-    loadBasSummary(selected.id);
-    const wsBase = getWsBaseUrl();
-    const token = localStorage.getItem("token") || "";
-    const ws = new WebSocket(`${wsBase}/ws/scans/${selected.id}/logs?token=${encodeURIComponent(token)}`);
-
-    ws.onopen = () => setWsConnected(true);
-    ws.onclose = () => setWsConnected(false);
-    ws.onerror = () => setWsConnected(false);
-    ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      if (payload.type === "logs") {
-        setLogs((prev) => {
-          const map = new Map(prev.map((l) => [l.id, l]));
-          for (const item of payload.items || []) map.set(item.id, item);
-          return Array.from(map.values()).sort((a, b) => a.id - b.id);
-        });
-      }
-    };
-
-    // Adaptive backoff polling: 1s → 2s → 4s → ... → 15s max.
-    // Stops automatically when the scan reaches a terminal status.
-    let cancelled = false;
-    let pollTimer = null;
-    const scheduleNextPoll = (intervalMs) => {
-      pollTimer = setTimeout(async () => {
-        if (cancelled) return;
-        let data;
-        try { data = await loadScanStatus(selected.id); } catch { data = null; }
-        if (!cancelled && !TERMINAL_SCAN_STATUSES.has(data?.status)) {
-          scheduleNextPoll(Math.min(intervalMs * 2, 15000));
-        }
-      }, intervalMs);
-    };
-    // Fire immediately, then start the backoff ladder.
-    (async () => {
-      let data;
-      try { data = await loadScanStatus(selected.id); } catch { data = null; }
-      if (!cancelled && !TERMINAL_SCAN_STATUSES.has(data?.status)) {
-        scheduleNextPoll(1000);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      clearTimeout(pollTimer);
-      ws.close();
-    };
-  }, [selected]);
-
-  const prepareTargetCompliance = async (singleTarget) => {
-    if (!singleTarget) {
-      throw new Error("Informe um alvo valido para iniciar o scan.");
-    }
-
-    setAuthStatus(`Validando requisitos operacionais para ${singleTarget}...`);
-
-    try {
-      await client.post("/api/policy/allowlist", {
-        target_pattern: singleTarget,
-        tool_group: "*",
-        is_active: true,
-      });
-    } catch {
-      // A allowlist pode ja existir; o objetivo aqui e garantir o gate operacional.
-    }
-
-    setAuthStatus(`Alvo ${singleTarget} validado e policy liberada para este scan.`);
-  };
-
-  const deleteSchedule = async (schedId) => {
-    const confirmed = window.confirm("Deseja excluir este agendamento?");
-    if (!confirmed) return;
-    try {
-      await client.delete(`/api/schedules/${schedId}`);
-      await loadSchedules();
-      setAuthStatus(`Agendamento #${schedId} excluído.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao excluir agendamento.");
-    }
-  };
-
-  const runScheduleNow = async (schedId) => {
-    try {
-      const { data } = await client.post(`/api/schedules/${schedId}/execute`);
-      await loadScans();
-      setAuthStatus(`Agendamento #${schedId} executado agora: ${data.batches_created || 0} job(s).`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao executar agendamento.");
-    }
-  };
-
-  const createScan = async (e) => {
-    e.preventDefault();
-    const parsedTargets = parseTargets(target);
-    if (parsedTargets.length === 0) {
-      setAuthStatus("Informe ao menos um alvo antes de iniciar.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const created = [];
-      const failed = [];
-
-      for (const singleTarget of parsedTargets) {
-        try {
-          await prepareTargetCompliance(singleTarget);
-          await client.post("/api/scans", {
-            target_query: singleTarget,
-            mode: "single",
-            access_group_id: accessGroupId ? Number(accessGroupId) : null,
-            access_group_name: accessGroupName.trim() || null,
-            scan_level: scanLevel,
-            auth_config: buildAuthPayload(),
-          });
-          created.push(singleTarget);
-        } catch (err) {
-          failed.push({
-            target: singleTarget,
-            error: err?.response?.data?.detail || err?.message || "Falha ao iniciar scan",
-          });
-        }
-      }
-
-      setTarget("");
-      setAccessGroupId("");
-      setAccessGroupName("");
-      if (failed.length === 0) {
-        setAuthStatus(`${created.length} scan(s) criado(s) com sucesso.`);
+      if (janela === "agendar") {
+        await onSchedule({ target, accessGroupId: "", accessGroupName: "", scheduleForm });
       } else {
-        const failedSummary = failed.slice(0, 3).map((item) => `${item.target}: ${item.error}`).join(" | ");
-        setAuthStatus(`${created.length}/${parsedTargets.length} scan(s) criado(s). Falhas: ${failedSummary}`);
+        await onCreate({ target, scanLevel: LEVEL_REVERSE[perfil] || "full", accessGroupId: "", accessGroupName: "", authPayload: buildAuth() });
       }
-      await loadScans();
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || err?.message || "Falha ao iniciar scan.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const removeScan = async (scanId) => {
-    const confirmed = window.confirm("Deseja excluir este scan? Esta acao remove logs e findings associados.");
-    if (!confirmed) return;
-    try {
-      await client.delete(`/api/scans/${scanId}`);
-      if (selected?.id === scanId) {
-        setSelected(null);
-        setLogs([]);
-        setScanStatus(null);
-      }
-      await loadScans();
-      setAuthStatus(`Scan #${scanId} excluido com sucesso.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao excluir scan.");
-    }
-  };
-
-  const removeReport = async (scanId) => {
-    const confirmed = window.confirm("Deseja excluir somente o relatorio (findings) deste scan?");
-    if (!confirmed) return;
-    try {
-      await client.delete(`/api/scans/${scanId}/report`);
-      if (selected?.id === scanId) {
-        await loadScanStatus(scanId);
-        await loadLogs(scanId);
-      }
-      await loadScans();
-      setAuthStatus(`Relatorio do scan #${scanId} excluido com sucesso.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao excluir relatorio.");
-    }
-  };
-
-  const stopScan = async (scanId) => {
-    const confirmed = window.confirm("Deseja interromper este scan agora?");
-    if (!confirmed) return;
-    try {
-      await client.post(`/api/scans/${scanId}/stop`);
-      if (selected?.id === scanId) {
-        await loadScanStatus(scanId);
-        await loadLogs(scanId);
-      }
-      await loadScans();
-      setAuthStatus(`Scan #${scanId} interrompido.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao interromper scan.");
-    }
-  };
-
-  const pauseScan = async (scanId) => {
-    const confirmed = window.confirm("Deseja pausar este scan agora? A operacao em andamento sera cancelada e retomada depois a partir da ultima acao registrada.");
-    if (!confirmed) return;
-    try {
-      await client.post(`/api/scans/${scanId}/pause`);
-      if (selected?.id === scanId) {
-        await loadScanStatus(scanId);
-        await loadLogs(scanId);
-      }
-      await loadScans();
-      setAuthStatus(`Scan #${scanId} pausado.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao pausar scan.");
-    }
-  };
-
-  const resumeScan = async (scanId) => {
-    try {
-      await client.post(`/api/scans/${scanId}/resume`);
-      if (selected?.id === scanId) {
-        await loadScanStatus(scanId);
-        await loadLogs(scanId);
-      }
-      await loadScans();
-      setAuthStatus(`Scan #${scanId} retomado.`);
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao retomar scan.");
-    }
-  };
-
-  const toggleScanSelection = (scanId) => {
-    const newSelected = new Set(selectedScans);
-    if (newSelected.has(scanId)) {
-      newSelected.delete(scanId);
-    } else {
-      newSelected.add(scanId);
-    }
-    setSelectedScans(newSelected);
-  };
-
-  const toggleSelectAll = () => {
-    if (selectedScans.size === scans.length) {
-      setSelectedScans(new Set());
-    } else {
-      const allIds = new Set(scans.map(s => s.id));
-      setSelectedScans(allIds);
-    }
-  };
-
-  const removeSelectedScans = async () => {
-    if (selectedScans.size === 0) {
-      setAuthStatus("Selecione ao menos um scan para excluir.");
-      return;
-    }
-    const count = selectedScans.size;
-    const confirmed = window.confirm(`Deseja excluir ${count} scan(s)? Esta acao remove logs e findings associados.`);
-    if (!confirmed) return;
-
-    setSubmitting(true);
-    const errors = [];
-    for (const scanId of selectedScans) {
-      try {
-        await client.delete(`/api/scans/${scanId}`);
-      } catch (err) {
-        errors.push(`Scan #${scanId}: ${err?.response?.data?.detail || err?.message}`);
-      }
-    }
-
-    setSelectedScans(new Set());
-    if (selected && selectedScans.has(selected.id)) {
-      setSelected(null);
-      setLogs([]);
-      setScanStatus(null);
-    }
-    await loadScans();
-
-    if (errors.length === 0) {
-      setAuthStatus(`${count} scan(s) excluido(s) com sucesso.`);
-    } else {
-      setAuthStatus(`${count - errors.length}/${count} excluidos. Erros: ${errors.join(" | ")}`);
-    }
-    setSubmitting(false);
-  };
-
-  const resetOperationalScans = async () => {
-    const confirmed = window.confirm(
-      "Deseja executar o reset operacional? Isso vai interromper/remover execucoes ja ocorridas (running/paused/completed/failed/stopped), mantendo scans em fila e schedules futuros.",
-    );
-    if (!confirmed) return;
-
-    setSubmitting(true);
-    try {
-      const { data } = await client.post("/api/scans/reset-operational");
-      setSelected(null);
-      setLogs([]);
-      setScanStatus(null);
-      setSelectedScans(new Set());
-      await loadScans();
-      const deleted = data?.deleted || {};
-      const preserved = data?.preserved || {};
-      setAuthStatus(
-        `Reset operacional concluido. Removidos - scans: ${deleted.scan_jobs || 0}, findings: ${deleted.findings || 0}, logs: ${deleted.scan_logs || 0}. Preservados - fila: ${preserved.queued_scans || 0}, schedules ativos: ${preserved.enabled_schedules || 0}.`,
-      );
-    } catch (err) {
-      setAuthStatus(err?.response?.data?.detail || "Falha ao executar reset operacional.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const Shell = embedded ? "div" : "main";
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
 
   return (
-    <Shell className={embedded ? "flex flex-col gap-0" : "flex flex-col gap-0"}>
-      {/* Top Banner */}
-      {!embedded && <div className="border-b border-slate-800/50 bg-gradient-to-r from-slate-900/20 to-slate-950/40 px-4 py-5 sm:px-6 lg:px-8 lg:py-6">
-        <div className="mx-auto max-w-7xl">
-          <h1 className="section-title">Scan · Agendamento · Alvos</h1>
-          <p className="mt-2 text-sm text-slate-400">Painel unificado de execução das 22 fases — criação manual, agendamentos recorrentes e gestão de targets</p>
+    <div className="sk-panel" style={{ padding: "18px 22px", marginBottom: 16, border: "1px solid var(--brand-300)", boxShadow: "var(--shadow-elevate, 0 4px 24px rgba(0,0,0,.12))" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>Nova missão</span>
+        <button onClick={onClose} style={{ border: "none", background: "transparent", color: "var(--ink-muted)", fontSize: 18, cursor: "pointer", lineHeight: 1 }}>✕</button>
+      </div>
+
+      {statusMsg && (
+        <div style={{ borderRadius: 8, padding: "8px 12px", fontSize: 12, marginBottom: 12, background: statusMsg.includes("sucesso") ? "var(--sev-low-bg)" : "var(--sev-medium-bg)", color: statusMsg.includes("sucesso") ? "var(--sev-low-text)" : "var(--sev-medium-text)", border: `1px solid ${statusMsg.includes("sucesso") ? "var(--sev-low-border)" : "var(--sev-medium-border)"}` }}>
+          {statusMsg}
         </div>
-      </div>}
+      )}
 
-      <div className={embedded ? "flex-1" : "flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-8"}>
-        <div className="mx-auto max-w-7xl">
-          <div className="grid gap-6 lg:grid-cols-3">
-            {/* Main Content */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Unified Create Section — Scan / Schedule / Target */}
-              <section className="panel p-6">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Nova Operação</h2>
-                  <div className="inline-flex w-full overflow-x-auto rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs sm:w-auto">
-                    <button
-                      type="button"
-                      onClick={() => setMode("now")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "now" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
-                    >
-                      Executar Agora
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setMode("schedule")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "schedule" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
-                    >
-                      Agendar
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setMode("targets")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${mode === "targets" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
-                    >
-                      Alvos
-                    </button>
-                  </div>
-                </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr auto", gap: 14, alignItems: "end" }}>
+        {/* Alvo */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Escopo / alvo</label>
+          <input
+            className="sk-mono" value={target} onChange={(e) => setTarget(e.target.value)}
+            placeholder="*.empresa.com.br"
+            style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5, padding: "9px 12px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)", background: "#fff" }}
+          />
+          <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4 }}>separe múltiplos alvos com ;</div>
+        </div>
 
-                {mode !== "targets" ? (
-                  <form onSubmit={mode === "now" ? createScan : createSchedule} className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-2">Alvos (separe por ;)</label>
-                      <input
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
-                        placeholder="exemplo.com;*.exemplo.com;192.168.0.10"
-                        value={target}
-                        onChange={(e) => setTarget(e.target.value)}
-                      />
-                      <p className="mt-2 text-xs text-slate-500">Cada alvo separado por ponto e virgula gera uma execução independente das 22 fases.</p>
-                    </div>
-
-                    {/* Scan Level (EASM/Full) */}
-                    {mode === "now" && (
-                      <div>
-                        <label className="block text-xs font-medium text-slate-400 mb-2">Profundidade do Scan</label>
-                        <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900/40 p-1 text-xs">
-                          <button type="button" onClick={() => setScanLevel("full")}
-                            className={`px-4 py-1.5 rounded-md transition-colors ${scanLevel === "full" ? "bg-emerald-700/40 text-emerald-200 border border-emerald-700" : "text-slate-400 hover:text-slate-200"}`}>
-                            Full (P01-P22, exploração)
-                          </button>
-                          <button type="button" onClick={() => setScanLevel("asm")}
-                            className={`px-4 py-1.5 rounded-md transition-colors ${scanLevel === "asm" ? "bg-amber-700/40 text-amber-200 border border-amber-700" : "text-slate-400 hover:text-slate-200"}`}>
-                            ASM (recon passivo, sem exploitation)
-                          </button>
-                        </div>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {scanLevel === "asm"
-                            ? "ASM analisa apenas P01-P08 + P18 + P21-P22 (descoberta de superfície, sem exploração ativa)."
-                            : "Full executa as 22 fases incluindo testes de exploração."}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Authentication */}
-                    {mode === "now" && (
-                      <div>
-                        <label className="inline-flex items-center gap-2 text-xs text-slate-400 mb-2">
-                          <input type="checkbox" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
-                          <span>Autenticação no scanner (testa rotas protegidas)</span>
-                        </label>
-                        {authEnabled && (
-                          <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-3">
-                            <div>
-                              <label className="block text-xs text-slate-500 mb-1">Tipo</label>
-                              <select className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
-                                value={authConfig.type} onChange={(e) => setAuthConfig({...authConfig, type: e.target.value})}>
-                                <option value="bearer">Bearer Token (JWT/OAuth)</option>
-                                <option value="cookie">Cookie (PHPSESSID, etc)</option>
-                                <option value="basic">Basic Auth</option>
-                                <option value="header">Header customizado (X-API-Key)</option>
-                              </select>
-                            </div>
-                            {authConfig.type === "bearer" && (
-                              <input type="text" placeholder="eyJhbGc..." className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
-                                value={authConfig.token} onChange={(e) => setAuthConfig({...authConfig, token: e.target.value})} />
-                            )}
-                            {authConfig.type === "cookie" && (
-                              <input type="text" placeholder="session=abc123; csrftoken=xyz" className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
-                                value={authConfig.cookie} onChange={(e) => setAuthConfig({...authConfig, cookie: e.target.value})} />
-                            )}
-                            {authConfig.type === "basic" && (
-                              <div className="grid grid-cols-2 gap-2">
-                                <input type="text" placeholder="username" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
-                                  value={authConfig.username} onChange={(e) => setAuthConfig({...authConfig, username: e.target.value})} />
-                                <input type="password" placeholder="password" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
-                                  value={authConfig.password} onChange={(e) => setAuthConfig({...authConfig, password: e.target.value})} />
-                              </div>
-                            )}
-                            {authConfig.type === "header" && (
-                              <div className="grid grid-cols-2 gap-2">
-                                <input type="text" placeholder="X-API-Key" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
-                                  value={authConfig.headerName} onChange={(e) => setAuthConfig({...authConfig, headerName: e.target.value})} />
-                                <input type="text" placeholder="valor" className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm font-mono"
-                                  value={authConfig.headerValue} onChange={(e) => setAuthConfig({...authConfig, headerValue: e.target.value})} />
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-400 mb-2">Grupo de Acesso</label>
-                        <select
-                          className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                          value={accessGroupId}
-                          onChange={(e) => {
-                            setAccessGroupId(e.target.value);
-                            if (e.target.value) setAccessGroupName("");
-                          }}
-                        >
-                          <option value="">Sem grupo</option>
-                          {groups.map((g) => (
-                            <option key={g.id} value={g.id}>{g.name}</option>
-                          ))}
-                        </select>
-                        <input
-                          className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500"
-                          placeholder="Ou digite o nome do grupo"
-                          value={accessGroupName}
-                          onChange={(e) => {
-                            setAccessGroupName(e.target.value);
-                            if (e.target.value.trim()) setAccessGroupId("");
-                          }}
-                          list="scan-access-groups"
-                        />
-                        <datalist id="scan-access-groups">
-                          {groups.map((g) => (
-                            <option key={g.id} value={g.name} />
-                          ))}
-                        </datalist>
-                      </div>
-                      {mode === "schedule" && (
-                        <div>
-                          <label className="block text-xs font-medium text-slate-400 mb-2">Frequência</label>
-                          <select
-                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                            value={scheduleForm.frequency}
-                            onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })}
-                          >
-                            <option value="hourly">A cada hora</option>
-                            <option value="daily">Diário</option>
-                            <option value="weekly">Semanal</option>
-                            <option value="monthly">Mensal</option>
-                          </select>
-                        </div>
-                      )}
-                    </div>
-
-                    {mode === "schedule" && (
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-400 mb-2">Horário</label>
-                          <input
-                            type="time"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100"
-                            value={scheduleForm.run_time}
-                            onChange={(e) => setScheduleForm({ ...scheduleForm, run_time: e.target.value })}
-                          />
-                        </div>
-                        {scheduleForm.frequency === "weekly" && (
-                          <div>
-                            <label className="block text-xs font-medium text-slate-400 mb-2">Dia da semana</label>
-                            <select
-                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm"
-                              value={scheduleForm.day_of_week}
-                              onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: e.target.value })}
-                            >
-                              <option value="monday">Segunda</option>
-                              <option value="tuesday">Terça</option>
-                              <option value="wednesday">Quarta</option>
-                              <option value="thursday">Quinta</option>
-                              <option value="friday">Sexta</option>
-                              <option value="saturday">Sábado</option>
-                              <option value="sunday">Domingo</option>
-                            </select>
-                          </div>
-                        )}
-                        {scheduleForm.frequency === "monthly" && (
-                          <div>
-                            <label className="block text-xs font-medium text-slate-400 mb-2">Dia do mês</label>
-                            <input
-                              type="number" min="1" max="31"
-                              className="w-full rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-2.5 text-sm text-slate-100"
-                              value={scheduleForm.day_of_month}
-                              onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_month: Number(e.target.value) })}
-                            />
-                          </div>
-                        )}
-                        <div className="flex items-end">
-                          <label className="inline-flex items-center gap-2 text-xs text-slate-400">
-                            <input type="checkbox" checked={scheduleForm.enabled} onChange={(e) => setScheduleForm({ ...scheduleForm, enabled: e.target.checked })} />
-                            <span>Ativo</span>
-                          </label>
-                        </div>
-                      </div>
-                    )}
-
-                    {authStatus && (
-                      <div className={`rounded-lg px-4 py-3 text-xs ${
-                        authStatus.includes("sucesso") ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-amber-50 text-amber-800 border border-amber-200"
-                      }`}>
-                        {authStatus}
-                      </div>
-                    )}
-
-                    <button type="submit" disabled={submitting} className="btn-primary w-full">
-                      {submitting ? "Processando..." : mode === "now" ? "Iniciar Varredura" : "Criar Agendamento"}
-                    </button>
-                  </form>
-                ) : (
-                  <div className="space-y-3">
-                    <p className="text-xs text-slate-400">Alvos descobertos via scans anteriores e ativos cadastrados. Use o modo &ldquo;Executar Agora&rdquo; ou &ldquo;Agendar&rdquo; para criar um novo scan a partir deles.</p>
-                    {targets.length === 0 ? (
-                      <div className="py-8 text-center text-sm text-slate-400">Nenhum alvo registrado ainda.</div>
-                    ) : (
-                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                        {targets.map((t, i) => (
-                          <div key={t.domain_or_ip || i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                              <p className="font-medium text-sm text-slate-100">{t.domain_or_ip || t.target_query || t.target}</p>
-                              <p className="text-xs text-slate-500 mt-0.5">
-                                {t.scan_count ? `${t.scan_count} scan(s)` : ""}
-                                {t.last_scan ? ` · último em ${fmtDateTime(t.last_scan)}` : ""}
-                                {t.findings_count ? ` · ${t.findings_count} finding(s)` : ""}
-                              </p>
-                            </div>
-                            <button
-                              onClick={() => { setTarget(t.domain_or_ip || t.target_query || t.target); setMode("now"); }}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-blue-900/20 text-blue-300 border border-blue-800/50 hover:bg-blue-900/40"
-                            >
-                              Rescan
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-
-              {/* Scans List */}
-              <section className="panel p-6">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <h2 className="text-lg font-semibold">Histórico operacional</h2>
-                    {scans.length > 0 && (
-                      <span className="text-xs font-medium text-slate-400 bg-slate-800/50 px-3 py-1 rounded-full">
-                        {selectedScans.size}/{scans.length} selecionadas
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    onClick={resetOperationalScans}
-                    disabled={submitting}
-                    className="rounded-lg border border-rose-700/50 bg-rose-900/20 px-3 py-2 text-xs font-semibold text-rose-300 transition-colors hover:bg-rose-900/40 disabled:opacity-50"
-                  >
-                    Reset operacional
-                  </button>
-                </div>
-
-                {selectedScans.size > 0 && (
-                  <div className="mb-4 rounded-lg border border-blue-700/50 bg-blue-900/20 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <span className="text-sm font-medium text-blue-300">{selectedScans.size} varredura(s) selecionada(s)</span>
-                    <button
-                      onClick={removeSelectedScans}
-                      disabled={submitting}
-                      className="btn-danger text-xs py-1.5 px-3"
-                    >
-                      Deletar Selecionadas
-                    </button>
-                  </div>
-                )}
-
-                <div className="space-y-2 max-h-[600px] overflow-y-auto">
-                  {scans.length > 0 && (
-                    <label className="flex items-center gap-3 px-4 py-2 rounded-lg hover:bg-slate-800/30 transition-colors">
-                      <input
-                        type="checkbox"
-                        checked={selectedScans.size === scans.length && scans.length > 0}
-                        onChange={toggleSelectAll}
-                        className="form-checkbox"
-                      />
-                      <span className="text-xs font-medium text-slate-400">Selecionar Todas</span>
-                    </label>
-                  )}
-
-                  {scans.length === 0 ? (
-                    <div className="py-12 text-center">
-                      <p className="text-sm text-slate-400">Nenhuma execução iniciada</p>
-                    </div>
-                  ) : (
-                    scans.map((scan) => (
-                      <div key={scan.id} className="rounded-lg border border-slate-800 bg-slate-900/40 hover:bg-slate-900/60 transition-colors p-4">
-                        <div className="flex gap-4">
-                          <input
-                            type="checkbox"
-                            checked={selectedScans.has(scan.id)}
-                            onChange={() => toggleScanSelection(scan.id)}
-                            className="mt-1 flex-shrink-0 form-checkbox"
-                          />
-                          <button onClick={() => setSelected(scan)} className="flex-1 text-left">
-                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                              <div>
-                                <p className="font-semibold text-slate-100">#{scan.id}</p>
-                                <p className="text-sm text-slate-300 mt-0.5">{scan.target_query}</p>
-                              </div>
-                              <span className={`badge text-xs ${
-                                scan.status === 'completed' ? 'badge-success' :
-                                scan.status === 'failed' || scan.status === 'blocked' ? 'badge-danger' :
-                                scan.status === 'paused' ? 'badge-warning' :
-                                scan.status === 'running' ? 'badge-primary' : 'badge-warning'
-                              }`}>
-                                {scan.status}
-                              </span>
-                            </div>
-                            <div className="mt-2 space-y-1.5">
-                              {/* Progress bar */}
-                              {(() => {
-                                const cov = scan.state_data?.subdomain_coverage;
-                                const barColor = scan.status === 'failed' ? '#ef4444' : scan.status === 'completed' ? '#22c55e' : scan.status === 'paused' ? '#facc15' : '#fb923c';
-                                const textColor = scan.status === 'failed' ? '#f87171' : scan.status === 'completed' ? '#4ade80' : scan.status === 'paused' ? '#fde047' : '#fb923c';
-                                const pct = scan.mission_progress ?? 0;
-                                return (
-                                  <>
-                                    <div className="flex items-center gap-2">
-                                      <div className="flex-1 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
-                                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: barColor }} />
-                                      </div>
-                                      <span className="text-xs font-mono font-bold" style={{ color: textColor, minWidth: 34, textAlign: 'right' }}>{pct}%</span>
-                                    </div>
-                                    {cov && cov.total_discovered > 0 && (
-                                      <div className="text-xs flex gap-3 mt-0.5" style={{ color: '#94a3b8' }}>
-                                        <span title="Subdomínios analisados / ativos descobertos">
-                                          <span style={{ color: textColor, fontWeight: 600 }}>{cov.scanned}</span>
-                                          <span>/{cov.active_total} subdomínios analisados</span>
-                                        </span>
-                                        {cov.failed_takeover > 0 && (
-                                          <span title="Excluídos: domain takeover confirmado" style={{ color: '#f87171' }}>
-                                            −{cov.failed_takeover} takeover
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                  </>
-                                );
-                              })()}
-                              {/* Step + timing */}
-                              <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
-                                <span className="truncate max-w-[180px]" title={scan.current_step}>{scan.current_step}</span>
-                                {scan.created_at && (() => {
-                                  const startMs = new Date(scan.created_at).getTime();
-                                  const endMs = scan.updated_at ? new Date(scan.updated_at).getTime() : Date.now();
-                                  const elapsedS = Math.floor((endMs - startMs) / 1000);
-                                  const h = Math.floor(elapsedS / 3600);
-                                  const m = Math.floor((elapsedS % 3600) / 60);
-                                  const s = elapsedS % 60;
-                                  const label = h > 0 ? `${h}h${String(m).padStart(2,"0")}m` : m > 0 ? `${m}m${String(s).padStart(2,"0")}s` : `${s}s`;
-                                  return <span className="text-slate-500 ml-auto shrink-0">⏱ {label}</span>;
-                                })()}
-                              </div>
-                              {scan.retry_attempt > 0 && (
-                                <p className="text-xs text-amber-300">Tentativa {scan.retry_attempt}/{scan.retry_max}</p>
-                              )}
-                            </div>
-                          </button>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {ACTIVE_SCAN_STATUS.includes(scan.status) && (
-                            <button
-                              onClick={() => pauseScan(scan.id)}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-amber-900/20 text-amber-300 border border-amber-800/50 hover:bg-amber-900/40 transition-colors"
-                            >
-                              Pausar
-                            </button>
-                          )}
-                          {["paused", "stopped", "failed"].includes(scan.status) && (
-                            <button
-                              onClick={() => resumeScan(scan.id)}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-emerald-900/20 text-emerald-300 border border-emerald-800/50 hover:bg-emerald-900/40 transition-colors"
-                            >
-                              {scan.status === "paused" ? "Retomar" : "Continuar"}
-                            </button>
-                          )}
-                          {STOPPABLE_SCAN_STATUS.includes(scan.status) && (
-                            <button
-                              onClick={() => stopScan(scan.id)}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-red-900/20 text-red-300 border border-red-800/50 hover:bg-red-900/40 transition-colors"
-                            >
-                              Parar
-                            </button>
-                          )}
-                          <button
-                            onClick={() => removeReport(scan.id)}
-                            disabled={ACTIVE_SCAN_STATUS.includes(scan.status)}
-                            className="text-xs px-3 py-1.5 rounded-lg bg-amber-900/20 text-amber-300 border border-amber-800/50 hover:bg-amber-900/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          >
-                            Limpar Report
-                          </button>
-                          <button
-                            onClick={() => removeScan(scan.id)}
-                            disabled={ACTIVE_SCAN_STATUS.includes(scan.status)}
-                            className="text-xs px-3 py-1.5 rounded-lg bg-rose-900/20 text-rose-300 border border-rose-800/50 hover:bg-rose-900/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          >
-                            Deletar
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </section>
-
-              {/* Schedules List */}
-              {schedules.length > 0 && (
-                <section className="panel p-6">
-                  <h2 className="text-lg font-semibold mb-4">Agendamentos Ativos</h2>
-                  <div className="space-y-2">
-                    {schedules.map((sched) => (
-                      <div key={sched.id} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="font-semibold text-slate-100 text-sm">#{sched.id} · {sched.frequency}</p>
-                            <p className="text-xs text-slate-400 mt-0.5 break-all sm:truncate">{sched.targets_text || (sched.targets || []).join("; ")}</p>
-                            <p className="text-xs text-slate-500 mt-0.5">Horário: {sched.run_time}{!sched.enabled ? " · desativado" : ""}</p>
-                          </div>
-                          <div className="flex flex-wrap gap-2 flex-shrink-0">
-                            <button
-                              onClick={() => runScheduleNow(sched.id)}
-                              className="text-xs px-2 py-1 rounded-lg bg-blue-900/20 text-blue-300 border border-blue-800/50 hover:bg-blue-900/40 transition-colors"
-                            >
-                              Executar
-                            </button>
-                            <button
-                              onClick={() => deleteSchedule(sched.id)}
-                              className="text-xs px-2 py-1 rounded-lg bg-rose-900/20 text-rose-300 border border-rose-800/50 hover:bg-rose-900/40 transition-colors"
-                            >
-                              Excluir
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-            </div>
-
-            {/* Sidebar */}
-            <div className="space-y-6 lg:sticky lg:top-8">
-              {/* Mission Progress */}
-              {selected && (
-                <MissionProgress scan={selected} scanStatus={scanStatus} />
-              )}
-
-              {/* Status Details */}
-              {selected && scanStatus && (
-                <section className="panel p-6">
-                  <h3 className="text-sm font-semibold mb-4">Detalhes da Execução</h3>
-                  <div className="space-y-3 text-xs">
-                    <div>
-                      <p className="text-slate-400">Status Compliance</p>
-                      <p className="text-slate-200 font-medium mt-0.5">{scanStatus.compliance_status}</p>
-                    </div>
-                    <div className="pt-3 border-t border-slate-800">
-                      <p className="text-slate-400">Connection WebSocket</p>
-                      <p className={`font-medium mt-0.5 ${wsConnected ? 'text-green-400' : 'text-slate-400'}`}>
-                        {wsConnected ? '● Ativo' : '○ Desconectado'}
-                      </p>
-                    </div>
-                    {scanStatus.discovered_ports && scanStatus.discovered_ports.length > 0 && (
-                      <div className="pt-3 border-t border-slate-800">
-                        <p className="text-slate-400 mb-2">Portas Descobertas</p>
-                        <div className="flex flex-wrap gap-1">
-                          {scanStatus.discovered_ports.map(port => (
-                            <span key={port} className="badge-primary text-xs">{port}</span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    <div className="pt-3 border-t border-slate-800">
-                      <p className="text-slate-400 mb-2">BAS / Validação de Controles</p>
-                      {basSummary ? (
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          <div className="rounded-lg border border-cyan-900/60 bg-cyan-950/20 p-2">
-                            <p className="text-slate-500">Técnicas</p>
-                            <p className="mt-1 font-mono text-lg text-cyan-200">{basSummary.techniques_exercised || 0}</p>
-                          </div>
-                          <div className="rounded-lg border border-sky-900/60 bg-sky-950/20 p-2">
-                            <p className="text-slate-500">Evidência pendente</p>
-                            <p className="mt-1 font-mono text-lg text-sky-200">{basSummary.pending_defensive_evidence || 0}</p>
-                          </div>
-                          <div className="col-span-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2">
-                            <p className="text-slate-500">Fontes esperadas</p>
-                            <p className="mt-1 text-slate-200">
-                              {(basSummary.expected_telemetry_sources || []).join(", ") || "Aguardando execução BAS"}
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <p className="text-slate-500">Sem resumo BAS disponível para este scan.</p>
-                      )}
-                    </div>
-                  </div>
-                </section>
-              )}
-            </div>
+        {/* Perfil */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Perfil</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            {Object.keys(SCAN_PERFIL).map((p) => (
+              <button key={p} type="button" onClick={() => setPerfil(p)} style={{
+                flex: 1, fontSize: 10.5, fontWeight: perfil === p ? 700 : 500, padding: "8px 4px", borderRadius: 8, cursor: "pointer",
+                border: `1px solid ${perfil === p ? "var(--brand-500)" : "var(--line)"}`,
+                background: perfil === p ? "var(--brand-50)" : "#fff",
+                color: perfil === p ? "var(--brand-700)" : "var(--ink-soft)", fontFamily: "var(--font-body)",
+              }}>{p}</button>
+            ))}
           </div>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>{SCAN_PERFIL[perfil].d}</div>
+        </div>
+
+        {/* Criticidade */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Criticidade</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            {["Crítica","Alta","Média","Baixa"].map((c) => (
+              <button key={c} type="button" onClick={() => setCrit(c)} style={{
+                flex: 1, fontSize: 10, fontWeight: crit === c ? 700 : 500, padding: "8px 2px", borderRadius: 8, cursor: "pointer",
+                border: `1px solid ${crit === c ? CRIT_CSS[c].bd : "var(--line)"}`,
+                background: crit === c ? CRIT_CSS[c].bg : "#fff",
+                color: crit === c ? CRIT_CSS[c].c : "var(--ink-soft)", fontFamily: "var(--font-body)",
+              }}>{c}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>define posição na fila</div>
+        </div>
+
+        {/* Janela */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Janela</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[["imediato","Agora"],["janela","22h–04h"],["agendar","Agendar"]].map(([v,l]) => (
+              <button key={v} type="button" onClick={() => setJanela(v)} style={{
+                flex: 1, fontSize: 10.5, fontWeight: janela === v ? 700 : 500, padding: "8px 4px", borderRadius: 8, cursor: "pointer",
+                border: `1px solid ${janela === v ? "var(--brand-500)" : "var(--line)"}`,
+                background: janela === v ? "var(--brand-50)" : "#fff",
+                color: janela === v ? "var(--brand-700)" : "var(--ink-soft)", fontFamily: "var(--font-body)",
+              }}>{l}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>guardrails aplicam automaticamente</div>
+        </div>
+
+        <button className="sk-btn-primary" style={{ padding: "10px 22px", whiteSpace: "nowrap" }} disabled={submitting || !target.trim()} onClick={handleLancar}>
+          {submitting ? "Lançando…" : "Lançar"}
+        </button>
+      </div>
+
+      {/* Autenticação (expansível) */}
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line-soft)" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--ink-soft)" }}>
+          <input type="checkbox" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
+          Autenticação no scanner
+        </label>
+        {authEnabled && (
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "160px 1fr 1fr", gap: 10, alignItems: "end" }}>
+            <select value={authConfig.type} onChange={(e) => setAuthConfig({ ...authConfig, type: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }}>
+              <option value="bearer">Bearer Token</option>
+              <option value="cookie">Cookie</option>
+              <option value="basic">Basic Auth</option>
+              <option value="header">Header</option>
+            </select>
+            {authConfig.type === "bearer" && <input placeholder="eyJhbGc…" value={authConfig.token} onChange={(e) => setAuthConfig({ ...authConfig, token: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />}
+            {authConfig.type === "cookie" && <input placeholder="session=abc123" value={authConfig.cookie} onChange={(e) => setAuthConfig({ ...authConfig, cookie: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />}
+            {authConfig.type === "basic" && <>
+              <input placeholder="username" value={authConfig.username} onChange={(e) => setAuthConfig({ ...authConfig, username: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }} />
+              <input type="password" placeholder="password" value={authConfig.password} onChange={(e) => setAuthConfig({ ...authConfig, password: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }} />
+            </>}
+            {authConfig.type === "header" && <>
+              <input placeholder="X-API-Key" value={authConfig.headerName} onChange={(e) => setAuthConfig({ ...authConfig, headerName: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />
+              <input placeholder="valor" value={authConfig.headerValue} onChange={(e) => setAuthConfig({ ...authConfig, headerValue: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />
+            </>}
+          </div>
+        )}
+        {janela === "agendar" && (
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Frequência</label>
+              <select value={scheduleForm.frequency} onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })} style={{ width: "100%", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }}>
+                <option value="daily">Diário</option>
+                <option value="weekly">Semanal</option>
+                <option value="monthly">Mensal</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Horário</label>
+              <input type="time" value={scheduleForm.run_time} onChange={(e) => setScheduleForm({ ...scheduleForm, run_time: e.target.value })} style={{ width: "100%", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", boxSizing: "border-box" }} />
+            </div>
+            {scheduleForm.frequency === "weekly" && (
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Dia da semana</label>
+                <select value={scheduleForm.day_of_week} onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: e.target.value })} style={{ width: "100%", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }}>
+                  {["monday","tuesday","wednesday","thursday","friday","saturday","sunday"].map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Painel de detalhe lateral ────────────────────────────────────────────────
+function DetailPanel({ scan, logs, scanStatus, onClose }) {
+  if (!scan) return null;
+  return (
+    <div className="sk-panel" style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>#{scan.id} · {scan.target_query}</span>
+        <button onClick={onClose} className="sk-btn-ghost" style={{ padding: "4px 12px", fontSize: 12 }}>Fechar</button>
+      </div>
+      <MissionProgress scan={scan} scanStatus={scanStatus} />
+      {logs.length > 0 && (
+        <div style={{ marginTop: 16, border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden" }}>
+          <LogTerminal logs={logs} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Modal de edição de agendamento ──────────────────────────────────────────
+function EditScheduleModal({ schedule, groups, onSave, onClose }) {
+  const [form, setForm] = useState({
+    targets_text:    schedule.targets_text || schedule.target_query || "",
+    scan_type:       schedule.scan_type   || schedule.level        || "full",
+    access_group_id: schedule.access_group_id ?? "",
+    frequency:       schedule.frequency   || "daily",
+    run_time:        schedule.run_time    || "00:00",
+    day_of_week:     schedule.day_of_week || "monday",
+    day_of_month:    schedule.day_of_month || 1,
+    enabled:         schedule.enabled !== false,
+  });
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const handleGroupChange = (e) => {
+    const id = e.target.value;
+    const g  = groups.find((g) => String(g.id) === String(id));
+    set("access_group_id",   id);
+    set("access_group_name", g?.name || "");
+  };
+
+  const handleSave = () => {
+    const payload = {
+      targets_text: form.targets_text.trim(),
+      scan_type:    form.scan_type,
+      frequency:    form.frequency,
+      run_time:     form.run_time,
+      enabled:      form.enabled,
+    };
+    if (form.frequency === "weekly")  payload.day_of_week  = form.day_of_week;
+    if (form.frequency === "monthly") payload.day_of_month = Number(form.day_of_month);
+    if (form.access_group_id !== "" && form.access_group_id !== null) {
+      payload.access_group_id = Number(form.access_group_id);
+    } else {
+      payload.access_group_id = null;
+    }
+    onSave(payload);
+  };
+
+  const inputStyle = { width: "100%", boxSizing: "border-box", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-body)" };
+  const labelStyle = { fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.35)", display: "grid", placeItems: "center", padding: 24 }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sk-panel" style={{ width: "100%", maxWidth: 540, padding: "22px 24px", boxShadow: "0 8px 40px rgba(0,0,0,.22)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>Editar agendamento <span className="sk-mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>#{schedule.id}</span></div>
+            {schedule.access_group_id && (
+              <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>
+                Grupo: {groups.find((g) => Number(g.id) === Number(schedule.access_group_id))?.name || `#${schedule.access_group_id}`}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "transparent", color: "var(--ink-muted)", fontSize: 18, cursor: "pointer" }}>✕</button>
+        </div>
+
+        <div style={{ display: "grid", gap: 14 }}>
+          {/* Alvo */}
+          <div>
+            <label style={labelStyle}>Escopo / alvo</label>
+            <input className="sk-mono" value={form.targets_text} onChange={(e) => set("targets_text", e.target.value)} style={{ ...inputStyle, fontFamily: "var(--font-mono)" }} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            {/* Grupo */}
+            <div>
+              <label style={labelStyle}>Grupo de acesso</label>
+              <select value={form.access_group_id} onChange={(e) => set("access_group_id", e.target.value)} style={inputStyle}>
+                <option value="">— sem grupo —</option>
+                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+
+            {/* Perfil */}
+            <div>
+              <label style={labelStyle}>Perfil</label>
+              <select value={form.scan_type} onChange={(e) => set("scan_type", e.target.value)} style={inputStyle}>
+                <option value="asm">Recon</option>
+                <option value="full">Padrão</option>
+                <option value="aggressive">Agressivo</option>
+              </select>
+            </div>
+
+            {/* Frequência */}
+            <div>
+              <label style={labelStyle}>Frequência</label>
+              <select value={form.frequency} onChange={(e) => set("frequency", e.target.value)} style={inputStyle}>
+                {["daily","weekly","monthly","once"].map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </div>
+
+            {/* Horário */}
+            <div>
+              <label style={labelStyle}>Horário (HH:MM)</label>
+              <input type="time" value={form.run_time} onChange={(e) => set("run_time", e.target.value)} style={inputStyle} />
+            </div>
+
+            {/* Dia da semana — weekly */}
+            {form.frequency === "weekly" && (
+              <div>
+                <label style={labelStyle}>Dia da semana</label>
+                <select value={form.day_of_week} onChange={(e) => set("day_of_week", e.target.value)} style={inputStyle}>
+                  {["monday","tuesday","wednesday","thursday","friday","saturday","sunday"].map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+            )}
+
+            {/* Dia do mês — monthly */}
+            {form.frequency === "monthly" && (
+              <div>
+                <label style={labelStyle}>Dia do mês</label>
+                <input type="number" min={1} max={28} value={form.day_of_month} onChange={(e) => set("day_of_month", e.target.value)} style={inputStyle} />
+              </div>
+            )}
+          </div>
+
+          {/* Ativo */}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>
+            <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)}
+              style={{ width: 15, height: 15, cursor: "pointer" }} />
+            Agendamento ativo
+          </label>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 20, justifyContent: "flex-end" }}>
+          <button className="sk-btn-ghost" onClick={onClose} style={{ padding: "8px 18px", fontSize: 12.5 }}>Cancelar</button>
+          <button className="sk-btn-primary" onClick={handleSave} style={{ padding: "8px 22px", fontSize: 12.5 }}>Salvar</button>
         </div>
       </div>
-    </Shell>
+    </div>
+  );
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
+export default function ScansPage() {
+  const [scans,     setScans]     = useState([]);
+  const [schedules, setSchedules] = useState([]);
+  const [groups,    setGroups]    = useState([]);
+  const [composer,  setComposer]  = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [selected,  setSelected]  = useState(null);
+  const [logs,      setLogs]      = useState([]);
+  const [scanStatus, setScanStatus] = useState({});
+  const [filaOrder,    setFilaOrder]    = useState([]);
+  const [editSchedule, setEditSchedule] = useState(null); // schedule being edited
+
+  // Split scans by lifecycle
+  const activeScans   = scans.filter((s) => [...ACTIVE_STATUS, "paused", "blocked", "stopped", "failed"].includes(s.status));
+  const terminalScans = scans.filter((s) => ["completed", "cancelled"].includes(s.status));
+  const runningCount  = scans.filter((s) => ACTIVE_STATUS.includes(s.status)).length;
+  const blockedCount  = scans.filter((s) => s.status === "blocked").length;
+
+  // ── API calls ─────────────────────────────────────────────────────────────
+  const loadScans = useCallback(async () => {
+    try {
+      const { data } = await client.get("/api/scans");
+      setScans(Array.isArray(data) ? data : []);
+    } catch { /* silencioso */ }
+  }, []);
+
+  const loadSchedules = useCallback(async () => {
+    try {
+      const { data } = await client.get("/api/schedules");
+      const list = Array.isArray(data) ? data : [];
+      setSchedules(list);
+      setFilaOrder(list.map((s) => s.id));
+    } catch { /* silencioso */ }
+  }, []);
+
+  const loadGroups = useCallback(async () => {
+    try {
+      const { data } = await client.get("/api/access-groups");
+      setGroups(Array.isArray(data) ? data : []);
+    } catch { /* silencioso */ }
+  }, []);
+
+  useEffect(() => {
+    loadScans(); loadSchedules(); loadGroups();
+    const id = setInterval(loadScans, 3000);
+    return () => clearInterval(id);
+  }, [loadScans, loadSchedules, loadGroups]);
+
+  // ── WebSocket logs ────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selected) { setLogs([]); return; }
+    const wsBase = getWsBaseUrl();
+    let ws, retries = 0, timer;
+    const connect = () => {
+      ws = new WebSocket(`${wsBase}/ws/scans/${selected.id}/logs`);
+      ws.onmessage = (e) => {
+        try { const msg = JSON.parse(e.data); setLogs((prev) => [...prev.slice(-999), msg]); } catch { /* skip */ }
+      };
+      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        if (retries < 5) { retries++; timer = setTimeout(connect, Math.min(1000 * retries, 8000)); }
+      };
+    };
+    connect();
+    return () => { clearTimeout(timer); ws?.close(); };
+  }, [selected?.id]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
+
+  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, authPayload }) => {
+    const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
+    for (const tgt of targets) {
+      const payload = { target_query: tgt, level: scanLevel || "full" };
+      if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
+      if (accessGroupName) payload.access_group_name = accessGroupName;
+      if (authPayload)     payload.auth_config        = authPayload;
+      await client.post("/api/scans", payload);
+    }
+    showMsg("Missão lançada com sucesso!");
+    setComposer(false);
+    loadScans();
+  };
+
+  const createSchedule = async ({ target, accessGroupId, accessGroupName, scheduleForm }) => {
+    const payload = { target_query: target.trim(), ...scheduleForm };
+    if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
+    if (accessGroupName) payload.access_group_name = accessGroupName;
+    await client.post("/api/schedules", payload);
+    showMsg("Agendamento criado com sucesso!");
+    setComposer(false);
+    loadSchedules();
+  };
+
+  const deleteSchedule = async (id) => {
+    await client.delete(`/api/schedules/${id}`);
+    loadSchedules();
+  };
+
+  const updateSchedule = async (id, payload) => {
+    await client.patch(`/api/schedules/${id}`, payload);
+    setEditSchedule(null);
+    showMsg("Agendamento atualizado!");
+    loadSchedules();
+  };
+
+  const runScheduleNow = async (id) => {
+    await client.post(`/api/schedules/${id}/run-now`);
+    loadScans();
+  };
+
+  const stopScan = async (id) => {
+    await client.post(`/api/scans/${id}/stop`);
+    loadScans();
+  };
+
+  const pauseScan = async (id) => {
+    await client.post(`/api/scans/${id}/pause`);
+    loadScans();
+  };
+
+  const resumeScan = async (id) => {
+    await client.post(`/api/scans/${id}/resume`);
+    loadScans();
+  };
+
+  const removeScan = async (id) => {
+    await client.delete(`/api/scans/${id}`);
+    if (selected?.id === id) setSelected(null);
+    loadScans();
+  };
+
+  const removeReport = async (id) => {
+    await client.delete(`/api/scans/${id}/report`);
+    loadScans();
+  };
+
+  const moverPrioridade = (id, dir) => {
+    setFilaOrder((prev) => {
+      const arr = [...prev];
+      const i = arr.indexOf(id);
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return arr;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      return arr;
+    });
+  };
+
+  const sortedSchedules = filaOrder.length
+    ? filaOrder.map((id) => schedules.find((s) => s.id === id)).filter(Boolean)
+    : schedules;
+
+  return (
+    <div style={{ padding: "26px 32px 48px" }}>
+      {/* ── Cabeçalho ── */}
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 16, marginBottom: 18 }}>
+        <div>
+          <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Orquestração de scans · RedTeam</div>
+          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 700, letterSpacing: "-0.02em" }}>Missões</h2>
+        </div>
+        <button className="sk-btn-primary" onClick={() => setComposer(true)}>+ Nova missão</button>
+      </div>
+
+      {/* ── Compositor inline ── */}
+      {composer && (
+        <NovoScanComposer
+          groups={groups}
+          statusMsg={statusMsg}
+          onClose={() => { setComposer(false); setStatusMsg(""); }}
+          onCreate={createScan}
+          onSchedule={createSchedule}
+        />
+      )}
+
+      {/* ── Scans ativos ── */}
+      {activeScans.length > 0 && (
+        <div style={{ marginBottom: 28 }}>
+          <div className="sk-eyebrow" style={{ marginBottom: 10 }}>
+            Em execução · {runningCount} rodando{blockedCount > 0 ? ` · ${blockedCount} bloqueada` : ""}
+            {" "}· <span style={{ color: "var(--sev-medium-text)", fontStyle: "normal" }}>Pause/Stop habilitados por missão</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
+            {activeScans.map((s) => (
+              <ActiveScanCard
+                key={s.id} scan={s}
+                onStop={stopScan} onPause={pauseScan} onResume={resumeScan}
+                onContinue={resumeScan} onDelete={removeScan} onReport={removeReport}
+                onClick={() => setSelected(selected?.id === s.id ? null : s)}
+              />
+            ))}
+          </div>
+          {selected && !TERMINAL_STATUS.has(selected.status) && (
+            <DetailPanel scan={selected} logs={logs} scanStatus={scanStatus} onClose={() => setSelected(null)} />
+          )}
+        </div>
+      )}
+
+      {/* ── Modal de edição de schedule ── */}
+      {editSchedule && (
+        <EditScheduleModal
+          schedule={editSchedule}
+          groups={groups}
+          onSave={(payload) => updateSchedule(editSchedule.id, payload)}
+          onClose={() => setEditSchedule(null)}
+        />
+      )}
+
+      {/* ── Fila + Histórico ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: 16, marginBottom: 28 }}>
+        {/* Fila priorizada */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div className="sk-eyebrow">Fila · ordem de execução</div>
+            <span style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>↑↓ reordena · clique ✎ para editar</span>
+          </div>
+          <div className="sk-panel" style={{ overflow: "hidden" }}>
+            {sortedSchedules.length === 0 ? (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--ink-muted)", fontSize: 13 }}>
+                Nenhum scan agendado
+              </div>
+            ) : sortedSchedules.map((f, i) => (
+              <div key={f.id} style={{ display: "flex", gap: 8, padding: "11px 16px", borderBottom: i < sortedSchedules.length - 1 ? "1px solid var(--line-soft)" : "none", alignItems: "center" }}>
+                {/* nº */}
+                <span className="sk-mono" style={{ fontSize: 15, fontWeight: 700, color: i === 0 ? "var(--brand-600)" : "var(--ink-muted)", width: 22, flexShrink: 0, textAlign: "center" }}>{i + 1}</span>
+                {/* info */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                    <span className="sk-mono" style={{ fontSize: 12, fontWeight: 700 }}>#{f.id}</span>
+                    {/* grupo — destaque primário */}
+                    {(() => {
+                      const gName = groups.find((g) => Number(g.id) === Number(f.access_group_id))?.name
+                        || (f.access_group_id ? `grupo #${f.access_group_id}` : null);
+                      return gName ? (
+                        <span style={{ fontSize: 10, fontWeight: 700, color: "var(--sev-info-text)", background: "var(--sev-info-bg)", border: "1px solid var(--sev-info-border)", padding: "2px 7px", borderRadius: 99 }}>
+                          {gName}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 10, fontWeight: 600, color: "var(--ink-muted)" }}>sem grupo</span>
+                      );
+                    })()}
+                    <PerfilBadge perfil={LEVEL_MAP[f.scan_type] || LEVEL_MAP[f.level] || "Padrão"} />
+                    {f.enabled === false && (
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--sev-medium-text)", background: "var(--sev-medium-bg)", border: "1px solid var(--sev-medium-border)", padding: "1px 6px", borderRadius: 99 }}>PAUSADO</span>
+                    )}
+                  </div>
+                  <div className="sk-mono" style={{ fontSize: 11, color: "var(--ink-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.targets_text || f.target_query}</div>
+                  <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 2 }}>
+                    {f.frequency}{f.run_time ? ` · ${f.run_time}` : ""}{f.day_of_week ? ` · ${f.day_of_week}` : ""}
+                  </div>
+                </div>
+                {/* reordenar */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
+                  <button onClick={() => moverPrioridade(f.id, -1)} disabled={i === 0} style={{ width: 20, height: 18, border: "1px solid var(--line)", borderRadius: 4, background: "#fff", cursor: i === 0 ? "default" : "pointer", color: i === 0 ? "var(--line)" : "var(--ink-soft)", fontSize: 9, display: "grid", placeItems: "center" }}>↑</button>
+                  <button onClick={() => moverPrioridade(f.id, 1)} disabled={i === sortedSchedules.length - 1} style={{ width: 20, height: 18, border: "1px solid var(--line)", borderRadius: 4, background: "#fff", cursor: i === sortedSchedules.length - 1 ? "default" : "pointer", color: i === sortedSchedules.length - 1 ? "var(--line)" : "var(--ink-soft)", fontSize: 9, display: "grid", placeItems: "center" }}>↓</button>
+                </div>
+                {/* ações */}
+                <button onClick={() => setEditSchedule(f)} title="Editar" style={{ fontSize: 11, padding: "4px 7px", borderRadius: 6, border: "1px solid var(--line)", background: "#fff", color: "var(--ink-soft)", cursor: "pointer" }}>✎</button>
+                <button onClick={() => runScheduleNow(f.id)} title="Executar agora" style={{ fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--brand-300)", background: "var(--brand-50)", color: "var(--brand-700)", cursor: "pointer" }}>▶</button>
+                <button onClick={() => deleteSchedule(f.id)} title="Excluir" style={{ fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)", cursor: "pointer" }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Histórico */}
+        <div>
+          <div className="sk-eyebrow" style={{ marginBottom: 10 }}>Histórico · missões concluídas</div>
+          <div className="sk-panel" style={{ overflow: "hidden" }}>
+            {terminalScans.length === 0 ? (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--ink-muted)", fontSize: 13 }}>
+                Nenhuma missão concluída ainda
+              </div>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "var(--surface-soft)" }}>
+                    <th className="sk-th" style={{ paddingLeft: 16 }}>Missão</th>
+                    <th className="sk-th">Perfil</th>
+                    <th className="sk-th">Concluída</th>
+                    <th className="sk-th" style={{ textAlign: "right" }}>Dur.</th>
+                    <th className="sk-th" style={{ textAlign: "right" }}>C</th>
+                    <th className="sk-th" style={{ textAlign: "right" }}>A</th>
+                    <th className="sk-th" style={{ textAlign: "right" }}>M</th>
+                    <th className="sk-th" style={{ textAlign: "right" }}>B</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {terminalScans.map((h) => (
+                    <tr key={h.id}
+                      onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-soft)"}
+                      onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                      onClick={() => setSelected(selected?.id === h.id ? null : h)}
+                      style={{ cursor: "pointer" }}>
+                      <td className="sk-td" style={{ paddingLeft: 16 }}>
+                        <span className="sk-mono" style={{ fontWeight: 700 }}>#{h.id}</span>
+                        <span className="sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)", marginLeft: 8 }}>{String(h.target_query||"").slice(0,30)}</span>
+                      </td>
+                      <td className="sk-td"><PerfilBadge perfil={getPerfil(h)} /></td>
+                      <td className="sk-td sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)" }}>{fmtDateSP(h.finished_at || h.updated_at)}</td>
+                      <td className="sk-td sk-mono" style={{ textAlign: "right" }}>{fmtDuration(h.started_at, h.finished_at)}</td>
+                      <td className="sk-td sk-mono" style={{ textAlign: "right", fontWeight: 700, color: h.open_critical > 0 ? "var(--sev-critical-text)" : "var(--ink-muted)" }}>{h.open_critical||0}</td>
+                      <td className="sk-td sk-mono" style={{ textAlign: "right", fontWeight: 700, color: h.open_high > 0 ? "var(--sev-high-text)" : "var(--ink-muted)" }}>{h.open_high||0}</td>
+                      <td className="sk-td sk-mono" style={{ textAlign: "right", color: "var(--ink-muted)" }}>{h.open_medium||0}</td>
+                      <td className="sk-td sk-mono" style={{ textAlign: "right", color: "var(--ink-muted)" }}>{h.open_low||0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.55 }}>
+            C = Crítico · A = Alto · M = Médio · B = Baixo · clique numa linha para ver detalhes
+          </div>
+          {selected && TERMINAL_STATUS.has(selected.status) && (
+            <DetailPanel scan={selected} logs={logs} scanStatus={scanStatus} onClose={() => setSelected(null)} />
+          )}
+        </div>
+      </div>
+
+      {/* ── Estado vazio ── */}
+      {scans.length === 0 && !composer && (
+        <div style={{ textAlign: "center", padding: "64px 0", color: "var(--ink-muted)" }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>🎯</div>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Nenhuma missão ativa</div>
+          <div style={{ fontSize: 13, marginBottom: 20 }}>Lance o primeiro scan para começar.</div>
+          <button className="sk-btn-primary" onClick={() => setComposer(true)}>+ Nova missão</button>
+        </div>
+      )}
+    </div>
   );
 }
