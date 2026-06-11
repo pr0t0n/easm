@@ -671,6 +671,18 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             scan_id = None
     timeout = int(request.arguments.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
     batch_targets = [str(t).strip() for t in (request.targets or []) if str(t).strip()]
+    # Forward per-job env vars (e.g. SHODAN_API_KEY) from submission arguments
+    _forwarded_env: dict[str, str] = {}
+    _env_forward_keys = ("SHODAN_API_KEY", "HIBP_API_KEY", "GITHUB_TOKEN")
+    for _ek in _env_forward_keys:
+        _val = str(request.arguments.get(_ek) or request.arguments.get(_ek.lower()) or "").strip()
+        if _val:
+            _forwarded_env[_ek] = _val
+    # Also accept a generic env_vars dict in arguments
+    _extra_env = request.arguments.get("env_vars") or {}
+    if isinstance(_extra_env, dict):
+        _forwarded_env.update({str(k): str(v) for k, v in _extra_env.items() if str(v).strip()})
+
     response = await kali_client.post(
         "/jobs",
         json={
@@ -681,6 +693,7 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "timeout": timeout,
             "auth_headers": request.arguments.get("auth_headers") or {},
+            "env_vars": _forwarded_env,
             "extra_args": _apply_guardrail(
                 (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
                 [

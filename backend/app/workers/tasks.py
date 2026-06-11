@@ -2039,6 +2039,20 @@ def execute_scan_work_item(item_id: int):
             _skill_ids = [str(_item_meta.get("skill_id"))]
         _primary_skill_id = _skill_ids[0] if _skill_ids else f"work_queue.{item.phase_id}"
 
+        # ── Per-job env vars: load API keys from AppSetting and forward to Kali ──
+        _job_env: dict[str, str] = {}
+        try:
+            from app.models.models import AppSetting as _AppSetting
+            _shodan_key = str(
+                db.query(_AppSetting.value)
+                .filter(_AppSetting.owner_id == job.owner_id, _AppSetting.key == "shodan_api_key")
+                .scalar() or ""
+            ).strip()
+            if _shodan_key:
+                _job_env["SHODAN_API_KEY"] = _shodan_key
+        except Exception:
+            pass
+
         execution = {
             "mcp_request_id": f"wi-{item.id}",
             "phase_id": item.phase_id,
@@ -2052,6 +2066,7 @@ def execute_scan_work_item(item_id: int):
                 "target": _dispatch_target,
                 "scan_id": item.scan_job_id,
                 **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
+                **({k: v for k, v in _job_env.items()} if _job_env else {}),
             },
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }

@@ -109,6 +109,7 @@ class JobRequest(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
     timeout: Optional[int] = None
     auth_headers: dict[str, str] = Field(default_factory=dict, description="Authentication headers injected into tool command")
+    env_vars: dict[str, str] = Field(default_factory=dict, description="Per-job env vars injected into the subprocess (e.g. SHODAN_API_KEY)")
 
 
 class JobStatus(BaseModel):
@@ -673,10 +674,12 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
 
     try:
         _set_job_fields(job_id, stage="checking_env")
+        # Per-job env vars override process env for requires_env check and subprocess
+        _job_env = {str(k): str(v) for k, v in (req.env_vars or {}).items() if str(v).strip()}
         missing_env = [
             str(name)
             for name in (profile.get("requires_env") or [])
-            if not str(os.getenv(str(name), "")).strip()
+            if not str(_job_env.get(str(name)) or os.getenv(str(name), "")).strip()
         ]
         if missing_env:
             _set_job_fields(
@@ -755,6 +758,9 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # start_new_session=True puts each tool in its own process group so we
         # can kill the whole group (incl. grandchildren) on cleanup/timeout.
         stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
+        # Merge per-job env vars into a copy of the process environment
+        _proc_env = dict(os.environ)
+        _proc_env.update(_job_env)
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
@@ -762,6 +768,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             stdin=subprocess.PIPE if stdin_bytes else None,
             start_new_session=True,   # own process group → pgid == pid at spawn
             cwd=str(workdir),
+            env=_proc_env,
         )
         # Store PID and PGID in job record immediately so cleanup works on crash
         try:
