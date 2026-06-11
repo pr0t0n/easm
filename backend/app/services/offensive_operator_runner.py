@@ -2429,6 +2429,10 @@ def _has_real_evidence(tool_evidences: list[dict[str, Any]]) -> tuple[bool, str]
             strongest = strongest or "missing_headers"
         if ev.get("injection_evidence"):
             return True, "injection_confirmed"
+        if ev.get("parameterized_urls"):
+            strongest = strongest or "parameterized_urls_found"
+        if ev.get("url_count", 0) > 0:
+            strongest = strongest or "urls_discovered"
     return (bool(strongest), strongest)
 
 
@@ -2481,6 +2485,14 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
     ]
     if has_evidence and meaningful:
         return f"[{phase_id}] {phase_name}: {meaningful[0][:120]}"
+    # Crawler summary: report URL count + parameterized URL count
+    _total_urls = sum(int(e.get("url_count") or 0) for e in evidence_list)
+    _param_urls = sum(len(e.get("parameterized_urls") or []) for e in evidence_list)
+    if _total_urls > 0:
+        return (
+            f"[{phase_id}] {phase_name}: {_total_urls} URLs descobertos"
+            + (f", {_param_urls} com parâmetros" if _param_urls else "")
+        )
     if has_evidence:
         return f"[{phase_id}] {phase_name}: evidência de superfície coletada"
     # No real evidence — coverage record only, not a vulnerability.
