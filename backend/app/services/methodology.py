@@ -27,17 +27,35 @@ METHODOLOGY_FAMILIES: list[str] = [
 
 def compute_methodology_coverage(db: Session, scan_id: int) -> dict:
     """Retorna cobertura por classe: tested/total, %, e classes não testadas."""
-    from app.models.models import ScanWorkItem, Finding
+    from app.models.models import ScanWorkItem, Finding, ExecutedToolRun
     from app.services.vuln_family import classify_family, family_label
 
-    # Famílias exercitadas via work items (o que foi TESTADO, com ou sem achado).
+    tested: set[str] = set()
+
+    # Famílias exercitadas via EXECUÇÕES REAIS de ferramentas. O motor ofensivo
+    # (offensive_operator) NÃO cria ScanWorkItem — ele registra cada execução em
+    # executed_tool_runs. Sem contar essa tabela, o scorecard via apenas os
+    # ACHADOS e marcava como "não testado" classes cujas ferramentas de fato
+    # rodaram (ex.: dalfox=XSS, sqlmap=SQLi, nuclei-auth-bypass=Auth Bypass,
+    # nuclei-lfi=LFI) mas não produziram achado — o oposto de transparência.
+    etr_rows = (
+        db.query(ExecutedToolRun.tool_name)
+        .filter(ExecutedToolRun.scan_job_id == scan_id)
+        .group_by(ExecutedToolRun.tool_name)
+        .all()
+    )
+    for (tool_name,) in etr_rows:
+        fam = classify_family(title="", tool=str(tool_name or ""))
+        if fam in METHODOLOGY_FAMILIES:
+            tested.add(fam)
+
+    # Famílias exercitadas via work items (modos que usam a fila de work items).
     wi_rows = (
         db.query(ScanWorkItem.tool_name, func.count(ScanWorkItem.id))
         .filter(ScanWorkItem.scan_job_id == scan_id)
         .group_by(ScanWorkItem.tool_name)
         .all()
     )
-    tested: set[str] = set()
     for tool_name, _cnt in wi_rows:
         fam = classify_family(title="", tool=str(tool_name or ""))
         if fam in METHODOLOGY_FAMILIES:
