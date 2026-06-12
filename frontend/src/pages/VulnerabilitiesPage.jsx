@@ -150,12 +150,17 @@ export default function VulnerabilitiesPage() {
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <div style={{ padding: "24px 40px 0", background: "var(--surface)", borderBottom: "1px solid var(--line)" }}>
           <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Vulnerabilidades</div>
-          <div className="vuln-tabs">
-            <button type="button" className="vuln-tab" onClick={() => setActiveTab("achados")}>Lista de achados</button>
-            <button type="button" className="vuln-tab active">Por Subdomínio</button>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div className="vuln-tabs">
+              <button type="button" className="vuln-tab" onClick={() => setActiveTab("achados")}>Lista de achados</button>
+              <button type="button" className="vuln-tab active">Por Subdomínio</button>
+            </div>
+            <div style={{ paddingBottom: 8 }}>
+              <ScanSelect value={scanId} onChange={setScanId} />
+            </div>
           </div>
         </div>
-        <DomainsPage embedded />
+        <DomainsPage embedded scanId={scanId} />
       </div>
     );
   }

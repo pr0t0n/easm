@@ -204,7 +204,7 @@ function VerificationQualityBar({ findings = [] }) {
   );
 }
 
-export default function DomainsPage({ embedded = false }) {
+export default function DomainsPage({ embedded = false, scanId = "" }) {
   const [domains, setDomains] = useState([]);
   const [selectedDomain, setSelectedDomain] = useState("");
   const [selectedSubdomain, setSelectedSubdomain] = useState("");
@@ -222,7 +222,7 @@ export default function DomainsPage({ embedded = false }) {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/domains/overview");
+        const { data } = await client.get("/api/domains/overview", { params: scanId ? { scan_id: scanId } : {} });
         if (!active) return;
         const rows = Array.isArray(data) ? data : [];
         setDomains(rows);
@@ -239,7 +239,7 @@ export default function DomainsPage({ embedded = false }) {
     };
     load();
     return () => { active = false; };
-  }, [refreshKey]);
+  }, [refreshKey, scanId]);
 
   // Load crown jewels + OSINT when domain changes (uses latest scan)
   useEffect(() => {
