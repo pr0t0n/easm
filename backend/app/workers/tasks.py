@@ -1496,7 +1496,50 @@ def _chain_lock_alive(scan_id: int) -> bool:
         return False
 
 
-def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "watchdog") -> dict:
+def _force_release_chain_lock(scan_id: int) -> bool:
+    """Remove um chain lock ÓRFÃO (worker morto sem rodar o finally → lock sobrevive
+    até o TTL de 90min e bloquearia a recuperação). Só chame após confirmar que NÃO
+    há task ativa para o scan."""
+    try:
+        from app.services.scan_work_queue import _redis_client
+        _redis_client().delete(_chain_lock_key(scan_id))
+        return True
+    except Exception:
+        return False
+
+
+def active_scan_task_ids(timeout: float = 3.0) -> tuple[set[int], bool]:
+    """Conjunto de scan_ids com task driver (run_scan_job_*) ATIVA no celery.
+
+    Retorna (ids, inspect_ok). inspect_ok=False quando o inspect falhou/voltou
+    vazio — nesse caso o chamador deve ser conservador (não roubar locks)."""
+    ids: set[int] = set()
+    try:
+        active = celery.control.inspect(timeout=timeout).active()
+    except Exception:
+        return ids, False
+    if not active:
+        return ids, False
+    for _, tasks in active.items():
+        for task in tasks or []:
+            if str(task.get("name") or "") not in {"run_scan_job_unit", "run_scan_job_scheduled"}:
+                continue
+            kw = task.get("kwargs") if isinstance(task.get("kwargs"), dict) else {}
+            sid = kw.get("scan_id")
+            if sid is None:
+                args = task.get("args")
+                if isinstance(args, (list, tuple)) and args:
+                    sid = args[0]
+            try:
+                if sid is not None:
+                    ids.add(int(sid))
+            except (TypeError, ValueError):
+                continue
+    return ids, True
+
+
+def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "watchdog",
+                             active_ids: set[int] | None = None, inspect_ok: bool | None = None) -> dict:
     """Recupera, de forma idempotente e limitada, um scan não-terminal que parou.
 
     Causa real (verificada): um restart do worker/backend durante a janela de boot
@@ -1523,17 +1566,33 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         if status not in _RECOVERABLE_SCAN_STATUSES:
             return {"scan_id": scan_id, "action": "skip", "status": status}
 
-        # Chain realmente viva → scan saudável (fase lenta do kali não toca o
-        # scan_jobs.updated_at, mas o lock continua de pé). Zera o contador.
+        # Chain lock vivo NÃO basta como prova de vida: se o worker é morto (ex.:
+        # restart) o finally que solta o lock não roda e o lock sobrevive até o TTL
+        # de 90min — um lock ÓRFÃO que travaria a recuperação. Cruzamos com as tasks
+        # ativas do celery: lock vivo COM task ativa = saudável; lock vivo SEM task
+        # ativa = órfão → roubar o lock e re-disparar.
         if _chain_lock_alive(scan_id):
-            state = dict(job.state_data or {})
-            rec = dict(state.get("recovery") or {})
-            if rec.get("redrive_count"):
-                rec["redrive_count"] = 0
-                state["recovery"] = rec
-                job.state_data = state
-                db.commit()
-            return {"scan_id": scan_id, "action": "chain_alive"}
+            if active_ids is None:
+                active_ids, inspect_ok = active_scan_task_ids()
+            if scan_id in active_ids:
+                state = dict(job.state_data or {})
+                rec = dict(state.get("recovery") or {})
+                if rec.get("redrive_count"):
+                    rec["redrive_count"] = 0
+                    state["recovery"] = rec
+                    job.state_data = state
+                    db.commit()
+                return {"scan_id": scan_id, "action": "chain_alive"}
+            if inspect_ok is False:
+                # Não conseguimos confirmar as tasks ativas → conservador: não rouba.
+                return {"scan_id": scan_id, "action": "chain_alive", "reason": "inspect_unavailable"}
+            # Lock órfão (sem task ativa) → libera para permitir o re-disparo.
+            _force_release_chain_lock(scan_id)
+            db.add(ScanLog(
+                scan_job_id=scan_id, source=source, level="WARNING",
+                message="Chain lock orfao detectado (lock vivo sem task ativa) → liberado para recuperacao",
+            ))
+            db.commit()
 
         # Órfão real: decide entre re-disparar (dentro do orçamento) ou falhar.
         state = dict(job.state_data or {})

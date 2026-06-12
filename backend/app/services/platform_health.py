@@ -150,7 +150,7 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
     if db is not None:
         try:
             from sqlalchemy import text as _t
-            from app.workers.tasks import recover_scan_if_orphaned
+            from app.workers.tasks import recover_scan_if_orphaned, active_scan_task_ids
             # cutoff em UTC-naive (a coluna updated_at é UTC-naive); evita o desvio
             # de fuso de comparar com now() do postgres (que está em -03).
             cutoff = datetime.utcnow() - timedelta(seconds=_GUARD_LIMBO_SECONDS)
@@ -158,8 +158,11 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
                 "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
                 "AND updated_at < :cutoff ORDER BY id"
             ), {"cutoff": cutoff}).fetchall()
+            # inspeciona as tasks ativas UMA vez (caro) e reusa para todos os scans.
+            active_ids, inspect_ok = active_scan_task_ids() if rows else (set(), True)
             for (sid,) in rows:
-                res = recover_scan_if_orphaned(int(sid), mode="unit", source=f"guard:{source}")
+                res = recover_scan_if_orphaned(int(sid), mode="unit", source=f"guard:{source}",
+                                               active_ids=active_ids, inspect_ok=inspect_ok)
                 if res.get("action") in ("redriven", "failed_budget"):
                     report["orphans_recovered"].append({"scan_id": int(sid), **res})
         except Exception as exc:

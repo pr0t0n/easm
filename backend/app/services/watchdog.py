@@ -145,11 +145,13 @@ def run_watchdog(db) -> dict:
             "AND updated_at < :cutoff ORDER BY id"
         ), {"cutoff": _cutoff}).fetchall()
         if limbo_rows:
-            from app.workers.tasks import recover_scan_if_orphaned
+            from app.workers.tasks import recover_scan_if_orphaned, active_scan_task_ids
+            active_ids, inspect_ok = active_scan_task_ids()
             for (sid,) in limbo_rows:
                 if int(sid) in revived:
                     continue
-                res = recover_scan_if_orphaned(int(sid), mode="unit", source="watchdog")
+                res = recover_scan_if_orphaned(int(sid), mode="unit", source="watchdog",
+                                               active_ids=active_ids, inspect_ok=inspect_ok)
                 if res.get("action") in ("redriven", "failed_budget"):
                     limbo_revived.append({"scan_id": int(sid), **res})
                     logger.warning("watchdog: scan %s em LIMBO → %s", sid, res.get("action"))

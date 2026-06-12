@@ -291,7 +291,11 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
     for _sid in _orphan_ids:
         try:
             from app.workers.tasks import recover_scan_if_orphaned
-            recover_scan_if_orphaned(int(_sid), mode="unit", source="reconciler")
+            # estes já vieram filtrados como SEM task ativa (não estão em
+            # active_scan_ids), então o lock — se vivo — é órfão: passamos o set
+            # vazio + inspect_ok=True para que a recuperação roube o lock.
+            recover_scan_if_orphaned(int(_sid), mode="unit", source="reconciler",
+                                     active_ids=set(), inspect_ok=True)
             fixed += 1
         except Exception:
             continue
