@@ -537,7 +537,6 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
         except (ValueError, TypeError):
             scan_id = None
 
-    timeout = int(parameters.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
     batch_targets = [str(t).strip() for t in (parameters.get("targets") or []) if str(t).strip()]
     response = await kali_client.post(
         "/jobs",
@@ -547,7 +546,6 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "targets": batch_targets,   # Tier 3: populated for batch profiles
             "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
-            "timeout": timeout,
             "auth_headers": parameters.get("auth_headers") or {},
             "extra_args": _apply_guardrail(
                 (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
@@ -669,7 +667,6 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             scan_id = int(str(scan_id))
         except (ValueError, TypeError):
             scan_id = None
-    timeout = int(request.arguments.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 300)
     batch_targets = [str(t).strip() for t in (request.targets or []) if str(t).strip()]
     # Forward per-job env vars (e.g. SHODAN_API_KEY) from submission arguments
     _forwarded_env: dict[str, str] = {}
@@ -683,6 +680,9 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
     if isinstance(_extra_env, dict):
         _forwarded_env.update({str(k): str(v) for k, v in _extra_env.items() if str(v).strip()})
 
+    # Do not pass a backend-computed timeout — the Kali runner profile timeout
+    # is the authoritative limit (nikto=3600s, nmap variants=900s, etc.).
+    # Passing a low value from any cache or default kills tools prematurely.
     response = await kali_client.post(
         "/jobs",
         json={
@@ -691,7 +691,6 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             "targets": batch_targets,
             "scan_id": scan_id,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
-            "timeout": timeout,
             "auth_headers": request.arguments.get("auth_headers") or {},
             "env_vars": _forwarded_env,
             "extra_args": _apply_guardrail(
@@ -706,7 +705,6 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
     )
     response.raise_for_status()
     payload = dict(response.json())
-    payload["timeout"] = timeout
     payload["profile"] = profile_name
     return payload
 

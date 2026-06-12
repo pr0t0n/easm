@@ -434,7 +434,7 @@ class ToolCatalog:
 
 
 def default_tool_catalog() -> list[ToolCatalogEntry]:
-    def entry(name: str, profile: str, capabilities: list[str], parser: str = "generic_json_parser") -> ToolCatalogEntry:
+    def entry(name: str, profile: str, capabilities: list[str], parser: str = "generic_json_parser", default_timeout: int = 300) -> ToolCatalogEntry:
         return ToolCatalogEntry(
             tool_name=name,
             profile=profile,
@@ -445,7 +445,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
             required_arguments=["target"],
             output_format="json",
             parser=parser,
-            timeout_policy={"default_timeout": 300, "max_timeout": 1800},
+            timeout_policy={"default_timeout": default_timeout, "max_timeout": max(default_timeout * 2, 1800)},
             risk_level="medium",
             noise_level="medium",
         )
@@ -531,8 +531,8 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("dirsearch", "dirsearch_paths", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("wfuzz", "wfuzz_param_names", ["parameter_discovery", "fuzzing"], "ffuf_parser"),
         # Vulnerability scanning
-        entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser"),
-        entry("wpscan", "wpscan_basic", ["cms_audit", "vuln_scanning"], "generic_json_parser"),
+        entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=1800),
+        entry("wpscan", "wpscan_basic", ["cms_audit", "vuln_scanning"], "generic_json_parser", default_timeout=900),
         # Credential / brute-force
         entry("crackmapexec", "crackmapexec_smb", ["smb_enumeration", "auth_validation"], "generic_json_parser"),
         entry("medusa", "medusa_smb", ["auth_validation", "credential_test"], "generic_json_parser"),

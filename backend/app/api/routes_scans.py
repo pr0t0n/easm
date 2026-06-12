@@ -2562,13 +2562,39 @@ def create_scan(
     )
 
 
+_TERMINAL_SCAN_STATUSES = {"completed", "failed", "stopped", "cancelled", "blocked"}
+
+
+def _open_finding_counts_by_scan(db: Session, scan_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Contagem de achados ABERTOS (is_false_positive != true) por severidade,
+    em UMA query agrupada (evita N+1). Retorna {scan_id: {critical,high,...}}."""
+    counts: dict[int, dict[str, int]] = {}
+    if not scan_ids:
+        return counts
+    rows = (
+        db.query(Finding.scan_job_id, Finding.severity, func.count(Finding.id))
+        .filter(Finding.scan_job_id.in_(scan_ids))
+        .filter(Finding.is_false_positive.isnot(True))
+        .group_by(Finding.scan_job_id, Finding.severity)
+        .all()
+    )
+    for sid, severity, n in rows:
+        bucket = counts.setdefault(int(sid), {})
+        bucket[str(severity or "low").lower()] = int(n or 0)
+    return counts
+
+
 @router.get("/scans", response_model=list[ScanResponse])
 def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _reconcile_orphan_running_scans(db)
     query = _authorized_scan_query(db, current_user)
     rows = query.order_by(ScanJob.created_at.desc()).all()
-    return [
-        ScanResponse(
+    fc = _open_finding_counts_by_scan(db, [s.id for s in rows])
+    out = []
+    for s in rows:
+        sev = fc.get(s.id, {})
+        terminal = str(s.status or "").lower() in _TERMINAL_SCAN_STATUSES
+        out.append(ScanResponse(
             id=s.id,
             target_query=s.target_query,
             mode=s.mode,
@@ -2583,10 +2609,16 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             last_error=s.last_error,
             created_at=s.created_at,
             updated_at=s.updated_at,
+            started_at=s.created_at,
+            finished_at=s.updated_at if terminal else None,
+            open_critical=int(sev.get("critical", 0)),
+            open_high=int(sev.get("high", 0)),
+            open_medium=int(sev.get("medium", 0)),
+            open_low=int(sev.get("low", 0)),
+            open_info=int(sev.get("info", 0)),
             state_data={"subdomain_coverage": (s.state_data or {}).get("subdomain_coverage") or {}},
-        )
-        for s in rows
-    ]
+        ))
+    return out
 
 
 @router.get("/reports/by-target")
@@ -2849,14 +2881,22 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
             synchronize_session=False,
         )
 
-    # 2) Assets e historico temporal podem apontar para este scan.
-    db.query(Asset).filter(Asset.last_scan_id == scan_id).update(
-        {Asset.last_scan_id: None},
-        synchronize_session=False,
-    )
+    # 2) Assets pertencentes a este scan — deletar (não apenas nullificar FK).
+    #    Asset tem cascade "all, delete-orphan" para rating_history e
+    #    vulnerabilities, então deletar o asset limpa toda a cadeia.
+    asset_ids_to_delete = [
+        row[0] for row in db.query(Asset.id).filter(Asset.last_scan_id == scan_id).all()
+    ]
+    if asset_ids_to_delete:
+        db.query(Vulnerability).filter(Vulnerability.asset_id.in_(asset_ids_to_delete)).delete(
+            synchronize_session=False,
+        )
+        db.query(AssetRatingHistory).filter(AssetRatingHistory.asset_id.in_(asset_ids_to_delete)).delete(
+            synchronize_session=False,
+        )
+        db.query(Asset).filter(Asset.id.in_(asset_ids_to_delete)).delete(synchronize_session=False)
     db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id == scan_id).update(
-        {AssetRatingHistory.scan_id: None},
-        synchronize_session=False,
+        {AssetRatingHistory.scan_id: None}, synchronize_session=False,
     )
 
     # 3) ExecutedToolRun, traces e scores referenciam scan_jobs sem cascade ORM;
@@ -2934,15 +2974,24 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .filter(Finding.scan_job_id.in_(resettable_scan_ids))
                 .subquery()
             )
-            # Nullify nullable FKs pointing at findings/scan_jobs
+            # Nullify nullable FKs pointing at findings
             db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids_subquery)).update(
                 {Vulnerability.finding_id: None},
                 synchronize_session=False,
             )
-            db.query(Asset).filter(Asset.last_scan_id.in_(resettable_scan_ids)).update(
-                {Asset.last_scan_id: None},
-                synchronize_session=False,
-            )
+            # Assets pertencentes a estes scans — deletar completamente para
+            # evitar orphãos visíveis na superfície após o reset.
+            _asset_ids_reset = [
+                row[0] for row in db.query(Asset.id).filter(Asset.last_scan_id.in_(resettable_scan_ids)).all()
+            ]
+            if _asset_ids_reset:
+                db.query(Vulnerability).filter(Vulnerability.asset_id.in_(_asset_ids_reset)).delete(
+                    synchronize_session=False,
+                )
+                db.query(AssetRatingHistory).filter(AssetRatingHistory.asset_id.in_(_asset_ids_reset)).delete(
+                    synchronize_session=False,
+                )
+                db.query(Asset).filter(Asset.id.in_(_asset_ids_reset)).delete(synchronize_session=False)
             db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id.in_(resettable_scan_ids)).update(
                 {AssetRatingHistory.scan_id: None},
                 synchronize_session=False,

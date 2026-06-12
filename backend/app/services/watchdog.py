@@ -88,13 +88,21 @@ def run_watchdog(db) -> dict:
     for sid, queued, active, stuck in rows:
         # stall = há trabalho na fila mas NADA executando (dispatch parou)
         if int(queued or 0) > 0 and int(active or 0) == 0:
-            report["stalled_scans"].append({"scan_id": int(sid), "queued": int(queued)})
-            logger.warning("watchdog: scan %s EMPACADO (queued=%s, active=0) → re-disparando dispatcher", sid, queued)
-            # AUTO-RECUPERAÇÃO: re-dispara a task principal (o driver morreu).
+            # AUTO-RECUPERAÇÃO via entry point canônico: ele NÃO re-dispara se a
+            # chain do scan ainda está viva (chain lock presente). Uma fase lenta
+            # (kali) deixa scan_work_items sem 'active' por minutos sem que o driver
+            # tenha morrido — re-disparar nesse caso criava chains PARALELAS (causa
+            # raiz do scan #8 duplicado).
             try:
-                from app.workers.tasks import run_scan_job_unit
-                run_scan_job_unit.delay(int(sid))
-                revived.append(int(sid))
+                from app.workers.tasks import ensure_scan_chain_running
+                _res = ensure_scan_chain_running(int(sid), mode="unit")
+                if _res.get("enqueued"):
+                    report["stalled_scans"].append({"scan_id": int(sid), "queued": int(queued)})
+                    logger.warning("watchdog: scan %s EMPACADO (queued=%s, active=0) → re-disparado", sid, queued)
+                    revived.append(int(sid))
+                else:
+                    logger.info("watchdog: scan %s queued=%s active=0 mas chain VIVA (%s) → não re-disparando",
+                                sid, queued, _res.get("reason"))
             except Exception as exc:
                 logger.error("watchdog: falha ao re-disparar scan %s: %s", sid, exc)
         # re-enfileira itens presos em dispatched há muito tempo (kali perdeu o job)

@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -1405,7 +1406,99 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         db.close()
 
 
-def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
+# ──────────────────────────────────────────────────────────────────────────────
+# Singleton chain-lock — at most ONE run_scan_job_* task may execute a given scan
+# at a time. The offensive-operator phase chain re-enqueues itself per phase-unit;
+# without this, watchdog re-dispatches and broker redeliveries spawn PARALLEL chains
+# that each advance the phase queue independently, doubling kali load and corrupting
+# state_data (last-writer-wins). TTL must exceed one phase-unit's wall-clock
+# (bounded by checkpoint_seconds≈50min and the per-phase deadline); on crash the
+# lock self-expires and the watchdog recovers.
+# ──────────────────────────────────────────────────────────────────────────────
+_SCAN_CHAIN_LOCK_TTL = max(600, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "5400")))  # 90min
+_SCAN_CHAIN_MAX_WAITS = max(1, int(os.getenv("SCAN_CHAIN_MAX_WAITS", "40")))
+
+
+def _chain_lock_key(scan_id: int) -> str:
+    return f"scan_chain_lock:{scan_id}"
+
+
+def _acquire_scan_chain_lock(scan_id: int, token: str):
+    """Try to claim the scan's chain lock. Returns the redis client if held,
+    None if redis is unavailable (fail-open), or False if another task holds it."""
+    try:
+        from app.services.scan_work_queue import _redis_client
+        r = _redis_client()
+    except Exception:
+        return None  # fail-open: redis down → behave as before (no lock)
+    try:
+        if r.set(_chain_lock_key(scan_id), token, nx=True, ex=_SCAN_CHAIN_LOCK_TTL):
+            return r
+        return False
+    except Exception:
+        return None  # fail-open on redis error
+
+
+def _release_scan_chain_lock(r, scan_id: int, token: str) -> None:
+    if r is None:
+        return
+    try:
+        if r.get(_chain_lock_key(scan_id)) == token:
+            r.delete(_chain_lock_key(scan_id))
+    except Exception:
+        pass
+
+
+def ensure_scan_chain_running(scan_id: int, mode: str = "unit") -> dict:
+    """Canonical, idempotent entry point to (re)start a scan's phase chain.
+
+    The offensive-operator chain re-enqueues itself per phase-unit. Historically
+    FOUR call sites (start, continue, watchdog, orphan-reconciler) each spawned a
+    chain via a raw ``.delay()`` with no coordination, which is how scan #8 ended
+    up with parallel duplicate chains. This is the ONE place that decides whether
+    a (re)dispatch is warranted: if the chain lock is alive, a task is already
+    executing this scan → do nothing. Otherwise enqueue exactly one driver task.
+
+    The chain lock (set in ``_run_scan_with_retry``) is the source of truth; the
+    enqueued task still re-checks it, so this is a fast-path that avoids spawning
+    tasks that would only defer-and-die.
+    """
+    try:
+        from app.services.scan_work_queue import _redis_client
+        if _redis_client().get(_chain_lock_key(scan_id)):
+            return {"scan_id": scan_id, "enqueued": False, "reason": "chain_alive"}
+    except Exception:
+        pass  # redis down → fail-open and enqueue (lock will arbitrate)
+    task = run_scan_job_scheduled if str(mode).lower() == "scheduled" else run_scan_job_unit
+    async_result = task.delay(scan_id)
+    return {"scan_id": scan_id, "enqueued": True, "task_id": getattr(async_result, "id", None)}
+
+
+def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode, lock_wait: int = 0) -> dict:
+    # ── Acquire the per-scan chain lock before doing any work ──────────────────
+    _lock_token = uuid.uuid4().hex
+    _lock_r = _acquire_scan_chain_lock(scan_id, _lock_token)
+    if _lock_r is False:
+        # Another task is actively executing this scan. This is either a legit
+        # hand-off still tearing down, or a duplicate (watchdog/redelivery). Defer
+        # briefly and retry; give up after N waits so duplicates die instead of
+        # spinning forever.
+        if int(lock_wait or 0) < _SCAN_CHAIN_MAX_WAITS:
+            try:
+                task_ctx.apply_async(args=[scan_id], kwargs={"_lock_wait": int(lock_wait or 0) + 1}, countdown=8)
+            except Exception:
+                pass
+            return {"ok": True, "skipped": True, "reason": "scan_chain_lock_held",
+                    "scan_id": scan_id, "lock_wait": int(lock_wait or 0)}
+        return {"ok": True, "skipped": True, "reason": "scan_chain_lock_giveup", "scan_id": scan_id}
+
+    try:
+        return _run_scan_with_retry_locked(task_ctx, scan_id, scan_mode)
+    finally:
+        _release_scan_chain_lock(_lock_r, scan_id, _lock_token)
+
+
+def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
     db: Session = SessionLocal()
     try:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
@@ -1570,13 +1663,13 @@ def _persist_autonomy_audit_log(db: Session, scan_id: int, final_state: dict[str
 
 
 @celery.task(bind=True, name="run_scan_job_unit", queue=SCAN_UNIT_QUEUE)
-def run_scan_job_unit(self, scan_id: int):
+def run_scan_job_unit(self, scan_id: int, _lock_wait: int = 0):
     """
     Task para scans UNITARIOS (execucao manual/pontual).
     Consumida exclusivamente pelos workers 'worker_unit' no docker-compose.
     Prioridade alta | concurrency=1 | escopo focado.
     """
-    return _run_scan_with_retry(self, scan_id, "unit")
+    return _run_scan_with_retry(self, scan_id, "unit", lock_wait=_lock_wait)
 
 
 @celery.task(bind=True, name="run_scan_target_subset", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
@@ -2073,11 +2166,9 @@ def execute_scan_work_item(item_id: int):
         if _is_batch:
             execution["targets"] = _batch_targets
 
-        # ── Adaptive timeout: respect per-item override (wapiti/sqlmap port-scaled) ──
-        _timeout_override = _item_meta.get("timeout_override")
-        if _timeout_override:
-            execution["arguments"]["timeout"] = int(_timeout_override)
-            execution["timeout_hint"] = int(_timeout_override)
+        # Never pass timeout to the kali runner — the profile's own timeout is
+        # the authoritative limit. A backend-side value kills long-running tools.
+        execution.get("arguments", {}).pop("timeout", None)
 
         response = requests.post(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/submit",
@@ -3239,13 +3330,13 @@ def poll_scan_work_item(item_id: int):
 
 
 @celery.task(bind=True, name="run_scan_job_scheduled", queue=SCAN_SCHEDULED_QUEUE)
-def run_scan_job_scheduled(self, scan_id: int):
+def run_scan_job_scheduled(self, scan_id: int, _lock_wait: int = 0):
     """
     Task para scans AGENDADOS (execucao periodica/batch).
     Consumida exclusivamente pelos workers 'worker_scheduled' no docker-compose.
     Prioridade normal | concurrency=2 | cobertura completa.
     """
-    return _run_scan_with_retry(self, scan_id, "scheduled")
+    return _run_scan_with_retry(self, scan_id, "scheduled", lock_wait=_lock_wait)
 
 
 # Alias retroativo — usado por fallback síncrono quando a fila nao esta disponivel

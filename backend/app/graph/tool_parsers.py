@@ -635,9 +635,12 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
 
         # CVEs e vulnerabilidades
         sev = "high" if ("cve-" in lowered or "osvdb" in lowered) else "medium"
+        # Título limpo: sem o prefixo "Nikto:" e sem o código entre colchetes
+        # (ex.: "[999986] /: Retrieved x-aspnet-version…" → "/: Retrieved …").
+        _clean = re.sub(r"^\[\d+\]\s*", "", line.lstrip("+ ").strip())
         findings.append(
             {
-                "title": f"Nikto: {line.lstrip('+ ').strip()[:180]}",
+                "title": _clean[:180],
                 "severity": sev,
                 "risk_score": 7 if sev == "high" else 5,
                 "source_worker": "analise_vulnerabilidade",

@@ -949,6 +949,7 @@ _schedule_periodic_cleanup(interval_hours=int(os.getenv("KALI_CLEANUP_INTERVAL_H
 app = FastAPI(title="ScriptKidd.o Kali Runner", version="1.0.0")
 
 
+@app.get("/health")
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     with _JOBS_LOCK:

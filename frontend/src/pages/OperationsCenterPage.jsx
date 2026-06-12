@@ -78,8 +78,9 @@ function EsteiraView({ esteira }) {
 
 function heatColor(sev, v, max = 12) {
   if (v === 0) return TV.surface2;
+  // Mesma escala do protótipo: saturação 0.15→1.0 com teto fixo de 12 por célula.
   const base = { critical: "214,69,69", high: "254,123,2", medium: "212,165,0", low: "34,145,96" }[sev];
-  return `rgba(${base},${(0.2 + (v / max) * 0.8).toFixed(2)})`;
+  return `rgba(${base},${(0.15 + (v / max) * 0.85).toFixed(2)})`;
 }
 
 export default function OperationsCenterPage() {
@@ -331,9 +332,9 @@ export default function OperationsCenterPage() {
                     ...sevCols.map((s) => (
                       <div key={r.classe + "-" + s} style={{
                         height: 34, borderRadius: 7, display: "grid", placeItems: "center",
-                        background: heatColor(s, r[s], heatMax),
+                        background: heatColor(s, r[s], 12),
                         fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700,
-                        color: heatMax > 0 && r[s] / heatMax > 0.4 ? "#fff" : r[s] === 0 ? TV.label : TV.text,
+                        color: r[s] / 12 > 0.45 ? "#fff" : r[s] === 0 ? TV.label : TV.text,
                       }}>{r[s] > 0 ? r[s] : ""}</div>
                     )),
                     <div key={r.classe + "-total"} style={{ fontFamily: "var(--font-mono)", textAlign: "center", fontSize: 11.5, fontWeight: 700, color: TV.muted }}>

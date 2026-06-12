@@ -1208,28 +1208,12 @@ def enqueue_scan_work_items(
             db.rollback()
             skipped += 1
 
-    # ── Slow tools that get adaptive timeout based on preflight port count ────
-    # wapiti/sqlmap/nikto are heavy deep tools. They only run on the FEW targets
-    # that survived P09 triage (had findings), so a generous floor is affordable.
-    # IMPORTANT: the old 120s floor GUARANTEED timeout — Cloudflare-fronted targets
-    # show 0 ports via naabu, so port_count=0 → 120s → tool killed before its own
-    # internal -maxtime (nikto 240s) could finish → status='timeout' (not completed).
-    # Floor raised to 300s so these tools exit cleanly within budget.
-    _ADAPTIVE_TIMEOUT_TOOLS = {"wapiti", "sqlmap", "nikto"}
-
+    # Timeout is no longer set from the backend — the Kali runner's profile
+    # timeout is the authoritative limit for every tool. This avoids the pattern
+    # where a low backend-side value (e.g. 300s) kills tools before their own
+    # internal completion (nikto, sqlmap, wapiti can run for 30+ minutes).
     def _adaptive_timeout(tool: str, target: str) -> int | None:
-        if tool not in _ADAPTIVE_TIMEOUT_TOOLS:
-            return None
-        target_preflight = ((state.get("preflight") or {}).get("targets") or {}).get(target) or {}
-        _ports = target_preflight.get("ports") or target_preflight.get("open_ports") or []
-        _port_count = len(_ports) if isinstance(_ports, (list, tuple)) else 0
-        if _port_count <= 1:
-            return 300
-        if _port_count <= 3:
-            return 420
-        if _port_count <= 6:
-            return 540
-        return 600
+        return None  # always defer to kali profile timeout
 
     # ── Pass 3: create individual items for non-batch tools ───────────────────
     for (phase_id, tool, target) in single_items:

@@ -24,6 +24,7 @@ import os
 import re
 import json
 import random
+import time
 import httpx
 
 _TIMEOUT = httpx.Timeout(connect=6.0, read=15.0, write=8.0, pool=6.0)
@@ -75,9 +76,11 @@ def _case_variants(w: str) -> list[str]:
                                w[:-1].capitalize() + "s" if w.endswith("s") else w.capitalize() + "s"]))
 
 
-def _collections_from_wordlist(c: httpx.Client, base: str) -> list[str]:
+def _collections_from_wordlist(c: httpx.Client, base: str, deadline: float = 0.0) -> list[str]:
     """Enumera coleções REST por wordlist (autenticado). Mantém as que devolvem
-    uma lista de objetos (data:[...]). Baixo volume, dirigido por wordlist."""
+    uma lista de objetos (data:[...]). Baixo volume, dirigido por wordlist.
+    `deadline` (time.monotonic) corta a varredura se o orçamento da fase estourar
+    — esta wordlist pode gerar ~620 probes × 15s contra um alvo lento."""
     found = []
     seen = set()
 
@@ -100,12 +103,16 @@ def _collections_from_wordlist(c: httpx.Client, base: str) -> list[str]:
     # 1) wordlist embutida (termos de negócio) + variações de caso
     prefixes = ["/api/", "/rest/"]
     for word in COLLECTION_WORDLIST:
+        if deadline > 0 and time.monotonic() > deadline:
+            break
         for variant in _case_variants(word):
             for pre in prefixes:
                 _probe(base.rstrip("/") + pre + variant)
 
     # 2) SecLists api-endpoints.txt — paths reais de APIs (sondagem direta, baixo volume)
     for entry in _load_wordlist("api-endpoints.txt", [])[:300]:
+        if deadline > 0 and time.monotonic() > deadline:
+            break
         _probe(base.rstrip("/") + "/" + entry.lstrip("/"))
 
     return found
@@ -596,10 +603,11 @@ def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:
     return cols
 
 
-def run_as_tool(target: str, extra_urls: list[str] | None = None) -> dict:
+def run_as_tool(target: str, extra_urls: list[str] | None = None, max_seconds: int = 1200) -> dict:
     from app.services.target_discovery import profile_target
     from app.services.generic_auth import authenticate
     base = (target if str(target).startswith("http") else f"http://{target}").rstrip("/")
+    _deadline = time.monotonic() + max(60, int(max_seconds or 0))
     findings = []
     # P03-discovered parameterized URLs — merged into param-tampering coverage
     # so bl-test tests the real endpoint surface, not just chromium+wordlist.
@@ -625,7 +633,7 @@ def run_as_tool(target: str, extra_urls: list[str] | None = None) -> dict:
             # coleções: chromium-capture (reais) + SWAGGER/OpenAPI (spec real,
             # SecLists Swagger.txt) + WORDLIST (autenticado, SecLists api-endpoints
             # + termos de negócio). Swagger é a fonte definitiva quando existe.
-            merged = collections + _collections_from_swagger(c, base) + _collections_from_wordlist(c, base)
+            merged = collections + _collections_from_swagger(c, base) + _collections_from_wordlist(c, base, _deadline)
             # dedupe case-insensitive: roteadores case-insensitive (ex.: JuiceShop)
             # resolvem /api/Products == /api/products → MESMO recurso. Mantém 1 só
             # para não gerar findings duplicados. API case-sensitive não é afetada
@@ -636,14 +644,18 @@ def run_as_tool(target: str, extra_urls: list[str] | None = None) -> dict:
                 if k not in _low:
                     _low.add(k); collections.append(u)
             # 1) manipulação de valor via REST-CRUD (corpo) — a técnica principal
-            findings += _rest_crud_negative(c, collections)
+            if time.monotonic() < _deadline:
+                findings += _rest_crud_negative(c, collections)
 
             # 1b) IDOR/BOLA ativo: acesso a objeto de outro dono (controlado, read-only)
-            findings += _bola_active(c, collections, token)
+            if time.monotonic() < _deadline:
+                findings += _bola_active(c, collections, token)
             # 1c) BOLA em recurso único (ex.: basket/{id}) — baseado na captura
-            findings += _bola_single_resource(c, cap, base, token)
+            if time.monotonic() < _deadline:
+                findings += _bola_single_resource(c, cap, base, token)
             # 1d) brute force CONTROLADO de cupom (baseline = código inválido)
-            findings += _coupon_brute(c, cap, base)
+            if time.monotonic() < _deadline:
+                findings += _coupon_brute(c, cap, base)
 
             # 2) manipulação de valor via GET param (apps onde BL está na query)
             # Merge P03-discovered URLs with target_discovery's own param endpoints.
@@ -652,6 +664,8 @@ def run_as_tool(target: str, extra_urls: list[str] | None = None) -> dict:
                 (prof.get("param_endpoints") or []) + _extra_param_urls
             ))
             for u in _param_endpoints[:40]:
+                if time.monotonic() > _deadline:
+                    break
                 pr = urlparse(u); q = parse_qs(pr.query)
                 for pn in q:
                     if not _BIZ_PARAM.search(pn):

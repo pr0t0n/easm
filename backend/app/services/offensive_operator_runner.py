@@ -131,8 +131,16 @@ def _enqueue_operator_continuation(
     task = run_scan_job_scheduled if mode == "scheduled" else run_scan_job_unit
     group = group_for_phase(next_phase_id)
     queue = phase_queue(next_phase_id, mode=mode)  # type: ignore[arg-type]
-    dedupe_ttl = max(5, int(countdown or 0))
-    dedupe_key = f"operator_continuation:{job.id}:{mode}:{next_phase_id}:{reason}"
+    # ── Idempotent continuation dedup (defense-in-depth atop the chain lock) ──
+    # Key on the next phase-UNIT (scan:mode:phase:target), NOT on `reason`, so two
+    # independent code paths that compute the same next-unit dedupe against each
+    # other. The TTL is wide enough to absorb concurrent bursts (duplicate chains,
+    # broker redeliveries) but far below the ~50min checkpoint cadence, so a
+    # legitimate checkpoint-resume of the same unit is never suppressed.
+    _next_target = str((job.state_data or {}).get("current_pentest_target") or "")
+    import os as _os
+    dedupe_ttl = max(int(_os.getenv("OPERATOR_CONTINUATION_DEDUP_TTL", "90")), int(countdown or 0) + 30)
+    dedupe_key = f"operator_continuation:{job.id}:{mode}:{next_phase_id}:{_next_target}"
     try:
         from app.services.scan_work_queue import _redis_client
 
@@ -143,7 +151,7 @@ def _enqueue_operator_continuation(
                 level="INFO",
                 message=(
                     f"phase_queue_enqueue_suppressed reason={reason} next_phase={next_phase_id} "
-                    f"group={group} queue={queue} ttl={dedupe_ttl}"
+                    f"target={_next_target} group={group} queue={queue} ttl={dedupe_ttl}"
                 ),
             ))
             return {"task_id": "", "queue": queue, "group": group, "next_phase_id": next_phase_id, "deduped": True}
@@ -178,6 +186,18 @@ def _is_absolute_http_url(target: str) -> bool:
 def _should_run_subdomain_enumeration(target: str) -> bool:
     """P01 is domain enumeration. Full URLs are explicit app targets."""
     return not _is_absolute_http_url(target)
+
+
+def _normalize_asset_host(target: str) -> str:
+    """Chave canônica de asset = host puro (sem esquema/porta/path/barra).
+    Sem isto, o MESMO alvo virava 2 assets: 'http://x/' e 'x' (bug recorrente)."""
+    from urllib.parse import urlparse
+    raw = str(target or "").strip()
+    if "://" in raw:
+        host = urlparse(raw).hostname or raw
+    else:
+        host = raw.split("/")[0].split("?")[0].split(":")[0]
+    return host.rstrip(".").lower()[:255]
 
 
 def _scope_from_job(job: ScanJob, target: str, execution_mode: str = "controlled_pentest") -> Scope:
@@ -221,6 +241,103 @@ def _mcp_available() -> bool:
         return response.ok and bool(payload.get("kali_connected", True))
     except Exception:
         return False
+
+
+# ── Target reachability gate (SYN) ───────────────────────────────────────────
+# Se o alvo ficar inacessível via SYN por _TARGET_UNREACHABLE_GRACE segundos,
+# o alvo é marcado morto e PULADO — todas as suas fases restantes são registradas
+# como skipped. Sem isto, cada ferramenta (ffuf/sqlmap/bl-test/...) trava esperando
+# conexão que nunca completa, parando o scan inteiro (caso real do #8).
+import os as _os_env
+_TARGET_UNREACHABLE_GRACE = max(30, int(_os_env.getenv("TARGET_UNREACHABLE_GRACE_SECONDS", "300")))
+_TARGET_SYN_TIMEOUT = 5.0
+_TARGET_SYN_PROBE_INTERVAL = 20.0
+
+
+def _tcp_syn_reachable(target: str, timeout: float = _TARGET_SYN_TIMEOUT) -> bool:
+    """TCP connect (SYN) ao host:porta do alvo. True se conecta dentro do timeout."""
+    import socket
+    from urllib.parse import urlparse
+    raw = target if "://" in str(target) else f"http://{target}"
+    p = urlparse(raw)
+    host = p.hostname
+    if not host:
+        return False
+    port = p.port or (443 if p.scheme == "https" else 80)
+    try:
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _reachability_gate(db, job: ScanJob, target: str, completed_work: set, phases: list[str]) -> bool:
+    """Portão de alcançabilidade por alvo. Retorna True (prosseguir) ou False
+    (alvo morto → pular). Quando o alvo fica inacessível via SYN por
+    _TARGET_UNREACHABLE_GRACE s, marca dead_targets, registra TODAS as fases
+    restantes do alvo como skipped (p/ o scan poder finalizar) e devolve False."""
+    import time as _t
+    state = dict(job.state_data or {})
+    dead = set(state.get("dead_targets") or [])
+    if target in dead:
+        return False
+    if _tcp_syn_reachable(target):
+        since = dict(state.get("target_unreachable_since") or {})
+        if since.pop(target, None) is not None:
+            state["target_unreachable_since"] = since
+            job.state_data = state
+            db.commit()
+        return True
+
+    # Inacessível → janela de tolerância (persistida p/ sobreviver a checkpoints).
+    since = dict(state.get("target_unreachable_since") or {})
+    first = since.get(target)
+    now_wall = _t.time()
+    if first is None:
+        since[target] = now_wall
+        state["target_unreachable_since"] = since
+        job.state_data = state
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                       message=(f"target_unreachable target={target} — sem resposta SYN; "
+                                f"sondando por até {_TARGET_UNREACHABLE_GRACE}s antes de pular")))
+        db.commit()
+        first = now_wall
+    started = _t.monotonic()
+    while True:
+        try:
+            db.refresh(job)
+            if _scan_halted(job):
+                return False
+        except Exception:
+            pass
+        elapsed_total = (now_wall - float(first)) + (_t.monotonic() - started)
+        if _tcp_syn_reachable(target):
+            since = dict((job.state_data or {}).get("target_unreachable_since") or {})
+            since.pop(target, None)
+            st = dict(job.state_data or {}); st["target_unreachable_since"] = since
+            job.state_data = st
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                           message=f"target_recovered target={target} respondeu SYN após {int(elapsed_total)}s"))
+            db.commit()
+            return True
+        if elapsed_total >= _TARGET_UNREACHABLE_GRACE:
+            st = dict(job.state_data or {})
+            dead = set(st.get("dead_targets") or []); dead.add(target)
+            st["dead_targets"] = sorted(dead)
+            since = dict(st.get("target_unreachable_since") or {}); since.pop(target, None)
+            st["target_unreachable_since"] = since
+            # registra todas as fases restantes do alvo como skipped p/ finalizar
+            for ph in phases:
+                completed_work.add(f"{ph}:{target}")
+            st["completed_work"] = sorted(completed_work)
+            job.state_data = st
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="ERROR",
+                           message=(f"target_timeout_destination target={target} inacessível via SYN "
+                                    f">{_TARGET_UNREACHABLE_GRACE}s — pulando alvo (fases restantes = skipped)")))
+            db.commit()
+            return False
+        _t.sleep(min(_TARGET_SYN_PROBE_INTERVAL, max(1.0, _TARGET_UNREACHABLE_GRACE - elapsed_total)))
 
 
 _MCP_STDOUT_STATE_CAP = 5_000  # bytes kept per mcp_result entry in state_data
@@ -581,11 +698,13 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     import time as _time
     if str(execution.get("tool_name") or "").strip().lower() in _BACKEND_LOCAL_TOOLS:
         return _run_backend_local_tool(execution)
-    tool_timeout = max(900, int(execution.get("timeout") or 0))
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
     arguments.setdefault("scan_id", execution.get("scan_id"))
-    arguments.setdefault("timeout", execution.get("timeout"))
+    # Never pass a timeout from the backend — the Kali runner's profile timeout
+    # is the authoritative limit. Passing a low value (e.g. 300) from the catalog
+    # kills long-running tools (nikto, sqlmap, wapiti) before they finish.
+    arguments.pop("timeout", None)
     _auth = _get_auth_headers()
     if _auth:
         arguments["auth_headers"] = _auth
@@ -845,6 +964,12 @@ def run_offensive_operator_scan(
     import time as _time
     _checkpoint_start = _time.monotonic()
     _CHECKPOINT_SECONDS = int(initial_state.get("checkpoint_seconds") or 3000)
+    # Per-phase-unit wall-clock budget. Bounds a SINGLE (phase,target) so a phase
+    # whose internal fan-out is large (e.g. P10/P12 multi-URL: up to 8 tools ×
+    # 3600s = 8h) can't monopolize a worker thread. When exceeded mid-phase we
+    # stop launching further tools and let the normal checkpoint advance the queue.
+    _PHASE_UNIT_DEADLINE = max(120, int(initial_state.get("phase_unit_deadline_seconds") or 1500))
+    _phase_unit_start = _time.monotonic()
     completed_work: set[str] = set(initial_state.get("completed_work") or [])
     # all_targets starts as the input targets; after P01 it grows with every
     # discovered subdomain so each phase P02-P22 runs against the full set.
@@ -931,6 +1056,10 @@ def run_offensive_operator_scan(
             pass
         _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
         if target in _delegated_targets:
+            _target_idx += 1
+            continue
+        # ── Portão de alcançabilidade (SYN): pula alvo morto p/ não travar o chain ──
+        if not _reachability_gate(db, job, target, completed_work, _phases_for_level):
             _target_idx += 1
             continue
         scope = _scope_from_job(job, target, execution_mode)
@@ -1057,6 +1186,7 @@ def run_offensive_operator_scan(
             db.commit()
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
+            _phase_unit_start = _time.monotonic()
             result = runtime.run_phase(phase_id, _effective_target, scope, execution_mode, offensive_state)
             try:
                 db.refresh(job)
@@ -1110,7 +1240,22 @@ def run_offensive_operator_scan(
                             _by_point[_point] = _u
                     _attack_urls = [u for u in _by_point.values() if u != _effective_target][:8]
                     _supp_results: list[dict[str, Any]] = []
+                    _skipped_urls = 0
                     for _au in _attack_urls:
+                        # Per-phase-unit deadline: stop launching further multi-URL
+                        # tools once the budget is spent (each can take up to 3600s).
+                        if _time.monotonic() - _phase_unit_start > _PHASE_UNIT_DEADLINE:
+                            _skipped_urls = len(_attack_urls) - len(_supp_results)
+                            db.add(ScanLog(
+                                scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                message=(
+                                    f"multiurl_deadline phase={phase_id} tool={_primary_tool} "
+                                    f"budget={_PHASE_UNIT_DEADLINE}s exceeded — {_skipped_urls} URL(s) "
+                                    f"not attacked this pass (will retry on a later phase-unit)"
+                                ),
+                            ))
+                            db.commit()
+                            break
                         _supp_exec = {
                             "mcp_request_id": f"multiurl-{phase_id}-{abs(hash(_au)) % 10**8}",
                             "phase_id": phase_id,
@@ -2109,8 +2254,24 @@ def run_offensive_operator_scan(
     job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
     # A scan is "completed" if at least one phase ran (completed or partial).
     # It is "failed" only when zero phases produced any result at all.
-    job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
-    job.current_step = "P22 Campaign Report"
+    _dead_targets = list((state or {}).get("dead_targets") or [])
+    if _dead_targets:
+        # Alvo(s) ficaram inacessíveis via SYN > grace. FINALIZA entregando os
+        # achados já coletados, com marcador final "Timeout Destination".
+        job.status = "completed"
+        job.current_step = "Timeout Destination"
+        state["timeout_destination"] = {
+            "dead_targets": _dead_targets,
+            "grace_seconds": _TARGET_UNREACHABLE_GRACE,
+            "reason": "alvo inacessível via SYN além do limite — fases restantes puladas",
+        }
+        job.state_data = state
+        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="ERROR",
+                       message=(f"scan_finalizado=Timeout Destination dead_targets={_dead_targets} "
+                                f"findings_preservados=sim phases_completed={completed_count} partial={partial_count}")))
+    else:
+        job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
+        job.current_step = "P22 Campaign Report"
     db.commit()
 
     # ── Persist findings from phase evidence into the Finding table ────────
@@ -2657,19 +2818,19 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
         if e.get("finding_summary") and not str(e.get("finding_summary")).lower().startswith(("no ", "nenhum", "sem "))
     ]
     if has_evidence and meaningful:
-        return f"[{phase_id}] {phase_name}: {meaningful[0][:120]}"
+        return f"{phase_name}: {meaningful[0][:120]}"
     # Crawler summary: report URL count + parameterized URL count
     _total_urls = sum(int(e.get("url_count") or 0) for e in evidence_list)
     _param_urls = sum(len(e.get("parameterized_urls") or []) for e in evidence_list)
     if _total_urls > 0:
         return (
-            f"[{phase_id}] {phase_name}: {_total_urls} URLs descobertos"
+            f"{phase_name}: {_total_urls} URLs descobertos"
             + (f", {_param_urls} com parâmetros" if _param_urls else "")
         )
     if has_evidence:
-        return f"[{phase_id}] {phase_name}: evidência de superfície coletada"
+        return f"{phase_name}: evidência de superfície coletada"
     # No real evidence — coverage record only, not a vulnerability.
-    return f"[{phase_id}] {phase_name} — Sem achados (cobertura executada)"
+    return f"{phase_name} — Sem achados (cobertura executada)"
 
 
 def _build_reproduction(phase_id: str, target: str, tool_evidences: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3349,6 +3510,13 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         # A phase that ran with no findings → 'info', never 'high'.
         severity, confidence = _assess_evidence_severity(phase_id, status, tool_evidences, PHASE_SEVERITY)
 
+        # Coverage-only records (fase rodou mas SEM evidência real) NÃO são
+        # vulnerabilidades — não persistir como Finding (eram o ruído "[Pxx] …
+        # Sem achados"). A cobertura da fase já fica registrada no phase_ledger.
+        _has_ev_persist, _ = _has_real_evidence(tool_evidences)
+        if not _has_ev_persist:
+            continue
+
         # State-derived context for MITRE/OWASP enrichment + tech_stack snapshot
         state_snap = dict(job.state_data or {})
         tech_snap = state_snap.get("tech_stack") or {}
@@ -3459,16 +3627,17 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             and _is_actionable_vulnerability(severity, tool_evidences, reproduction)
         ):
             try:
+                _akey = _normalize_asset_host(target)
                 asset = db.query(Asset).filter(
                     Asset.owner_id == job.owner_id,
-                    Asset.domain_or_ip == str(target)[:255],
+                    Asset.domain_or_ip == _akey,
                 ).first()
                 if not asset:
                     from datetime import datetime as _dt
                     _now = _dt.utcnow()
                     asset = Asset(
                         owner_id=job.owner_id,
-                        domain_or_ip=str(target)[:255],
+                        domain_or_ip=_akey,
                         asset_type="domain",
                         first_seen=_now,
                         last_seen=_now,

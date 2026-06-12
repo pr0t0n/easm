@@ -944,6 +944,7 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
 
 
 @router.put("/schedules/{schedule_id}")
+@router.patch("/schedules/{schedule_id}")
 def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     query = db.query(ScheduledScan).filter(ScheduledScan.id == schedule_id)
     if not current_user.is_admin:
@@ -1010,6 +1011,7 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
 
 
 @router.post("/schedules/{schedule_id}/execute")
+@router.post("/schedules/{schedule_id}/run-now")
 def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     row = db.query(ScheduledScan).filter(ScheduledScan.id == schedule_id).first()
     if not row:
@@ -1579,13 +1581,18 @@ def _extract_scan_id(task: dict) -> int | None:
     return None
 
 
-def _active_scan_ids() -> tuple[dict[str, set[int]], bool]:
+def _active_scan_ids() -> tuple[dict[str, set[int]], bool, dict[int, int]]:
+    """Returns (scan_ids_by_mode, inspect_ok, task_counts_by_scan_id).
+
+    task_counts counts EVERY active run_scan_job_* task per scan_id (not deduped)
+    so callers can detect duplicate concurrent chains (count > 1)."""
     inspector = celery.control.inspect(timeout=1.5)
     active = inspector.active()
     if active is None:
-        return {"unit": set(), "scheduled": set()}, False
+        return {"unit": set(), "scheduled": set()}, False, {}
 
     result = {"unit": set(), "scheduled": set()}
+    counts: dict[int, int] = {}
     for _, tasks in active.items():
         for task in tasks or []:
             name = str(task.get("name") or "")
@@ -1594,9 +1601,11 @@ def _active_scan_ids() -> tuple[dict[str, set[int]], bool]:
                 continue
             if name == "run_scan_job_unit":
                 result["unit"].add(scan_id)
+                counts[scan_id] = counts.get(scan_id, 0) + 1
             elif name == "run_scan_job_scheduled":
                 result["scheduled"].add(scan_id)
-    return result, True
+                counts[scan_id] = counts.get(scan_id, 0) + 1
+    return result, True, counts
 
 
 def _phase_from_task_name(task_name: str | None) -> str:
@@ -1637,6 +1646,70 @@ def _phase_from_scan(scan: ScanJob | None) -> str:
     return "desconhecido"
 
 
+def _environment_health(db: Session, now: datetime, task_counts: dict[int, int]) -> dict:
+    """Caixa de AMBIENTE: saúde da chain por scan ativo + estado do broker.
+
+    Expõe os sinais que faltavam (e que esconderam a duplicação do scan #8):
+      • chain_lock_alive / chain_lock_ttl — há uma chain viva? por quanto tempo?
+      • active_task_count — quantas tasks run_scan_job_* executando (>1 = DUPLICADO)
+      • seconds_since_last_event — fuso CORRIGIDO (scan_logs naïve UTC vs utcnow())
+      • driver_alive — lock vivo OU task ativa; running sem isso = driver morto
+    """
+    out: dict = {"redis_ok": False, "scans": [], "duplicate_chain_scans": [],
+                 "driverless_running_scans": []}
+    r = None
+    try:
+        from app.services.scan_work_queue import _redis_client
+        r = _redis_client()
+        r.ping()
+        out["redis_ok"] = True
+    except Exception:
+        r = None
+
+    rows = (
+        db.query(ScanJob)
+        .filter(ScanJob.status.in_(["running", "queued", "retrying"]))
+        .order_by(ScanJob.id.desc())
+        .all()
+    )
+    for job in rows:
+        lock_alive, lock_ttl = False, None
+        if r is not None:
+            try:
+                key = f"scan_chain_lock:{job.id}"
+                lock_alive = bool(r.get(key))
+                if lock_alive:
+                    lock_ttl = int(r.ttl(key))
+            except Exception:
+                pass
+        atc = int(task_counts.get(job.id, 0))
+        last_evt = (
+            db.query(func.max(ScanLog.created_at))
+            .filter(ScanLog.scan_job_id == job.id)
+            .scalar()
+        )
+        secs = int((now - last_evt).total_seconds()) if last_evt else None
+        driver_alive = bool(lock_alive or atc > 0)
+        entry = {
+            "scan_id": job.id,
+            "status": job.status,
+            "current_step": job.current_step,
+            "target_query": job.target_query,
+            "chain_lock_alive": lock_alive,
+            "chain_lock_ttl": lock_ttl,
+            "active_task_count": atc,
+            "seconds_since_last_event": secs,
+            "duplicate_chains": atc > 1,
+            "driver_alive": driver_alive,
+        }
+        out["scans"].append(entry)
+        if atc > 1:
+            out["duplicate_chain_scans"].append(job.id)
+        if str(job.status or "").lower() == "running" and not driver_alive:
+            out["driverless_running_scans"].append(job.id)
+    return out
+
+
 @router.get("/worker-manager/health")
 def worker_manager_health(
     stale_after_seconds: int | None = Query(default=None, ge=10, le=3600),
@@ -1649,7 +1722,7 @@ def worker_manager_health(
     now = datetime.utcnow()
     cutoff = now - timedelta(seconds=stale_after_seconds)
 
-    active_scan_ids, inspect_ok = _active_scan_ids()
+    active_scan_ids, inspect_ok, active_task_counts = _active_scan_ids()
     active_unit = active_scan_ids.get("unit", set())
     active_scheduled = active_scan_ids.get("scheduled", set())
 
@@ -1741,6 +1814,8 @@ def worker_manager_health(
     except Exception:
         pass
 
+    environment = _environment_health(db, now, active_task_counts)
+
     return {
         "summary": {
             "total_workers": len(rows),
@@ -1749,8 +1824,12 @@ def worker_manager_health(
             "stale_after_seconds": stale_after_seconds,
             "inspect_ok": inspect_ok,
             "phase_counts": phase_counts,
+            "running_scans": len(environment["scans"]),
+            "duplicate_chain_scans": len(environment["duplicate_chain_scans"]),
+            "driverless_running_scans": len(environment["driverless_running_scans"]),
         },
         "capacity": capacity_info,
+        "environment": environment,
         "workers": workers,
     }
 
@@ -1781,7 +1860,7 @@ def requeue_orphan_scans(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="older_than_seconds deve ser >= 30")
 
     cutoff = datetime.utcnow() - timedelta(seconds=older_than_seconds)
-    active_by_mode, inspect_ok = _active_scan_ids()
+    active_by_mode, inspect_ok, _ = _active_scan_ids()
     if not inspect_ok:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

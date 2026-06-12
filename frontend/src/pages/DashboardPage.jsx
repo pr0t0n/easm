@@ -343,7 +343,9 @@ function MissionFeedPanel({ scans = [], tools = [], flows = [], selectedScan }) 
 
 function SurfaceHeatmap({ rows = [] }) {
   const columns = ["critical", "high", "medium", "low"];
-  const max = Math.max(1, ...rows.flatMap((row) => columns.map((key) => Number(row?.[key] || 0))));
+  // Escala FIXA (= protótipo): saturação total em 12 achados por célula. Escala
+  // dinâmica fazia poucos achados parecerem máximos (cor "errada" vs layout).
+  const maxCell = 12;
   return (
     <div className="cockpit-panel heatmap-panel">
       <div className="cockpit-panel-head">
@@ -361,12 +363,17 @@ function SurfaceHeatmap({ rows = [] }) {
             <strong>{row.label}</strong>
             {columns.map((col) => {
               const value = Number(row?.[col] || 0);
-              const intensity = value ? 0.16 + (value / max) * 0.78 : 0;
+              const ratio = value / maxCell;
+              const intensity = value ? 0.15 + ratio * 0.85 : 0;
               return (
                 <span
                   key={col}
                   className={`heat-cell heat-${col}`}
-                  style={{ "--heat-alpha": intensity }}
+                  style={{
+                    "--heat-alpha": intensity,
+                    color: ratio > 0.45 ? "#fff" : "var(--ink-soft)",
+                    ...(value ? {} : { background: "var(--surface-soft)" }),
+                  }}
                   title={`${row.label} · ${SEVERITY_LABELS[col]}: ${value}`}
                 >
                   {value || ""}

@@ -41,6 +41,17 @@ class ScanResponse(BaseModel):
     last_error: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    # Derived timestamps (scan_jobs não tem colunas próprias): started=created,
+    # finished=updated quando o status é terminal.
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    # Contagem de achados ABERTOS (is_false_positive=false) por severidade —
+    # o card/Centro Operacional leem estes campos; sem eles, mostravam 0.
+    open_critical: int = 0
+    open_high: int = 0
+    open_medium: int = 0
+    open_low: int = 0
+    open_info: int = 0
     state_data: dict[str, Any] = {}
 
 
