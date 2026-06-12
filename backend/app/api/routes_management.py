@@ -876,10 +876,18 @@ def list_schedules(db: Session = Depends(get_db), current_user: User = Depends(g
         allowed_ids = [g.id for g in current_user.groups]
         query = query.filter((ScheduledScan.owner_id == current_user.id) | (ScheduledScan.access_group_id.in_(allowed_ids)))
     rows = query.order_by(ScheduledScan.created_at.desc()).all()
+    # Resolve nomes de grupo numa única query (evita N+1 e o front não precisa
+    # buscar /access-groups só pra exibir o nome).
+    _gids = {row.access_group_id for row in rows if row.access_group_id}
+    _gname: dict[int, str] = {}
+    if _gids:
+        for g in db.query(AccessGroup).filter(AccessGroup.id.in_(list(_gids))).all():
+            _gname[g.id] = g.name
     return [
         {
             "id": row.id,
             "access_group_id": row.access_group_id,
+            "access_group_name": _gname.get(row.access_group_id),
             "targets_text": row.targets_text,
             "targets": _parse_targets(row.targets_text),
             "scan_type": row.scan_type,

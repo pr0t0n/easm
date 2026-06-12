@@ -293,12 +293,19 @@ export default function OperationsCenterPage() {
                 {schedules.length > 0 && (
                   <div style={{ borderTop: `1px solid ${TV.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
                     <span style={{ fontSize: 9.5, color: TV.label, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>A seguir</span>
-                    {schedules.slice(0,3).map((s) => (
-                      <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: TV.text }}>#{s.id} {String(s.target_query||"").slice(0,22)}</span>
-                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: TV.muted, whiteSpace: "nowrap" }}>{s.run_time||"—"} · {s.frequency}</span>
+                    {schedules.slice(0,3).map((s) => {
+                      const grp = s.access_group_name || (s.access_group_id ? `grupo #${s.access_group_id}` : "sem grupo");
+                      const alvo = String(s.targets_text || s.target_query || "").split(/[;,\n]/)[0].trim();
+                      return (
+                      <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: TV.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                          <span style={{ color: "#9db4ff", fontWeight: 700 }}>{grp}</span>
+                          <span style={{ color: TV.muted }}> · #{s.id}</span> {alvo.slice(0, 20)}
+                        </span>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: TV.muted, whiteSpace: "nowrap", flexShrink: 0 }}>{s.run_time||"—"} · {s.frequency}</span>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

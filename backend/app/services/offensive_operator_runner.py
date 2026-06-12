@@ -255,21 +255,37 @@ _TARGET_SYN_PROBE_INTERVAL = 20.0
 
 
 def _tcp_syn_reachable(target: str, timeout: float = _TARGET_SYN_TIMEOUT) -> bool:
-    """TCP connect (SYN) ao host:porta do alvo. True se conecta dentro do timeout."""
+    """SYN connect ao alvo — usado pelo gate de alcançabilidade.
+
+    CRÍTICO: isto roda no DRIVER (scope worker), cuja resolução DNS é
+    NÃO-confiável por design — a rede real do scan é feita pelo kali_runner.
+    Portanto:
+      • Falha de DNS (gaierror) = problema do driver, NÃO do alvo → fail-open
+        (True). Nunca marcar um alvo como morto só porque o driver não resolveu;
+        senão um hiccup do Docker DNS mataria todos os scans como "Timeout
+        Destination".
+      • Só conclui inacessível (False) quando o DNS RESOLVE mas nenhuma porta
+        candidata aceita conexão (alvo genuinamente fora do ar).
+      • Testa 80 e 443 (alvo HTTPS-only não pode virar falso-negativo)."""
     import socket
     from urllib.parse import urlparse
     raw = target if "://" in str(target) else f"http://{target}"
     p = urlparse(raw)
     host = p.hostname
     if not host:
-        return False
-    port = p.port or (443 if p.scheme == "https" else 80)
+        return True  # não dá pra concluir → fail-open
     try:
-        s = socket.create_connection((host, int(port)), timeout=timeout)
-        s.close()
-        return True
+        socket.gethostbyname(host)
     except Exception:
-        return False
+        return True  # DNS do driver falhou → inconclusivo → fail-open
+    ports = [int(p.port)] if p.port else ([443] if p.scheme == "https" else [80, 443])
+    for port in ports:
+        try:
+            socket.create_connection((host, port), timeout=timeout).close()
+            return True
+        except OSError:
+            continue
+    return False
 
 
 def _reachability_gate(db, job: ScanJob, target: str, completed_work: set, phases: list[str]) -> bool:
