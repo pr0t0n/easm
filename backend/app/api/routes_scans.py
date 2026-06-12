@@ -3430,11 +3430,19 @@ def _empty_severity_counts() -> dict[str, int]:
 
 @router.get("/domains/overview")
 def domains_overview(
+    scan_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    scans = _authorized_scan_query(db, current_user).order_by(ScanJob.created_at.desc(), ScanJob.id.desc()).all()
-    findings = _authorized_finding_query(db, current_user).order_by(Finding.created_at.desc()).all()
+    # scan_id opcional: escopa a visão "Por Subdomínio" a um scan específico
+    # (lista suspensa na página de Vulnerabilidades). Sem ele, agrega todos.
+    scans_q = _authorized_scan_query(db, current_user)
+    findings_q = _authorized_finding_query(db, current_user)
+    if scan_id:
+        scans_q = scans_q.filter(ScanJob.id == scan_id)
+        findings_q = findings_q.filter(Finding.scan_job_id == scan_id)
+    scans = scans_q.order_by(ScanJob.created_at.desc(), ScanJob.id.desc()).all()
+    findings = findings_q.order_by(Finding.created_at.desc()).all()
 
     domains: dict[str, dict[str, Any]] = {}
 
@@ -8998,6 +9006,28 @@ def get_cockpit(
 
     state = dict(selected.state_data or {})
     crown = state.get("crown_jewels", []) or []
+    if not crown:
+        # Fallback: o motor ofensivo nem sempre persiste crown_jewels no state
+        # (o analyzer lê scan_work_items, que esse motor não cria) → a página
+        # ficava vazia mesmo com subdomínios descobertos. Deriva on-the-fly dos
+        # hosts conhecidos do scan pelos MESMOS padrões do analyzer (auth/pay/
+        # admin/db/api/...), populando a partir de dados que já temos.
+        try:
+            from app.services.crown_jewel_analyzer import identify_crown_jewels
+            # Usa apenas os ATIVOS reais persistidos deste scan (hosts vivos), não
+            # o target_set bruto — que contém permutações especulativas de
+            # brute-force (pay.X, admin.X…) e geraria centenas de falsos.
+            _hosts = sorted({
+                str(_d) for (_d,) in
+                db.query(Asset.domain_or_ip).filter(Asset.last_scan_id == selected.id).all() if _d
+            })
+            if _hosts:
+                crown = [
+                    {"target": t, "boost": b, "label": lbl}
+                    for t, b, lbl in identify_crown_jewels(_hosts)[:40]
+                ]
+        except Exception:
+            crown = []
     jewel_hosts = set()
     for j in crown:
         t = j.get("target") or j.get("asset") or j.get("host") or ""
