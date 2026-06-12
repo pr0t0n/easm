@@ -19,7 +19,7 @@ from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
     ScanAuditLog, AgentTraceEvent, AgentActivityLog, SkillScore, VulnerabilityLearning, AccessGroup,
-    ScanWorkItem,
+    ScanWorkItem, SkillLibrary,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -6514,12 +6514,18 @@ def dashboard_insights(
         segment=None,  # dashboard não tem alvo único — usa peso padrão
     )
 
-    if float(effective_scans or 0) <= 0:
+    # Sem execução no escopo, o rating é INDEFINIDO (não "F"). Ausência de dados
+    # não é a pior nota possível — é ausência. score/grade = None → UI mostra "—".
+    has_scan_data = float(effective_scans or 0) > 0
+    if not has_scan_data:
         continuous_rating = {
-            "score": 0.0,
-            "grade": "F",
+            "score": None,
+            "grade": None,
             "factors": [],
+            "has_data": False,
         }
+    else:
+        continuous_rating = {**continuous_rating, "has_data": True}
 
     scan_timeline_seed: list[dict] = []
     for s in sorted(jobs, key=lambda item: item.created_at or datetime.min):
@@ -6553,10 +6559,20 @@ def dashboard_insights(
         findings_total=float(effective_total or 0),
         findings_triaged=float(effective_mitigated or 0),
     )
+    # Sem execução no escopo, os frameworks ficam INDEFINIDOS — não 100/A. Score
+    # 100 sem scan significaria "compliance perfeita" derivada de zero evidência;
+    # ausência de dados não é conformidade. score/grade = None → UI mostra "—".
+    if not has_scan_data:
+        for _fw in framework_scores.values():
+            if isinstance(_fw, dict):
+                _fw["score"] = None
+                _fw["grade"] = None
+                _fw["has_data"] = False
     scan_ids = [int(j.id) for j in jobs if j.id is not None]
 
     trace_rows: list[AgentTraceEvent] = []
     executed_runs: list[ExecutedToolRun] = []
+    skill_score_rows: list[SkillScore] = []
     if scan_ids:
         trace_rows = (
             db.query(AgentTraceEvent)
@@ -6572,6 +6588,17 @@ def dashboard_insights(
             .limit(2000)
             .all()
         )
+        skill_score_rows = (
+            db.query(SkillScore)
+            .filter(SkillScore.scan_id.in_(scan_ids))
+            .all()
+        )
+
+    # Universo de skills ofensivas aplicáveis (catálogo executável real, não a
+    # biblioteca de aprendizados). Denominador da cobertura de execução confirmada.
+    active_skill_count = int(
+        db.query(SkillLibrary).filter(SkillLibrary.is_active.is_(True)).count()
+    )
 
     worker_rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).limit(100).all()
     if current_user.is_admin:
@@ -7092,6 +7119,23 @@ def dashboard_insights(
         else _pct(rag_trace_hits, len(trace_rows))
     )
 
+    # Cobertura de skill CONFIRMADA — contém a resiliência ao propósito da
+    # plataforma: skill executada COM confirmação. Uma skill só conta quando
+    # teve execução bem-sucedida no escopo (tool_successes > 0 = atendeu o
+    # quality_criteria da execução). Diferente de learning_coverage, que media
+    # a biblioteca de aprendizados (global, autorreferente, sempre ~100%) e não
+    # representa nada exercitado no alvo.
+    confirmed_skill_ids = {
+        str(row.skill_id)
+        for row in skill_score_rows
+        if int(row.tool_successes or 0) > 0
+    }
+    skill_confirmation_coverage = _pct(len(confirmed_skill_ids), active_skill_count)
+    # A resiliência só EXISTE a partir de execução confirmada. Sem scan no
+    # escopo ou sem nenhuma skill confirmada, o índice é indefinido (None) — a
+    # UI mostra "—", nunca 0% nem um piso fabricado.
+    bas_has_confirmed_execution = bool(scan_ids) and bool(confirmed_skill_ids)
+
     telemetry_rows = []
     for row in telemetry_by_source.values():
         total_source = int(row.get("total") or 0)
@@ -7124,7 +7168,20 @@ def dashboard_insights(
 
     bas_command_center = {
         "summary": {
-            "bas_resilience_index": round((control_efficacy_index * 0.45) + (tool_efficiency * 0.2) + (learning_coverage * 0.2) + (_pct(effective_mitigated, effective_total) * 0.15), 1),
+            "bas_resilience_index": (
+                round(
+                    (control_efficacy_index * 0.45)
+                    + (tool_efficiency * 0.2)
+                    + (skill_confirmation_coverage * 0.2)
+                    + (_pct(effective_mitigated, effective_total) * 0.15),
+                    1,
+                )
+                if bas_has_confirmed_execution
+                else None
+            ),
+            "skill_confirmation_coverage_percent": skill_confirmation_coverage,
+            "confirmed_skill_count": len(confirmed_skill_ids),
+            "active_skill_count": active_skill_count,
             "attack_success_index": attack_success_index,
             "attack_success_count": attack_success_count,
             "attack_attempts": attack_attempts,
@@ -7207,7 +7264,7 @@ def dashboard_insights(
             "external_rating_score": continuous_rating.get("score"),
             "external_rating_grade": continuous_rating.get("grade"),
             "aggregation_mode": agg_mode,
-            "aggregation_targets": len(scope_targets) if scope_targets else 1,
+            "aggregation_targets": len(scope_targets),
         },
         "frameworks": framework_scores,
         "recent_scans": recent_scans,

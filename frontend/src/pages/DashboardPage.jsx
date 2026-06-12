@@ -522,7 +522,7 @@ export default function DashboardPage() {
           age_market_avg_days: dashboard.stats?.age_market_avg_days || 0,
           age_exploit_avg_days: dashboard.stats?.age_exploit_avg_days || 0,
           external_rating_score: dashboard.stats?.external_rating_score || 0,
-          external_rating_grade: dashboard.stats?.external_rating_grade || "F",
+          external_rating_grade: dashboard.stats?.external_rating_grade || null,
           vulnerability_findings: dashboard.stats?.vulnerability_findings || 0,
           recon_findings: dashboard.stats?.recon_findings || 0,
           osint_findings: dashboard.stats?.osint_findings || 0,
@@ -533,14 +533,14 @@ export default function DashboardPage() {
           medium: dashboard.stats?.medium || 0,
           low: dashboard.stats?.low || 0,
           aggregation_mode: dashboard.stats?.aggregation_mode || "global",
-          aggregation_targets: dashboard.stats?.aggregation_targets || 1,
+          aggregation_targets: dashboard.stats?.aggregation_targets || 0,
         });
 
         setFrameworks([
-          { name: "ISO 27001", score: dashboard.frameworks?.iso27001?.score || 0 },
-          { name: "NIST CSF", score: dashboard.frameworks?.nist?.score || 0 },
-          { name: "CIS v8", score: dashboard.frameworks?.cis_v8?.score || 0 },
-          { name: "PCI", score: dashboard.frameworks?.pci?.score || 0 },
+          { name: "ISO 27001", score: dashboard.frameworks?.iso27001?.score ?? null },
+          { name: "NIST CSF", score: dashboard.frameworks?.nist?.score ?? null },
+          { name: "CIS v8", score: dashboard.frameworks?.cis_v8?.score ?? null },
+          { name: "PCI", score: dashboard.frameworks?.pci?.score ?? null },
         ]);
 
         setRecentScans(dashboard.recent_scans || []);
@@ -603,7 +603,7 @@ export default function DashboardPage() {
           || "F"
         );
         setGlobalVasmMeta({
-          aggregationTargets: Number(globalDashboard.stats?.aggregation_targets || 1),
+          aggregationTargets: Number(globalDashboard.stats?.aggregation_targets || 0),
           scanCount: Number(globalTimeline.length || 0),
         });
         setScopedVulnerabilityRating({
@@ -746,7 +746,10 @@ export default function DashboardPage() {
   const basWorkers = basCommandCenter?.workers || EMPTY_BAS.workers;
   const basLearning = basCommandCenter?.learning || EMPTY_BAS.learning;
 
+  const resilienceDefined = basSummary.bas_resilience_index !== null && basSummary.bas_resilience_index !== undefined;
   const resilience = Number(basSummary.bas_resilience_index || 0);
+  const confirmedSkillCount = Number(basSummary.confirmed_skill_count || 0);
+  const activeSkillCount = Number(basSummary.active_skill_count || 0);
   const controlEff = Number(basSummary.control_efficacy_index || 0);
   const gapCount = Number(basSummary.detection_gap_count || 0);
   const detectedCount = Number(basDetection.detected || 0);
@@ -763,10 +766,12 @@ export default function DashboardPage() {
   const basMetrics = [
     {
       label: "Resiliência BAS",
-      value: resilience.toFixed(1),
-      unit: "%",
-      sub: "eficácia + ferramentas + aprendizagem",
-      tone: resilience >= 70 ? "tone-green" : "tone-amber",
+      value: resilienceDefined ? resilience.toFixed(1) : "—",
+      unit: resilienceDefined ? "%" : "",
+      sub: resilienceDefined
+        ? `${confirmedSkillCount}/${activeSkillCount} skills confirmadas`
+        : "nenhuma skill executada com confirmação",
+      tone: !resilienceDefined ? "tone-muted" : resilience >= 70 ? "tone-green" : "tone-amber",
     },
     {
       label: "Eficácia do ataque",
@@ -816,7 +821,7 @@ export default function DashboardPage() {
   const scansExecuting = scansRunning + scansQueued;
   const weakFrameworks = frameworks
     .slice()
-    .sort((a, b) => Number(a.score || 0) - Number(b.score || 0))
+    .sort((a, b) => Number(a.score ?? 101) - Number(b.score ?? 101))
     .slice(0, 4);
   // Fila de ataque: prioriza dado REAL do /api/cockpit (EPSS FIRST.org, MITRE
   // derivado, verification_status, flag de joia). Fallback ao insights só
@@ -863,9 +868,13 @@ export default function DashboardPage() {
     || null
   );
   const selectedScanId = selectedSubdomainScanId || selectedScan?.id || "";
+  // Sem execução no escopo não há rating: ausência de dados não é nota "F".
+  const hasScanData = Number(stats?.scans || 0) > 0;
   const cockpitScore = Number(stats?.external_rating_score || scopedVulnerabilityRating?.score || 0);
-  const cockpitGrade = stats?.external_rating_grade || scopedVulnerabilityRating?.grade || gradeFromScore(cockpitScore);
-  const cockpitTone = ratingTone(cockpitScore);
+  const cockpitGrade = hasScanData
+    ? (stats?.external_rating_grade || scopedVulnerabilityRating?.grade || gradeFromScore(cockpitScore))
+    : "—";
+  const cockpitTone = hasScanData ? ratingTone(cockpitScore) : "t-muted";
   const activeScanRows = scanRows.filter((scan) => ["running", "queued", "retrying"].includes(String(scan?.status || "").toLowerCase()));
   const scanOptions = scanRows.slice(0, 80);
   // Heatmap: dado REAL por finding vindo de /api/cockpit (classificação por
@@ -969,7 +978,7 @@ export default function DashboardPage() {
           </div>
           {!!stats && (
             <div className="cockpit-scope-note">
-              <b>{Number(stats.aggregation_targets || 1)}</b> alvo(s) · {Number(stats.scans || 0)} ciclo(s)
+              <b>{Number(stats.aggregation_targets || 0)}</b> alvo(s) · {Number(stats.scans || 0)} ciclo(s)
             </div>
           )}
         </section>
@@ -983,7 +992,7 @@ export default function DashboardPage() {
         <section className="cockpit-hero">
           <div className="cockpit-score">
             <div className="score-ring">
-              <strong>{cockpitScore.toFixed(0)}</strong>
+              <strong>{hasScanData ? cockpitScore.toFixed(0) : "—"}</strong>
               <span>rating</span>
             </div>
             <div>
@@ -1001,7 +1010,7 @@ export default function DashboardPage() {
           </div>
           <div className="cockpit-kpi">
             <span>Ativos expostos</span>
-            <strong>{Number(selectedSubdomainScan?.subdomain_count || totalDiscoveredSubdomains || stats?.aggregation_targets || 0)}</strong>
+            <strong>{Number(selectedSubdomainScan?.subdomain_count || totalDiscoveredSubdomains || 0)}</strong>
             <small>hosts na superfície analisada</small>
           </div>
           <div className="cockpit-kpi warn">
@@ -1011,8 +1020,8 @@ export default function DashboardPage() {
           </div>
           <div className="cockpit-kpi ok">
             <span>Resiliência BAS</span>
-            <strong>{resilience.toFixed(0)}%</strong>
-            <small>{gapCount} gap(s) de detecção</small>
+            <strong>{resilienceDefined ? `${resilience.toFixed(0)}%` : "—"}</strong>
+            <small>{resilienceDefined ? `${gapCount} gap(s) de detecção` : "sem skill confirmada"}</small>
           </div>
           <div className="cockpit-severity">
             <span>Severidade</span>
@@ -1038,11 +1047,12 @@ export default function DashboardPage() {
               </div>
             </div>
             {weakFrameworks.map((fw) => {
+              const hasFwData = fw.score !== null && fw.score !== undefined;
               const score = clampPct(fw.score);
               return (
                 <div key={fw.name} className="framework-row">
-                  <div><b>{fw.name}</b><span>{score.toFixed(0)}%</span></div>
-                  <i><em style={{ width: `${score}%` }} /></i>
+                  <div><b>{fw.name}</b><span>{hasFwData ? `${score.toFixed(0)}%` : "—"}</span></div>
+                  <i><em style={{ width: `${hasFwData ? score : 0}%` }} /></i>
                 </div>
               );
             })}

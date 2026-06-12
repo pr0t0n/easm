@@ -1358,6 +1358,8 @@
 .dash .bas-m.tone-amber { background: rgba(254, 200, 0, 0.08); border-color: rgba(212, 165, 0, 0.26); color: var(--sev-medium-text); }
 .dash .bas-m.tone-red   { background: rgba(214, 69, 69, 0.06); border-color: rgba(214, 69, 69, 0.22); color: var(--sev-critical-text); }
 .dash .bas-m.tone-slate { background: var(--surface-soft); border-color: var(--line); color: var(--ink); }
+.dash .bas-m.tone-muted { background: var(--surface-soft); border-color: var(--line); color: var(--ink-soft, #8a8f98); }
+.dash .score-grade.t-muted b { color: var(--ink-soft, #8a8f98); }
 
 /* BAS rows */
 .dash .bas-grid-1 { display: grid; grid-template-columns: 5fr 4fr 3fr; gap: 14px; margin-bottom: 14px; }
