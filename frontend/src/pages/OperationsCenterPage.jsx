@@ -262,8 +262,8 @@ export default function OperationsCenterPage() {
       )}
 
       {/* ── TV Wall grid ── */}
-      <div style={{ flex: 1, padding: 16, overflowY: "auto" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, alignContent: "start" }}>
+      <div style={{ flex: 1, padding: 16, overflowY: "auto", minWidth: 0 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
 
             {/* Scans rodando + fila */}
             <TvPanel title="Scans" right={`${rodando.length} rodando · ${schedules.length} na fila`}>
@@ -443,7 +443,7 @@ export default function OperationsCenterPage() {
 
             {/* Missões recentes · 2 cols */}
             <TvPanel title="Missões recentes" right="últimos resultados" span={2}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 10 }}>
                 {/* Aviso de autorização */}
                 <div style={{ gridColumn: "span 2", display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 12px", background: "rgba(254,215,0,0.08)", border: "1px solid rgba(254,215,0,0.25)", borderRadius: 8, fontSize: 11, color: "#ffe08a" }}>
                   <span style={{ flexShrink: 0 }}>⚠</span>
@@ -453,7 +453,7 @@ export default function OperationsCenterPage() {
                   const pct = s.mission_progress ?? s.progress ?? 0;
                   const isActive = ACTIVE_STATUS.includes(s.status);
                   return (
-                    <div key={s.id} style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+                    <div key={s.id} style={{ minWidth: 0, background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
                         <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: TV.text }}>#{s.id}</span>
                         <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: isActive ? "#7fe0b0" : TV.muted, fontWeight: 600 }}>{s.status}</span>
