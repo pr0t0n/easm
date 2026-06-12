@@ -26,6 +26,10 @@ logger = logging.getLogger("watchdog")
 _KALI_URL = os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088").rstrip("/")
 _KALI_CONTAINER = os.getenv("KALI_CONTAINER", "scriptkiddo_kali_runner")
 _STUCK_MINUTES = int(os.getenv("WATCHDOG_STUCK_MINUTES", "12"))
+# Tempo sem atualização antes de tratar um scan não-terminal como órfão em limbo.
+# Cobre o caso real: restart do worker/backend perde a mensagem .delay() e o scan
+# fica 'queued' para sempre, invisível à recuperação antiga (que só via 'running').
+_LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
 
 
 def _kali_functional_ok() -> bool:
@@ -117,6 +121,32 @@ def run_watchdog(db) -> dict:
 
     if report["requeued"]:
         db.commit()
+
+    # ── 3. scans em LIMBO: não-terminais porém SEM execução real ─────────────
+    # (queued/running/retrying com updated_at antigo e SEM chain lock viva). É o
+    # buraco que deixava #9/#10/#11 'queued' para sempre: a recuperação acima só
+    # olha status='running'. Aqui pegamos QUALQUER status recuperável. O helper é
+    # idempotente (no-op se o lock está vivo) e limita os re-disparos.
+    limbo_revived = []
+    try:
+        limbo_rows = db.execute(text("""
+            SELECT id FROM scan_jobs
+            WHERE status IN ('queued','running','retrying')
+              AND updated_at < now() - interval '%d seconds'
+            ORDER BY id
+        """ % _LIMBO_SECONDS)).fetchall()
+        if limbo_rows:
+            from app.workers.tasks import recover_scan_if_orphaned
+            for (sid,) in limbo_rows:
+                if int(sid) in revived:
+                    continue
+                res = recover_scan_if_orphaned(int(sid), mode="unit", source="watchdog")
+                if res.get("action") in ("redriven", "failed_budget"):
+                    limbo_revived.append({"scan_id": int(sid), **res})
+                    logger.warning("watchdog: scan %s em LIMBO → %s", sid, res.get("action"))
+    except Exception as exc:
+        logger.error("watchdog: pass de limbo falhou: %s", exc)
+    report["limbo_recovered"] = limbo_revived
 
     # guarda o último resultado para a página de Saúde
     try:

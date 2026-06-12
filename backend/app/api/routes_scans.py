@@ -246,6 +246,7 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
     )
 
     fixed = 0
+    _orphan_ids: list[int] = []
     for row in stale_rows:
         if row.id in active_scan_ids:
             continue
@@ -269,29 +270,31 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
             row.mission_progress = 100
             row.last_error = None
             row.next_retry_at = None
-            msg = f"Scan completed via reconciliador — todos os {_total_items} work items terminais"
-            level = "INFO"
-        else:
-            # Genuine orphan: task desapareceu, items ainda pendentes
-            row.status = "failed"
-            row.current_step = "Scan encerrado por reconciliacao de orfao"
-            row.last_error = "Scan marcado como falho por estar running sem task ativa no worker"
-            row.next_retry_at = None
-            msg = "Scan running/retrying sem task ativa; status corrigido para failed"
-            level = "WARNING"
-
-        db.add(
-            ScanLog(
+            db.add(ScanLog(
                 scan_job_id=row.id,
                 source="reconciler",
-                level=level,
-                message=msg,
-            )
-        )
-        fixed += 1
+                level="INFO",
+                message=f"Scan completed via reconciliador — todos os {_total_items} work items terminais",
+            ))
+            fixed += 1
+        else:
+            # Órfão durante janela de restart/redelivery: NÃO matar como failed
+            # (era a causa de #9/#10/#11 morrerem em todo rebuild). Re-disparar de
+            # forma idempotente e limitada — o helper só falha após esgotar o
+            # orçamento de re-disparos, e é no-op se a chain estiver de fato viva.
+            _orphan_ids.append(row.id)
 
-    if fixed:
+    # Persiste as mutações 'completed' desta sessão ANTES de re-disparar órfãos
+    # (recover_scan_if_orphaned abre a própria sessão e lê o job já comitado).
+    if fixed or _orphan_ids:
         db.commit()
+    for _sid in _orphan_ids:
+        try:
+            from app.workers.tasks import recover_scan_if_orphaned
+            recover_scan_if_orphaned(int(_sid), mode="unit", source="reconciler")
+            fixed += 1
+        except Exception:
+            continue
     return fixed
 
 

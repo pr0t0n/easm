@@ -1417,6 +1417,13 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 _SCAN_CHAIN_LOCK_TTL = max(600, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "5400")))  # 90min
 _SCAN_CHAIN_MAX_WAITS = max(1, int(os.getenv("SCAN_CHAIN_MAX_WAITS", "40")))
+# Quantas vezes a recuperação automática re-dispara um scan órfão antes de
+# desistir e marcá-lo como failed (evita loop infinito em scan genuinamente
+# quebrado, mas tolera janelas de restart/redelivery).
+_SCAN_REDRIVE_MAX = max(1, int(os.getenv("SCAN_REDRIVE_MAX", "6")))
+# Estados não-terminais em que um scan DEVERIA estar executando. failed/stopped/
+# paused/completed ficam de fora: terminais ou controlados pelo usuário.
+_RECOVERABLE_SCAN_STATUSES = {"queued", "running", "retrying"}
 
 
 def _chain_lock_key(scan_id: int) -> str:
@@ -1472,6 +1479,112 @@ def ensure_scan_chain_running(scan_id: int, mode: str = "unit") -> dict:
     task = run_scan_job_scheduled if str(mode).lower() == "scheduled" else run_scan_job_unit
     async_result = task.delay(scan_id)
     return {"scan_id": scan_id, "enqueued": True, "task_id": getattr(async_result, "id", None)}
+
+
+def _chain_lock_alive(scan_id: int) -> bool:
+    """True se a chain do scan está realmente em execução (lock vivo no redis).
+
+    Fonte de verdade mais confiável que ``celery inspect`` (que é lento/instável):
+    o driver mantém ``scan_chain_lock:{id}`` enquanto trabalha. Fail-open para
+    False (redis indisponível) → a recuperação tenta re-disparar e o próprio lock
+    arbitra eventual corrida.
+    """
+    try:
+        from app.services.scan_work_queue import _redis_client
+        return bool(_redis_client().get(_chain_lock_key(scan_id)))
+    except Exception:
+        return False
+
+
+def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "watchdog") -> dict:
+    """Recupera, de forma idempotente e limitada, um scan não-terminal que parou.
+
+    Causa real (verificada): um restart do worker/backend durante a janela de boot
+    faz a mensagem ``.delay()`` do scan ser perdida — o scan fica ``queued`` (ou
+    ``running``) para sempre, sem chain lock e sem task. Nada o recuperava porque o
+    watchdog só olhava ``status='running'`` e o reconciliador o matava como failed.
+
+    Regras:
+      • Se o status for terminal/halted → não mexe.
+      • Se a chain lock está viva → o scan está realmente executando; zera o contador
+        de re-disparos e não faz nada.
+      • Senão (órfão real) → re-dispara via ``ensure_scan_chain_running`` (o lock
+        arbitra duplicatas), contabilizando em ``state_data.recovery.redrive_count``.
+      • Esgotado o orçamento de re-disparos → marca failed com motivo claro, para não
+        repetir indefinidamente em scan genuinamente quebrado.
+    """
+    db: Session = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not job:
+            return {"scan_id": scan_id, "action": "missing"}
+
+        status = str(job.status or "").lower()
+        if status not in _RECOVERABLE_SCAN_STATUSES:
+            return {"scan_id": scan_id, "action": "skip", "status": status}
+
+        # Chain realmente viva → scan saudável (fase lenta do kali não toca o
+        # scan_jobs.updated_at, mas o lock continua de pé). Zera o contador.
+        if _chain_lock_alive(scan_id):
+            state = dict(job.state_data or {})
+            rec = dict(state.get("recovery") or {})
+            if rec.get("redrive_count"):
+                rec["redrive_count"] = 0
+                state["recovery"] = rec
+                job.state_data = state
+                db.commit()
+            return {"scan_id": scan_id, "action": "chain_alive"}
+
+        # Órfão real: decide entre re-disparar (dentro do orçamento) ou falhar.
+        state = dict(job.state_data or {})
+        rec = dict(state.get("recovery") or {})
+        count = int(rec.get("redrive_count") or 0)
+
+        if count >= _SCAN_REDRIVE_MAX:
+            job.status = "failed"
+            job.current_step = "Falha definitiva: scan orfao apos multiplos re-disparos"
+            job.next_retry_at = None
+            job.last_error = (
+                f"Recuperacao automatica esgotada apos {count} re-disparos sem progresso "
+                f"(origem={source})"
+            )
+            db.add(ScanLog(
+                scan_job_id=scan_id, source=source, level="ERROR",
+                message=f"Re-disparo automatico esgotado em {count} tentativas; scan marcado como failed",
+            ))
+            db.commit()
+            return {"scan_id": scan_id, "action": "failed_budget", "redrive_count": count}
+
+        res = ensure_scan_chain_running(scan_id, mode=mode)
+        if not res.get("enqueued"):
+            # Corrida: o lock surgiu entre a checagem e o dispatch → já há execução.
+            return {"scan_id": scan_id, "action": "chain_alive", "reason": res.get("reason")}
+
+        rec["redrive_count"] = count + 1
+        rec["last_redrive_source"] = source
+        state["recovery"] = rec
+        job.state_data = state
+        job.status = "queued"
+        job.current_step = "Recuperacao automatica: re-disparando execucao"
+        job.next_retry_at = None
+        db.add(ScanLog(
+            scan_job_id=scan_id, source=source, level="WARNING",
+            message=(
+                f"Scan orfao re-disparado automaticamente "
+                f"(recuperacao {count + 1}/{_SCAN_REDRIVE_MAX}, origem={source})"
+            ),
+        ))
+        db.commit()
+        return {"scan_id": scan_id, "action": "redriven", "redrive_count": count + 1,
+                "task_id": res.get("task_id")}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"scan_id": scan_id, "action": "error", "error": str(exc)}
+    finally:
+        db.close()
 
 
 def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode, lock_wait: int = 0) -> dict:
