@@ -9375,9 +9375,24 @@ def get_platform_health_endpoint(
     current_user: User = Depends(require_admin),
 ):
     """Saúde de toda a plataforma (visão Docker): status/health por container,
-    alerta quando algo está fora e último log/erro para validar."""
+    alerta quando algo está fora e último log/erro para validar. Cada chamada
+    também roda o guardião de auto-correção (cooldown-gated)."""
     from app.services.platform_health import get_platform_health
     return get_platform_health(db)
+
+
+@router.post("/platform/self-heal")
+def trigger_platform_self_heal(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Dispara a auto-correção da plataforma imediatamente (ignora cooldown).
+
+    Verifica a vida do auto-curador (watchdog), reinicia containers stateless
+    caídos e re-dispara scans órfãos/limbo. Útil para acionar manualmente ou via
+    monitor de uptime externo (cron) — garante auto-cura mesmo sem navegador."""
+    from app.services.platform_health import run_platform_self_heal
+    return run_platform_self_heal(db, source="manual", force=True)
 
 
 @router.get("/guardrails")

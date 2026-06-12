@@ -10,13 +10,165 @@ heartbeats (worker_heartbeats) + ping de serviços, para nunca quebrar a página
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+from datetime import datetime, timedelta
+
+logger = logging.getLogger("platform_guard")
 
 # Prefixo dos containers do projeto (compose: container_name scriptkiddo_*).
 _PROJECT_PREFIX = os.getenv("HEALTH_CONTAINER_PREFIX", "scriptkiddo_")
 _LOG_TAIL = 40
 _ERROR_RE = re.compile(r"(error|exception|traceback|killed|oom|fatal|panic|refused|cannot|failed)", re.I)
+
+# ── Self-correction (guardião) ───────────────────────────────────────────────
+# Heartbeat que o watchdog (run_watchdog, executado pelo beat→worker_scope a cada
+# minuto) grava a cada tick. É a prova de vida do PRÓPRIO auto-curador: se ficar
+# velho, o laço de auto-recuperação está quebrado (beat morto ou worker_scope sem
+# consumir) e o backend — sempre de pé — revive a espinha do laço.
+_WATCHDOG_HEARTBEAT_KEY = "platform:watchdog_heartbeat"
+_WATCHDOG_STALE_SECONDS = int(os.getenv("WATCHDOG_STALE_SECONDS", "180"))      # 3 ticks perdidos
+_SELF_HEAL_COOLDOWN = int(os.getenv("SELF_HEAL_COOLDOWN_SECONDS", "45"))       # anti-martelo entre polls
+_RESTART_COOLDOWN = int(os.getenv("SELF_HEAL_RESTART_COOLDOWN", "300"))        # anti-tempestade de restart
+_GUARD_LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
+
+# Containers SEGUROS de reiniciar automaticamente (stateless / consumidores
+# idempotentes). NUNCA reinicia postgres/redis (stateful), backend (é onde o
+# guardião roda) nem frontend/ollama/zap (caros ou irrelevantes ao scan).
+_AUTO_RESTART_NAMES = {"celery_beat", "mcp_server", "kali_runner"}
+
+
+def _is_auto_restartable(short_name: str) -> bool:
+    return short_name.startswith("worker_") or short_name in _AUTO_RESTART_NAMES
+
+
+def _guard_redis():
+    from app.services.scan_work_queue import _redis_client
+    return _redis_client()
+
+
+def record_watchdog_heartbeat() -> None:
+    """Prova de vida do auto-curador — chamada a cada tick do watchdog."""
+    try:
+        _guard_redis().set(_WATCHDOG_HEARTBEAT_KEY, datetime.utcnow().isoformat())
+    except Exception:
+        pass
+
+
+_GUARD_HEARTBEAT_KEY = "platform:guard_heartbeat"
+
+
+def record_guard_heartbeat() -> None:
+    """Prova de vida do guardião do backend (thread daemon)."""
+    try:
+        _guard_redis().set(_GUARD_HEARTBEAT_KEY, datetime.utcnow().isoformat())
+    except Exception:
+        pass
+
+
+def _watchdog_heartbeat_age() -> float | None:
+    """Idade (s) do último heartbeat do watchdog; None se ausente/ilegível."""
+    try:
+        raw = _guard_redis().get(_WATCHDOG_HEARTBEAT_KEY)
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return (datetime.utcnow() - datetime.fromisoformat(raw)).total_seconds()
+    except Exception:
+        return None
+
+
+def _restart_container(short_or_full: str, reason: str) -> dict:
+    """Reinicia um container via Docker, com cooldown por-container no redis para
+    evitar tempestade de restart. Falha graciosamente (reporta, não levanta)."""
+    name = short_or_full if short_or_full.startswith(_PROJECT_PREFIX) else f"{_PROJECT_PREFIX}{short_or_full}"
+    short = name.replace(_PROJECT_PREFIX, "")
+    try:
+        r = _guard_redis()
+        if r.get(f"platform:self_heal:restart:{short}"):
+            return {"container": short, "action": "skip_cooldown", "reason": reason}
+        r.set(f"platform:self_heal:restart:{short}", datetime.utcnow().isoformat(), ex=_RESTART_COOLDOWN)
+    except Exception:
+        pass
+    try:
+        import docker
+        docker.from_env().containers.get(name).restart(timeout=20)
+        logger.warning("guard: container %s REINICIADO (%s)", short, reason)
+        return {"container": short, "action": "restarted", "reason": reason}
+    except Exception as exc:
+        logger.error("guard: falha ao reiniciar %s: %s", short, exc)
+        return {"container": short, "action": "restart_failed", "reason": reason, "error": str(exc)[:160]}
+
+
+def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False,
+                           docker_view: dict | None = None) -> dict:
+    """Guardião independente (roda no backend, sempre de pé).
+
+    Fecha o meta-SPOF "quem vigia o vigia": o watchdog se auto-cura, mas se o
+    PRÓPRIO laço (beat/worker_scope) cair, ninguém o revive. Este guardião:
+      1. Checa o heartbeat do watchdog; se velho → reinicia celery_beat + worker_scope.
+      2. Reinicia containers stateless caídos (workers/mcp/kali), com cooldown.
+      3. Re-dispara scans órfãos/limbo direto (independe do beat — só precisa de
+         redis+DB+fila, que o backend tem).
+    Idempotente e protegido por cooldown, então é barato chamar a cada poll."""
+    report = {
+        "checked_at": datetime.utcnow().isoformat(), "source": source,
+        "corrections": [], "orphans_recovered": [], "watchdog": {}, "skipped": False,
+    }
+
+    if not force:
+        # cooldown global: só age uma vez por janela, mesmo sob polling intenso.
+        try:
+            if not _guard_redis().set("platform:self_heal:cooldown", source, nx=True, ex=_SELF_HEAL_COOLDOWN):
+                report["skipped"] = True
+                return report
+        except Exception:
+            pass
+
+    # 1. Vida do auto-curador ────────────────────────────────────────────────
+    age = _watchdog_heartbeat_age()
+    alive = age is not None and age <= _WATCHDOG_STALE_SECONDS
+    report["watchdog"] = {"heartbeat_age_seconds": age, "stale_threshold": _WATCHDOG_STALE_SECONDS, "alive": alive}
+    if not alive:
+        for c in ("celery_beat", "worker_scope"):
+            report["corrections"].append(_restart_container(c, reason=f"watchdog_stale(age={age})"))
+
+    # 2. Containers stateless caídos ──────────────────────────────────────────
+    view = docker_view if docker_view is not None else _docker_view()
+    if view and view.get("source") == "docker":
+        for c in view.get("containers", []):
+            if not c.get("is_alert"):
+                continue
+            short = str(c.get("name") or "")
+            status = str(c.get("status") or "")
+            if _is_auto_restartable(short) and any(k in status for k in ("exited", "dead", "restarting")):
+                report["corrections"].append(_restart_container(short, reason=f"container_{status}"))
+
+    # 3. Scans órfãos/limbo (independe do beat) ────────────────────────────────
+    if db is not None:
+        try:
+            from sqlalchemy import text as _t
+            from app.workers.tasks import recover_scan_if_orphaned
+            # cutoff em UTC-naive (a coluna updated_at é UTC-naive); evita o desvio
+            # de fuso de comparar com now() do postgres (que está em -03).
+            cutoff = datetime.utcnow() - timedelta(seconds=_GUARD_LIMBO_SECONDS)
+            rows = db.execute(_t(
+                "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
+                "AND updated_at < :cutoff ORDER BY id"
+            ), {"cutoff": cutoff}).fetchall()
+            for (sid,) in rows:
+                res = recover_scan_if_orphaned(int(sid), mode="unit", source=f"guard:{source}")
+                if res.get("action") in ("redriven", "failed_budget"):
+                    report["orphans_recovered"].append({"scan_id": int(sid), **res})
+        except Exception as exc:
+            report["orphan_error"] = str(exc)[:160]
+
+    if report["corrections"] or report["orphans_recovered"]:
+        logger.warning("guard[%s]: %d restart(s), %d scan(s) recuperado(s)",
+                       source, len(report["corrections"]), len(report["orphans_recovered"]))
+    return report
 
 # Papel de cada serviço (para agrupar/explicar na UI).
 _ROLE = {
@@ -188,9 +340,21 @@ def _adaptive_capacity_view() -> dict | None:
 
 
 def get_platform_health(db=None) -> dict:
-    """Visão de saúde da plataforma. Prefere Docker; cai em fallback."""
+    """Visão de saúde da plataforma + AUTO-CORREÇÃO.
+
+    Prefere Docker; cai em fallback. A cada chamada também roda o guardião de
+    auto-correção (cooldown-gated): como a UI de Saúde e o Centro Operacional
+    fazem polling deste endpoint, a plataforma se vigia e se cura continuamente
+    enquanto observada — em cima da thread de guarda do backend (sempre de pé)."""
     view = _docker_view()
     if view is None:
         view = _fallback_view(db)
     view["adaptive_capacity"] = _adaptive_capacity_view()
+    try:
+        view["self_heal"] = run_platform_self_heal(
+            db, source="health_poll",
+            docker_view=view if view.get("source") == "docker" else None,
+        )
+    except Exception as exc:
+        view["self_heal"] = {"error": str(exc)[:160]}
     return view

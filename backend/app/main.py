@@ -94,6 +94,45 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
     seed_admin_user()
     seed_skill_library_data()
+    start_platform_guard()
+
+
+def start_platform_guard():
+    """Guardião autônomo do backend (thread daemon).
+
+    Fecha o meta-SPOF "quem vigia o vigia": o watchdog (beat→worker_scope) se
+    auto-cura, mas se o PRÓPRIO laço cair, ninguém o revive. O backend está
+    SEMPRE de pé (serve a API), então uma thread leve checa periodicamente a
+    saúde e auto-corrige — independente do beat e de qualquer navegador aberto."""
+    import os
+    import threading
+    import time
+
+    if str(os.getenv("PLATFORM_GUARD_ENABLED", "true")).lower() in ("0", "false", "no"):
+        logger.info("platform guard desativado por env")
+        return
+
+    interval = max(30, int(os.getenv("PLATFORM_GUARD_INTERVAL", "60")))
+
+    def _loop():
+        # pequena espera p/ o resto do boot (workers/beat subindo) assentar.
+        time.sleep(max(15, interval // 2))
+        while True:
+            try:
+                from app.db.session import SessionLocal
+                from app.services.platform_health import run_platform_self_heal, record_guard_heartbeat
+                record_guard_heartbeat()  # prova de vida do PRÓPRIO guardião
+                db = SessionLocal()
+                try:
+                    run_platform_self_heal(db, source="backend_thread", force=True)
+                finally:
+                    db.close()
+            except Exception as exc:
+                logger.warning("platform guard loop error: %s", exc)
+            time.sleep(interval)
+
+    threading.Thread(target=_loop, name="platform-guard", daemon=True).start()
+    logger.warning("platform guard iniciado (intervalo=%ss)", interval)
 
 
 def seed_admin_user():

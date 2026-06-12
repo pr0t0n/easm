@@ -65,6 +65,14 @@ def run_watchdog(db) -> dict:
     report = {"kali_functional": True, "kali_restarted": False,
               "stalled_scans": [], "requeued": 0, "checked_at": datetime.utcnow().isoformat()}
 
+    # Prova de vida do auto-curador: grava ANTES de qualquer trabalho, para que o
+    # guardião do backend saiba que beat→worker_scope→watchdog está vivo.
+    try:
+        from app.services.platform_health import record_watchdog_heartbeat
+        record_watchdog_heartbeat()
+    except Exception:
+        pass
+
     # ── Capacidade ADAPTATIVA (AIMD por saúde): sobe/desce o paralelismo ─────
     try:
         from app.services.adaptive_capacity import adjust as _adjust_cap
@@ -129,12 +137,13 @@ def run_watchdog(db) -> dict:
     # idempotente (no-op se o lock está vivo) e limita os re-disparos.
     limbo_revived = []
     try:
-        limbo_rows = db.execute(text("""
-            SELECT id FROM scan_jobs
-            WHERE status IN ('queued','running','retrying')
-              AND updated_at < now() - interval '%d seconds'
-            ORDER BY id
-        """ % _LIMBO_SECONDS)).fetchall()
+        # cutoff em UTC-naive (coluna updated_at é UTC-naive). Comparar com now()
+        # do postgres (-03) desviava ~3h e só pegava scans muito antigos.
+        _cutoff = datetime.utcnow() - timedelta(seconds=_LIMBO_SECONDS)
+        limbo_rows = db.execute(text(
+            "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
+            "AND updated_at < :cutoff ORDER BY id"
+        ), {"cutoff": _cutoff}).fetchall()
         if limbo_rows:
             from app.workers.tasks import recover_scan_if_orphaned
             for (sid,) in limbo_rows:
