@@ -1095,6 +1095,82 @@ def save_shodan_config(payload: dict, db: Session = Depends(get_db), current_use
     return {"ok": True}
 
 
+_SSO_PROVIDERS = ("okta", "azure")
+_SSO_FIELDS = ("enabled", "client_id", "client_secret", "tenant_or_domain", "metadata_url")
+
+
+@router.get("/config/sso")
+def get_sso_config(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    """Configuração de SSO corporativo (Okta / Azure AD) — mesmos provedores
+    exibidos na tela de login. Segredos não são devolvidos em claro (mascarados)."""
+    import json as _json
+    row = (
+        db.query(AppSetting)
+        .filter(AppSetting.owner_id == current_user.id, AppSetting.key == "sso_config")
+        .first()
+    )
+    raw = {}
+    if row and row.value:
+        try:
+            raw = _json.loads(row.value)
+        except Exception:
+            raw = {}
+    providers = {}
+    for p in _SSO_PROVIDERS:
+        cfg = dict(raw.get(p) or {})
+        secret = str(cfg.get("client_secret") or "")
+        providers[p] = {
+            "enabled": bool(cfg.get("enabled")),
+            "client_id": cfg.get("client_id") or "",
+            "tenant_or_domain": cfg.get("tenant_or_domain") or "",
+            "metadata_url": cfg.get("metadata_url") or "",
+            "client_secret_set": bool(secret),
+            "configured": bool(cfg.get("client_id") and (cfg.get("metadata_url") or cfg.get("tenant_or_domain"))),
+        }
+    return {"providers": providers}
+
+
+@router.put("/config/sso")
+def save_sso_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    """Salva a config de SSO. client_secret só é sobrescrito se um novo valor for
+    enviado (string vazia preserva o segredo já gravado)."""
+    import json as _json
+    row = (
+        db.query(AppSetting)
+        .filter(AppSetting.owner_id == current_user.id, AppSetting.key == "sso_config")
+        .first()
+    )
+    existing = {}
+    if row and row.value:
+        try:
+            existing = _json.loads(row.value)
+        except Exception:
+            existing = {}
+
+    incoming = payload.get("providers") or {}
+    merged = {}
+    for p in _SSO_PROVIDERS:
+        prev = dict(existing.get(p) or {})
+        new = dict(incoming.get(p) or {})
+        cfg = {
+            "enabled": bool(new.get("enabled", prev.get("enabled", False))),
+            "client_id": str(new.get("client_id", prev.get("client_id", "")) or "").strip(),
+            "tenant_or_domain": str(new.get("tenant_or_domain", prev.get("tenant_or_domain", "")) or "").strip(),
+            "metadata_url": str(new.get("metadata_url", prev.get("metadata_url", "")) or "").strip(),
+        }
+        new_secret = str(new.get("client_secret") or "").strip()
+        cfg["client_secret"] = new_secret if new_secret else str(prev.get("client_secret") or "")
+        merged[p] = cfg
+
+    value = _json.dumps(merged)
+    if row:
+        row.value = value
+    else:
+        db.add(AppSetting(owner_id=current_user.id, key="sso_config", value=value))
+    db.commit()
+    return {"ok": True}
+
+
 def _get_setting(db: Session, owner_id: int, key: str, default: str = "") -> str:
     row = db.query(AppSetting).filter(AppSetting.owner_id == owner_id, AppSetting.key == key).first()
     if not row:
@@ -1740,7 +1816,16 @@ def worker_manager_health(
         scan_rows = db.query(ScanJob).filter(ScanJob.id.in_(list(active_scan_union))).all()
         active_scan_map = {row.id: row for row in scan_rows}
 
-    rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).all()
+    # GHOST CUTOFF: o worker_name = HOSTNAME (hash do container), que muda a cada
+    # restart → a tabela acumula heartbeats de instâncias MORTAS (dias atrás). Sem
+    # filtrar, total_workers conta esses fantasmas e phase_counts os marca todos
+    # como 'desconhecido'/idle → o painel mostra "workers sempre IDLE". Considera
+    # apenas heartbeats vistos dentro da janela de fantasma (workers de fato vivos).
+    ghost_after_seconds = _setting_int(db, current_user.id, "worker_health_ghost_after_seconds", 900, 120, 86400)
+    ghost_cutoff = now - timedelta(seconds=ghost_after_seconds)
+    all_rows = db.query(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()).all()
+    rows = [r for r in all_rows if r.last_seen_at and r.last_seen_at >= ghost_cutoff]
+    ghost_workers = len(all_rows) - len(rows)
 
     heartbeat_scan_ids = {int(row.current_scan_id) for row in rows if row.current_scan_id is not None}
     linked_scan_map: dict[int, ScanJob] = {}
@@ -1829,7 +1914,9 @@ def worker_manager_health(
             "total_workers": len(rows),
             "online_workers": online_count,
             "offline_workers": max(0, len(rows) - online_count),
+            "ghost_workers": ghost_workers,
             "stale_after_seconds": stale_after_seconds,
+            "ghost_after_seconds": ghost_after_seconds,
             "inspect_ok": inspect_ok,
             "phase_counts": phase_counts,
             "running_scans": len(environment["scans"]),
@@ -2148,6 +2235,20 @@ def change_own_password(payload: dict, db: Session = Depends(get_db), current_us
     current_user.password_hash = get_password_hash(new_password)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/admin/logs")
+def admin_environment_logs(
+    kind: str = Query(default="workers", pattern="^(workers|comms)$"),
+    tail: int = Query(default=50, ge=1, le=500),
+    current_user: User = Depends(require_admin),
+):
+    """Admin · Logs — últimas linhas dos Workers e das comunicações do ambiente.
+
+    kind=workers → containers dos workers (+ agendador). kind=comms → gateway MCP
+    (interno), Kali (requisições externas aos alvos) e API. Tail padrão = 50."""
+    from app.services.platform_health import get_environment_logs
+    return get_environment_logs(kind=kind, tail=tail)
 
 
 @router.get("/kali-runner/health")

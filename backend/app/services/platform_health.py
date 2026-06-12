@@ -342,6 +342,54 @@ def _adaptive_capacity_view() -> dict | None:
         return None
 
 
+def get_environment_logs(kind: str = "workers", tail: int = 50) -> dict:
+    """Últimas `tail` linhas de log dos containers, para a tela Admin · Logs.
+
+    kind="workers" → todos os containers scriptkiddo_worker_* (execução dos scans).
+    kind="comms"   → mcp_server (gateway interno de ferramentas) + kali_runner
+                     (requisições externas aos alvos) + backend (API/requisições).
+    Lê via Docker socket; falha graciosamente por container."""
+    tail = max(1, min(int(tail or 50), 500))
+    try:
+        import docker
+        client = docker.from_env()
+        client.ping()
+    except Exception as exc:
+        return {"kind": kind, "tail": tail, "available": False,
+                "error": f"Docker indisponivel: {str(exc)[:120]}", "sources": []}
+
+    if kind == "comms":
+        wanted = ["mcp_server", "kali_runner", "backend"]
+        roles = {"mcp_server": "Gateway MCP (interno)", "kali_runner": "Arsenal Kali (externo)", "backend": "API / requisições"}
+        names = [f"{_PROJECT_PREFIX}{w}" for w in wanted]
+    else:
+        kind = "workers"
+        names = []
+        try:
+            for c in client.containers.list(all=True):
+                if c.name.startswith(f"{_PROJECT_PREFIX}worker_") or c.name == f"{_PROJECT_PREFIX}celery_beat":
+                    names.append(c.name)
+        except Exception:
+            pass
+        names.sort()
+        roles = {}
+
+    sources = []
+    for name in names:
+        short = name.replace(_PROJECT_PREFIX, "")
+        entry = {"name": short, "container": name, "role": roles.get(short, "Worker"), "lines": [], "error": None}
+        try:
+            ct = client.containers.get(name)
+            raw = ct.logs(tail=tail, timestamps=True).decode("utf-8", "replace")
+            entry["lines"] = [ln for ln in raw.splitlines() if ln.strip()][-tail:]
+            entry["status"] = ct.status
+        except Exception as exc:
+            entry["error"] = str(exc)[:140]
+        sources.append(entry)
+
+    return {"kind": kind, "tail": tail, "available": True, "sources": sources}
+
+
 def get_platform_health(db=None) -> dict:
     """Visão de saúde da plataforma + AUTO-CORREÇÃO.
 

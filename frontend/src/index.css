@@ -1473,6 +1473,53 @@ code,
     word-break: break-word;
     white-space: normal;
   }
+
+  /* ── Quebra de página do relatório (normal/red team) ───────────────────
+     Margens reais da folha + cada seção/cartão/linha evita ser cortado no
+     meio da página. Sem isto o conteúdo era fatiado entre páginas. */
+  @page {
+    size: A4;
+    margin: 14mm 12mm;
+  }
+
+  .report-section,
+  .report-summary-grid,
+  .report-kpis > div,
+  .report-two-col > section,
+  .report-heatgrid,
+  .report-jewels li,
+  .report-evolution,
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* O heatmap e as joias ficam lado a lado na tela; no papel empilham para
+     não estourar a largura da folha. */
+  .report-two-col {
+    display: block !important;
+  }
+  .report-two-col > section {
+    margin-bottom: 10mm;
+  }
+
+  /* Títulos de seção nunca ficam órfãos no fim da página. */
+  .sk-eyebrow {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .report-head,
+  .report-foot {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Garante que cabeçalho de tabela longa (plano de ação) repita por página. */
+  .attack-table thead,
+  .report-plan thead {
+    display: table-header-group;
+  }
 }
 
 /* ============================================================

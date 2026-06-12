@@ -4,7 +4,27 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core.config import settings
-from app.workers.worker_groups import SCAN_SCHEDULED_QUEUE
+from app.workers.worker_groups import (
+    SCAN_SCHEDULED_QUEUE,
+    SCAN_UNIT_QUEUE,
+    SCAN_PARALLEL_QUEUE,
+    all_queues,
+)
+
+# Heartbeat em leque: um agendamento por fila de worker, para que TODOS os
+# workers se registrem vivos a cada 30s (não só o que pega a fila default).
+try:
+    _HEARTBEAT_QUEUES = sorted(set(all_queues("unit")) | {SCAN_UNIT_QUEUE, SCAN_PARALLEL_QUEUE})
+except Exception:
+    _HEARTBEAT_QUEUES = [SCAN_UNIT_QUEUE]
+_HEARTBEAT_SCHEDULE = {
+    f"worker-heartbeat-{_q}": {
+        "task": "worker.heartbeat",
+        "schedule": 30.0,
+        "options": {"queue": _q},
+    }
+    for _q in _HEARTBEAT_QUEUES
+}
 
 
 celery = Celery(
@@ -55,6 +75,7 @@ celery.conf.update(
             "schedule": crontab(minute="*"),
             "options": {"queue": SCAN_SCHEDULED_QUEUE},
         },
+        **_HEARTBEAT_SCHEDULE,
     },
     timezone="America/Sao_Paulo",
 )

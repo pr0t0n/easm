@@ -1678,6 +1678,27 @@ def run_offensive_operator_scan(
                                message=(f"target_set refined — {len(_refined['live_targets'])} live, "
                                         f"{len(_refined['dead_targets'])} dead, "
                                         f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
+                # ─ Superfície de ataque: inventaria TODOS os subdomínios vivos como
+                # assets (não só o domínio raiz). Antes, um host só virava asset se
+                # gerasse uma vuln acionável (linha ~3640), então a superfície
+                # mostrava apenas o alvo do scan. O inventário é independente de
+                # achados — é o mapa do que existe e responde.
+                try:
+                    from app.graph.workflow import _persist_discovered_assets_to_db
+                    _inv_hosts = []
+                    _seen_inv = set()
+                    for _h in [target] + list(_refined.get("live_targets") or []):
+                        _hn = _normalize_asset_host(str(_h or ""))
+                        if _hn and _hn not in _seen_inv:
+                            _seen_inv.add(_hn)
+                            _inv_hosts.append(_hn)
+                    _inv_added = _persist_discovered_assets_to_db(job.id, job.owner_id, _inv_hosts, source_tool="subdomain_enum")
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
+                                   message=(f"attack_surface inventory — {len(_inv_hosts)} host(s) vivo(s) persistido(s) "
+                                            f"como asset ({_inv_added} novo(s))")))
+                except Exception as _inv_err:
+                    db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                   message=f"attack_surface inventory falhou: {str(_inv_err)[:120]}"))
                 # ─ Tier 4: Asset DAG init + incremental change detection ────
                 _cp_state["asset_dag"] = build_asset_dag(_cp_state, all_targets, PHASE_ORDER)
                 _ic_prev_targets = list(state.get("expanded_targets_snapshot") or [target])

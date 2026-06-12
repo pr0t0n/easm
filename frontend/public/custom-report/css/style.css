@@ -1339,7 +1339,7 @@ body {
 
   .page {
     width: auto;
-    min-height: calc(297mm - 20mm);
+    min-height: auto;
     max-height: none;
     margin: 0;
     padding: 14mm 12mm;
@@ -1352,6 +1352,15 @@ body {
     overflow: visible;
     background: #ffffff !important;
     color: #1c1c1c !important;
+  }
+
+  /* CADA página do relatório começa numa folha nova. Antes faltava esta regra
+     (só os vuln-cards forçavam quebra), então as .page empilhavam e o conteúdo
+     era fatiado entre folhas — a paginação "quebrada" reportada. O seletor de
+     irmão evita uma folha em branco antes da capa. */
+  .page + .page {
+    page-break-before: always;
+    break-before: page;
   }
 
   .page::before {

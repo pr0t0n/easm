@@ -88,6 +88,7 @@ export default function OperationsCenterPage() {
   const [schedules,    setSchedules]    = useState([]);
   const [sevCounts,    setSevCounts]    = useState({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
   const [workerHealth, setWorkerHealth] = useState({ summary: {}, capacity: {} });
+  const [platformHealth, setPlatformHealth] = useState({});
   const [filtro,       setFiltro]       = useState("todos");
   const [lastRefresh, setLastRefresh] = useState(() => {
     const n = new Date();
@@ -100,16 +101,18 @@ export default function OperationsCenterPage() {
   const ACTIVE_STATUS = ["queued", "running", "retrying"];
 
   const loadData = useCallback(async () => {
-    const [sr, schr, fr, whr] = await Promise.all([
+    const [sr, schr, fr, whr, phr] = await Promise.all([
       client.get("/api/scans").catch(() => ({ data: [] })),
       client.get("/api/schedules").catch(() => ({ data: [] })),
       client.get("/api/findings/page?limit=1&offset=0&status_filter=open").catch(() => ({ data: {} })),
       client.get("/api/worker-manager/health").catch(() => ({ data: {} })),
+      client.get("/api/platform/health").catch(() => ({ data: {} })),
     ]);
     setScans(Array.isArray(sr.data) ? sr.data : []);
     setSchedules(Array.isArray(schr.data) ? schr.data : []);
     if (fr.data?.severity_counts) setSevCounts(fr.data.severity_counts);
     if (whr.data) setWorkerHealth(whr.data);
+    if (phr.data) setPlatformHealth(phr.data);
   }, []);
 
   const doRefresh = useCallback(() => {
@@ -197,6 +200,18 @@ export default function OperationsCenterPage() {
   const capSlots      = Number(wkCapacity.total_slots   || capLevel || Math.max(totalWorkers, 1));
   const workerUtilPct = totalWorkers > 0 ? Math.round((onlineWorkers / totalWorkers) * 100) : 0;
   const scanUtilPct   = capSlots  > 0 ? Math.min(100, Math.round((rodando.length / capSlots) * 100)) : 0;
+
+  /* ── Guardião da plataforma (auto-cura) ── */
+  const selfHeal = platformHealth.self_heal || {};
+  const wdog = selfHeal.watchdog || {};
+  const wdAge = wdog.heartbeat_age_seconds;
+  const wdAlive = wdog.alive === true;
+  const phContainers = Array.isArray(platformHealth.containers) ? platformHealth.containers : [];
+  const phAlerts = phContainers.filter((c) => c.is_alert);
+  const phAllHealthy = platformHealth.all_healthy !== false && phAlerts.length === 0;
+  const corrections = Array.isArray(selfHeal.corrections) ? selfHeal.corrections : [];
+  const orphansRec = Array.isArray(selfHeal.orphans_recovered) ? selfHeal.orphans_recovered : [];
+  const fmtAge = (s) => (s == null ? "—" : s < 90 ? `${Math.round(s)}s` : `${Math.round(s / 60)}min`);
 
   return (
     <div style={{ minHeight: "100vh", background: TV.bg, display: "flex", flexDirection: "column" }}>
@@ -431,23 +446,6 @@ export default function OperationsCenterPage() {
               </div>
             </TvPanel>
 
-            {/* Guardrails */}
-            <TvPanel title="Guardrails · auditoria de controle" right={`${bloqueados.length} intervenções`}>
-              <div style={{ display: "flex", flexDirection: "column" }}>
-                {bloqueados.length === 0 ? (
-                  <div style={{ fontSize: 11, color: TV.muted, padding: "8px 0" }}>Sem guardrails ativos</div>
-                ) : bloqueados.map((s) => (
-                  <div key={s.id} style={{ display: "grid", gridTemplateColumns: "44px 1fr", gap: 8, alignItems: "baseline", padding: "5px 0", borderBottom: `1px solid ${TV.border}`, fontSize: 10.5 }}>
-                    <span style={{ fontFamily: "var(--font-mono)", color: TV.label }}>#{s.id}</span>
-                    <span style={{ fontFamily: "var(--font-mono)", color: TV.text }}>
-                      {String(s.target_query||"").slice(0,28)}{" "}
-                      <span style={{ color: TV.muted }}>· scan bloqueado</span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </TvPanel>
-
             {/* Missões recentes · 2 cols */}
             <TvPanel title="Missões recentes" right="últimos resultados" span={2}>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 10 }}>
@@ -476,6 +474,58 @@ export default function OperationsCenterPage() {
                     </div>
                   );
                 })}
+              </div>
+            </TvPanel>
+
+            {/* Guardião da plataforma · auto-cura */}
+            <TvPanel title="Guardião da plataforma · auto-cura" right={phAllHealthy && wdAlive ? "saudável" : "atenção"} span={3}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+                {/* Watchdog (auto-curador) */}
+                <div style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+                  <div style={{ fontSize: 10, color: TV.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Auto-curador (watchdog)</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 99, background: wdAlive ? "#7fe0b0" : "#ff8a8a", flexShrink: 0 }} />
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: wdAlive ? "#7fe0b0" : "#ff8a8a" }}>
+                      {wdAlive ? "VIVO" : "PARADO"}
+                    </span>
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: TV.label, marginTop: 5 }}>
+                    heartbeat há {fmtAge(wdAge)}
+                  </div>
+                </div>
+
+                {/* Containers */}
+                <div style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+                  <div style={{ fontSize: 10, color: TV.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Containers</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: phAllHealthy ? "#7fe0b0" : "#ff8a8a" }}>
+                    {phContainers.length - phAlerts.length}/{phContainers.length || "—"} ok
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: phAlerts.length ? "#ff8a8a" : TV.label, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {phAlerts.length ? phAlerts.map((c) => c.name).slice(0, 4).join(", ") : "todos saudáveis"}
+                  </div>
+                </div>
+
+                {/* Correções recentes */}
+                <div style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+                  <div style={{ fontSize: 10, color: TV.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Correções (último ciclo)</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: corrections.length ? "#ffe08a" : "#7fe0b0" }}>
+                    {corrections.length} restart(s)
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: TV.label, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {corrections.length ? corrections.map((c) => c.container).slice(0, 3).join(", ") : "nenhuma necessária"}
+                  </div>
+                </div>
+
+                {/* Scans recuperados */}
+                <div style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+                  <div style={{ fontSize: 10, color: TV.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Scans recuperados</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: orphansRec.length ? "#ffe08a" : "#7fe0b0" }}>
+                    {orphansRec.length}
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: TV.label, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {orphansRec.length ? orphansRec.map((o) => `#${o.scan_id}`).join(", ") : "nenhum órfão"}
+                  </div>
+                </div>
               </div>
             </TvPanel>
 

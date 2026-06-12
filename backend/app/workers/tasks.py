@@ -398,13 +398,9 @@ def scheduler_tick():
 
 
 # Scheduler separado
-@celery.on_after_configure.connect
-def setup_periodic_tasks(sender, **kwargs):
-    sender.add_periodic_task(
-        30.0,
-        worker_heartbeat.s(),
-        name="worker-heartbeat"
-    )
+# O heartbeat periódico em leque (um por fila de worker) é definido de forma
+# ESTÁTICA em celery_app.beat_schedule (_HEARTBEAT_SCHEDULE). on_after_configure
+# não era confiável para beat, então não agendamos heartbeat aqui.
 
 
 def _format_mission_progress(state_data: dict, current_step: str) -> str:

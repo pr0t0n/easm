@@ -14,6 +14,7 @@ import RedTeamReportPage from "./pages/RedTeamReportPage";
 import ScanOperationsPage from "./pages/ScanOperationsPage";
 import OperationsCenterPage from "./pages/OperationsCenterPage";
 import UserManagementPage from "./pages/UserManagementPage";
+import AdminLogsPage from "./pages/AdminLogsPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import DomainsPage from "./pages/DomainsPage";
 import AttackSurfacePage from "./pages/AttackSurfacePage";
@@ -96,6 +97,7 @@ export default function App() {
                     <Route path="/joias" element={<CrownJewelsPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
+                    <Route path="/logs" element={<AdminOnly><AdminLogsPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
                     <Route path="/operacional" element={<AdminOnly><OperationsCenterPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<Navigate to="/operacional?module=phases_agents" replace />} />

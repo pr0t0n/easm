@@ -55,6 +55,47 @@ export default function SettingsPage() {
 
   const shodanOk = shodanStatus?.configured && shodanStatus?.enabled !== false;
 
+  // ── SSO corporativo (Okta / Azure AD) ───────────────────────────────────────
+  const SSO_META = {
+    okta:  { label: "Okta SSO", swatch: "linear-gradient(135deg,#007dc1,#003a6b)", domainLabel: "Domínio Okta" },
+    azure: { label: "Azure AD", swatch: "linear-gradient(135deg,#0078d4,#004b8d)", domainLabel: "Tenant ID" },
+  };
+  const [sso, setSso] = useState({ okta: {}, azure: {} });
+  const [ssoSaving, setSsoSaving] = useState(false);
+
+  const loadSso = async () => {
+    try {
+      const { data } = await client.get("/api/config/sso");
+      setSso(data.providers || { okta: {}, azure: {} });
+    } catch { /* mantém vazio */ }
+  };
+  useEffect(() => { loadSso(); }, []);
+
+  const setSsoField = (prov, field, val) =>
+    setSso((s) => ({ ...s, [prov]: { ...s[prov], [field]: val } }));
+
+  const saveSso = async (e) => {
+    e.preventDefault();
+    setSsoSaving(true);
+    try {
+      const providers = {};
+      for (const p of ["okta", "azure"]) {
+        const c = sso[p] || {};
+        providers[p] = {
+          enabled: !!c.enabled,
+          client_id: c.client_id || "",
+          tenant_or_domain: c.tenant_or_domain || "",
+          metadata_url: c.metadata_url || "",
+          ...(c.client_secret ? { client_secret: c.client_secret } : {}),
+        };
+      }
+      await client.put("/api/config/sso", { providers });
+      toastSuccess("Configuração de SSO salva.");
+      loadSso();
+    } catch { toastError("Erro ao salvar SSO."); }
+    finally { setSsoSaving(false); }
+  };
+
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Configurações</h1>
@@ -106,6 +147,71 @@ export default function SettingsPage() {
             <button type="button" style={BTN("secondary")} onClick={loadShodan}>
               Recarregar
             </button>
+          </div>
+        </form>
+      </div>
+
+      {/* ── SSO corporativo ──────────────────────────────────────────── */}
+      <div style={CARD}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>SSO corporativo</span>
+          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-muted)" }}>
+            provedores da tela de login
+          </span>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 18, lineHeight: 1.5 }}>
+          Habilite e configure os provedores de identidade exibidos na tela de login
+          (<strong>Okta SSO</strong> e <strong>Azure AD</strong>). O segredo é gravado de
+          forma mascarada; deixe em branco para preservar o valor já salvo.
+        </p>
+
+        <form onSubmit={saveSso}>
+          {["okta", "azure"].map((p) => {
+            const meta = SSO_META[p];
+            const c = sso[p] || {};
+            return (
+              <div key={p} style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "16px 18px", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                  <span style={{ width: 16, height: 16, borderRadius: 5, background: meta.swatch, flexShrink: 0 }} />
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{meta.label}</span>
+                  {c.configured && <span style={CHIP(true)}>✓ Configurado</span>}
+                  <label style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink-soft)", cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!c.enabled} onChange={(e) => setSsoField(p, "enabled", e.target.checked)} />
+                    Habilitado
+                  </label>
+                </div>
+                <div style={ROW}>
+                  <span style={LABEL}>Client ID</span>
+                  <input style={INPUT} value={c.client_id || ""} placeholder="application / client id"
+                    onChange={(e) => setSsoField(p, "client_id", e.target.value)} autoComplete="off" />
+                </div>
+                <div style={ROW}>
+                  <span style={LABEL}>Client Secret</span>
+                  <input style={INPUT} type="password"
+                    placeholder={c.client_secret_set ? "•••••••• (mantém atual)" : "client secret"}
+                    value={c.client_secret || ""}
+                    onChange={(e) => setSsoField(p, "client_secret", e.target.value)} autoComplete="off" />
+                </div>
+                <div style={ROW}>
+                  <span style={LABEL}>{meta.domainLabel}</span>
+                  <input style={INPUT} value={c.tenant_or_domain || ""}
+                    placeholder={p === "okta" ? "suaempresa.okta.com" : "tenant id (GUID)"}
+                    onChange={(e) => setSsoField(p, "tenant_or_domain", e.target.value)} autoComplete="off" />
+                </div>
+                <div style={{ ...ROW, marginBottom: 0 }}>
+                  <span style={LABEL}>Metadata URL</span>
+                  <input style={INPUT} value={c.metadata_url || ""}
+                    placeholder="https://.../.well-known/openid-configuration"
+                    onChange={(e) => setSsoField(p, "metadata_url", e.target.value)} autoComplete="off" />
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ display: "flex", gap: 10 }}>
+            <button type="submit" style={BTN("primary")} disabled={ssoSaving}>
+              {ssoSaving ? "Salvando…" : "Salvar SSO"}
+            </button>
+            <button type="button" style={BTN("secondary")} onClick={loadSso}>Recarregar</button>
           </div>
         </form>
       </div>
