@@ -1725,6 +1725,22 @@ def worker_manager_health(
             }
         )
 
+    capacity_info: dict = {}
+    try:
+        from app.services.adaptive_capacity import get_level, get_capacity, MIN_L, MAX_L
+        cap_level = get_level()
+        cap_breakdown = get_capacity()
+        cap_total = sum(cap_breakdown.values())
+        capacity_info = {
+            "level": cap_level,
+            "min": MIN_L,
+            "max": MAX_L,
+            "breakdown": cap_breakdown,
+            "total_slots": cap_total,
+        }
+    except Exception:
+        pass
+
     return {
         "summary": {
             "total_workers": len(rows),
@@ -1734,6 +1750,7 @@ def worker_manager_health(
             "inspect_ok": inspect_ok,
             "phase_counts": phase_counts,
         },
+        "capacity": capacity_info,
         "workers": workers,
     }
 

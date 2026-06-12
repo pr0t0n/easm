@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
-import MissionProgress from "../components/MissionProgress";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
 const FASES_IDS  = ["P01","P02","P03","P04","P05","P06","P07","P08"];
@@ -414,20 +413,147 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
 }
 
 // ─── Painel de detalhe lateral ────────────────────────────────────────────────
-function DetailPanel({ scan, logs, scanStatus, onClose }) {
+function DetailPanel({ scan, logs, onClose }) {
+  const [phases, setPhases] = useState([]);
+  const [breakdown, setBreakdown] = useState(null);
+  const [progress, setProgress] = useState(scan?.mission_progress ?? 0);
+
+  useEffect(() => {
+    if (!scan?.id) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { data } = await client.get(`/api/scans/${scan.id}/phase-monitor`, { _skipToast: true });
+        if (cancelled) return;
+        if (Array.isArray(data?.phases)) setPhases(data.phases);
+        if (data?.mission_progress != null) setProgress(data.mission_progress);
+      } catch { /* silencioso */ }
+      try {
+        const { data } = await client.get(`/api/scans/${scan.id}/phase-breakdown`, { _skipToast: true });
+        if (!cancelled && data?.phases) setBreakdown(data);
+      } catch { /* silencioso */ }
+    };
+    load();
+    const isLive = ["queued","running","retrying"].includes(scan.status);
+    const t = isLive ? setInterval(load, 5000) : null;
+    return () => { cancelled = true; if (t) clearInterval(t); };
+  }, [scan?.id, scan?.status]);
+
   if (!scan) return null;
+
+  const pct = Math.max(0, Math.min(100, Number(progress || 0)));
+  const isLive = ["queued","running","retrying"].includes(scan.status);
+
+  const STATUS_BAR = {
+    executed:                     "var(--sev-low-solid)",
+    partial_coverage:             "var(--sev-medium-solid)",
+    attempted_failed:             "var(--sev-critical-solid)",
+    node_completed_tools_skipped: "var(--sev-info-solid)",
+    no_tools_installed:           "var(--line)",
+    node_completed_no_phase_tools:"var(--sev-high-solid)",
+    node_visited_no_tools:        "var(--sev-info-solid)",
+    pending:                      "var(--canvas-muted)",
+    skipped:                      "var(--canvas-muted)",
+  };
+  const STATUS_LABEL = {
+    executed: "OK", partial_coverage: "parcial", attempted_failed: "falhou",
+    node_completed_tools_skipped: "pulada", no_tools_installed: "sem tool",
+    node_visited_no_tools: "visitada", pending: "—", skipped: "—",
+  };
+
+  // Usa breakdown detalhado se disponível, senão usa phase-monitor
+  const rows = breakdown?.phases?.length
+    ? breakdown.phases.map((p) => ({
+        id:     p.phase_id,
+        label:  p.phase_id,
+        status: p.status,
+        pct:    p.pct ?? 0,
+        ok:     p.completed ?? 0,
+        fail:   (p.failed ?? 0) + (p.timeout ?? 0),
+        total:  p.total ?? 0,
+      }))
+    : phases.slice(0, 22).map((p) => ({
+        id:    p.id,
+        label: p.id,
+        status: p.status,
+        pct:   p.status === "executed" ? 100 : p.status === "pending" || p.status === "skipped" ? 0 : 50,
+        ok:    0, fail: 0, total: 0,
+      }));
+
   return (
-    <div className="sk-panel" style={{ marginTop: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-        <span style={{ fontSize: 13, fontWeight: 700 }}>#{scan.id} · {scan.target_query}</span>
-        <button onClick={onClose} className="sk-btn-ghost" style={{ padding: "4px 12px", fontSize: 12 }}>Fechar</button>
-      </div>
-      <MissionProgress scan={scan} scanStatus={scanStatus} />
-      {logs.length > 0 && (
-        <div style={{ marginTop: 16, border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden" }}>
-          <LogTerminal logs={logs} />
+    /* overlay semitransparente */
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.28)", display: "flex", justifyContent: "flex-end" }}
+    >
+      {/* drawer */}
+      <div style={{
+        width: "min(480px, 92vw)", height: "100vh", background: "var(--bg-main)",
+        borderLeft: "1px solid var(--line)", display: "flex", flexDirection: "column",
+        boxShadow: "-4px 0 24px rgba(0,0,0,.14)",
+      }}>
+        {/* cabeçalho */}
+        <div style={{ padding: "18px 20px 14px", borderBottom: "1px solid var(--line-soft)", flexShrink: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <span className="sk-mono" style={{ fontSize: 15, fontWeight: 700 }}>#{scan.id}</span>
+                <StatusDot status={scan.status} />
+              </div>
+              <div className="sk-mono" style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>{scan.target_query}</div>
+            </div>
+            <button onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "var(--ink-muted)", padding: "0 4px", lineHeight: 1 }}>✕</button>
+          </div>
+          {/* barra de progresso */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ flex: 1, height: 7, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: isLive ? "var(--brand-500)" : "var(--sev-low-solid)", borderRadius: 99, transition: "width .5s" }} />
+            </div>
+            <span className="sk-mono" style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{pct}%</span>
+          </div>
         </div>
-      )}
+
+        {/* fases */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
+          {rows.length === 0 ? (
+            <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 12, padding: "32px 0" }}>Aguardando dados das fases…</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+              {rows.map((r) => {
+                const bar = STATUS_BAR[r.status] || "var(--canvas-muted)";
+                const lbl = STATUS_LABEL[r.status] ?? r.status;
+                const hasPct = r.total > 0;
+                return (
+                  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "36px 1fr 40px 56px", gap: 8, alignItems: "center", padding: "5px 0", borderBottom: "1px solid var(--line-soft)" }}>
+                    {/* id */}
+                    <span className="sk-mono" style={{ fontSize: 9.5, fontWeight: 700, color: bar === "var(--canvas-muted)" ? "var(--ink-muted)" : "var(--ink)", background: "var(--surface-soft)", border: "1px solid var(--line)", borderRadius: 4, padding: "2px 3px", textAlign: "center" }}>{r.label}</span>
+                    {/* barra */}
+                    <div style={{ height: 5, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden" }}>
+                      <div style={{ width: `${hasPct ? r.pct : r.status === "executed" ? 100 : r.status === "pending" || r.status === "skipped" ? 0 : 45}%`, height: "100%", background: bar, borderRadius: 99, transition: "width .5s" }} />
+                    </div>
+                    {/* % */}
+                    <span className="sk-mono" style={{ fontSize: 9.5, color: "var(--ink-muted)", textAlign: "right" }}>
+                      {hasPct ? `${r.pct}%` : ""}
+                    </span>
+                    {/* status */}
+                    <span style={{ fontSize: 9.5, fontWeight: 700, textAlign: "right", color: bar === "var(--canvas-muted)" ? "var(--ink-muted)" : "var(--ink-soft)" }}>{lbl}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* logs */}
+          {logs.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div className="sk-eyebrow" style={{ marginBottom: 8 }}>Logs recentes</div>
+              <div style={{ border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden" }}>
+                <LogTerminal logs={logs} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -761,7 +887,7 @@ export default function ScansPage() {
             ))}
           </div>
           {selected && !TERMINAL_STATUS.has(selected.status) && (
-            <DetailPanel scan={selected} logs={logs} scanStatus={scanStatus} onClose={() => setSelected(null)} />
+            <DetailPanel scan={selected} logs={logs} onClose={() => setSelected(null)} />
           )}
         </div>
       )}
@@ -883,7 +1009,7 @@ export default function ScansPage() {
             C = Crítico · A = Alto · M = Médio · B = Baixo · clique numa linha para ver detalhes
           </div>
           {selected && TERMINAL_STATUS.has(selected.status) && (
-            <DetailPanel scan={selected} logs={logs} scanStatus={scanStatus} onClose={() => setSelected(null)} />
+            <DetailPanel scan={selected} logs={logs} onClose={() => setSelected(null)} />
           )}
         </div>
       </div>

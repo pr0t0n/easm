@@ -83,10 +83,11 @@ function heatColor(sev, v, max = 12) {
 }
 
 export default function OperationsCenterPage() {
-  const [scans,     setScans]     = useState([]);
-  const [schedules, setSchedules] = useState([]);
-  const [sevCounts, setSevCounts] = useState({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
-  const [filtro,    setFiltro]    = useState("todos");
+  const [scans,        setScans]        = useState([]);
+  const [schedules,    setSchedules]    = useState([]);
+  const [sevCounts,    setSevCounts]    = useState({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+  const [workerHealth, setWorkerHealth] = useState({ summary: {}, capacity: {} });
+  const [filtro,       setFiltro]       = useState("todos");
   const [lastRefresh, setLastRefresh] = useState(() => {
     const n = new Date();
     return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}:${String(n.getSeconds()).padStart(2,"0")}`;
@@ -98,14 +99,16 @@ export default function OperationsCenterPage() {
   const ACTIVE_STATUS = ["queued", "running", "retrying"];
 
   const loadData = useCallback(async () => {
-    const [sr, schr, fr] = await Promise.all([
+    const [sr, schr, fr, whr] = await Promise.all([
       client.get("/api/scans").catch(() => ({ data: [] })),
       client.get("/api/schedules").catch(() => ({ data: [] })),
       client.get("/api/findings/page?limit=1&offset=0&status_filter=open").catch(() => ({ data: {} })),
+      client.get("/api/worker-manager/health").catch(() => ({ data: {} })),
     ]);
     setScans(Array.isArray(sr.data) ? sr.data : []);
     setSchedules(Array.isArray(schr.data) ? schr.data : []);
     if (fr.data?.severity_counts) setSevCounts(fr.data.severity_counts);
+    if (whr.data) setWorkerHealth(whr.data);
   }, []);
 
   const doRefresh = useCallback(() => {
@@ -182,14 +185,17 @@ export default function OperationsCenterPage() {
   ];
   const heatMax = Math.max(...heat.flatMap(r => sevCols.map(s => r[s])), 1);
 
-  const workersData = [
-    { id: "wk-01", tipo: "recon",     cpu: [12,8,15,6,4,9,4],       st: "ocioso" },
-    { id: "wk-02", tipo: "exploit",   cpu: [40,55,62,70,75,82,78],  st: rodando.length > 0 ? "executando" : "ocioso" },
-    { id: "wk-03", tipo: "exploit",   cpu: [30,45,50,58,66,60,64],  st: rodando.length > 1 ? "executando" : "ocioso" },
-    { id: "wk-04", tipo: "validação", cpu: [20,25,28,35,30,33,31],  st: rodando.length > 0 ? "executando" : "ocioso" },
-    { id: "wk-05", tipo: "scan",      cpu: [60,72,85,90,94,97,96],  st: rodando.length > 2 ? "degradado"  : "ocioso" },
-  ];
   const stTone = { ocioso: TV.muted, executando: "#7fe0b0", degradado: "#ff8a8a" };
+
+  const wkSummary  = workerHealth.summary  || {};
+  const wkCapacity = workerHealth.capacity || {};
+  const totalWorkers  = Number(wkSummary.total_workers  || 0);
+  const onlineWorkers = Number(wkSummary.online_workers || 0);
+  const capLevel      = Number(wkCapacity.level         || 0);
+  const capMax        = Number(wkCapacity.max           || Math.max(totalWorkers, 1));
+  const capSlots      = Number(wkCapacity.total_slots   || capLevel || Math.max(totalWorkers, 1));
+  const workerUtilPct = totalWorkers > 0 ? Math.round((onlineWorkers / totalWorkers) * 100) : 0;
+  const scanUtilPct   = capSlots  > 0 ? Math.min(100, Math.round((rodando.length / capSlots) * 100)) : 0;
 
   return (
     <div style={{ minHeight: "100vh", background: TV.bg, display: "flex", flexDirection: "column" }}>
@@ -359,17 +365,62 @@ export default function OperationsCenterPage() {
               </div>
             </TvPanel>
 
-            {/* Frota de workers */}
-            <TvPanel title="Frota de workers" right={`${workersData.filter(w=>w.st==="executando").length} ativos · ${workersData.filter(w=>w.st==="degradado").length} degradados`}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-                {workersData.map((w) => (
-                  <div key={w.id} style={{ display: "grid", gridTemplateColumns: "52px 70px 1fr 36px", gap: 10, alignItems: "center" }}>
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, fontWeight: 700, color: TV.text }}>{w.id}</span>
-                    <span style={{ fontSize: 10, color: stTone[w.st], fontWeight: 600 }}>{w.st}</span>
-                    <Spark data={w.cpu} color={w.st === "degradado" ? "#ff8a8a" : "#7fe0b0"} />
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: w.cpu[6] > 90 ? "#ff8a8a" : TV.muted, textAlign: "right" }}>{w.cpu[6]}%</span>
+            {/* Capacidade & Workers */}
+            <TvPanel title="Capacidade & Workers" right={`${onlineWorkers}/${totalWorkers} online`}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+                {/* Scan utilization */}
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                    <span style={{ fontSize: 10.5, color: TV.muted }}>Utilização de scan</span>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700, color: scanUtilPct > 80 ? "#ff8a8a" : "#7fe0b0" }}>
+                      {scanUtilPct}%
+                    </span>
                   </div>
-                ))}
+                  <div style={{ height: 8, background: TV.surface2, borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{ width: `${scanUtilPct}%`, height: "100%", borderRadius: 99, background: scanUtilPct > 80 ? "#ff8a8a" : "var(--brand-500)", transition: "width 400ms" }} />
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: TV.label, marginTop: 3 }}>
+                    {rodando.length} rodando · cap. {capSlots || "—"} slots {capLevel ? `(nível ${capLevel}/${capMax})` : ""}
+                  </div>
+                </div>
+
+                {/* Worker utilization */}
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                    <span style={{ fontSize: 10.5, color: TV.muted }}>Workers online</span>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700, color: workerUtilPct < 50 ? "#ff8a8a" : "#7fe0b0" }}>
+                      {workerUtilPct}%
+                    </span>
+                  </div>
+                  <div style={{ height: 8, background: TV.surface2, borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{ width: `${workerUtilPct}%`, height: "100%", borderRadius: 99, background: workerUtilPct < 50 ? "#ff8a8a" : "#7fe0b0", transition: "width 400ms" }} />
+                  </div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: TV.label, marginTop: 3 }}>
+                    {onlineWorkers} de {totalWorkers} workers ativos
+                  </div>
+                </div>
+
+                {/* Breakdown by phase */}
+                {wkSummary.phase_counts && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, borderTop: `1px solid ${TV.border}`, paddingTop: 10 }}>
+                    {Object.entries({
+                      recon: "Recon",
+                      analise_vulnerabilidade: "Vuln",
+                      osint: "OSINT",
+                      desconhecido: "Idle",
+                    }).map(([key, label]) => {
+                      const v = Number(wkSummary.phase_counts[key] || 0);
+                      return (
+                        <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: 10, color: TV.muted }}>{label}</span>
+                          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: v > 0 ? "#7fe0b0" : TV.label }}>{v}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
               </div>
             </TvPanel>
 
