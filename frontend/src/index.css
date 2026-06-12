@@ -231,6 +231,21 @@ textarea:focus {
   background-color: var(--input-bg) !important;
 }
 
+/* Select escuro (Centro Operacional / modo TV) — sobrepõe a regra global de
+   select que força background-color: var(--input-bg) !important (tema claro),
+   o que deixava o dropdown branco com texto claro (ilegível). */
+.ops-tv-select,
+.ops-tv-select:hover,
+.ops-tv-select:focus {
+  background-color: var(--sidebar-surface) !important;
+  color: var(--sidebar-text) !important;
+  border-color: var(--sidebar-border) !important;
+}
+.ops-tv-select option {
+  background-color: var(--sidebar-surface);
+  color: var(--sidebar-text);
+}
+
 button:focus-visible,
 a:focus-visible {
   outline: none;

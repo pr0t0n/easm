@@ -206,14 +206,13 @@ export default function OperationsCenterPage() {
         <span style={{ color: TV.text, fontWeight: 700, fontSize: 15, flexShrink: 0 }}>Centro Operacional</span>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: TV.muted }}>telemetria do ambiente · modo TV</span>
 
-        <select value={filtro} onChange={(e) => setFiltro(e.target.value)} style={{
+        <select value={filtro} onChange={(e) => setFiltro(e.target.value)} className="ops-tv-select" style={{
           fontSize: 11.5, padding: "6px 10px", borderRadius: 8, cursor: "pointer",
-          background: TV.surface, color: TV.text, border: `1px solid ${TV.border}`,
           fontFamily: "var(--font-mono)",
         }}>
-          <option value="todos">todos os scans</option>
+          <option value="todos" style={{ background: TV.surface, color: TV.text }}>todos os scans</option>
           {rodando.map((s) => (
-            <option key={s.id} value={String(s.id)}>#{s.id} · {String(s.target_query||"").slice(0,30)}</option>
+            <option key={s.id} value={String(s.id)} style={{ background: TV.surface, color: TV.text }}>#{s.id} · {String(s.target_query||"").slice(0,30)}</option>
           ))}
         </select>
 

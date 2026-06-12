@@ -876,7 +876,7 @@ export default function ScansPage() {
             Em execução · {runningCount} rodando{blockedCount > 0 ? ` · ${blockedCount} bloqueada` : ""}
             {" "}· <span style={{ color: "var(--sev-medium-text)", fontStyle: "normal" }}>Pause/Stop habilitados por missão</span>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14 }}>
             {activeScans.map((s) => (
               <ActiveScanCard
                 key={s.id} scan={s}
@@ -903,7 +903,9 @@ export default function ScansPage() {
       )}
 
       {/* ── Fila + Histórico ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: 16, marginBottom: 28 }}>
+      {/* minmax(0,…) impede o blowout do grid (1fr=minmax(auto,1fr) cresce além
+          do container quando o conteúdo é largo → cortava a parte direita). */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.5fr)", gap: 16, marginBottom: 28 }}>
         {/* Fila priorizada */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -950,10 +952,10 @@ export default function ScansPage() {
                   <button onClick={() => moverPrioridade(f.id, -1)} disabled={i === 0} style={{ width: 20, height: 18, border: "1px solid var(--line)", borderRadius: 4, background: "#fff", cursor: i === 0 ? "default" : "pointer", color: i === 0 ? "var(--line)" : "var(--ink-soft)", fontSize: 9, display: "grid", placeItems: "center" }}>↑</button>
                   <button onClick={() => moverPrioridade(f.id, 1)} disabled={i === sortedSchedules.length - 1} style={{ width: 20, height: 18, border: "1px solid var(--line)", borderRadius: 4, background: "#fff", cursor: i === sortedSchedules.length - 1 ? "default" : "pointer", color: i === sortedSchedules.length - 1 ? "var(--line)" : "var(--ink-soft)", fontSize: 9, display: "grid", placeItems: "center" }}>↓</button>
                 </div>
-                {/* ações */}
-                <button onClick={() => setEditSchedule(f)} title="Editar" style={{ fontSize: 11, padding: "4px 7px", borderRadius: 6, border: "1px solid var(--line)", background: "#fff", color: "var(--ink-soft)", cursor: "pointer" }}>✎</button>
-                <button onClick={() => runScheduleNow(f.id)} title="Executar agora" style={{ fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--brand-300)", background: "var(--brand-50)", color: "var(--brand-700)", cursor: "pointer" }}>▶</button>
-                <button onClick={() => deleteSchedule(f.id)} title="Excluir" style={{ fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)", cursor: "pointer" }}>✕</button>
+                {/* ações — flexShrink:0 garante que nunca são cortadas (o texto do alvo encolhe) */}
+                <button onClick={() => setEditSchedule(f)} title="Editar" style={{ flexShrink: 0, fontSize: 11, padding: "4px 7px", borderRadius: 6, border: "1px solid var(--line)", background: "#fff", color: "var(--ink-soft)", cursor: "pointer" }}>✎</button>
+                <button onClick={() => runScheduleNow(f.id)} title="Executar agora" style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--brand-300)", background: "var(--brand-50)", color: "var(--brand-700)", cursor: "pointer" }}>▶</button>
+                <button onClick={() => deleteSchedule(f.id)} title="Excluir" style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--sev-critical-border)", background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)", cursor: "pointer" }}>✕</button>
               </div>
             ))}
           </div>
