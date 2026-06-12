@@ -981,6 +981,7 @@ export default function ScansPage() {
                     <th className="sk-th" style={{ textAlign: "right" }}>A</th>
                     <th className="sk-th" style={{ textAlign: "right" }}>M</th>
                     <th className="sk-th" style={{ textAlign: "right" }}>B</th>
+                    <th className="sk-th" style={{ textAlign: "right", paddingRight: 16 }}></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1001,6 +1002,31 @@ export default function ScansPage() {
                       <td className="sk-td sk-mono" style={{ textAlign: "right", fontWeight: 700, color: h.open_high > 0 ? "var(--sev-high-text)" : "var(--ink-muted)" }}>{h.open_high||0}</td>
                       <td className="sk-td sk-mono" style={{ textAlign: "right", color: "var(--ink-muted)" }}>{h.open_medium||0}</td>
                       <td className="sk-td sk-mono" style={{ textAlign: "right", color: "var(--ink-muted)" }}>{h.open_low||0}</td>
+                      <td className="sk-td" style={{ textAlign: "right", paddingRight: 16 }}>
+                        <button
+                          title="Excluir missão (remove scan, vulnerabilidades e ativos da superfície de ataque)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(
+                              `Excluir a missão #${h.id} (${String(h.target_query||"").slice(0,40)})?\n\n` +
+                              `Isto remove permanentemente:\n` +
+                              `• o scan e seu histórico\n` +
+                              `• as vulnerabilidades encontradas\n` +
+                              `• os ativos/alvos na Superfície de ataque deste scan\n\n` +
+                              `Esta ação não pode ser desfeita.`
+                            )) {
+                              removeScan(h.id);
+                            }
+                          }}
+                          style={{
+                            flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "4px 9px",
+                            borderRadius: 6, border: "1px solid var(--sev-critical-border)",
+                            background: "var(--sev-critical-bg)", color: "var(--sev-critical-text)",
+                            cursor: "pointer",
+                          }}>
+                          Excluir
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
