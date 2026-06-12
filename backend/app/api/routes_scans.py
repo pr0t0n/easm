@@ -8989,11 +8989,22 @@ def get_cockpit(
             "findings": [],
         }
 
-    findings = (
-        db.query(Finding)
-        .filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
-        .all()
-    )
+    # "TODOS os scans" (scan_id=None) = visão AGREGADA de todos os scans do dono;
+    # caso contrário, escopa ao scan selecionado. Antes, sem scan_id, caía no
+    # scan_rows[0] (só o mais recente) → a página mostrava 1 alvo, não todos.
+    aggregate = scan_id is None
+    if aggregate:
+        findings = (
+            _authorized_finding_query(db, current_user)
+            .filter(Finding.is_false_positive.is_(False))
+            .all()
+        )
+    else:
+        findings = (
+            db.query(Finding)
+            .filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
+            .all()
+        )
 
     sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for f in findings:
@@ -9005,26 +9016,27 @@ def get_cockpit(
     grade = _score_to_grade(score)
 
     state = dict(selected.state_data or {})
-    crown = state.get("crown_jewels", []) or []
+    # Em modo agregado ("TODOS"), ignora o crown_jewels de um único scan e deriva
+    # de TODOS os ativos do dono; escopado, usa o state do scan e cai no fallback.
+    crown = [] if aggregate else (state.get("crown_jewels", []) or [])
     if not crown:
         # Fallback: o motor ofensivo nem sempre persiste crown_jewels no state
         # (o analyzer lê scan_work_items, que esse motor não cria) → a página
         # ficava vazia mesmo com subdomínios descobertos. Deriva on-the-fly dos
-        # hosts conhecidos do scan pelos MESMOS padrões do analyzer (auth/pay/
-        # admin/db/api/...), populando a partir de dados que já temos.
+        # hosts conhecidos pelos MESMOS padrões do analyzer (auth/pay/admin/db/api).
         try:
             from app.services.crown_jewel_analyzer import identify_crown_jewels
-            # Usa apenas os ATIVOS reais persistidos deste scan (hosts vivos), não
-            # o target_set bruto — que contém permutações especulativas de
-            # brute-force (pay.X, admin.X…) e geraria centenas de falsos.
-            _hosts = sorted({
-                str(_d) for (_d,) in
-                db.query(Asset.domain_or_ip).filter(Asset.last_scan_id == selected.id).all() if _d
-            })
+            # Usa apenas os ATIVOS reais persistidos (hosts vivos), não o target_set
+            # bruto — que tem permutações de brute-force (pay.X, admin.X…). Em
+            # agregado, todos os ativos do dono; escopado, só os deste scan.
+            _asset_q = db.query(Asset.domain_or_ip).filter(Asset.owner_id == current_user.id)
+            if not aggregate:
+                _asset_q = _asset_q.filter(Asset.last_scan_id == selected.id)
+            _hosts = sorted({str(_d) for (_d,) in _asset_q.all() if _d})
             if _hosts:
                 crown = [
                     {"target": t, "boost": b, "label": lbl}
-                    for t, b, lbl in identify_crown_jewels(_hosts)[:40]
+                    for t, b, lbl in identify_crown_jewels(_hosts)[:60]
                 ]
         except Exception:
             crown = []
