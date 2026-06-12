@@ -148,6 +148,21 @@ export default function OperationsCenterPage() {
   const totalMed   = Number(sevCounts.medium   || 0);
   const totalBaix  = Number(sevCounts.low      || 0);
 
+  // ── Escopo da seleção: quando um scan é escolhido na lista suspensa, os
+  // painéis (Esteira, Heatmap, Risco por framework) se moldam a ELE; caso
+  // contrário usam o agregado global. eff* são as severidades efetivas.
+  const selScan  = filtro === "todos" ? null : (scans.find((x) => String(x.id) === filtro) || null);
+  const effCrit  = selScan ? Number(selScan.open_critical || 0) : totalCrit;
+  const effAlto  = selScan ? Number(selScan.open_high     || 0) : totalAlto;
+  const effMed   = selScan ? Number(selScan.open_medium   || 0) : totalMed;
+  const effBaix  = selScan ? Number(selScan.open_low      || 0) : totalBaix;
+  const escopoLabel = selScan ? `#${selScan.id} ${String(selScan.target_query||"").slice(0,18)}` : "visão global";
+  // Intensidade de severidade (0..1) do escopo atual — pondera o risco por framework.
+  const sevIntensity = (() => {
+    const w = effCrit * 1.0 + effAlto * 0.6 + effMed * 0.3 + effBaix * 0.1;
+    return w <= 0 ? 0 : Math.min(1, w / 12);
+  })();
+
   const bigNums = filtro === "todos"
     ? [
         { v: String(scans.length),     l: "total de missões",          c: TV.text   },
@@ -171,23 +186,37 @@ export default function OperationsCenterPage() {
         ];
       })();
 
-  const esteiraDados = [
-    { nome: "Missões ativas", qtd: rodando.length,    sub: `${pausados.length} pausadas`,  conv: rodando.length > 0 ? Math.round(rodando.reduce((a,s)=>a+(s.mission_progress??s.progress??0),0)/rodando.length) : 0 },
-    { nome: "Críticos",       qtd: totalCrit,          sub: "achados críticos",             conv: scans.length > 0 ? Math.round((totalCrit / scans.length) * 10) : 0 },
-    { nome: "Altos",          qtd: totalAlto,          sub: "achados altos",                conv: scans.length > 0 ? Math.round((totalAlto / scans.length) * 10) : 0 },
-    { nome: "Schedules",      qtd: schedules.length,   sub: `${schedules.filter(s=>s.enabled!==false).length} ativos`, conv: schedules.length },
-    { nome: "Concluídos",     qtd: concluidos.length,  sub: "missões terminadas",           conv: null },
-  ];
+  const esteiraDados = selScan
+    ? [
+        { nome: "Progresso",  qtd: `${selScan.mission_progress ?? selScan.progress ?? 0}%`, sub: selScan.status, conv: selScan.mission_progress ?? selScan.progress ?? 0 },
+        { nome: "Críticos",   qtd: effCrit, sub: "achados críticos", conv: effCrit > 0 ? 100 : 0 },
+        { nome: "Altos",      qtd: effAlto, sub: "achados altos",    conv: effAlto > 0 ? 80 : 0 },
+        { nome: "Médios",     qtd: effMed,  sub: "achados médios",   conv: effMed > 0 ? 50 : 0 },
+        { nome: "Baixos",     qtd: effBaix, sub: "achados baixos",   conv: null },
+      ]
+    : [
+        { nome: "Missões ativas", qtd: rodando.length,    sub: `${pausados.length} pausadas`,  conv: rodando.length > 0 ? Math.round(rodando.reduce((a,s)=>a+(s.mission_progress??s.progress??0),0)/rodando.length) : 0 },
+        { nome: "Críticos",       qtd: totalCrit,          sub: "achados críticos",             conv: scans.length > 0 ? Math.round((totalCrit / scans.length) * 10) : 0 },
+        { nome: "Altos",          qtd: totalAlto,          sub: "achados altos",                conv: scans.length > 0 ? Math.round((totalAlto / scans.length) * 10) : 0 },
+        { nome: "Schedules",      qtd: schedules.length,   sub: `${schedules.filter(s=>s.enabled!==false).length} ativos`, conv: schedules.length },
+        { nome: "Concluídos",     qtd: concluidos.length,  sub: "missões terminadas",           conv: null },
+      ];
 
   const sevCols = ["critical","high","medium","low"];
   const heat = [
-    { classe: "Aplicações web",     critical: totalCrit, high: totalAlto, medium: totalMed, low: totalBaix },
-    { classe: "APIs",               critical: Math.round(totalCrit*.4), high: Math.round(totalAlto*.3), medium: Math.round(totalMed*.3), low: Math.round(totalBaix*.2) },
-    { classe: "Infraestrutura",     critical: 0, high: Math.round(totalAlto*.2), medium: Math.round(totalMed*.2), low: Math.round(totalBaix*.3) },
-    { classe: "Auth & credenciais", critical: Math.round(totalCrit*.6), high: Math.round(totalAlto*.5), medium: Math.round(totalMed*.1), low: Math.round(totalBaix*.1) },
-    { classe: "DNS & headers",      critical: 0, high: Math.round(totalAlto*.1), medium: Math.round(totalMed*.2), low: Math.round(totalBaix*.4) },
+    { classe: "Aplicações web",     critical: effCrit, high: effAlto, medium: effMed, low: effBaix },
+    { classe: "APIs",               critical: Math.round(effCrit*.4), high: Math.round(effAlto*.3), medium: Math.round(effMed*.3), low: Math.round(effBaix*.2) },
+    { classe: "Infraestrutura",     critical: 0, high: Math.round(effAlto*.2), medium: Math.round(effMed*.2), low: Math.round(effBaix*.3) },
+    { classe: "Auth & credenciais", critical: Math.round(effCrit*.6), high: Math.round(effAlto*.5), medium: Math.round(effMed*.1), low: Math.round(effBaix*.1) },
+    { classe: "DNS & headers",      critical: 0, high: Math.round(effAlto*.1), medium: Math.round(effMed*.2), low: Math.round(effBaix*.4) },
   ];
   const heatMax = Math.max(...heat.flatMap(r => sevCols.map(s => r[s])), 1);
+  // Frameworks: cobertura/técnicas são capacidade da plataforma (estática); o
+  // RISCO se molda à severidade do escopo selecionado (intensidade 0..1).
+  const frameworksView = FRAMEWORKS.map((fw) => ({
+    ...fw,
+    risco: selScan ? Math.round(fw.risco * sevIntensity) : fw.risco,
+  }));
 
   const stTone = { ocioso: TV.muted, executando: "#7fe0b0", degradado: "#ff8a8a" };
 
@@ -327,17 +356,26 @@ export default function OperationsCenterPage() {
             </TvPanel>
 
             {/* Esteira · 2 cols */}
-            <TvPanel title="Esteira · da descoberta à prova" right={`${rodando.length} ativas · ${schedules.length} agendadas`} span={2}>
+            <TvPanel title="Esteira · da descoberta à prova" right={selScan ? escopoLabel : `${rodando.length} ativas · ${schedules.length} agendadas`} span={2}>
               <EsteiraView esteira={esteiraDados} />
               <div style={{ display: "flex", gap: 18, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${TV.border}`, fontSize: 10.5, color: TV.muted }}>
-                <span>Total missões: <b style={{ color: "#9db4ff" }}>{scans.length}</b></span>
-                <span>· Críticos abertos: <b style={{ color: "#ff8a8a" }}>{totalCrit}</b></span>
-                <span>· Altos abertos: <b style={{ color: "#ffb377" }}>{totalAlto}</b></span>
+                {selScan ? (
+                  <>
+                    <span>Escopo: <b style={{ color: "#9db4ff" }}>#{selScan.id}</b></span>
+                    <span>· Etapa: <b style={{ color: TV.text }}>{selScan.current_step || "—"}</b></span>
+                  </>
+                ) : (
+                  <>
+                    <span>Total missões: <b style={{ color: "#9db4ff" }}>{scans.length}</b></span>
+                    <span>· Críticos abertos: <b style={{ color: "#ff8a8a" }}>{effCrit}</b></span>
+                    <span>· Altos abertos: <b style={{ color: "#ffb377" }}>{effAlto}</b></span>
+                  </>
+                )}
               </div>
             </TvPanel>
 
             {/* Heatmap · 2 cols */}
-            <TvPanel title="Heatmap · vulnerabilidades por classe" right="classe × severidade" span={2}>
+            <TvPanel title="Heatmap · vulnerabilidades por classe" right={selScan ? escopoLabel : "classe × severidade"} span={2}>
               <div style={{ display: "grid", gridTemplateColumns: "180px repeat(4, 1fr) 44px", gap: 4, alignItems: "center" }}>
                 {/* header */}
                 <span />
@@ -367,9 +405,9 @@ export default function OperationsCenterPage() {
             </TvPanel>
 
             {/* Frameworks */}
-            <TvPanel title="Risco por framework" right="exposição validada × cobertura">
+            <TvPanel title="Risco por framework" right={selScan ? escopoLabel : "exposição validada × cobertura"}>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {FRAMEWORKS.map((fw) => (
+                {frameworksView.map((fw) => (
                   <div key={fw.nome}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
                       <span style={{ fontSize: 11, fontWeight: 700, color: TV.text }}>{fw.nome}</span>

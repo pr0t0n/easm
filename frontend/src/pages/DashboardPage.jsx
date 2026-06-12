@@ -863,7 +863,6 @@ export default function DashboardPage() {
     || null
   );
   const selectedScanId = selectedSubdomainScanId || selectedScan?.id || "";
-  const cockpitTarget = selectedTarget || selectedScan?.target_query || "todos os alvos";
   const cockpitScore = Number(stats?.external_rating_score || scopedVulnerabilityRating?.score || 0);
   const cockpitGrade = stats?.external_rating_grade || scopedVulnerabilityRating?.grade || gradeFromScore(cockpitScore);
   const cockpitTone = ratingTone(cockpitScore);
@@ -921,10 +920,6 @@ export default function DashboardPage() {
           <div>
             <div className="sk-eyebrow">Cockpit RedTeam</div>
             <h1>O que atacar primeiro</h1>
-            <p>
-              {cockpitTarget} · {selectedScan ? `scan #${selectedScan.id}` : "visão global"} ·
-              {" "}{aggregationLabel(stats?.aggregation_mode)}
-            </p>
           </div>
           <div className="cockpit-actions">
             <select value={selectedScanId || ""} onChange={handleScanSelect} aria-label="Selecionar scan do cockpit">
