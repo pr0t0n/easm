@@ -2475,10 +2475,22 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- ffuf / gobuster: discovered paths ---
     elif tool_lower in {"ffuf", "gobuster", "feroxbuster", "dirsearch", "wfuzz"}:
+        # Linhas de ERRO/USAGE do tool (ex.: gobuster "Incorrect Usage: flag
+        # provided but no definition: -/…") contêm "/" e eram capturadas como
+        # "paths descobertos", gerando evidência FALSA. Backlog item 1 (mesma
+        # raiz "rodou≠achou"). Só aceita linha que é REALMENTE path/URL.
+        _bad_path = ("incorrect usage", "flag provided", "usage:", "error",
+                     "panic:", "command not found", "no such", "definition:",
+                     "unknown flag", "available commands")
         if isinstance(parsed, list) and parsed:
             paths = [str(p.get("url") or p.get("path") or p) if isinstance(p, dict) else str(p) for p in parsed[:100]]
         else:
-            paths = [l.strip() for l in _clean_lines(stdout) if "/" in l and not _is_noise_line(l)][:100]
+            paths = [
+                l.strip() for l in _clean_lines(stdout)
+                if l.strip().startswith(("http://", "https://", "/"))
+                and not _is_noise_line(l)
+                and not any(b in l.lower() for b in _bad_path)
+            ][:100]
         evidence["discovered_paths"] = paths[:100]
         evidence["path_count"] = len(paths)
         evidence["finding_summary"] = (
@@ -2928,13 +2940,25 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
     ran but found nothing is labelled 'Sem achados' (coverage only).
     """
     has_evidence, signal = _has_real_evidence(evidence_list)
-    # Pick the most informative non-empty summary that isn't a "nothing found" line
-    # nem um banner ASCII de ferramenta (item 1).
+    # Pick the most informative non-empty summary that isn't a "nothing found"
+    # line nem um banner ASCII de ferramenta (item 1). Rejeita "nada encontrado"
+    # em QUALQUER posição (não só no início) — antes "Nuclei: 0 finding(s) — no
+    # vulnerabilities detected" virava título por começar com "Nuclei:".
+    _empty_markers = ("0 finding", "no vulnerabilities", "no critical", "no paths discovered",
+                      "nenhum", "no parseable", "incorrect usage", "0 path", "ran (")
+
+    def _is_meaningful_summary(s: str) -> bool:
+        s = str(s or "").strip()
+        if not s or _is_banner_line(s):
+            return False
+        low = s.lower()
+        if low.startswith(("no ", "sem ", "nenhuma")):
+            return False
+        return not any(m in low for m in _empty_markers)
+
     meaningful = [
         e.get("finding_summary", "") for e in evidence_list
-        if e.get("finding_summary")
-        and not str(e.get("finding_summary")).lower().startswith(("no ", "nenhum", "sem ", "nenhuma"))
-        and not _is_banner_line(str(e.get("finding_summary")))
+        if _is_meaningful_summary(e.get("finding_summary", ""))
     ]
     if has_evidence and meaningful:
         return f"{phase_name}: {meaningful[0][:120]}"
