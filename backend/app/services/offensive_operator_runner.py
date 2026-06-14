@@ -403,6 +403,23 @@ def _is_noise_line(line: str) -> bool:
     )
 
 
+def _is_banner_line(line: str) -> bool:
+    """Detecta arte ASCII / banner de ferramenta (figlet, box-drawing) que NÃO é
+    achado. Os scanners (wapiti, sqlmap, etc.) imprimem um logo na inicialização
+    que era capturado como título/summary de vulnerabilidade. Ver backlog item 1."""
+    s = (line or "").strip()
+    if not s:
+        return True
+    # Caracteres de box-drawing / blocos (banner do wapiti, sqlmap, dalfox, etc.)
+    if any(ch in s for ch in "█▄▀▒░╗║╔╝╚╠╣╦╩╬│┌┐└┘├┤┬┴┼"):
+        return True
+    # Linha dominada por não-alfanuméricos (figlet com _ / \ | ( ) . ')
+    alnum = sum(c.isalnum() for c in s)
+    if len(s) >= 6 and alnum / max(len(s), 1) < 0.4:
+        return True
+    return False
+
+
 def _extract_domains_from_output(stdout: str) -> list[str]:
     domains: list[str] = []
     seen: set[str] = set()
@@ -2586,12 +2603,33 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
 
     # --- sqlmap: injection points ---
     elif tool_lower in {"sqlmap"}:
-        injections = [l.strip() for l in _clean_lines(stdout)
-                      if any(k in l.lower() for k in ["parameter", "injectable", "payload", "technique", "dbms"])]
-        evidence["injection_evidence"] = injections[:20]
+        # CONFIRMAÇÃO real de injeção — não as linhas "[INFO] testing 'X technique'"
+        # nem "parameter ... does NOT appear to be injectable" (que CONTÊM
+        # 'injectable'/'parameter'/'technique'). Só conta quando o sqlmap declara
+        # a injeção. Ver backlog itens 1 e 15.
+        _low = (stdout or "").lower()
+        _negative = (
+            "do not appear to be injectable" in _low
+            or "does not seem to be injectable" in _low
+            or "all tested parameters do not" in _low
+        )
+        _confirmed = (
+            "sqlmap identified the following injection point" in _low
+            or "is vulnerable" in _low
+            or "back-end dbms:" in _low
+        )
+        injections: list[str] = []
+        if _confirmed and not _negative:
+            injections = [
+                l.strip() for l in _clean_lines(stdout)
+                if any(k in l.lower() for k in ["parameter:", "type:", "title:", "payload:", "back-end dbms"])
+                and "[info]" not in l.lower() and "[warning]" not in l.lower()
+            ]
+            if injections:
+                evidence["injection_evidence"] = injections[:20]
         evidence["finding_summary"] = (
-            "SQLMap injection evidence: " + "; ".join(injections[:3])
-            if injections else "No SQL injection found"
+            "SQLMap: injeção CONFIRMADA — " + "; ".join(injections[:3])
+            if injections else ("SQLMap: parâmetros NÃO injetáveis" if _negative else "Nenhuma injeção SQL confirmada")
         )
 
     elif tool_lower in {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}:
@@ -2620,10 +2658,11 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
         )
 
     else:
-        # Generic: return first meaningful output lines
-        lines = [l.strip() for l in _clean_lines(stdout) if not _is_noise_line(l)][:20]
+        # Generic: return first meaningful output lines — descarta banner ASCII
+        # da ferramenta (figlet/box-drawing), que virava título de "vuln". Item 1.
+        lines = [l.strip() for l in _clean_lines(stdout) if not _is_noise_line(l) and not _is_banner_line(l)][:20]
         evidence["output_lines"] = lines
-        evidence["finding_summary"] = lines[0] if lines else f"{tool_name} ran (no parseable output)"
+        evidence["finding_summary"] = lines[0] if lines else f"{tool_name} executado (sem saída estruturada)"
 
     return evidence
 
@@ -2828,6 +2867,12 @@ def _assess_evidence_severity(phase_id: str, status: str, tool_evidences: list[d
     if signal in {"nuclei_critical", "secret_exposed", "cve_identified", "injection_confirmed"}:
         return phase_sev if phase_sev != "info" else "high", 90
 
+    # Business logic CONFIRMADA (read-back/baseline via navegador real) — risco
+    # REAL que antes caía no default 'info' por falta de branch (backlog item 17).
+    # Ex.: token/JWT em localStorage confirmado pelo chromium-capture.
+    if signal == "business_logic_confirmed":
+        return (phase_sev if phase_sev in {"high", "critical"} else "medium"), 85
+
     # Sensitive path / nuclei medium finding → at least medium.
     if signal in {"sensitive_path", "nuclei_finding", "vulnerability"}:
         escalated = phase_sev if phase_sev in {"high", "critical", "medium"} else "medium"
@@ -2850,9 +2895,12 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
     """
     has_evidence, signal = _has_real_evidence(evidence_list)
     # Pick the most informative non-empty summary that isn't a "nothing found" line
+    # nem um banner ASCII de ferramenta (item 1).
     meaningful = [
         e.get("finding_summary", "") for e in evidence_list
-        if e.get("finding_summary") and not str(e.get("finding_summary")).lower().startswith(("no ", "nenhum", "sem "))
+        if e.get("finding_summary")
+        and not str(e.get("finding_summary")).lower().startswith(("no ", "nenhum", "sem ", "nenhuma"))
+        and not _is_banner_line(str(e.get("finding_summary")))
     ]
     if has_evidence and meaningful:
         return f"{phase_name}: {meaningful[0][:120]}"
@@ -2969,6 +3017,12 @@ def _build_redteam_impact(phase_id: str, severity: str, target: str, tool_eviden
         return (
             f"O alvo {target} apresentou evidencia de injecao. O impacto potencial inclui leitura "
             "ou alteracao de dados, bypass de autenticacao e execucao de consultas nao autorizadas."
+        )
+    if signal == "business_logic_confirmed":
+        return (
+            f"Falha de logica de negocio CONFIRMADA em {target} (read-back/baseline via navegador real). "
+            "Ex.: token/JWT de sessao acessivel via JavaScript (localStorage/sessionStorage) e roubavel "
+            "por XSS, ou autorizacao quebrada (IDOR/BOLA) permitindo acesso a dados de outro usuario."
         )
     if signal == "sensitive_path":
         return (
