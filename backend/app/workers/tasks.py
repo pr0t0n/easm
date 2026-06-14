@@ -236,10 +236,26 @@ def _touch_worker_heartbeat(
 
 @celery.task(name="worker.heartbeat")
 def worker_heartbeat() -> dict[str, Any]:
-    """Heartbeat periódico de worker para health-check operacional."""
+    """Heartbeat periódico de worker para health-check operacional.
+
+    Backlog item 10: este heartbeat de LIVENESS não pode CLOBBERAR o contexto
+    (mode/current_scan_id/status) que a task de scan grava — antes ele resetava
+    todo mundo para unit/alive/scan_id=NULL a cada 30s, mascarando qual worker
+    está em qual scan e o grupo real. Agora só bumpa o last_seen_at e, se o
+    worker estiver de fato ocioso (sem scan), marca 'alive'."""
     db: Session = SessionLocal()
     try:
-        hb = _touch_worker_heartbeat(db, scan_mode="unit", status="alive")
+        worker_name = os.getenv("WORKER_NAME") or os.getenv("HOSTNAME") or "unknown-worker"
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_name == worker_name).first()
+        if hb is None:
+            hb = _touch_worker_heartbeat(db, scan_mode="unit", status="alive")
+        else:
+            hb.last_seen_at = datetime.utcnow()
+            # Só rebaixa para 'alive' (idle) quando NÃO há scan em andamento;
+            # preserva mode/current_scan_id/status de um worker ativo.
+            if not hb.current_scan_id and str(hb.status or "").lower() not in {"running", "busy", "active"}:
+                hb.status = "alive"
+            db.add(hb)
         db.commit()
         return {
             "ok": True,

@@ -7014,7 +7014,12 @@ def dashboard_insights(
         age_seconds = (now_utc - last_seen).total_seconds() if last_seen else 999999
         status = str(worker.status or "unknown").lower()
         mode = str(worker.mode or "unit").lower()
-        if status in {"running", "busy", "active"}:
+        # "ativo" = processando scan (status de trabalho OU com current_scan_id)
+        # e com heartbeat recente. Backlog item 10: antes 'alive' (liveness) não
+        # contava, então o cockpit mostrava 0 ativos mesmo com scan rodando.
+        if age_seconds <= 300 and (
+            status in {"running", "busy", "active"} or worker.current_scan_id
+        ):
             worker_active += 1
         if age_seconds > 300:
             worker_stale += 1

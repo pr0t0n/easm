@@ -318,7 +318,24 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             if int(counts.get("blocked", 0) or 0) > 0
         )
         wq_current_phase_id = active_phases[0] if active_phases else (blocked_phases[0] if blocked_phases else "")
-    effective_current_pentest_phase_id = wq_current_phase_id or current_pentest_phase_id
+    # Backlog item 12: o derivado da work-queue pegava a MENOR fase com item em
+    # fila (sempre ~P02 por causa da super-geração), travando o cursor enquanto
+    # o scan já estava em P14. O scan.current_step traz o cursor REAL do operador
+    # ("Pxx ..."). Escolhe a fase MAIS AVANÇADA entre os dois sinais.
+    import re as _re_pm
+    _step_m = _re_pm.match(r"\s*(P\d{2})\b", str(scan.current_step or ""))
+    _step_phase = _step_m.group(1) if _step_m else ""
+
+    def _phase_num(pid: str) -> int:
+        try:
+            return int(str(pid or "").lstrip("Pp") or 0)
+        except Exception:
+            return 0
+
+    _candidates = [p for p in (wq_current_phase_id, current_pentest_phase_id, _step_phase) if p]
+    effective_current_pentest_phase_id = (
+        max(_candidates, key=_phase_num) if _candidates else ""
+    )
 
     obs_by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for obs in autonomy_obs:
