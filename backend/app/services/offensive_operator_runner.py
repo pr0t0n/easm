@@ -420,6 +420,43 @@ def _is_banner_line(line: str) -> bool:
     return False
 
 
+# Marcadores de erro/usage/banner de ferramenta que NÃO são achado.
+_TOOL_ERROR_MARKERS = (
+    "incorrect usage", "flag provided", "usage:", "panic:", "command not found",
+    "no such", "definition:", "unknown flag", "available commands",
+)
+_JUNK_SUMMARY_MARKERS = (
+    "0 finding", "no vulnerabilities", "no critical", "no paths discovered",
+    "no parseable", "incorrect usage", "0 path", "ran (", "nikto v", "- nikto",
+    "v2.", "scan terminated",
+)
+
+
+def _is_real_path(line: str) -> bool:
+    s = (line or "").strip()
+    return (
+        s.startswith(("http://", "https://", "/"))
+        and not any(b in s.lower() for b in _TOOL_ERROR_MARKERS)
+    )
+
+
+def _sanitize_evidence(ev: dict[str, Any]) -> dict[str, Any]:
+    """Re-valida uma evidência ANTES do gate de persistência. Remove 'paths'
+    que na verdade são saída de erro/usage do tool (envenena o sinal mesmo
+    vindo de ledger em cache) e zera summary que é banner/erro. Backlog item 1."""
+    if not isinstance(ev, dict):
+        return ev
+    paths = ev.get("discovered_paths")
+    if isinstance(paths, list) and paths:
+        clean = [p for p in paths if _is_real_path(str(p))]
+        ev["discovered_paths"] = clean
+        ev["path_count"] = len(clean)
+    summ = str(ev.get("finding_summary") or "")
+    if _is_banner_line(summ) or any(m in summ.lower() for m in _TOOL_ERROR_MARKERS):
+        ev["finding_summary"] = ""
+    return ev
+
+
 def _extract_domains_from_output(stdout: str) -> list[str]:
     domains: list[str] = []
     seen: set[str] = set()
@@ -2484,6 +2521,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                      "unknown flag", "available commands")
         if isinstance(parsed, list) and parsed:
             paths = [str(p.get("url") or p.get("path") or p) if isinstance(p, dict) else str(p) for p in parsed[:100]]
+            paths = [p for p in paths if _is_real_path(p)]
         else:
             paths = [
                 l.strip() for l in _clean_lines(stdout)
@@ -2944,9 +2982,6 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
     # line nem um banner ASCII de ferramenta (item 1). Rejeita "nada encontrado"
     # em QUALQUER posição (não só no início) — antes "Nuclei: 0 finding(s) — no
     # vulnerabilities detected" virava título por começar com "Nuclei:".
-    _empty_markers = ("0 finding", "no vulnerabilities", "no critical", "no paths discovered",
-                      "nenhum", "no parseable", "incorrect usage", "0 path", "ran (")
-
     def _is_meaningful_summary(s: str) -> bool:
         s = str(s or "").strip()
         if not s or _is_banner_line(s):
@@ -2954,7 +2989,11 @@ def _build_redteam_title(phase_id: str, phase_name: str, status: str, evidence_l
         low = s.lower()
         if low.startswith(("no ", "sem ", "nenhuma")):
             return False
-        return not any(m in low for m in _empty_markers)
+        return not (
+            any(m in low for m in _JUNK_SUMMARY_MARKERS)
+            or any(m in low for m in _TOOL_ERROR_MARKERS)
+            or "nenhum" in low
+        )
 
     meaningful = [
         e.get("finding_summary", "") for e in evidence_list
@@ -3670,6 +3709,11 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
             tool_name = str(mcp_res.get("tool_name") or "")
             if mcp_res.get("status") in {"success", "done"} and tool_name:
                 ev = _extract_evidence(phase_id, tool_name, mcp_res)
+                # SANITIZA no gate (não só na extração): ledgers em CACHE podem
+                # ter evidência envenenada de antes do fix (ex.: 54 "paths" que
+                # eram o erro do gobuster). Sem isto, a geração de finding
+                # ressuscita o FP a partir do cache. Backlog item 1.
+                ev = _sanitize_evidence(ev)
                 tool_evidences.append(ev)
 
         # Severity + confidence are derived from ACTUAL evidence, not the phase.

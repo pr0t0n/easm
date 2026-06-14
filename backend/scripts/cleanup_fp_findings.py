@@ -16,7 +16,9 @@ import sys
 
 from app.db.session import SessionLocal
 from app.models.models import Finding, Vulnerability
-from app.services.offensive_operator_runner import _is_banner_line
+from app.services.offensive_operator_runner import (
+    _is_banner_line, _sanitize_evidence, _has_real_evidence,
+)
 
 _COVERAGE_RE = re.compile(
     r"(0 finding|no vulnerabilities detected|no parseable output|ran \(no parseable|"
@@ -60,6 +62,18 @@ def classify(f: Finding) -> str | None:
         return "coverage"
     if _is_fp_injection(f):
         return "fp_injection"
+    # Findings do OPERADOR: re-sanitiza a evidência (remove path de erro do
+    # gobuster, banner, etc.) e, se sobrar SEM evidência real, é registro de
+    # cobertura que não devia existir → remove. Pega títulos como "- Nikto
+    # v2.6.0" e qualquer wrapper de fase sem achado real. Restrito ao operador
+    # para não tocar findings do work-queue (headers/recon legítimos).
+    det = f.details if isinstance(f.details, dict) else {}
+    if str(det.get("scan_mode") or det.get("source_worker") or "") == "offensive_operator" or det.get("phase_id"):
+        evs = [_sanitize_evidence(dict(e)) for e in (det.get("tool_evidence") or []) if isinstance(e, dict)]
+        if det.get("tool_evidence") is not None:
+            has_real, _ = _has_real_evidence(evs)
+            if not has_real and str(det.get("finding_class") or "") != "business_logic_confirmed":
+                return "no_real_evidence"
     return None
 
 
