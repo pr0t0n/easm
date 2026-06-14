@@ -335,7 +335,7 @@ def _extract_shcheck_findings(stdout: str, step_name: str, default_target: str) 
         header_match = header_pattern.search(line)
         if not header_match:
             continue
-        header = str(header_match.group(1) or "").strip().lower()
+        header = re.sub(r"[^a-z0-9-]", "", str(header_match.group(1) or "").strip().lower())
         lowered = line.lower()
         is_missing = any(token in lowered for token in missing_tokens)
         is_present = any(token in lowered for token in present_tokens) or (":" in line and not is_missing)
@@ -587,8 +587,11 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
         # Extrai headers ausentes especialmente
         header_match = header_pattern.search(line)
         if header_match:
-            header = str(header_match.group(1) or "").strip().lower()
-            if header not in seen_headers:
+            # Normaliza o nome do header: o nikto emite com ponto final
+            # ("content-security-policy.") o que derrubava o dedup contra o
+            # curl-headers ("content-security-policy"). Backlog item 3.
+            header = re.sub(r"[^a-z0-9-]", "", str(header_match.group(1) or "").strip().lower())
+            if header and header not in seen_headers:
                 seen_headers.add(header)
                 sev = "medium" if header in {"strict-transport-security", "content-security-policy", "permissions-policy"} else "low"
                 findings.append(
@@ -633,8 +636,18 @@ def _extract_nikto_findings(stdout: str, step_name: str, default_target: str) ->
             continue
         seen.add(lowered)
 
-        # CVEs e vulnerabilidades
-        sev = "high" if ("cve-" in lowered or "osvdb" in lowered) else "medium"
+        # CVEs e vulnerabilidades. Observações informativas do nikto (alt-svc
+        # anunciando HTTP/2, headers recuperados, métodos permitidos listados)
+        # NÃO são vulnerabilidades médias — backlog item 4.
+        if "cve-" in lowered or "osvdb" in lowered:
+            sev = "high"
+        elif any(m in lowered for m in (
+            "alt-svc", "advertising http", "retrieved the ", "uncommon header",
+            "allowed http methods", "allowed methods",
+        )):
+            sev = "info"
+        else:
+            sev = "medium"
         # Título limpo: sem o prefixo "Nikto:" e sem o código entre colchetes
         # (ex.: "[999986] /: Retrieved x-aspnet-version…" → "/: Retrieved …").
         _clean = re.sub(r"^\[\d+\]\s*", "", line.lstrip("+ ").strip())

@@ -56,6 +56,21 @@ from app.graph.tool_parsers import (
 # New parsers for structured Kali-runner outputs
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Faixas de borda de CDN/WAF conhecidas (Cloudflare). Um IP nessas faixas é a
+# borda, não a origem — não deve virar "host ativo". Backlog item 5.
+_CDN_EDGE_PREFIXES = (
+    "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.",
+    "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "104.28.",
+    "172.64.", "172.65.", "172.66.", "172.67.", "162.158.", "162.159.",
+    "131.0.72.", "188.114.", "190.93.", "197.234.", "198.41.128.",
+)
+
+
+def _is_cdn_edge_host(url: str) -> bool:
+    """True se a URL/host é um IP de borda de CDN/WAF (ex.: Cloudflare)."""
+    host = re.sub(r"^https?://", "", str(url or "")).split("/")[0].split(":")[0].strip()
+    return any(host.startswith(p) for p in _CDN_EDGE_PREFIXES)
+
 
 def _extract_httpx_findings(
     parsed_result: Any, stdout: str, target: str
@@ -240,8 +255,9 @@ def _extract_httpx_findings(
                     },
                 })
 
-        # HTTP response
-        if status_code:
+        # HTTP response. Não reporta IP de borda de CDN/WAF (ex.: Cloudflare
+        # 104.16.0.0/13) como "host ativo" — é a borda, não a origem. Item 5.
+        if status_code and not _is_cdn_edge_host(url):
             findings.append({
                 "title": f"Host HTTP ativo: {url} [{status_code}]",
                 "severity": "info",

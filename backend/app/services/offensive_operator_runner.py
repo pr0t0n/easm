@@ -440,7 +440,8 @@ def _extract_parameters_from_output(stdout: str, parsed: Any) -> list[str]:
 
     def add_param(raw: Any) -> None:
         param = str(raw or "").strip().strip("[]'\",;")
-        if not param or param.lower() in {"none", "null", "true", "false", "target", "found", "stable"}:
+        # "_" é cache-buster do jQuery (artefato, não parâmetro real). Backlog item 5.
+        if not param or param.lower() in {"none", "null", "true", "false", "target", "found", "stable", "_"}:
             return
         if not _BARE_PARAM_RE.match(param):
             return
