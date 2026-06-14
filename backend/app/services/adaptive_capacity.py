@@ -18,11 +18,16 @@ from sqlalchemy import text
 from app.core.config import settings
 
 _KEY = "easm:adaptive:concurrency_level"
-MIN_L = int(os.getenv("ADAPTIVE_MIN", "4"))
-MAX_L = int(os.getenv("ADAPTIVE_MAX", "16"))   # teto lógico; caps por classe ainda limitam o envio real
-START_L = int(os.getenv("ADAPTIVE_START", "10"))
-STEP_UP = int(os.getenv("ADAPTIVE_STEP_UP", "2"))
-_HIGH_TIMEOUT = float(os.getenv("ADAPTIVE_HIGH_TIMEOUT", "0.35"))  # >35% timeout → recua
+MIN_L = int(os.getenv("ADAPTIVE_MIN", "6"))
+MAX_L = int(os.getenv("ADAPTIVE_MAX", "32"))   # teto lógico; caps por classe ainda limitam o envio real
+START_L = int(os.getenv("ADAPTIVE_START", "16"))
+STEP_UP = int(os.getenv("ADAPTIVE_STEP_UP", "3"))
+# Backlog item 18: o timeout de tool contra alvo atrás de WAF (Cloudflare) é
+# bloqueio REMOTO, não saturação local — não deve colapsar a concorrência (a CPU
+# fica ociosa a ~0,3%). Por isso o threshold de timeout é mais tolerante e o
+# recuo por timeout é SUAVE (aditivo); só a pressão de MEMÓRIA local causa recuo
+# multiplicativo (saturação real da máquina).
+_HIGH_TIMEOUT = float(os.getenv("ADAPTIVE_HIGH_TIMEOUT", "0.55"))  # >55% timeout → recuo suave
 _LOW_TIMEOUT = float(os.getenv("ADAPTIVE_LOW_TIMEOUT", "0.10"))    # <10% → avança
 _MIN_SAMPLES = 8
 _HIGH_MEM = float(os.getenv("ADAPTIVE_HIGH_MEM", "88"))
@@ -82,11 +87,18 @@ def adjust(db) -> dict:
 
     level = get_level()
     old = level
-    if (mem is not None and mem >= _HIGH_MEM) or (rate is not None and rate > _HIGH_TIMEOUT):
-        level = max(MIN_L, level // 2)            # queda multiplicativa
-        action = "decrease"
-    elif rate is not None and rate < _LOW_TIMEOUT:
-        level = min(MAX_L, level + STEP_UP)        # aumento aditivo
+    if mem is not None and mem >= _HIGH_MEM:
+        # Pressão de MEMÓRIA local (saturação real) → recuo multiplicativo.
+        level = max(MIN_L, level // 2)
+        action = "decrease_mem"
+    elif rate is not None and rate > _HIGH_TIMEOUT:
+        # Timeout alto = majoritariamente bloqueio REMOTO (WAF) → recuo SUAVE
+        # (aditivo). Não colapsa a concorrência local com a CPU ociosa.
+        level = max(MIN_L, level - STEP_UP)
+        action = "decrease_timeout"
+    elif rate is None or rate < _LOW_TIMEOUT:
+        # Saudável (ou amostra insuficiente) → avança aditivamente até o teto.
+        level = min(MAX_L, level + STEP_UP)
         action = "increase"
     else:
         action = "hold"

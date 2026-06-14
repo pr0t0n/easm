@@ -642,10 +642,43 @@ def _pending_parallel_targets(state: dict[str, Any], completed_work: set[str], a
     return pending
 
 
+def _slim_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Enxuga campos BRUTOS pesados (stdout/output) de um ledger já processado.
+    Backlog item 19: phase_ledger_v2 acumulava o ledger completo (com stdout
+    bruto de mcp_results/tool_evidence) de TODOS os ~2600 phase-targets em
+    state_data (80MB), reescrito a cada checkpoint = write amplification brutal.
+    Os achados já foram persistidos (Finding) e o output bruto já está em
+    executed_tool_runs — aqui mantém só a estrutura necessária ao resume."""
+    slim = dict(ledger)
+    mr = slim.get("mcp_results")
+    if isinstance(mr, list):
+        slim["mcp_results"] = [
+            {k: v for k, v in m.items()
+             if k not in ("stdout", "raw_output", "output", "stdout_preview", "output_lines")}
+            for m in mr if isinstance(m, dict)
+        ]
+    for fld in ("evidence", "tool_evidence"):
+        ev = slim.get(fld)
+        if isinstance(ev, list):
+            slim[fld] = [
+                {k: v for k, v in e.items()
+                 if k not in ("output", "raw_output", "raw_output_preview", "stdout", "output_lines")}
+                for e in ev if isinstance(e, dict)
+            ]
+    return slim
+
+
 def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
-    for ledger in list(existing or []) + list(additions or []):
+    # Ledgers já existentes (de checkpoints anteriores) entram ENXUTOS — seus
+    # achados já foram persistidos. Apenas os `additions` (frescos) mantêm o
+    # output bruto, necessário para _persist_offensive_findings desta rodada.
+    _existing_terminal = {"completed", "partial", "skipped", "failed", "blocked"}
+    for ledger in [
+        (_slim_ledger(l) if isinstance(l, dict) and str(l.get("status") or "").lower() in _existing_terminal else l)
+        for l in list(existing or [])
+    ] + list(additions or []):
         if not isinstance(ledger, dict):
             continue
         key = (
