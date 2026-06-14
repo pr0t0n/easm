@@ -3172,8 +3172,25 @@ def _emit_skill_runtime_telemetry(
                     created_at=now,
                 ))
 
-        successes = len([m for m in mcp_results if str(m.get("status") or "").lower() in {"success", "done", "completed"}])
-        failures = max(0, len(mcp_results) - successes)
+        # Atribuição POR-SKILL (backlog item 7): antes carimbava o AGREGADO da
+        # fase (len(mcp_results)) em CADA skill — todas as ~15 skills de uma fase
+        # ficavam com números idênticos. Agora usa o skill_coverage por skill.
+        _cov = (ledger.get("skill_coverage") or {}).get(skill_id) or {}
+        _has_cov = bool(_cov)
+        _sk_attempts = len(_cov.get("tools_attempted") or _cov.get("tool_execution_keys_attempted") or [])
+        _sk_success = len(_cov.get("tools_success") or _cov.get("tool_execution_keys_success") or [])
+        _sk_failed = len(_cov.get("tools_failed") or _cov.get("tool_execution_keys_failed") or [])
+        _sk_evidence = len(_cov.get("evidence_ids") or [])
+        _sk_positive = str(_cov.get("status") or "").lower() in {"completed", "success"} if _has_cov else positive
+        # Fallback ao agregado da fase só quando NÃO há cobertura por skill.
+        n_attempts = _sk_attempts if _has_cov else len(mcp_results)
+        n_success = _sk_success if _has_cov else len([m for m in mcp_results if str(m.get("status") or "").lower() in {"success", "done", "completed"}])
+        n_failed = _sk_failed if _has_cov else max(0, len(mcp_results) - n_success)
+        n_evidence = _sk_evidence if _has_cov else len(evidence)
+        # library_hits HONESTO (item 8): conta learnings de fato consultados para
+        # esta skill (registrados no coverage), não o hardcoded "max(,1)".
+        n_library = len(_cov.get("learning_refs") or _cov.get("rag_matches") or [])
+
         existing_score = (
             db.query(SkillScore)
             .filter(
@@ -3191,14 +3208,14 @@ def _emit_skill_runtime_telemetry(
                 created_at=now,
             )
             db.add(existing_score)
-        existing_score.library_hits = max(int(existing_score.library_hits or 0), 1)
-        existing_score.tool_attempts = max(int(existing_score.tool_attempts or 0), len(mcp_results))
-        existing_score.tool_successes = max(int(existing_score.tool_successes or 0), successes)
-        existing_score.tool_failures = max(int(existing_score.tool_failures or 0), failures)
-        existing_score.findings_raw = max(int(existing_score.findings_raw or 0), len(evidence))
-        existing_score.findings_promoted = max(int(existing_score.findings_promoted or 0), 1 if positive else 0)
-        existing_score.efficiency_score = round(successes / max(1, len(mcp_results)), 4)
-        existing_score.productivity_score = round((len(evidence) + (1 if positive else 0)) / max(1, len(mcp_results)), 4)
+        existing_score.library_hits = max(int(existing_score.library_hits or 0), n_library)
+        existing_score.tool_attempts = max(int(existing_score.tool_attempts or 0), n_attempts)
+        existing_score.tool_successes = max(int(existing_score.tool_successes or 0), n_success)
+        existing_score.tool_failures = max(int(existing_score.tool_failures or 0), n_failed)
+        existing_score.findings_raw = max(int(existing_score.findings_raw or 0), n_evidence)
+        existing_score.findings_promoted = max(int(existing_score.findings_promoted or 0), 1 if _sk_positive else 0)
+        existing_score.efficiency_score = round(n_success / max(1, n_attempts), 4)
+        existing_score.productivity_score = round((n_evidence + (1 if _sk_positive else 0)) / max(1, n_attempts), 4)
 
 
 def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_results: list[dict[str, Any]]) -> None:

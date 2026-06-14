@@ -7095,11 +7095,19 @@ def dashboard_insights(
     learned_techniques = sum(int(row.technique_count or len(row.learned_techniques or [])) for row in accepted_learning)
     target_catalog_size = max(len(ADVERSARY_TECHNIQUE_CATALOG), learned_techniques + sum(int(row.technique_count or 0) for row in pending_learning), 1)
     def _event_uses_rag(event: AgentTraceEvent) -> bool:
-        blob = json.dumps(_as_dict(event.payload), default=str).lower()
+        # Backlog item 8: o teste `"rag" in blob` casava por SUBSTRING em
+        # "cove**rag**e" (presente em quase todo payload via skill_coverage),
+        # inflando falsamente a "utilização de RAG". Agora checa SINAIS reais de
+        # consulta a aprendizado, sem o substring espúrio.
+        payload = _as_dict(event.payload)
+        if payload.get("learning_refs") or payload.get("rag_matches") or payload.get("learning_applied"):
+            return True
+        blob = json.dumps(payload, default=str).lower()
         return (
-            "rag" in blob
-            or "accepted_learning" in blob
+            "accepted_learning" in blob
             or "learning_guided" in blob
+            or "rag_match" in blob
+            or "semantic_learning" in blob
             or str(event.skill_id or "").lower().startswith("learned")
         )
 
@@ -7125,12 +7133,19 @@ def dashboard_insights(
     # quality_criteria da execução). Diferente de learning_coverage, que media
     # a biblioteca de aprendizados (global, autorreferente, sempre ~100%) e não
     # representa nada exercitado no alvo.
+    # Backlog item 6: o denominador era COUNT(skill_library is_active)=18 (catálogo
+    # de nomes simples), mas confirmed_skill_ids vêm de skill_scores no namespace
+    # skill.* (33+) — universos diferentes. Agora numerador E denominador saem do
+    # MESMO universo: skills exercitadas no escopo (skill_scores). Cobertura =
+    # skills confirmadas / skills exercitadas.
+    exercised_skill_ids = {str(row.skill_id) for row in skill_score_rows if str(row.skill_id)}
     confirmed_skill_ids = {
         str(row.skill_id)
         for row in skill_score_rows
         if int(row.tool_successes or 0) > 0
     }
-    skill_confirmation_coverage = _pct(len(confirmed_skill_ids), active_skill_count)
+    skill_universe = len(exercised_skill_ids) or active_skill_count
+    skill_confirmation_coverage = _pct(len(confirmed_skill_ids), skill_universe)
     # A resiliência só EXISTE a partir de execução confirmada. Sem scan no
     # escopo ou sem nenhuma skill confirmada, o índice é indefinido (None) — a
     # UI mostra "—", nunca 0% nem um piso fabricado.
@@ -7181,7 +7196,7 @@ def dashboard_insights(
             ),
             "skill_confirmation_coverage_percent": skill_confirmation_coverage,
             "confirmed_skill_count": len(confirmed_skill_ids),
-            "active_skill_count": active_skill_count,
+            "active_skill_count": skill_universe,
             "attack_success_index": attack_success_index,
             "attack_success_count": attack_success_count,
             "attack_attempts": attack_attempts,
