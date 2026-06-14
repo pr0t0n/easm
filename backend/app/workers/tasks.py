@@ -1310,7 +1310,14 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         job.status = "completed"
         job.last_error = None
         job.next_retry_at = None
-        
+
+        # Feature 5 — diff contínuo de superfície vs scan anterior do alvo.
+        try:
+            from app.services.surface_diff import detect_and_alert_surface_changes
+            detect_and_alert_surface_changes(db, job)
+        except Exception:
+            pass
+
         # Log resumo final
         mission_summary = _format_mission_progress(final_state, job.current_step)
         easm_rating = final_state.get("easm_rating") or {}
@@ -2161,6 +2168,13 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 try:
                     from app.services.cve_enrichment_service import enrichment_service as _enrich
                     _enrich.enrich_scan_findings(db, scan_id)
+                except Exception:
+                    pass
+                # Feature 5 — diff contínuo de superfície: alerta novos
+                # subdomínios vs o scan anterior do mesmo alvo.
+                try:
+                    from app.services.surface_diff import detect_and_alert_surface_changes
+                    detect_and_alert_surface_changes(db, job)
                 except Exception:
                     pass
                 db.add(ScanLog(

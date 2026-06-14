@@ -1290,6 +1290,44 @@ def _extract_subdomain_discovery_findings(
             },
         })
 
+    # Feature 3 — Exposição de ambiente NÃO-PRODUTIVO (dev/staging/homolog/uat/
+    # test/qa/sandbox). Classe de achado dedicada: pré-produção exposta à internet
+    # é risco real e distinto (auth mais fraca, debug ligado, dados de teste,
+    # versões não-hardened). Ex.: dev-api-igreen-bank, dev-fatura.
+    _NONPROD_RE = re.compile(
+        r"(^|[.\-])(dev|develop|development|staging|stg|hml|homolog(?:acao)?|uat|"
+        r"qa|teste?|sandbox|preprod|pre-prod|beta|demo)([.\-]|$)",
+        re.IGNORECASE,
+    )
+    nonprod = sorted({s for s in subdomains if _NONPROD_RE.search(s)})
+    if nonprod:
+        findings.append({
+            "title": f"Ambiente não-produtivo exposto à internet: {len(nonprod)} host(s)",
+            "severity": "medium",
+            "risk_score": 6,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon",
+                "step": tool_name,
+                "asset": target,
+                "tool": tool_name,
+                "evidence": "\n".join(nonprod[:30]),
+                "nonprod_subdomains": nonprod[:200],
+                "nonprod_count": len(nonprod),
+                "finding_class": "nonprod_exposure",
+                "owasp_category": "A05:2021 Security Misconfiguration",
+                "impact": (
+                    "Ambientes de desenvolvimento/homologação acessíveis publicamente "
+                    "costumam ter autenticação mais fraca, debug habilitado, dados de "
+                    "teste/produção e versões sem hardening — caminho comum de entrada."
+                ),
+                "remediation": (
+                    "Restrinja o acesso a ambientes não-produtivos (VPN/allowlist de IP), "
+                    "remova debug/stack traces, e garanta que não contenham dados reais."
+                ),
+            },
+        })
+
     return findings
 
 
