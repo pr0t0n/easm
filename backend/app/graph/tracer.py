@@ -79,23 +79,36 @@ def save_skill_score(
 
         db = SessionLocal()
         try:
-            score = SkillScore(
-                scan_id=int(scan_id),
-                iteration=int(iteration),
-                skill_id=str(skill_id),
-                capability=str(capability),
-                library_hits=int(library_hits),
-                tool_attempts=int(tool_attempts),
-                tool_successes=int(tool_successes),
-                tool_failures=int(tool_failures),
-                findings_raw=int(findings_raw),
-                findings_promoted=int(findings_promoted),
-                duration_ms=float(duration_ms),
-                efficiency_score=max(0.0, min(100.0, efficiency)),
-                productivity_score=max(0.0, min(100.0, productivity)),
-                created_at=datetime.utcnow(),
+            # Item 9: UPSERT por (scan_id, skill_id, capability) em vez de sempre
+            # inserir — antes o grafo criava linhas duplicadas por skill/fase
+            # (ex.: port_service_discovery P02 ×8), poluindo as métricas por-skill.
+            score = (
+                db.query(SkillScore)
+                .filter(
+                    SkillScore.scan_id == int(scan_id),
+                    SkillScore.skill_id == str(skill_id),
+                    SkillScore.capability == str(capability),
+                )
+                .first()
             )
-            db.add(score)
+            if score is None:
+                score = SkillScore(
+                    scan_id=int(scan_id),
+                    iteration=int(iteration),
+                    skill_id=str(skill_id),
+                    capability=str(capability),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(score)
+            score.library_hits = max(int(score.library_hits or 0), int(library_hits))
+            score.tool_attempts = max(int(score.tool_attempts or 0), int(tool_attempts))
+            score.tool_successes = max(int(score.tool_successes or 0), int(tool_successes))
+            score.tool_failures = max(int(score.tool_failures or 0), int(tool_failures))
+            score.findings_raw = max(int(score.findings_raw or 0), int(findings_raw))
+            score.findings_promoted = max(int(score.findings_promoted or 0), int(findings_promoted))
+            score.duration_ms = float(duration_ms)
+            score.efficiency_score = max(0.0, min(100.0, efficiency))
+            score.productivity_score = max(0.0, min(100.0, productivity))
             db.commit()
         finally:
             db.close()

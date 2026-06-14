@@ -2454,6 +2454,26 @@ def persist_finding_dicts(
             if cve_exists:
                 continue
 
+        # Item 3 — dedup CROSS-TOOL de header ausente: o mesmo header era
+        # reportado por curl-headers, nikto E wapiti como findings separados
+        # (o dedup genérico inclui `tool`, então não colapsava). Aqui dedupa por
+        # (scan, host, header_name normalizado) IGNORANDO a ferramenta.
+        _hdr = str(details.get("header_name") or "").strip().lower()
+        _hdr = re.sub(r"[^a-z0-9-]", "", _hdr)
+        if _hdr and str(details.get("header_issue") or "").lower() == "missing":
+            _hdr_dup = (
+                db.query(Finding.id)
+                .filter(
+                    Finding.scan_job_id == job.id,
+                    Finding.domain == domain_col,
+                    Finding.title.ilike(f"%{_hdr}%"),
+                    Finding.title.ilike("%ausente%"),
+                )
+                .first()
+            )
+            if _hdr_dup:
+                continue
+
         # Generic dedup: skip if (scan_job_id, title, domain, tool) already exists
         exists = (
             db.query(Finding.id)

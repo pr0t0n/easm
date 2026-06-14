@@ -159,6 +159,25 @@ def run_watchdog(db) -> dict:
         logger.error("watchdog: pass de limbo falhou: %s", exc)
     report["limbo_recovered"] = limbo_revived
 
+    # Item 20 — limpeza segura da fila: itens pendentes (queued/blocked/
+    # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela
+    # (scan #12 chegou a 6072 blocked). Remover é seguro — o scan acabou.
+    try:
+        purged = db.execute(text("""
+            DELETE FROM scan_work_items
+            WHERE status IN ('queued','blocked','submitted','retry')
+              AND scan_job_id IN (
+                  SELECT id FROM scan_jobs
+                  WHERE lower(status) IN ('completed','failed','stopped','cancelled')
+              )
+        """))
+        db.commit()
+        report["queue_purged"] = int(getattr(purged, "rowcount", 0) or 0)
+    except Exception as exc:
+        db.rollback()
+        logger.error("watchdog: limpeza de fila falhou: %s", exc)
+        report["queue_purged"] = 0
+
     # guarda o último resultado para a página de Saúde
     try:
         db.execute(text("""

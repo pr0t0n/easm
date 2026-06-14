@@ -3762,6 +3762,59 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         db.add(finding)
         db.flush()
 
+        # Item 17 — emite cada finding de BUSINESS LOGIC CONFIRMADO como Finding
+        # PRÓPRIO (antes ficavam aninhados em tool_evidence do wrapper, invisíveis).
+        # Ex.: token/JWT em localStorage confirmado via navegador real.
+        try:
+            _seen_bl: set[str] = set()
+            for _ev in tool_evidences:
+                for _bl in (_ev.get("business_logic_findings") or []):
+                    if not isinstance(_bl, dict):
+                        continue
+                    if str(_bl.get("verification_status") or "").lower() != "confirmed":
+                        continue
+                    _bl_title = str(_bl.get("title") or "").strip()[:255]
+                    if not _bl_title or _bl_title in _seen_bl:
+                        continue
+                    _seen_bl.add(_bl_title)
+                    _bl_url = str(_bl.get("url") or target)
+                    _bl_dup = (
+                        db.query(Finding.id)
+                        .filter(Finding.scan_job_id == job.id, Finding.title == _bl_title,
+                                Finding.domain == str(target)[:255])
+                        .first()
+                    )
+                    if _bl_dup:
+                        continue
+                    db.add(Finding(
+                        scan_job_id=job.id,
+                        title=_bl_title,
+                        severity=severity if severity in {"high", "critical", "medium"} else "medium",
+                        cve=None,
+                        cvss=_severity_to_cvss(severity if severity != "info" else "medium"),
+                        domain=str(target)[:255],
+                        tool=", ".join(tools_success or ["bl-test"])[:100] or None,
+                        recommendation="Não armazene tokens/segredos de sessão em localStorage/sessionStorage (use cookie HttpOnly+Secure+SameSite); valide autorização por objeto (IDOR/BOLA).",
+                        confidence_score=max(confidence, 85),
+                        risk_score=max(1, max(confidence, 85) // 10),
+                        details={
+                            "phase_id": phase_id,
+                            "phase_name": phase_name,
+                            "target": target,
+                            "finding_class": "business_logic_confirmed",
+                            "verification_status": "confirmed",
+                            "scan_mode": "offensive_operator",
+                            "source_worker": "offensive_operator",
+                            "business_logic_detail": _bl,
+                            "url": _bl_url,
+                            "evidence": str(_bl.get("title") or "")[:1000],
+                        },
+                        verification_status="confirmed",
+                    ))
+            db.flush()
+        except Exception:
+            pass
+
         # Persist asset + vulnerability only for actionable, reproducible risk.
         if (
             status in {"completed", "partial"}

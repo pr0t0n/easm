@@ -198,6 +198,28 @@ def _progress_from_state(final_state: dict) -> tuple[int, dict]:
     }
 
 
+def _worker_group_label() -> str:
+    """Grupo kill-chain do worker, extraído do node name do celery
+    (`-n exploitation@host` → "exploitation"). Vazio se indisponível."""
+    try:
+        from celery import current_app
+        node = ""
+        try:
+            from celery import current_task
+            node = str(getattr(getattr(current_task, "request", None), "hostname", "") or "")
+        except Exception:
+            node = ""
+        node = node or str(getattr(current_app, "oid", "") or "")
+        if "@" in node:
+            prefix = node.split("@", 1)[0].strip().lower()
+            # ignora prefixos genéricos (celery, gen<pid>)
+            if prefix and prefix not in {"celery"} and not prefix.startswith("gen"):
+                return prefix
+    except Exception:
+        pass
+    return ""
+
+
 def _touch_worker_heartbeat(
     db: Session,
     *,
@@ -211,7 +233,11 @@ def _touch_worker_heartbeat(
     if hb is None:
         hb = WorkerHeartbeat(worker_name=worker_name)
 
-    hb.mode = scan_mode
+    # Item 10: o campo `mode` passa a refletir o GRUPO kill-chain do worker
+    # (exploitation/weaponization/delivery/…), derivado do node name do celery
+    # (`-n exploitation@%h`), em vez do genérico "unit". Fallback ao scan_mode.
+    _group = _worker_group_label() or str(scan_mode)
+    hb.mode = _group[:20]
     hb.status = status
     hb.current_scan_id = scan_id
     hb.last_task_name = task_name
