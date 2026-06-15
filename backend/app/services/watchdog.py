@@ -173,6 +173,7 @@ def run_watchdog(db) -> dict:
     progress_revived = []
     try:
         from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running
+        from app.models.models import ScanLog
         stuck = db.execute(text(
             """
             SELECT j.id,
