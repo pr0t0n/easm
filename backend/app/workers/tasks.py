@@ -3043,7 +3043,11 @@ def poll_scan_work_item(item_id: int):
                 # Cap: ZAP is heavy (1-2 min/target) — limit to first 15 live targets.
                 _zap_count = int(_state_zap.get("zap_run_count") or 0)
                 if not _state_zap.get(_zap_key) and _zap_count < 15:
-                    from app.services.zap_scanner import run_zap_baseline as _zap_baseline, is_zap_available as _zap_avail
+                    from app.services.zap_scanner import (
+                        run_zap_baseline as _zap_baseline,
+                        run_zap_active_scan as _zap_active,
+                        is_zap_available as _zap_avail,
+                    )
                     if _zap_avail():
                         _tgt = item.target
                         _zap_url = _tgt if str(_tgt).startswith("http") else f"https://{_tgt}"
@@ -3055,8 +3059,32 @@ def poll_scan_work_item(item_id: int):
                             _zap_auth = auth_headers_from_state(_state_zap) or {}
                         except Exception:
                             _zap_auth = {}
-                        _zap_res = _zap_baseline(_zap_url, auth_headers=_zap_auth or None)
+                        # P8 — ZAP ACTIVE SCAN (DAST real OWASP Top 10) nos alvos de
+                        # ALTO VALOR (crown jewel / bank/auth/api/admin/login); baseline
+                        # (passivo) no resto, p/ equilibrar profundidade × tempo. O active
+                        # acha inj/XSS/IDOR que ALIMENTAM a regra de negócio (P13).
+                        _tl = str(_tgt).lower()
+                        _crown_hosts = {str(c.get("host") if isinstance(c, dict) else c).lower()
+                                        for c in (_state_zap.get("crown_jewels") or [])}
+                        _hv = (_tl in _crown_hosts) or any(
+                            k in _tl for k in ("bank", "invoice", "fatura", "pay", "auth",
+                                               "sso", "login", "admin", "token", "api", "account", "conta"))
+                        _zap_active_used = int(_state_zap.get("zap_active_count") or 0)
+                        if _hv and _zap_active_used < 8:
+                            _zap_res = _zap_active(_zap_url, auth_headers=_zap_auth or None)
+                            _state_zap["zap_active_count"] = _zap_active_used + 1
+                        else:
+                            _zap_res = _zap_baseline(_zap_url, auth_headers=_zap_auth or None)
                         _zap_findings = _zap_res.get("findings") or []
+                        # Item 31b — NÃO persistir alerta ZAP oco ("ZAP Finding"
+                        # sem nome/cwe/descrição), que poluía com coverage vazio.
+                        def _zap_meaningful(_f):
+                            _t = str(_f.get("title") or "").strip().lower()
+                            _d = _f.get("details") or {}
+                            if not _t or _t in ("zap finding", "[zap]", "zap"):
+                                return bool(_d.get("cwe_id") or _d.get("description") or _d.get("solution"))
+                            return True
+                        _zap_findings = [f for f in _zap_findings if _zap_meaningful(f)]
                         _state_zap[_zap_key] = True
                         _state_zap["zap_run_count"] = _zap_count + 1
                         job.state_data = _state_zap
