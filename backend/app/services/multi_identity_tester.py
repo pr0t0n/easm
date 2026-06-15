@@ -242,7 +242,12 @@ def run_multi_identity_test(db, job, target: str) -> dict[str, Any]:
     from app.models.models import Finding, ScanLog, ScanWorkItem
     from datetime import datetime
 
-    # Check if httpx confirmed HTTP services on this target
+    # P5 — antes exigia item httpx do WORK-QUEUE p/ confirmar HTTP, mas o
+    # offensive_operator não cria esse artefato → BOLA/BFLA pulava em TODO host
+    # do operador. Agora aceita confirmação HTTP de qualquer fonte (work-queue OU
+    # executed_tool_runs do operador). O próprio tester sonda https/http e aborta
+    # se inalcançável (gate real). Assim o teste de autorização entre identidades
+    # roda também nos hosts do operador.
     http_items = (
         db.query(ScanWorkItem)
         .filter(
@@ -253,9 +258,20 @@ def run_multi_identity_test(db, job, target: str) -> dict[str, Any]:
         )
         .all()
     )
-
     if not http_items:
-        return {"skipped": "no_http_confirmed"}
+        from app.models.models import ExecutedToolRun as _ETR
+        _op_http = (
+            db.query(_ETR.id)
+            .filter(
+                _ETR.scan_job_id == job.id,
+                _ETR.target == target,
+                _ETR.tool_name.in_(["httpx", "whatweb", "curl", "curl-headers", "nuclei"]),
+                _ETR.status.in_(["success", "done", "completed"]),
+            )
+            .first()
+        )
+        if not _op_http:
+            return {"skipped": "no_http_confirmed"}
 
     # Try both HTTP and HTTPS
     results = []
