@@ -174,19 +174,24 @@ def run_watchdog(db) -> dict:
     try:
         from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running
         from app.models.models import ScanLog
+        # Relógio ÚNICO (UTC): created_at é gravado pelo app em UTC-naive; now()
+        # do PG é -03 → comparar direto desviava ~3h e dava idle≈3h SEMPRE (até
+        # p/ scan vivo → re-dispatch a cada minuto, falso positivo). timezone('UTC',
+        # now()) traz o agora em UTC-naive, consistente com created_at. Exclui os
+        # próprios logs do watchdog (senão a recuperação reseta o sinal de vida).
         stuck = db.execute(text(
             """
             SELECT j.id,
-                   EXTRACT(EPOCH FROM (now() - COALESCE(
-                       (SELECT max(l.created_at) FROM scan_logs l WHERE l.scan_job_id = j.id),
+                   EXTRACT(EPOCH FROM (timezone('UTC', now()) - COALESCE(
+                       (SELECT max(l.created_at) FROM scan_logs l
+                         WHERE l.scan_job_id = j.id AND l.source <> 'watchdog'),
                        j.updated_at)))::int AS idle_s
             FROM scan_jobs j
             WHERE j.status IN ('queued','running','retrying')
             """
         )).fetchall()
         for sid, idle_s in stuck:
-            # idle_s pode vir negativo por skew de fuso (app grava +3h) — normaliza.
-            idle = abs(int(idle_s or 0))
+            idle = int(idle_s or 0)
             if idle >= _ORPHAN_NO_PROGRESS_SECONDS:
                 _force_release_chain_lock(int(sid))
                 _res = ensure_scan_chain_running(int(sid), mode="unit")
