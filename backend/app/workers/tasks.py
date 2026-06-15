@@ -1343,6 +1343,12 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
             detect_and_alert_surface_changes(db, job)
         except Exception:
             pass
+        # P2/P7 — síntese de PENTEST: cadeias de ataque + prova de impacto.
+        try:
+            from app.services.pentest_synthesis import synthesize_pentest
+            synthesize_pentest(db, job)
+        except Exception:
+            pass
 
         # Log resumo final
         mission_summary = _format_mission_progress(final_state, job.current_step)
@@ -2201,6 +2207,12 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 try:
                     from app.services.surface_diff import detect_and_alert_surface_changes
                     detect_and_alert_surface_changes(db, job)
+                except Exception:
+                    pass
+                # P2/P7 — síntese de PENTEST.
+                try:
+                    from app.services.pentest_synthesis import synthesize_pentest
+                    synthesize_pentest(db, job)
                 except Exception:
                     pass
                 db.add(ScanLog(
