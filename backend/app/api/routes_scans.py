@@ -9095,28 +9095,27 @@ def get_cockpit(
     state = dict(selected.state_data or {})
     # Em modo agregado ("TODOS"), ignora o crown_jewels de um único scan e deriva
     # de TODOS os ativos do dono; escopado, usa o state do scan e cai no fallback.
-    crown = [] if aggregate else (state.get("crown_jewels", []) or [])
-    if not crown:
-        # Fallback: o motor ofensivo nem sempre persiste crown_jewels no state
-        # (o analyzer lê scan_work_items, que esse motor não cria) → a página
-        # ficava vazia mesmo com subdomínios descobertos. Deriva on-the-fly dos
-        # hosts conhecidos pelos MESMOS padrões do analyzer (auth/pay/admin/db/api).
-        try:
-            from app.services.crown_jewel_analyzer import identify_crown_jewels
-            # Usa apenas os ATIVOS reais persistidos (hosts vivos), não o target_set
-            # bruto — que tem permutações de brute-force (pay.X, admin.X…). Em
-            # agregado, todos os ativos do dono; escopado, só os deste scan.
-            _asset_q = db.query(Asset.domain_or_ip).filter(Asset.owner_id == current_user.id)
-            if not aggregate:
-                _asset_q = _asset_q.filter(Asset.last_scan_id == selected.id)
-            _hosts = sorted({str(_d) for (_d,) in _asset_q.all() if _d})
-            if _hosts:
-                crown = [
-                    {"target": t, "boost": b, "label": lbl}
-                    for t, b, lbl in identify_crown_jewels(_hosts)[:60]
-                ]
-        except Exception:
-            crown = []
+    crown = [] if aggregate else list(state.get("crown_jewels", []) or [])
+    # Item 37 — SEMPRE deriva joias dos ATIVOS REAIS descobertos e MESCLA com os
+    # objetivos do state. Antes era `if not crown:` → como o state tem 3 objetivos
+    # genéricos (dashboard/internal/api), o fallback nunca rodava e os hosts de
+    # alto valor REAIS com achados (api-connect, dev-fatura, dev-api-*) sumiam.
+    try:
+        from app.services.crown_jewel_analyzer import identify_crown_jewels
+        _asset_q = db.query(Asset.domain_or_ip).filter(Asset.owner_id == current_user.id)
+        if not aggregate:
+            _asset_q = _asset_q.filter(Asset.last_scan_id == selected.id)
+        _hosts = sorted({str(_d) for (_d,) in _asset_q.all() if _d})
+        _have = {
+            _cockpit_host(domain=str(j.get("target") or j.get("asset") or j.get("host") or ""))
+            for j in crown
+        }
+        for t, b, lbl in identify_crown_jewels(_hosts)[:60]:
+            if _cockpit_host(domain=str(t)) not in _have:
+                crown.append({"target": t, "boost": b, "label": lbl})
+                _have.add(_cockpit_host(domain=str(t)))
+    except Exception:
+        pass
     jewel_hosts = set()
     for j in crown:
         t = j.get("target") or j.get("asset") or j.get("host") or ""

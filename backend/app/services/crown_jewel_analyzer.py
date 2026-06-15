@@ -30,41 +30,55 @@ logger = logging.getLogger(__name__)
 # ── Crown jewel patterns ──────────────────────────────────────────────────────
 # Each entry: (regex_pattern, boost, label)
 # boost is NEGATIVE = higher priority (lower number wins in ORDER BY priority ASC)
+# Item 37: padrões agora casam a keyword como QUALQUER label separado por '.' ou
+# '-' (não só o primeiro label com ponto). Antes `^(api)\.` perdia api-connect,
+# dev-api-voffice, dev-fatura, dev-api-igreen-bank — justamente as joias reais.
+# Helper `_kw` monta o regex tolerante. + termos PT (fatura/boleto/banco/conta).
+def _kw(*words: str) -> str:
+    return r"(^|[.\-])(" + "|".join(words) + r")([.\-]|$)"
+
+
 CROWN_JEWEL_PATTERNS: list[tuple[str, int, str]] = [
     # Auth / identity
-    (r"^(auth|sso|login|oauth|id|identity|iam)\.", -30, "identity/auth"),
-    (r"^(accounts?|usuarios?|users?)\.", -25, "user_management"),
+    (_kw("auth", "sso", "login", "oauth", "identity", "iam"), -30, "identity/auth"),
+    (_kw("accounts?", "usuarios?", "users?", "conta", "contas"), -25, "user_management"),
 
-    # Payments / financials
-    (r"^(pay|payment|billing|invoice|checkout|pix|boleto|financ)\.", -35, "payment/financial"),
-    (r"^(wallet|credit|debit|card)\.", -30, "payment/financial"),
+    # Payments / financials (EN + PT)
+    (_kw("pay", "payment", "payments", "billing", "invoice", "checkout", "pix",
+         "boleto", "financ", "fatura", "faturas", "cobranca", "pagamento",
+         "pagamentos", "bank", "banco", "banking"), -35, "payment/financial"),
+    (_kw("wallet", "credit", "debit", "card", "cartao"), -30, "payment/financial"),
 
     # Admin / management
-    (r"^(admin|administrator|portal|dashboard|manager|mgmt|backoffice)\.", -25, "admin_panel"),
-    (r"^(control|painel|gestao|gerencia)\.", -20, "admin_panel"),
+    (_kw("admin", "administrator", "portal", "dashboard", "manager", "mgmt",
+         "backoffice"), -25, "admin_panel"),
+    (_kw("control", "painel", "gestao", "gerencia"), -20, "admin_panel"),
 
-    # Data stores (often directly exposed in EASM scans)
-    (r"^(db|mysql|postgres|redis|mongo|elastic|kibana|rabbitmq|kafka)\.", -30, "data_store"),
-    (r"^(data|database|analytics|warehouse|bi|tableau|grafana)\.", -25, "data_store"),
+    # Data stores
+    (_kw("db", "mysql", "postgres", "redis", "mongo", "elastic", "kibana",
+         "rabbitmq", "kafka"), -30, "data_store"),
+    (_kw("data", "database", "analytics", "warehouse", "bi", "tableau",
+         "grafana", "datascience"), -25, "data_store"),
 
     # CI/CD and dev tools
-    (r"^(ci|cd|jenkins|gitlab|github|bitbucket|artifactory|nexus|sonar)\.", -25, "cicd"),
-    (r"^(build|deploy|devops|release|pipeline|registry)\.", -20, "cicd"),
+    (_kw("ci", "cd", "jenkins", "gitlab", "github", "bitbucket", "artifactory",
+         "nexus", "sonar"), -25, "cicd"),
+    (_kw("build", "deploy", "devops", "release", "pipeline", "registry"), -20, "cicd"),
 
     # API gateways / microservices
-    (r"^(api|gw|gateway|proxy|lb|loadbalancer)\.", -20, "api_gateway"),
-    (r"^(internal|intranet|private)\.", -25, "internal_service"),
+    (_kw("api", "gw", "gateway", "proxy", "lb", "loadbalancer"), -20, "api_gateway"),
+    (_kw("internal", "intranet", "private"), -25, "internal_service"),
 
     # Secrets / config management
-    (r"^(vault|config|secrets?|consul|etcd|zookeeper)\.", -30, "secrets_mgmt"),
-    (r"^(env|settings?|credentials?)\.", -25, "secrets_mgmt"),
+    (_kw("vault", "config", "secrets?", "consul", "etcd", "zookeeper"), -30, "secrets_mgmt"),
+    (_kw("env", "settings?", "credentials?"), -25, "secrets_mgmt"),
 
     # Customer-facing SPAs / critical products
-    (r"^(app|platform|webapp|web|portal|service)\.", -15, "customer_app"),
+    (_kw("app", "platform", "webapp", "portal", "service"), -15, "customer_app"),
 
     # Cloud metadata / infra
-    (r"169\.254\.169\.254", -40, "cloud_metadata"),  # AWS/GCP/Azure metadata endpoint
-    (r"^(backup|archive|dr|recovery)\.", -20, "backup_infra"),
+    (r"169\.254\.169\.254", -40, "cloud_metadata"),
+    (_kw("backup", "archive", "dr", "recovery"), -20, "backup_infra"),
 ]
 
 # Minimum phase completions before crown jewel analysis runs
