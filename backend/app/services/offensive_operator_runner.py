@@ -1079,6 +1079,32 @@ def run_offensive_operator_scan(
     # discovered subdomain so each phase P02-P22 runs against the full set.
     all_targets: list[str] = list(initial_state.get("target_set") or targets)
     _input_target_count = len(targets)
+    # P3 — PENTEST dirigido por OBJETIVO: processa os hosts de MAIOR VALOR
+    # (crown jewels + APIs bancárias/auth/admin) ANTES dos demais, em vez da
+    # ordem de descoberta. Preserva os seeds originais nas primeiras posições
+    # (o gating de P01 usa o índice < _input_target_count). Só reordena os
+    # subdomínios DESCOBERTOS (índice >= _input_target_count).
+    try:
+        _seeds = all_targets[:_input_target_count]
+        _discovered = all_targets[_input_target_count:]
+        if _discovered:
+            _crown = {str(c.get("host") if isinstance(c, dict) else c).lower()
+                      for c in (initial_state.get("crown_jewels") or [])}
+            _hv_kw = ("bank", "invoice", "fatura", "pay", "pagamento", "auth", "sso",
+                      "login", "admin", "token", "api", "account", "conta", "checkout")
+
+            def _target_rank(h: str) -> int:
+                hl = str(h or "").lower()
+                if hl in _crown:
+                    return 0                      # crown jewel — máxima prioridade
+                if any(k in hl for k in _hv_kw):
+                    return 1                      # alto valor por palavra-chave
+                return 2                          # demais
+
+            _discovered = sorted(_discovered, key=lambda h: (_target_rank(h), h))
+            all_targets = _seeds + _discovered
+    except Exception:
+        pass
     _phases_for_level = [p for p in PHASE_ORDER if allowed_phases is None or p in allowed_phases]
     # host → resolved IP, for IP-grouped network phases (populated after P01)
     host_ip_map: dict[str, str] = dict(initial_state.get("host_ip_map") or {})
