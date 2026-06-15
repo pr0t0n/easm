@@ -207,3 +207,69 @@ def discover_origin_candidates(
         "candidate_origins": ranked,
         "summary": summary,
     }
+
+
+# Marcadores de página de challenge/bloqueio do WAF (resposta da BORDA, não da origem).
+_WAF_CHALLENGE_MARKERS = (
+    "cf-ray", "cf-chl", "challenge-platform", "just a moment", "attention required",
+    "cloudflare", "/cdn-cgi/", "request blocked", "access denied", "akamai",
+    "incapsula", "_imperva", "the requested url was rejected", "support id",
+)
+
+
+def validate_origin_candidates(root: str, candidates: list[dict[str, Any]],
+                               max_check: int = 8, timeout: int = 8) -> list[dict[str, Any]]:
+    """Feature 2 — VALIDA de fato cada candidato de origem (antes só recomendava
+    o curl). Requisita https://{root}/ resolvendo para o IP candidato (Host:root)
+    e compara com a resposta da BORDA (WAF). Origem CONFIRMADA quando o IP serve
+    conteúdo de APP real (200/3xx/401/403-app) SEM marcadores de challenge do WAF.
+    Retorna só os confirmados, com a evidência. Seguro: apenas GET / com timeout."""
+    confirmed: list[dict[str, Any]] = []
+    try:
+        import httpx
+    except Exception:
+        return confirmed
+
+    def _is_challenge(text: str, headers: dict) -> bool:
+        blob = (text[:4000] + " " + " ".join(f"{k}:{v}" for k, v in headers.items())).lower()
+        return any(m in blob for m in _WAF_CHALLENGE_MARKERS)
+
+    # Resposta da BORDA (WAF) — baseline para comparação.
+    edge_blob = ""
+    try:
+        with httpx.Client(verify=False, timeout=timeout, follow_redirects=True) as c:
+            r = c.get(f"https://{root}/")
+            edge_blob = (r.text or "")[:2000]
+    except Exception:
+        edge_blob = ""
+
+    for cand in (candidates or [])[:max_check]:
+        ip = str(cand.get("ip") or "").strip()
+        if not ip:
+            continue
+        try:
+            # Conecta NO IP candidato, mas pede o Host real (bypass do DNS/WAF).
+            with httpx.Client(
+                verify=False, timeout=timeout, follow_redirects=False,
+                headers={"Host": root},
+            ) as c:
+                # httpx não tem --resolve; usa a URL com IP + Host header.
+                r = c.get(f"https://{ip}/", headers={"Host": root})
+                body = r.text or ""
+                served = (200 <= r.status_code < 500)
+                challenge = _is_challenge(body, dict(r.headers))
+                # Confirmado: serve app, NÃO é challenge, e difere da borda.
+                if served and not challenge and body[:500] != edge_blob[:500]:
+                    confirmed.append({
+                        "ip": ip,
+                        "host": root,
+                        "status": r.status_code,
+                        "server": r.headers.get("server", ""),
+                        "hint_score": cand.get("hint_score", 0),
+                        "evidence": f"https://{ip}/ (Host: {root}) → {r.status_code}, "
+                                    f"server={r.headers.get('server','?')}, sem challenge do WAF "
+                                    f"— ORIGEM acessível direto, contornando o WAF",
+                    })
+        except Exception:
+            continue
+    return confirmed

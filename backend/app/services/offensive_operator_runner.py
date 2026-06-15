@@ -1960,6 +1960,62 @@ def run_offensive_operator_scan(
                                                 f"top candidate {_top['ip']} (confidence={_top['confidence']}, "
                                                 f"hosts={_top['hosts'][:3]})")))
                         _persist_origin_finding(db, job, target, _origin)
+                        # Feature 2 — VALIDA a origem de fato (só com exploração
+                        # ativa autorizada: alcançar a origem por trás do WAF é
+                        # ação ativa). Confirma o IP que serve o app sem challenge,
+                        # emite achado HIGH e registra p/ scan DIRETO na origem.
+                        if _cp_state.get("active_exploit_authorized"):
+                            try:
+                                from app.services.waf_origin import validate_origin_candidates as _val_origin
+                                _confirmed = _val_origin(target, _cands)
+                                if _confirmed:
+                                    _origin_ips = sorted({c["ip"] for c in _confirmed})
+                                    # Registra a origem confirmada como ALVO DIRETO:
+                                    # entra no target_set (a fila do operador) e em
+                                    # direct_url_targets (pula P01/subdomain-enum p/ IP).
+                                    # Assim a exploração ativa roda DIRETO na origem,
+                                    # contornando o WAF. Backlog Feature 2.
+                                    _ts = list(_cp_state.get("target_set") or [])
+                                    _du = list(_cp_state.get("direct_url_targets") or [])
+                                    _do = list(_cp_state.get("direct_origin_targets") or [])
+                                    for _ip in _origin_ips:
+                                        _ourl = f"https://{_ip}"
+                                        if _ourl not in _ts:
+                                            _ts.append(_ourl)
+                                        if _ourl not in _du:
+                                            _du.append(_ourl)
+                                        if _ourl not in _do:
+                                            _do.append(_ourl)
+                                    _cp_state["target_set"] = _ts
+                                    _cp_state["direct_url_targets"] = _du
+                                    _cp_state["direct_origin_targets"] = _do
+                                    db.add(Finding(
+                                        scan_job_id=job.id,
+                                        title=f"[WAF BYPASS CONFIRMADO] Origem acessível direto: {', '.join(_origin_ips[:3])}"[:255],
+                                        severity="high",
+                                        domain=str(target)[:255],
+                                        tool="waf_origin_validate",
+                                        confidence_score=90,
+                                        risk_score=8,
+                                        verification_status="proven",
+                                        recommendation="Restrinja o acesso à origem apenas ao WAF (allowlist de IPs do Cloudflare/F5 no firewall da origem). Origem exposta direto anula a proteção do WAF.",
+                                        details={
+                                            "phase_id": "P05", "target": target,
+                                            "finding_class": "waf_bypass_origin_confirmed",
+                                            "scan_mode": "offensive_operator",
+                                            "source_worker": "waf_origin_validate",
+                                            "confirmed_origins": _confirmed,
+                                            "evidence": "; ".join(c["evidence"] for c in _confirmed[:3]),
+                                        },
+                                    ))
+                                    db.flush()
+                                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                                   message=(f"waf_bypass_origin_CONFIRMED {target}: "
+                                                            f"{len(_confirmed)} origem(ns) direta(s) {_origin_ips[:3]} "
+                                                            f"— registradas p/ scan direto (bypass do WAF)")))
+                            except Exception as _vexc:
+                                db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
+                                               message=f"origin_validate_skip error={_vexc!s}"))
                     else:
                         db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
                                        message=f"waf_origin_discovery {_origin['summary']}"))
