@@ -44,7 +44,7 @@ def dispatch_agents_for_mission(state: AgentState) -> AgentState:
                 "data": {
                     "phase_plan": phase_plan,
                     "mission_index": current_mission_index,
-                    "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                    "timestamp": __import__("datetime").datetime.now().isoformat(),
                 },
             })
 
@@ -55,7 +55,7 @@ def dispatch_agents_for_mission(state: AgentState) -> AgentState:
             # Atualiza state com referência à tarefa
             execution_control = dict(state.get("execution_control") or {})
             execution_control["orchestration_task_id"] = orchestration_task_id
-            execution_control["agents_dispatched_at"] = __import__("datetime").datetime.utcnow().isoformat()
+            execution_control["agents_dispatched_at"] = __import__("datetime").datetime.now().isoformat()
             state["execution_control"] = execution_control
 
             return state
@@ -68,7 +68,7 @@ def dispatch_agents_for_mission(state: AgentState) -> AgentState:
         state["autonomy_errors"].append({
             "source": "agent_dispatch",
             "text": f"Agent dispatch failed: {str(e)}",
-            "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+            "timestamp": __import__("datetime").datetime.now().isoformat(),
         })
         return state
 
@@ -132,7 +132,7 @@ def integrate_agents_with_workflow(workflow_graph) -> None:
             state["autonomy_observations"].append({
                 "source": "agent_orchestrator",
                 "text": f"Phases incomplete: {', '.join(incomplete[:3])}",
-                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
             })
 
         return state

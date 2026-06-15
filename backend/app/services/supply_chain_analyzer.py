@@ -886,7 +886,7 @@ def run_supply_chain_scan(
                 details=details_payload,
                 retest_status="confirmed",
                 risk_score={"critical": 9, "high": 7, "medium": 5, "low": 2}.get(bf["severity"], 5),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             total_findings += 1

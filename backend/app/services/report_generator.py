@@ -169,7 +169,7 @@ def generate_executive_report(
     # ── Top findings por severidade ───────────────────────────────────────────
     top_findings = sorted(findings, key=lambda f: (_severity_order(f.severity or "info"), -(f.risk_score or 0)))[:20]
 
-    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
     domains_str = ", ".join(root_domains)
 
     # ── Recommendation builder helper (avoids inline f-string with escapes) ──
@@ -556,7 +556,7 @@ def generate_pentest_report(
         pass
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
     domains_str = job.target_query or str(scan_id)
 
     def _sev_color(s: str) -> str:

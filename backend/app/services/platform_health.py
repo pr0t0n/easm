@@ -51,7 +51,7 @@ def _guard_redis():
 def record_watchdog_heartbeat() -> None:
     """Prova de vida do auto-curador — chamada a cada tick do watchdog."""
     try:
-        _guard_redis().set(_WATCHDOG_HEARTBEAT_KEY, datetime.utcnow().isoformat())
+        _guard_redis().set(_WATCHDOG_HEARTBEAT_KEY, datetime.now().isoformat())
     except Exception:
         pass
 
@@ -62,7 +62,7 @@ _GUARD_HEARTBEAT_KEY = "platform:guard_heartbeat"
 def record_guard_heartbeat() -> None:
     """Prova de vida do guardião do backend (thread daemon)."""
     try:
-        _guard_redis().set(_GUARD_HEARTBEAT_KEY, datetime.utcnow().isoformat())
+        _guard_redis().set(_GUARD_HEARTBEAT_KEY, datetime.now().isoformat())
     except Exception:
         pass
 
@@ -75,7 +75,7 @@ def _watchdog_heartbeat_age() -> float | None:
             return None
         if isinstance(raw, bytes):
             raw = raw.decode()
-        return (datetime.utcnow() - datetime.fromisoformat(raw)).total_seconds()
+        return (datetime.now() - datetime.fromisoformat(raw)).total_seconds()
     except Exception:
         return None
 
@@ -89,7 +89,7 @@ def _restart_container(short_or_full: str, reason: str) -> dict:
         r = _guard_redis()
         if r.get(f"platform:self_heal:restart:{short}"):
             return {"container": short, "action": "skip_cooldown", "reason": reason}
-        r.set(f"platform:self_heal:restart:{short}", datetime.utcnow().isoformat(), ex=_RESTART_COOLDOWN)
+        r.set(f"platform:self_heal:restart:{short}", datetime.now().isoformat(), ex=_RESTART_COOLDOWN)
     except Exception:
         pass
     try:
@@ -114,7 +114,7 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
          redis+DB+fila, que o backend tem).
     Idempotente e protegido por cooldown, então é barato chamar a cada poll."""
     report = {
-        "checked_at": datetime.utcnow().isoformat(), "source": source,
+        "checked_at": datetime.now().isoformat(), "source": source,
         "corrections": [], "orphans_recovered": [], "watchdog": {}, "skipped": False,
     }
 
@@ -153,7 +153,7 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
             from app.workers.tasks import recover_scan_if_orphaned, active_scan_task_ids
             # cutoff em UTC-naive (a coluna updated_at é UTC-naive); evita o desvio
             # de fuso de comparar com now() do postgres (que está em -03).
-            cutoff = datetime.utcnow() - timedelta(seconds=_GUARD_LIMBO_SECONDS)
+            cutoff = datetime.now() - timedelta(seconds=_GUARD_LIMBO_SECONDS)
             rows = db.execute(_t(
                 "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
                 "AND updated_at < :cutoff ORDER BY id"
@@ -282,7 +282,7 @@ def _fallback_view(db) -> dict:
         rows = db.execute(_t(
             "SELECT worker_name, status, last_seen_at FROM worker_heartbeats ORDER BY worker_name"
         )).fetchall()
-        now = datetime.utcnow()
+        now = datetime.now()
         for wn, st, seen in rows:
             stale = True
             if seen:

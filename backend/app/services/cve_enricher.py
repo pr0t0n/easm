@@ -346,7 +346,7 @@ def enrich_cve_finding(finding: Any, db: Session, *, force: bool = False) -> boo
         if desc_short:
             finding.title = f"{cve_id}: {desc_short}"[:500]
 
-    finding.updated_at = datetime.utcnow() if hasattr(finding, "updated_at") else None
+    finding.updated_at = datetime.now() if hasattr(finding, "updated_at") else None
 
     return True
 

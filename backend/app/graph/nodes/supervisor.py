@@ -63,7 +63,7 @@ def _append_autonomy_entry(state: AgentState, key: str, payload: dict[str, Any])
     bucket.append(
         {
             **payload,
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now().isoformat(),
             "iteration": int(state.get("loop_iteration", 0)),
         }
     )
@@ -501,7 +501,7 @@ def _register_delegation_task(state: AgentState, node: str, reason: str, priorit
         "reason": reason,
         "priority": int(priority),
         "status": "pending",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now().isoformat(),
     }
     tasks.append(task)
     tasks.sort(key=lambda item: int(item.get("priority", 999)))
@@ -515,14 +515,14 @@ def _complete_delegation_task(state: AgentState, node: str, summary: str) -> Non
     for item in tasks:
         if str(item.get("node") or "") == node and str(item.get("status") or "") == "pending":
             item["status"] = "done"
-            item["completed_at"] = datetime.utcnow().isoformat()
+            item["completed_at"] = datetime.now().isoformat()
             item["summary"] = summary
             changed = True
             break
     state["delegated_tasks"] = tasks
     if changed:
         delegation_log = list(state.get("delegation_log") or [])
-        delegation_log.append({"node": node, "summary": summary, "ts": datetime.utcnow().isoformat()})
+        delegation_log.append({"node": node, "summary": summary, "ts": datetime.now().isoformat()})
         state["delegation_log"] = delegation_log
 
 

@@ -66,7 +66,7 @@ def _get_or_create_asset(
     port: int | None = None, protocol: str = "http",
 ) -> Asset:
     """Upsert an Asset row keyed on (owner_id, domain_or_ip, port)."""
-    now = datetime.utcnow()
+    now = datetime.now()
     q = db.query(Asset).filter(
         Asset.owner_id == owner_id,
         Asset.domain_or_ip == domain_or_ip,
@@ -105,7 +105,7 @@ def _upsert_vulnerability(
     """Create or update a Vulnerability row linked to the given asset/finding."""
     import math
 
-    now = datetime.utcnow()
+    now = datetime.now()
     fair_pillar = _TOOL_FAIR_PILLAR.get(tool, "patching_hygiene")
     cvss_score = cvss or _SEV_CVSS_FALLBACK.get(severity, 5.0)
 
@@ -241,7 +241,7 @@ def _touch_worker_heartbeat(
     hb.status = status
     hb.current_scan_id = scan_id
     hb.last_task_name = task_name
-    hb.last_seen_at = datetime.utcnow()
+    hb.last_seen_at = datetime.now()
     db.add(hb)
     try:
         db.flush()
@@ -254,7 +254,7 @@ def _touch_worker_heartbeat(
         hb.status = status
         hb.current_scan_id = scan_id
         hb.last_task_name = task_name
-        hb.last_seen_at = datetime.utcnow()
+        hb.last_seen_at = datetime.now()
         db.add(hb)
         db.flush()
     return hb
@@ -276,7 +276,7 @@ def worker_heartbeat() -> dict[str, Any]:
         if hb is None:
             hb = _touch_worker_heartbeat(db, scan_mode="unit", status="alive")
         else:
-            hb.last_seen_at = datetime.utcnow()
+            hb.last_seen_at = datetime.now()
             # Só rebaixa para 'alive' (idle) quando NÃO há scan em andamento;
             # preserva mode/current_scan_id/status de um worker ativo.
             if not hb.current_scan_id and str(hb.status or "").lower() not in {"running", "busy", "active"}:
@@ -416,7 +416,7 @@ def scheduler_tick():
             )
 
             # marca execução
-            sched.last_run_at = datetime.utcnow()
+            sched.last_run_at = datetime.now()
             db.add(sched)
             db.commit()
 
@@ -479,7 +479,7 @@ def _format_mission_progress(state_data: dict, current_step: str) -> str:
                     break
     
     lines = []
-    current_time = datetime.utcnow()
+    current_time = datetime.now()
     
     for idx, mission_name in enumerate(mission_items):
         if idx < mission_index:
@@ -1292,7 +1292,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                     open_medium_count=open_counts.get("medium", 0),
                     remediated_this_period=remediated_count,
                     pillar_scores=pillar_scores,
-                    recorded_at=datetime.utcnow(),
+                    recorded_at=datetime.now(),
                 )
                 db.add(history)
         
@@ -1779,7 +1779,7 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
             exponential_delay = int(min(max_delay, delay_seconds * (2 ** max(0, attempt - 1))))
             jitter = random.randint(0, max(1, min(15, delay_seconds // 2)))
             countdown = exponential_delay + jitter
-            next_retry_at = datetime.utcnow() + timedelta(seconds=countdown)
+            next_retry_at = datetime.now() + timedelta(seconds=countdown)
             job.status = "retrying"
             job.next_retry_at = next_retry_at
             job.current_step = f"Retry agendado ({attempt + 1}/{max_attempts})"
@@ -2159,7 +2159,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
             "limit": limit,
             "engine": "capacity_work_queue",
             "counts": counts,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now().isoformat(),
         }
         job.state_data = state
         if _should_log_dispatch:
@@ -2260,7 +2260,7 @@ def execute_scan_work_item(item_id: int):
         if not job:
             item.status = "failed"
             item.last_error = "scan_not_found"
-            item.finished_at = datetime.utcnow()
+            item.finished_at = datetime.now()
             db.commit()
             return {"error": "scan_not_found"}
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
@@ -2268,7 +2268,7 @@ def execute_scan_work_item(item_id: int):
                 item.status = "queued"
                 item.lease_until = None
                 item.last_error = f"{job.status}_before_execution"
-                item.updated_at = datetime.utcnow()
+                item.updated_at = datetime.now()
                 db.commit()
             return {"id": item.id, "status": item.status, "scan_status": job.status}
         if item.status not in {"dispatched", "queued", "retry"}:
@@ -2279,7 +2279,7 @@ def execute_scan_work_item(item_id: int):
         _meta_for_applicability = dict(item.item_metadata or {})
         _meta_for_applicability["applicability_dispatch"] = _applicability
         if not _applicability.get("applicable"):
-            now = datetime.utcnow()
+            now = datetime.now()
             reason = str(_applicability.get("reason") or "not_applicable")
             item.status = "skipped"
             item.lease_until = None
@@ -2341,7 +2341,7 @@ def execute_scan_work_item(item_id: int):
         else:
             item.item_metadata = _meta_for_applicability
 
-        now = datetime.utcnow()
+        now = datetime.now()
         item.status = "running"
         item.attempts = int(item.attempts or 0) + 1
         item.started_at = item.started_at or now
@@ -2423,7 +2423,7 @@ def execute_scan_work_item(item_id: int):
             item.status = "queued"
             item.lease_until = None
             item.last_error = f"{job.status}_after_submit"
-            item.updated_at = datetime.utcnow()
+            item.updated_at = datetime.now()
             db.commit()
             return {"id": item.id, "status": "queued", "scan_status": job.status}
         raw_status = str(result.get("status") or "").lower()
@@ -2434,11 +2434,11 @@ def execute_scan_work_item(item_id: int):
             if raw_status == "skipped":
                 item.status = "skipped"
                 item.lease_until = None
-                item.finished_at = datetime.utcnow()
+                item.finished_at = datetime.now()
             else:
                 item.status = "retry" if item.attempts < item.max_attempts else (raw_status or "failed")
-                item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
-                item.finished_at = datetime.utcnow() if item.status != "retry" else None
+                item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
+                item.finished_at = datetime.now() if item.status != "retry" else None
             item.last_error = str(result.get("error") or "mcp_submit_failed")[:2000]
         else:
             timeout = int(result.get("timeout") or 300)
@@ -2446,7 +2446,7 @@ def execute_scan_work_item(item_id: int):
             # lease = tool_timeout + generous polling buffer (at least 600s / 10 min)
             # This prevents premature expiration when poll tasks are briefly delayed
             # (e.g. during worker pool contention on startup).
-            item.lease_until = datetime.utcnow() + timedelta(seconds=max(600, timeout + 300))
+            item.lease_until = datetime.now() + timedelta(seconds=max(600, timeout + 300))
             item.last_error = None
             item.result = {
                 "status": "submitted",
@@ -2457,10 +2457,10 @@ def execute_scan_work_item(item_id: int):
                 "profile": result.get("profile"),
                 "timeout": timeout,
                 "execution_path": result.get("execution_path"),
-                "submitted_at": datetime.utcnow().isoformat(),
+                "submitted_at": datetime.now().isoformat(),
             }
             poll_scan_work_item.apply_async(args=[item.id], countdown=5)
-        item.updated_at = datetime.utcnow()
+        item.updated_at = datetime.now()
         try:
             execution_key = f"wi-{item.id}"
             run = (
@@ -2482,7 +2482,7 @@ def execute_scan_work_item(item_id: int):
                     execution_key=execution_key,
                     arguments_hash=str(item.id)[:80],
                     status=str(item.status or "submitted")[:50],
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 )
                 db.add(run)
             run.phase_id = str(item.phase_id or "")[:10] or None
@@ -2515,8 +2515,8 @@ def execute_scan_work_item(item_id: int):
         if item:
             item.status = "retry" if int(item.attempts or 0) < int(item.max_attempts or 1) else "failed"
             item.last_error = str(exc)[:2000]
-            item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
-            item.finished_at = datetime.utcnow() if item.status == "failed" else None
+            item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
+            item.finished_at = datetime.now() if item.status == "failed" else None
             # ── Camada 0: semaphore leak fix — release slot on exception ──────
             if item.status == "failed":
                 try:
@@ -2557,7 +2557,7 @@ def poll_scan_work_item(item_id: int):
             item.status = "queued"
             item.lease_until = None
             item.last_error = f"{job.status}_before_poll"
-            item.updated_at = datetime.utcnow()
+            item.updated_at = datetime.now()
             db.commit()
             return {"id": item.id, "status": "queued", "scan_status": job.status}
         result_state = dict(item.result or {})
@@ -2565,8 +2565,8 @@ def poll_scan_work_item(item_id: int):
         if not kali_job_id:
             item.status = "retry" if item.attempts < item.max_attempts else "failed"
             item.last_error = "missing_kali_job_id"
-            item.lease_until = datetime.utcnow() + timedelta(seconds=120) if item.status == "retry" else None
-            item.finished_at = datetime.utcnow() if item.status == "failed" else None
+            item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
+            item.finished_at = datetime.now() if item.status == "failed" else None
             db.commit()
             return {"id": item.id, "status": item.status}
 
@@ -2578,11 +2578,11 @@ def poll_scan_work_item(item_id: int):
         status_payload = dict(status_response.json())
         raw_status = str(status_payload.get("status") or "").lower()
         if raw_status not in {"done", "failed", "timeout", "skipped"}:
-            item.lease_until = datetime.utcnow() + timedelta(seconds=300)
-            result_state["last_poll"] = datetime.utcnow().isoformat()
+            item.lease_until = datetime.now() + timedelta(seconds=300)
+            result_state["last_poll"] = datetime.now().isoformat()
             result_state["kali_status"] = raw_status or "running"
             item.result = result_state
-            item.updated_at = datetime.utcnow()
+            item.updated_at = datetime.now()
             db.commit()
             poll_scan_work_item.apply_async(args=[item.id], countdown=15)
             return {"id": item.id, "status": "submitted", "kali_status": raw_status}
@@ -2604,7 +2604,7 @@ def poll_scan_work_item(item_id: int):
                 item.status = "queued"
                 item.lease_until = None
                 item.last_error = f"{job.status}_before_result_persist"
-                item.updated_at = datetime.utcnow()
+                item.updated_at = datetime.now()
                 db.commit()
                 return {"id": item.id, "status": "queued", "scan_status": job.status}
         exit_code = result.get("return_code", result.get("exit_code"))
@@ -2613,8 +2613,8 @@ def poll_scan_work_item(item_id: int):
             terminal = "retry"
 
         item.status = terminal
-        item.finished_at = datetime.utcnow() if terminal != "retry" else None
-        item.lease_until = None if terminal != "retry" else datetime.utcnow() + timedelta(seconds=120)
+        item.finished_at = datetime.now() if terminal != "retry" else None
+        item.lease_until = None if terminal != "retry" else datetime.now() + timedelta(seconds=120)
         item.last_error = str(result.get("error") or "")[:2000] or None
 
         # Libera slot no semáforo Redis global quando tarefa termina (não é retry)
@@ -2653,9 +2653,9 @@ def poll_scan_work_item(item_id: int):
             "stdout_preview": _full_stdout[:3000],       # display only
             "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
             "parsed_result": _parsed_result,
-            "finished_at": datetime.utcnow().isoformat(),
+            "finished_at": datetime.now().isoformat(),
         }
-        item.updated_at = datetime.utcnow()
+        item.updated_at = datetime.now()
         db.commit()
         db.refresh(item)
         if job:
@@ -2687,7 +2687,7 @@ def poll_scan_work_item(item_id: int):
                         float(result.get("duration_seconds"))
                         if result.get("duration_seconds") is not None else None
                     ),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 )
                 .on_conflict_do_update(
                     constraint="uq_executed_tool_runs_scan_execution_key",
@@ -2765,7 +2765,7 @@ def poll_scan_work_item(item_id: int):
                     duration_ms=float(result.get("duration_seconds") or 0.0) * 1000.0,
                     efficiency_score=_efficiency,
                     productivity_score=_productivity,
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 ))
                 db.add(AgentTraceEvent(
                     scan_id=item.scan_job_id,
@@ -2786,7 +2786,7 @@ def poll_scan_work_item(item_id: int):
                         "skill_consultation_ids": list(_feedback_meta.get("skill_consultation_ids") or []),
                         "learning_used": bool(_feedback_meta.get("learning_sources")),
                     },
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 ))
             db.commit()
 
@@ -3574,7 +3574,7 @@ def poll_scan_work_item(item_id: int):
             _over_limit = int(item.attempts or 0) >= int(item.max_attempts or 2)
             if _over_limit:
                 item.status = "failed"
-                item.finished_at = datetime.utcnow()
+                item.finished_at = datetime.now()
                 item.lease_until = None
                 # ── Camada 0: semaphore leak fix — release slot on exception ──
                 try:
@@ -3583,8 +3583,8 @@ def poll_scan_work_item(item_id: int):
                 except Exception:
                     pass
             else:
-                item.lease_until = datetime.utcnow() + timedelta(seconds=120)
-            item.updated_at = datetime.utcnow()
+                item.lease_until = datetime.now() + timedelta(seconds=120)
+            item.updated_at = datetime.now()
             db.commit()
             if not _over_limit:
                 poll_scan_work_item.apply_async(args=[item.id], countdown=30)

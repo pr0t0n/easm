@@ -299,7 +299,7 @@ def run_osint_phase_zero(
                 "top_findings": (gh.get("findings") or [])[:3],
                 "needs_verification": True,
             },
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
         db.add(f)
         findings_created += 1
@@ -324,7 +324,7 @@ def run_osint_phase_zero(
                 "needs_verification": True,
                 "verification_note": "Requer teste de credential stuffing para confirmar credenciais válidas.",
             },
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
         db.add(f)
         findings_created += 1
@@ -355,7 +355,7 @@ def run_osint_phase_zero(
                 ],
                 "needs_verification": True,
             },
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
         db.add(f)
         findings_created += 1

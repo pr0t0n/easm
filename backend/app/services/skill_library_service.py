@@ -581,7 +581,7 @@ def get_activity_demand_for_capability(
         "objective": objective,
         "quality_criteria": quality_criteria,
         "target": target,
-        "demanded_at": datetime.utcnow().isoformat(),
+        "demanded_at": datetime.now().isoformat(),
         "iteration": iteration,
     }
 
@@ -648,7 +648,7 @@ def update_agent_activity_log(
             return
         for key, val in fields.items():
             setattr(entry, key, val)
-        entry.updated_at = datetime.utcnow()
+        entry.updated_at = datetime.now()
         db.commit()
     except Exception as exc:
         db.rollback()

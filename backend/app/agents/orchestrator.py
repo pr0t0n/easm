@@ -17,7 +17,7 @@ class AgentOrchestrator:
         self.phase_id = phase_id
         self.agents = get_agents_for_phase(phase_id)
         self.execution_log: list[dict[str, Any]] = []
-        self.start_time = datetime.utcnow().isoformat()
+        self.start_time = datetime.now().isoformat()
 
     def get_mandatory_agents(self) -> list[str]:
         """Return agent IDs that MUST execute for this phase."""
@@ -50,7 +50,7 @@ class AgentOrchestrator:
         self.execution_log.append({
             "agent_id": agent_id,
             "status": status,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "details": dict(details or {}),
         })
 
@@ -70,7 +70,7 @@ class AgentOrchestrator:
             "mandatory_failed": len(mandatory_failed),
             "execution_log": self.execution_log,
             "start_time": self.start_time,
-            "end_time": datetime.utcnow().isoformat(),
+            "end_time": datetime.now().isoformat(),
             "all_mandatory_executed": len(mandatory_failed) == 0,
         }
 

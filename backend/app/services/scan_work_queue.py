@@ -419,7 +419,7 @@ def _skill_consultations_for_phase(
                 f"Skill {skill_id} consultada para {phase_id}; selecionada={selected_for_execution} "
                 f"score={round(best_score, 4)} com ferramentas aplicáveis: {', '.join(applicable_tools) or 'nenhuma'}."
             ),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now().isoformat(),
         })
     return consultations
 
@@ -457,7 +457,7 @@ def _append_skill_consultations_to_state(
             capability=str(consultation.get("phase_id") or "")[:100],
             status="selected" if consultation.get("selected") else "consulted",
             payload=consultation,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         ))
     if not added:
         return
@@ -976,7 +976,7 @@ def unblock_phase_items(
     if not phases_to_unlock or not targets:
         return 0
 
-    now = datetime.utcnow()
+    now = datetime.now()
     # Inclui batch items cujos batch_targets intersectam com os targets dados
     # Para batch: target='__batch__', batch_targets em item_metadata
     updated = (
@@ -1147,7 +1147,7 @@ def enqueue_scan_work_items(
                 existing_batch.item_metadata = old_meta
                 if existing_batch.status == "blocked" and not existing_batch.last_error:
                     existing_batch.last_error = initial_last_error_for_phase(phase_id)
-                existing_batch.updated_at = datetime.utcnow()
+                existing_batch.updated_at = datetime.now()
                 db.flush()
             existing += 1
             continue
@@ -1197,8 +1197,8 @@ def enqueue_scan_work_items(
                 "high_risk": best_boost < 0,
                 "applicability": _tool_applicability_decision(phase_id, tool, "__batch__", state, at="enqueue"),
             }, phase_id, tool, source=source),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         try:
@@ -1266,8 +1266,8 @@ def enqueue_scan_work_items(
             last_error=initial_last_error_for_phase(phase_id),
             max_attempts=2,
             item_metadata=apply_phase_tool_metadata(_item_meta, phase_id, tool, source=source),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         try:
@@ -1461,7 +1461,7 @@ def enrich_phase_ledgers_from_work_items(db: Session, job: ScanJob) -> dict[str,
 
 
 def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> list[int]:
-    now = datetime.utcnow()
+    now = datetime.now()
     lease_until = now + timedelta(seconds=max(60, int(settings.scan_work_queue_lease_seconds)))
     dispatch_limit = max(1, int(limit or settings.scan_work_queue_dispatch_limit))
     caps = capacity_limits()
@@ -1660,9 +1660,9 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
     count = 0
     for item in cancelled:
         item.status = "skipped"
-        item.result = {"skipped_reason": f"target_triage:{reason}", "triage_at": datetime.utcnow().isoformat()}
+        item.result = {"skipped_reason": f"target_triage:{reason}", "triage_at": datetime.now().isoformat()}
         item.last_error = f"skipped:target_triage:{reason}"
-        item.updated_at = datetime.utcnow()
+        item.updated_at = datetime.now()
         count += 1
     if count:
         db.commit()
@@ -1735,7 +1735,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
     )
 
     cancelled = 0
-    now = datetime.utcnow()
+    now = datetime.now()
     for wi in items_to_cancel:
         wi.status = "skipped"
         wi.result = {
@@ -1785,7 +1785,7 @@ def has_pending_work(db: Session, scan_id: int) -> bool:
     fires. Including them prevents premature scan completion when the
     active queue temporarily drains while blocked items wait.
     """
-    now = datetime.utcnow()
+    now = datetime.now()
     return db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,
         or_(

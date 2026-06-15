@@ -94,7 +94,7 @@ def detect_and_alert_surface_changes(db: Session, job: ScanJob) -> dict[str, Any
                 "target": job.target_query,
                 "new_subdomains": new_subs[:200],
             },
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         ))
         db.flush()
         return {"baseline": False, "new_subdomains": len(new_subs)}

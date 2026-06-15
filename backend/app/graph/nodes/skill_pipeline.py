@@ -422,7 +422,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "sub_agent_plan": list(runtime_invocation.get("sub_agent_plan") or []),
                 "confidence": runtime_invocation.get("confidence", 0.9),
                 "playbook_title": playbook.get("title"),
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now().isoformat(),
             }
             invocations = list(state.get("skill_invocations") or [])
             invocations.append(invocation_record)
@@ -517,7 +517,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "sub_agent_plan": list(invocation.get("sub_agent_plan") or []),
                 "confidence": invocation.get("confidence", 0.7),
                 "playbook_title": playbook.get("title"),
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now().isoformat(),
             }
             invocations = list(state.get("skill_invocations") or [])
             invocations.append(invocation_record)
@@ -1277,7 +1277,7 @@ def tool_executor_node(state: AgentState) -> AgentState:
                 "findings_added": int(findings_added),
                 "targets_executed": int(targets_executed),
                 "reason": reason,
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": datetime.now().isoformat(),
             }
         )
         state["pentest_tactics_completed"] = completed_tactics[-40:]
@@ -1765,7 +1765,7 @@ def agent_reporter_node(state: AgentState) -> AgentState:
             f"{findings_count} achados coletados com '{tool_used}'. "
             "Foi satisfatório para avançar na Kill Chain?"
         ),
-        "reported_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "reported_at": __import__("datetime").datetime.now().isoformat(),
         "iteration": int(state.get("loop_iteration", 0)),
     }
     state["agent_report"] = report

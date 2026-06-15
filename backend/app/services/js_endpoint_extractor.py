@@ -256,8 +256,8 @@ def seed_high_value_probes(
                 "discovered_paths": (high_value_urls + sensitive_urls)[:10],
                 "api_path_count": len(api_paths),
             }, phase_id, tool_name, source="js_endpoint_extractor"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         try:

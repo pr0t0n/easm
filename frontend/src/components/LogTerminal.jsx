@@ -2,8 +2,10 @@ export default function LogTerminal({ logs }) {
   const parseLogDate = (value) => {
     const raw = String(value || "").trim();
     if (!raw) return new Date();
-    // Timestamps sem timezone vindos do backend representam UTC.
-    const normalized = /z$|[+-]\d\d:\d\d$/i.test(raw) ? raw : `${raw}Z`;
+    // Timestamps do backend são gravados em -03 (America/Sao_Paulo), naive.
+    // Ancorar explicitamente em -03 para exibir o relógio de parede correto
+    // independente do fuso do navegador.
+    const normalized = /z$|[+-]\d\d:\d\d$/i.test(raw) ? raw : `${raw.replace(" ", "T")}-03:00`;
     const parsed = new Date(normalized);
     return Number.isNaN(parsed.getTime()) ? new Date(raw) : parsed;
   };
@@ -15,7 +17,7 @@ export default function LogTerminal({ logs }) {
         {logs.length === 0 && <p>Nenhum log ainda.</p>}
         {logs.map((log) => (
           <p key={log.id}>
-            [{parseLogDate(log.created_at).toLocaleTimeString("pt-BR")}] {log.source}: {log.message}
+            [{parseLogDate(log.created_at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" })}] {log.source}: {log.message}
           </p>
         ))}
       </div>

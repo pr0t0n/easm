@@ -108,7 +108,7 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
         tool_name=tool_name, profile=tool_name, resource_class=rc,
         priority=pri - 10, status="queued", max_attempts=2,
         item_metadata=apply_phase_tool_metadata(metadata, phase_id, tool_name, source=str((metadata or {}).get("source") or "endpoint_discovery")),
-        created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        created_at=datetime.now(), updated_at=datetime.now(),
     ))
     try:
         db.flush()

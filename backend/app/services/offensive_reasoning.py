@@ -413,7 +413,7 @@ def evaluate_finding_offensively(finding: dict[str, Any]) -> dict[str, Any]:
         "attack_capability_gained": attack_capability_gained,
         "chaining_tags": chaining_tags,
         "impact_score": impact_score,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
 
 
@@ -533,7 +533,7 @@ def generate_hypotheses(observations: list[dict[str, Any]]) -> list[dict[str, An
                 "test_phases": list(template["test_phases"]),
                 "priority": template["priority"],
                 "status": "open",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now().isoformat(),
                 "validated": False,
                 "validation_result": None,
             })
@@ -565,7 +565,7 @@ def build_attack_path_fragment(
         "capability_gained": str(observation.get("attack_capability_gained") or ""),
         "chaining_tags": list(observation.get("chaining_tags") or []),
         "impact_score": int(observation.get("impact_score") or 0),
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
 
 
@@ -618,7 +618,7 @@ def consolidate_attack_paths(fragments: list[dict[str, Any]]) -> list[dict[str, 
         "depth": len(path_steps),
         "impact_score": total_impact,
         "chaining_tags": sorted(all_tags),
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now().isoformat(),
         "validated": False,
     })
 
@@ -680,7 +680,7 @@ def generate_post_exploitation_tasks(observations: list[dict[str, Any]]) -> list
                         "priority": template["priority"],
                         "triggered_by_signal": signal,
                         "status": "pending",
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": datetime.now().isoformat(),
                     })
 
     tasks.sort(key=lambda t: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(t["priority"], 4))
@@ -791,7 +791,7 @@ def apply_offensive_reasoning(
                         "phase_id": ph,
                         "reason": obs["attack_capability_gained"],
                         "priority_boost": 8,
-                        "ts": datetime.utcnow().isoformat(),
+                        "ts": datetime.now().isoformat(),
                     })
                     logger.info(
                         "OFFENSIVE_REASONING [%s] phase_promotion=%s reason=%s",
@@ -873,7 +873,7 @@ def apply_offensive_reasoning(
     campaign["phase_promotions"] = phase_promotions
     campaign["chaining_candidates"] = chaining_candidates[-100:]
     campaign["offensive_state"] = offensive_state
-    campaign["last_reasoning_at"] = datetime.utcnow().isoformat()
+    campaign["last_reasoning_at"] = datetime.now().isoformat()
     campaign["last_reasoning_phase"] = phase_id
 
     logger.info(

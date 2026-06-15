@@ -212,8 +212,8 @@ def _seed_credential_test(
                 "propagation_type": "credential_stuffing",
                 "engine": "cross_target_propagator",
             }, phase_id, tool_name, source="cross_target_propagator"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         db.flush()
@@ -277,8 +277,8 @@ def _seed_version_cve_for_target(
                 "propagation_type": "shared_version",
                 "engine": "cross_target_propagator",
             }, phase_id, tool_name, source="cross_target_propagator"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         db.flush()
@@ -364,7 +364,7 @@ def propagate_credential_findings(
                     "propagation_type": "credential_stuffing",
                     "owasp_category": "A07:2021 Identification and Authentication Failures",
                 },
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             ))
             db.flush()
     except Exception:

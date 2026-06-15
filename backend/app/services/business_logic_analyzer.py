@@ -965,7 +965,7 @@ def run_business_logic_scan(
                 details=details_payload,
                 retest_status=bf.get("validation_status", "hypothesis"),
                 risk_score=int(bf.get("details", {}).get("cvss_estimate", 5.0)),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             total_findings += 1

@@ -193,7 +193,7 @@ def _requeue_inflight_work_items_for_pause(db: Session, scan_id: int) -> int:
         kali_inflight_release = None
 
     released_by_class: dict[str, int] = {}
-    now = datetime.utcnow()
+    now = datetime.now()
     for item in items:
         if item.status in {"running", "submitted"}:
             resource_class = str(item.resource_class or "light")
@@ -238,7 +238,7 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
             if scan_id is not None:
                 active_scan_ids.add(scan_id)
 
-    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    cutoff = datetime.now() - timedelta(minutes=10)
     stale_rows = (
         db.query(ScanJob)
         .filter(ScanJob.status.in_(["running", "retrying"]), ScanJob.updated_at < cutoff)
@@ -3159,7 +3159,7 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User =
     pause_control = dict(state.get("pause_control") or {})
     pause_control.update(
         {
-            "paused_at": datetime.utcnow().isoformat(),
+            "paused_at": datetime.now().isoformat(),
             "resume_step": previous_step,
             "revoked_task_ids": task_ids,
             "requeued_work_items": requeued_items,
@@ -3219,7 +3219,7 @@ def resume_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     state = dict(job.state_data or {})
     pause_control = dict(state.get("pause_control") or {})
     resume_step = str(pause_control.get("resume_step") or job.current_step or "Retomando scan")
-    pause_control["resumed_at"] = datetime.utcnow().isoformat()
+    pause_control["resumed_at"] = datetime.now().isoformat()
     state["pause_control"] = pause_control
     job.state_data = state
     job.status = "queued"
@@ -3947,7 +3947,7 @@ def vulnerability_management_dashboard(
         lifecycle_query = lifecycle_query.filter(Finding.severity == severity_filter)
 
     if period_days:
-        window_start = datetime.utcnow() - timedelta(days=int(period_days))
+        window_start = datetime.now() - timedelta(days=int(period_days))
         query = query.filter(Finding.created_at >= window_start)
         lifecycle_query = lifecycle_query.filter(Finding.created_at >= window_start)
 
@@ -4146,7 +4146,7 @@ def vulnerability_management_dashboard(
             "closure_rate_percent": closure_rate,
         },
         "vulnerabilities": vulnerabilities,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now().isoformat(),
     }
 
 
@@ -7760,7 +7760,7 @@ def get_vulnerability_report(
             "high_count": high_ct,
             "medium_count": medium_ct,
             "avg_age_days": int(sum(
-                (datetime.utcnow() - v.first_detected).days 
+                (datetime.now() - v.first_detected).days 
                 for v in asset_vulns if v.first_detected
             ) / max(1, len(asset_vulns))) if asset_vulns else 0,
         })

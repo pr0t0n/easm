@@ -39,7 +39,7 @@ def emit_trace(
                 status=str(status),
                 duration_ms=float(duration_ms) if duration_ms is not None else None,
                 payload=dict(payload or {}),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(event)
             db.commit()
@@ -97,7 +97,7 @@ def save_skill_score(
                     iteration=int(iteration),
                     skill_id=str(skill_id),
                     capability=str(capability),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 )
                 db.add(score)
             score.library_hits = max(int(score.library_hits or 0), int(library_hits))

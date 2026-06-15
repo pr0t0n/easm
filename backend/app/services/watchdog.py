@@ -69,7 +69,7 @@ def _restart_kali() -> bool:
 def run_watchdog(db) -> dict:
     """Verifica saúde funcional + stall de scan; auto-recupera. Idempotente."""
     report = {"kali_functional": True, "kali_restarted": False,
-              "stalled_scans": [], "requeued": 0, "checked_at": datetime.utcnow().isoformat()}
+              "stalled_scans": [], "requeued": 0, "checked_at": datetime.now().isoformat()}
 
     # Prova de vida do auto-curador: grava ANTES de qualquer trabalho, para que o
     # guardião do backend saiba que beat→worker_scope→watchdog está vivo.
@@ -145,7 +145,7 @@ def run_watchdog(db) -> dict:
     try:
         # cutoff em UTC-naive (coluna updated_at é UTC-naive). Comparar com now()
         # do postgres (-03) desviava ~3h e só pegava scans muito antigos.
-        _cutoff = datetime.utcnow() - timedelta(seconds=_LIMBO_SECONDS)
+        _cutoff = datetime.now() - timedelta(seconds=_LIMBO_SECONDS)
         limbo_rows = db.execute(text(
             "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
             "AND updated_at < :cutoff ORDER BY id"
@@ -174,15 +174,14 @@ def run_watchdog(db) -> dict:
     try:
         from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running
         from app.models.models import ScanLog
-        # Relógio ÚNICO (UTC): created_at é gravado pelo app em UTC-naive; now()
-        # do PG é -03 → comparar direto desviava ~3h e dava idle≈3h SEMPRE (até
-        # p/ scan vivo → re-dispatch a cada minuto, falso positivo). timezone('UTC',
-        # now()) traz o agora em UTC-naive, consistente com created_at. Exclui os
-        # próprios logs do watchdog (senão a recuperação reseta o sinal de vida).
+        # Relógio ÚNICO (-03): created_at agora é gravado pelo app em -03 (naive,
+        # via datetime.now() com TZ=America/Sao_Paulo) e now() do PG também é -03 →
+        # comparar direto é consistente, idle real. Exclui os próprios logs do
+        # watchdog (senão a recuperação reseta o sinal de vida).
         stuck = db.execute(text(
             """
             SELECT j.id,
-                   EXTRACT(EPOCH FROM (timezone('UTC', now()) - COALESCE(
+                   EXTRACT(EPOCH FROM (now() - COALESCE(
                        (SELECT max(l.created_at) FROM scan_logs l
                          WHERE l.scan_job_id = j.id AND l.source <> 'watchdog'),
                        j.updated_at)))::int AS idle_s

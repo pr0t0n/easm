@@ -50,7 +50,7 @@ def _mark_phase_running(ledger: dict[str, Any], phase_id: str, phase_name: str) 
     entry["phase_id"] = phase_id
     entry["name"] = phase_name
     entry["status"] = "running"
-    entry["started_at"] = entry.get("started_at") or datetime.utcnow().isoformat()
+    entry["started_at"] = entry.get("started_at") or datetime.now().isoformat()
     ledger[phase_id] = entry
 
 
@@ -63,7 +63,7 @@ def _mark_phase_completed(
 ) -> None:
     entry = _ledger_entry(ledger, phase_id)
     entry["status"] = "completed"
-    entry["completed_at"] = datetime.utcnow().isoformat()
+    entry["completed_at"] = datetime.now().isoformat()
     entry["exit_criteria_met"] = True
     entry["can_advance"] = True
     entry["evidence_persisted"] = evidence_persisted
@@ -71,7 +71,7 @@ def _mark_phase_completed(
         "status": "completed",
         "reason": reason,
         "can_advance": True,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     # Merge tools_succeeded without duplicates
     existing = list(entry.get("tools_succeeded") or [])
@@ -96,7 +96,7 @@ def _mark_phase_partial(
         "status": "partial",
         "reason": reason,
         "can_advance": False,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     ledger[phase_id] = entry
 
@@ -115,7 +115,7 @@ def _mark_phase_failed(
         "status": "failed",
         "reason": reason,
         "can_advance": False,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     ledger[phase_id] = entry
 
@@ -129,12 +129,12 @@ def _mark_phase_skipped(
     entry["status"] = "skipped"
     entry["can_advance"] = True
     entry["skip_reason"] = skip_reason
-    entry["completed_at"] = datetime.utcnow().isoformat()
+    entry["completed_at"] = datetime.now().isoformat()
     entry["validation_result"] = {
         "status": "skipped",
         "reason": skip_reason,
         "can_advance": True,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     ledger[phase_id] = entry
 
@@ -244,7 +244,7 @@ class AgentSupervisor:
         self.db = db or SessionLocal()
         self.scan: ScanJob | None = None
         self.phase_ledger: dict[str, Any] = {}
-        self.started_at = datetime.utcnow().isoformat()
+        self.started_at = datetime.now().isoformat()
         self._load_scan()
 
     def _load_scan(self) -> None:
@@ -325,7 +325,7 @@ class AgentSupervisor:
             "phase_name": phase_name,
             "scan_id": self.scan_id,
             "status": "submitted",
-            "submitted_at": datetime.utcnow().isoformat(),
+            "submitted_at": datetime.now().isoformat(),
         }
 
     def validate_and_advance(self, phase_id: str, retry_count: int = 0) -> dict[str, Any]:
@@ -496,7 +496,7 @@ class AgentSupervisor:
         return {
             "scan_id": self.scan_id,
             "started_at": self.started_at,
-            "current_time": datetime.utcnow().isoformat(),
+            "current_time": datetime.now().isoformat(),
             "pentest_phase_index": self._current_phase_index(),
             "phases_total": len(PENTEST_PHASES),
             "phases_completed": len(completed),

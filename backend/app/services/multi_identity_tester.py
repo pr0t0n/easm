@@ -305,7 +305,7 @@ def run_multi_identity_test(db, job, target: str) -> dict[str, Any]:
                 "evidence": f_dict.get("evidence"),
                 "test_type": "bola",
             },
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
         db.add(f)
         findings_created += 1

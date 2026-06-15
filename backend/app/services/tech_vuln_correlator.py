@@ -742,8 +742,8 @@ def _seed_attack_profile_for_tech(
                     "tech_keyword": tech_kw,
                     "engine": "tech_vuln_correlator",
                 }, phase_id, tool_name, source="tech_attack_profile"),
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
             )
             db.add(item)
             try:
@@ -814,8 +814,8 @@ def _seed_targeted_nuclei(
             "detected_tech": product,
             "engine": "tech_vuln_correlator",
         }, phase_id, tool_name, source="tech_correlator"),
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
     )
     db.add(item)
     try:
@@ -920,7 +920,7 @@ def _add_learning_work_item(
         priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
         status="queued", max_attempts=2,
         item_metadata=apply_phase_tool_metadata(metadata, phase_id, tname, source=str(metadata.get("source") or "learning_work_item")),
-        created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        created_at=datetime.now(), updated_at=datetime.now(),
     ))
     try:
         db.flush()

@@ -22,7 +22,7 @@ class AccessGroup(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     description: Mapped[str] = mapped_column(String(500), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class User(Base):
@@ -33,7 +33,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     groups = relationship("AccessGroup", secondary=user_access_groups, lazy="joined")
 
@@ -58,8 +58,8 @@ class ScanJob(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     state_data: Mapped[dict] = mapped_column(JSONB, default=dict)
     tech_stack: Mapped[list] = mapped_column(JSONB, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     logs = relationship("ScanLog", back_populates="scan_job", cascade="all, delete-orphan")
     findings = relationship("Finding", back_populates="scan_job", cascade="all, delete-orphan")
@@ -73,7 +73,7 @@ class ScanLog(Base):
     source: Mapped[str] = mapped_column(String(100), default="manager")
     level: Mapped[str] = mapped_column(String(20), default="INFO")
     message: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob", back_populates="logs")
 
@@ -109,7 +109,7 @@ class Finding(Base):
     verification_status: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     # Endpoint específico do finding para business-impact scoring
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     scan_job = relationship("ScanJob", back_populates="findings")
     fp_reviewed_by = relationship("User", foreign_keys=[fp_reviewed_by_id])
@@ -134,7 +134,7 @@ class ExecutedToolRun(Base):
     status: Mapped[str] = mapped_column(String(50), default="success")  # success, failed, skipped
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob")
 
@@ -169,8 +169,8 @@ class ScanWorkItem(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     result: Mapped[dict] = mapped_column(JSONB, default=dict)
     item_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     scan_job = relationship("ScanJob")
 
@@ -185,7 +185,7 @@ class ScanAuditLog(Base):
     node_name: Mapped[str] = mapped_column(String(100), index=True)  # supervisor, strategic_planning, etc
     entry_type: Mapped[str] = mapped_column(String(50), index=True)  # note, todo, action, observation, error
     content: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob")
 
@@ -198,7 +198,7 @@ class FalsePositiveMemory(Base):
     signature: Mapped[str] = mapped_column(String(500), index=True)
     embedding_ref: Mapped[str] = mapped_column(String(255))
     memory_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class VulnerabilityLearning(Base):
@@ -231,8 +231,8 @@ class VulnerabilityLearning(Base):
     accepted_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     owner = relationship("User", foreign_keys=[owner_id])
     accepted_by = relationship("User", foreign_keys=[accepted_by_id])
@@ -253,8 +253,8 @@ class ScheduledScan(Base):
     day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class AppSetting(Base):
@@ -264,7 +264,7 @@ class AppSetting(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     key: Mapped[str] = mapped_column(String(100), index=True)
     value: Mapped[str] = mapped_column(Text, default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class OperationLine(Base):
@@ -277,8 +277,8 @@ class OperationLine(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     definition: Mapped[dict] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class WorkerHeartbeat(Base):
@@ -290,8 +290,8 @@ class WorkerHeartbeat(Base):
     status: Mapped[str] = mapped_column(String(20), default="idle", index=True)
     current_scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True, index=True)
     last_task_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class ScanAuthorization(Base):
@@ -307,7 +307,7 @@ class ScanAuthorization(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class AuditEvent(Base):
@@ -320,7 +320,7 @@ class AuditEvent(Base):
     level: Mapped[str] = mapped_column(String(20), default="INFO")
     message: Mapped[str] = mapped_column(Text)
     event_metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 
 class ClientPolicy(Base):
@@ -330,8 +330,8 @@ class ClientPolicy(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), default="Default Policy")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class PolicyAllowlistEntry(Base):
@@ -342,7 +342,7 @@ class PolicyAllowlistEntry(Base):
     target_pattern: Mapped[str] = mapped_column(String(500), index=True)
     tool_group: Mapped[str] = mapped_column(String(50), default="*")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -368,8 +368,8 @@ class Asset(Base):
     scan_count: Mapped[int] = mapped_column(Integer, default=0)
     last_scan_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True)
     asset_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     vulnerabilities = relationship("Vulnerability", back_populates="asset", cascade="all, delete-orphan")
     rating_history = relationship("AssetRatingHistory", back_populates="asset", cascade="all, delete-orphan")
@@ -398,8 +398,8 @@ class Vulnerability(Base):
     ra_score: Mapped[float] = mapped_column(sa.Float, default=0.0)  # Risk score
     remediation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     vulnerability_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     asset = relationship("Asset", back_populates="vulnerabilities")
     finding = relationship("Finding", foreign_keys=[finding_id])
@@ -444,7 +444,7 @@ class EASMAlert(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     webhook_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 
 class EASMAlertRule(Base):
@@ -461,8 +461,8 @@ class EASMAlertRule(Base):
     webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     notify_channels: Mapped[dict] = mapped_column(JSONB, default=dict)  # ["email", "slack", "pagerduty"]
     asset_filter: Mapped[dict] = mapped_column(JSONB, default=dict)  # {min_criticality: 70, types: [...]}
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -482,7 +482,7 @@ class SkillLibrary(Base):
     objective: Mapped[str] = mapped_column(Text, default="")
     quality_criteria: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     tool_mappings = relationship("SkillToolMapping", back_populates="skill", cascade="all, delete-orphan")
 
@@ -499,7 +499,7 @@ class SkillToolMapping(Base):
     evidence_type: Mapped[str] = mapped_column(String(120), default="")
     parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     skill = relationship("SkillLibrary", back_populates="tool_mappings")
 
@@ -523,8 +523,8 @@ class AgentActivityLog(Base):
     supervisor_evaluation: Mapped[dict] = mapped_column(JSONB, default=dict)
     approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     scan_job = relationship("ScanJob")
 
@@ -545,7 +545,7 @@ class AgentTraceEvent(Base):
     status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob", foreign_keys=[scan_id])
 
@@ -568,6 +568,6 @@ class SkillScore(Base):
     duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
     efficiency_score: Mapped[float] = mapped_column(Float, default=0.0)
     productivity_score: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob", foreign_keys=[scan_id])

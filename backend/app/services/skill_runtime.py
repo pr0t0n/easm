@@ -708,7 +708,7 @@ def resolve_skill_invocation(
         "confidence": confidence,
         "source": "accepted_learning+skill_catalog" if learning.get("techniques") else "skill_catalog",
         "playbook_title": (playbook or {}).get("title"),
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now().isoformat(),
     }
 
     # Attach structured .md skill contract when found

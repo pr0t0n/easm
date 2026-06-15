@@ -236,8 +236,8 @@ def seed_attack_chain_items(
                 "rationale": chain.get("rationale", "")[:300],
                 "llm_proposed": True,
             }, phase, tool[:120], source="llm_operator"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
         )
         db.add(item)
         try:

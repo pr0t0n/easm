@@ -417,7 +417,7 @@ def run_attack_narrative(db, job) -> dict[str, Any]:
     # Store in state_data
     state["attack_narrative"] = narrative
     state["attack_narrative_method"] = method
-    state["attack_narrative_generated_at"] = __import__("datetime").datetime.utcnow().isoformat()
+    state["attack_narrative_generated_at"] = __import__("datetime").datetime.now().isoformat()
     job.state_data = state
 
     db.add(ScanLog(

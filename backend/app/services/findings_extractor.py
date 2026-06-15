@@ -2513,7 +2513,7 @@ def persist_finding_dicts(
             details=details,
             verification_status=v_status,
             url=finding_url,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
         db.add(finding)
         try:
@@ -2810,7 +2810,7 @@ def _supervisor_validate_finding(
     return {
         "status": status,
         "reviewed_by": "deterministic_supervisor",
-        "reviewed_at": datetime.utcnow().isoformat() + "Z",
+        "reviewed_at": datetime.now().isoformat() + "Z",
         "checks": checks,
         "missing": missing,
         "tool": tool,
@@ -3104,7 +3104,7 @@ def _seed_verification_work_item(
         status="queued",
         max_attempts=1,  # verification runs once; no retry
         item_metadata=apply_phase_tool_metadata(meta, phase_id, verify_tool[:120], source="evidence_gate_stage2"),
-        created_at=__import__("datetime").datetime.utcnow(),
-        updated_at=__import__("datetime").datetime.utcnow(),
+        created_at=__import__("datetime").datetime.now(),
+        updated_at=__import__("datetime").datetime.now(),
     )
     db.add(verify_item)

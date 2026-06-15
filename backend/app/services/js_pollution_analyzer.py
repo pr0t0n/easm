@@ -762,7 +762,7 @@ def run_js_pollution_scan(
                 details=details,
                 retest_status=pf.get("validation_status", "candidate"),
                 risk_score=int(details.get("cvss_estimate", 5.0)),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             total_created += 1

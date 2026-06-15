@@ -257,7 +257,7 @@ def build_campaign(target: str, objective: str | None = None) -> dict[str, Any]:
         "campaign_id": f"CAMP-{uuid4().hex[:8].upper()}",
         "target": target,
         "objective": objective or f"Obtain administrative access to {target}",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now().isoformat(),
         "current_stage": "initial_access",
         "stage_history": [],
         "active_hypotheses": [],
@@ -308,7 +308,7 @@ def advance_offensive_stage(
         "from_stage": current,
         "to_stage": new_stage,
         "reason": reason,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     })
     campaign["current_stage"] = new_stage
     campaign["stage_history"] = history

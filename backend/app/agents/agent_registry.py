@@ -35,7 +35,7 @@ class AgentManifest:
         self.phase_ids = phase_ids
         self.priority = priority
         self.timeout_seconds = timeout_seconds
-        self.created_at = datetime.utcnow().isoformat()
+        self.created_at = datetime.now().isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {

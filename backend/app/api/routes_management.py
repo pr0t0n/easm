@@ -285,7 +285,7 @@ def _resolve_valid_authorization_code(db: Session, authorization_code: str | Non
     )
     if not row:
         return None
-    if row.expires_at and row.expires_at < datetime.utcnow():
+    if row.expires_at and row.expires_at < datetime.now():
         return None
     return row
 
@@ -389,7 +389,7 @@ def approve_authorization(authorization_id: int, payload: dict, db: Session = De
     expires_at = datetime.fromisoformat(expires_at_raw) if expires_at_raw else None
     row.status = "approved"
     row.approved_by_id = current_user.id
-    row.approved_at = datetime.utcnow()
+    row.approved_at = datetime.now()
     row.expires_at = expires_at
     row.notes = (payload.get("notes") or row.notes or "").strip()
 
@@ -1803,7 +1803,7 @@ def worker_manager_health(
     if stale_after_seconds is None:
         stale_after_seconds = _setting_int(db, current_user.id, "worker_health_stale_after_seconds", 60, 10, 3600)
 
-    now = datetime.utcnow()
+    now = datetime.now()
     cutoff = now - timedelta(seconds=stale_after_seconds)
 
     active_scan_ids, inspect_ok, active_task_counts = _active_scan_ids()
@@ -1954,7 +1954,7 @@ def requeue_orphan_scans(
     if older_than_seconds < 30:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="older_than_seconds deve ser >= 30")
 
-    cutoff = datetime.utcnow() - timedelta(seconds=older_than_seconds)
+    cutoff = datetime.now() - timedelta(seconds=older_than_seconds)
     active_by_mode, inspect_ok, _ = _active_scan_ids()
     if not inspect_ok:
         raise HTTPException(

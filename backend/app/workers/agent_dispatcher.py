@@ -40,7 +40,7 @@ class AgentExecutionTask:
         self.tools = tools
         self.priority = priority
         self.status = "pending"  # pending, running, success, failed, skipped
-        self.created_at = datetime.utcnow().isoformat()
+        self.created_at = datetime.now().isoformat()
         self.started_at: str | None = None
         self.completed_at: str | None = None
         self.error_message: str | None = None
@@ -109,7 +109,7 @@ class AgentQueue:
         """Marca tarefa como em execução."""
         if task_id in self.active_tasks:
             self.active_tasks[task_id].status = "running"
-            self.active_tasks[task_id].started_at = datetime.utcnow().isoformat()
+            self.active_tasks[task_id].started_at = datetime.now().isoformat()
 
     def mark_complete(
         self,
@@ -122,7 +122,7 @@ class AgentQueue:
         if task_id in self.active_tasks:
             task = self.active_tasks.pop(task_id)
             task.status = status
-            task.completed_at = datetime.utcnow().isoformat()
+            task.completed_at = datetime.now().isoformat()
             task.error_message = error
             task.execution_time_seconds = execution_time
             self.completed_tasks[task_id] = task
@@ -255,7 +255,7 @@ def record_tool_execution(
     """
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = datetime.now()
 
         # Check if already executed (idempotency)
         existing = db.query(ExecutedToolRun).filter(

@@ -176,7 +176,7 @@ def _metric_end(state: AgentState, node_name: str, started_at: float):
         {
             "node": node_name,
             "duration_ms": duration_ms,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "mission_index": state.get("mission_index", 0),
         }
     )
@@ -793,7 +793,7 @@ def _persist_discovered_assets_to_db(scan_job_id: int, owner_id: int, assets: li
         _db = SessionLocal()
         try:
             inserted_count = 0
-            now = datetime.utcnow()
+            now = datetime.now()
 
             for asset_str in (assets or []):
                 domain_normalized = str(asset_str or "").strip().lower()
@@ -880,7 +880,7 @@ def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, exec
                 existing.status = execution_status
                 existing.error_message = error_msg
                 existing.execution_time_seconds = exec_time
-                existing.created_at = datetime.utcnow()
+                existing.created_at = datetime.now()
             else:
                 record = ExecutedToolRun(
                     scan_job_id=scan_id,
@@ -889,7 +889,7 @@ def _record_tool_execution_in_db(scan_id: int, tool_name: str, target: str, exec
                     status=execution_status,
                     error_message=error_msg,
                     execution_time_seconds=exec_time,
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 )
                 db.add(record)
             db.commit()
@@ -1706,7 +1706,7 @@ def _update_phase_ledger_for_tool(
         mcp_failures.append({
             "tool": tool_lower,
             "error": dispatch_error[:500],
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now().isoformat(),
         })
         entry["mcp_failures"] = mcp_failures
         if str(entry.get("mcp_status") or "") != "unavailable":
@@ -1750,14 +1750,14 @@ def _update_phase_ledger_for_tool(
         "mcp_used": mcp_used,
         "dispatch_error": dispatch_error[:200] if dispatch_error else None,
         "exec_time_s": round(exec_time, 2),
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     })
     entry["tool_execution_log"] = tool_log
 
     # Set running status if pending
     if entry.get("status") == "pending":
         entry["status"] = "running"
-        entry["started_at"] = entry.get("started_at") or datetime.utcnow().isoformat()
+        entry["started_at"] = entry.get("started_at") or datetime.now().isoformat()
 
     # Register parser_result when a tool executes successfully.
     # A tool that ran IS the parser result — phases must not be blocked
@@ -1769,7 +1769,7 @@ def _update_phase_ledger_for_tool(
         entry["parser_result"] = {
             "tool": tool_lower,
             "findings_count": len(findings) if findings else 0,
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now().isoformat(),
             "status": "executed",
         }
 
@@ -1951,10 +1951,10 @@ def finalize_phase_in_ledger(
         "status": status,
         "reason": reason,
         "can_advance": can_advance,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     if can_advance and not entry.get("completed_at"):
-        entry["completed_at"] = datetime.utcnow().isoformat()
+        entry["completed_at"] = datetime.now().isoformat()
 
     ledger[phase_id] = entry
     state["phase_ledger"] = ledger
@@ -2011,12 +2011,12 @@ def skip_phase_with_reason(
     entry["status"] = "skipped"
     entry["skip_reason"] = str(reason)
     entry["can_advance"] = True
-    entry["completed_at"] = datetime.utcnow().isoformat()
+    entry["completed_at"] = datetime.now().isoformat()
     entry["validation_result"] = {
         "status": "skipped",
         "reason": reason,
         "can_advance": True,
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now().isoformat(),
     }
     ledger[phase_id] = entry
     state["phase_ledger"] = ledger
@@ -2195,7 +2195,7 @@ def initial_state(
         "confidence_state": {
             "global_confidence": 60,
             "reason": "initial_state",
-            "last_updated": datetime.utcnow().isoformat(),
+            "last_updated": datetime.now().isoformat(),
         },
         "evidence_contract": {
             "rules": EVIDENCE_RULES,

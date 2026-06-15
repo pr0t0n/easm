@@ -159,7 +159,7 @@ def consolidate_systemic_findings(db: Session, scan_id: int) -> int:
                     f"Problema sistêmico: {len(affected)} subdomínios afetados. "
                     "Corrigir na configuração central do servidor/CDN em vez de individualmente."
                 ),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(systemic)
             try:
@@ -342,7 +342,7 @@ def correlate_waf_shodan(db: Session, scan_id: int) -> int:
                     f"Servidor de origem em {ip} pode ser acessado contornando o WAF. "
                     f"Portas sensíveis expostas: {sensitive_open}. Ação imediata recomendada."
                 ),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(corr)
             try:
@@ -477,7 +477,7 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                     ),
                 },
                 recommendation=remediation,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             try:
@@ -533,7 +533,7 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                     f"Isolar {len(dev_list)} ambientes de dev de acesso público. "
                     "Usar VPN ou IP allowlist para acesso ao ambiente de desenvolvimento."
                 ),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             try:
@@ -606,7 +606,7 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                     f"Revisar conformidade LGPD para {data_type} em {target}. "
                     "Implementar headers de segurança e documentar tratamento de dados pessoais."
                 ),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
             )
             db.add(f)
             try:
