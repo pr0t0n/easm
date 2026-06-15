@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 _NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 _NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
 _NVD_CACHE: dict[str, dict] = {}
+# Item 39 — cache por CVE do resultado do ExploitDB (searchsploit), evita
+# poll repetido do kali_runner para o mesmo CVE durante o enriquecimento.
+_EXPLOIT_CACHE: dict[str, dict] = {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Base local de reprodução — CVEs de alto impacto com PoC documentado
@@ -322,6 +325,19 @@ def enrich_cve_finding(finding: Any, db: Session, *, force: bool = False) -> boo
         "patch_url": patch_url,
         "validation_status": "confirmed" if local else "hypothesis",
     })
+
+    # Item 39 — coluna EXPLOIT (ExploitDB via searchsploit do Kali). Lookup
+    # OFFLINE, read-only, cacheado por CVE (evita poll repetido). available:
+    # True/False/None(=não-checado, searchsploit ausente). NÃO altera severity
+    # aqui — a API aplica o boost a partir de details['exploit'] na leitura,
+    # preservando severity_base honesto.
+    try:
+        from app.services.exploitdb_check import check_exploitdb
+        if cve_id not in _EXPLOIT_CACHE:
+            _EXPLOIT_CACHE[cve_id] = check_exploitdb(cve_id)
+        details["exploit"] = _EXPLOIT_CACHE[cve_id]
+    except Exception:
+        details.setdefault("exploit", {"available": None, "refs": []})
 
     finding.details = details
     # JSONB mutation must be signaled explicitly — SQLAlchemy may not detect

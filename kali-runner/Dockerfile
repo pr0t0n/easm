@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       theharvester \
       sslscan testssl.sh \
       hashcat \
+      exploitdb \
       seclists wordlists \
     && rm -rf /var/lib/apt/lists/*
 
@@ -213,7 +214,7 @@ RUN set -eux; \
       dnsrecon dnsenum sublist3r findomain \
       sslscan testssl.sh \
       jwt_tool paramspider wpscan xsstrike linkfinder \
-      semgrep bandit retire; \
+      semgrep bandit retire searchsploit; \
     do command -v "$tool" || echo "WARN: $tool not found"; done; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt; \
     test -f /usr/share/seclists/Discovery/Web-Content/raft-small-files.txt; \
