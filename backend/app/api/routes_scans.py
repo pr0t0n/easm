@@ -4210,6 +4210,21 @@ def list_findings(
     return response
 
 
+def _finding_display_title(finding, details: dict) -> str:
+    """Título de exibição da vuln: limpo de prefixo de status (item 35) e, para
+    CVE, com o PRODUTO afetado (item 38, ex.: 'PHP — CVE-2024-5458')."""
+    from app.services.vuln_family import clean_finding_title, descriptive_cve_title
+    import re as _re_cve
+    raw = clean_finding_title(finding.title)
+    cve = str(getattr(finding, "cve", "") or "").strip().upper()
+    if not cve:
+        m = _re_cve.search(r"CVE-\d{4}-\d{4,7}", str(raw).upper())
+        cve = m.group(0) if m else ""
+    if cve.startswith("CVE-"):
+        return descriptive_cve_title(cve, details)
+    return raw
+
+
 @router.get("/findings/page")
 def list_findings_paginated(
     severity: str | None = None,
@@ -4311,7 +4326,7 @@ def list_findings_paginated(
 
     rows = rows[offset:offset + limit]
 
-    from app.services.vuln_family import classify_family, family_label, family_description, clean_finding_title
+    from app.services.vuln_family import classify_family, family_label, family_description, clean_finding_title, descriptive_cve_title
     from app.services.framework_mapping import attack_for_family
     from app.services.verification_criteria import verification_for
 
@@ -4344,9 +4359,10 @@ def list_findings_paginated(
                 "scan_job_id": finding.scan_job_id,
                 "target_query": finding.scan_job.target_query if finding.scan_job else None,
                 "scan_status": finding.scan_job.status if finding.scan_job else None,
-                # Item 35 — título limpo (sem prefixo [CONFIRMADA]/[ZAP]/[WAF-BYPASS]);
-                # o status fica na coluna de evidência/verification_status.
-                "title": clean_finding_title(finding.title),
+                # Item 35 — título limpo (sem prefixo [CONFIRMADA]/[ZAP]/[WAF-BYPASS]).
+                # Item 38 — CVE ganha produto: "PHP — CVE-2024-5458" (não só o ID),
+                # quando o produto é conhecido (detalhe/NVD/mapa curado).
+                "title": _finding_display_title(finding, details),
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
                 "technical_description": _desc,

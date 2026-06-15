@@ -203,6 +203,38 @@ def family_description(family_id: str | None) -> str:
     return FAMILY_DESCRIPTIONS.get(str(family_id or "outros"), "")
 
 
+# Item 38 — Mapa offline CURADO de CVE→produto (alta confiança), p/ quando o
+# NVD não está acessível. Só entradas confiáveis — NUNCA inventar produto.
+# Em produção, o cve_enrichment_service (NVD) popula details['product'] e este
+# mapa é o fallback. Estender conforme aprendido.
+_CVE_PRODUCT: dict[str, str] = {
+    "CVE-2024-5458": "PHP",   # filter_var FILTER_VALIDATE_URL bypass (PHP)
+}
+
+
+def cve_product_label(cve_id: str | None, details: dict | None = None) -> str:
+    """Produto/componente afetado por um CVE, p/ compor título descritivo.
+    Prioridade: details enriquecido (NVD/shodan) → mapa curado → vazio
+    (NÃO inventa). Item 38."""
+    details = details or {}
+    cid = str(cve_id or "").strip().upper()
+    for k in ("product", "cve_product", "affected_product", "vendor_product", "service"):
+        v = str(details.get(k) or "").strip()
+        if v:
+            return v
+    return _CVE_PRODUCT.get(cid, "")
+
+
+def descriptive_cve_title(cve_id: str | None, details: dict | None = None) -> str:
+    """Título descritivo de CVE: '<produto> — CVE-XXXX' quando o produto é
+    conhecido; senão só o CVE (honesto, sem inventar). Item 38."""
+    cid = str(cve_id or "").strip().upper()
+    if not cid.startswith("CVE-"):
+        return str(cve_id or "")
+    prod = cve_product_label(cid, details)
+    return f"{prod} — {cid}" if prod else cid
+
+
 # Prefixos de status que poluem o TÍTULO do achado (o status já tem coluna
 # própria — coluna evidência / verification_status). Item 35.
 import re as _re_title
