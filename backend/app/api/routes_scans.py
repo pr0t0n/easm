@@ -4329,6 +4329,7 @@ def list_findings_paginated(
     from app.services.vuln_family import classify_family, family_label, family_description, clean_finding_title, descriptive_cve_title
     from app.services.framework_mapping import attack_for_family
     from app.services.verification_criteria import verification_for
+    from app.services.exploitdb_check import exploit_severity_boost as _exploit_boost
 
     items = []
     for finding in rows:
@@ -4368,7 +4369,19 @@ def list_findings_paginated(
                 "technical_description": _desc,
                 "mitre_attack": attack_for_family(_fam),
                 "verification_criteria": verification_for(_fam),
-                "severity": finding.severity,
+                # Item 39 — coluna EXPLOIT (ExploitDB) + boost de criticidade.
+                # available: True (há exploit público) / False / None (não-checado).
+                "exploit": {
+                    "available": (details.get("exploit") or {}).get("available"),
+                    "refs": (details.get("exploit") or {}).get("refs") or [],
+                },
+                "exploit_available": bool((details.get("exploit") or {}).get("available")),
+                # severidade EFETIVA: sobe um nível quando há exploit público.
+                "severity": (
+                    _exploit_boost(finding.severity, True)
+                    if (details.get("exploit") or {}).get("available") else finding.severity
+                ),
+                "severity_base": finding.severity,
                 "risk_score": finding.risk_score,
                 "confidence_score": finding.confidence_score,
                 "is_false_positive": finding.is_false_positive,
