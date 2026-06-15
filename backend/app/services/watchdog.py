@@ -30,6 +30,12 @@ _STUCK_MINUTES = int(os.getenv("WATCHDOG_STUCK_MINUTES", "12"))
 # Cobre o caso real: restart do worker/backend perde a mensagem .delay() e o scan
 # fica 'queued' para sempre, invisível à recuperação antiga (que só via 'running').
 _LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
+# Item 27 (definitivo) — recuperação baseada em PROGRESSO REAL (último scan_log),
+# SEM depender do celery inspect (instável → deixava o scan travado até o TTL de
+# 90min do lock). Sem nenhum scan_log por este tempo num scan não-terminal = órfão
+# → libera o lock e re-dispara. Threshold > maior ferramenta legítima (ZAP active
+# ~30min é gated/raro; o operador loga mcp/checkpoint constantemente quando vivo).
+_ORPHAN_NO_PROGRESS_SECONDS = int(os.getenv("WATCHDOG_ORPHAN_NO_PROGRESS", "720"))  # 12min
 
 
 def _kali_functional_ok() -> bool:
@@ -158,6 +164,44 @@ def run_watchdog(db) -> dict:
     except Exception as exc:
         logger.error("watchdog: pass de limbo falhou: %s", exc)
     report["limbo_recovered"] = limbo_revived
+
+    # ── 3b. Item 27 (DEFINITIVO) — órfão por FALTA DE PROGRESSO real ─────────
+    # Não depende de celery inspect (instável). Para cada scan não-terminal: se
+    # NÃO há scan_log há > _ORPHAN_NO_PROGRESS_SECONDS, está morto (o operador
+    # loga mcp/dispatch/checkpoint o tempo todo quando vivo) → ROUBA o lock
+    # (force release) e re-dispara. É exatamente o que era feito na mão.
+    progress_revived = []
+    try:
+        from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running
+        stuck = db.execute(text(
+            """
+            SELECT j.id,
+                   EXTRACT(EPOCH FROM (now() - COALESCE(
+                       (SELECT max(l.created_at) FROM scan_logs l WHERE l.scan_job_id = j.id),
+                       j.updated_at)))::int AS idle_s
+            FROM scan_jobs j
+            WHERE j.status IN ('queued','running','retrying')
+            """
+        )).fetchall()
+        for sid, idle_s in stuck:
+            # idle_s pode vir negativo por skew de fuso (app grava +3h) — normaliza.
+            idle = abs(int(idle_s or 0))
+            if idle >= _ORPHAN_NO_PROGRESS_SECONDS:
+                _force_release_chain_lock(int(sid))
+                _res = ensure_scan_chain_running(int(sid), mode="unit")
+                progress_revived.append({"scan_id": int(sid), "idle_s": idle, "redispatch": _res})
+                db.add(ScanLog(
+                    scan_job_id=int(sid), source="watchdog", level="WARNING",
+                    message=(f"orfao por SEM-PROGRESSO ({idle}s sem scan_log) → lock liberado "
+                             f"e scan re-disparado (item 27, sem depender de celery inspect)"),
+                ))
+                logger.warning("watchdog: scan %s SEM PROGRESSO %ss → lock liberado + re-disparado", sid, idle)
+        if progress_revived:
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("watchdog: pass de progresso (item 27) falhou: %s", exc)
+    report["progress_recovered"] = progress_revived
 
     # Item 20 — limpeza segura da fila: itens pendentes (queued/blocked/
     # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela

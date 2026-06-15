@@ -1466,7 +1466,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 # (bounded by checkpoint_seconds≈50min and the per-phase deadline); on crash the
 # lock self-expires and the watchdog recovers.
 # ──────────────────────────────────────────────────────────────────────────────
-_SCAN_CHAIN_LOCK_TTL = max(600, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "5400")))  # 90min
+_SCAN_CHAIN_LOCK_TTL = max(600, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "1200")))  # 20min (item 27: lock órfão expira rápido)
 _SCAN_CHAIN_MAX_WAITS = max(1, int(os.getenv("SCAN_CHAIN_MAX_WAITS", "40")))
 # Quantas vezes a recuperação automática re-dispara um scan órfão antes de
 # desistir e marcá-lo como failed (evita loop infinito em scan genuinamente
