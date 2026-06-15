@@ -4311,7 +4311,7 @@ def list_findings_paginated(
 
     rows = rows[offset:offset + limit]
 
-    from app.services.vuln_family import classify_family, family_label
+    from app.services.vuln_family import classify_family, family_label, family_description, clean_finding_title
     from app.services.framework_mapping import attack_for_family
     from app.services.verification_criteria import verification_for
 
@@ -4328,15 +4328,28 @@ def list_findings_paginated(
             cve=finding.cve,
             learning_family=(details.get("learning_source") or {}).get("vuln_family"),
         )
+        # Item 36 — descrição técnica: usa a do finding/CVE; se vazia, a da
+        # FAMÍLIA (o quê/como/impacto) — fim do "Sem descrição técnica registrada".
+        _desc = (
+            details.get("cve_description")
+            or details.get("description")
+            or details.get("technical_description")
+            or details.get("desc")
+            or family_description(_fam)
+            or ""
+        )
         items.append(
             {
                 "id": finding.id,
                 "scan_job_id": finding.scan_job_id,
                 "target_query": finding.scan_job.target_query if finding.scan_job else None,
                 "scan_status": finding.scan_job.status if finding.scan_job else None,
-                "title": finding.title,
+                # Item 35 — título limpo (sem prefixo [CONFIRMADA]/[ZAP]/[WAF-BYPASS]);
+                # o status fica na coluna de evidência/verification_status.
+                "title": clean_finding_title(finding.title),
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
+                "technical_description": _desc,
                 "mitre_attack": attack_for_family(_fam),
                 "verification_criteria": verification_for(_fam),
                 "severity": finding.severity,
@@ -4346,12 +4359,7 @@ def list_findings_paginated(
                 "retest_status": finding.retest_status,
                 "cve": finding.cve,
                 "cvss": finding.cvss,
-                "cve_description": (
-                    details.get("cve_description") or
-                    details.get("description") or
-                    details.get("desc") or
-                    ""
-                ),
+                "cve_description": _desc,
                 "domain": finding.domain,
                 "target": loc.get("target"),
                 "subdomain": loc.get("subdomain"),
