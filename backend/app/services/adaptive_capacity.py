@@ -18,7 +18,14 @@ from sqlalchemy import text
 from app.core.config import settings
 
 _KEY = "easm:adaptive:concurrency_level"
-MIN_L = int(os.getenv("ADAPTIVE_MIN", "6"))
+# C2 — re-tune do AIMD. O "travado em ~4 com CPU ociosa" não era a CPU: o sinal
+# que colapsava o nível era PRESSÃO DE MEMÓRIA (Docker Desktop tem baseline alto)
+# disparando o recuo multiplicativo a 88%. Memória é a restrição REAL aqui (há
+# histórico de OOM/exit 137 com onnxruntime), então o ajuste é MODESTO e seguro:
+#  - piso (MIN_L) sobe 6→8 para não colapsar tão fundo sob spike de memória;
+#  - threshold de memória 88→90 (menos twitchy ao baseline do host);
+# mantém o recuo multiplicativo por memória (proteção anti-OOM). Tudo via env.
+MIN_L = int(os.getenv("ADAPTIVE_MIN", "8"))
 MAX_L = int(os.getenv("ADAPTIVE_MAX", "32"))   # teto lógico; caps por classe ainda limitam o envio real
 START_L = int(os.getenv("ADAPTIVE_START", "16"))
 STEP_UP = int(os.getenv("ADAPTIVE_STEP_UP", "3"))
@@ -30,7 +37,7 @@ STEP_UP = int(os.getenv("ADAPTIVE_STEP_UP", "3"))
 _HIGH_TIMEOUT = float(os.getenv("ADAPTIVE_HIGH_TIMEOUT", "0.55"))  # >55% timeout → recuo suave
 _LOW_TIMEOUT = float(os.getenv("ADAPTIVE_LOW_TIMEOUT", "0.10"))    # <10% → avança
 _MIN_SAMPLES = 8
-_HIGH_MEM = float(os.getenv("ADAPTIVE_HIGH_MEM", "88"))
+_HIGH_MEM = float(os.getenv("ADAPTIVE_HIGH_MEM", "90"))
 
 
 def _redis():

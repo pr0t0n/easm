@@ -233,7 +233,12 @@ services:
     # onnxruntime (embedding semântico, Frente A) carrega arenas de memória no
     # worker; 8 threads + onnxruntime causava OOM (exit 137). OMP_NUM_THREADS=1
     # mantém o onnxruntime enxuto; mem_limit contém picos.
-    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=4
+    # B2 — orquestrador da fila paralela: era o gargalo (concurrency=4 despachava/
+    # poll de TODOS os work-items de TODOS os scans). Sobe para 10 (configurável via
+    # SCAN_PARALLEL_CONCURRENCY). Os caps reais de kali continuam limitados pelo
+    # semáforo global (kali:inflight) + fatia justa por scan, então isto só remove o
+    # afunilamento de orquestração sem aumentar a carga real no kali.
+    command: celery -A app.workers.celery_app.celery worker -l info -Q scan.parallel -n parallel@%h --pool=threads --concurrency=${SCAN_PARALLEL_CONCURRENCY:-10}
     env_file: *optional_env_file
     environment: { APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo, OMP_NUM_THREADS: "1", ONNXRUNTIME_INTRA_OP_NUM_THREADS: "1" }
     mem_limit: 5g

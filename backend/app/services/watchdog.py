@@ -208,6 +208,56 @@ def run_watchdog(db) -> dict:
         logger.error("watchdog: pass de progresso (item 27) falhou: %s", exc)
     report["progress_recovered"] = progress_revived
 
+    # ── 3c. A3 — CADEIA MORTA por AUSÊNCIA DE LOCK (não depende de log) ───────
+    # Bug real (scan #15): a cadeia principal (run_scan_job_unit, que avança as
+    # fases) morreu, mas os pollers da fila paralela seguiram logando → os passes
+    # baseados em "log recente" / "updated_at recente" não disparavam. Aqui o
+    # sinal de vida é o PRÓPRIO chain lock (com B1 ele expira em ≤TTL quando o
+    # worker morre). Para todo scan running SEM lock → recupera (o helper cruza
+    # com celery inspect e tem orçamento de re-disparo, então é seguro mesmo na
+    # janela curta entre phase-units).
+    deadchain_revived = []
+    try:
+        from app.workers.tasks import recover_scan_if_orphaned, _chain_lock_alive, active_scan_task_ids
+        running_ids = [int(r[0]) for r in db.execute(text(
+            "SELECT id FROM scan_jobs WHERE status='running' ORDER BY id"
+        )).fetchall()]
+        no_lock = [sid for sid in running_ids if not _chain_lock_alive(sid)]
+        if no_lock:
+            active_ids, inspect_ok = active_scan_task_ids()
+            # Só re-dispara o que é ORFÃO de verdade: sem lock E sem task ativa no
+            # celery. Isso evita falso-positivo na janela curta entre phase-units
+            # (sem lock, porém a próxima unit já está ativa) — que, repetido,
+            # esgotaria o orçamento de re-disparo de um scan saudável. Se o inspect
+            # não respondeu (inspect_ok=False) → conservador: não mexe.
+            truly_orphan = [sid for sid in no_lock if inspect_ok and sid not in active_ids]
+            for sid in truly_orphan:
+                res = recover_scan_if_orphaned(sid, mode="unit", source="watchdog-deadchain",
+                                               active_ids=active_ids, inspect_ok=inspect_ok)
+                if res.get("action") in ("redriven", "failed_budget"):
+                    deadchain_revived.append({"scan_id": sid, **res})
+                    logger.warning("watchdog: scan %s CADEIA MORTA (running sem lock) → %s",
+                                   sid, res.get("action"))
+        if deadchain_revived:
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("watchdog: pass de cadeia-morta (A3) falhou: %s", exc)
+    report["deadchain_recovered"] = deadchain_revived
+
+    # ── 3d. A1 — PROMOTOR de scans em espera (admissão) ──────────────────────
+    # Sobe scans diferidos por limite de concorrência quando abre vaga (FIFO).
+    # Agendado nunca preempta: só entra aqui quando há espaço de fato.
+    try:
+        from app.workers.tasks import promote_deferred_scans
+        _prom = promote_deferred_scans()
+        report["scans_promoted"] = _prom.get("promoted", [])
+        if _prom.get("promoted"):
+            logger.warning("watchdog: scans promovidos da fila de admissão: %s", _prom["promoted"])
+    except Exception as exc:
+        logger.error("watchdog: promotor de admissão (A1) falhou: %s", exc)
+        report["scans_promoted"] = []
+
     # Item 20 — limpeza segura da fila: itens pendentes (queued/blocked/
     # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela
     # (scan #12 chegou a 6072 blocked). Remover é seguro — o scan acabou.

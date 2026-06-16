@@ -2538,7 +2538,10 @@ def create_scan(
 
     if compliance_status == "approved":
         try:
-            run_scan_job_unit.delay(job.id)
+            # A1 — respeita o limite de scans concorrentes: dispara se houver vaga,
+            # senão deixa o scan aguardando (o promotor do watchdog o sobe depois).
+            from app.workers.tasks import admit_or_defer_scan
+            admit_or_defer_scan(job.id, mode="unit")
         except Exception as exc:
             log_audit(
                 db,
@@ -3246,8 +3249,12 @@ def resume_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
 
     task_id = None
     try:
-        async_result = run_scan_job_scheduled.delay(job.id) if str(job.mode or "").lower() == "scheduled" else run_scan_job_unit.delay(job.id)
-        task_id = getattr(async_result, "id", None)
+        # A1 — retomada também respeita o limite de concorrência: se não houver
+        # vaga, o scan fica aguardando e o promotor do watchdog o sobe ao liberar.
+        from app.workers.tasks import admit_or_defer_scan
+        _mode = "scheduled" if str(job.mode or "").lower() == "scheduled" else "unit"
+        _adm = admit_or_defer_scan(job.id, mode=_mode)
+        task_id = _adm.get("task_id")
     except Exception as exc:
         log_audit(
             db,

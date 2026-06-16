@@ -420,11 +420,9 @@ def scheduler_tick():
             db.add(sched)
             db.commit()
 
-            celery.send_task(
-                "run_scan_job_scheduled",
-                kwargs={"scan_id": job.id},
-                queue=SCAN_SCHEDULED_QUEUE,
-            )
+            # A1 — admissão: agendado NUNCA preempta. Se há vaga dispara; senão
+            # fica em espera (queued) e o promotor do watchdog o sobe depois.
+            admit_or_defer_scan(job.id, mode="scheduled")
 
             fired += 1
 
@@ -1466,7 +1464,18 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 # (bounded by checkpoint_seconds≈50min and the per-phase deadline); on crash the
 # lock self-expires and the watchdog recovers.
 # ──────────────────────────────────────────────────────────────────────────────
-_SCAN_CHAIN_LOCK_TTL = max(600, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "1200")))  # 20min (item 27: lock órfão expira rápido)
+# B1 — lock com RENOVAÇÃO (heartbeat). Antes: TTL fixo de 20min que era MENOR que
+# uma phase-unit em scan grande (>20min) → o lock expirava no meio e uma duplicata
+# era disparada (chains paralelas corrompendo state_data). Agora o TTL é CURTO
+# (180s) mas uma thread renova enquanto a unit roda → nunca expira durante trabalho
+# legítimo, e some rápido (≤TTL) quando o worker morre → recuperação por ausência
+# de lock é veloz (resolve também A3: cadeia morta com pollers vivos).
+_SCAN_CHAIN_LOCK_TTL = max(120, int(os.getenv("SCAN_CHAIN_LOCK_TTL", "180")))
+_SCAN_CHAIN_LOCK_RENEW = max(30, int(os.getenv("SCAN_CHAIN_LOCK_RENEW", "60")))
+# A1 — admissão: máximo de scans executando concorrentemente. Excedente fica em
+# espera (status preservado + flag admission_deferred) e é promovido pelo watchdog
+# quando abre vaga. Agendado NUNCA preempta — entra na fila.
+_MAX_CONCURRENT_SCANS = max(1, int(os.getenv("SCAN_MAX_CONCURRENT", "3")))
 _SCAN_CHAIN_MAX_WAITS = max(1, int(os.getenv("SCAN_CHAIN_MAX_WAITS", "40")))
 # Quantas vezes a recuperação automática re-dispara um scan órfão antes de
 # desistir e marcá-lo como failed (evita loop infinito em scan genuinamente
@@ -1479,6 +1488,91 @@ _RECOVERABLE_SCAN_STATUSES = {"queued", "running", "retrying"}
 
 def _chain_lock_key(scan_id: int) -> str:
     return f"scan_chain_lock:{scan_id}"
+
+
+# ── A1 — Admissão / limite de scans concorrentes ────────────────────────────────
+def _count_running_scans(db: Session, exclude_id: int | None = None) -> int:
+    """Quantos scans estão de fato EXECUTANDO (status running e não diferidos)."""
+    q = db.query(func.count(ScanJob.id)).filter(ScanJob.status == "running")
+    if exclude_id is not None:
+        q = q.filter(ScanJob.id != exclude_id)
+    return int(q.scalar() or 0)
+
+
+def _can_admit_scan(db: Session, scan_id: int) -> bool:
+    """True se há vaga para ESTE scan começar (abaixo de _MAX_CONCURRENT_SCANS).
+    Conta o próprio scan como vaga se ele já estiver running."""
+    return _count_running_scans(db, exclude_id=scan_id) < _MAX_CONCURRENT_SCANS
+
+
+def _defer_scan_admission(db: Session, job: "ScanJob", reason: str = "admission_limit") -> None:
+    """Marca o scan como aguardando vaga: status 'queued' + flag em state_data.
+    O promotor (watchdog) o re-dispara quando abrir vaga. NÃO preempta ninguém."""
+    state = dict(job.state_data or {})
+    state["admission_deferred"] = True
+    job.state_data = state
+    job.status = "queued"
+    job.current_step = "Aguardando vaga (limite de scans concorrentes)"
+    db.add(ScanLog(
+        scan_job_id=job.id, source="admission", level="INFO",
+        message=(f"scan em espera ({reason}): {_count_running_scans(db)} rodando / "
+                 f"limite {_MAX_CONCURRENT_SCANS} — sera promovido quando abrir vaga"),
+    ))
+
+
+def admit_or_defer_scan(scan_id: int, mode: str = "unit") -> dict:
+    """Ponto único de entrada que RESPEITA o limite de concorrência. Em vez de
+    chamar ensure_scan_chain_running direto, manual e agendado passam por aqui:
+    se há vaga → dispara; senão → defere (fica queued, sem preemptar)."""
+    db: Session = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not job or str(job.status or "").lower() in {"completed", "failed", "stopped", "paused"}:
+            return {"scan_id": scan_id, "admitted": False, "reason": "not_admissible"}
+        if _can_admit_scan(db, scan_id):
+            # limpa flag de espera, se houver, e dispara
+            state = dict(job.state_data or {})
+            if state.pop("admission_deferred", None) is not None:
+                job.state_data = state
+            db.commit()
+            return {"scan_id": scan_id, "admitted": True, **ensure_scan_chain_running(scan_id, mode=mode)}
+        _defer_scan_admission(db, job)
+        db.commit()
+        return {"scan_id": scan_id, "admitted": False, "reason": "deferred"}
+    finally:
+        db.close()
+
+
+def promote_deferred_scans() -> dict:
+    """Promove scans que estavam aguardando vaga, até encher o limite. Chamado
+    periodicamente pelo watchdog. Ordem FIFO (created_at)."""
+    db: Session = SessionLocal()
+    promoted: list[int] = []
+    try:
+        free = _MAX_CONCURRENT_SCANS - _count_running_scans(db)
+        if free <= 0:
+            return {"promoted": [], "free": 0}
+        waiting = (
+            db.query(ScanJob)
+            .filter(ScanJob.status.in_(["queued", "pending"]))
+            .order_by(ScanJob.created_at.asc())
+            .all()
+        )
+        for job in waiting:
+            if free <= 0:
+                break
+            state = dict(job.state_data or {})
+            # só promove os que foram explicitamente diferidos OU agendados pendentes
+            if not state.get("admission_deferred") and str(job.status) != "pending":
+                continue
+            mode = "scheduled" if str(job.mode or "").lower() == "scheduled" else "unit"
+            res = ensure_scan_chain_running(int(job.id), mode=mode)
+            if res.get("enqueued"):
+                promoted.append(int(job.id))
+                free -= 1
+        return {"promoted": promoted, "free": max(0, free)}
+    finally:
+        db.close()
 
 
 def _acquire_scan_chain_lock(scan_id: int, token: str):
@@ -1715,9 +1809,31 @@ def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode, lock_wait:
                     "scan_id": scan_id, "lock_wait": int(lock_wait or 0)}
         return {"ok": True, "skipped": True, "reason": "scan_chain_lock_giveup", "scan_id": scan_id}
 
+    # B1 — heartbeat de renovação: mantém o lock vivo enquanto a unit roda. Se o
+    # worker morre, a thread morre junto → o lock expira em ≤TTL e a recuperação
+    # re-dispara. _lock_r é o cliente redis (truthy) quando o lock foi de fato
+    # adquirido; None = redis down (sem lock, nada a renovar).
+    _stop_renew = threading.Event()
+    _renew_thread = None
+    if _lock_r not in (None, False):
+        def _renew_chain_lock():
+            from app.services.scan_work_queue import _redis_client
+            while not _stop_renew.wait(_SCAN_CHAIN_LOCK_RENEW):
+                try:
+                    r = _redis_client()
+                    if r.get(_chain_lock_key(scan_id)) == _lock_token:
+                        r.expire(_chain_lock_key(scan_id), _SCAN_CHAIN_LOCK_TTL)
+                    else:
+                        break  # perdemos o lock (expirou/roubado) → para de renovar
+                except Exception:
+                    pass
+        _renew_thread = threading.Thread(target=_renew_chain_lock, name=f"chainlock-{scan_id}", daemon=True)
+        _renew_thread.start()
+
     try:
         return _run_scan_with_retry_locked(task_ctx, scan_id, scan_mode)
     finally:
+        _stop_renew.set()
         _release_scan_chain_lock(_lock_r, scan_id, _lock_token)
 
 
