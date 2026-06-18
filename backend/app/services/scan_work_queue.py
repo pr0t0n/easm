@@ -1467,7 +1467,7 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
     caps = capacity_limits()
     claimed: list[int] = []
     lock_key = 917000 + int(scan_id)
-    lock_acquired = bool(db.execute(text("select pg_try_advisory_lock(:key)"), {"key": lock_key}).scalar())
+    lock_acquired = bool(db.execute(text("select pg_try_advisory_xact_lock(:key)"), {"key": lock_key}).scalar())
     if not lock_acquired:
         return []
 
@@ -1631,12 +1631,10 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                 claimed.append(item.id)
         db.commit()
         return claimed
-    finally:
-        try:
-            db.execute(text("select pg_advisory_unlock(:key)"), {"key": lock_key})
-            db.commit()
-        except Exception:
-            db.rollback()
+    except Exception:
+        db.rollback()
+        raise
+    # pg_try_advisory_xact_lock auto-libera no commit/rollback — nenhum unlock explícito necessário.
 
 
 def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no_http") -> int:
