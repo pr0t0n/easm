@@ -14,7 +14,16 @@ from app.graph.mission import SKILL_CATALOG
 # Skills markdown loader — loads structured skill objects from skills/*.md
 # ---------------------------------------------------------------------------
 
-_SKILLS_ROOT = Path(__file__).parent.parent.parent.parent / "skills"
+_SKILLS_ROOT = Path(
+    __import__("os").getenv("SKILLS_DIR", "")
+    or next(
+        (str(p / "skills") for p in [
+            Path(__file__).parent.parent.parent.parent,  # host layout: repo/backend/app/services/…
+            Path(__file__).parent.parent.parent,         # container layout: /app/app/services/…
+        ] if (p / "skills").is_dir()),
+        str(Path(__file__).parent.parent.parent.parent / "skills"),
+    )
+)
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 

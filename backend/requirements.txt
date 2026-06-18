@@ -38,6 +38,10 @@ kombu==5.3.7
 langgraph==0.2.62
 langgraph-checkpoint-postgres==2.0.9
 ollama==0.6.1
+# SDK Anthropic — opcional; usado apenas quando ANTHROPIC_API_KEY definida.
+# O supervisor principal continua em Ollama/qwen. Claude fica disponível para
+# tarefas auxiliares (relatórios, análises pontuais) sem mudar o fluxo core.
+anthropic==0.54.0
 
 # Vector DB
 chromadb==0.5.23

@@ -13,6 +13,45 @@ from app.services.kali_executor import TOOL_TO_PROFILE, normalize_kali_result, n
 
 logger = logging.getLogger(__name__)
 
+# ── RAG via pgvector direto (sem HTTP ao mcp_server) ─────────────────────────
+# Importação lazy para evitar ciclo de importação no startup do backend.
+
+def _rag_query(
+    query: str,
+    top_k: int = 5,
+    filters: dict[str, Any] | None = None,
+    skill: str | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        from app.services import rag_repository
+        return rag_repository.query(query, top_k=top_k, filters=filters, skill=skill)
+    except Exception as exc:
+        logger.error("rag_repository.query failed, returning empty: %s", exc)
+        return []
+
+
+def _rag_ingest(
+    content: str,
+    metadata: dict[str, Any] | None = None,
+    source: str = "easm_backend",
+    document_id: str | None = None,
+) -> bool:
+    try:
+        from app.services import rag_repository
+        ids = rag_repository.ingest_document(content, metadata=metadata, source=source, document_id=document_id)
+        return len(ids) > 0
+    except Exception as exc:
+        logger.error("rag_repository.ingest_document failed: %s", exc)
+        return False
+
+
+def _rag_available() -> bool:
+    try:
+        from app.services import rag_repository
+        return rag_repository.document_count() >= 0
+    except Exception:
+        return False
+
 
 _PROFILE_TIMEOUT_HINTS: dict[str, int] = {
     # Long-running web validation profiles. The previous default was
@@ -70,14 +109,18 @@ class MCPClient:
             return False
 
     def health_check_sync(self) -> bool:
+        # RAG health: pgvector direto (não depende do mcp_server)
+        rag_ok = _rag_available()
+        # Kali health: mcp_server ainda é necessário para execução de ferramentas
         try:
             with self._sync_client() as client:
                 response = client.get("/health")
                 response.raise_for_status()
-                return str(response.json().get("status") or "").lower() == "healthy"
+                kali_ok = str(response.json().get("status") or "").lower() == "healthy"
         except Exception as exc:  # noqa: BLE001
-            logger.warning("MCP sync health check failed: %s", exc)
-            return False
+            logger.debug("MCP sync health check (kali) failed: %s", exc)
+            kali_ok = False
+        return rag_ok or kali_ok
 
     def kali_tools_available_sync(self) -> bool:
         """True only when MCP can actually proxy tool execution to Kali.
@@ -99,7 +142,6 @@ class MCPClient:
             logger.warning("MCP Kali tool availability check failed: %s", exc)
             return False
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def query_knowledge(
         self,
         query: str,
@@ -107,22 +149,10 @@ class MCPClient:
         filters: dict[str, Any] | None = None,
         skill: str | None = None,
     ) -> list[dict[str, Any]]:
-        try:
-            async with self._async_client() as client:
-                response = await client.post(
-                    "/rag/query",
-                    json={
-                        "query": query,
-                        "top_k": top_k,
-                        "filters": filters or None,
-                        "skill": skill,
-                    },
-                )
-                response.raise_for_status()
-                return list(response.json().get("results") or [])
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MCP async query failed: %s", exc)
-            return []
+        # RAG via pgvector direto — sem rede, sem retry necessário
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _rag_query(query, top_k, filters, skill)
+        )
 
     def query_knowledge_sync(
         self,
@@ -131,24 +161,8 @@ class MCPClient:
         filters: dict[str, Any] | None = None,
         skill: str | None = None,
     ) -> list[dict[str, Any]]:
-        try:
-            with self._sync_client() as client:
-                response = client.post(
-                    "/rag/query",
-                    json={
-                        "query": query,
-                        "top_k": top_k,
-                        "filters": filters or None,
-                        "skill": skill,
-                    },
-                )
-                response.raise_for_status()
-                return list(response.json().get("results") or [])
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MCP sync query failed: %s", exc)
-            return []
+        return _rag_query(query, top_k, filters, skill)
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
     async def ingest_document(
         self,
         content: str,
@@ -156,22 +170,9 @@ class MCPClient:
         source: str = "easm_backend",
         document_id: str | None = None,
     ) -> bool:
-        try:
-            async with self._async_client() as client:
-                response = await client.post(
-                    "/rag/ingest",
-                    json={
-                        "content": content,
-                        "metadata": metadata or {},
-                        "source": source,
-                        "document_id": document_id,
-                    },
-                )
-                response.raise_for_status()
-                return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MCP async ingest failed: %s", exc)
-            return False
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _rag_ingest(content, metadata, source, document_id)
+        )
 
     def ingest_document_sync(
         self,
@@ -180,22 +181,18 @@ class MCPClient:
         source: str = "easm_backend",
         document_id: str | None = None,
     ) -> bool:
+        return _rag_ingest(content, metadata, source, document_id)
+
+    def ingest_documents_bulk_sync(
+        self,
+        documents: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         try:
-            with self._sync_client() as client:
-                response = client.post(
-                    "/rag/ingest",
-                    json={
-                        "content": content,
-                        "metadata": metadata or {},
-                        "source": source,
-                        "document_id": document_id,
-                    },
-                )
-                response.raise_for_status()
-                return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MCP sync ingest failed: %s", exc)
-            return False
+            from app.services import rag_repository
+            return rag_repository.ingest_documents_bulk(documents)
+        except Exception as exc:
+            logger.error("rag_repository.ingest_bulk failed: %s", exc)
+            return {"documents_ingested": 0, "chunks_ingested": 0, "errors": len(documents)}
 
     def list_tools_sync(self) -> list[dict[str, Any]]:
         try:
@@ -310,7 +307,7 @@ class RAGService:
     async def is_available(self) -> bool:
         if not settings.mcp_rag_enabled:
             return False
-        return await self.mcp_client.health_check()
+        return await asyncio.get_event_loop().run_in_executor(None, _rag_available)
 
     async def enrich_prompt_with_context(
         self,

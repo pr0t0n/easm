@@ -80,7 +80,6 @@ services:
     ports:
       - "${MCP_HOST_PORT:-3000}:3000"
     volumes:
-      - mcp_chroma_data:/app/chroma_db
       # Source mounted so MCP logic changes (profile resolution, etc.) apply
       # with a container restart — no image rebuild needed.
       - ./mcp-server/mcp_server.py:/app/mcp_server.py:ro
@@ -432,5 +431,4 @@ volumes:
   postgres_data:
   ollama_data:
   kali_workspace:
-  mcp_chroma_data:
   zap_data:

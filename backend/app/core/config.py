@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     celery_result_backend: str
     langgraph_checkpointer_dsn: str | None = None
 
+    # Anthropic — opcional. Quando definida, habilita tarefas auxiliares via Claude
+    # (relatórios, análises pontuais). Supervisor principal continua em Ollama/qwen.
+    anthropic_api_key: str = ""
+    # Modelo Claude para tarefas auxiliares. Padrão = Sonnet 4.6 (custo/benefício).
+    anthropic_model: str = "claude-sonnet-4-6"
+
     ollama_base_url: str = "http://ollama:11434"
     llm_primary_provider: str = "ollama"
     llm_primary_model: str = "qwen2.5:7b"
