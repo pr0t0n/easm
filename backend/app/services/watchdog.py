@@ -225,12 +225,26 @@ def run_watchdog(db) -> dict:
         no_lock = [sid for sid in running_ids if not _chain_lock_alive(sid)]
         if no_lock:
             active_ids, inspect_ok = active_scan_task_ids()
-            # Só re-dispara o que é ORFÃO de verdade: sem lock E sem task ativa no
-            # celery. Isso evita falso-positivo na janela curta entre phase-units
-            # (sem lock, porém a próxima unit já está ativa) — que, repetido,
-            # esgotaria o orçamento de re-disparo de um scan saudável. Se o inspect
-            # não respondeu (inspect_ok=False) → conservador: não mexe.
-            truly_orphan = [sid for sid in no_lock if inspect_ok and sid not in active_ids]
+            # CADEIA MORTA de verdade exige TRÊS sinais (senão é falso-positivo):
+            #  (1) sem chain lock;
+            #  (2) sem task run_scan_job ATIVA no celery (inspect_ok=True);
+            #  (3) FILA OCIOSA — nenhum work item tocado há > _ORPHAN_NO_PROGRESS.
+            # O (3) é o que faltava: em modo PARALELO a cadeia solta o lock e se
+            # re-enfileira por countdown enquanto espera a fila drenar
+            # (work_queue_wait) — estado legítimo. Se há itens sendo despachados/
+            # polados (updated_at recente), o scan está VIVO mesmo sem lock. Só
+            # re-dispara quando o lock sumiu E a fila parou de fato.
+            _idle_cut = datetime.now() - timedelta(seconds=_ORPHAN_NO_PROGRESS_SECONDS)
+            truly_orphan = []
+            for sid in no_lock:
+                if not inspect_ok or sid in active_ids:
+                    continue
+                last_item = db.execute(text(
+                    "SELECT max(updated_at) FROM scan_work_items WHERE scan_job_id=:s"
+                ), {"s": sid}).scalar()
+                # fila vazia (last_item None) OU parada há muito → órfão real.
+                if last_item is None or last_item < _idle_cut:
+                    truly_orphan.append(sid)
             for sid in truly_orphan:
                 res = recover_scan_if_orphaned(sid, mode="unit", source="watchdog-deadchain",
                                                active_ids=active_ids, inspect_ok=inspect_ok)
