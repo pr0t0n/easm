@@ -1285,6 +1285,15 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
         .all()
     )
 
+    # P5 — capacidade de aceleração detectada (read-only, à prova de falha).
+    # A plataforma reporta sozinha se há GPU utilizável; no Docker do Mac/CI
+    # cai corretamente para "cpu".
+    try:
+        from app.services.gpu_detect import capability_summary
+        accelerator = capability_summary(settings.ollama_base_url)
+    except Exception as exc:  # noqa: BLE001
+        accelerator = {"accelerator": "unknown", "gpu_usable": False, "error": str(exc)}
+
     return {
         "ollama": {
             "health": health,
@@ -1293,6 +1302,7 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
             "available_models": models,
             "error": error_message,
         },
+        "accelerator": accelerator,
         "runtime": {
             "debug_mode": _get_setting(db, current_user.id, "debug_mode", "false") == "true",
             "verbose_mode": _get_setting(db, current_user.id, "verbose_mode", "false") == "true",
