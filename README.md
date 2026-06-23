@@ -8,8 +8,8 @@ O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → 
 
 | Item | Detalhe |
 | --- | --- |
-| Arquitetura | Kali-only para tools - backend/worker tool-free - LangGraph para fluxo |
-| Containers | 16 servicos (1 Kali - 1 backend - 9 workers Kill Chain - 5 infra/UI) |
+| Arquitetura | Kali-only para tools - backend/worker tool-free - LangGraph para fluxo - RAG em pgvector (backend) - MCP como ponte de execucao Kali-only |
+| Containers | 18 servicos (1 Kali - 1 backend - 1 MCP - 9 workers - 1 ZAP - 5 infra/UI: postgres/redis/ollama/celery_beat/frontend) |
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
@@ -61,7 +61,7 @@ Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *
 
 - Premissa do produto: ScriptKidd.o e uma ferramenta de pentest defensivo para visibilidade e protecao de ambientes, nao apenas uma analise automatizada de vulnerabilidades.
 - Uso defensivo e autorizado: scans devem ser executados somente contra alvos sob escopo aprovado.
-- Pensamento de pentest: cada scan deve escolher skills, formular hipoteses, executar tecnicas, correlacionar conhecimento RAG/MCP e adaptar o plano conforme as evidencias.
+- Pensamento de pentest: cada scan deve escolher skills, formular hipoteses, executar tecnicas, correlacionar conhecimento via RAG (pgvector no backend) e adaptar o plano conforme as evidencias. O `mcp_server` e apenas a ponte de execucao para o Kali (Kali-only); nao guarda mais conhecimento.
 - Execucao centralizada: workers nao executam ferramentas ofensivas localmente; todos chamam o `kali_runner`.
 - Evidencia primeiro: achados criticos e altos precisam de evidencia tecnica, impacto e reprodutibilidade para serem promovidos.
 - Visibilidade continua: progresso, logs, jobs, ferramentas usadas, findings, ratings e workers ficam expostos via API e frontend.
@@ -74,7 +74,7 @@ Princípio fundamental: o **cerebro** (LangGraph supervisor) decide *quando* e *
 | Frontend | React + Vite + Tailwind/CSS do produto | Dashboard, scans, targets, phase monitor, workers, jobs, vulnerabilidades, evolucao e relatorios |
 | Backend API | FastAPI + SQLAlchemy + Alembic | Autenticacao, autorizacao, criacao de scans, consultas, agregacoes, relatorios e proxy do Kali |
 | Orquestracao | LangGraph | Supervisor autonomo, roteamento de capacidades, loop de decisao e estado da missao |
-| Filas | Celery + Redis | Execucao assincrona de scans, schedules, workers e pos-processamentos |
+| Filas | Celery + Redis | Execucao assincrona de scans, schedules, workers e pos-processamentos. Work queue paralela (`scan.parallel`) com admissao FIFO, lock de cadeia com renovacao, semaforos de inflight por classe (`kali:inflight:*`), capacidade adaptativa (AIMD) e watchdog de recuperacao de scan |
 | Banco | PostgreSQL | ScanJob, logs, findings, assets, vulnerabilities, historico de rating, auditoria e heartbeats |
 | Execucao de ferramentas | Kali Runner FastAPI | Perfis YAML, execucao de CLI, persistencia de jobs e evidencias em `/workspace` |
 | LLM local | Ollama | Narrativas, recomendacoes e apoio ao relatorio, quando configurado |
@@ -87,7 +87,8 @@ O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servico
 | --- | --- | --- |
 | `postgres` | compose service `postgres` | Banco transacional |
 | `redis` | compose service `redis` | Broker/result backend Celery |
-| `ollama` | compose service `ollama` | Runtime LLM local |
+| `ollama` | compose service `ollama` | Runtime LLM local (CPU por padrao) |
+| `mcp_server` | compose service `mcp_server` | Ponte de execucao Kali-only (resolve profile/alias, aplica guardrail, faz proxy de jobs). NAO faz RAG |
 | `kali_runner` | compose service `kali_runner` | Unico local de execucao das ferramentas |
 | `backend` | compose service `backend` | API FastAPI |
 | `worker_scope` | compose service `worker_scope` | Validacao de escopo e entrada |
@@ -96,10 +97,11 @@ O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servico
 | `worker_delivery` | compose service `worker_delivery` | Descoberta de caminhos, parametros e vetores |
 | `worker_exploitation` | compose service `worker_exploitation` | Validacao de vulnerabilidades |
 | `worker_installation` | compose service `worker_installation` | Risco de persistencia, auth e credenciais |
-| `worker_c2` | compose service `worker_c2` | Risco de C2 e canais externos |
+| `worker_parallel` | compose service `worker_parallel` | Dispatcher/poll dos work items paralelos (fila `scan.parallel`) |
 | `worker_actions` | compose service `worker_actions` | Secrets, SAST, dependencias e impacto |
 | `worker_reporting` | compose service `worker_reporting` | Narrativa e consolidacao |
-| `celery_beat` | compose service `celery_beat` | Agendamentos |
+| `celery_beat` | compose service `celery_beat` | Agendamentos + watchdog de recuperacao de scan |
+| `zap` | compose service `zap` | OWASP ZAP (scans ativos/baseline via profiles zap-*) |
 | `frontend` | compose service `frontend` | Interface web |
 
 Portas sao configuraveis por `.env`. Defaults do compose:
@@ -641,6 +643,9 @@ kali-runner/profiles/reconnaissance.yaml
 kali-runner/profiles/weaponization.yaml
 kali-runner/profiles/delivery_exploitation.yaml
 kali-runner/profiles/post_exploitation.yaml
+kali-runner/profiles/exploit_intel.yaml
+kali-runner/profiles/operational.yaml
+kali-runner/profiles/web_scanner.yaml
 ```
 
 Cada profile define:
