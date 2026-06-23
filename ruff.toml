@@ -1,0 +1,15 @@
+# P19 — config de lint conservador. Foco em bugs reais (pyflakes: imports não
+# usados, nomes indefinidos) sem impor reformatação no código existente.
+# E501 (linha longa) fica ignorado de propósito para não gerar ruído.
+
+line-length = 120
+target-version = "py312"
+
+extend-exclude = ["**/migrations/**", "**/alembic/**", "**/__pycache__/**"]
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+  "E501",  # linha longa — não falhar por isso
+  "E741",  # nomes ambíguos (l, I, O) — comum em código existente
+]

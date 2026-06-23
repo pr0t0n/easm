@@ -1,0 +1,19 @@
+# P19 — pre-commit opt-in. Roda só em arquivos alterados. Para ativar:
+#   pip install pre-commit && pre-commit install
+# Não impõe reformatação no código existente — ruff (lint) com --fix corrige
+# o trivial; os hooks básicos pegam erro de sintaxe/YAML/conflito antes do commit.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-ast            # sintaxe Python válida
+      - id: check-yaml           # compose / workflows / este arquivo
+      - id: check-merge-conflict
+      - id: check-added-large-files
