@@ -37,3 +37,56 @@ jobs:
 
       - name: Run tests
         run: pytest tests -q
+
+  # P22 — prova que todas as migrations aplicam num Postgres pgvector limpo
+  # (mesma imagem da compose) e que o downgrade do head é reversível.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: scriptkiddo
+          POSTGRES_USER: scriptkiddo
+          POSTGRES_PASSWORD: scriptkiddo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scriptkiddo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgresql://scriptkiddo:scriptkiddo@localhost:5432/scriptkiddo
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+      SECRET_KEY: ci-test-secret
+      ADMIN_EMAIL: admin@ci.local
+      ADMIN_PASSWORD: ci-admin-pass
+      APP_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Upgrade head (todas as migrations num DB limpo)
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Round-trip do head (downgrade -1 e upgrade de volta)
+        run: |
+          alembic -c alembic.ini downgrade -1
+          alembic -c alembic.ini upgrade head
