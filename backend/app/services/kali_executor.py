@@ -19,6 +19,8 @@ from typing import Any, Optional
 
 import requests
 
+from app.services.guardrail_policy import sanitize_tool_args
+
 
 logger = logging.getLogger(__name__)
 
@@ -257,13 +259,23 @@ def execute_via_kali(
     base = _runner_url()
     started = time.perf_counter()
     try:
+        # P2 — o guardrail tem que rodar no caminho DIRETO ao Kali também. Antes
+        # a sanitização só acontecia no gateway MCP; quando MCP_EXECUTE_TOOLS_VIA_MCP
+        # é false (ou no caminho direto), flags destrutivas (--dump, --os-shell,
+        # --file-write…) passavam sem filtro. SSOT em guardrail_policy.sanitize_tool_args.
+        _raw_extra = [str(arg) for arg in (extra_args or []) if str(arg).strip()]
+        _clean_extra, _removed_extra = sanitize_tool_args(norm_tool or tool_name, _raw_extra)
+        if _removed_extra:
+            logger.warning(
+                "guardrail stripped args tool=%s removed=%s", norm_tool or tool_name, _removed_extra
+            )
         payload: dict[str, Any] = {
             "profile": profile,
             "target": dispatch_target,
             "scan_id": scan_id,
             "tool": tool_name,
             "skill_context": dict(skill_context or {}),
-            "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
+            "extra_args": _clean_extra,
         }
         if dispatch_targets:
             payload["targets"] = dispatch_targets
