@@ -2694,11 +2694,32 @@ def poll_scan_work_item(item_id: int):
         status_payload = dict(status_response.json())
         raw_status = str(status_payload.get("status") or "").lower()
         if raw_status not in {"done", "failed", "timeout", "skipped"}:
-            item.lease_until = datetime.now() + timedelta(seconds=300)
-            result_state["last_poll"] = datetime.now().isoformat()
+            _now = datetime.now()
+            item.lease_until = _now + timedelta(seconds=300)
+            result_state["last_poll"] = _now.isoformat()
             result_state["kali_status"] = raw_status or "running"
+            # P1 — heartbeat de progresso VISÍVEL. O updated_at já era tocado a
+            # cada poll (sinal mudo p/ o watchdog), mas o branch "ainda rodando"
+            # não emitia log nenhum — então no log/UI o job parecia morto. Conta
+            # os polls e emite um ScanLog de progresso a cada ~60s (poll=15s) p/
+            # operador e watchdog distinguirem "progredindo" de "preso".
+            _polls = int(result_state.get("poll_count") or 0) + 1
+            result_state["poll_count"] = _polls
             item.result = result_state
-            item.updated_at = datetime.now()
+            item.updated_at = _now
+            if _polls == 1 or _polls % 4 == 0:
+                _started_at = item.started_at or _now
+                _elapsed = int((_now - _started_at).total_seconds())
+                db.add(ScanLog(
+                    scan_job_id=item.scan_job_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=(
+                        f"work_item_progress id={item.id} phase={item.phase_id} "
+                        f"target={item.target} tool={item.tool_name} "
+                        f"kali_status={raw_status or 'running'} elapsed={_elapsed}s poll={_polls}"
+                    ),
+                ))
             db.commit()
             poll_scan_work_item.apply_async(args=[item.id], countdown=15)
             return {"id": item.id, "status": "submitted", "kali_status": raw_status}
