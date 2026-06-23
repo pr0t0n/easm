@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -74,6 +75,21 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
     models = _candidate_ollama_models()
 
+    # P4 — opções base. num_predict cap a saída; temperature baixa p/ decisão.
+    _options: dict[str, Any] = {"temperature": 0.1, "num_predict": 1024}
+    # num_ctx (janela de contexto) é configurável por env. Por padrão fica
+    # AUSENTE = comportamento atual do Ollama (default ~2048). Setar OLLAMA_NUM_CTX
+    # > 0 amplia a janela p/ não truncar o prompt do supervisor — mas custa RAM
+    # (KV-cache), então é lever explícito, medido com os logs abaixo, não default.
+    _num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "0") or 0)
+    if _num_ctx > 0:
+        _options["num_ctx"] = _num_ctx
+
+    # P4 — instrumentação ("medir primeiro"): tamanho aproximado do prompt em
+    # tokens (~chars/4) e latência por chamada, p/ ver se está truncando em
+    # num_ctx e quanto cada decisão custa no LLM em CPU.
+    _approx_tokens = (len(system) + len(user)) // 4
+
     last_error: Exception | None = None
     for model_name in models:
         payload = {
@@ -84,9 +100,10 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "options": {"temperature": 0.1, "num_predict": 1024},
+            "options": _options,
         }
         try:
+            _t0 = time.perf_counter()
             r = httpx.post(url, json=payload, timeout=timeout)
             if r.status_code == 404 and len(models) > 1:
                 last_error = httpx.HTTPStatusError(
@@ -97,6 +114,11 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
                 continue
             r.raise_for_status()
             data = r.json()
+            _elapsed_ms = int((time.perf_counter() - _t0) * 1000)
+            logger.info(
+                "ollama_chat model=%s approx_prompt_tokens=%d num_ctx=%s latency_ms=%d",
+                model_name, _approx_tokens, _num_ctx or "default", _elapsed_ms,
+            )
             return str(data.get("message", {}).get("content") or "").strip()
         except Exception as exc:  # noqa: BLE001
             last_error = exc
