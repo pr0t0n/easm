@@ -63,7 +63,9 @@ services:
       TZ: America/Sao_Paulo
 
   # ─────────────────────────────────────────────────────────────────
-  # MCP Server — RAG and Model Context Protocol
+  # MCP Server — Kali-only execution bridge (resolve profile/alias,
+  # aplica guardrail, faz proxy de jobs ao kali_runner). O RAG migrou
+  # para o backend (pgvector); este serviço NÃO faz mais RAG/conhecimento.
   # ─────────────────────────────────────────────────────────────────
 
   mcp_server:
