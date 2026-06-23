@@ -32,8 +32,6 @@ def mock_settings(monkeypatch):
     """Override settings fields for tests that need specific values."""
     from app.core.config import settings
     monkeypatch.setattr(settings, "app_env", "test")
-    monkeypatch.setattr(settings, "enable_observability", False)
-    monkeypatch.setattr(settings, "enable_auto_evaluation", False)
     yield settings
 
 
