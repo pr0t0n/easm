@@ -9,7 +9,7 @@ O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → 
 | Item | Detalhe |
 | --- | --- |
 | Arquitetura | Kali-only para tools - backend/worker tool-free - LangGraph para fluxo - RAG em pgvector (backend) - MCP como ponte de execucao Kali-only |
-| Containers | 18 servicos (1 Kali - 1 backend - 1 MCP - 9 workers - 1 ZAP - 5 infra/UI: postgres/redis/ollama/celery_beat/frontend) |
+| Containers | 19 servicos (1 Kali - 1 backend - 1 MCP - 10 workers - 1 ZAP - 5 infra/UI: postgres/redis/ollama/celery_beat/frontend) |
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
@@ -97,6 +97,7 @@ O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servico
 | `worker_delivery` | compose service `worker_delivery` | Descoberta de caminhos, parametros e vetores |
 | `worker_exploitation` | compose service `worker_exploitation` | Validacao de vulnerabilidades |
 | `worker_installation` | compose service `worker_installation` | Risco de persistencia, auth e credenciais |
+| `worker_c2` | compose service `worker_c2` | Risco de C2/canais externos + APIs (filas `command_control` e `api`) |
 | `worker_parallel` | compose service `worker_parallel` | Dispatcher/poll dos work items paralelos (fila `scan.parallel`) |
 | `worker_actions` | compose service `worker_actions` | Secrets, SAST, dependencias e impacto |
 | `worker_reporting` | compose service `worker_reporting` | Narrativa e consolidacao |
