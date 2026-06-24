@@ -1,0 +1,171 @@
+# ScriptKidd.o — Kali tool modules (click-to-install).
+#
+# These are the HEAVY parts of the toolchain (Go compilation, pipx, git+venv,
+# binary downloads) that were removed from the base image to keep the Docker
+# build fast/small. They are installed on demand from the admin UI.
+#
+# Everything installs UNDER $TOOLS_PREFIX (/opt/tools), which is a persistent
+# named volume on PATH — so installed tools survive container restarts and the
+# /tools endpoint discovers them automatically (PATH-based discovery).
+#
+# The runner injects this env before each step (see runner.py _module_env):
+#   TOOLS_PREFIX=/opt/tools
+#   GOBIN=$TOOLS_PREFIX/bin   GOFLAGS=-mod=mod
+#   PIPX_HOME=$TOOLS_PREFIX/pipx   PIPX_BIN_DIR=$TOOLS_PREFIX/bin
+#   GEM_HOME=GEM_PATH=$TOOLS_PREFIX/gems
+#   PATH=$TOOLS_PREFIX/bin:$TOOLS_PREFIX/gems/bin:<base PATH>
+#
+# `provides` = binaries that must be on PATH for the module to count as
+# installed. apt-based tools (nmap, hydra, seclists, …) stay baked in the base
+# image and are NOT listed here.
+
+recon:
+  name: "Reconnaissance — Go suite"
+  phase: RECONNAISSANCE
+  description: "ProjectDiscovery + OSINT recon: subfinder, httpx, naabu, dnsx, katana, amass, gau, etc."
+  provides:
+    - subfinder
+    - httpx
+    - naabu
+    - dnsx
+    - shuffledns
+    - alterx
+    - katana
+    - interactsh-client
+    - amass
+    - assetfinder
+    - waybackurls
+    - gau
+    - hakrawler
+    - gospider
+    - subjack
+    - massdns
+    - paramspider
+    - linkfinder
+  steps:
+    - name: "subfinder"
+      run: "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+    - name: "httpx (ProjectDiscovery)"
+      run: "go install github.com/projectdiscovery/httpx/cmd/httpx@latest && rm -f /usr/bin/httpx /bin/httpx"
+    - name: "naabu"
+      run: "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"
+    - name: "dnsx"
+      run: "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+    - name: "shuffledns"
+      run: "go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest"
+    - name: "alterx"
+      run: "go install github.com/projectdiscovery/alterx/cmd/alterx@latest"
+    - name: "katana"
+      run: "go install github.com/projectdiscovery/katana/cmd/katana@latest"
+    - name: "interactsh-client"
+      run: "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"
+    - name: "amass"
+      run: "go install github.com/owasp-amass/amass/v4/cmd/amass@latest"
+    - name: "assetfinder"
+      run: "go install github.com/tomnomnom/assetfinder@latest"
+    - name: "waybackurls"
+      run: "go install github.com/tomnomnom/waybackurls@latest"
+    - name: "gau"
+      run: "go install github.com/lc/gau/v2/cmd/gau@latest"
+    - name: "hakrawler"
+      run: "go install github.com/hakluke/hakrawler@latest"
+    - name: "gospider"
+      run: "go install github.com/jaeles-project/gospider@latest"
+    - name: "subjack"
+      run: "go install github.com/haccer/subjack@latest"
+    - name: "massdns (build from source)"
+      run: "rm -rf $TOOLS_PREFIX/src/massdns && git clone --depth 1 https://github.com/blechschmidt/massdns.git $TOOLS_PREFIX/src/massdns && make -C $TOOLS_PREFIX/src/massdns && cp $TOOLS_PREFIX/src/massdns/bin/massdns $TOOLS_PREFIX/bin/"
+    - name: "ParamSpider (git+venv)"
+      run: "rm -rf $TOOLS_PREFIX/src/ParamSpider && git clone --depth 1 https://github.com/devanshbatham/ParamSpider $TOOLS_PREFIX/src/ParamSpider && python3 -m venv $TOOLS_PREFIX/venvs/paramspider && $TOOLS_PREFIX/venvs/paramspider/bin/pip install --no-cache-dir $TOOLS_PREFIX/src/ParamSpider && ln -sf $TOOLS_PREFIX/venvs/paramspider/bin/paramspider $TOOLS_PREFIX/bin/paramspider"
+    - name: "LinkFinder (git+venv)"
+      run: "rm -rf $TOOLS_PREFIX/src/LinkFinder && git clone --depth 1 https://github.com/GerbenJavado/LinkFinder.git $TOOLS_PREFIX/src/LinkFinder && python3 -m venv $TOOLS_PREFIX/venvs/linkfinder && $TOOLS_PREFIX/venvs/linkfinder/bin/pip install --no-cache-dir -r $TOOLS_PREFIX/src/LinkFinder/requirements.txt && printf '#!/bin/sh\\nexec %s/venvs/linkfinder/bin/python %s/src/LinkFinder/linkfinder.py \"$@\"\\n' \"$TOOLS_PREFIX\" \"$TOOLS_PREFIX\" > $TOOLS_PREFIX/bin/linkfinder && chmod +x $TOOLS_PREFIX/bin/linkfinder"
+
+nuclei:
+  name: "Nuclei — template vulnerability scanner"
+  phase: VULN_SCAN
+  description: "ProjectDiscovery nuclei engine + community template repository (heavy: pulls ~10k templates)."
+  provides:
+    - nuclei
+  steps:
+    - name: "nuclei engine"
+      run: "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+    - name: "update templates"
+      run: "nuclei -update-templates"
+
+web:
+  name: "Web application scanners"
+  phase: WEB_SCAN
+  description: "ffuf, dalfox, sqlmap, wapiti, arjun, XSStrike, ghauri."
+  provides:
+    - ffuf
+    - dalfox
+    - sqlmap
+    - wapiti
+    - arjun
+    - xsstrike
+    - ghauri
+  steps:
+    - name: "ffuf"
+      run: "go install github.com/ffuf/ffuf/v2@latest"
+    - name: "dalfox"
+      run: "go install github.com/hahwul/dalfox/v2@latest"
+    - name: "sqlmap (pipx)"
+      run: "pipx install --force sqlmap"
+    - name: "wapiti3 (pipx)"
+      run: "pipx install --force wapiti3"
+    - name: "arjun (pipx)"
+      run: "pipx install --force arjun"
+    - name: "XSStrike (git+venv)"
+      run: "rm -rf $TOOLS_PREFIX/src/XSStrike && git clone --depth 1 https://github.com/s0md3v/XSStrike $TOOLS_PREFIX/src/XSStrike && python3 -m venv $TOOLS_PREFIX/venvs/xsstrike && $TOOLS_PREFIX/venvs/xsstrike/bin/pip install --no-cache-dir -r $TOOLS_PREFIX/src/XSStrike/requirements.txt && printf '#!/bin/sh\\nexec %s/venvs/xsstrike/bin/python %s/src/XSStrike/xsstrike.py \"$@\"\\n' \"$TOOLS_PREFIX\" \"$TOOLS_PREFIX\" > $TOOLS_PREFIX/bin/xsstrike && chmod +x $TOOLS_PREFIX/bin/xsstrike"
+    - name: "ghauri (git+venv)"
+      run: "rm -rf $TOOLS_PREFIX/src/ghauri && git clone --depth 1 https://github.com/r0oth3x49/ghauri $TOOLS_PREFIX/src/ghauri && python3 -m venv $TOOLS_PREFIX/venvs/ghauri && $TOOLS_PREFIX/venvs/ghauri/bin/pip install --no-cache-dir $TOOLS_PREFIX/src/ghauri && ln -sf $TOOLS_PREFIX/venvs/ghauri/bin/ghauri $TOOLS_PREFIX/bin/ghauri"
+
+secrets:
+  name: "Secret / SAST / container scanners"
+  phase: CODE_SCAN
+  description: "gitleaks, trufflehog, semgrep, bandit, retire.js, trivy."
+  provides:
+    - gitleaks
+    - trufflehog
+    - semgrep
+    - bandit
+    - retire
+    - trivy
+  steps:
+    - name: "gitleaks"
+      run: "go install github.com/zricethezav/gitleaks/v8@latest"
+    - name: "trufflehog"
+      run: "curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b $TOOLS_PREFIX/bin"
+    - name: "semgrep (pipx)"
+      run: "pipx install --force semgrep==1.161.0"
+    - name: "bandit (pipx)"
+      run: "pipx install --force bandit==1.9.4"
+    - name: "retire.js (npm)"
+      run: "npm install -g --prefix $TOOLS_PREFIX retire@5.4.2"
+    - name: "trivy"
+      run: "TRIVY_VER=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest | grep '\"tag_name\"' | sed 's/.*\"v\\([^\"]*\\)\".*/\\1/') && ARCH=$(dpkg --print-architecture) && case \"$ARCH\" in amd64) TA=64bit;; arm64) TA=ARM64;; armhf) TA=ARM;; i386) TA=32bit;; *) TA=$ARCH;; esac && curl -sL \"https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER}/trivy_${TRIVY_VER}_Linux-${TA}.tar.gz\" -o /tmp/trivy.tar.gz && tar -xzf /tmp/trivy.tar.gz -C $TOOLS_PREFIX/bin trivy && rm /tmp/trivy.tar.gz"
+
+weaponization:
+  name: "Weaponization / OSINT"
+  phase: WEAPONIZATION
+  description: "wpscan (WordPress), shodan, h8mail."
+  provides:
+    - wpscan
+    - shodan
+  steps:
+    - name: "wpscan (gem)"
+      run: "gem install --no-document wpscan"
+    - name: "shodan (pipx)"
+      run: "pipx install --force shodan"
+    - name: "h8mail (pipx)"
+      run: "pipx install --force h8mail"
+
+post_exploit:
+  name: "Post-exploitation"
+  phase: POST_EXPLOITATION
+  description: "jwt_tool (JWT audit)."
+  provides:
+    - jwt_tool
+  steps:
+    - name: "jwt_tool (git+venv)"
+      run: "rm -rf $TOOLS_PREFIX/src/jwt_tool && git clone --depth 1 https://github.com/ticarpi/jwt_tool.git $TOOLS_PREFIX/src/jwt_tool && python3 -m venv $TOOLS_PREFIX/venvs/jwt_tool && $TOOLS_PREFIX/venvs/jwt_tool/bin/pip install --no-cache-dir -r $TOOLS_PREFIX/src/jwt_tool/requirements.txt ratelimit && printf '#!/bin/sh\\nexec %s/venvs/jwt_tool/bin/python %s/src/jwt_tool/jwt_tool.py \"$@\"\\n' \"$TOOLS_PREFIX\" \"$TOOLS_PREFIX\" > $TOOLS_PREFIX/bin/jwt_tool && chmod +x $TOOLS_PREFIX/bin/jwt_tool"

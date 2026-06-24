@@ -17,6 +17,7 @@ import os
 import ipaddress
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1051,6 +1052,249 @@ def reload_profiles() -> dict[str, Any]:
     global PROFILES  # noqa: PLW0603
     PROFILES = _load_profiles()
     return {"reloaded": True, "count": len(PROFILES)}
+
+
+# ── Tool modules (click-to-install) ──────────────────────────────────────────
+# Heavy tools (Go/pipx/git/binary) live outside the base image and are installed
+# on demand into TOOLS_PREFIX (a persistent volume on PATH). See modules.yaml.
+TOOLS_PREFIX = Path(os.getenv("TOOLS_PREFIX", "/opt/tools"))
+MODULES_FILE = Path(__file__).parent / "modules.yaml"
+MODULES_STATE_FILE = TOOLS_PREFIX / ".modules_state.json"
+MODULE_STEP_TIMEOUT = int(os.getenv("KALI_MODULE_STEP_TIMEOUT", "1800"))
+MAX_MODULE_LOG_LINES = 2000
+
+_MODULES_LOCK = threading.Lock()
+# id -> {status, current_step, step_index, total_steps, log:[str], started_at, finished_at, error}
+_MODULE_RUNS: dict[str, dict[str, Any]] = {}
+
+
+def _load_modules() -> dict[str, dict[str, Any]]:
+    if not MODULES_FILE.exists():
+        return {}
+    try:
+        data = yaml.safe_load(MODULES_FILE.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[modules] failed to load {MODULES_FILE}: {exc}")
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+MODULES: dict[str, dict[str, Any]] = _load_modules()
+
+
+def _module_env() -> dict[str, str]:
+    env = os.environ.copy()
+    prefix = str(TOOLS_PREFIX)
+    env["TOOLS_PREFIX"] = prefix
+    env["GOBIN"] = f"{prefix}/bin"
+    env.setdefault("GOPATH", "/root/go")
+    env["GOFLAGS"] = "-mod=mod"
+    env["PIPX_HOME"] = f"{prefix}/pipx"
+    env["PIPX_BIN_DIR"] = f"{prefix}/bin"
+    env["GEM_HOME"] = f"{prefix}/gems"
+    env["GEM_PATH"] = f"{prefix}/gems"
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    extra = f"{prefix}/bin:{prefix}/gems/bin"
+    env["PATH"] = f"{extra}:{env.get('PATH', '')}"
+    return env
+
+
+def _ensure_tools_dirs() -> None:
+    for sub in ("bin", "pipx", "gems", "src", "venvs"):
+        (TOOLS_PREFIX / sub).mkdir(parents=True, exist_ok=True)
+
+
+def _module_installed(spec: dict[str, Any]) -> bool:
+    provides = spec.get("provides") or []
+    if not provides:
+        return False
+    return all(shutil.which(str(b)) is not None for b in provides)
+
+
+def _provides_status(spec: dict[str, Any]) -> dict[str, bool]:
+    return {str(b): shutil.which(str(b)) is not None for b in (spec.get("provides") or [])}
+
+
+def _persisted_state() -> dict[str, Any]:
+    try:
+        return json.loads(MODULES_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"installed": {}}
+
+
+def _persist_module_state(module_id: str, installed: bool) -> None:
+    _ensure_tools_dirs()
+    state = _persisted_state()
+    installed_map = state.setdefault("installed", {})
+    if installed:
+        installed_map[module_id] = {"at": datetime.utcnow().isoformat() + "Z"}
+    else:
+        installed_map.pop(module_id, None)
+    try:
+        MODULES_STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[modules] failed to persist state: {exc}")
+
+
+def _module_status(module_id: str, spec: dict[str, Any]) -> str:
+    with _MODULES_LOCK:
+        run = _MODULE_RUNS.get(module_id)
+    if run and run.get("status") == "installing":
+        return "installing"
+    if _module_installed(spec):
+        return "installed"
+    if run and run.get("status") == "failed":
+        return "failed"
+    # state file claims installed but binaries are gone (e.g. fresh volume)
+    if module_id in _persisted_state().get("installed", {}):
+        return "partial"
+    return "not_installed"
+
+
+def _module_payload(module_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+    with _MODULES_LOCK:
+        run = dict(_MODULE_RUNS.get(module_id) or {})
+    return {
+        "id": module_id,
+        "name": spec.get("name", module_id),
+        "phase": spec.get("phase"),
+        "description": spec.get("description"),
+        "provides": list(spec.get("provides") or []),
+        "provides_status": _provides_status(spec),
+        "total_steps": len(spec.get("steps") or []),
+        "status": _module_status(module_id, spec),
+        "current_step": run.get("current_step"),
+        "step_index": run.get("step_index"),
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "error": run.get("error"),
+        "log": (run.get("log") or [])[-200:],
+    }
+
+
+def _append_log(module_id: str, line: str) -> None:
+    with _MODULES_LOCK:
+        run = _MODULE_RUNS.get(module_id)
+        if run is None:
+            return
+        log = run.setdefault("log", [])
+        log.append(line)
+        if len(log) > MAX_MODULE_LOG_LINES:
+            del log[: len(log) - MAX_MODULE_LOG_LINES]
+
+
+def _run_module_install(module_id: str, spec: dict[str, Any]) -> None:
+    _ensure_tools_dirs()
+    env = _module_env()
+    steps = spec.get("steps") or []
+    _append_log(module_id, f"=== installing module '{module_id}' ({len(steps)} steps) ===")
+    try:
+        for idx, step in enumerate(steps, start=1):
+            name = str(step.get("name") or f"step {idx}")
+            cmd = str(step.get("run") or "").strip()
+            with _MODULES_LOCK:
+                run = _MODULE_RUNS.get(module_id)
+                if run is not None:
+                    run["current_step"] = name
+                    run["step_index"] = idx
+            _append_log(module_id, f"\n── [{idx}/{len(steps)}] {name} ──\n$ {cmd}")
+            if not cmd:
+                continue
+            proc = subprocess.run(  # noqa: S602 - admin-only, predefined commands
+                ["bash", "-c", cmd],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=MODULE_STEP_TIMEOUT,
+            )
+            if proc.stdout:
+                _append_log(module_id, proc.stdout.rstrip())
+            if proc.stderr:
+                _append_log(module_id, proc.stderr.rstrip())
+            if proc.returncode != 0:
+                raise RuntimeError(f"step '{name}' failed (exit {proc.returncode})")
+        # verify provides landed on PATH
+        missing = [b for b, ok in _provides_status(spec).items() if not ok]
+        if missing:
+            raise RuntimeError(f"installed but missing on PATH: {', '.join(missing)}")
+        _persist_module_state(module_id, installed=True)
+        with _MODULES_LOCK:
+            run = _MODULE_RUNS.get(module_id)
+            if run is not None:
+                run["status"] = "installed"
+                run["finished_at"] = datetime.utcnow().isoformat() + "Z"
+        _append_log(module_id, "\n=== done ===")
+    except Exception as exc:  # noqa: BLE001
+        with _MODULES_LOCK:
+            run = _MODULE_RUNS.get(module_id)
+            if run is not None:
+                run["status"] = "failed"
+                run["error"] = str(exc)
+                run["finished_at"] = datetime.utcnow().isoformat() + "Z"
+        _append_log(module_id, f"\n=== FAILED: {exc} ===")
+
+
+@app.get("/modules")
+def list_modules() -> dict[str, Any]:
+    return {
+        "count": len(MODULES),
+        "tools_prefix": str(TOOLS_PREFIX),
+        "modules": [_module_payload(mid, spec) for mid, spec in MODULES.items()],
+    }
+
+
+@app.get("/modules/{module_id}")
+def get_module(module_id: str) -> dict[str, Any]:
+    spec = MODULES.get(module_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"unknown module: {module_id}")
+    return _module_payload(module_id, spec)
+
+
+@app.post("/modules/{module_id}/install")
+def install_module(module_id: str) -> dict[str, Any]:
+    spec = MODULES.get(module_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"unknown module: {module_id}")
+    with _MODULES_LOCK:
+        run = _MODULE_RUNS.get(module_id)
+        if run and run.get("status") == "installing":
+            raise HTTPException(status_code=409, detail="install already in progress")
+        _MODULE_RUNS[module_id] = {
+            "status": "installing",
+            "log": [],
+            "step_index": 0,
+            "total_steps": len(spec.get("steps") or []),
+            "current_step": None,
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "finished_at": None,
+            "error": None,
+        }
+    threading.Thread(
+        target=_run_module_install, args=(module_id, spec), daemon=True,
+        name=f"module-install-{module_id}",
+    ).start()
+    return {"status": "installing", "module": module_id}
+
+
+@app.post("/modules/{module_id}/uninstall")
+def uninstall_module(module_id: str) -> dict[str, Any]:
+    spec = MODULES.get(module_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"unknown module: {module_id}")
+    removed: list[str] = []
+    for binary in spec.get("provides") or []:
+        path = shutil.which(str(binary))
+        if path and str(TOOLS_PREFIX) in path:
+            try:
+                Path(path).unlink()
+                removed.append(str(binary))
+            except OSError:
+                pass
+    _persist_module_state(module_id, installed=False)
+    with _MODULES_LOCK:
+        _MODULE_RUNS.pop(module_id, None)
+    return {"status": "uninstalled", "module": module_id, "removed": removed}
 
 
 @app.post("/jobs")
