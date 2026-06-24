@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ScriptKidd.o — Centro Operacional (modo TV) · DEMO mock</title>
+<!--
+  DEMONSTRAÇÃO — reprodução FIEL da página real "Centro Operacional / modo TV"
+  (frontend/src/pages/OperationsCenterPage.jsx), com dados 100% MOCKADOS no
+  formato das APIs (/api/scans, /api/findings/page, /api/worker-manager/health,
+  /api/platform/health). Não é um layout novo — espelha o existente.
+  Autocontido, sem dependências. Abrir em tela cheia (F11) para efeito de telão.
+-->
+<style>
+  :root{
+    --bg:#1f242c; --surface:#262c36; --surface2:#2d343f; --border:#2f3743;
+    --text:#e8eaed; --muted:#8a93a3; --label:#6b7384;
+    --brand-500:#e96363; --green:#7fe0b0; --red:#ff8a8a; --orange:#ffb377;
+    --yellow:#ffe08a; --blue:#9db4ff;
+    --font-mono:"SF Mono","Cascadia Code",Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--text);font-family:"Segoe UI",Roboto,Inter,system-ui,sans-serif;min-height:100vh}
+  .mono{font-family:var(--font-mono)}
+  /* toolbar */
+  .toolbar{display:flex;align-items:center;gap:12px;padding:16px 24px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .toolbar .title{color:var(--text);font-weight:700;font-size:15px;flex-shrink:0}
+  select.ops{font-size:11.5px;padding:6px 10px;border-radius:8px;cursor:pointer;font-family:var(--font-mono);
+    background:var(--surface);color:var(--text);border:1px solid var(--border)}
+  .seg{display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:3px}
+  .seg button{font-size:10.5px;padding:4px 10px;border-radius:6px;cursor:pointer;border:none;font-family:var(--font-mono);background:transparent;color:var(--muted)}
+  .seg button.on{background:var(--brand-500);color:#fff;font-weight:700}
+  .refresh{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 12px;cursor:pointer;font-family:var(--font-mono);font-size:11px;color:var(--text);min-width:110px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* big numbers */
+  .bignums{display:grid;gap:1px;background:var(--border);border-bottom:1px solid var(--border)}
+  .bignum{background:var(--bg);padding:16px 12px;text-align:center}
+  .bignum .v{font-family:var(--font-mono);font-size:30px;font-weight:700;line-height:1}
+  .bignum .l{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:6px}
+  /* wall */
+  .wall{padding:16px}
+  .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-content:start}
+  .panel{background:var(--surface);border-radius:12px;border:1px solid var(--border);padding:13px 16px;min-width:0}
+  .panel .ph{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
+  .panel .ph .t{font-size:12px;font-weight:700;color:var(--text)}
+  .panel .ph .r{font-family:var(--font-mono);font-size:10px;color:var(--muted)}
+  .span2{grid-column:span 2}.span3{grid-column:span 3}
+  .bar{height:5px;background:var(--surface2);border-radius:99px;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--brand-500)}
+</style>
+</head>
+<body>
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <span class="title">Centro Operacional</span>
+    <span class="mono" style="font-size:11px;color:var(--muted)">telemetria do ambiente · modo TV · <b style="color:var(--yellow)">DEMO (mock)</b></span>
+    <select class="ops"><option>todos os scans</option><option>#2048 · juice-shop.local</option><option>#2047 · api.acme-corp.com</option></select>
+    <span class="mono" style="margin-left:auto;font-size:11px;color:var(--muted)">atualizado <span id="lastRef">--:--:--</span> BRT</span>
+    <div class="seg">
+      <button>Manual</button><button>1 min</button><button class="on">3 min</button><button>15 min</button>
+    </div>
+    <button class="refresh" id="refreshBtn"><span id="spin" style="font-size:14px;line-height:1;display:inline-block">↻</span><span id="cd">02:48</span></button>
+    <span class="mono" style="font-size:11px;color:var(--green)">● <span id="activeTxt">3 scan(s) ativo(s)</span></span>
+  </div>
+
+  <!-- 6 números gigantes -->
+  <div class="bignums" id="bignums"></div>
+
+  <!-- TV Wall -->
+  <div class="wall"><div class="grid" id="grid"></div></div>
+
+<script>
+// ───────── MOCK no formato das APIs ─────────
+const scans = [
+  {id:2048, target_query:"juice-shop.local",  status:"running",  mission_progress:62, current_step:"EXPLOITATION_VALIDATION", open_critical:3, open_high:6, open_medium:8, open_low:5},
+  {id:2047, target_query:"api.acme-corp.com",  status:"running",  mission_progress:38, current_step:"DELIVERY_MAPPING",        open_critical:1, open_high:4, open_medium:5, open_low:6},
+  {id:2045, target_query:"vpn.acme-corp.com",  status:"running",  mission_progress:14, current_step:"RECONNAISSANCE",          open_critical:0, open_high:1, open_medium:2, open_low:1},
+  {id:2044, target_query:"shop.acme-corp.com", status:"paused",   mission_progress:51, current_step:"RISK_ASSESSMENT",         open_critical:1, open_high:3, open_medium:4, open_low:7},
+  {id:2040, target_query:"mail.acme-corp.com", status:"completed",mission_progress:100,current_step:"REPORTING",              open_critical:1, open_high:2, open_medium:5, open_low:9},
+  {id:2039, target_query:"blog.acme-corp.com", status:"completed",mission_progress:100,current_step:"REPORTING",              open_critical:0, open_high:2, open_medium:4, open_low:6},
+  {id:2038, target_query:"cdn.acme-corp.com",  status:"completed",mission_progress:100,current_step:"REPORTING",              open_critical:0, open_high:1, open_medium:3, open_low:5},
+  {id:2035, target_query:"id.acme-corp.com",   status:"failed",   mission_progress:73, current_step:"timeout",                open_critical:0, open_high:0, open_medium:2, open_low:4},
+];
+const schedules = [
+  {id:91, access_group_name:"grupo acme",   targets_text:"app.acme-corp.com", run_time:"02:00", frequency:"diário"},
+  {id:92, access_group_name:"grupo interno",targets_text:"intra.acme.local",  run_time:"03:30", frequency:"semanal"},
+  {id:93, access_group_name:"perímetro",    targets_text:"*.acme-corp.com",   run_time:"06:00", frequency:"diário"},
+];
+const sevCounts = {critical:7, high:19, medium:33, low:48, info:61};
+const workerHealth = {summary:{total_workers:10, online_workers:5, phase_counts:{recon:2, analise_vulnerabilidade:2, osint:1, desconhecido:5}}, capacity:{level:8, max:16, total_slots:8}};
+const platformHealth = {all_healthy:true, containers:Array.from({length:19},(_,i)=>({name:"c"+i,is_alert:false})),
+  self_heal:{watchdog:{alive:true, heartbeat_age_seconds:12}, corrections:[], orphans_recovered:[]}};
+
+const FRAMEWORKS=[
+  {nome:"MITRE ATT&CK",cobertura:59,risco:72,tecnicos:38,total:64,gaps:["T1203 parcial"],cor:"214,69,69"},
+  {nome:"NIST CSF",    cobertura:48,risco:61,tecnicos:12,total:25,gaps:["PR.AC-5 exposto"],cor:"254,123,2"},
+  {nome:"ISO 27001",   cobertura:54,risco:55,tecnicos:22,total:41,gaps:["A.12.6.1 aberto"],cor:"212,165,0"},
+  {nome:"PCI DSS 4.0", cobertura:61,risco:84,tecnicos:9, total:14,gaps:["Req 6.4 crítico"],cor:"214,69,69"},
+  {nome:"CIS Controls",cobertura:67,risco:54,tecnicos:12,total:18,gaps:["CIS-7 parcial"],cor:"34,145,96"},
+];
+const SEV_LABEL={critical:"Crítico",high:"Alto",medium:"Médio",low:"Baixo"};
+const TV={surface2:"#2d343f",border:"#2f3743",text:"#e8eaed",muted:"#8a93a3",label:"#6b7384"};
+
+// ───────── derivados (mesma lógica do componente) ─────────
+const ACTIVE=["queued","running","retrying"];
+const $=s=>document.querySelector(s);
+const rodando=scans.filter(s=>ACTIVE.includes(s.status));
+const pausados=scans.filter(s=>s.status==="paused");
+const concluidos=scans.filter(s=>["completed","failed","cancelled","stopped"].includes(s.status));
+const totalCrit=sevCounts.critical, totalAlto=sevCounts.high, totalMed=sevCounts.medium, totalBaix=sevCounts.low;
+
+function renderBigNums(){
+  const b=[
+    {v:scans.length,l:"total de missões",c:"var(--text)"},
+    {v:rodando.length,l:"scans rodando",c:"var(--green)"},
+    {v:pausados.length,l:"pausados",c:"var(--yellow)"},
+    {v:concluidos.length,l:"concluídos",c:"var(--muted)"},
+    {v:totalCrit,l:"achados críticos abertos",c:"var(--red)"},
+    {v:totalAlto,l:"achados altos abertos",c:"var(--orange)"},
+  ];
+  $("#bignums").style.gridTemplateColumns=`repeat(${b.length},1fr)`;
+  $("#bignums").innerHTML=b.map(x=>`<div class="bignum"><div class="v" style="color:${x.c}">${x.v}</div><div class="l">${x.l}</div></div>`).join("");
+}
+
+function panelScans(){
+  const rows=rodando.map(s=>{const p=s.mission_progress;return `
+    <div style="margin-bottom:2px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">
+        <span class="mono" style="font-size:11.5px;font-weight:700">#${s.id} <span style="font-weight:400;color:var(--muted)">${s.target_query.slice(0,26)}</span></span>
+        <span class="mono" style="font-size:11px;color:var(--green);font-weight:700">${p}%</span>
+      </div>
+      <div class="bar"><i style="width:${p}%"></i></div>
+      <div class="mono" style="font-size:9.5px;color:var(--muted);margin-top:3px">${s.current_step} · C:${s.open_critical} A:${s.open_high} M:${s.open_medium}</div>
+    </div>`}).join("");
+  const sched=`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
+    <span style="font-size:9.5px;color:var(--label);text-transform:uppercase;letter-spacing:.1em;font-weight:600">A seguir</span>
+    ${schedules.slice(0,3).map(s=>`<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:6px">
+      <span class="mono" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        <span style="color:var(--blue);font-weight:700">${s.access_group_name}</span><span style="color:var(--muted)"> · #${s.id}</span> ${s.targets_text.slice(0,20)}</span>
+      <span class="mono" style="font-size:9.5px;color:var(--muted);white-space:nowrap">${s.run_time} · ${s.frequency}</span></div>`).join("")}</div>`;
+  return panel("Scans",`${rodando.length} rodando · ${schedules.length} na fila`,
+    `<div style="display:flex;flex-direction:column;gap:10px">${rows}${sched}</div>`);
+}
+
+function panelEsteira(){
+  const avg=rodando.length?Math.round(rodando.reduce((a,s)=>a+s.mission_progress,0)/rodando.length):0;
+  const cards=[
+    {nome:"Missões ativas",qtd:rodando.length,sub:`${pausados.length} pausadas`,conv:avg},
+    {nome:"Críticos",qtd:totalCrit,sub:"achados críticos",conv:Math.round(totalCrit/scans.length*10)},
+    {nome:"Altos",qtd:totalAlto,sub:"achados altos",conv:Math.round(totalAlto/scans.length*10)},
+    {nome:"Schedules",qtd:schedules.length,sub:`${schedules.length} ativos`,conv:schedules.length},
+    {nome:"Concluídos",qtd:concluidos.length,sub:"missões terminadas",conv:null},
+  ];
+  const body=`<div style="display:flex;align-items:stretch">${cards.map((c,i)=>{
+    const last=i===cards.length-1;
+    const card=`<div style="flex:1;padding:10px 12px;border-radius:10px;min-width:0;background:${last?'rgba(233,99,99,.16)':'var(--surface2)'};border:1px solid ${last?'rgba(233,99,99,.45)':'var(--border)'}">
+      <div class="mono" style="font-size:24px;font-weight:700;line-height:1;color:${last?'#ff8a8a':'var(--text)'}">${c.qtd}</div>
+      <div style="font-size:10.5px;font-weight:700;margin-top:6px">${c.nome}</div>
+      <div style="font-size:9.5px;color:var(--muted)">${c.sub}</div></div>`;
+    const arrow=(c.conv!=null)?`<div style="width:44px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+      <span class="mono" style="font-size:10.5px;font-weight:700;color:${c.conv>=60?'var(--green)':'var(--muted)'}">${c.conv}%</span>
+      <span style="color:var(--border);font-size:15px;line-height:1">→</span></div>`:"";
+    return card+arrow;}).join("")}</div>
+    <div style="display:flex;gap:18px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:10.5px;color:var(--muted)">
+      <span>Total missões: <b style="color:var(--blue)">${scans.length}</b></span>
+      <span>· Críticos abertos: <b style="color:var(--red)">${totalCrit}</b></span>
+      <span>· Altos abertos: <b style="color:var(--orange)">${totalAlto}</b></span></div>`;
+  return panel("Esteira · da descoberta à prova",`${rodando.length} ativas · ${schedules.length} agendadas`,body,2);
+}
+
+function heatColor(sev,v){if(v===0)return"var(--surface2)";const base={critical:"214,69,69",high:"254,123,2",medium:"212,165,0",low:"34,145,96"}[sev];return `rgba(${base},${Math.min(1,0.15+v/12*0.85).toFixed(2)})`;}
+function panelHeatmap(){
+  const eff={critical:totalCrit,high:totalAlto,medium:totalMed,low:totalBaix};
+  const heat=[
+    {classe:"Aplicações web",critical:eff.critical,high:eff.high,medium:eff.medium,low:eff.low},
+    {classe:"APIs",critical:Math.round(eff.critical*.4),high:Math.round(eff.high*.3),medium:Math.round(eff.medium*.3),low:Math.round(eff.low*.2)},
+    {classe:"Infraestrutura",critical:0,high:Math.round(eff.high*.2),medium:Math.round(eff.medium*.2),low:Math.round(eff.low*.3)},
+    {classe:"Auth & credenciais",critical:Math.round(eff.critical*.6),high:Math.round(eff.high*.5),medium:Math.round(eff.medium*.1),low:Math.round(eff.low*.1)},
+    {classe:"DNS & headers",critical:0,high:Math.round(eff.high*.1),medium:Math.round(eff.medium*.2),low:Math.round(eff.low*.4)},
+  ];
+  const cols=["critical","high","medium","low"];
+  let g=`<span></span>${cols.map(s=>`<span style="font-size:9px;text-align:center;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600">${SEV_LABEL[s]}</span>`).join("")}<span style="font-size:9px;text-align:center;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600">Total</span>`;
+  heat.forEach(r=>{const tot=cols.reduce((a,s)=>a+r[s],0);
+    g+=`<span style="font-size:11px;font-weight:600;padding-right:8px">${r.classe}</span>`;
+    g+=cols.map(s=>`<div class="mono" style="height:34px;border-radius:7px;display:grid;place-items:center;background:${heatColor(s,r[s])};font-size:12px;font-weight:700;color:${r[s]/12>0.45?'#fff':r[s]===0?'var(--label)':'var(--text)'}">${r[s]>0?r[s]:""}</div>`).join("");
+    g+=`<div class="mono" style="text-align:center;font-size:11.5px;font-weight:700;color:var(--muted)">${tot>0?tot:"—"}</div>`;});
+  return panel("Heatmap · vulnerabilidades por classe","classe × severidade",
+    `<div style="display:grid;grid-template-columns:180px repeat(4,1fr) 44px;gap:4px;align-items:center">${g}</div>`,2);
+}
+
+function panelFrameworks(){
+  const body=`<div style="display:flex;flex-direction:column;gap:10px">${FRAMEWORKS.map(fw=>`
+    <div><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">
+      <span style="font-size:11px;font-weight:700">${fw.nome}</span>
+      <span class="mono" style="font-size:10px;color:rgba(${fw.cor},.9);font-weight:700">${fw.risco}% risco</span></div>
+      <div style="height:8px;border-radius:99px;overflow:hidden;background:var(--surface2)"><div style="width:${fw.cobertura}%;height:100%;background:rgba(${fw.cor},.85)"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:3px">
+        <span class="mono" style="font-size:9px;color:var(--muted)">${fw.tecnicos}/${fw.total} técnicas</span>
+        <span class="mono" style="font-size:9px;color:var(--label)">${fw.gaps[0]}</span></div></div>`).join("")}</div>`;
+  return panel("Risco por framework","exposição validada × cobertura",body);
+}
+
+function panelWorkers(){
+  const s=workerHealth.summary,c=workerHealth.capacity;
+  const util=Math.round(s.online_workers/s.total_workers*100);
+  const scanUtil=Math.min(100,Math.round(rodando.length/c.total_slots*100));
+  const phase=[["recon","Recon"],["analise_vulnerabilidade","Vuln"],["osint","OSINT"],["desconhecido","Idle"]];
+  const body=`<div style="display:flex;flex-direction:column;gap:12px">
+    <div><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px"><span style="font-size:10.5px;color:var(--muted)">Utilização de scan</span>
+      <span class="mono" style="font-size:13px;font-weight:700;color:${scanUtil>80?'var(--red)':'var(--green)'}">${scanUtil}%</span></div>
+      <div style="height:8px;background:var(--surface2);border-radius:99px;overflow:hidden"><div style="width:${scanUtil}%;height:100%;background:var(--brand-500)"></div></div>
+      <div class="mono" style="font-size:9.5px;color:var(--label);margin-top:3px">${rodando.length} rodando · cap. ${c.total_slots} slots (nível ${c.level}/${c.max})</div></div>
+    <div><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px"><span style="font-size:10.5px;color:var(--muted)">Workers online</span>
+      <span class="mono" style="font-size:13px;font-weight:700;color:${util<50?'var(--red)':'var(--green)'}">${util}%</span></div>
+      <div style="height:8px;background:var(--surface2);border-radius:99px;overflow:hidden"><div style="width:${util}%;height:100%;background:var(--green)"></div></div>
+      <div class="mono" style="font-size:9.5px;color:var(--label);margin-top:3px">${s.online_workers} de ${s.total_workers} workers ativos</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;border-top:1px solid var(--border);padding-top:10px">
+      ${phase.map(([k,l])=>{const v=s.phase_counts[k]||0;return `<div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:10px;color:var(--muted)">${l}</span><span class="mono" style="font-size:11px;font-weight:700;color:${v>0?'var(--green)':'var(--label)'}">${v}</span></div>`;}).join("")}</div>
+  </div>`;
+  return panel("Capacidade & Workers",`${s.online_workers}/${s.total_workers} online`,body);
+}
+
+function panelRecentes(){
+  const warn=`<div style="grid-column:span 2;display:flex;align-items:flex-start;gap:10px;padding:9px 12px;background:rgba(254,215,0,.08);border:1px solid rgba(254,215,0,.25);border-radius:8px;font-size:11px;color:var(--yellow)">
+    <span>⚠</span><span>Execute testes apenas em ambientes autorizados. Certifique-se de ter autorização formal do proprietário do alvo.</span></div>`;
+  const cards=scans.slice(0,6).map(s=>{const p=s.mission_progress;const act=ACTIVE.includes(s.status);return `
+    <div style="min-width:0;background:var(--surface2);border-radius:8px;padding:10px 12px;border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px"><span class="mono" style="font-size:12px;font-weight:700">#${s.id}</span>
+        <span class="mono" style="font-size:10px;color:${act?'var(--green)':'var(--muted)'};font-weight:600">${s.status}</span></div>
+      <div class="mono" style="font-size:10.5px;color:var(--muted);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.target_query}</div>
+      <div style="height:3px;background:#1f242c;border-radius:99px;overflow:hidden"><div style="width:${p}%;height:100%;background:${act?'var(--brand-500)':'var(--muted)'}"></div></div>
+      <div class="mono" style="display:flex;justify-content:space-between;margin-top:5px;font-size:10px;color:var(--label)"><span>C:${s.open_critical} A:${s.open_high} M:${s.open_medium} B:${s.open_low}</span><span>${p}%</span></div></div>`;}).join("");
+  return panel("Missões recentes","últimos resultados",
+    `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">${warn}${cards}</div>`,2);
+}
+
+function panelGuardiao(){
+  const sh=platformHealth.self_heal, w=sh.watchdog;
+  const okC=platformHealth.containers.length;
+  const card=(t,big,bigc,sub)=>`<div style="background:var(--surface2);border-radius:8px;padding:10px 12px;border:1px solid var(--border)">
+    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${t}</div>
+    <div class="mono" style="font-size:14px;font-weight:700;color:${bigc}">${big}</div>
+    <div class="mono" style="font-size:10px;color:var(--label);margin-top:5px">${sub}</div></div>`;
+  const body=`<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px">
+    ${card("Auto-curador (watchdog)", (w.alive?"VIVO":"PARADO"), w.alive?"var(--green)":"var(--red)", "heartbeat há "+w.heartbeat_age_seconds+"s")}
+    ${card("Containers", okC+"/"+okC+" ok", "var(--green)", "todos saudáveis")}
+    ${card("Correções (último ciclo)", sh.corrections.length+" restart(s)", sh.corrections.length?"var(--yellow)":"var(--green)", sh.corrections.length?"":"nenhuma necessária")}
+    ${card("Scans recuperados", sh.orphans_recovered.length, sh.orphans_recovered.length?"var(--yellow)":"var(--green)", sh.orphans_recovered.length?"":"nenhum órfão")}
+  </div>`;
+  return panel("Guardião da plataforma · auto-cura","saudável",body,3);
+}
+
+function panel(title,right,body,span){
+  return `<div class="panel ${span===2?'span2':span===3?'span3':''}"><div class="ph"><span class="t">${title}</span><span class="r">${right}</span></div>${body}</div>`;
+}
+
+function render(){
+  renderBigNums();
+  $("#grid").innerHTML=[panelScans(),panelEsteira(),panelHeatmap(),panelFrameworks(),panelWorkers(),panelRecentes(),panelGuardiao()].join("");
+  $("#activeTxt").textContent=`${rodando.length} scan(s) ativo(s)`;
+}
+function tickClock(){const n=new Date();$("#lastRef").textContent=n.toLocaleTimeString('pt-BR');}
+render(); tickClock();
+
+// countdown 3min como na página real (apenas visual no mock)
+let cd=3*60;
+setInterval(()=>{cd=cd<=1?3*60:cd-1;const m=String(Math.floor(cd/60)).padStart(2,"0"),s=String(cd%60).padStart(2,"0");$("#cd").textContent=`${m}:${s}`;
+  if(cd===3*60){$("#spin").style.animation="spin .8s linear";setTimeout(()=>{$("#spin").style.animation="none";tickClock();},800);}},1000);
+$("#refreshBtn").onclick=()=>{$("#spin").style.animation="spin .8s linear";setTimeout(()=>{$("#spin").style.animation="none";tickClock();},800);};
+</script>
+</body>
+</html>
