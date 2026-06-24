@@ -143,7 +143,7 @@ shodan_lookup:
   category: osint
   phase: WEAPONIZATION_SIMULATION
   description: "Shodan host lookup — banners, ports, CVEs (uses bundled wrapper script to avoid template interpolation issues)."
-  cmd: ["/opt/pipx/venvs/shodan/bin/python", "/opt/runner-scripts/shodan_lookup.py", "{host}"]
+  cmd: ["/opt/tools/pipx/venvs/shodan/bin/python", "/opt/runner-scripts/shodan_lookup.py", "{host}"]
   requires_env: ["SHODAN_API_KEY"]
   timeout: 60
   parser: json
