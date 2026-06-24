@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import and_, func, or_, text
+from sqlalchemy import and_, case, func, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -944,6 +944,14 @@ PHASE_GATE: dict[str, str | None] = {
     "P20": "P09",
 }
 
+# Fases-GATE: as fases das quais OUTRAS dependem (valores do PHASE_GATE).
+# Enquanto uma fase-gate tem itens pendentes, todas as fases que esperam por ela
+# ficam 'blocked'. Por isso o dispatcher prioriza drenar fases-gate primeiro
+# (ver claim_work_items) — senão uma fase-gate pode ser estarvada por uma fase
+# não-gate de prioridade melhor que compete pela mesma capacidade, deixando a
+# exploração bloqueada para sempre (vira "scan de vuln", não pentest).
+_GATE_TARGET_PHASES: frozenset[str] = frozenset(g for g in PHASE_GATE.values() if g)
+
 # Fases que RECEBEM items como 'blocked' (aguardam gate)
 _BLOCKED_AT_CREATE: frozenset[str] = frozenset(
     ph for ph, gate in PHASE_GATE.items() if gate is not None
@@ -1613,7 +1621,17 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                     ScanWorkItem.attempts < ScanWorkItem.max_attempts,
                     or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
                 )
-                .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.created_at.asc(), ScanWorkItem.id.asc())
+                # GATE-AWARE: fases-gate (P02/P06/P09…) são reivindicadas ANTES
+                # de qualquer fase não-gate que dispute a mesma capacidade. Isso
+                # impede que uma fase-gate seja estarvada (ex.: P09=prio 50 perdia
+                # p/ P16=45 e nunca drenava → exploração bloqueada eternamente).
+                # Uma fase-gate sempre drena → seu gate abre → o pentest avança.
+                .order_by(
+                    case((ScanWorkItem.phase_id.in_(_GATE_TARGET_PHASES), 0), else_=1).asc(),
+                    ScanWorkItem.priority.asc(),
+                    ScanWorkItem.created_at.asc(),
+                    ScanWorkItem.id.asc(),
+                )
                 .limit(to_claim)
                 .with_for_update(skip_locked=True)
                 .all()
