@@ -4427,6 +4427,25 @@ def list_findings_paginated(
     }
 
 
+@router.get("/findings/{finding_id}/intelligence")
+def get_finding_intelligence(
+    finding_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Finding Intelligence v2: experiment, proof pack, ledger and genealogy."""
+    from app.services.finding_experiment import build_finding_intelligence
+
+    finding = (
+        _authorized_finding_query(db, current_user)
+        .filter(Finding.id == finding_id)
+        .first()
+    )
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding não encontrado")
+    return build_finding_intelligence(db, finding)
+
+
 @router.get("/findings/export.csv")
 def export_findings_csv(
     severity: str | None = None,
@@ -8771,6 +8790,25 @@ def get_attack_graph(
 
     graph = build_attack_graph(db, scan_id)
     return {"scan_id": scan_id, **graph}
+
+
+@router.get("/scans/{scan_id}/uncertainty")
+def get_scan_uncertainty(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mapa de incerteza, dívida de exploração e autópsia do scan."""
+    from app.models.models import ScanJob
+    from app.services.scan_uncertainty import build_scan_uncertainty
+
+    job = db.query(ScanJob).filter(
+        ScanJob.id == scan_id,
+        ScanJob.owner_id == current_user.id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    return build_scan_uncertainty(db, job)
 
 
 @router.post("/scans/{scan_id}/business-logic")

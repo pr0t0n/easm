@@ -2336,6 +2336,102 @@ def kali_runner_tools(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
 
 
+@router.get("/kali-runner/modules")
+def kali_runner_modules(current_user: User = Depends(get_current_user)):
+    """Proxy the runner's tool-module catalog (click-to-install status)."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.get(f"{settings.kali_runner_url.rstrip('/')}/modules", timeout=12)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
+@router.get("/kali-runner/modules/{module_id}")
+def kali_runner_module_detail(module_id: str, current_user: User = Depends(get_current_user)):
+    """Proxy a single module's status (used to poll install progress)."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.get(
+            f"{settings.kali_runner_url.rstrip('/')}/modules/{module_id}", timeout=12
+        )
+        if r.status_code == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown module")
+        r.raise_for_status()
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
+@router.post("/kali-runner/modules/{module_id}/install")
+def kali_runner_module_install(
+    module_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Trigger a click-to-install of a Kali tool module (admin only)."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.post(
+            f"{settings.kali_runner_url.rstrip('/')}/modules/{module_id}/install", timeout=12
+        )
+        if r.status_code == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown module")
+        if r.status_code == 409:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="install already in progress")
+        r.raise_for_status()
+        log_audit(
+            db,
+            event_type="kali.module.install",
+            message=f"Instalação do módulo Kali '{module_id}' iniciada",
+            actor_user_id=current_user.id,
+            metadata={"module": module_id},
+        )
+        db.commit()
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
+@router.post("/kali-runner/modules/{module_id}/uninstall")
+def kali_runner_module_uninstall(
+    module_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Remove an installed Kali tool module (admin only)."""
+    import requests
+    from app.core.config import settings
+    try:
+        r = requests.post(
+            f"{settings.kali_runner_url.rstrip('/')}/modules/{module_id}/uninstall", timeout=20
+        )
+        if r.status_code == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown module")
+        r.raise_for_status()
+        log_audit(
+            db,
+            event_type="kali.module.uninstall",
+            message=f"Módulo Kali '{module_id}' removido",
+            actor_user_id=current_user.id,
+            metadata={"module": module_id},
+        )
+        db.commit()
+        return r.json()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"runner unreachable: {exc}")
+
+
 @router.get("/learning/vulnerabilities")
 def list_vulnerability_learnings(
     status_filter: str | None = Query(None, alias="status"),

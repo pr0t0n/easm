@@ -125,10 +125,16 @@ services:
       - "${KALI_RUNNER_HOST_PORT:-8088}:8088"
     volumes:
       - kali_workspace:/workspace
+      # Persistent store for click-to-install tool modules (Go/pipx/git/binary
+      # tools land here and survive restarts; the base image stays lean).
+      - kali_tools:/opt/tools
       # Profiles mounted read-only so tuning tool timeouts/rates needs only a
       # container restart (not a full image rebuild). Aligns with the rule:
       # never rebuild kali_runner unnecessarily — it's a stable tool repository.
       - ./kali-runner/profiles:/app/profiles:ro
+      # Module manifest mounted read-only so install steps can be tuned without
+      # a rebuild (a container restart reloads modules.yaml).
+      - ./kali-runner/modules.yaml:/app/modules.yaml:ro
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -433,4 +439,5 @@ volumes:
   postgres_data:
   ollama_data:
   kali_workspace:
+  kali_tools:
   zap_data:
