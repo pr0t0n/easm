@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
