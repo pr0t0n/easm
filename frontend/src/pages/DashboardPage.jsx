@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import client from "../api/client";
 import "../styles/dashboard.css";
 
@@ -197,10 +198,13 @@ function AttackGraphPanel({ paths = [], jewels = [] }) {
           <h3>Caminhos de ataque até as joias</h3>
           <span>grafo operacional do ciclo selecionado</span>
         </div>
-        <div className="graph-legend">
-          {["critical", "high", "medium"].map((sev) => (
-            <span key={sev}><i className={`line-${sev}`} />{SEVERITY_LABELS[sev]}</span>
-          ))}
+        <div className="graph-head-actions">
+          <Link to="/attack-graph">abrir explorer</Link>
+          <div className="graph-legend">
+            {["critical", "high", "medium"].map((sev) => (
+              <span key={sev}><i className={`line-${sev}`} />{SEVERITY_LABELS[sev]}</span>
+            ))}
+          </div>
         </div>
       </div>
       {!hasGraph ? (

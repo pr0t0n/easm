@@ -96,6 +96,71 @@ export default function SettingsPage() {
     finally { setSsoSaving(false); }
   };
 
+  // ── Arsenal Kali (módulos click-to-install) ─────────────────────────────────
+  const [modules, setModules] = useState([]);
+  const [modulesLoading, setModulesLoading] = useState(false);
+  const [modulesError, setModulesError] = useState("");
+  const [openLog, setOpenLog] = useState(null); // id do módulo com log aberto
+  const [moduleBusy, setModuleBusy] = useState({}); // id -> bool
+
+  const loadModules = async () => {
+    setModulesLoading(true);
+    setModulesError("");
+    try {
+      const { data } = await client.get("/api/kali-runner/modules");
+      setModules(data.modules || []);
+    } catch {
+      setModulesError("Runner Kali indisponível.");
+    } finally {
+      setModulesLoading(false);
+    }
+  };
+  useEffect(() => { loadModules(); }, []);
+
+  // Poll enquanto houver algum módulo instalando.
+  const anyInstalling = modules.some((m) => m.status === "installing");
+  useEffect(() => {
+    if (!anyInstalling) return undefined;
+    const t = setInterval(loadModules, 3000);
+    return () => clearInterval(t);
+  }, [anyInstalling]);
+
+  const installModule = async (id) => {
+    setModuleBusy((b) => ({ ...b, [id]: true }));
+    try {
+      await client.post(`/api/kali-runner/modules/${id}/install`);
+      toastSuccess(`Instalação de "${id}" iniciada.`);
+      setOpenLog(id);
+      loadModules();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || "Falha ao iniciar instalação.");
+    } finally {
+      setModuleBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const uninstallModule = async (id) => {
+    if (!window.confirm(`Remover o módulo "${id}"? As ferramentas serão apagadas do volume.`)) return;
+    setModuleBusy((b) => ({ ...b, [id]: true }));
+    try {
+      await client.post(`/api/kali-runner/modules/${id}/uninstall`);
+      toastSuccess(`Módulo "${id}" removido.`);
+      loadModules();
+    } catch (e) {
+      toastError(e?.response?.data?.detail || "Falha ao remover.");
+    } finally {
+      setModuleBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const MODULE_STATUS = {
+    installed:     { label: "✓ Instalado",   color: "#15803d", bg: "#dcfce7" },
+    installing:    { label: "⟳ Instalando…", color: "#b45309", bg: "#fef3c7" },
+    failed:        { label: "✗ Falhou",      color: "#b91c1c", bg: "#fee2e2" },
+    partial:       { label: "⚠ Incompleto",  color: "#b45309", bg: "#fef3c7" },
+    not_installed: { label: "Não instalado", color: "var(--ink-muted)", bg: "var(--surface-alt)" },
+  };
+
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Configurações</h1>
@@ -214,6 +279,94 @@ export default function SettingsPage() {
             <button type="button" style={BTN("secondary")} onClick={loadSso}>Recarregar</button>
           </div>
         </form>
+      </div>
+
+      {/* ── Arsenal Kali (módulos click-to-install) ──────────────────── */}
+      <div style={CARD}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>Arsenal Kali</span>
+          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-muted)" }}>
+            instalação modular sob demanda
+          </span>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 18, lineHeight: 1.5 }}>
+          A imagem base sobe enxuta (só ferramentas apt). Os módulos pesados
+          (suite Go, sqlmap, nuclei, trivy…) são instalados aqui sob demanda, num
+          volume persistente — sobrevivem a reinício e ficam disponíveis para os scans.
+        </p>
+
+        {modulesError && (
+          <div style={{ fontSize: 13, color: "#b91c1c", marginBottom: 14 }}>{modulesError}</div>
+        )}
+
+        {modules.map((m) => {
+          const st = MODULE_STATUS[m.status] || MODULE_STATUS.not_installed;
+          const busy = !!moduleBusy[m.id];
+          const installing = m.status === "installing";
+          const installed = m.status === "installed";
+          return (
+            <div key={m.id} style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "14px 16px", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{m.name}</span>
+                <span style={{ ...CHIP(installed), background: st.bg, color: st.color }}>{st.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--ink-muted)" }}>
+                  {m.provides?.length || 0} ferramentas
+                </span>
+              </div>
+              <p style={{ fontSize: 12.5, color: "var(--ink-muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+                {m.description}
+              </p>
+
+              {installing && (
+                <div style={{ fontSize: 12, color: "#b45309", marginBottom: 10 }}>
+                  Passo {m.step_index || 0}/{m.total_steps}: {m.current_step || "iniciando…"}
+                </div>
+              )}
+              {m.status === "failed" && m.error && (
+                <div style={{ fontSize: 12, color: "#b91c1c", marginBottom: 10 }}>{m.error}</div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {!installed && (
+                  <button style={BTN("primary")} disabled={busy || installing} onClick={() => installModule(m.id)}>
+                    {installing ? "Instalando…" : busy ? "…" : "Instalar"}
+                  </button>
+                )}
+                {installed && (
+                  <>
+                    <button style={BTN("primary")} disabled={busy} onClick={() => installModule(m.id)}>
+                      Reinstalar
+                    </button>
+                    <button style={BTN("secondary")} disabled={busy} onClick={() => uninstallModule(m.id)}>
+                      Remover
+                    </button>
+                  </>
+                )}
+                {(m.log?.length > 0 || installing) && (
+                  <button style={BTN("secondary")} onClick={() => setOpenLog(openLog === m.id ? null : m.id)}>
+                    {openLog === m.id ? "Ocultar log" : "Ver log"}
+                  </button>
+                )}
+              </div>
+
+              {openLog === m.id && (
+                <pre style={{
+                  marginTop: 10, maxHeight: 220, overflow: "auto", fontSize: 11, lineHeight: 1.45,
+                  background: "var(--canvas)", border: "1px solid var(--line)", borderRadius: 8,
+                  padding: "10px 12px", color: "var(--ink-soft)", whiteSpace: "pre-wrap",
+                }}>
+                  {(m.log || []).join("\n") || "(sem saída ainda)"}
+                </pre>
+              )}
+            </div>
+          );
+        })}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+          <button type="button" style={BTN("secondary")} onClick={loadModules} disabled={modulesLoading}>
+            {modulesLoading ? "Atualizando…" : "Recarregar"}
+          </button>
+        </div>
       </div>
 
       {/* ── Info box: OSINT phase ────────────────────────────────────── */}

@@ -26,6 +26,8 @@ export default function VulnerabilitiesPage() {
   const [error, setError] = useState("");
   const [sevFilter, setSevFilter] = useState("todas");
   const [selected, setSelected] = useState(null);
+  const [selectedIntel, setSelectedIntel] = useState(null);
+  const [intelLoading, setIntelLoading] = useState(false);
   const [scanId, setScanId] = useState("");
 
   useEffect(() => {
@@ -45,6 +47,20 @@ export default function VulnerabilitiesPage() {
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
 
+  useEffect(() => {
+    if (!selected?.id) {
+      setSelectedIntel(null);
+      return;
+    }
+    setIntelLoading(true);
+    setSelectedIntel(null);
+    client
+      .get(`/api/findings/${selected.id}/intelligence`, { _skipToast: true })
+      .then(({ data }) => setSelectedIntel(data || null))
+      .catch(() => setSelectedIntel(null))
+      .finally(() => setIntelLoading(false));
+  }, [selected?.id]);
+
   if (loading) {
     return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Carregando vulnerabilidades…</p></div></div></div></main>;
   }
@@ -58,6 +74,10 @@ export default function VulnerabilitiesPage() {
     const sev = String(f.severity || "info").toLowerCase();
     const target = f.target || f.domain || f.target_query || "—";
     const details = f.details || {};
+    const proofPack = selectedIntel?.proof_pack || {};
+    const experiment = selectedIntel?.experiment || {};
+    const ledger = Array.isArray(selectedIntel?.confidence_ledger) ? selectedIntel.confidence_ledger : [];
+    const contradictions = Array.isArray(selectedIntel?.contradictions) ? selectedIntel.contradictions : [];
     const evidence = details.evidence || details.payload || details.command || details.proof || details.raw_output || details.request || "";
     const reproSteps = Array.isArray(details.repro_steps) ? details.repro_steps : (Array.isArray(details.reproduction_steps) ? details.reproduction_steps : []);
     const vrank = { hypothesis: 1, candidate: 2, confirmed: 3 };
@@ -71,7 +91,7 @@ export default function VulnerabilitiesPage() {
     return (
       <main className="dash">
         <div className="content report-shell">
-          <button className="vuln-back sk-mono" onClick={() => setSelected(null)} type="button">← voltar para a lista</button>
+          <button className="vuln-back sk-mono" onClick={() => { setSelected(null); setSelectedIntel(null); }} type="button">← voltar para a lista</button>
           <header className="vuln-detail-head">
             <div className="vuln-detail-badges">
               <span className={`sk-badge sk-badge--${sev}`}><span className={`sk-dot sk-dot--${sev}`} />{SEV_LABEL[sev]}</span>
@@ -93,16 +113,32 @@ export default function VulnerabilitiesPage() {
 
               <section className="report-section">
                 <div className="sk-eyebrow">Evidência reproduzível</div>
-                {f.url && <div className="vuln-code sk-mono" style={{ marginBottom: evidence ? 8 : 0 }}>{f.url}</div>}
-                {evidence ? (
-                  <pre className="vuln-evidence sk-mono">{String(evidence).slice(0, 4000)}</pre>
+                {(experiment.target || f.url) && <div className="vuln-code sk-mono" style={{ marginBottom: evidence ? 8 : 0 }}>{experiment.target || f.url}</div>}
+                {(proofPack.evidence || evidence) ? (
+                  <pre className="vuln-evidence sk-mono">{String(proofPack.evidence || evidence).slice(0, 4000)}</pre>
                 ) : (!f.url && (
                   <div className="report-empty">Sem evidência técnica capturada para este achado.</div>
                 ))}
-                {reproSteps.length > 0 && (
+                {(proofPack.reproduction?.steps?.length > 0 || reproSteps.length > 0) && (
                   <ol className="vuln-repro">
-                    {reproSteps.slice(0, 8).map((s, i) => <li key={i}>{String(s)}</li>)}
+                    {(proofPack.reproduction?.steps || reproSteps).slice(0, 8).map((s, i) => <li key={i}>{String(s)}</li>)}
                   </ol>
+                )}
+              </section>
+
+              <section className="report-section">
+                <div className="sk-eyebrow">Experimento formal</div>
+                {intelLoading ? (
+                  <div className="report-empty">Carregando inteligência do achado...</div>
+                ) : selectedIntel ? (
+                  <div className="vuln-experiment-grid">
+                    <div><b>Claim</b><span>{experiment.claim || "—"}</span></div>
+                    <div><b>Resultado seguro esperado</b><span>{experiment.expected_secure_result || "—"}</span></div>
+                    <div><b>Resultado observado</b><span>{experiment.observed_result || "—"}</span></div>
+                    <div><b>Veredito</b><span>{experiment.verdict || "—"} · confiança final {selectedIntel.final_confidence ?? "—"}%</span></div>
+                  </div>
+                ) : (
+                  <div className="report-empty">Inteligência formal indisponível para este achado.</div>
                 )}
               </section>
 
@@ -135,6 +171,36 @@ export default function VulnerabilitiesPage() {
                 <section className="sk-panel vuln-reco-panel">
                   <div className="sk-eyebrow">Recomendação</div>
                   <p className="report-narrative" style={{ fontSize: 12.5 }}>{f.recommendation}</p>
+                </section>
+              )}
+              <section className="sk-panel vuln-reco-panel">
+                <div className="sk-eyebrow">Confidence ledger</div>
+                {intelLoading ? (
+                  <div className="report-empty">Carregando ledger...</div>
+                ) : ledger.length ? (
+                  <div className="vuln-ledger">
+                    {ledger.map((entry, idx) => (
+                      <div key={`${entry.signal}-${idx}`} className={Number(entry.delta || 0) >= 0 ? "pos" : "neg"}>
+                        <b className="sk-mono">{Number(entry.delta || 0) >= 0 ? "+" : ""}{entry.delta}</b>
+                        <span>{entry.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="report-empty">Sem ledger calculado.</div>
+                )}
+              </section>
+              {contradictions.length > 0 && (
+                <section className="sk-panel vuln-reco-panel">
+                  <div className="sk-eyebrow">Contradições</div>
+                  <div className="vuln-contradictions">
+                    {contradictions.map((item) => (
+                      <div key={item.type}>
+                        <b>{item.message}</b>
+                        <span>{item.recommended_action}</span>
+                      </div>
+                    ))}
+                  </div>
                 </section>
               )}
             </div>

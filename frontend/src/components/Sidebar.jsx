@@ -10,6 +10,7 @@ const svg = (children) => (
 const ICONS = {
   cockpit:     svg(<><path d="m12 14 4-4" /><path d="M3.34 19a10 10 0 1 1 17.32 0" /></>),
   superficie:  svg(<><circle cx="12" cy="12" r="10" /><path d="M2 12h20" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z" /></>),
+  attackGraph: svg(<><circle cx="5" cy="12" r="2" /><circle cx="12" cy="5" r="2" /><circle cx="12" cy="19" r="2" /><circle cx="19" cy="12" r="2" /><path d="M7 11 10.5 6.5" /><path d="M7 13 10.5 17.5" /><path d="M13.5 6.5 17 11" /><path d="M13.5 17.5 17 13" /></>),
   joias:       svg(<><path d="m2 6 4 12h12l4-12-5.5 5L12 5l-4.5 6L2 6Z" /><path d="M6 18h12" /></>),
   vulns:       svg(<><path d="m8 2 1.88 1.88" /><path d="M14.12 3.88 16 2" /><path d="M9 7.13v-1a3 3 0 1 1 6 0v1" /><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6Z" /><path d="M12 20v-9" /><path d="M6 13H2" /><path d="M22 13h-4" /></>),
   scans:       svg(<><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34" /><path d="M4 6h.01" /><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35" /><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67" /><circle cx="12" cy="12" r="2" /><path d="m13.41 10.59 5.66-5.66" /></>),
@@ -33,6 +34,7 @@ const NAV_GROUPS = [
     grupo: "Superfície",
     itens: [
       { to: "/superficie", label: "Superfície de ataque", icon: "superficie" },
+      { to: "/attack-graph", label: "Attack Graph", icon: "attackGraph" },
       { to: "/joias",      label: "Joias da Coroa",       icon: "joias" },
       { to: "/vulnerabilidades", label: "Vulnerabilidades", icon: "vulns" },
     ],

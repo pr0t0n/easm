@@ -18,6 +18,7 @@ import AdminLogsPage from "./pages/AdminLogsPage";
 import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
 import DomainsPage from "./pages/DomainsPage";
 import AttackSurfacePage from "./pages/AttackSurfacePage";
+import AttackGraphPage from "./pages/AttackGraphPage";
 import CrownJewelsPage from "./pages/CrownJewelsPage";
 import LearningPage from "./pages/LearningPage";
 import GuardrailsPage from "./pages/GuardrailsPage";
@@ -93,6 +94,7 @@ export default function App() {
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
                     <Route path="/superficie" element={<AttackSurfacePage />} />
+                    <Route path="/attack-graph" element={<AttackGraphPage />} />
                     <Route path="/dominios" element={<Navigate to="/vulnerabilidades" replace />} />
                     <Route path="/joias" element={<CrownJewelsPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
