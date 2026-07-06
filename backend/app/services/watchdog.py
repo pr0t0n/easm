@@ -95,15 +95,24 @@ def run_watchdog(db) -> dict:
     rows = db.execute(text("""
         SELECT s.id,
           count(*) FILTER (WHERE w.status = 'queued') AS queued,
-          count(*) FILTER (WHERE w.status IN ('running','dispatched')) AS active,
-          count(*) FILTER (WHERE w.status='dispatched' AND w.updated_at < now() - interval '%d minutes') AS stuck_dispatched
+          count(*) FILTER (WHERE w.status IN ('running','dispatched','submitted')) AS active,
+          count(*) FILTER (
+            WHERE w.status IN ('running','dispatched','submitted')
+              AND w.lease_until IS NOT NULL
+              AND w.lease_until <= now()
+          ) AS expired_active,
+          count(*) FILTER (
+            WHERE w.status IN ('running','dispatched','submitted')
+              AND w.updated_at < now() - interval '%d minutes'
+          ) AS stuck_active
         FROM scan_jobs s JOIN scan_work_items w ON w.scan_job_id = s.id
         WHERE s.status = 'running'
         GROUP BY s.id
     """ % _STUCK_MINUTES)).fetchall()
 
     revived = []
-    for sid, queued, active, stuck in rows:
+    stale_repaired = []
+    for sid, queued, active, expired, stuck in rows:
         # stall = há trabalho na fila mas NADA executando (dispatch parou)
         if int(queued or 0) > 0 and int(active or 0) == 0:
             # AUTO-RECUPERAÇÃO via entry point canônico: ele NÃO re-dispara se a
@@ -123,18 +132,58 @@ def run_watchdog(db) -> dict:
                                 sid, queued, _res.get("reason"))
             except Exception as exc:
                 logger.error("watchdog: falha ao re-disparar scan %s: %s", sid, exc)
-        # re-enfileira itens presos em dispatched há muito tempo (kali perdeu o job)
-        if int(stuck or 0) > 0:
-            res = db.execute(text("""
-                UPDATE scan_work_items SET status='queued', updated_at=now()
-                WHERE scan_job_id=:sid AND status='dispatched'
-                  AND updated_at < now() - interval '%d minutes'
+        # Repara itens ativos órfãos. O caso crítico é status='submitted':
+        # o poller já entregou ao Kali, o processo/restart perdeu a continuação,
+        # e o dispatcher antigo só re-enfileirava 'dispatched'. Com lease vencido
+        # e attempts=max_attempts, esses itens nunca voltavam a terminalizar e o
+        # ScanJob ficava "running" para sempre.
+        if int(expired or 0) > 0 or int(stuck or 0) > 0:
+            retry_res = db.execute(text("""
+                UPDATE scan_work_items
+                   SET status='retry',
+                       lease_until=NULL,
+                       updated_at=now(),
+                       last_error='watchdog_stale_active_requeued'
+                 WHERE scan_job_id=:sid
+                   AND status IN ('running','dispatched','submitted')
+                   AND attempts < max_attempts
+                   AND (
+                     (lease_until IS NOT NULL AND lease_until <= now())
+                     OR updated_at < now() - interval '%d minutes'
+                   )
             """ % _STUCK_MINUTES), {"sid": int(sid)})
-            report["requeued"] += int(getattr(res, "rowcount", 0) or 0)
+            fail_res = db.execute(text("""
+                UPDATE scan_work_items
+                   SET status='failed',
+                       lease_until=NULL,
+                       finished_at=now(),
+                       updated_at=now(),
+                       last_error='watchdog_stale_active_max_attempts'
+                 WHERE scan_job_id=:sid
+                   AND status IN ('running','dispatched','submitted')
+                   AND attempts >= max_attempts
+                   AND (
+                     (lease_until IS NOT NULL AND lease_until <= now())
+                     OR updated_at < now() - interval '%d minutes'
+                   )
+            """ % _STUCK_MINUTES), {"sid": int(sid)})
+            requeued = int(getattr(retry_res, "rowcount", 0) or 0)
+            failed = int(getattr(fail_res, "rowcount", 0) or 0)
+            if requeued or failed:
+                report["requeued"] += requeued
+                report["stale_failed"] = int(report.get("stale_failed", 0) or 0) + failed
+                stale_repaired.append({"scan_id": int(sid), "requeued": requeued, "failed": failed})
     report["revived_scans"] = revived
+    report["stale_repaired"] = stale_repaired
 
-    if report["requeued"]:
+    if report["requeued"] or stale_repaired:
         db.commit()
+        try:
+            from app.workers.tasks import dispatch_scan_work_items
+            for item in stale_repaired:
+                dispatch_scan_work_items.delay(int(item["scan_id"]))
+        except Exception as exc:
+            logger.error("watchdog: falha ao acordar dispatcher apos reparo stale: %s", exc)
 
     # ── 3. scans em LIMBO: não-terminais porém SEM execução real ─────────────
     # (queued/running/retrying com updated_at antigo e SEM chain lock viva). É o
