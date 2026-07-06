@@ -371,7 +371,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b")
 _URL_PARAM_RE = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_.:-]{0,79})=")
 _BARE_PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,79}$")
-_HALTED_SCAN_STATUSES = {"paused", "stopped"}
+_HALTED_SCAN_STATUSES = {"paused", "stopped", "completed", "failed", "cancelled", "canceled"}
 
 
 def _scan_halted(job: ScanJob) -> bool:
