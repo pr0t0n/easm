@@ -2319,6 +2319,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 job.state_data = _final_state
                 job.status = "completed"
                 job.mission_progress = 100
+                job.current_step = "Scan completed"
                 # Trigger post-scan CVE enrichment pass
                 try:
                     from app.services.cve_enrichment_service import enrichment_service as _enrich
