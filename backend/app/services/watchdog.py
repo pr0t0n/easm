@@ -103,8 +103,9 @@ def run_watchdog(db) -> dict:
           ) AS expired_active,
           count(*) FILTER (
             WHERE w.status IN ('running','dispatched','submitted')
+              AND w.lease_until IS NULL
               AND w.updated_at < now() - interval '%d minutes'
-          ) AS stuck_active
+          ) AS orphan_without_lease
         FROM scan_jobs s JOIN scan_work_items w ON w.scan_job_id = s.id
         WHERE s.status = 'running'
         GROUP BY s.id
@@ -132,11 +133,10 @@ def run_watchdog(db) -> dict:
                                 sid, queued, _res.get("reason"))
             except Exception as exc:
                 logger.error("watchdog: falha ao re-disparar scan %s: %s", sid, exc)
-        # Repara itens ativos órfãos. O caso crítico é status='submitted':
-        # o poller já entregou ao Kali, o processo/restart perdeu a continuação,
-        # e o dispatcher antigo só re-enfileirava 'dispatched'. Com lease vencido
-        # e attempts=max_attempts, esses itens nunca voltavam a terminalizar e o
-        # ScanJob ficava "running" para sempre.
+        # Repara itens ativos órfãos. Lease é o contrato de posse: se ainda está
+        # no futuro, uma ferramenta longa pode estar saudável mesmo sem tocar
+        # updated_at. Só mexemos quando o lease venceu ou quando nem existe lease
+        # e o item está velho.
         if int(expired or 0) > 0 or int(stuck or 0) > 0:
             retry_res = db.execute(text("""
                 UPDATE scan_work_items
@@ -148,8 +148,8 @@ def run_watchdog(db) -> dict:
                    AND status IN ('running','dispatched','submitted')
                    AND attempts < max_attempts
                    AND (
-                     (lease_until IS NOT NULL AND lease_until <= now())
-                     OR updated_at < now() - interval '%d minutes'
+                     lease_until <= now()
+                     OR (lease_until IS NULL AND updated_at < now() - interval '%d minutes')
                    )
             """ % _STUCK_MINUTES), {"sid": int(sid)})
             fail_res = db.execute(text("""
@@ -163,8 +163,8 @@ def run_watchdog(db) -> dict:
                    AND status IN ('running','dispatched','submitted')
                    AND attempts >= max_attempts
                    AND (
-                     (lease_until IS NOT NULL AND lease_until <= now())
-                     OR updated_at < now() - interval '%d minutes'
+                     lease_until <= now()
+                     OR (lease_until IS NULL AND updated_at < now() - interval '%d minutes')
                    )
             """ % _STUCK_MINUTES), {"sid": int(sid)})
             requeued = int(getattr(retry_res, "rowcount", 0) or 0)

@@ -2477,6 +2477,9 @@ def execute_scan_work_item(item_id: int):
     from app.services.scan_work_queue import kali_inflight_release, work_item_applicability_decision, work_queue_counts
 
     db = SessionLocal()
+    _execute_lock = None
+    _execute_lock_key = f"work_item_execute_lock:{int(item_id)}"
+    _execute_lock_token = uuid.uuid4().hex
     try:
         item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
         if not item:
@@ -2507,6 +2510,21 @@ def execute_scan_work_item(item_id: int):
             return {"id": item.id, "status": item.status, "scan_status": job.status}
         if item.status not in {"dispatched", "queued", "retry"}:
             return {"status": item.status}
+        try:
+            from app.services.scan_work_queue import _redis_client as _work_item_redis
+
+            _execute_lock = _work_item_redis()
+            if not _execute_lock.set(_execute_lock_key, _execute_lock_token, nx=True, ex=7200):
+                db.add(ScanLog(
+                    scan_job_id=item.scan_job_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=f"work_item_execute_lock_held id={item.id} status={item.status}",
+                ))
+                db.commit()
+                return {"id": item.id, "status": item.status, "skipped": "execute_lock_held"}
+        except Exception:
+            _execute_lock = None
 
         _state_for_applicability = dict(job.state_data or {})
         _applicability = work_item_applicability_decision(item, _state_for_applicability, at="dispatch")
@@ -2848,6 +2866,15 @@ def execute_scan_work_item(item_id: int):
             db.commit()
         return {"id": item_id, "status": "error", "error": str(exc)}
     finally:
+        if _execute_lock is not None:
+            try:
+                _lock_value = _execute_lock.get(_execute_lock_key)
+                if isinstance(_lock_value, bytes):
+                    _lock_value = _lock_value.decode("utf-8", errors="ignore")
+                if str(_lock_value or "") == _execute_lock_token:
+                    _execute_lock.delete(_execute_lock_key)
+            except Exception:
+                pass
         db.close()
 
 
