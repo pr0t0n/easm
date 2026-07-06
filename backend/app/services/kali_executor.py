@@ -274,6 +274,7 @@ def execute_via_kali(
             "target": dispatch_target,
             "scan_id": scan_id,
             "tool": tool_name,
+            "timeout": int(max_wait),
             "skill_context": dict(skill_context or {}),
             "extra_args": _clean_extra,
         }

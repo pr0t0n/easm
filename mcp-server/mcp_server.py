@@ -375,6 +375,7 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "target": parameters["target"],
             "targets": batch_targets,
             "scan_id": scan_id,
+            "timeout": timeout,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "auth_headers": parameters.get("auth_headers") or {},
             "extra_args": _apply_guardrail(
@@ -490,6 +491,7 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             "target": request.target,
             "targets": batch_targets,
             "scan_id": scan_id,
+            "timeout": int(request.arguments.get("timeout") or (kali_profiles.get(profile_name) or {}).get("timeout") or 1800),
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "auth_headers": request.arguments.get("auth_headers") or {},
             "env_vars": _forwarded_env,
