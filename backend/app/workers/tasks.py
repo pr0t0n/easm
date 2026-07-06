@@ -37,12 +37,33 @@ from app.workers.worker_groups import (
 
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
 HALTED_SCAN_STATUSES = {"stopped", "paused"}
+TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 
 
 def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
     status = str(scan_status or "").lower()
     error = "scan_paused" if status == "paused" else "scan_stopped"
     return {"ok": False, "error": error, "retryable": False}
+
+
+def _scan_is_terminal(scan_status: str | None) -> bool:
+    return str(scan_status or "").lower() in TERMINAL_SCAN_STATUSES
+
+
+def _finish_work_item_for_terminal_scan(item: Any, scan_status: str | None, reason: str) -> None:
+    now = datetime.now()
+    item.status = "skipped"
+    item.lease_until = None
+    item.finished_at = now
+    item.updated_at = now
+    item.last_error = f"skipped:scan_{str(scan_status or 'terminal').lower()}:{reason}"[:2000]
+    result = dict(getattr(item, "result", None) or {})
+    result.update({
+        "status": "skipped",
+        "skipped_reason": item.last_error,
+        "finished_at": now.isoformat(),
+    })
+    item.result = result
 
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
@@ -843,9 +864,9 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return _halted_scan_result(job.status)
 
-        # Se já completou (via work_queue_dispatcher), não re-inicia
-        if job.status == "completed":
-            return {"ok": True, "error": "scan_already_completed", "retryable": False}
+        # Se já terminou (ex.: via work_queue_dispatcher), não re-inicia.
+        if _scan_is_terminal(job.status):
+            return {"ok": job.status == "completed", "error": f"scan_already_{job.status}", "retryable": False}
 
         job.status = "running"
         job.current_step = "Iniciando grafo"
@@ -1622,6 +1643,22 @@ def ensure_scan_chain_running(scan_id: int, mode: str = "unit") -> dict:
             return {"scan_id": scan_id, "enqueued": False, "reason": "chain_alive"}
     except Exception:
         pass  # redis down → fail-open and enqueue (lock will arbitrate)
+    db: Session | None = None
+    try:
+        db = SessionLocal()
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not job:
+            return {"scan_id": scan_id, "enqueued": False, "reason": "scan_missing"}
+        if _scan_is_terminal(job.status) or str(job.status or "").lower() in HALTED_SCAN_STATUSES:
+            return {"scan_id": scan_id, "enqueued": False, "reason": f"scan_{job.status}"}
+    except Exception:
+        pass
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
     task = run_scan_job_scheduled if str(mode).lower() == "scheduled" else run_scan_job_unit
     async_result = task.delay(scan_id)
     return {"scan_id": scan_id, "enqueued": True, "task_id": getattr(async_result, "id", None)}
@@ -1742,6 +1779,34 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
 
         # Órfão real: decide entre re-disparar (dentro do orçamento) ou falhar.
         state = dict(job.state_data or {})
+        if state.get("parallel_engine") == "capacity_work_queue":
+            from app.models.models import ScanWorkItem
+
+            total_items = db.query(ScanWorkItem.id).filter(ScanWorkItem.scan_job_id == scan_id).count()
+            if total_items:
+                try:
+                    dispatch_scan_work_items.delay(scan_id)
+                except Exception:
+                    pass
+                job.status = "running"
+                job.current_step = "Recuperacao automatica: retomando fila persistida"
+                job.next_retry_at = None
+                db.add(ScanLog(
+                    scan_job_id=scan_id,
+                    source=source,
+                    level="WARNING",
+                    message=(
+                        "Scan orfao com capacity_work_queue detectado; "
+                        "retomando dispatcher persistido em vez de re-disparar operador"
+                    ),
+                ))
+                db.commit()
+                return {
+                    "scan_id": scan_id,
+                    "action": "work_queue_resumed",
+                    "work_items": int(total_items),
+                }
+
         rec = dict(state.get("recovery") or {})
         count = int(rec.get("redrive_count") or 0)
 
@@ -2265,6 +2330,42 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
             import logging as _retry_log2
             _retry_log2.getLogger(__name__).debug("auto_retry_timeouts failed: %s", _retry_exc)
 
+        # ── Poller rehydration ────────────────────────────────────────────────
+        # A submitted item is durable DB state, but its poll task is just a
+        # volatile Celery message. If a worker restarts after submitting to Kali
+        # and before the next poll is acknowledged, the item can stay submitted
+        # forever even though the dispatcher is alive. Recreate stale pollers
+        # from the DB source of truth every dispatch cycle.
+        _rehydrated_polls = 0
+        try:
+            _stale_poll_cutoff = datetime.now() - timedelta(seconds=45)
+            _submitted_to_poll = (
+                db.query(ScanWorkItem.id)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.status == "submitted",
+                    ScanWorkItem.updated_at < _stale_poll_cutoff,
+                )
+                .order_by(ScanWorkItem.updated_at.asc(), ScanWorkItem.id.asc())
+                .limit(100)
+                .all()
+            )
+            for (_poll_item_id,) in _submitted_to_poll:
+                poll_scan_work_item.apply_async(args=[int(_poll_item_id)], countdown=1)
+                _rehydrated_polls += 1
+            if _rehydrated_polls:
+                db.add(ScanLog(
+                    scan_job_id=scan_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=f"poller_rehydration scheduled={_rehydrated_polls}",
+                ))
+        except Exception as _poll_rehydrate_exc:
+            import logging as _poll_rehydrate_log
+            _poll_rehydrate_log.getLogger(__name__).debug(
+                "poller_rehydration failed: %s", _poll_rehydrate_exc
+            )
+
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
         try:
@@ -2387,6 +2488,15 @@ def execute_scan_work_item(item_id: int):
             item.finished_at = datetime.now()
             db.commit()
             return {"error": "scan_not_found"}
+        if _scan_is_terminal(job.status):
+            if item.status in {"dispatched", "running", "submitted", "retry"}:
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+            _finish_work_item_for_terminal_scan(item, job.status, "before_execution")
+            db.commit()
+            return {"id": item.id, "status": item.status, "scan_status": job.status}
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             if item.status in {"dispatched", "running", "submitted", "retry"}:
                 item.status = "queued"
@@ -2616,6 +2726,15 @@ def execute_scan_work_item(item_id: int):
         response.raise_for_status()
         result = dict(response.json())
         db.refresh(job)
+        if _scan_is_terminal(job.status):
+            try:
+                from app.services.scan_work_queue import kali_inflight_release
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            _finish_work_item_for_terminal_scan(item, job.status, "after_submit")
+            db.commit()
+            return {"id": item.id, "status": item.status, "scan_status": job.status}
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             try:
                 from app.services.scan_work_queue import kali_inflight_release
@@ -2750,6 +2869,15 @@ def poll_scan_work_item(item_id: int):
         if item.status != "submitted":
             return {"id": item.id, "status": item.status}
         job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if job and _scan_is_terminal(job.status):
+            try:
+                from app.services.scan_work_queue import kali_inflight_release
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            _finish_work_item_for_terminal_scan(item, job.status, "before_poll")
+            db.commit()
+            return {"id": item.id, "status": item.status, "scan_status": job.status}
         if job and str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             try:
                 from app.services.scan_work_queue import kali_inflight_release
@@ -2818,6 +2946,15 @@ def poll_scan_work_item(item_id: int):
         result = dict(result_response.json())
         if job:
             db.refresh(job)
+            if _scan_is_terminal(job.status):
+                try:
+                    from app.services.scan_work_queue import kali_inflight_release
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                _finish_work_item_for_terminal_scan(item, job.status, "before_result_persist")
+                db.commit()
+                return {"id": item.id, "status": item.status, "scan_status": job.status}
             if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
                 try:
                     from app.services.scan_work_queue import kali_inflight_release
