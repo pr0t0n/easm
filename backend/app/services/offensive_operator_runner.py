@@ -188,6 +188,16 @@ def _should_run_subdomain_enumeration(target: str) -> bool:
     return not _is_absolute_http_url(target)
 
 
+def _should_apply_syn_gate(target: str) -> bool:
+    """The SYN gate is only authoritative for explicit web URLs.
+
+    A bare domain is an inventory seed: the apex may not answer on 80/443 while
+    DNS enumeration is still valid and necessary. Port/web liveness for those
+    assets is handled by P02/P06 preflight and work-queue triage.
+    """
+    return _is_absolute_http_url(target)
+
+
 def _normalize_asset_host(target: str) -> str:
     """Chave canônica de asset = host puro (sem esquema/porta/path/barra).
     Sem isto, o MESMO alvo virava 2 assets: 'http://x/' e 'x' (bug recorrente)."""
@@ -1188,10 +1198,6 @@ def run_offensive_operator_scan(
         if target in _delegated_targets:
             _target_idx += 1
             continue
-        # ── Portão de alcançabilidade (SYN): pula alvo morto p/ não travar o chain ──
-        if not _reachability_gate(db, job, target, completed_work, _phases_for_level):
-            _target_idx += 1
-            continue
         scope = _scope_from_job(job, target, execution_mode)
         offensive_state["target"] = target
         offensive_state["campaign_id"] = offensive_state.get("campaign_id") or f"scan-{job.id}"
@@ -1211,6 +1217,12 @@ def run_offensive_operator_scan(
             if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
                 _record_direct_url_p01_skip(db, job, phase_ledgers, completed_work, target, all_targets)
                 continue
+            if phase_id != "P01" and _should_apply_syn_gate(target):
+                # ── Portão de alcançabilidade (SYN): only for explicit web
+                # URLs. Bare domains must reach P01/P02/P06 so enumeration and
+                # liveness can be decided by DNS + Kali-side tooling.
+                if not _reachability_gate(db, job, target, completed_work, _phases_for_level):
+                    break
             if phase_id != "P01":
                 _pf_state = dict(job.state_data or {})
                 _profile, _created = _preflight_profile_for(_pf_state, target)

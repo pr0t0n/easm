@@ -2233,6 +2233,9 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         try:
             from app.models.models import ScanWorkItem as _SWI_retry
             from datetime import datetime as _dt_retry
+            from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+            _gate_phases = {"P02", "P06", "P09"}
             _retried = 0
             _timeout_items = (
                 db.query(_SWI_retry)
@@ -2245,6 +2248,9 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 .all()
             )
             for _ti in _timeout_items:
+                _required_tools = set((PHASE_CONTRACTS.get(str(_ti.phase_id or "")) or {}).get("required_tools") or [])
+                if str(_ti.phase_id or "") in _gate_phases and str(_ti.tool_name or "") not in _required_tools:
+                    continue
                 _ti.status = "queued"
                 _ti.lease_until = None
                 _ti.last_error = f"[auto-retry after timeout attempt {_ti.attempts}]"
@@ -2519,6 +2525,84 @@ def execute_scan_work_item(item_id: int):
         if _is_batch:
             execution["targets"] = _batch_targets
 
+        if str(item.tool_name or "").strip().lower() in {"bl-test", "code-analyzer", "semgrep"}:
+            from app.services.worker_dispatcher import execute_tool_with_workers
+
+            result = execute_tool_with_workers(
+                item.tool_name,
+                _dispatch_target,
+                scan_mode="unit",
+                scan_id=item.scan_job_id,
+                skill_id=_primary_skill_id,
+                targets=_batch_targets if _is_batch else None,
+            )
+            raw_status = str(result.get("status") or "").lower()
+            exit_code = result.get("return_code", result.get("exit_code", 0))
+            terminal = "completed" if raw_status in {"done", "success", "completed"} and int(exit_code or 0) == 0 else "failed"
+            if terminal == "failed" and item.attempts < item.max_attempts:
+                terminal = "retry"
+            now_done = datetime.now()
+            item.status = terminal
+            item.finished_at = now_done if terminal != "retry" else None
+            item.lease_until = None if terminal != "retry" else now_done + timedelta(seconds=120)
+            item.last_error = str(result.get("stderr") or result.get("error") or result.get("dispatch_error") or "")[:2000] or None
+            stdout = str(result.get("stdout") or "")
+            item.result = {
+                "status": raw_status or terminal,
+                "exit_code": exit_code,
+                "command": result.get("command") or f"{item.tool_name} {_dispatch_target}",
+                "stdout_preview": stdout[:3000],
+                "stdout_full": stdout[:200_000],
+                "stderr": result.get("stderr") or "",
+                "parsed_result": result.get("parsed") or {},
+                "findings_extracted": result.get("findings_extracted") or [],
+                "finished_at": now_done.isoformat(),
+                "execution_path": "backend_local",
+            }
+            item.updated_at = now_done
+            try:
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            for _sid in _skill_ids:
+                db.add(AgentTraceEvent(
+                    scan_id=item.scan_job_id,
+                    event_type="skill_execution_result",
+                    from_node="work_queue",
+                    to_node="supervisor",
+                    skill_id=_sid[:120],
+                    tool_name=str(item.tool_name or "")[:100],
+                    capability=str(item.phase_id or "")[:100],
+                    status=terminal,
+                    payload={
+                        "work_item_id": item.id,
+                        "phase_id": item.phase_id,
+                        "target": item.target,
+                        "tool_name": item.tool_name,
+                        "execution_path": "backend_local",
+                    },
+                    created_at=now_done,
+                ))
+            db.add(ScanLog(
+                scan_job_id=item.scan_job_id,
+                source="work-queue",
+                level="INFO",
+                message=(
+                    f"work_item_finish id={item.id} phase={item.phase_id} target={item.target} "
+                    f"tool={item.tool_name} status={terminal} execution_path=backend_local"
+                ),
+            ))
+            db.commit()
+            if terminal == "completed":
+                try:
+                    from app.services.findings_extractor import persist_findings_from_work_item as _persist_findings
+
+                    _persist_findings(db, item, job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            return {"id": item.id, "status": terminal, "execution_path": "backend_local"}
+
         # Never pass timeout to the kali runner — the profile's own timeout is
         # the authoritative limit. A backend-side value kills long-running tools.
         execution.get("arguments", {}).pop("timeout", None)
@@ -2748,7 +2832,20 @@ def poll_scan_work_item(item_id: int):
         exit_code = result.get("return_code", result.get("exit_code"))
         terminal = "completed" if raw_status in {"done", "success"} and exit_code == 0 else raw_status
         if terminal in {"failed", "timeout"} and item.attempts < item.max_attempts:
-            terminal = "retry"
+            retry_optional_gate_tool = True
+            try:
+                from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+                gate_phases = {"P02", "P06", "P09"}
+                required_tools = set((PHASE_CONTRACTS.get(str(item.phase_id or "")) or {}).get("required_tools") or [])
+                retry_optional_gate_tool = not (
+                    str(item.phase_id or "") in gate_phases
+                    and str(item.tool_name or "") not in required_tools
+                )
+            except Exception:
+                retry_optional_gate_tool = True
+            if retry_optional_gate_tool:
+                terminal = "retry"
 
         item.status = terminal
         item.finished_at = datetime.now() if terminal != "retry" else None

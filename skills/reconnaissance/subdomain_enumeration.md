@@ -157,6 +157,29 @@ Wordlists used by `shuffledns`:
 | `takeover_candidates` | Subdomains with dangling CNAMEs | If found |
 | `wildcard_detection` | Whether apex domain has wildcard DNS | Recommended |
 
+Canonical finding format consumed by the application:
+
+```json
+{
+  "title": "Subdomínios descobertos (<tool>): <count> host(s)",
+  "severity": "info",
+  "source_worker": "recon",
+  "details": {
+    "tool": "<subfinder|assetfinder|amass|dnsx|...>",
+    "asset": "<root-domain>",
+    "discovered_subdomains": ["api.example.com", "admin.example.com"],
+    "subdomains": ["api.example.com", "admin.example.com"],
+    "resolved_records": [
+      {"subdomain": "api.example.com", "type": "A", "value": "203.0.113.10"}
+    ],
+    "count": 2,
+    "evidence": "api.example.com\nadmin.example.com"
+  }
+}
+```
+
+`discovered_subdomains` is the preferred structured field. `subdomains` is kept for legacy parsers. DNS validators should include `resolved_records` when record type/value are available. The application still supports one-host-per-line stdout as a fallback, but downstream asset registration should rely on the structured fields above.
+
 # Validation Logic
 
 **SUCCESS**: At least 1 subdomain resolved successfully, tool completed with exit_code=0

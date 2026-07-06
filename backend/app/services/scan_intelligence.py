@@ -29,43 +29,125 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
-import requests
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Multi-target propagation
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SUBDOMAIN_RE = re.compile(r"^[A-Za-z0-9_]([A-Za-z0-9_\-\.]{0,253}[A-Za-z0-9_\-])?$")
+_SUBDOMAIN_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$")
+_IP_OR_CIDR_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$")
+_NOISE_TOKENS = {"done", "domain", "host", "hosts", "address", "addresses"}
+_DNS_ENUM_SKIP_SECTIONS = {
+    "wildcard",
+    "nameservers",
+    "mx",
+    "zone_transfer",
+    "netranges",
+    "ipblocks",
+}
+
+
+def _root_scope(root_domain: str) -> str:
+    return _normalize_host(str(root_domain or "").lstrip("*.")).lower()
+
+
+def _is_ip_or_cidr(value: str) -> bool:
+    token = str(value or "").strip().lower().strip(".")
+    if not token:
+        return False
+    if _IP_OR_CIDR_RE.match(token):
+        return True
+    try:
+        import ipaddress
+
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except Exception:
+        return False
+
+
+def _canonical_in_scope_host(value: str, root: str) -> str:
+    token = str(value or "").strip().strip("[](),;")
+    if not token:
+        return ""
+    if "://" in token:
+        token = _normalize_host(token)
+    else:
+        token = token.split("/")[0]
+        if ":" in token:
+            left, right = token.split(":", 1)
+            # Tool outputs often use host:ip. Keep the host side, but do not
+            # treat host:port-like values as URLs here.
+            if _is_ip_or_cidr(right):
+                token = left
+        token = token.strip().strip(".").lower()
+
+    if not token or token in _NOISE_TOKENS or _is_ip_or_cidr(token):
+        return ""
+    if not _SUBDOMAIN_RE.match(token):
+        return ""
+    if token == root or token.endswith("." + root):
+        return token
+    return ""
+
+
+def _dnsenum_section(line: str, current: str | None) -> str | None:
+    lower = line.strip().lower()
+    if not lower:
+        return current
+    if "wildcard detection" in lower or "wildcards detected" in lower:
+        return "wildcard"
+    if lower.startswith("name servers"):
+        return "nameservers"
+    if lower.startswith("mail (mx)"):
+        return "mx"
+    if lower.startswith("trying zone transfer"):
+        return "zone_transfer"
+    if "class c netranges" in lower:
+        return "netranges"
+    if " ip blocks" in lower:
+        return "ipblocks"
+    if lower.startswith("brute forcing"):
+        return "bruteforce"
+    if lower.endswith(":") and "servers" in lower:
+        return current
+    return current
 
 
 def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain: str) -> list[str]:
     """Parse subfinder/amass/assetfinder/etc stdout to extract subdomains in scope."""
     if not root_domain:
         return []
-    root = root_domain.lstrip("*.").strip().lower()
+    root = _root_scope(root_domain)
+    if not root:
+        return []
+    candidate_only_profiles = {"alterx_permutations"}
+    candidate_only_tools = {"alterx"}
     found: set[str] = set()
     for mcp in mcp_results or []:
         if not isinstance(mcp, dict):
             continue
-        stdout = str(mcp.get("stdout") or "")
+        tool_name = str(mcp.get("tool_name") or mcp.get("tool") or "").strip().lower()
+        profile = str(mcp.get("profile") or "").strip().lower()
+        if tool_name in candidate_only_tools or profile in candidate_only_profiles:
+            continue
+        stdout = "\n".join(
+            str(mcp.get(key) or "")
+            for key in ("stdout", "output", "stderr")
+            if str(mcp.get(key) or "").strip()
+        )
         if not stdout:
             continue
+        section: str | None = None
         for line in stdout.splitlines():
+            section = _dnsenum_section(line, section)
+            if section in _DNS_ENUM_SKIP_SECTIONS:
+                continue
             token = line.strip().split()[0] if line.strip() else ""
             if not token:
                 continue
-            # strip optional URL prefix
-            for prefix in ("http://", "https://"):
-                if token.startswith(prefix):
-                    token = token[len(prefix):].split("/")[0]
-                    break
-            token = token.lower()
-            if not _SUBDOMAIN_RE.match(token):
-                continue
-            # in-scope check: must end with root domain
-            if token == root or token.endswith("." + root):
-                found.add(token)
+            host = _canonical_in_scope_host(token, root)
+            if host:
+                found.add(host)
     return sorted(found)
 
 
@@ -80,15 +162,24 @@ def expand_targets_after_p01(state: dict[str, Any], root_target: str, mcp_result
     """
     raw_cap = state.get("expanded_targets_cap")
     cap = int(raw_cap) if raw_cap not in (None, "", 0, "0") else None
-    # lista_ativos is populated from raw P01 stdout before this function is called.
-    # It contains ALL discovered subdomains without a cap, so prefer it.
+    # Prefer parser-aware MCP extraction so DNS tool sections such as wildcard
+    # probes, NS records and CIDR blocks do not contaminate the target set.
+    # lista_ativos remains a legacy fallback for older execution paths.
     lista = list(state.get("lista_ativos") or [])
-    if lista:
-        subs = [h for h in lista if h and h != root_target]
+    root = _root_scope(root_target)
+    parsed_subs = extract_discovered_subdomains(mcp_results, root_target)
+    if parsed_subs:
+        subs = [host for host in parsed_subs if host and host != root]
+    elif lista:
+        subs = [
+            host
+            for host in (_canonical_in_scope_host(str(h), root) for h in lista)
+            if host and host != root
+        ]
     else:
         subs = extract_discovered_subdomains(mcp_results, root_target)
     # Always keep the root first.
-    expanded = [root_target]
+    expanded = [root or root_target]
     for s in subs:
         if s not in expanded:
             expanded.append(s)
@@ -175,6 +266,8 @@ def _resolve_hosts_via_kali_dnsx(hosts: list[str], timeout: int = 180) -> dict[s
 
     base = str(os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088")).rstrip("/")
     try:
+        import requests
+
         post = requests.post(
             f"{base}/jobs",
             json={
@@ -226,12 +319,12 @@ def _tcp_connects(host: str, port: int, timeout: float = 1.5) -> bool:
 
 
 def _http_probe(host: str, port: int, timeout: float = 3.0) -> dict[str, Any] | None:
-    import requests
-
     scheme = "https" if int(port) in {443, 8443} else "http"
     default_port = (scheme == "http" and int(port) == 80) or (scheme == "https" and int(port) == 443)
     url = f"{scheme}://{host}" if default_port else f"{scheme}://{host}:{int(port)}"
     try:
+        import requests
+
         response = requests.get(
             url,
             timeout=timeout,
@@ -377,8 +470,14 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
     host_ip: dict[str, str] = {}
     live: list[str] = []
     dead: list[str] = []
-    ordered = [root] + [s for s in subdomains if s and s != root]
-    ordered = list(dict.fromkeys(_normalize_host(host) for host in ordered if _normalize_host(host)))
+    root_norm = _root_scope(root)
+    scoped_subdomains = [
+        host
+        for host in (_canonical_in_scope_host(str(host), root_norm) for host in subdomains)
+        if host and host != root_norm
+    ]
+    ordered = [root_norm] + scoped_subdomains
+    ordered = list(dict.fromkeys(host for host in ordered if host))
     kali_resolved = _resolve_hosts_via_kali_dnsx(ordered)
     for host in ordered:
         if cap is not None and len(live) >= cap:
@@ -387,7 +486,7 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
         if ip:
             host_ip[host] = ip
             live.append(host)
-        elif host != root:  # root stays even if resolution hiccups
+        elif host != root_norm:  # root stays even if resolution hiccups
             dead.append(host)
         else:
             live.append(host)

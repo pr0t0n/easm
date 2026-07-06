@@ -85,5 +85,11 @@ class Settings(BaseSettings):
     scan_work_queue_cap_heavy: int = 4
     scan_work_queue_cap_oob: int = 3
 
+    # Vulnerability testing catalog exposed by docker-compose. The list uses
+    # the markdown filename slugs from skills/vulnerability_testing/*.md.
+    vulnerability_catalog_enabled: bool = True
+    vulnerability_catalog_dir: str = "/app/skills/vulnerability_testing"
+    vulnerability_catalog_skills: str = ""
+
 
 settings = Settings()

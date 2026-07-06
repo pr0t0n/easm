@@ -727,6 +727,72 @@ def _extract_port_service_evidence(result: dict[str, Any], tool_name: str = "") 
 # Asset discovery helpers
 # ─────────────────────────────────────────────────────────────
 
+DISCOVERED_SUBDOMAIN_DETAIL_KEYS = (
+    "subdomains",
+    "discovered_subdomains",
+    "new_subdomains",
+    "high_value_subdomains",
+    "nonprod_subdomains",
+)
+
+
+def _normalize_discovered_host(value: Any, scope: str) -> str:
+    host = str(value or "").strip().lower().strip(".")
+    if not host:
+        return ""
+    if "://" in host:
+        try:
+            from urllib.parse import urlparse
+
+            host = str(urlparse(host).hostname or "").strip().lower().strip(".")
+        except Exception:
+            return ""
+    if host == scope or host.endswith(f".{scope}"):
+        return host
+    return ""
+
+
+def _extract_assets_from_findings(findings: list[dict[str, Any]], root_domain: str) -> list[str]:
+    """Extract discovered subdomains from the structured finding contract.
+
+    Canonical fields for domain enumeration findings live under ``details``:
+    ``subdomains`` for legacy LangGraph parsers and ``discovered_subdomains``
+    for Kali-runner parsers. ``resolved_records`` supports DNS validators such
+    as massdns/dnsx where each item carries ``subdomain`` plus record metadata.
+    """
+    scope = str(root_domain or "").strip().lower().lstrip("*.").strip(".")
+    if not scope:
+        return []
+
+    candidates: set[str] = set()
+    for finding in findings or []:
+        details = finding.get("details") if isinstance(finding, dict) else {}
+        if not isinstance(details, dict):
+            continue
+
+        for key in DISCOVERED_SUBDOMAIN_DETAIL_KEYS:
+            values = details.get(key)
+            if isinstance(values, str):
+                values = [line.strip() for line in values.splitlines() if line.strip()]
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                host = _normalize_discovered_host(value, scope)
+                if host:
+                    candidates.add(host)
+
+        records = details.get("resolved_records")
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                host = _normalize_discovered_host(record.get("subdomain"), scope)
+                if host:
+                    candidates.add(host)
+
+    return sorted(candidates)
+
+
 def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> list[str]:
     scope = str(root_domain or "").strip().lower().lstrip("*.").strip(".")
     if not scope:
@@ -744,11 +810,10 @@ def _extract_assets_from_result(result: dict[str, Any], root_domain: str) -> lis
     host_pattern = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
     candidates: set[str] = set()
     for match in host_pattern.findall(text):
-        host = str(match or "").strip().lower().strip(".")
+        host = _normalize_discovered_host(match, scope)
         if not host:
             continue
-        if host == scope or host.endswith(f".{scope}"):
-            candidates.add(host)
+        candidates.add(host)
 
     return sorted(candidates)
 
@@ -1495,6 +1560,8 @@ def _run_tools_and_collect(
             state["logs_terminais"].append(
                 f"{log_prefix}: tool={tool} tool_findings={len(tool_specific_findings)}"
             )
+            for asset in _extract_assets_from_findings(tool_specific_findings, root_domain=root_domain):
+                discovered_assets.add(asset)
         extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
         for port in extracted_ports:
             discovered_ports.add(port)

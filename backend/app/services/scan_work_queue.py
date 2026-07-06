@@ -70,6 +70,63 @@ def kali_inflight_release(rc: str, count: int = 1) -> None:
 from app.services.offensive_operator_core import PHASE_CONTRACTS, PHASE_TOOL_BINDINGS, ToolCatalog
 
 
+MODULE_TOOL_REQUIREMENTS: dict[str, set[str]] = {
+    "recon": {
+        "subfinder", "httpx", "naabu", "dnsx", "shuffledns", "alterx",
+        "katana", "katana-js", "interactsh-client", "amass", "amass-brute",
+        "amass-intel", "assetfinder", "waybackurls", "gau", "hakrawler",
+        "gospider", "subjack", "massdns", "paramspider", "linkfinder",
+    },
+    "nuclei": {"nuclei"},
+    "web": {"ffuf", "ffuf-params", "ffuf-content", "dalfox", "sqlmap", "wapiti", "arjun"},
+    "secrets": {"bandit", "gitleaks", "retire", "semgrep", "trivy", "trufflehog", "trufflehog-filesystem"},
+    "weaponization": {"shodan-cli", "wpscan"},
+    "post_exploit": {"jwt_tool"},
+}
+
+
+def _tool_module_id(tool: str) -> str | None:
+    name = str(tool or "").strip().lower()
+    if name.startswith("nuclei"):
+        return "nuclei"
+    for module_id, tools in MODULE_TOOL_REQUIREMENTS.items():
+        if name in tools:
+            return module_id
+    return None
+
+
+def _installed_kali_modules() -> dict[str, str]:
+    try:
+        from urllib.request import urlopen
+
+        with urlopen(f"{settings.kali_runner_url.rstrip('/')}/modules", timeout=4) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        modules = payload.get("modules") if isinstance(payload, dict) else payload
+        if not isinstance(modules, list):
+            return {}
+        return {
+            str(module.get("id") or "").strip(): str(module.get("status") or "").strip().lower()
+            for module in modules
+            if isinstance(module, dict) and str(module.get("id") or "").strip()
+        }
+    except Exception:
+        return {}
+
+
+def _filter_tools_by_kali_modules(tools: list[str], module_status: dict[str, str]) -> tuple[list[str], list[str]]:
+    if not module_status:
+        return tools, []
+    selected: list[str] = []
+    missing: list[str] = []
+    for tool in tools:
+        module_id = _tool_module_id(tool)
+        if module_id and module_status.get(module_id) != "installed":
+            missing.append(tool)
+            continue
+        selected.append(tool)
+    return selected, missing
+
+
 HEAVY_TOOLS = {
     "amass",
     "amass-brute",
@@ -1051,6 +1108,8 @@ def enqueue_scan_work_items(
     single_items: list[tuple[str, str, str]] = []
     consultation_by_phase_target: dict[tuple[str, str], list[dict[str, Any]]] = {}
     learning_playbook_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    module_status = _installed_kali_modules()
+    missing_module_tools: dict[str, set[str]] = {}
 
     clean_targets = [str(t).strip() for t in targets if str(t or "").strip()]
 
@@ -1062,6 +1121,13 @@ def enqueue_scan_work_items(
             required = list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_tools") or [])
             optional = [tool for tool in tools if tool not in set(required)]
             selected = list(dict.fromkeys(required + optional[:max_optional_per_phase]))
+            selected, missing_for_modules = _filter_tools_by_kali_modules(selected, module_status)
+            for missing_tool in missing_for_modules:
+                module_id = _tool_module_id(missing_tool) or "unknown"
+                missing_module_tools.setdefault(module_id, set()).add(missing_tool)
+            skipped += len(missing_for_modules)
+            if not selected:
+                continue
             applicability_by_tool = {
                 tool: _tool_applicability_decision(phase_id, tool, target, state, at="enqueue")
                 for tool in selected
@@ -1291,6 +1357,19 @@ def enqueue_scan_work_items(
         level="INFO",
         message=f"work_queue_seed source={source} targets={len(targets)} created={created} existing={existing} skipped={skipped} batch_groups={len(batch_accumulator)}",
     ))
+    if missing_module_tools:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="WARNING",
+            message=(
+                "work_queue_skipped_uninstalled_modules "
+                + json.dumps(
+                    {module: sorted(tools) for module, tools in sorted(missing_module_tools.items())},
+                    sort_keys=True,
+                )
+            ),
+        ))
     db.commit()
     return {"created": created, "existing": existing, "skipped": skipped}
 
@@ -1707,23 +1786,44 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
     _INJECTION_PHASES = {"P10", "P12", "P13"}
     _HIGH_COST_TOOLS = {"wapiti", "sqlmap", "dalfox", "nikto", "wpscan", "zap-active", "zap-api"}
 
+    def _finding_targets(finding: Finding) -> set[str]:
+        values: set[str] = set()
+        for raw in (
+            getattr(finding, "domain", None),
+            getattr(finding, "url", None),
+            (getattr(finding, "details", None) or {}).get("target"),
+            (getattr(finding, "details", None) or {}).get("host"),
+            (getattr(finding, "details", None) or {}).get("asset"),
+            (getattr(finding, "details", None) or {}).get("matched_at"),
+        ):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(text if "://" in text else f"http://{text}")
+                host = parsed.hostname or text.split("/")[0].split(":")[0]
+            except Exception:
+                host = text.split("/")[0].split(":")[0]
+            host = host.strip().lower().rstrip(".")
+            if host:
+                values.add(host)
+        return values
+
     # 1. Subdomínios com achados medium/high/critical de ferramentas P09
     finding_rows = (
-        db.query(Finding.subdomain, Finding.domain)
+        db.query(Finding)
         .filter(
             Finding.scan_job_id == scan_id,
             Finding.severity.in_(list(_HIGH_SEV)),
             Finding.tool.in_(list(_P09_TOOLS)),
         )
-        .distinct()
         .all()
     )
     targets_with_findings: set[str] = set()
-    for row in finding_rows:
-        if row.subdomain:
-            targets_with_findings.add(str(row.subdomain))
-        if row.domain:
-            targets_with_findings.add(str(row.domain))
+    for finding in finding_rows:
+        targets_with_findings.update(_finding_targets(finding))
 
     # 2. Crown Jewels sempre mantidos — alto valor independe de findings
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()

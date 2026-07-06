@@ -68,6 +68,25 @@ def tool_execution_key(phase_id: str, skill_id: str, tool: dict[str, Any]) -> st
     )
 
 
+def tool_execution_signature(phase_id: str, tool: dict[str, Any]) -> str:
+    """Operational dedupe key independent of skill attribution.
+
+    Multiple approved skills can request the same runner profile for the same
+    target. Executing it once is enough; the richer execution_key still records
+    skill-specific attribution for planned coverage.
+    """
+    return stable_id(
+        "TS",
+        {
+            "phase_id": phase_id,
+            "profile": tool.get("profile"),
+            "target": (tool.get("arguments") or {}).get("target"),
+            "arguments": tool.get("arguments") or {},
+            "execution_backend": tool.get("execution_backend"),
+        },
+    )
+
+
 def _load_skill_tool_map(skills_root: Path | str | None = None) -> dict[str, dict[str, Any]]:
     """Read every skill .md and return skill_id → {required_tools, optional_tools, fallback_tools}.
 
@@ -865,6 +884,10 @@ class SkillRegistry:
                     continue
                 parsed = parse_skill_markdown(path)
                 metadata = parsed["metadata"]
+                from app.services.vulnerability_catalog_config import is_vulnerability_skill_enabled
+
+                if not is_vulnerability_skill_enabled(path, metadata):
+                    continue
                 skill_id = str(metadata.get("skill_id") or "")
                 gate = self.validate(parsed)
                 skills[skill_id or str(path)] = {
@@ -1656,6 +1679,7 @@ class OffensiveSkillRuntime:
 
         mcp_results: list[dict[str, Any]] = []
         executed_tool_keys: set[str] = set()
+        executed_tool_signatures: set[str] = set()
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
         required_skill_set = set(contract.get("required_skills") or [])
@@ -1669,11 +1693,17 @@ class OffensiveSkillRuntime:
                 continue
             tool_plans.append(tp)
             ran_skills.append(sid)
-            new_tools = [t for t in tp["tools"] if t.get("execution_key") not in executed_tool_keys]
+            new_tools: list[dict[str, Any]] = []
+            for t in tp["tools"]:
+                execution_key = str(t.get("execution_key") or "")
+                signature = tool_execution_signature(phase_id, t)
+                if execution_key in executed_tool_keys or signature in executed_tool_signatures:
+                    continue
+                executed_tool_keys.add(execution_key)
+                executed_tool_signatures.add(signature)
+                new_tools.append(t)
             if not new_tools:
                 continue
-            for t in new_tools:
-                executed_tool_keys.add(str(t.get("execution_key") or ""))
             mcp_results.extend(self.executor.execute({**tp, "tools": new_tools}, target))
         if not tool_plans:
             ledger = create_phase_ledger(contract)

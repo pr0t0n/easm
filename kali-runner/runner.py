@@ -119,6 +119,7 @@ class JobStatus(BaseModel):
     tool: str
     target: str
     status: str
+    timeout: Optional[int] = None
     command: Optional[str] = None
     enqueued_at: str
     started_at: Optional[str] = None
@@ -1322,6 +1323,7 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         "profile": req.profile,
         "tool": job["tool"],
         "target": req.target,
+        "timeout": job.get("timeout"),
     }
 
 

@@ -109,6 +109,13 @@ def _load_skill_file(path: Path) -> dict[str, Any] | None:
         meta = _parse_yaml_frontmatter(m.group(1))
     except Exception:
         return None
+    try:
+        from app.services.vulnerability_catalog_config import is_vulnerability_skill_enabled
+
+        if not is_vulnerability_skill_enabled(path, meta):
+            return None
+    except Exception:
+        pass
 
     skill_id = str(meta.get("skill_id") or "").strip()
     if not skill_id:
