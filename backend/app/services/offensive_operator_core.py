@@ -1679,7 +1679,6 @@ class OffensiveSkillRuntime:
 
         mcp_results: list[dict[str, Any]] = []
         executed_tool_keys: set[str] = set()
-        executed_tool_signatures: set[str] = set()
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
         required_skill_set = set(contract.get("required_skills") or [])
@@ -1696,11 +1695,9 @@ class OffensiveSkillRuntime:
             new_tools: list[dict[str, Any]] = []
             for t in tp["tools"]:
                 execution_key = str(t.get("execution_key") or "")
-                signature = tool_execution_signature(phase_id, t)
-                if execution_key in executed_tool_keys or signature in executed_tool_signatures:
+                if execution_key in executed_tool_keys:
                     continue
                 executed_tool_keys.add(execution_key)
-                executed_tool_signatures.add(signature)
                 new_tools.append(t)
             if not new_tools:
                 continue

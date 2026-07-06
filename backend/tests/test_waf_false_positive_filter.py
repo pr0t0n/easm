@@ -1,9 +1,12 @@
 import sys
 import types
 import os
+from importlib.util import find_spec
 
 
-# Permite importar app.graph.workflow sem depender do pacote langgraph no ambiente de teste.
+# Permite importar app.graph.workflow sem depender de pacotes opcionais no
+# ambiente de teste. Só instala stubs quando a dependência real não existe;
+# caso contrário o stub fica em sys.modules e contamina testes posteriores.
 langgraph_module = types.ModuleType("langgraph")
 langgraph_graph_module = types.ModuleType("langgraph.graph")
 langgraph_checkpoint_module = types.ModuleType("langgraph.checkpoint")
@@ -31,17 +34,19 @@ class _DummyCelery:
         raise RuntimeError("dummy celery send_task not available in unit test")
 
 
-langgraph_graph_module.END = "END"
-langgraph_graph_module.StateGraph = _DummyStateGraph
-langgraph_checkpoint_memory_module.MemorySaver = _DummyMemorySaver
-celery_module.Celery = _DummyCelery
-celery_module.current_task = None
+if find_spec("langgraph") is None:
+    langgraph_graph_module.END = "END"
+    langgraph_graph_module.StateGraph = _DummyStateGraph
+    langgraph_checkpoint_memory_module.MemorySaver = _DummyMemorySaver
+    sys.modules.setdefault("langgraph", langgraph_module)
+    sys.modules.setdefault("langgraph.graph", langgraph_graph_module)
+    sys.modules.setdefault("langgraph.checkpoint", langgraph_checkpoint_module)
+    sys.modules.setdefault("langgraph.checkpoint.memory", langgraph_checkpoint_memory_module)
 
-sys.modules.setdefault("langgraph", langgraph_module)
-sys.modules.setdefault("langgraph.graph", langgraph_graph_module)
-sys.modules.setdefault("langgraph.checkpoint", langgraph_checkpoint_module)
-sys.modules.setdefault("langgraph.checkpoint.memory", langgraph_checkpoint_memory_module)
-sys.modules.setdefault("celery", celery_module)
+if find_spec("celery") is None:
+    celery_module.Celery = _DummyCelery
+    celery_module.current_task = None
+    sys.modules.setdefault("celery", celery_module)
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")

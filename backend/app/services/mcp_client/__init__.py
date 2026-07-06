@@ -257,7 +257,10 @@ class MCPClient:
 
         profile_timeout = metadata_timeout or _PROFILE_TIMEOUT_HINTS.get(profile_name, 0)
         runner_timeout = int(timeout or profile_timeout or max(self.timeout * 6, 120))
-        client_timeout = max(float(runner_timeout) + 15.0, self.timeout)
+        # Tool calls use the runner/profile timeout plus a small transport grace.
+        # The global MCP request timeout may be much larger for non-tool calls;
+        # using it here hides stuck profiles and breaks per-tool SLA contracts.
+        client_timeout = float(runner_timeout) + 15.0
         payload: dict[str, Any] = {
             "target": normalized_target,
             "scan_id": scan_id or "mcp_scan",

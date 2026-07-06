@@ -410,9 +410,10 @@ def _tools_for_group(scan_mode: str, group_name: str) -> list[str]:
     groups = get_worker_groups(mode=scan_mode)
 
     node_to_groups: dict[str, list[str]] = {
-        "asset_discovery":        ["reconnaissance"],
-        "threat_intel":           ["weaponization", "actions_on_objectives"],
-        "risk_assessment":        ["exploitation", "delivery", "weaponization", "actions_on_objectives"],
+        "asset_discovery":        ["reconnaissance", "delivery", "weaponization"],
+        "threat_intel":           ["weaponization", "actions_on_objectives", "reconnaissance"],
+        "risk_assessment":        ["exploitation", "delivery", "installation", "weaponization", "reconnaissance", "actions_on_objectives"],
+        "evidence_adjudication":  ["actions_on_objectives", "exploitation", "reporting"],
         "governance":             ["command_control"],
         "executive_analyst":      ["reporting"],
         # Legacy aliases
@@ -2177,10 +2178,10 @@ def build_graph(mode: ScanMode = "unit"):
     graph.add_edge("skill_selector", "skill_planner")
     graph.add_edge("skill_planner", "tool_selector")
     graph.add_edge("tool_selector", "tool_executor")
-    # agent_reporter compila o relatório após execução e pergunta ao supervisor
-    graph.add_edge("tool_executor", "agent_reporter")
-    graph.add_edge("agent_reporter", "evidence_gate")
-    graph.add_edge("evidence_gate", "supervisor")
+    # Evidence must be adjudicated before narrative/reporting can summarize it.
+    graph.add_edge("tool_executor", "evidence_gate")
+    graph.add_edge("evidence_gate", "agent_reporter")
+    graph.add_edge("agent_reporter", "supervisor")
 
     for node_name in ["governance", "executive_analyst"]:
         graph.add_edge(node_name, "supervisor")

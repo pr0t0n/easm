@@ -500,6 +500,44 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
+def _default_tool_metadata(tool_name: str, phase: str) -> dict[str, Any]:
+    family = "vuln" if tool_name.startswith("nuclei") else "recon"
+    if tool_name.startswith("manual") or tool_name == "report-builder":
+        family = "reporting"
+    elif tool_name in {"semgrep", "bandit", "gitleaks", "trufflehog", "trivy", "retire"}:
+        family = "code"
+    return {
+        "category": family,
+        "phase": phase,
+        "description": f"Runtime tool/profile alias used by the automated pentest phase contract: {tool_name}.",
+        "when_to_use": "When selected by the P01-P22 phase contract or by a bound skill requiring this exact profile.",
+        "inputs": "target or phase-specific artifact",
+        "outputs": "tool evidence normalized by the scanner pipeline",
+        "prerequisites": "safe Kali profile or backend-local adapter available",
+    }
+
+
+def _sync_tool_catalog_with_runtime_contracts() -> None:
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS
+    except Exception:
+        return
+    runtime_tools: set[str] = set()
+    for phase_id, contract in PHASE_CONTRACTS.items():
+        for tool in list(contract.get("required_tools") or []) + list(contract.get("optional_tools") or []):
+            name = str(tool or "").strip()
+            if name:
+                runtime_tools.add(name)
+            if name and name not in TOOL_CATALOG:
+                TOOL_CATALOG[name] = _default_tool_metadata(name, str(phase_id))
+    for name in list(TOOL_CATALOG.keys()):
+        if name not in runtime_tools:
+            TOOL_CATALOG.pop(name, None)
+
+
+_sync_tool_catalog_with_runtime_contracts()
+
+
 def is_tool_installed(tool_name: str) -> bool:
     """Back-compat name for "available in the Kali runner".
 

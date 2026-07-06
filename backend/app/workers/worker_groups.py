@@ -89,6 +89,62 @@ CANONICAL_GROUP_TOOLS: dict[str, list[str]] = {
     "reporting": ["report-builder", "manual_review"],
 }
 
+
+PHASE_TO_WORKER_GROUP: dict[str, str] = {
+    "P01": "reconnaissance",
+    "P02": "reconnaissance",
+    "P03": "reconnaissance",
+    "P04": "delivery",
+    "P05": "reconnaissance",
+    "P06": "reconnaissance",
+    "P07": "weaponization",
+    "P08": "weaponization",
+    "P09": "weaponization",
+    "P10": "exploitation",
+    "P11": "exploitation",
+    "P12": "exploitation",
+    "P13": "exploitation",
+    "P14": "installation",
+    "P15": "delivery",
+    "P16": "delivery",
+    "P17": "exploitation",
+    "P18": "actions_on_objectives",
+    "P19": "exploitation",
+    "P20": "actions_on_objectives",
+    "P21": "reporting",
+    "P22": "reporting",
+}
+
+
+def _sync_group_tools_with_phase_contracts() -> dict[str, list[str]]:
+    """Derive executable worker tool lists from the P01-P22 contracts.
+
+    The phase contract is the source of truth for automated pentest coverage.
+    Keeping worker groups broader than the phases made tools selectable in one
+    place but invisible in another, which produced false coverage gaps.
+    """
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS
+    except Exception:
+        return CANONICAL_GROUP_TOOLS
+
+    synced: dict[str, list[str]] = {group: [] for group in CANONICAL_GROUP_TOOLS.keys()}
+    seen: dict[str, set[str]] = {group: set() for group in synced.keys()}
+    for phase_id, contract in PHASE_CONTRACTS.items():
+        group = PHASE_TO_WORKER_GROUP.get(str(phase_id))
+        if not group:
+            continue
+        for tool in list(contract.get("required_tools") or []) + list(contract.get("optional_tools") or []):
+            name = str(tool or "").strip()
+            if not name or name in seen.setdefault(group, set()):
+                continue
+            synced.setdefault(group, []).append(name)
+            seen[group].add(name)
+    return synced
+
+
+CANONICAL_GROUP_TOOLS = _sync_group_tools_with_phase_contracts()
+
 CANONICAL_GROUP_MISSIONS: dict[str, dict[str, Any]] = {
     "scope_validation": {
         "mission": "Validar escopo autorizado, normalizar alvos e bloquear qualquer execucao fora do contrato.",
@@ -571,31 +627,6 @@ UNIT_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(mode="unit"
 SCHEDULED_WORKER_GROUPS: dict[str, dict[str, Any]] = _build_worker_groups(mode="scheduled", priorities=_SCHED_PRIORITIES)
 
 WORKER_GROUPS = UNIT_WORKER_GROUPS
-
-PHASE_TO_WORKER_GROUP: dict[str, str] = {
-    "P01": "reconnaissance",
-    "P02": "reconnaissance",
-    "P03": "reconnaissance",
-    "P04": "delivery",
-    "P05": "reconnaissance",
-    "P06": "reconnaissance",
-    "P07": "weaponization",
-    "P08": "weaponization",
-    "P09": "weaponization",
-    "P10": "weaponization",
-    "P11": "exploitation",
-    "P12": "exploitation",
-    "P13": "exploitation",
-    "P14": "installation",
-    "P15": "delivery",
-    "P16": "delivery",
-    "P17": "exploitation",
-    "P18": "command_control",
-    "P19": "installation",
-    "P20": "exploitation",
-    "P21": "actions_on_objectives",
-    "P22": "reporting",
-}
 
 
 def get_worker_groups(mode: ScanMode = "unit") -> dict[str, dict[str, Any]]:
