@@ -49,6 +49,18 @@ def execute_tool_with_workers(
     backend-local because they do not execute external offensive tooling.
     """
     norm_tool = str(tool_name or "").strip().lower()
+    # Try to surface the current scan_id so evidence and auth context are filed
+    # under the same scan, including backend-local tools.
+    if scan_id is None:
+        try:
+            from celery import current_task as _ct  # type: ignore
+            if _ct is not None and getattr(_ct, "request", None):
+                scan_id = (_ct.request.kwargs or {}).get("scan_id")
+                if not scan_id and _ct.request.args:
+                    scan_id = _ct.request.args[0]
+        except Exception:
+            scan_id = None
+    auth_context = _resolve_auth_context(scan_id, skill_contract)
     if norm_tool in {"code-analyzer", "semgrep"}:
         if norm_tool == "code-analyzer":
             from app.services.code_analyzer import run_as_tool
@@ -69,9 +81,12 @@ def execute_tool_with_workers(
             result.setdefault("worker_rules", worker_rules or {})
             result.setdefault("sub_agent_plan", sub_agent_plan or [])
             result.setdefault("playbook", playbook or "")
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", source_agent_name)
         result.setdefault("worker_group", worker_group)
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
     if norm_tool == "bl-test":
@@ -82,9 +97,12 @@ def execute_tool_with_workers(
             result.setdefault("skill_id", skill_id)
             result.setdefault("skill_contract", skill_contract or {})
             result.setdefault("evidence_required", evidence_required or [])
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", "Backend Business Logic Tester")
         result.setdefault("worker_group", "risk_assessment")
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
     if norm_tool not in TOOL_TO_PROFILE:
@@ -101,18 +119,6 @@ def execute_tool_with_workers(
             "source_agent_name": "Kali Runner",
             "open_ports": [],
         }
-
-    # Try to surface the current scan_id so evidence is filed under
-    # /workspace/{scan_id}/{tool}/{job_id}/ on the runner.
-    if scan_id is None:
-        try:
-            from celery import current_task as _ct  # type: ignore
-            if _ct is not None and getattr(_ct, "request", None):
-                scan_id = (_ct.request.kwargs or {}).get("scan_id")
-                if not scan_id and _ct.request.args:
-                    scan_id = _ct.request.args[0]
-        except Exception:
-            scan_id = None
 
     if settings.mcp_execute_tools_via_mcp:
         if not mcp_client.kali_tools_available_sync():
@@ -143,6 +149,7 @@ def execute_tool_with_workers(
                     "evidence_required": evidence_required or [],
                     "constraints": constraints or [],
                     "playbook": playbook or "",
+                    "auth_context": auth_context,
                 },
             )
     else:
@@ -159,6 +166,7 @@ def execute_tool_with_workers(
                 "evidence_required": evidence_required or [],
                 "constraints": constraints or [],
                 "playbook": playbook or "",
+                "auth_context": auth_context,
             },
         )
     if skill_id:
@@ -195,4 +203,61 @@ def execute_tool_with_workers(
         )
     except Exception:
         logger.exception("Falha ao anexar perfil do agente para tool=%s", tool_name)
+    _persist_result_artifact(scan_id, result, skill_contract, auth_context)
     return result
+
+
+def _resolve_auth_context(scan_id: int | None, skill_contract: dict[str, Any] | None) -> dict[str, Any]:
+    if not scan_id:
+        return {}
+    identity_key = ""
+    if isinstance(skill_contract, dict):
+        identity_key = str(skill_contract.get("identity_key") or "")
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ScanJob
+        from app.services.auth_session_manager import AuthSessionManager
+
+        db = SessionLocal()
+        try:
+            scan = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+            if not scan:
+                return {}
+            material = AuthSessionManager(db, scan).get_material(identity_key or None)
+            return material.to_dict() if material else {}
+        finally:
+            db.close()
+    except Exception:
+        return {}
+
+
+def _persist_result_artifact(
+    scan_id: int | None,
+    result: dict[str, Any],
+    skill_contract: dict[str, Any] | None,
+    auth_context: dict[str, Any] | None,
+) -> None:
+    if not scan_id:
+        return
+    try:
+        from app.db.session import SessionLocal
+        from app.services.evidence_contract_service import create_artifact_from_tool_result
+
+        db = SessionLocal()
+        try:
+            create_artifact_from_tool_result(
+                db,
+                scan_job_id=int(scan_id),
+                result=result,
+                phase_id=str((skill_contract or {}).get("phase_id") or result.get("phase_id") or ""),
+                skill_id=str((skill_contract or {}).get("skill_id") or result.get("skill_id") or ""),
+                identity_key=str((auth_context or {}).get("identity_key") or ""),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception:
+        logger.debug("evidence artifact persistence skipped", exc_info=True)

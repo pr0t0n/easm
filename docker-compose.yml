@@ -417,6 +417,67 @@ services:
           memory: 512m
 
   # ─────────────────────────────────────────────────────────────────
+  # Pentest Automation Lab — optional controlled targets for E2E validation.
+  # Start with:
+  #   docker compose --profile dev --profile pentest-lab up -d
+  # Internal targets for scans:
+  #   http://juice-shop:3000
+  #   http://dvwa:80
+  #   http://idor_api:8080
+  # ─────────────────────────────────────────────────────────────────
+
+  juice_shop:
+    image: bkimminich/juice-shop:v17.3.0
+    container_name: scriptkiddo_lab_juice_shop
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      NODE_ENV: unsafe
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_JUICE_SHOP_HOST_PORT:-3001}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: scriptkiddo_lab_dvwa
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_DVWA_HOST_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/login.php >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  idor_api:
+    build:
+      context: ./infra/pentest-lab/idor-api
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_lab_idor_api
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_IDOR_API_HOST_PORT:-8082}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─────────────────────────────────────────────────────────────────
   # Frontend
   # ─────────────────────────────────────────────────────────────────
 

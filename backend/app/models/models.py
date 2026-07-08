@@ -115,6 +115,85 @@ class Finding(Base):
     fp_reviewed_by = relationship("User", foreign_keys=[fp_reviewed_by_id])
 
 
+class ScanIdentity(Base):
+    """Identidade operacional usada em pentest autenticado."""
+    __tablename__ = "scan_identities"
+    __table_args__ = (
+        sa.UniqueConstraint("scan_job_id", "identity_key", name="uq_scan_identities_scan_identity_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    identity_key: Mapped[str] = mapped_column(String(120), index=True)
+    role: Mapped[str] = mapped_column(String(120), default="", index=True)
+    username_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_type: Mapped[str] = mapped_column(String(60), default="none", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    session_valid: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    scan_job = relationship("ScanJob")
+
+
+class ScanAuthSession(Base):
+    """Sessão autenticada normalizada e auditável por identidade."""
+    __tablename__ = "scan_auth_sessions"
+    __table_args__ = (
+        sa.UniqueConstraint("scan_identity_id", "session_key", name="uq_scan_auth_sessions_identity_session"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    scan_identity_id: Mapped[int | None] = mapped_column(ForeignKey("scan_identities.id"), nullable=True, index=True)
+    session_key: Mapped[str] = mapped_column(String(120), default="default", index=True)
+    auth_type: Mapped[str] = mapped_column(String(60), default="none", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    headers: Mapped[dict] = mapped_column(JSONB, default=dict)
+    cookies: Mapped[dict] = mapped_column(JSONB, default=dict)
+    validation_result: Mapped[dict] = mapped_column(JSONB, default=dict)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    scan_job = relationship("ScanJob")
+    identity = relationship("ScanIdentity")
+
+
+class EvidenceArtifact(Base):
+    """Proof-pack persistente usado pelo evidence gate e relatório de pentest."""
+    __tablename__ = "evidence_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
+    phase_id: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    artifact_type: Mapped[str] = mapped_column(String(80), default="tool_output", index=True)
+    validation_status: Mapped[str] = mapped_column(String(40), default="candidate", index=True)
+    confidence_score: Mapped[int] = mapped_column(Integer, default=50)
+    baseline_request: Mapped[dict] = mapped_column(JSONB, default=dict)
+    baseline_response_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exploit_request: Mapped[dict] = mapped_column(JSONB, default=dict)
+    exploit_response_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reproduction_steps: Mapped[list] = mapped_column(JSONB, default=list)
+    workspace_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+    scan_job = relationship("ScanJob")
+    finding = relationship("Finding")
+
+
 class ExecutedToolRun(Base):
     """Rastreia execução de ferramentas para idempotência dentro de uma missão."""
     __tablename__ = "executed_tool_runs"
@@ -571,3 +650,26 @@ class SkillScore(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
     scan_job = relationship("ScanJob", foreign_keys=[scan_id])
+
+
+class ToolHealthSnapshot(Base):
+    """Snapshot operacional de disponibilidade e prontidão de uma ferramenta."""
+    __tablename__ = "tool_health_snapshots"
+    __table_args__ = (
+        sa.UniqueConstraint("tool_name", "profile", "checked_at", name="uq_tool_health_tool_profile_checked"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tool_name: Mapped[str] = mapped_column(String(120), index=True)
+    profile: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    binary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    phase: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    worker_group: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    parser_status: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    dry_run_status: Mapped[str] = mapped_column(String(40), default="not_run", index=True)
+    timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resource_class: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
