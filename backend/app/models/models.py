@@ -662,7 +662,7 @@ class ToolHealthSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     tool_name: Mapped[str] = mapped_column(String(120), index=True)
     profile: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    binary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    binary: Mapped[str | None] = mapped_column("binary_path", String(255), nullable=True)
     phase: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     worker_group: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
