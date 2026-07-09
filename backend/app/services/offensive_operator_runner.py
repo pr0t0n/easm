@@ -1667,46 +1667,19 @@ def run_offensive_operator_scan(
                         db.add(ScanLog(scan_job_id=job.id, source="zap", level="WARNING",
                                        message=f"zap_integration_failed target={_effective_target} error={_zap_exc}"))
                     db.commit()
-            # 2c. browser-xss: real DOM XSS via headless browser at the SPA search
-            # route. dalfox/nuclei-xss only speak raw HTTP to the backend, so they
-            # can never see XSS that only fires when Angular/React renders the
-            # payload client-side (the exact category OWASP Juice Shop's DOM XSS/
-            # Reflected XSS/Bonus Payload challenges test). exploit_browser_xss.py
-            # already had the right payload and false-positive discipline (never
-            # auto-"confirmed" without an OOB/DOM signal) but nothing called it.
-            _browser_xss_done = list(state.get("_browser_xss_done_targets") or [])
-            if phase_id == "P12" and target not in _browser_xss_done:
-                _browser_xss_done.append(target)
-                state["_browser_xss_done_targets"] = _browser_xss_done
-                job.state_data = state
-                if len(_browser_xss_done) <= 15:
-                    try:
-                        from app.services.exploit_browser_xss import run_browser_xss
-                        _bx_result = run_browser_xss(str(target), authorized=True, scan_id=job.id)
-                        _bx_raw = [{
-                            "title": f"XSS DOM via SPA ({f.get('type')}) — {f.get('endpoint', '')[:120]}",
-                            "severity": f.get("severity", "medium"),
-                            "risk_score": 8 if f.get("severity") == "high" else 5,
-                            "details": {
-                                "tool": "browser-xss",
-                                "vuln_family": "xss",
-                                "url": f.get("endpoint"),
-                                "payload": f.get("payload"),
-                                "evidence": f.get("evidence"),
-                                "discovery_method": "headless browser rendering the SPA search route with an iframe/javascript: payload",
-                            },
-                        } for f in (_bx_result.get("findings") or [])]
-                        if _bx_raw:
-                            from app.services.findings_extractor import persist_finding_dicts
-                            persist_finding_dicts(
-                                db, job, _bx_raw,
-                                default_tool="browser-xss", default_target=str(target), source_item=None,
-                            )
-                            db.commit()
-                    except Exception as _bx_exc:
-                        db.add(ScanLog(scan_job_id=job.id, source="browser-xss", level="WARNING",
-                                       message=f"browser_xss_integration_failed target={target} error={_bx_exc}"))
-                        db.commit()
+            # 2c. browser-xss — REVERTED (2026-07-09). exploit_browser_xss.py hardcodes
+            # one specific app's known walkthrough (route "/#/search?q=" + the exact
+            # two payloads from the OWASP Juice Shop DOM XSS/Bonus Payload challenges).
+            # Wiring that unconditionally into every scan's P12 phase means every
+            # non-Juice-Shop target gets tested against a route/payload combo that has
+            # no relationship to what recon actually found on that target — the
+            # opposite of how this platform is supposed to work (discover first, then
+            # apply a generic technique to what was found). Do not re-wire this without
+            # first rewriting run_browser_xss to take a real discovered candidate
+            # (e.g. _effective_target once P10/P12's discovered_parameterized_urls
+            # upgrade picks a genuine "q="/"search="-bearing URL from recon) and to run
+            # the full generic payload catalog from skills/vulnerability_testing/xss.md,
+            # not two payloads copied from one CTF's answer key.
             # 3. Evasion profile: adapt rate-limits when WAF detected
             evasion = evasion_profile_for(tech_stack)
             state["evasion_profile"] = evasion
@@ -2141,7 +2114,7 @@ def run_offensive_operator_scan(
             # the initial entry URL.
             if phase_id == "P03" and not _cp_state.get("_p03_url_expansion_done"):
                 try:
-                    _crawler_tools = {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}
+                    _crawler_tools = {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls", "linkfinder"}
                     _param_urls: list[str] = list(_cp_state.get("discovered_parameterized_urls") or [])
                     _param_seen: set[str] = set(_param_urls)
                     for _ev in result.get("tool_evidences") or []:
