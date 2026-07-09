@@ -493,7 +493,7 @@ services:
   # Start with:
   #   docker compose --profile dev --profile pentest-lab up -d
   # Internal targets for scans:
-  #   http://juice-shop:3000
+  #   http://juice_shop:3000
   #   http://dvwa:80
   #   http://idor_api:8080
   # ─────────────────────────────────────────────────────────────────
