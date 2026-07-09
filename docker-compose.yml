@@ -160,6 +160,15 @@ services:
       retries: 4
       start_period: 60s
 
+  evidence_init:
+    image: busybox:1.36
+    container_name: scriptkiddo_evidence_init
+    profiles: ["dev", "prod"]
+    restart: "no"
+    command: sh -c "mkdir -p /evidence && chmod -R 0777 /evidence"
+    volumes:
+      - evidence_storage:/evidence
+
   # ─────────────────────────────────────────────────────────────────
   # Backend API
   # ─────────────────────────────────────────────────────────────────
@@ -207,6 +216,8 @@ services:
         condition: service_started
       mcp_server:
         condition: service_started
+      evidence_init:
+        condition: service_completed_successfully
       zap:
         condition: service_started
     ports:
