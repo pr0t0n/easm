@@ -74,7 +74,10 @@ def create_artifact_from_tool_result(
         target=str(result.get("target") or ""),
         identity_key=identity_key,
         artifact_type="tool_result",
-        validation_status="confirmed" if str(result.get("status") or "") == "executed" else "candidate",
+        # A tool exiting successfully proves the command ran, not that it proved a
+        # vulnerability — promotion to "confirmed" is decided by evaluate_finding_promotion
+        # based on baseline/exploit reproduction, never by execution status alone.
+        validation_status="candidate",
         confidence_score=80 if str(result.get("status") or "") == "executed" else 40,
         payload=str(details.get("payload") or ""),
         diff_summary=str(details.get("diff") or result.get("stderr") or "")[:4000],

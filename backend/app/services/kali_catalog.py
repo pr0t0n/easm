@@ -22,6 +22,10 @@ BACKEND_LOCAL_PROFILES = {
     "code_analyzer_backend",
     "business_logic_backend",
     "semgrep_backend",
+    # zap-api (OpenAPI/Swagger-driven scan) runs against the dedicated `zap`
+    # container via zap_scanner.py, never through a kali_runner profile — see
+    # workers/tasks.py's ZAP post-processing hook.
+    "zap_api_scan",
 }
 RUNNER_BUILTIN_EXECUTABLES = {"bash", "sh", "python", "python3"}
 

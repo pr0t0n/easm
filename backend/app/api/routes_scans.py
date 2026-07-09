@@ -2528,7 +2528,7 @@ def create_scan(
                 job.last_error = f"Falha ao preparar autenticacao: {exc}"
                 compliance_status = "auth_failed"
     try:
-        if scan_level == "full" and str(__import__("os").getenv("ENFORCE_TOOL_HEALTH_PRECHECK", "false")).lower() in {"1", "true", "yes"}:
+        if scan_level == "full" and settings.enforce_tool_health_precheck:
             from app.services.tool_health_service import latest_tool_health
 
             health = latest_tool_health(db)
@@ -2616,6 +2616,7 @@ def create_scan(
         next_retry_at=job.next_retry_at,
         last_error=job.last_error,
         created_at=job.created_at,
+        state_data=job.state_data or {},
     )
 
 

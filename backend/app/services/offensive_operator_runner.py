@@ -1608,6 +1608,65 @@ def run_offensive_operator_scan(
             if tech_stack.get("detected") and phase_id in {"P06", "P07"}:
                 db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
                                message=f"tech_detected phase={phase_id} stack={tech_stack['detected']} cms={tech_stack.get('cms')} waf={tech_stack.get('waf')}"))
+            # 2b. ZAP: AJAX spider (SPA endpoint discovery) + baseline + active scan.
+            # Static crawlers (katana/gospider/gau) only regex-match URLs already
+            # present in HTML/JS source — they never see the fetch/XHR calls a
+            # React/Vue/Angular app makes at runtime, so discovered_parameterized_urls
+            # stays nearly empty for SPAs and P10/P12 (sqlmap/dalfox) have nothing
+            # real to attack. ZAP's AJAX spider renders the page in a real browser
+            # and its active scan fuzzes POST/JSON bodies via the proxy, which
+            # sqlmap/dalfox never do here. Runs once per target, capped so it can't
+            # blow up scan time on many-host targets.
+            _zap_done_targets = list(state.get("_zap_done_targets") or [])
+            if phase_id in {"P06", "P07"} and _effective_target not in _zap_done_targets:
+                _zap_done_targets.append(_effective_target)
+                state["_zap_done_targets"] = _zap_done_targets
+                job.state_data = state
+                if len(_zap_done_targets) <= 15:
+                    try:
+                        from app.services.zap_scanner import (
+                            is_zap_available as _zap_avail,
+                            run_zap_ajax_spider as _zap_ajax,
+                            run_zap_baseline as _zap_baseline,
+                            run_zap_active_scan as _zap_active,
+                        )
+                        if _zap_avail():
+                            _zap_url = (
+                                _effective_target if str(_effective_target).startswith("http")
+                                else f"https://{_effective_target}"
+                            )
+                            _zap_auth = auth_headers_from_state(state)
+                            _zap_raw: list[dict[str, Any]] = []
+
+                            _ajax_result = _zap_ajax(_zap_url)
+                            _new_urls = [u for u in (_ajax_result.get("discovered_urls") or []) if "?" in u]
+                            if _new_urls:
+                                _existing_urls = list(state.get("discovered_parameterized_urls") or [])
+                                _merged = list(dict.fromkeys(_existing_urls + _new_urls))
+                                state["discovered_parameterized_urls"] = _merged
+                                job.state_data = state
+                                db.add(ScanLog(scan_job_id=job.id, source="zap", level="INFO",
+                                               message=f"zap_ajax_spider target={_zap_url} new_parameterized_urls={len(_new_urls)}"))
+                            _zap_raw.extend(_ajax_result.get("findings") or [])
+                            db.commit()  # surface AJAX-discovered URLs to P10/P12 immediately, don't wait on active scan
+
+                            _zap_raw.extend((_zap_baseline(_zap_url, _zap_auth) or {}).get("findings") or [])
+                            db.commit()
+
+                            if len(_zap_done_targets) <= 3:
+                                _zap_raw.extend((_zap_active(_zap_url, _zap_auth) or {}).get("findings") or [])
+                                db.commit()
+
+                            if _zap_raw:
+                                from app.services.findings_extractor import persist_finding_dicts
+                                persist_finding_dicts(
+                                    db, job, _zap_raw,
+                                    default_tool="zap-baseline", default_target=str(_zap_url), source_item=None,
+                                )
+                    except Exception as _zap_exc:
+                        db.add(ScanLog(scan_job_id=job.id, source="zap", level="WARNING",
+                                       message=f"zap_integration_failed target={_effective_target} error={_zap_exc}"))
+                    db.commit()
             # 3. Evasion profile: adapt rate-limits when WAF detected
             evasion = evasion_profile_for(tech_stack)
             state["evasion_profile"] = evasion

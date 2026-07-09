@@ -6,6 +6,7 @@ cookies and metadata; raw passwords stay in the transient auth_config payload.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -227,13 +228,21 @@ class AuthSessionManager:
         payload = {**extra_fields, username_field: username, password_field: password}
         try:
             with requests.Session() as session:
+                csrf_field = self._fetch_csrf_field(session, contract.login_url, request_headers)
+                if csrf_field and csrf_field[0] not in payload:
+                    payload[csrf_field[0]] = csrf_field[1]
                 response = session.post(contract.login_url, data=payload, headers=request_headers, timeout=20)
-                valid, reason = self._validate_response(response, contract.success_check)
+                valid, reason = self._validate_response(response, contract.success_check, contract.login_url)
+                response_headers = dict(request_headers)
+                if valid and "Authorization" not in response_headers:
+                    token = self._extract_bearer_token(response)
+                    if token:
+                        response_headers["Authorization"] = f"Bearer {token}"
                 return AuthMaterial(
                     identity_key=identity_key,
                     role=role,
                     auth_type=contract.auth_type,
-                    headers=request_headers,
+                    headers=response_headers,
                     cookies={str(k): str(v) for k, v in session.cookies.get_dict().items()},
                     valid=valid,
                     status="valid" if valid else "failed",
@@ -251,7 +260,9 @@ class AuthSessionManager:
                 error=str(exc),
             )
 
-    def _validate_response(self, response: requests.Response, success_check: dict[str, Any]) -> tuple[bool, str]:
+    def _validate_response(
+        self, response: requests.Response, success_check: dict[str, Any], login_url: str = ""
+    ) -> tuple[bool, str]:
         if response.status_code >= 400:
             return False, f"login_http_{response.status_code}"
         check_type = str(success_check.get("type") or "").strip().lower()
@@ -264,7 +275,47 @@ class AuthSessionManager:
         if check_type == "status_code":
             expected = int(success_check.get("value") or 200)
             return (response.status_code == expected, f"unexpected_status_{response.status_code}")
+        if login_url and response.history and str(response.url) == login_url:
+            # No explicit success_check: a login POST that actually redirected
+            # (response.history non-empty) and landed back on the login page
+            # itself is the common signature of rejected credentials or a
+            # missing CSRF token. Do NOT apply this when there was no redirect
+            # at all (e.g. a JSON API that replies 200 in place) — that's the
+            # normal successful shape for most REST login endpoints.
+            return False, "redirected_back_to_login_url"
         return True, ""
+
+    _CSRF_FIELD_NAMES = ("user_token", "csrf_token", "_token", "authenticity_token", "csrfmiddlewaretoken", "csrf")
+
+    def _fetch_csrf_field(self, session: requests.Session, login_url: str, headers: dict[str, str]) -> tuple[str, str] | None:
+        """Some login forms (e.g. DVWA) reject the POST without a hidden CSRF
+        token minted by a prior GET of the login page."""
+        try:
+            resp = session.get(login_url, headers=headers, timeout=15)
+        except Exception:
+            return None
+        html = resp.text or ""
+        for name in self._CSRF_FIELD_NAMES:
+            match = re.search(rf'name=["\']{name}["\'][^>]*value=["\']([^"\']*)["\']', html, re.I)
+            if not match:
+                match = re.search(rf'value=["\']([^"\']*)["\'][^>]*name=["\']{name}["\']', html, re.I)
+            if match:
+                return name, match.group(1)
+        return None
+
+    def _extract_bearer_token(self, response: requests.Response) -> str:
+        """Most REST login endpoints return a JSON access token, not a cookie."""
+        try:
+            body = response.json()
+        except ValueError:
+            return ""
+        if not isinstance(body, dict):
+            return ""
+        for key in ("access_token", "token", "accessToken", "jwt"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
 
     def _raw_identity(self, identity_key: str) -> dict[str, Any]:
         state = dict(self.scan.state_data or {})

@@ -91,5 +91,10 @@ class Settings(BaseSettings):
     vulnerability_catalog_dir: str = "/app/skills/vulnerability_testing"
     vulnerability_catalog_skills: str = ""
 
+    # Blocks "full" scans when the latest tool_health_snapshot shows required
+    # tools missing_profile/missing_binary. Fail-open when no snapshot exists yet
+    # (see refresh_tool_health_snapshot beat task, which keeps the snapshot fresh).
+    enforce_tool_health_precheck: bool = True
+
 
 settings = Settings()

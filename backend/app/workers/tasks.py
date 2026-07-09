@@ -313,6 +313,25 @@ def watchdog_tick():
         db.close()
 
 
+@celery.task(name="tool_health.refresh", queue=SCAN_SCHEDULED_QUEUE)
+def refresh_tool_health_snapshot():
+    """Keeps tool_health_snapshots fresh so ENFORCE_TOOL_HEALTH_PRECHECK never
+    fails-open due to a missing snapshot (see routes_scans.create_scan)."""
+    db: Session = SessionLocal()
+    try:
+        from app.services.tool_health_service import persist_tool_health_snapshot
+        matrix = persist_tool_health_snapshot(db, force=True)
+        db.commit()
+        return {"ready": matrix.get("ready"), "broken_required": matrix.get("broken_required")}
+    except Exception as exc:
+        db.rollback()
+        import logging as _tlog
+        _tlog.getLogger(__name__).error("refresh_tool_health_snapshot failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
 
 def scheduler_tick():
