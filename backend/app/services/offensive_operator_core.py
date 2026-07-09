@@ -224,13 +224,13 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["skill.recon.port_service_discovery"], ["whatweb"],
          ["httpx", "whatweb-basic", "nmap-http", "wpscan"]),
         ("P08", "JavaScript Endpoint Analysis", "Analyze JS bundles, API routes, and SPA endpoints",
-         ["skill.discovery.endpoint_discovery"], ["linkfinder"],
+         ["skill.discovery.endpoint_discovery"], ["linkfinder", "chromium-capture"],
          # katana-js/hakrawler/gospider removed: no DOM rendering, captures less than P03
          # linkfinder: AST/regex over JS bundles discovers hidden API routes (pentest staple)
          # nuclei-js-secrets: finds API keys, JWT tokens hardcoded in production bundles
          # nuclei-js-analysis: source maps, debug endpoints, webpack chunk enumeration
          # gau: historical JS URLs from AlienVault/Wayback (catches removed but cached endpoints)
-         # Output feeds P04 (parameter discovery) and P16 (API review) with discovered endpoints
+         # Output feeds P10/P12/P13 with discovered endpoints and real browser API requests.
          ["nuclei-js-secrets", "nuclei-js-analysis", "gau", "nuclei-exposure", "katana"]),
         ("P09", "Vulnerability Template Scan", "Nuclei CVE/misconfiguration templates + content discovery",
          ["skill.discovery.endpoint_discovery"], ["nuclei"],

@@ -1,9 +1,10 @@
 """Normalização genérica de crawlers/fuzzers para o inventário ofensivo."""
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,8 @@ def normalize_crawler_result(
     inv = OffensiveInventoryService(db, scan)
     payload = result if isinstance(result, dict) else {}
     raw = _raw_text(payload)
+    browser_requests = _browser_requests_from_payload(payload, raw, target)
+    browser_urls = {req["url"] for req in browser_requests}
     urls = _urls_from_payload(payload, raw, target)
     forms = _forms_from_html(raw, target)
     api_candidates = _api_candidates(raw, target)
@@ -40,6 +43,8 @@ def normalize_crawler_result(
 
     endpoints = []
     for url in sorted(set(urls + api_candidates)):
+        if url in browser_urls:
+            continue
         method = _method_for_url(raw, url)
         ep = inv.ingest_url(
             url,
@@ -53,6 +58,47 @@ def normalize_crawler_result(
         if method != "GET":
             ep.method = method
         endpoints.append(ep)
+
+    captured_params = 0
+    for req in browser_requests:
+        method = str(req.get("method") or "GET").upper()
+        url = str(req.get("url") or "")
+        if not url:
+            continue
+        ep = inv.upsert_endpoint(
+            url,
+            method=method,
+            source_tool=tool_name,
+            discovered_from=target,
+            auth_context=auth_context,
+            source_artifact_id=source_artifact_id,
+            tags=["browser-captured", "api"],
+            metadata={
+                "source": "browser_capture",
+                "source_artifact_id": source_artifact_id,
+                "has_post_data": bool(req.get("postData")),
+            },
+        )
+        endpoints.append(ep)
+        for name in req.get("query_parameters") or []:
+            inv.upsert_parameter(
+                ep,
+                name,
+                location="query",
+                source_tool=tool_name,
+                metadata={"source": "browser_capture_query"},
+            )
+            captured_params += 1
+        body_location = "json" if _looks_json(str(req.get("postData") or "")) else "body"
+        for name in req.get("body_parameters") or []:
+            inv.upsert_parameter(
+                ep,
+                name,
+                location=body_location,
+                source_tool=tool_name,
+                metadata={"source": "browser_capture_body"},
+            )
+            captured_params += 1
 
     form_params = 0
     for form in forms:
@@ -97,6 +143,8 @@ def normalize_crawler_result(
         "api_candidates": len(set(api_candidates)),
         "forms": len(forms),
         "form_params": form_params,
+        "browser_requests": len(browser_requests),
+        "captured_params": captured_params,
         "endpoints_upserted": len(endpoints),
     }
 
@@ -130,6 +178,113 @@ def _urls_from_payload(payload: dict[str, Any], raw: str, target: str) -> list[s
     urls.extend(m.group(0).split("#", 1)[0] for m in _URL_RE.finditer(raw or ""))
     urls.extend(_absolute(m.group(1), target) for m in _PATH_RE.finditer(raw or ""))
     return [u for u in urls if str(u).startswith("http")]
+
+
+def _browser_requests_from_payload(payload: dict[str, Any], raw: str, target: str) -> list[dict[str, Any]]:
+    requests_seen: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_req(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        url = _absolute(str(item.get("url") or ""), target)
+        if not url.startswith("http"):
+            return
+        method = str(item.get("method") or "GET").upper()
+        post_data = str(item.get("postData") or item.get("post_data") or item.get("body") or "")
+        key = (method, url.split("#", 1)[0], post_data[:500])
+        if key in seen:
+            return
+        seen.add(key)
+        requests_seen.append({
+            "method": method,
+            "url": url.split("#", 1)[0],
+            "postData": post_data,
+            "query_parameters": _query_param_names(url),
+            "body_parameters": _body_param_names(post_data),
+        })
+
+    for parsed in _parsed_dicts(payload, raw):
+        for item in parsed.get("api_requests") or parsed.get("requests") or []:
+            add_req(item)
+    return requests_seen[:200]
+
+
+def _parsed_dicts(payload: dict[str, Any], raw: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    parsed = payload.get("parsed_result") or payload.get("parsed")
+    if isinstance(parsed, dict):
+        out.append(parsed)
+    for key in ("stdout_full", "stdout_preview", "stdout", "body", "raw", "output"):
+        value = payload.get(key)
+        if not value:
+            continue
+        text = str(value).strip()
+        candidates = [text]
+        if "{" in text and "}" in text:
+            candidates.append(text[text.find("{"): text.rfind("}") + 1])
+        for candidate in candidates:
+            try:
+                decoded = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(decoded, dict):
+                out.append(decoded)
+                break
+    return out
+
+
+def _query_param_names(url: str) -> list[str]:
+    return _unique_names(name for name, _ in parse_qsl(urlparse(url).query, keep_blank_values=True))
+
+
+def _body_param_names(post_data: str) -> list[str]:
+    raw = str(post_data or "").strip()
+    if not raw:
+        return []
+    names: list[str] = []
+    try:
+        decoded = json.loads(raw)
+    except Exception:
+        decoded = None
+    if decoded is not None:
+        _collect_json_keys(decoded, names)
+        return _unique_names(names)
+    form_names = [name for name, _ in parse_qsl(raw, keep_blank_values=True)]
+    if form_names:
+        return _unique_names(form_names)
+    multipart_names = re.findall(r'name=["\']([^"\']+)["\']', raw)
+    return _unique_names(multipart_names)
+
+
+def _collect_json_keys(value: Any, names: list[str]) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str):
+                names.append(key)
+            _collect_json_keys(child, names)
+    elif isinstance(value, list):
+        for child in value[:20]:
+            _collect_json_keys(child, names)
+
+
+def _unique_names(values: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        name = str(value or "").strip()
+        if not name or len(name) > 160:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out[:100]
+
+
+def _looks_json(value: str) -> bool:
+    return str(value or "").lstrip().startswith(("{", "["))
 
 
 def _api_candidates(raw: str, target: str) -> list[str]:
