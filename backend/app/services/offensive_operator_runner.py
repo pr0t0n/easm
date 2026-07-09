@@ -576,6 +576,54 @@ def _query_parameters_from_url(url: str) -> list[str]:
     return out[:100]
 
 
+def _neutral_value_for_param(name: str, original: Any = "") -> Any:
+    lower = str(name or "").lower()
+    if isinstance(original, bool):
+        return True
+    if isinstance(original, int) and not isinstance(original, bool):
+        return 1
+    if isinstance(original, float):
+        return 1
+    if any(k in lower for k in ("email", "mail")):
+        return "user@example.com"
+    if any(k in lower for k in ("pass", "pwd", "senha")):
+        return "Password123!"
+    if any(k in lower for k in ("id", "count", "qty", "quantity", "page", "limit", "offset", "price")):
+        return 1
+    if any(k in lower for k in ("url", "uri", "redirect", "callback", "return")):
+        return "https://example.com/"
+    return "test"
+
+
+def _safe_body_template(body: str, fallback_params: list[str] | None = None) -> tuple[str, str]:
+    import json as _json
+    from urllib.parse import parse_qsl as _parse_qsl, urlencode as _urlencode
+
+    raw = str(body or "").strip()
+
+    def scrub(value: Any, key_hint: str = "") -> Any:
+        if isinstance(value, dict):
+            return {str(k): scrub(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [scrub(v, key_hint) for v in value[:20]]
+        return _neutral_value_for_param(key_hint, value)
+
+    if raw:
+        try:
+            decoded = _json.loads(raw)
+            return _json.dumps(scrub(decoded), separators=(",", ":")), "application/json"
+        except Exception:
+            pairs = _parse_qsl(raw, keep_blank_values=True)
+            if pairs:
+                scrubbed = [(key, str(_neutral_value_for_param(key, value))) for key, value in pairs]
+                return _urlencode(scrubbed), "application/x-www-form-urlencoded"
+
+    params = [str(p) for p in (fallback_params or []) if str(p).strip()]
+    if params:
+        return _json.dumps({p: _neutral_value_for_param(p) for p in params}, separators=(",", ":")), "application/json"
+    return "", ""
+
+
 def _trim_mcp_stdout(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a shallow copy of each result with stdout/stderr capped for DB storage.
 
@@ -1465,13 +1513,78 @@ def run_offensive_operator_scan(
                             _supp_results.append(_call_mcp_execution(_supp_exec))
                         except Exception:
                             continue
+
+                    _all_param_reqs = [
+                        r for r in list(dict(job.state_data or {}).get("discovered_parameterized_requests") or [])
+                        if isinstance(r, dict)
+                    ]
+                    _body_by_point: dict[str, dict[str, Any]] = {}
+                    for _req in _all_param_reqs:
+                        _method = str(_req.get("method") or "GET").upper()
+                        _body_params = list(_req.get("body_parameters") or [])
+                        _body_template = str(_req.get("body_template") or "").strip()
+                        _url = str(_req.get("url") or "").strip()
+                        if _method not in {"POST", "PUT", "PATCH"} or not _url.startswith("http"):
+                            continue
+                        if not _body_params or not _body_template:
+                            continue
+                        try:
+                            _pp = _up(_url)
+                            _point = f"{_method} {_pp.path} body:{','.join(sorted(_body_params))}"
+                        except Exception:
+                            _point = f"{_method} {_url} body:{','.join(sorted(_body_params))}"
+                        if _point not in _body_by_point or len(_body_template) < len(str(_body_by_point[_point].get("body_template") or "")):
+                            _body_by_point[_point] = _req
+
+                    _body_reqs = list(_body_by_point.values())[:5]
+                    _body_profile = "sqlmap_body" if phase_id == "P10" else "dalfox_body"
+                    _body_count = 0
+                    for _req in _body_reqs:
+                        if _time.monotonic() - _phase_unit_start > _PHASE_UNIT_DEADLINE:
+                            db.add(ScanLog(
+                                scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                message=(
+                                    f"body_attack_deadline phase={phase_id} tool={_primary_tool} "
+                                    f"budget={_PHASE_UNIT_DEADLINE}s exceeded"
+                                ),
+                            ))
+                            db.commit()
+                            break
+                        _url = str(_req.get("url") or "")
+                        _method = str(_req.get("method") or "POST").upper()
+                        _body_template = str(_req.get("body_template") or "")
+                        _content_type = str(_req.get("content_type") or "").strip() or "application/json"
+                        _supp_exec = {
+                            "mcp_request_id": f"body-{phase_id}-{abs(hash((_method, _url, _body_template))) % 10**8}",
+                            "phase_id": phase_id,
+                            "skill_id": _primary_skill,
+                            "tool_name": _primary_tool,
+                            "profile": _body_profile,
+                            "target": _url,
+                            "arguments": {
+                                "target": _url,
+                                "scan_id": job.id,
+                                "env_vars": {
+                                    "SCAN_HTTP_METHOD": _method,
+                                    "SCAN_FUZZ_POST_DATA": _body_template,
+                                    "SCAN_FUZZ_CONTENT_TYPE": _content_type,
+                                },
+                            },
+                            "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
+                        }
+                        try:
+                            _supp_results.append(_call_mcp_execution(_supp_exec))
+                            _body_count += 1
+                        except Exception:
+                            continue
+
                     if _supp_results:
                         result["mcp_results"] = list(result.get("mcp_results") or []) + _supp_results
                         db.add(ScanLog(
                             scan_job_id=job.id, source="offensive-operator", level="INFO",
                             message=(
                                 f"multiurl_attack phase={phase_id} tool={_primary_tool} "
-                                f"extra_urls={len(_attack_urls)} (alvos: "
+                                f"extra_urls={len(_attack_urls)} body_requests={_body_count} (alvos: "
                                 + ", ".join(u.split('/')[-1][:40] for u in _attack_urls[:3]) + ")"
                             ),
                         ))
@@ -2212,6 +2325,8 @@ def run_offensive_operator_scan(
                                     "query_parameters": list(_req.get("query_parameters") or [])[:50],
                                     "body_parameters": list(_req.get("body_parameters") or [])[:50],
                                     "parameters": _params[:100],
+                                    "body_template": str(_req.get("body_template") or "")[:5000],
+                                    "content_type": str(_req.get("content_type") or "")[:120],
                                     "source_phase": phase_id,
                                     "source_tool": str(_ev.get("tool") or ""),
                                 })
@@ -2986,28 +3101,37 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
         _all_urls: list[str] = []
         _param_urls: list[str] = []
         _param_requests: list[dict[str, Any]] = []
-        _seen: set[str] = set()
+        _seen_urls: set[str] = set()
+        _seen_reqs: set[str] = set()
         try:
             _cap = _json.loads(stdout or "{}")
         except Exception:
             _cap = {}
         for _req in (_cap.get("api_requests") or []):
+            _method = str(_req.get("method") or "GET").upper()
             _u = str(_req.get("url") or "").strip()
-            if not _u.startswith("http") or _u in _seen:
+            _post_data = str(_req.get("postData") or "")
+            _req_sig = f"{_method} {_u} {_post_data[:500]}"
+            if not _u.startswith("http") or _req_sig in _seen_reqs:
                 continue
-            _seen.add(_u)
-            _all_urls.append(_u)
+            _seen_reqs.add(_req_sig)
+            if _u not in _seen_urls:
+                _seen_urls.add(_u)
+                _all_urls.append(_u)
             _query_params = _query_parameters_from_url(_u)
-            _body_params = _extract_parameters_from_body(str(_req.get("postData") or ""))
+            _body_params = _extract_parameters_from_body(_post_data)
             if _param_re.match(_u):
                 _param_urls.append(_u)
             if _query_params or _body_params:
+                _body_template, _content_type = _safe_body_template(_post_data, _body_params)
                 _param_requests.append({
-                    "method": str(_req.get("method") or "GET").upper(),
+                    "method": _method,
                     "url": _u,
                     "query_parameters": _query_params,
                     "body_parameters": _body_params,
                     "parameters": list(dict.fromkeys(_query_params + _body_params))[:100],
+                    "body_template": _body_template,
+                    "content_type": _content_type,
                 })
         evidence["discovered_urls"] = _all_urls[:200]
         evidence["parameterized_urls"] = _param_urls[:50]
