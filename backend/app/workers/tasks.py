@@ -3088,6 +3088,7 @@ def poll_scan_work_item(item_id: int):
         # Capture full stdout BEFORE truncating for storage — parsers see the whole output
         _full_stdout = str(result.get("stdout") or "")
         _parsed_result = result.get("parsed")
+        from app.services.tool_output_compression import compress_tool_output as _compress_stdout
         item.result = {
             **result_state,
             "status": raw_status,
@@ -3097,7 +3098,8 @@ def poll_scan_work_item(item_id: int):
             "stderr_path": result.get("stderr_path"),
             "duration_seconds": result.get("duration_seconds"),
             "error": result.get("error"),
-            "stdout_preview": _full_stdout[:3000],       # display only
+            # display only — never fed to a parser, safe to lossily compact
+            "stdout_preview": _compress_stdout(_full_stdout, max_chars=3000),
             "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
             "parsed_result": _parsed_result,
             "finished_at": datetime.now().isoformat(),

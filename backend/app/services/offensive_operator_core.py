@@ -1497,36 +1497,96 @@ class PhaseValidator:
         }
 
 
+def _hypothesis_state_view(
+    phase_id: str, evidence: list[dict[str, Any]], offensive_state: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Project the live evidence/offensive_state shape into the state dict
+    `hypothesis_engine.extract_pentest_hypotheses` expects.
+
+    The two orchestration paths grew independent state schemas (this one is
+    asset/endpoint/parameter-centric; the hypothesis engine's is the older
+    LangGraph mission-state shape with Portuguese keys). This is a read-only
+    view, not a migration of either schema — extract_pentest_hypotheses is
+    never modified, just fed data shaped the way it expects.
+    """
+    state = dict(offensive_state or {})
+    findings: list[dict[str, Any]] = []
+    for ev in evidence:
+        parsed = ev.get("parsed_json") if isinstance(ev.get("parsed_json"), dict) else {}
+        # Pass the tool parser's own dict through as `details` — if a parser
+        # already produces url/form_inputs/form_method/kind, the richer
+        # hypothesis_engine rules (H1/H6/H7/H8) can use them directly.
+        details = dict(parsed)
+        details.setdefault("url", ev.get("target") or "")
+        details.setdefault("asset", ev.get("target") or "")
+        if parsed:
+            details.setdefault("evidence", json.dumps(parsed, ensure_ascii=False, default=str)[:4000])
+        findings.append({"title": f"{ev.get('tool_name', '')} result", "details": details})
+
+    known_parameters = []
+    for row in state.get("known_parameters") or []:
+        if isinstance(row, dict):
+            known_parameters.append(row)
+        elif row:
+            known_parameters.append({"url": state.get("target") or "", "name": str(row)})
+
+    recon_graph = {
+        "technologies": list(state.get("technologies") or []),
+        "web_targets": [{"url": a} for a in (state.get("known_assets") or []) if a],
+        "endpoints": [{"url": e} for e in (state.get("known_endpoints") or []) if e],
+        "parameters": known_parameters,
+    }
+    return {
+        "vulnerabilidades_encontradas": findings,
+        "recon_graph": recon_graph,
+        "detected_tech_stack": list(state.get("technologies") or []),
+        "target": str(state.get("target") or ""),
+        "lista_ativos": list(state.get("known_assets") or []),
+    }
+
+
 class HypothesisEngine:
-    def update_from_evidence(self, phase_id: str, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def update_from_evidence(
+        self,
+        phase_id: str,
+        evidence: list[dict[str, Any]],
+        offensive_state: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        from app.services.hypothesis_engine import extract_pentest_hypotheses
+
+        state_view = _hypothesis_state_view(phase_id, evidence, offensive_state)
+        raw_hypotheses = extract_pentest_hypotheses(state_view)
+        evidence_ids = [str(ev.get("evidence_id") or "") for ev in evidence if ev.get("evidence_id")]
+
         hypotheses: list[dict[str, Any]] = []
-        for ev in evidence:
-            parsed = ev.get("parsed_json") if isinstance(ev.get("parsed_json"), dict) else {}
-            for parameter in parsed.get("parameters", []):
-                lower = str(parameter).lower()
-                skills = ["skill.idor_object_authorization"]
-                title = f"Parameter {parameter} may alter authorization or object access"
-                if any(token in lower for token in ["redirect", "callback", "url", "uri"]):
-                    skills = ["skill.ssr_basic_discovery", "skill.open_redirect_testing"]
-                    title = f"Potential SSRF or redirect behavior in {parameter}"
-                hypotheses.append(
-                    {
-                        "hypothesis_id": stable_id("H", {"phase_id": phase_id, "parameter": parameter}),
-                        "title": title,
-                        "description": "",
-                        "source_phase": phase_id,
-                        "source_evidence_ids": [ev["evidence_id"]],
-                        "confidence": 0.74,
-                        "status": "open",
-                        "required_skills": skills,
-                        "required_tools": ["curl"],
-                        "payload_candidates": [],
-                        "test_plan": {},
-                        "result": None,
-                        "created_at": utc_now(),
-                        "updated_at": utc_now(),
-                    }
-                )
+        for h in raw_hypotheses:
+            family = str(h.get("family") or "")
+            target_param = str(h.get("target_param") or "")
+            title = f"[{family}] {h.get('rationale', '')}"[:280]
+            tool = str(h.get("suggested_tool") or "curl")
+            hypotheses.append(
+                {
+                    "hypothesis_id": str(h.get("id") or stable_id("H", {"phase_id": phase_id, **h})),
+                    "title": title,
+                    "description": str(h.get("signal_expected") or ""),
+                    "source_phase": phase_id,
+                    "source_evidence_ids": evidence_ids,
+                    "confidence": float(h.get("confidence") or 0.5),
+                    "status": "open",
+                    "required_skills": [s for s in [h.get("suggested_skill")] if s],
+                    "required_tools": [tool],
+                    "payload_candidates": [],
+                    "test_plan": {
+                        "target": str(h.get("target") or ""),
+                        "target_param": target_param,
+                        "extra_args": dict(h.get("suggested_extra_args") or {}),
+                    },
+                    "result": None,
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                    "family": family,
+                }
+            )
         return hypotheses
 
 
@@ -1786,10 +1846,17 @@ class OffensiveSkillRuntime:
             _sid = ev.get("skill_id")
             if _sid in skill_coverage:
                 skill_coverage[_sid]["evidence_ids"].append(ev["evidence_id"])
-        generated_hypotheses = self.hypotheses.update_from_evidence(phase_id, evidence)
+        generated_hypotheses = self.hypotheses.update_from_evidence(phase_id, evidence, state)
         attack_paths = self.attack_paths.correlate(evidence, generated_hypotheses)
         state["current_phase"] = phase_id
-        state["open_hypotheses"].extend(generated_hypotheses)
+        # extract_pentest_hypotheses re-derives universal probes (hidden
+        # params, header matrix, verb tampering) from the full known-asset
+        # list every call, so the same hypothesis_id recurs across phases —
+        # dedupe against what's already open before extending.
+        _known_hids = {str(h.get("hypothesis_id") or "") for h in state["open_hypotheses"]}
+        state["open_hypotheses"].extend(
+            h for h in generated_hypotheses if str(h.get("hypothesis_id") or "") not in _known_hids
+        )
         state["attack_paths"].extend(attack_paths)
         state["next_objectives"] = [item["title"] for item in generated_hypotheses[:3]]
         decision = self.validator.validate(contract, tool_plan, mcp_results, evidence, generated_hypotheses, state, skill_coverage=skill_coverage)

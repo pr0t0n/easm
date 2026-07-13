@@ -1066,6 +1066,72 @@ def list_profiles() -> dict[str, Any]:
     }
 
 
+# ── Typed contract per profile ───────────────────────────────────────────────
+# What a genuine MCP tool schema would carry — params derived from the
+# {placeholder}/{{placeholder}} tokens each profile's cmd actually uses, plus
+# the shape POST /jobs + GET /jobs/{id}/result always return. This is additive
+# (GET /profiles above is untouched, mcp-server keeps consuming it as-is) —
+# a typed contract layer on top of the existing profile catalog, not a
+# rewrite of it.
+_PLACEHOLDER_RE = re.compile(r"\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}")
+
+_PARAM_DESCRIPTIONS = {
+    "target": "Raw target as submitted (host, URL, or IP)",
+    "url": "Normalized http(s) URL for the target",
+    "https_url": "Target URL forced to https",
+    "host": "Hostname or IP, no scheme/path/port",
+    "host_ip": "Resolved IP of host (only when the profile needs it)",
+    "domain": "Alias for host",
+    "subdomain": "Alias for host",
+    "netloc": "host[:port]",
+    "port": "Target port, if present in the URL",
+    "scheme": "http or https",
+    "path": "Same as target (kept for profile compatibility)",
+    "out": "Job workdir — where evidence files are written",
+    "target_file": "Path to the materialized batch-target list, for profiles that scan multiple targets in one run",
+}
+
+
+def _profile_parameters(command: list[str]) -> list[dict[str, str]]:
+    seen: dict[str, None] = {}
+    for token in command:
+        for match in _PLACEHOLDER_RE.finditer(str(token)):
+            name = match.group(1)
+            if name.startswith("env_"):
+                continue
+            seen.setdefault(name, None)
+    return [
+        {"name": name, "description": _PARAM_DESCRIPTIONS.get(name, "Runner-resolved value")}
+        for name in seen
+    ]
+
+
+@app.get("/profiles/typed")
+def list_typed_profiles() -> dict[str, Any]:
+    def _typed_payload(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+        command = list(spec.get("cmd") or [])
+        return {
+            "name": name,
+            "tool": spec.get("tool", name),
+            "category": spec.get("category"),
+            "phase": spec.get("phase"),
+            "description": spec.get("description"),
+            "parameters": _profile_parameters(command),
+            "timeout_seconds": spec.get("timeout", DEFAULT_TIMEOUT),
+            "result_schema": {
+                "status": "queued | running | done | failed | timeout | skipped",
+                "exit_code": "int",
+                "stdout": "str (full output, truncated at 500KB in the API response — full text always on disk)",
+                "parsed": "tool-specific structured object, shape depends on the profile's parser",
+            },
+        }
+
+    return {
+        "count": len(PROFILES),
+        "profiles": [_typed_payload(name, spec) for name, spec in sorted(PROFILES.items())],
+    }
+
+
 @app.get("/tools")
 def list_kali_tools() -> dict[str, Any]:
     tools = _discover_kali_tools()
