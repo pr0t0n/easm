@@ -1824,14 +1824,15 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         if status not in _RECOVERABLE_SCAN_STATUSES:
             return {"scan_id": scan_id, "action": "skip", "status": status}
 
+        if active_ids is None:
+            active_ids, inspect_ok = active_scan_task_ids()
+
         # Chain lock vivo NÃO basta como prova de vida: se o worker é morto (ex.:
         # restart) o finally que solta o lock não roda e o lock sobrevive até o TTL
         # de 90min — um lock ÓRFÃO que travaria a recuperação. Cruzamos com as tasks
         # ativas do celery: lock vivo COM task ativa = saudável; lock vivo SEM task
         # ativa = órfão → roubar o lock e re-disparar.
         if _chain_lock_alive(scan_id):
-            if active_ids is None:
-                active_ids, inspect_ok = active_scan_task_ids()
             if scan_id in active_ids:
                 state = dict(job.state_data or {})
                 rec = dict(state.get("recovery") or {})
@@ -1851,6 +1852,16 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
                 message="Chain lock orfao detectado (lock vivo sem task ativa) → liberado para recuperacao",
             ))
             db.commit()
+
+        elif scan_id in active_ids:
+            state = dict(job.state_data or {})
+            rec = dict(state.get("recovery") or {})
+            if rec.get("redrive_count"):
+                rec["redrive_count"] = 0
+                state["recovery"] = rec
+                job.state_data = state
+                db.commit()
+            return {"scan_id": scan_id, "action": "task_active", "reason": "active_without_chain_lock"}
 
         # Órfão real: decide entre re-disparar (dentro do orçamento) ou falhar.
         state = dict(job.state_data or {})

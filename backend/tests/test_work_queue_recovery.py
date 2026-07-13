@@ -63,6 +63,57 @@ def test_recover_orphaned_capacity_work_queue_resumes_dispatcher(monkeypatch) ->
     assert job.current_step == "Recuperacao automatica: retomando fila persistida"
 
 
+def test_recover_does_not_redrive_active_phase_queue_task(monkeypatch) -> None:
+    from app.models.models import ScanJob
+    from app.workers import tasks
+
+    job = SimpleNamespace(
+        id=7,
+        status="running",
+        state_data={
+            "_operator_phase_queue_started": True,
+            "current_pentest_phase_id": "P03",
+            "current_pentest_target": "www.valid.com",
+            "recovery": {"redrive_count": 2},
+        },
+        current_step="P03 Endpoint Discovery (www.valid.com)",
+        next_retry_at=None,
+    )
+    commits: list[bool] = []
+
+    class FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return job
+
+    class FakeSession:
+        def query(self, model):
+            assert model is ScanJob
+            return FakeQuery()
+
+        def commit(self):
+            commits.append(True)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: False)
+    monkeypatch.setattr(tasks, "active_scan_task_ids", lambda: ({7}, True))
+
+    result = tasks.recover_scan_if_orphaned(7, source="test")
+
+    assert result == {
+        "scan_id": 7,
+        "action": "task_active",
+        "reason": "active_without_chain_lock",
+    }
+    assert job.state_data["recovery"]["redrive_count"] == 0
+    assert commits == [True]
+
+
 def test_terminal_scan_finishes_late_work_item_without_requeue() -> None:
     from app.workers.tasks import _finish_work_item_for_terminal_scan
 
