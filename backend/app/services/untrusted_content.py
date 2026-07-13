@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 import secrets
 import unicodedata
+from dataclasses import dataclass
+from typing import Any
 
 _ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
 
@@ -32,15 +34,25 @@ _HOMOGLYPH_MAP = str.maketrans({
 
 _LEETSPEAK_MAP = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a"})
 
+@dataclass(frozen=True)
+class AdversarialPattern:
+    id: str
+    category: str
+    severity: str
+    regex: re.Pattern[str]
+
+
 _ADVERSARIAL_PATTERNS = [
-    re.compile(r"ignore\b.{0,30}\binstructions?\b", re.I),
-    re.compile(r"disregard (the )?(system|previous|above) prompt", re.I),
-    re.compile(r"you are now (in )?(developer|debug|admin|jailbreak|dan) mode", re.I),
-    re.compile(r"\bsystem\s*:\s*", re.I),
-    re.compile(r"\bassistant\s*:\s*", re.I),
-    re.compile(r"new instructions?\s*:", re.I),
-    re.compile(r"do not (report|flag|mention) this", re.I),
-    re.compile(r"reveal (your|the) (system prompt|instructions)", re.I),
+    AdversarialPattern("ignore_instructions", "prompt_injection", "high", re.compile(r"ignore\b.{0,30}\binstructions?\b", re.I)),
+    AdversarialPattern("disregard_system_prompt", "prompt_injection", "high", re.compile(r"disregard (the )?(system|previous|above) prompt", re.I)),
+    AdversarialPattern("mode_switch", "jailbreak", "high", re.compile(r"you are now (in )?(developer|debug|admin|jailbreak|dan) mode", re.I)),
+    AdversarialPattern("system_role_spoof", "role_spoofing", "medium", re.compile(r"\bsystem\s*:\s*", re.I)),
+    AdversarialPattern("assistant_role_spoof", "role_spoofing", "medium", re.compile(r"\bassistant\s*:\s*", re.I)),
+    AdversarialPattern("new_instruction_block", "prompt_injection", "medium", re.compile(r"new instructions?\s*:", re.I)),
+    AdversarialPattern("suppress_reporting", "evasion", "medium", re.compile(r"do not (report|flag|mention) this", re.I)),
+    AdversarialPattern("reveal_system_prompt", "secret_exfiltration", "high", re.compile(r"reveal (your|the) (system prompt|instructions)", re.I)),
+    AdversarialPattern("tool_abuse_request", "tool_abuse", "high", re.compile(r"(run|execute|call)\b.{0,40}\b(shell|terminal|tool|mcp|curl|python)\b", re.I)),
+    AdversarialPattern("hidden_html_text", "hidden_document_instruction", "medium", re.compile(r"(font-size\s*:\s*0|display\s*:\s*none|color\s*:\s*(white|#fff|transparent))", re.I)),
 ]
 
 
@@ -72,7 +84,47 @@ def is_adversarial(text: str) -> bool:
     """
     if not text:
         return False
-    return any(pattern.search(text) for pattern in _ADVERSARIAL_PATTERNS)
+    return any(pattern.regex.search(text) for pattern in _ADVERSARIAL_PATTERNS)
+
+
+def analyze_adversarial_text(text: str) -> dict[str, Any]:
+    """Return structured prompt-injection signals for target-controlled text.
+
+    This keeps the original boolean detector simple while giving dashboards,
+    tests, and future benchmark scoring enough detail to explain why a payload
+    was quarantined.
+    """
+    normalized = normalize_adversarial_text(text)
+    matches: list[dict[str, str]] = []
+    for pattern in _ADVERSARIAL_PATTERNS:
+        hit = pattern.regex.search(normalized)
+        if not hit:
+            continue
+        matches.append(
+            {
+                "id": pattern.id,
+                "category": pattern.category,
+                "severity": pattern.severity,
+                "evidence": hit.group(0)[:160],
+            }
+        )
+    categories = sorted({item["category"] for item in matches})
+    severities = {item["severity"] for item in matches}
+    if "high" in severities:
+        severity = "high"
+    elif "medium" in severities:
+        severity = "medium"
+    elif "low" in severities:
+        severity = "low"
+    else:
+        severity = "none"
+    return {
+        "adversarial": bool(matches),
+        "severity": severity,
+        "categories": categories,
+        "matches": matches,
+        "normalized_length": len(normalized),
+    }
 
 
 def generate_canary_token() -> str:
