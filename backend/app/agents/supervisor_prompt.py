@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.services.untrusted_content import wrap_untrusted
+
 
 # ── Static system prompt (the user-provided contract) ────────────────────────
 SUPERVISOR_ORCHESTRATION_SYSTEM_PROMPT = """Você é o Supervisor de Orquestração de uma plataforma de segurança ofensiva controlada.
@@ -129,13 +131,22 @@ def build_supervisor_orchestration_prompt(
     else:
         catalog_block = json.dumps(tool_catalog, ensure_ascii=False, indent=2)
 
+    # EXECUTION_CONTEXT/SKILL_MEMORY carry live scan signals (finding text,
+    # tool output) the scanned target influences — quarantine them before
+    # they reach the decision that dispatches to the Kali runner.
     return (
         "PLAYBOOK_APRENDIDO:\n"
         + json.dumps(playbook or {}, ensure_ascii=False, indent=2)
         + "\n\nEXECUTION_CONTEXT:\n"
-        + json.dumps(execution_context or {}, ensure_ascii=False, indent=2)
+        + wrap_untrusted(
+            json.dumps(execution_context or {}, ensure_ascii=False, indent=2),
+            label="execution_context_do_alvo",
+        )
         + "\n\nSKILL_MEMORY:\n"
-        + json.dumps(skill_memory or {}, ensure_ascii=False, indent=2)
+        + wrap_untrusted(
+            json.dumps(skill_memory or {}, ensure_ascii=False, indent=2),
+            label="skill_memory_do_alvo",
+        )
         + "\n\nTOOL_CATALOG:\n"
         + catalog_block
         + "\n\nResponda APENAS com o JSON da SAÍDA OBRIGATÓRIA."

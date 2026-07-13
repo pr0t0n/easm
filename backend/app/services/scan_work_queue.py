@@ -218,6 +218,16 @@ PORT_REQUIRED_TOOLS: dict[str, set[int]] = {
 TECH_REQUIRED_TOOLS: dict[str, set[str]] = {
     "wpscan": {"wordpress", "wp-content", "wp-includes"},
 }
+# Tools that are structurally useless without a specific prior finding (e.g.
+# sqlmap has nothing to inject into without a discovered parameter). Unlike
+# PORT/TECH_REQUIRED_TOOLS above, "unknown yet" and "known empty" are treated
+# the same way here on purpose: these tools' own skill docs (sqli.md) require
+# P04 parameter discovery before firing, and the whole point of this gate is
+# to stop them firing before that evidence exists — not just once it's
+# proven absent.
+EVIDENCE_REQUIRED_TOOLS: dict[str, str] = {
+    "sqlmap": "discovered_parameterized_urls",
+}
 SKILL_SELECTION_THRESHOLD = 0.35
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -762,6 +772,15 @@ def validate_skill_applicability(
                 reason=f"required_technology_absent:{','.join(sorted(required_tech))}",
             )
             return decision
+
+    required_evidence_key = EVIDENCE_REQUIRED_TOOLS.get(tool_l)
+    if required_evidence_key and not state.get(required_evidence_key):
+        decision.update(
+            applicable=False,
+            score=0.0,
+            reason=f"required_evidence_absent:{required_evidence_key}",
+        )
+        return decision
 
     if not ctx["preflight_known"] and at == "enqueue":
         decision["score"] = 0.65

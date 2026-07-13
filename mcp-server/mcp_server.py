@@ -378,6 +378,7 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
             "timeout": timeout,
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "auth_headers": parameters.get("auth_headers") or {},
+            "authorized_scope": [str(r) for r in (parameters.get("authorized_scope") or [])],
             "extra_args": _apply_guardrail(
                 (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
                 [str(arg) for arg in list(parameters.get("extra_args") or []) if str(arg).strip()],
@@ -495,6 +496,7 @@ async def _submit_kali_profile(profile_name: str, request: MCPExecutionRequest) 
             "tool": (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
             "auth_headers": request.arguments.get("auth_headers") or {},
             "env_vars": _forwarded_env,
+            "authorized_scope": [str(r) for r in (request.arguments.get("authorized_scope") or [])],
             "extra_args": _apply_guardrail(
                 (kali_profiles.get(profile_name) or {}).get("tool") or profile_name,
                 [str(arg) for arg in list(request.arguments.get("extra_args") or []) if str(arg).strip()],
@@ -618,6 +620,7 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
                 "scan_id": request.arguments.get("scan_id"),
                 "timeout": request.arguments.get("timeout"),
                 "auth_headers": request.arguments.get("auth_headers") or {},
+                "authorized_scope": request.arguments.get("authorized_scope") or [],
             },
         )
         exit_code = raw.get("return_code", raw.get("exit_code"))

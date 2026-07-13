@@ -99,6 +99,40 @@ def test_extract_discovered_subdomains_ignores_candidate_only_alterx() -> None:
     ]
 
 
+def test_extract_discovered_subdomains_discards_unannounced_wildcard_bruteforce_flood() -> None:
+    # Reproduces the real scan #7 incident against tarcisio.blog: dnsenum's own
+    # self-check ("Host's addresses" empty -> no "Wildcard detection using:"
+    # banner) never fired, so it brute-forced blind and every guessed label
+    # under the wildcarded zone "resolved" to the same catch-all IP.
+    header = (
+        "dnsenum VERSION:1.3.1\n\n-----   tarcisio.blog   -----\n\n"
+        "Host's addresses:\n__________________\n\n\n"
+        "Name Servers:\n______________\n\n\n"
+        "Brute forcing with /usr/share/dnsenum/dns.txt:\n"
+        "_______________________________________________\n\n"
+    )
+    flood = "\n".join(
+        f"guess{i}.tarcisio.blog.                 377      IN    A        72.60.2.144"
+        for i in range(200)
+    )
+    dnsenum_unannounced_wildcard = header + flood + "\ndone.\n"
+
+    assert extract_discovered_subdomains(
+        [{"stdout": dnsenum_unannounced_wildcard}], "Tarcisio.blog"
+    ) == []
+
+    # A genuine (small) brute-force hit list from a non-wildcarded zone must
+    # still come through untouched.
+    small_hit_list = header + "\n".join(
+        f"real{i}.tarcisio.blog.                 377      IN    A        203.0.113.{i}"
+        for i in range(5)
+    ) + "\ndone.\n"
+
+    assert extract_discovered_subdomains(
+        [{"stdout": small_hit_list}], "Tarcisio.blog"
+    ) == ["real0.tarcisio.blog", "real1.tarcisio.blog", "real2.tarcisio.blog", "real3.tarcisio.blog", "real4.tarcisio.blog"]
+
+
 def test_refine_target_set_rejects_external_hosts_and_ips_before_dns() -> None:
     refined = refine_target_set(
         "Tarcisio.blog",

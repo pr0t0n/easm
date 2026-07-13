@@ -2923,6 +2923,12 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     db.query(SkillScore).filter(SkillScore.scan_id == scan_id).delete(
         synchronize_session=False,
     )
+    db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(AgentActivityLog).filter(AgentActivityLog.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
 
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)

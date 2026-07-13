@@ -174,9 +174,37 @@ def test_validate_skill_score_adjusted_for_low_yield_tool() -> None:
     state["preflight"] = {
         "targets": {"target.example.com": {"status": "http_live", "open_ports": [443], "http": [{}]}}
     }
+    state["discovered_parameterized_urls"] = ["https://target.example.com/page?id=1"]
     d = validate_skill_applicability(
         "P10", "skill.vuln.sqli", "sqlmap", "target.example.com", state, at="dispatch",
     )
     assert d["applicable"] is True
     assert d.get("score_history_adjusted") is True
     assert d["score"] < 1.0  # blended down by low historical yield
+
+
+# ── Evidence-required tools (Fase 1, item 4) ─────────────────────────────────
+
+
+def test_sqlmap_blocked_without_discovered_parameters() -> None:
+    state = _state_for(
+        "target.example.com",
+        {"status": "http_live", "open_ports": [443], "http": [{"status_code": 200}]},
+    )
+    decision = validate_skill_applicability(
+        "P10", "skill.vuln.sqli", "sqlmap", "target.example.com", state, at="dispatch",
+    )
+    assert decision["applicable"] is False
+    assert decision["reason"] == "required_evidence_absent:discovered_parameterized_urls"
+
+
+def test_sqlmap_allowed_once_parameters_are_discovered() -> None:
+    state = _state_for(
+        "target.example.com",
+        {"status": "http_live", "open_ports": [443], "http": [{"status_code": 200}]},
+    )
+    state["discovered_parameterized_urls"] = ["https://target.example.com/search?q=1"]
+    decision = validate_skill_applicability(
+        "P10", "skill.vuln.sqli", "sqlmap", "target.example.com", state, at="dispatch",
+    )
+    assert decision["applicable"] is True

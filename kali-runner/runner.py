@@ -100,6 +100,56 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _target_host(target: str) -> str:
+    host = (target or "").strip().lower()
+    for prefix in ("http://", "https://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    return host.split("/")[0].split(":")[0].strip(".")
+
+
+def _is_target_in_scope(target: str, authorized_scope: list[str] | None) -> tuple[bool, str]:
+    """Defense-in-depth scope check: is `target` covered by `authorized_scope`?
+
+    `authorized_scope` is resolved backend-side (ScanJob.target_query) and
+    passed down through mcp-server. This does NOT replace the upstream
+    ScanAuthorization gate — it's a second, independent check so a
+    compromised or hallucinating caller can't redirect an allowed tool at an
+    out-of-scope host. If the caller didn't send any scope (older/manual
+    job submissions), this fails open but the caller should log a warning.
+    """
+    scope = [str(s).strip().lower() for s in (authorized_scope or []) if str(s).strip()]
+    if not scope:
+        return True, "no_authorized_scope_provided"
+
+    host = _target_host(target)
+    if not host:
+        return False, "empty target host"
+
+    for root in scope:
+        if _is_ip_or_cidr(root):
+            try:
+                import ipaddress
+
+                if ipaddress.ip_address(host) in ipaddress.ip_network(root, strict=False):
+                    return True, ""
+            except ValueError:
+                continue
+        elif host == root or host.endswith(f".{root}"):
+            return True, ""
+    return False, f"target {host!r} outside authorized scope {scope}"
+
+
+def _is_ip_or_cidr(value: str) -> bool:
+    try:
+        import ipaddress
+
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 # ── Job model ────────────────────────────────────────────────────────────────
 class JobRequest(BaseModel):
     profile: str = Field(..., description="Profile id (see GET /profiles)")
@@ -111,6 +161,7 @@ class JobRequest(BaseModel):
     timeout: Optional[int] = None
     auth_headers: dict[str, str] = Field(default_factory=dict, description="Authentication headers injected into tool command")
     env_vars: dict[str, str] = Field(default_factory=dict, description="Per-job env vars injected into the subprocess (e.g. SHODAN_API_KEY)")
+    authorized_scope: list[str] = Field(default_factory=list, description="Roots (domains/IPs/CIDRs) the scan is authorized to touch; validated in addition to the upstream ScanAuthorization gate")
 
 
 class JobStatus(BaseModel):
@@ -1307,6 +1358,13 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
     unsafe, reason = _is_unsafe_target(req.target)
     if unsafe:
         raise HTTPException(status_code=400, detail=f"unsafe target: {reason}")
+
+    if not req.authorized_scope:
+        print(f"[scope] job for target={req.target!r} carries no authorized_scope — allowing (upstream gate only)")
+    for candidate in [req.target, *req.targets]:
+        in_scope, scope_reason = _is_target_in_scope(candidate, req.authorized_scope)
+        if not in_scope:
+            raise HTTPException(status_code=400, detail=f"target out of authorized scope: {scope_reason}")
 
     job = _new_job_record(req, profile)
     job_id = job["job_id"]

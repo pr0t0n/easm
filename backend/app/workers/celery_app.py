@@ -33,8 +33,6 @@ celery = Celery(
     backend=settings.celery_result_backend,
     include=[
         "app.workers.tasks",
-        "app.workers.agent_dispatcher",
-        "app.workers.agent_supervisor",
     ],
 )
 
@@ -74,6 +72,12 @@ celery.conf.update(
             "task": "watchdog.tick",
             "schedule": crontab(minute="*"),
             "options": {"queue": SCAN_SCHEDULED_QUEUE},
+        },
+        # Ingestao semanal do aprendizado HackerOne/GitHub (antes so rodava sob demanda).
+        "hackerone-learning-tick": {
+            "task": "hackerone_learning.tick",
+            "schedule": crontab(minute="0", hour="3", day_of_week="1"),
+            "options": {"queue": "worker.unit.reporting"},
         },
         **_HEARTBEAT_SCHEDULE,
     },

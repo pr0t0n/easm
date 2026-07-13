@@ -82,3 +82,10 @@ def test_terminal_scan_finishes_late_work_item_without_requeue() -> None:
     assert item.finished_at is not None
     assert item.last_error == "skipped:scan_completed:before_poll"
     assert item.result["status"] == "skipped"
+
+
+def test_retry_policy_only_treats_required_phase_tools_as_required() -> None:
+    from app.workers.tasks import _work_item_tool_is_required
+
+    assert _work_item_tool_is_required(SimpleNamespace(phase_id="P17", tool_name="nuclei")) is True
+    assert _work_item_tool_is_required(SimpleNamespace(phase_id="P17", tool_name="sqlmap")) is False

@@ -29,6 +29,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
+from app.services.untrusted_content import normalize_adversarial_text, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +113,21 @@ def _group_findings_by_kill_chain(findings: list[dict]) -> dict[str, list[dict]]
 
 
 def _findings_to_prompt_json(findings: list[dict], max_count: int = 20) -> str:
-    """Convert findings to compact JSON for prompt."""
+    """Convert findings to compact JSON for prompt.
+
+    `title`/`domain`/`url` can carry text the scanned target controls
+    (e.g. a header value or path echoed back into a finding) — normalize
+    them so obfuscated injection attempts don't survive into the prompt.
+    """
     items = []
     for f in sorted(findings, key=lambda x: -int(x.get("risk_score") or 1))[:max_count]:
         items.append({
-            "title": f.get("title"),
+            "title": normalize_adversarial_text(str(f.get("title") or "")),
             "severity": f.get("severity"),
             "cve": f.get("cve"),
             "tool": f.get("tool"),
-            "domain": f.get("domain"),
-            "url": f.get("url"),
+            "domain": normalize_adversarial_text(str(f.get("domain") or "")),
+            "url": normalize_adversarial_text(str(f.get("url") or "")),
             "verification": f.get("verification_status", "candidate"),
             "risk_score": f.get("risk_score"),
         })
@@ -161,8 +167,8 @@ def generate_narrative_with_llm(
         high_count=sev_counts.get("high", 0),
         medium_count=sev_counts.get("medium", 0),
         low_count=sev_counts.get("low", 0),
-        findings_json=_findings_to_prompt_json(priority_findings),
-        tech_stack_json=json.dumps(tech_stack[:10], ensure_ascii=False),
+        findings_json=wrap_untrusted(_findings_to_prompt_json(priority_findings), label="findings_do_alvo"),
+        tech_stack_json=wrap_untrusted(json.dumps(tech_stack[:10], ensure_ascii=False), label="tech_stack_do_alvo"),
         phases=json.dumps(phases_done),
     )
 

@@ -26,6 +26,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
+from app.services.untrusted_content import normalize_adversarial_text, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +56,36 @@ def _build_operator_prompt(
     tech_stack: list[dict],
     phases_done: list[str],
 ) -> str:
-    """Build the prompt for the LLM operator."""
+    """Build the prompt for the LLM operator.
+
+    `title`/`domain`/`tech`/`version` are attacker-controlled (echoed from
+    HTTP responses/banners) and this prompt's output directly creates new
+    ScanWorkItems for Kali to execute — the highest-risk LLM call in the
+    platform for indirect prompt injection. Normalize before interpolating,
+    and wrap the target-derived blocks so the model can tell data from
+    instruction.
+    """
     findings_summary = []
     for f in findings[:20]:  # cap at 20 to avoid token overflow
         findings_summary.append({
-            "title": f.get("title"),
+            "title": normalize_adversarial_text(str(f.get("title") or "")),
             "severity": f.get("severity"),
             "tool": f.get("tool"),
-            "domain": f.get("domain"),
+            "domain": normalize_adversarial_text(str(f.get("domain") or "")),
             "verification_status": f.get("verification_status", "candidate"),
         })
 
     tech_summary = [
-        {"target": t.get("target"), "tech": t.get("tech"), "version": t.get("version")}
+        {
+            "target": t.get("target"),
+            "tech": normalize_adversarial_text(str(t.get("tech") or "")),
+            "version": normalize_adversarial_text(str(t.get("version") or "")),
+        }
         for t in tech_stack[:10]
     ]
+
+    tech_block = wrap_untrusted(json.dumps(tech_summary, indent=2), label="tech_stack_do_alvo")
+    findings_block = wrap_untrusted(json.dumps(findings_summary, indent=2), label="findings_do_alvo")
 
     prompt = f"""Analyze this attack surface and propose 3-5 novel attack chains:
 
@@ -78,10 +94,10 @@ TARGETS: {json.dumps(targets[:10])}
 COMPLETED PHASES: {json.dumps(phases_done)}
 
 TECHNOLOGY STACK DETECTED:
-{json.dumps(tech_summary, indent=2)}
+{tech_block}
 
 FINDINGS SO FAR ({len(findings)} total, showing top {len(findings_summary)}):
-{json.dumps(findings_summary, indent=2)}
+{findings_block}
 
 Based on this evidence, what are the most promising attack chains to pursue?
 Focus on gaps — what critical checks haven't been run yet given the tech stack?

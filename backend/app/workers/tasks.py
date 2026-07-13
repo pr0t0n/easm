@@ -65,6 +65,16 @@ def _finish_work_item_for_terminal_scan(item: Any, scan_status: str | None, reas
     })
     item.result = result
 
+
+def _work_item_tool_is_required(item: Any) -> bool:
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+        phase = PHASE_CONTRACTS.get(str(getattr(item, "phase_id", "") or "")) or {}
+        return str(getattr(item, "tool_name", "") or "") in set(phase.get("required_tools") or [])
+    except Exception:
+        return True
+
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
     "naabu": "perimeter_resilience", "nmap": "perimeter_resilience",
@@ -329,6 +339,33 @@ def watchdog_tick():
     except Exception as exc:
         import logging as _wlog
         _wlog.getLogger(__name__).error("watchdog_tick failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
+@celery.task(name="hackerone_learning.tick", queue="worker.unit.reporting")
+def hackerone_learning_tick():
+    """Dispara semanalmente o crawler de aprendizado HackerOne/GitHub.
+
+    Antes, `create_github_hackerone_learning_task` só rodava sob demanda via
+    POST /api/management/learning/vulnerabilities/github-crawler. O consumo
+    em runtime (supervisor/scan_work_queue/tech_vuln_correlator) já é vivo;
+    faltava só agendar a ingestão.
+    """
+    from app.models.models import User
+
+    db: Session = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.email == settings.admin_email).first()
+        if not admin:
+            admin = db.query(User).filter(User.is_admin.is_(True)).order_by(User.id).first()
+        if not admin:
+            return {"error": "no admin user found to own scheduled learning ingest"}
+        return create_github_hackerone_learning_task(admin.id)
+    except Exception as exc:
+        import logging as _hlog
+        _hlog.getLogger(__name__).error("hackerone_learning_tick failed: %s", exc)
         return {"error": str(exc)}
     finally:
         db.close()
@@ -2298,9 +2335,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         try:
             from app.models.models import ScanWorkItem as _SWI_retry
             from datetime import datetime as _dt_retry
-            from app.services.offensive_operator_core import PHASE_CONTRACTS
 
-            _gate_phases = {"P02", "P06", "P09"}
             _retried = 0
             _timeout_items = (
                 db.query(_SWI_retry)
@@ -2313,8 +2348,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 .all()
             )
             for _ti in _timeout_items:
-                _required_tools = set((PHASE_CONTRACTS.get(str(_ti.phase_id or "")) or {}).get("required_tools") or [])
-                if str(_ti.phase_id or "") in _gate_phases and str(_ti.tool_name or "") not in _required_tools:
+                if not _work_item_tool_is_required(_ti):
                     continue
                 _ti.status = "queued"
                 _ti.lease_until = None
@@ -2634,6 +2668,12 @@ def execute_scan_work_item(item_id: int):
         except Exception:
             pass
 
+        try:
+            from app.services.scan_scope import authorized_scope_for_scan
+            _authorized_scope = authorized_scope_for_scan(db, item.scan_job_id)
+        except Exception:
+            _authorized_scope = []
+
         execution = {
             "mcp_request_id": f"wi-{item.id}",
             "phase_id": item.phase_id,
@@ -2646,6 +2686,7 @@ def execute_scan_work_item(item_id: int):
             "arguments": {
                 "target": _dispatch_target,
                 "scan_id": item.scan_job_id,
+                "authorized_scope": _authorized_scope,
                 **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
                 **({k: v for k, v in _job_env.items()} if _job_env else {}),
             },
@@ -2668,7 +2709,7 @@ def execute_scan_work_item(item_id: int):
             raw_status = str(result.get("status") or "").lower()
             exit_code = result.get("return_code", result.get("exit_code", 0))
             terminal = "completed" if raw_status in {"done", "success", "completed"} and int(exit_code or 0) == 0 else "failed"
-            if terminal == "failed" and item.attempts < item.max_attempts:
+            if terminal == "failed" and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
                 terminal = "retry"
             now_done = datetime.now()
             item.status = terminal
@@ -2996,21 +3037,8 @@ def poll_scan_work_item(item_id: int):
                 return {"id": item.id, "status": "queued", "scan_status": job.status}
         exit_code = result.get("return_code", result.get("exit_code"))
         terminal = "completed" if raw_status in {"done", "success"} and exit_code == 0 else raw_status
-        if terminal in {"failed", "timeout"} and item.attempts < item.max_attempts:
-            retry_optional_gate_tool = True
-            try:
-                from app.services.offensive_operator_core import PHASE_CONTRACTS
-
-                gate_phases = {"P02", "P06", "P09"}
-                required_tools = set((PHASE_CONTRACTS.get(str(item.phase_id or "")) or {}).get("required_tools") or [])
-                retry_optional_gate_tool = not (
-                    str(item.phase_id or "") in gate_phases
-                    and str(item.tool_name or "") not in required_tools
-                )
-            except Exception:
-                retry_optional_gate_tool = True
-            if retry_optional_gate_tool:
-                terminal = "retry"
+        if terminal in {"failed", "timeout"} and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
+            terminal = "retry"
 
         item.status = terminal
         item.finished_at = datetime.now() if terminal != "retry" else None

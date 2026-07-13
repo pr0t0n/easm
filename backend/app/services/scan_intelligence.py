@@ -90,6 +90,20 @@ def _canonical_in_scope_host(value: str, root: str) -> str:
     return ""
 
 
+# A real, non-wildcarded zone rarely yields more than a handful of hits from
+# a single blind wordlist brute-force. dnsenum has no built-in wildcard filter
+# (unlike amass/shuffledns/dnsrecon, which detect and drop this on their own —
+# confirmed empirically: against the same wildcarded target, those tools
+# returned 0-32 hits while dnsenum's brute-force section alone returned
+# 1300+, one line per guessed wordlist label that "resolved" to the same
+# catch-all IP). Treat an anomalously large brute-force section as poisoned
+# and discard it wholesale rather than trying to filter it line-by-line —
+# individually probing each candidate's IP against a fresh wildcard lookup
+# would also drop the domain's own legitimate root/www hosts whenever they
+# happen to share the wildcard's catch-all IP (a common real-world setup).
+_DNSENUM_BRUTEFORCE_MAX_HITS = 40
+
+
 def _dnsenum_section(line: str, current: str | None) -> str | None:
     lower = line.strip().lower()
     if not lower:
@@ -138,6 +152,8 @@ def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain
         if not stdout:
             continue
         section: str | None = None
+        bruteforce_hits: list[str] = []
+        bruteforce_poisoned = False
         for line in stdout.splitlines():
             section = _dnsenum_section(line, section)
             if section in _DNS_ENUM_SKIP_SECTIONS:
@@ -146,8 +162,17 @@ def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain
             if not token:
                 continue
             host = _canonical_in_scope_host(token, root)
-            if host:
-                found.add(host)
+            if not host:
+                continue
+            if section == "bruteforce":
+                if not bruteforce_poisoned:
+                    bruteforce_hits.append(host)
+                    if len(bruteforce_hits) > _DNSENUM_BRUTEFORCE_MAX_HITS:
+                        bruteforce_poisoned = True
+                        bruteforce_hits = []
+                continue
+            found.add(host)
+        found.update(bruteforce_hits)
     return sorted(found)
 
 
