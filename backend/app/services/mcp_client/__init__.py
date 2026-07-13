@@ -275,6 +275,9 @@ class MCPClient:
             ]
         if skill_context:
             payload["skill_context"] = dict(skill_context)
+            auth_headers = _auth_headers_from_skill_context(skill_context)
+            if auth_headers:
+                payload["auth_headers"] = auth_headers
         if normalized_target != original_target:
             payload["original_target"] = original_target
         result = self.call_tool_sync(selected_name, payload, timeout=client_timeout)
@@ -350,6 +353,18 @@ class RAGService:
 
 
 mcp_client = MCPClient()
+
+
+def _auth_headers_from_skill_context(skill_context: dict[str, Any] | None) -> dict[str, str]:
+    ctx = dict(skill_context or {})
+    auth = dict(ctx.get("auth_context") or {})
+    headers = {str(k): str(v) for k, v in dict(auth.get("headers") or {}).items() if str(v).strip()}
+    cookies = {str(k): str(v) for k, v in dict(auth.get("cookies") or {}).items() if str(v).strip()}
+    if cookies and not any(k.lower() == "cookie" for k in headers):
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return headers
+
+
 rag_service = RAGService()
 
 

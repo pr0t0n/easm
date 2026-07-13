@@ -122,6 +122,8 @@ def _candidate_js(urls: list[str]) -> list[str]:
 
 def run_js_analysis_for_scan(db, job) -> dict:
     from app.models.models import Finding
+    from app.services.hypothesis_rules import generate_hypotheses_for_scan
+    from app.services.offensive_inventory_service import OffensiveInventoryService, sha256_text
 
     state = dict(getattr(job, "state_data", None) or {})
     root = _root_domain(str(getattr(job, "target_query", "") or "").split(",")[0].strip())
@@ -144,13 +146,40 @@ def run_js_analysis_for_scan(db, job) -> dict:
     findings: list[dict] = []
     new_endpoints: set[str] = set()
     analyzed = 0
+    inv = OffensiveInventoryService(db, job)
     for ju in js_files:
+        js_endpoint = inv.upsert_endpoint(ju, source_tool="js_analyzer", tags=["js"], metadata={"source": "discovered_js_candidate"})
+        js_asset = inv.upsert_js_asset(ju, endpoint=js_endpoint, download_status="pending", analysis_status="running", source_tool="js_analyzer")
         a = analyze_js(ju, scope_root=root)
         if not a.get("ok"):
+            js_asset.analysis_status = "failed"
+            js_asset.js_metadata = {**dict(js_asset.js_metadata or {}), "error": a.get("error")}
+            db.add(js_asset)
             continue
         analyzed += 1
+        js_asset.analysis_status = "parsed"
+        js_asset.download_status = "downloaded"
+        js_asset.sha256 = sha256_text(str(a))
+        js_asset.js_metadata = {
+            **dict(js_asset.js_metadata or {}),
+            "params": a.get("params") or [],
+            "functions": a.get("functions") or [],
+            "eval_sinks": a.get("eval_sinks") or [],
+            "proto_sinks": a.get("proto_sinks") or [],
+            "secrets_count": len(a.get("secrets") or []),
+        }
+        db.add(js_asset)
         for e in a["endpoints"]:
             new_endpoints.add(e)
+            ep = inv.upsert_endpoint(
+                e,
+                source_tool="js_analyzer",
+                discovered_from=ju,
+                tags=["api"] if "/api" in e.lower() or "/rest" in e.lower() else [],
+                metadata={"source_js_asset_id": js_asset.id, "source_js_url": ju},
+            )
+            for p in a.get("params") or []:
+                inv.upsert_parameter(ep, p, location="json", source_tool="js_analyzer", source_js_asset_id=js_asset.id)
         for sec in a["secrets"]:
             findings.append({
                 "title": f"Segredo hardcoded em JS ({sec['type']}): {ju.split('/')[-1][:60]}",
@@ -194,6 +223,10 @@ def run_js_analysis_for_scan(db, job) -> dict:
         st["discovered_endpoints"] = list(seen)[:5000]
         job.state_data = st
         reseeded = len(fresh)
+    try:
+        generate_hypotheses_for_scan(db, job)
+    except Exception:
+        pass
 
     created = 0
     if findings:

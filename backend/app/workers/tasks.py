@@ -371,6 +371,25 @@ def hackerone_learning_tick():
         db.close()
 
 
+@celery.task(name="tool_health.refresh", queue=SCAN_SCHEDULED_QUEUE)
+def refresh_tool_health_snapshot():
+    """Keeps tool_health_snapshots fresh so ENFORCE_TOOL_HEALTH_PRECHECK never
+    fails-open due to a missing snapshot (see routes_scans.create_scan)."""
+    db: Session = SessionLocal()
+    try:
+        from app.services.tool_health_service import persist_tool_health_snapshot
+        matrix = persist_tool_health_snapshot(db, force=True)
+        db.commit()
+        return {"ready": matrix.get("ready"), "broken_required": matrix.get("broken_required")}
+    except Exception as exc:
+        db.rollback()
+        import logging as _tlog
+        _tlog.getLogger(__name__).error("refresh_tool_health_snapshot failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
 
 def scheduler_tick():
@@ -3503,6 +3522,27 @@ def poll_scan_work_item(item_id: int):
                             _state_zap["zap_active_count"] = _zap_active_used + 1
                         else:
                             _zap_res = _zap_baseline(_zap_url, auth_headers=_zap_auth or None)
+                        try:
+                            from app.services.crawler_result_normalizer import normalize_crawler_result as _norm_zap
+                            from app.services.hypothesis_rules import generate_hypotheses_for_scan as _hyp_zap
+                            _zap_urls = []
+                            for _zf in (_zap_res.get("findings") or []):
+                                _zd = _zf.get("details") or {}
+                                if _zd.get("matched_at"):
+                                    _zap_urls.append(str(_zd.get("matched_at")))
+                                if _zf.get("url"):
+                                    _zap_urls.append(str(_zf.get("url")))
+                            _norm_zap(
+                                db,
+                                job,
+                                target=_zap_url,
+                                tool_name=str(_zap_res.get("scan_type") or "zap-baseline"),
+                                result={"parsed_result": {"urls": _zap_urls}, "stdout": "\n".join(_zap_urls)},
+                                auth_context="authenticated" if _zap_auth else "anonymous",
+                            )
+                            _hyp_zap(db, job)
+                        except Exception:
+                            pass
                         _zap_findings = _zap_res.get("findings") or []
                         # Item 31b — NÃO persistir alerta ZAP oco ("ZAP Finding"
                         # sem nome/cwe/descrição), que poluía com coverage vazio.
@@ -3701,6 +3741,29 @@ def poll_scan_work_item(item_id: int):
                             _jlog.getLogger(__name__).info(
                                 "js_analyzer scan=%d findings=%s endpoints_reseeded=%s",
                                 job.id, _jr.get("findings_created"), _jr.get("endpoints_reseeded"))
+
+                # ── Pentest inventory intelligence: hypotheses + coverage + safe validators ──
+                if item.phase_id in ("P03", "P08", "P09", "P10", "P12", "P13", "P16", "P17") and item.status == "completed":
+                    try:
+                        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+                        from app.services.pentest_coverage_service import refresh_coverage
+                        _inv_state = dict(job.state_data or {})
+                        _hyp_res = generate_hypotheses_for_scan(db, job)
+                        if not _inv_state.get("pentest_safe_validators_done") and item.phase_id in ("P09", "P10", "P12", "P13", "P17"):
+                            from app.services.pentest_validators import run_validators_for_scan
+                            _val_res = run_validators_for_scan(db, job, limit=80)
+                            _inv_state["pentest_safe_validators_done"] = True
+                            _inv_state["pentest_safe_validators_summary"] = _val_res
+                            job.state_data = _inv_state
+                        _cov_res = refresh_coverage(db, job)
+                        if (_hyp_res.get("hypotheses_created_or_seen") or 0) > 0:
+                            import logging as _invlog
+                            _invlog.getLogger(__name__).info(
+                                "pentest_inventory scan=%d hypotheses=%s coverage=%s%%",
+                                job.id, _hyp_res.get("hypotheses_created_or_seen"), _cov_res.get("coverage_percent"))
+                    except Exception as _inv_err:
+                        import logging as _invlog2
+                        _invlog2.getLogger(__name__).debug("pentest inventory post-processing failed: %s", _inv_err)
 
                 # ── Fase 2: Excessive Data Exposure / Mass Assignment (API) ───
                 if item.phase_id in ("P09", "P16") and item.status == "completed":

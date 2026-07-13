@@ -503,6 +503,7 @@ def _build_command(
     extra_args: list[str],
     workdir: Path | None = None,
     target_file: Path | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> list[str]:
     """Materialize the argv for a profile. Profile spec:
         tool: subfinder
@@ -520,6 +521,8 @@ def _build_command(
         target_file=target_file,
         resolve_ip=needs_host_ip,
     )
+    for key, value in (env_vars or {}).items():
+        context[f"env_{key}"] = str(value)
     materialized = [_render_template(str(part), context) for part in raw]
     materialized.extend(str(a) for a in (extra_args or []))
     return materialized
@@ -569,10 +572,13 @@ def _target_context(
         "SCAN_FUZZ_PARAM",
         "SCAN_FUZZ_POST_DATA",
         "SCAN_FUZZ_CONTENT_TYPE",
+        "SCAN_HTTP_METHOD",
     ):
         context.setdefault(f"env_{env_name}", "")
     if not context.get("env_SCAN_FUZZ_CONTENT_TYPE", "").strip():
         context["env_SCAN_FUZZ_CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    if not context.get("env_SCAN_HTTP_METHOD", "").strip():
+        context["env_SCAN_HTTP_METHOD"] = "POST"
     return context
 
 
@@ -794,7 +800,14 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             )
 
         _set_job_fields(job_id, stage="building_command")
-        argv = _build_command(profile, req.target, req.extra_args, workdir=workdir, target_file=batch_target_file)
+        argv = _build_command(
+            profile,
+            req.target,
+            req.extra_args,
+            workdir=workdir,
+            target_file=batch_target_file,
+            env_vars=_job_env,
+        )
         # Inject authentication headers into supported tools (ffuf, curl, gobuster,
         # nuclei, httpx, wfuzz, sqlmap, dalfox, wpscan, feroxbuster, dirsearch).
         if req.auth_headers:

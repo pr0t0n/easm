@@ -152,6 +152,7 @@ weaponization:
   provides:
     - wpscan
     - shodan
+    - h8mail
   steps:
     - name: "wpscan (gem)"
       run: "gem install --no-document wpscan"

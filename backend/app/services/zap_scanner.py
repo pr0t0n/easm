@@ -113,6 +113,18 @@ def _clear_auth_headers(descriptions: list[str]) -> None:
             pass
 
 
+def _is_zap_does_not_exist(exc: Exception) -> bool:
+    """True when ZAP rejected the scanId itself (never started) — retrying for
+    the full timeout in this case only wastes time, it will never succeed."""
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 400:
+        return False
+    try:
+        return str(response.json().get("code") or "") == "does_not_exist"
+    except Exception:
+        return False
+
+
 def _wait_for_spider(scan_id: str, max_wait: int = _SPIDER_MAX_WAIT) -> None:
     """Aguarda o spider ZAP completar."""
     deadline = time.time() + max_wait
@@ -122,8 +134,10 @@ def _wait_for_spider(scan_id: str, max_wait: int = _SPIDER_MAX_WAIT) -> None:
             pct = int(status.get("status") or 0)
             if pct >= 100:
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            if _is_zap_does_not_exist(exc):
+                logger.warning("ZAP spider scanId=%s never registered — aborting wait early", scan_id)
+                return
         time.sleep(3)
     logger.warning("ZAP spider timeout after %ds", max_wait)
 
@@ -151,8 +165,10 @@ def _wait_for_active_scan(scan_id: str, max_wait: int = _ACTIVE_MAX_WAIT) -> Non
             pct = int(status.get("status") or 0)
             if pct >= 100:
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            if _is_zap_does_not_exist(exc):
+                logger.warning("ZAP active scan scanId=%s never registered — aborting wait early", scan_id)
+                return
         time.sleep(10)
     logger.warning("ZAP active scan timeout after %ds", max_wait)
 
@@ -365,6 +381,14 @@ def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None)
 
     _auth_rules = _apply_auth_headers(auth_headers)
     try:
+        # ZAP's active scanner rejects a URL with "URL Not Found in the Scan
+        # Tree" unless it's already been registered — accessUrl is the
+        # cheapest way to guarantee that regardless of what the spider does.
+        try:
+            _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "true"})
+        except Exception as exc:
+            logger.debug("ZAP accessUrl error: %s", exc)
+
         # Spider first to populate sitemap
         try:
             spider_data = _zap_post("/JSON/spider/action/scan/", {

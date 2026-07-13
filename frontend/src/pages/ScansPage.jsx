@@ -66,6 +66,15 @@ function extractPhase(step) {
   const m = String(step).match(/P(\d+)/i);
   return m ? `P${m[1].padStart(2,"0")}` : null;
 }
+// compliance_status é a única fonte real do motivo de bloqueio hoje
+// (create_scan só seta status="blocked" para auth_failed/tool_health_failed —
+// não existe gate de "guardrail/escopo" na criação do scan).
+function blockedReasonLabel(scan) {
+  const reason = scan.compliance_status;
+  if (reason === "auth_failed") return "Bloqueado · autenticação obrigatória falhou";
+  if (reason === "tool_health_failed") return "Bloqueado · ferramentas indisponíveis";
+  return scan.last_error ? `Bloqueado · ${scan.last_error}` : "Bloqueado";
+}
 function getPerfil(scan) {
   return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Padrão";
 }
@@ -165,7 +174,7 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
           <span style={{ fontSize: 12, fontWeight: 600 }}>
             {isBlocked
-              ? <span style={{ color: "var(--sev-critical-text)" }}>Bloqueado por guardrail · escopo</span>
+              ? <span style={{ color: "var(--sev-critical-text)" }}>{blockedReasonLabel(scan)}</span>
               : isPaused
                 ? <span style={{ color: "var(--sev-medium-text)" }}>{faseLabel} — pausado</span>
                 : <span>{faseLabel}</span>

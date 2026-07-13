@@ -278,6 +278,9 @@ def execute_via_kali(
             "skill_context": dict(skill_context or {}),
             "extra_args": _clean_extra,
         }
+        _auth_headers = _auth_headers_from_skill_context(skill_context)
+        if _auth_headers:
+            payload["auth_headers"] = _auth_headers
         if dispatch_targets:
             payload["targets"] = dispatch_targets
         if original_target != dispatch_target and not dispatch_targets:
@@ -441,6 +444,16 @@ def _kali_failure(
         "dispatch_task_id": dispatch_task_id,
         "open_ports": [],
     }
+
+
+def _auth_headers_from_skill_context(skill_context: dict[str, Any] | None) -> dict[str, str]:
+    ctx = dict(skill_context or {})
+    auth = dict(ctx.get("auth_context") or {})
+    headers = {str(k): str(v) for k, v in dict(auth.get("headers") or {}).items() if str(v).strip()}
+    cookies = {str(k): str(v) for k, v in dict(auth.get("cookies") or {}).items() if str(v).strip()}
+    if cookies and not any(k.lower() == "cookie" for k in headers):
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return headers
 
 
 def runner_health() -> dict[str, Any]:

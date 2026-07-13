@@ -291,6 +291,28 @@ def process_crawl_result(
         return {"urls": 0, "probes_seeded": 0}
 
     crawl_result = extract_endpoints_from_crawl(stdout, target, tool_name)
+    try:
+        from app.models.models import ScanJob
+        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+        from app.services.offensive_inventory_service import OffensiveInventoryService
+
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if job:
+            inv = OffensiveInventoryService(db, job)
+            for url in crawl_result.get("urls") or []:
+                inv.ingest_url(url, source_tool=tool_name, discovered_from=target)
+            for js_url in crawl_result.get("js_files") or []:
+                ep = inv.ingest_url(js_url, source_tool=tool_name, discovered_from=target)
+                inv.upsert_js_asset(js_url, endpoint=ep, source_tool=tool_name)
+            for path in crawl_result.get("api_paths") or []:
+                api_url = path if str(path).startswith("http") else target.rstrip("/") + "/" + str(path).lstrip("/")
+                inv.ingest_url(api_url, source_tool=tool_name, discovered_from=target, metadata={"api_path": path})
+            for url in (crawl_result.get("high_value") or []) + (crawl_result.get("sensitive_paths") or []):
+                inv.ingest_url(url, source_tool=tool_name, discovered_from=target, metadata={"high_value": True})
+            generate_hypotheses_for_scan(db, job)
+            db.flush()
+    except Exception as exc:
+        logger.debug("js_endpoint_extractor inventory persistence failed: %s", exc)
     probes = seed_high_value_probes(db, scan_id, target, crawl_result)
 
     return {

@@ -524,6 +524,106 @@ def _extract_parameters_from_output(stdout: str, parsed: Any) -> list[str]:
     return params[:200]
 
 
+def _extract_parameters_from_body(body: str) -> list[str]:
+    import json as _json
+    from urllib.parse import parse_qsl as _parse_qsl
+
+    params: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        name = str(raw or "").strip()
+        if not name or len(name) > 160 or name.lower() in seen:
+            return
+        seen.add(name.lower())
+        params.append(name)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                add(key)
+                walk(child)
+        elif isinstance(value, list):
+            for child in value[:20]:
+                walk(child)
+
+    raw = str(body or "").strip()
+    if not raw:
+        return []
+    try:
+        walk(_json.loads(raw))
+    except Exception:
+        pairs = _parse_qsl(raw, keep_blank_values=True)
+        if pairs:
+            for key, _ in pairs:
+                add(key)
+        else:
+            for key in re.findall(r'name=["\']([^"\']+)["\']', raw):
+                add(key)
+    return params[:100]
+
+
+def _query_parameters_from_url(url: str) -> list[str]:
+    from urllib.parse import parse_qsl as _parse_qsl, urlparse as _urlparse
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for key, _ in _parse_qsl(_urlparse(str(url or "")).query, keep_blank_values=True):
+        clean = str(key or "").strip()
+        if clean and clean.lower() not in seen:
+            seen.add(clean.lower())
+            out.append(clean)
+    return out[:100]
+
+
+def _neutral_value_for_param(name: str, original: Any = "") -> Any:
+    lower = str(name or "").lower()
+    if isinstance(original, bool):
+        return True
+    if isinstance(original, int) and not isinstance(original, bool):
+        return 1
+    if isinstance(original, float):
+        return 1
+    if any(k in lower for k in ("email", "mail")):
+        return "user@example.com"
+    if any(k in lower for k in ("pass", "pwd", "senha")):
+        return "Password123!"
+    if any(k in lower for k in ("id", "count", "qty", "quantity", "page", "limit", "offset", "price")):
+        return 1
+    if any(k in lower for k in ("url", "uri", "redirect", "callback", "return")):
+        return "https://example.com/"
+    return "test"
+
+
+def _safe_body_template(body: str, fallback_params: list[str] | None = None) -> tuple[str, str]:
+    import json as _json
+    from urllib.parse import parse_qsl as _parse_qsl, urlencode as _urlencode
+
+    raw = str(body or "").strip()
+
+    def scrub(value: Any, key_hint: str = "") -> Any:
+        if isinstance(value, dict):
+            return {str(k): scrub(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [scrub(v, key_hint) for v in value[:20]]
+        return _neutral_value_for_param(key_hint, value)
+
+    if raw:
+        try:
+            decoded = _json.loads(raw)
+            return _json.dumps(scrub(decoded), separators=(",", ":")), "application/json"
+        except Exception:
+            pairs = _parse_qsl(raw, keep_blank_values=True)
+            if pairs:
+                scrubbed = [(key, str(_neutral_value_for_param(key, value))) for key, value in pairs]
+                return _urlencode(scrubbed), "application/x-www-form-urlencoded"
+
+    params = [str(p) for p in (fallback_params or []) if str(p).strip()]
+    if params:
+        return _json.dumps({p: _neutral_value_for_param(p) for p in params}, separators=(",", ":")), "application/json"
+    return "", ""
+
+
 def _trim_mcp_stdout(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a shallow copy of each result with stdout/stderr capped for DB storage.
 
@@ -1413,13 +1513,78 @@ def run_offensive_operator_scan(
                             _supp_results.append(_call_mcp_execution(_supp_exec))
                         except Exception:
                             continue
+
+                    _all_param_reqs = [
+                        r for r in list(dict(job.state_data or {}).get("discovered_parameterized_requests") or [])
+                        if isinstance(r, dict)
+                    ]
+                    _body_by_point: dict[str, dict[str, Any]] = {}
+                    for _req in _all_param_reqs:
+                        _method = str(_req.get("method") or "GET").upper()
+                        _body_params = list(_req.get("body_parameters") or [])
+                        _body_template = str(_req.get("body_template") or "").strip()
+                        _url = str(_req.get("url") or "").strip()
+                        if _method not in {"POST", "PUT", "PATCH"} or not _url.startswith("http"):
+                            continue
+                        if not _body_params or not _body_template:
+                            continue
+                        try:
+                            _pp = _up(_url)
+                            _point = f"{_method} {_pp.path} body:{','.join(sorted(_body_params))}"
+                        except Exception:
+                            _point = f"{_method} {_url} body:{','.join(sorted(_body_params))}"
+                        if _point not in _body_by_point or len(_body_template) < len(str(_body_by_point[_point].get("body_template") or "")):
+                            _body_by_point[_point] = _req
+
+                    _body_reqs = list(_body_by_point.values())[:5]
+                    _body_profile = "sqlmap_body" if phase_id == "P10" else "dalfox_body"
+                    _body_count = 0
+                    for _req in _body_reqs:
+                        if _time.monotonic() - _phase_unit_start > _PHASE_UNIT_DEADLINE:
+                            db.add(ScanLog(
+                                scan_job_id=job.id, source="offensive-operator", level="WARNING",
+                                message=(
+                                    f"body_attack_deadline phase={phase_id} tool={_primary_tool} "
+                                    f"budget={_PHASE_UNIT_DEADLINE}s exceeded"
+                                ),
+                            ))
+                            db.commit()
+                            break
+                        _url = str(_req.get("url") or "")
+                        _method = str(_req.get("method") or "POST").upper()
+                        _body_template = str(_req.get("body_template") or "")
+                        _content_type = str(_req.get("content_type") or "").strip() or "application/json"
+                        _supp_exec = {
+                            "mcp_request_id": f"body-{phase_id}-{abs(hash((_method, _url, _body_template))) % 10**8}",
+                            "phase_id": phase_id,
+                            "skill_id": _primary_skill,
+                            "tool_name": _primary_tool,
+                            "profile": _body_profile,
+                            "target": _url,
+                            "arguments": {
+                                "target": _url,
+                                "scan_id": job.id,
+                                "env_vars": {
+                                    "SCAN_HTTP_METHOD": _method,
+                                    "SCAN_FUZZ_POST_DATA": _body_template,
+                                    "SCAN_FUZZ_CONTENT_TYPE": _content_type,
+                                },
+                            },
+                            "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
+                        }
+                        try:
+                            _supp_results.append(_call_mcp_execution(_supp_exec))
+                            _body_count += 1
+                        except Exception:
+                            continue
+
                     if _supp_results:
                         result["mcp_results"] = list(result.get("mcp_results") or []) + _supp_results
                         db.add(ScanLog(
                             scan_job_id=job.id, source="offensive-operator", level="INFO",
                             message=(
                                 f"multiurl_attack phase={phase_id} tool={_primary_tool} "
-                                f"extra_urls={len(_attack_urls)} (alvos: "
+                                f"extra_urls={len(_attack_urls)} body_requests={_body_count} (alvos: "
                                 + ", ".join(u.split('/')[-1][:40] for u in _attack_urls[:3]) + ")"
                             ),
                         ))
@@ -1608,6 +1773,78 @@ def run_offensive_operator_scan(
             if tech_stack.get("detected") and phase_id in {"P06", "P07"}:
                 db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
                                message=f"tech_detected phase={phase_id} stack={tech_stack['detected']} cms={tech_stack.get('cms')} waf={tech_stack.get('waf')}"))
+            # 2b. ZAP: AJAX spider (SPA endpoint discovery) + baseline + active scan.
+            # Static crawlers (katana/gospider/gau) only regex-match URLs already
+            # present in HTML/JS source — they never see the fetch/XHR calls a
+            # React/Vue/Angular app makes at runtime, so discovered_parameterized_urls
+            # stays nearly empty for SPAs and P10/P12 (sqlmap/dalfox) have nothing
+            # real to attack. ZAP's AJAX spider renders the page in a real browser
+            # and its active scan fuzzes POST/JSON bodies via the proxy, which
+            # sqlmap/dalfox never do here. Runs once per target, capped so it can't
+            # blow up scan time on many-host targets.
+            _zap_done_targets = list(state.get("_zap_done_targets") or [])
+            if phase_id in {"P06", "P07"} and _effective_target not in _zap_done_targets:
+                _zap_done_targets.append(_effective_target)
+                state["_zap_done_targets"] = _zap_done_targets
+                job.state_data = state
+                if len(_zap_done_targets) <= 15:
+                    try:
+                        from app.services.zap_scanner import (
+                            is_zap_available as _zap_avail,
+                            run_zap_ajax_spider as _zap_ajax,
+                            run_zap_baseline as _zap_baseline,
+                            run_zap_active_scan as _zap_active,
+                        )
+                        if _zap_avail():
+                            _zap_url = (
+                                _effective_target if str(_effective_target).startswith("http")
+                                else f"https://{_effective_target}"
+                            )
+                            _zap_auth = auth_headers_from_state(state)
+                            _zap_raw: list[dict[str, Any]] = []
+
+                            _ajax_result = _zap_ajax(_zap_url)
+                            _new_urls = [u for u in (_ajax_result.get("discovered_urls") or []) if "?" in u]
+                            if _new_urls:
+                                _existing_urls = list(state.get("discovered_parameterized_urls") or [])
+                                _merged = list(dict.fromkeys(_existing_urls + _new_urls))
+                                state["discovered_parameterized_urls"] = _merged
+                                job.state_data = state
+                                db.add(ScanLog(scan_job_id=job.id, source="zap", level="INFO",
+                                               message=f"zap_ajax_spider target={_zap_url} new_parameterized_urls={len(_new_urls)}"))
+                            _zap_raw.extend(_ajax_result.get("findings") or [])
+                            db.commit()  # surface AJAX-discovered URLs to P10/P12 immediately, don't wait on active scan
+
+                            _zap_raw.extend((_zap_baseline(_zap_url, _zap_auth) or {}).get("findings") or [])
+                            db.commit()
+
+                            if len(_zap_done_targets) <= 3:
+                                _zap_raw.extend((_zap_active(_zap_url, _zap_auth) or {}).get("findings") or [])
+                                db.commit()
+
+                            if _zap_raw:
+                                from app.services.findings_extractor import persist_finding_dicts
+                                persist_finding_dicts(
+                                    db, job, _zap_raw,
+                                    default_tool="zap-baseline", default_target=str(_zap_url), source_item=None,
+                                )
+                    except Exception as _zap_exc:
+                        db.add(ScanLog(scan_job_id=job.id, source="zap", level="WARNING",
+                                       message=f"zap_integration_failed target={_effective_target} error={_zap_exc}"))
+                    db.commit()
+            # 2c. browser-xss — REVERTED (2026-07-09). exploit_browser_xss.py hardcodes
+            # one specific app's known walkthrough (route "/#/search?q=" + the exact
+            # two payloads from the OWASP Juice Shop DOM XSS/Bonus Payload challenges).
+            # Wiring that unconditionally into every scan's P12 phase means every
+            # non-Juice-Shop target gets tested against a route/payload combo that has
+            # no relationship to what recon actually found on that target — the
+            # opposite of how this platform is supposed to work (discover first, then
+            # apply a generic technique to what was found). Do not re-wire this without
+            # first rewriting run_browser_xss to take a real discovered candidate
+            # (e.g. _effective_target once P10/P12's discovered_parameterized_urls
+            # upgrade picks a genuine "q="/"search="-bearing URL from recon) and to run
+            # the full generic payload catalog from skills/vulnerability_testing/xss.md,
+            # not two payloads copied from one CTF's answer key.
             # 3. Evasion profile: adapt rate-limits when WAF detected
             evasion = evasion_profile_for(tech_stack)
             state["evasion_profile"] = evasion
@@ -2034,18 +2271,36 @@ def run_offensive_operator_scan(
                 except Exception as _oexc:  # noqa: BLE001
                     db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
                                    message=f"waf_origin_discovery_failed error={_oexc!s}"))
-            # ─ P03 post-processing: extract parameterized URLs for attack phases ─
-            # Crawlers (katana, gau, waybackurls) discover URLs with parameters
-            # like Comments.aspx?id=3 and ReadNews.aspx?id=3&NewsAd=...
-            # These are stored in state["discovered_parameterized_urls"] so
-            # P10 (sqlmap) and P12 (dalfox) can target them instead of only
-            # the initial entry URL.
-            if phase_id == "P03" and not _cp_state.get("_p03_url_expansion_done"):
+            # ─ Discovery post-processing: feed parameterized surfaces forward ─
+            # Crawlers produce query URLs; chromium-capture produces real browser
+            # requests with method + query/body params. Keep both shapes: legacy
+            # URL-only tools consume discovered_parameterized_urls, while POST/JSON
+            # aware validators consume discovered_parameterized_requests.
+            if phase_id in {"P03", "P04", "P08", "P13"}:
                 try:
-                    _crawler_tools = {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}
+                    _crawler_tools = {
+                        "katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls", "linkfinder",
+                        "chromium-capture", "chromium_capture",
+                    }
                     _param_urls: list[str] = list(_cp_state.get("discovered_parameterized_urls") or [])
                     _param_seen: set[str] = set(_param_urls)
-                    for _ev in result.get("tool_evidences") or []:
+                    _param_reqs: list[dict[str, Any]] = list(_cp_state.get("discovered_parameterized_requests") or [])
+                    _req_seen: set[str] = {
+                        f"{str(r.get('method') or 'GET').upper()} {r.get('url')} {','.join(r.get('parameters') or [])}"
+                        for r in _param_reqs if isinstance(r, dict)
+                    }
+                    _evs = [ev for ev in (result.get("tool_evidences") or []) if isinstance(ev, dict)]
+                    for _res in (result.get("mcp_results") or []):
+                        if not isinstance(_res, dict):
+                            continue
+                        _tool = str(_res.get("tool_name") or "").lower()
+                        if _tool not in _crawler_tools:
+                            continue
+                        if str(_res.get("status") or "").lower() in {"success", "done", "completed"}:
+                            _evs.append(_extract_evidence(phase_id, _tool, _res))
+                    _added_urls = 0
+                    _added_reqs = 0
+                    for _ev in _evs:
                         if not isinstance(_ev, dict):
                             continue
                         if str(_ev.get("tool") or "").lower() not in _crawler_tools:
@@ -2054,6 +2309,28 @@ def run_offensive_operator_scan(
                             if _u and _u not in _param_seen:
                                 _param_seen.add(_u)
                                 _param_urls.append(_u)
+                                _added_urls += 1
+                        for _req in (_ev.get("parameterized_requests") or []):
+                            if not isinstance(_req, dict):
+                                continue
+                            _params = list(_req.get("parameters") or [])
+                            if not _params:
+                                _params = list(dict.fromkeys(list(_req.get("query_parameters") or []) + list(_req.get("body_parameters") or [])))
+                            _sig = f"{str(_req.get('method') or 'GET').upper()} {_req.get('url')} {','.join(_params)}"
+                            if _req.get("url") and _params and _sig not in _req_seen:
+                                _req_seen.add(_sig)
+                                _param_reqs.append({
+                                    "method": str(_req.get("method") or "GET").upper(),
+                                    "url": str(_req.get("url")),
+                                    "query_parameters": list(_req.get("query_parameters") or [])[:50],
+                                    "body_parameters": list(_req.get("body_parameters") or [])[:50],
+                                    "parameters": _params[:100],
+                                    "body_template": str(_req.get("body_template") or "")[:5000],
+                                    "content_type": str(_req.get("content_type") or "")[:120],
+                                    "source_phase": phase_id,
+                                    "source_tool": str(_ev.get("tool") or ""),
+                                })
+                                _added_reqs += 1
                     # Also scan mcp_results for stdout lines from crawlers
                     for _res in (result.get("mcp_results") or []):
                         if not isinstance(_res, dict):
@@ -2065,20 +2342,21 @@ def run_offensive_operator_scan(
                             if _u.startswith("http") and "?" in _u and "=" in _u and _u not in _param_seen:
                                 _param_seen.add(_u)
                                 _param_urls.append(_u)
-                    if _param_urls:
+                                _added_urls += 1
+                    if _added_urls or _added_reqs:
                         _cp_state["discovered_parameterized_urls"] = _param_urls[:100]
-                        _cp_state["_p03_url_expansion_done"] = True
+                        _cp_state["discovered_parameterized_requests"] = _param_reqs[:200]
                         db.add(ScanLog(
                             scan_job_id=job.id, source="scan-intelligence", level="INFO",
                             message=(
-                                f"p03_url_expansion: {len(_param_urls)} parameterized URLs discovered "
-                                f"— feeding P10/P12. Sample: "
-                                + ", ".join(u.split("?")[0].split("/")[-1] + "?" + u.split("?")[1][:30]
-                                            for u in _param_urls[:3])
+                                f"parameter_surface_expansion phase={phase_id}: "
+                                f"new_urls={_added_urls} new_requests={_added_reqs} "
+                                f"total_urls={len(_param_urls)} total_requests={len(_param_reqs)}"
                             ),
                         ))
                 except Exception as _p3e:
-                    pass
+                    db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="WARNING",
+                                   message=f"parameter_surface_expansion_failed phase={phase_id} error={_p3e!s}"))
 
             # Progress across the whole job (every target × every phase).
             _total_units = max(1, len(all_targets) * max(1, len(_phases_for_level)))
@@ -2810,6 +3088,63 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
             if injections else ("SQLMap: parâmetros NÃO injetáveis" if _negative else "Nenhuma injeção SQL confirmada")
         )
 
+    elif tool_lower in {"chromium-capture", "chromium_capture"}:
+        # Real captured browser traffic (CDP) — the app's own JS made these
+        # requests when actually rendered, so these are GROUND TRUTH endpoints/
+        # params, not a guess. This is how a real parameter like Juice Shop's
+        # /rest/products/search?q= gets discovered without assuming it in
+        # advance: the headless browser opens the app, Angular fires the
+        # search API call on load, and we see the real URL it used.
+        import json as _json
+        import re as _re
+        _param_re = _re.compile(r"https?://[^\s\"'<>]+\?[^\s\"'<>]+")
+        _all_urls: list[str] = []
+        _param_urls: list[str] = []
+        _param_requests: list[dict[str, Any]] = []
+        _seen_urls: set[str] = set()
+        _seen_reqs: set[str] = set()
+        try:
+            _cap = _json.loads(stdout or "{}")
+        except Exception:
+            _cap = {}
+        for _req in (_cap.get("api_requests") or []):
+            _method = str(_req.get("method") or "GET").upper()
+            _u = str(_req.get("url") or "").strip()
+            _post_data = str(_req.get("postData") or "")
+            _req_sig = f"{_method} {_u} {_post_data[:500]}"
+            if not _u.startswith("http") or _req_sig in _seen_reqs:
+                continue
+            _seen_reqs.add(_req_sig)
+            if _u not in _seen_urls:
+                _seen_urls.add(_u)
+                _all_urls.append(_u)
+            _query_params = _query_parameters_from_url(_u)
+            _body_params = _extract_parameters_from_body(_post_data)
+            if _param_re.match(_u):
+                _param_urls.append(_u)
+            if _query_params or _body_params:
+                _body_template, _content_type = _safe_body_template(_post_data, _body_params)
+                _param_requests.append({
+                    "method": _method,
+                    "url": _u,
+                    "query_parameters": _query_params,
+                    "body_parameters": _body_params,
+                    "parameters": list(dict.fromkeys(_query_params + _body_params))[:100],
+                    "body_template": _body_template,
+                    "content_type": _content_type,
+                })
+        evidence["discovered_urls"] = _all_urls[:200]
+        evidence["parameterized_urls"] = _param_urls[:50]
+        evidence["parameterized_requests"] = _param_requests[:80]
+        evidence["url_count"] = len(_all_urls)
+        evidence["param_url_count"] = len(_param_urls)
+        evidence["param_request_count"] = len(_param_requests)
+        evidence["finding_summary"] = (
+            f"chromium-capture: {len(_all_urls)} requisições reais capturadas, "
+            f"{len(_param_requests)} com parâmetros"
+            + (f" — {', '.join(str(r.get('url', '')).split('?')[0].split('/')[-1] for r in _param_requests[:3])}" if _param_requests else "")
+        )
+
     elif tool_lower in {"katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls"}:
         # Crawlers: extract URLs with query parameters — these seed P10/P12 attack phases.
         import re as _re
@@ -3019,6 +3354,8 @@ def _has_real_evidence(tool_evidences: list[dict[str, Any]]) -> tuple[bool, str]
             return True, "injection_confirmed"
         if ev.get("parameterized_urls"):
             strongest = strongest or "parameterized_urls_found"
+        if ev.get("parameterized_requests"):
+            strongest = strongest or "parameterized_requests_found"
         if ev.get("url_count", 0) > 0:
             strongest = strongest or "urls_discovered"
     return (bool(strongest), strongest)
@@ -3479,6 +3816,39 @@ def _persist_executed_tool_runs(db, job: ScanJob, ledger: dict[str, Any], mcp_re
         db.flush()
 
 
+def _persist_discovery_inventory(db, job: ScanJob, target: str, mcp_results: list[dict[str, Any]]) -> None:
+    discovery_tools = {
+        "katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls", "linkfinder",
+        "chromium-capture", "chromium_capture",
+    }
+    try:
+        from app.services.crawler_result_normalizer import normalize_crawler_result
+        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+    except Exception:
+        return
+
+    changed = False
+    for mcp_res in mcp_results:
+        if not isinstance(mcp_res, dict):
+            continue
+        tool_name = str(mcp_res.get("tool_name") or "").strip().lower()
+        if tool_name not in discovery_tools:
+            continue
+        if str(mcp_res.get("status") or "").lower() not in {"success", "done", "completed"}:
+            continue
+        normalize_crawler_result(
+            db,
+            job,
+            target=str(mcp_res.get("target") or target or job.target_query or ""),
+            tool_name=tool_name,
+            result=mcp_res,
+        )
+        changed = True
+    if changed:
+        generate_hypotheses_for_scan(db, job)
+        db.flush()
+
+
 def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     """Run P02-P22 for a single target. Used by the parallel fan-out task.
 
@@ -3790,6 +4160,7 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         # propagation where many ledgers share the same phase_id).
         mcp_results = ledger.get("mcp_results") or phase_mcp_map.get(phase_id) or []
         _persist_executed_tool_runs(db, job, ledger, mcp_results)
+        _persist_discovery_inventory(db, job, str(target), mcp_results)
 
         key = (phase_id, str(target))
         if key in seen:

@@ -12,6 +12,7 @@ from app.api.routes_management import router as management_router
 from app.api.routes_scans import router as scans_router
 from app.api.routes_ws import router as ws_router
 from app.api.routes_agent_flow import router as agent_flow_router
+from app.api.routes_pentest import router as pentest_router
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.db.session import Base, engine
@@ -176,3 +177,4 @@ app.include_router(scans_router)
 app.include_router(management_router)
 app.include_router(ws_router)
 app.include_router(agent_flow_router)
+app.include_router(pentest_router)

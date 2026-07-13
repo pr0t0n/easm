@@ -2504,6 +2504,53 @@ def create_scan(
     )
     db.add(job)
     db.flush()
+    if auth_config:
+        try:
+            from app.services.auth_session_manager import AuthSessionManager
+
+            auth_result = AuthSessionManager(db, job).ensure_sessions()
+            if bool(auth_config.get("required")) and not bool(auth_result.get("ready")):
+                job.status = "blocked"
+                job.compliance_status = "auth_failed"
+                job.last_error = "Auth obrigatoria nao ficou pronta para execucao"
+                compliance_status = "auth_failed"
+        except Exception as exc:
+            state = dict(job.state_data or {})
+            state["auth_summary"] = {
+                "ready": False,
+                "required": bool(auth_config.get("required")),
+                "error": str(exc),
+            }
+            job.state_data = state
+            if bool(auth_config.get("required")):
+                job.status = "blocked"
+                job.compliance_status = "auth_failed"
+                job.last_error = f"Falha ao preparar autenticacao: {exc}"
+                compliance_status = "auth_failed"
+    try:
+        if scan_level == "full" and settings.enforce_tool_health_precheck:
+            from app.services.tool_health_service import latest_tool_health
+
+            health = latest_tool_health(db)
+            counts = dict(health.get("counts") or {})
+            broken = int(counts.get("missing_profile") or 0) + int(counts.get("missing_binary") or 0)
+            state = dict(job.state_data or {})
+            state["tool_health_precheck"] = {
+                "enforced": True,
+                "snapshot_available": bool(health.get("total")),
+                "counts": counts,
+                "broken_required": broken,
+            }
+            job.state_data = state
+            if health.get("total") and broken > 0:
+                job.status = "blocked"
+                job.compliance_status = "tool_health_failed"
+                job.last_error = f"Tool health precheck bloqueou o scan: {broken} ferramenta(s) sem profile/binario"
+                compliance_status = "tool_health_failed"
+    except Exception as exc:
+        state = dict(job.state_data or {})
+        state["tool_health_precheck"] = {"enforced": True, "error": str(exc)}
+        job.state_data = state
     log_audit(
         db,
         event_type="scan.created",
@@ -2569,6 +2616,7 @@ def create_scan(
         next_retry_at=job.next_retry_at,
         last_error=job.last_error,
         created_at=job.created_at,
+        state_data=job.state_data or {},
     )
 
 

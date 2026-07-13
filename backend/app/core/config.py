@@ -91,5 +91,21 @@ class Settings(BaseSettings):
     vulnerability_catalog_dir: str = "/app/skills/vulnerability_testing"
     vulnerability_catalog_skills: str = ""
 
+    # Blocks "full" scans when the latest tool_health_snapshot shows required
+    # tools missing_profile/missing_binary. Fail-open when no snapshot exists yet
+    # (see refresh_tool_health_snapshot beat task, which keeps the snapshot fresh).
+    enforce_tool_health_precheck: bool = True
+
+    # Pentest automation infrastructure. Services are declared in docker-compose
+    # and may be disabled by env in lightweight/dev runs.
+    evidence_storage_path: str = "/evidence"
+    browser_runner_url: str = "http://browser_runner:9222"
+    enable_browser_capture: bool = True
+    browser_capture_har: bool = True
+    browser_capture_screenshots: bool = True
+    browser_max_duration_seconds: int = 180
+    enable_artifact_replay: bool = True
+    enable_oob_validation: bool = False
+
 
 settings = Settings()

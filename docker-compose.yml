@@ -130,6 +130,7 @@ services:
       - "${KALI_RUNNER_HOST_PORT:-8088}:8088"
     volumes:
       - kali_workspace:/workspace
+      - evidence_storage:/evidence
       # Persistent store for click-to-install tool modules (Go/pipx/git/binary
       # tools land here and survive restarts; the base image stays lean).
       - kali_tools:/opt/tools
@@ -159,6 +160,15 @@ services:
       retries: 4
       start_period: 60s
 
+  evidence_init:
+    image: busybox:1.36
+    container_name: scriptkiddo_evidence_init
+    profiles: ["dev", "prod"]
+    restart: "no"
+    command: sh -c "mkdir -p /evidence && chmod -R 0777 /evidence"
+    volumes:
+      - evidence_storage:/evidence
+
   # ─────────────────────────────────────────────────────────────────
   # Backend API
   # ─────────────────────────────────────────────────────────────────
@@ -179,6 +189,14 @@ services:
       MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}"
       ZAP_URL: "${ZAP_URL:-http://zap:8090}"
       ZAP_API_KEY: "${ZAP_API_KEY:-scriptkiddo-zap-key}"
+      EVIDENCE_STORAGE_PATH: "${EVIDENCE_STORAGE_PATH:-/evidence}"
+      BROWSER_RUNNER_URL: "${BROWSER_RUNNER_URL:-http://browser_runner:9222}"
+      ENABLE_BROWSER_CAPTURE: "${ENABLE_BROWSER_CAPTURE:-true}"
+      BROWSER_CAPTURE_HAR: "${BROWSER_CAPTURE_HAR:-true}"
+      BROWSER_CAPTURE_SCREENSHOTS: "${BROWSER_CAPTURE_SCREENSHOTS:-true}"
+      BROWSER_MAX_DURATION_SECONDS: "${BROWSER_MAX_DURATION_SECONDS:-180}"
+      ENABLE_ARTIFACT_REPLAY: "${ENABLE_ARTIFACT_REPLAY:-true}"
+      ENABLE_OOB_VALIDATION: "${ENABLE_OOB_VALIDATION:-false}"
       MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}"
       MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}"
       ENABLE_OBSERVABILITY: "${ENABLE_OBSERVABILITY:-false}"
@@ -198,6 +216,8 @@ services:
         condition: service_started
       mcp_server:
         condition: service_started
+      evidence_init:
+        condition: service_completed_successfully
       zap:
         condition: service_started
     ports:
@@ -209,6 +229,7 @@ services:
     volumes:
       - ./backend:/app
       - ./skills:/app/skills:ro
+      - evidence_storage:/evidence
       # Visão de saúde dos containers (Centro Operacional). Socket read-only:
       # o backend lê status/health/logs via Docker API. Não inicia/para nada.
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -233,7 +254,7 @@ services:
     # kali_runner quando detecta o 'wedge' (Up mas travado).
     group_add: ["0"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro", "/var/run/docker.sock:/var/run/docker.sock"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence", "/var/run/docker.sock:/var/run/docker.sock"]
 
   worker_parallel:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -257,7 +278,7 @@ services:
     mem_limit: 5g
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_recon:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -268,7 +289,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_weaponization:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -279,7 +300,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_delivery:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -290,7 +311,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_exploitation:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -301,7 +322,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_installation:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -312,7 +333,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_c2:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -323,7 +344,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_actions:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -334,7 +355,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_reporting:
     build: { context: ./backend, dockerfile: Dockerfile }
@@ -345,7 +366,69 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
-    volumes: ["./backend:/app", "./skills:/app/skills:ro"]
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
+
+  # ─────────────────────────────────────────────────────────────────
+  # Browser + Evidence workers — dynamic SPA capture and proof-pack IO.
+  # ─────────────────────────────────────────────────────────────────
+
+  browser_runner:
+    image: mcr.microsoft.com/playwright:v1.54.1-noble
+    container_name: scriptkiddo_browser_runner
+    restart: unless-stopped
+    profiles: ["dev", "prod"]
+    command: >
+      sh -c "npx -y playwright@1.54.1 run-server --host 0.0.0.0 --port 9222"
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${BROWSER_RUNNER_HOST_PORT:-9222}:9222"
+    volumes:
+      - browser_traces:/browser-traces
+      - evidence_storage:/evidence
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:9222').then(()=>process.exit(0)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  worker_browser:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    container_name: scriptkiddo_worker_browser
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.browser,worker.scheduled.browser -n browser@%h --pool=threads --concurrency=${BROWSER_WORKER_CONCURRENCY:-4}
+    env_file: *optional_env_file
+    environment:
+      <<: *vulnerability_catalog_env
+      APP_ENV: development
+      WORKER_MODE: unit
+      KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}"
+      MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}"
+      BROWSER_RUNNER_URL: "${BROWSER_RUNNER_URL:-http://browser_runner:9222}"
+      EVIDENCE_STORAGE_PATH: "${EVIDENCE_STORAGE_PATH:-/evidence}"
+      ENABLE_BROWSER_CAPTURE: "${ENABLE_BROWSER_CAPTURE:-true}"
+      TZ: America/Sao_Paulo
+    profiles: ["dev"]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, browser_runner: { condition: service_started } }
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "browser_traces:/browser-traces", "evidence_storage:/evidence"]
+
+  worker_evidence:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    container_name: scriptkiddo_worker_evidence
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app.celery worker -l info -Q worker.unit.evidence,worker.scheduled.evidence -n evidence@%h --pool=threads --concurrency=${EVIDENCE_WORKER_CONCURRENCY:-4}
+    env_file: *optional_env_file
+    environment:
+      <<: *vulnerability_catalog_env
+      APP_ENV: development
+      WORKER_MODE: unit
+      EVIDENCE_STORAGE_PATH: "${EVIDENCE_STORAGE_PATH:-/evidence}"
+      ENABLE_ARTIFACT_REPLAY: "${ENABLE_ARTIFACT_REPLAY:-true}"
+      TZ: America/Sao_Paulo
+    profiles: ["dev"]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started } }
+    volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   celery_beat:
     build:
@@ -417,6 +500,67 @@ services:
           memory: 512m
 
   # ─────────────────────────────────────────────────────────────────
+  # Pentest Automation Lab — optional controlled targets for E2E validation.
+  # Start with:
+  #   docker compose --profile dev --profile pentest-lab up -d
+  # Internal targets for scans:
+  #   http://juice_shop:3000
+  #   http://dvwa:80
+  #   http://idor_api:8080
+  # ─────────────────────────────────────────────────────────────────
+
+  juice_shop:
+    image: bkimminich/juice-shop:v17.3.0
+    container_name: scriptkiddo_lab_juice_shop
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      NODE_ENV: unsafe
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_JUICE_SHOP_HOST_PORT:-3001}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: scriptkiddo_lab_dvwa
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_DVWA_HOST_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/login.php >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  idor_api:
+    build:
+      context: ./infra/pentest-lab/idor-api
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_lab_idor_api
+    restart: unless-stopped
+    profiles: ["pentest-lab"]
+    environment:
+      TZ: America/Sao_Paulo
+    ports:
+      - "${LAB_IDOR_API_HOST_PORT:-8082}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─────────────────────────────────────────────────────────────────
   # Frontend
   # ─────────────────────────────────────────────────────────────────
 
@@ -448,3 +592,5 @@ volumes:
   kali_workspace:
   kali_tools:
   zap_data:
+  evidence_storage:
+  browser_traces:

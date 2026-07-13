@@ -79,6 +79,13 @@ celery.conf.update(
             "schedule": crontab(minute="0", hour="3", day_of_week="1"),
             "options": {"queue": "worker.unit.reporting"},
         },
+        # Mantém tool_health_snapshots fresco p/ ENFORCE_TOOL_HEALTH_PRECHECK
+        # nunca operar fail-open por falta de snapshot (ver create_scan).
+        "tool-health-refresh": {
+            "task": "tool_health.refresh",
+            "schedule": crontab(minute="*/20"),
+            "options": {"queue": SCAN_SCHEDULED_QUEUE},
+        },
         **_HEARTBEAT_SCHEDULE,
     },
     timezone="America/Sao_Paulo",

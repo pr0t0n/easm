@@ -158,6 +158,16 @@ theharvester_passive:
   timeout: 300
   parser: raw
 
+h8mail_breach:
+  tool: h8mail
+  category: osint
+  phase: WEAPONIZATION_SIMULATION
+  description: "Email breach lookup for harvested accounts. Requires configured providers for enriched results."
+  cmd: ["h8mail", "-t", "{target}"]
+  timeout: 180
+  parser: raw
+  allowed_return_codes: [0, 1]
+
 # === HackerOne-derived nuclei template profiles (weaponization phase) ===
 # Covers vulnerability classes ranked medium–critical in HackerOne data:
 # RCE/Command Injection, Auth/Default Creds, JWT/OAuth, Info Disclosure,
@@ -261,4 +271,3 @@ nuclei_spoofing:
         "-rate-limit", "100"]
   timeout: 300
   parser: jsonl
-

@@ -361,7 +361,13 @@ linkfinder_js:
   phase: RECONNAISSANCE
   description: "Extrai endpoints/rotas de API de bundles JS (P08)."
   # -i aceita URL; -o cli imprime endpoints (um por linha) no stdout.
-  cmd: ["linkfinder", "-i", "{url}", "-o", "cli"]
+  # -d (domain mode) é OBRIGATÓRIO para SPAs: sem ele, linkfinder só analisa o
+  # HTML da própria URL (que numa SPA é só <script src="main.js"> etc — zero
+  # endpoints reais). Com -d ele busca e analisa os bundles JS referenciados
+  # (main.js, vendor.js...), onde as rotas/params de verdade (ex.: /rest/
+  # products/search?q=) estão. Sem isso, P03/P04 nunca veem esses parâmetros
+  # e P10/P12 (sqlmap/dalfox) nunca os testam.
+  cmd: ["linkfinder", "-d", "-i", "{url}", "-o", "cli"]
   timeout: 180
   parser: lines
 

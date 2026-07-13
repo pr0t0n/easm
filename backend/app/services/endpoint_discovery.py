@@ -140,6 +140,21 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         return {"new_endpoints": 0}
 
     new_eps.sort(key=lambda u: (0 if _HIGH_VALUE.search(u) else 1, len(u)))
+    try:
+        from app.services.crawler_result_normalizer import normalize_crawler_result
+        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+
+        normalize_crawler_result(
+            db,
+            job,
+            target=source_target,
+            tool_name=tool_name,
+            result=result,
+            auth_context="anonymous",
+        )
+        generate_hypotheses_for_scan(db, job)
+    except Exception as exc:
+        logger.debug("offensive inventory normalization falhou: %s", exc)
     for u in new_eps:
         seen.add(u)
 

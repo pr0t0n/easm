@@ -124,6 +124,15 @@ def generate_executive_report(
         .all()
     )
 
+    try:
+        from app.services.evidence_contract_service import apply_finding_validation, link_artifacts_to_findings
+        link_artifacts_to_findings(db, job)
+        for _finding in findings:
+            apply_finding_validation(db, _finding)
+        db.commit()
+    except Exception:
+        db.rollback()
+
     # Delta: findings do scan anterior para comparação
     prev_titles: set[str] = set()
     if previous_scan_id:
@@ -467,6 +476,20 @@ def generate_pentest_report(
         .order_by(Finding.id)
         .all()
     )
+
+    # ── Evidence contract reconciliation ──────────────────────────────────────
+    # evidence_gate.py assigns verification_status at creation time from tool-name
+    # heuristics alone (e.g. sqlmap/dalfox auto-"confirmed"). Before the report is
+    # built, re-derive it from actual EvidenceArtifact proof (baseline vs exploit,
+    # authenticated identity) so the deliverable never inflates unproven findings.
+    try:
+        from app.services.evidence_contract_service import apply_finding_validation, link_artifacts_to_findings
+        link_artifacts_to_findings(db, job)
+        for _finding in all_findings:
+            apply_finding_validation(db, _finding)
+        db.commit()
+    except Exception:
+        db.rollback()
 
     # ── Categorize by verification status ────────────────────────────────────
     try:

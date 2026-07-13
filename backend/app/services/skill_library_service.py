@@ -433,8 +433,9 @@ def seed_skill_library(db) -> None:
         if count > 0:
             return
 
-        for entry in SKILL_CATALOG_SEED:
-            tools = entry.pop("tools", [])
+        for seed_entry in SKILL_CATALOG_SEED:
+            entry = dict(seed_entry)
+            tools = list(entry.pop("tools", []))
             skill = SkillLibrary(**entry)
             db.add(skill)
             db.flush()
@@ -447,6 +448,63 @@ def seed_skill_library(db) -> None:
     except Exception as exc:
         db.rollback()
         logger.warning("Skill library seed failed (may already exist): %s", exc)
+
+
+def sync_markdown_skill_library(db) -> dict[str, Any]:
+    """Materializa skills markdown no banco usado pela UI/Agent Flow."""
+    from app.models.models import SkillLibrary, SkillToolMapping
+    from app.services.skill_runtime import load_all_md_skills
+
+    skills = load_all_md_skills()
+    created = 0
+    updated = 0
+    mappings = 0
+    for skill_id, skill_data in skills.items():
+        skill = db.query(SkillLibrary).filter(SkillLibrary.skill_name == skill_id).first()
+        if skill is None:
+            skill = SkillLibrary(skill_name=skill_id)
+            db.add(skill)
+            db.flush()
+            created += 1
+        else:
+            updated += 1
+        skill.skill_category = str(skill_data.get("category") or "custom")
+        skill.activity_types = list(skill_data.get("triggers") or [])
+        skill.kill_chain_phases = list(skill_data.get("phase_ids") or skill_data.get("phases") or [])
+        skill.objective = str(skill_data.get("description") or skill_data.get("name") or skill_id)
+        skill.quality_criteria = str(skill_data.get("exit_criteria") or "")
+        skill.is_active = True
+
+        db.query(SkillToolMapping).filter(SkillToolMapping.skill_id == skill.id).delete()
+        ordered_tools = []
+        ordered_tools.extend((tool, 10.0, "required") for tool in list(skill_data.get("required_tools") or []))
+        ordered_tools.extend((tool, 7.0, "optional") for tool in list(skill_data.get("optional_tools") or []))
+        ordered_tools.extend((tool, 5.0, "fallback") for tool in list(skill_data.get("fallback_tools") or []))
+        seen: set[str] = set()
+        for tool_name, score, evidence_type in ordered_tools:
+            tool_name = str(tool_name or "").strip()
+            if not tool_name or tool_name in seen:
+                continue
+            seen.add(tool_name)
+            db.add(
+                SkillToolMapping(
+                    skill_id=skill.id,
+                    tool_name=tool_name,
+                    score=score,
+                    usage_guide=f"{evidence_type} tool from markdown skill {skill_id}",
+                    evidence_type=evidence_type,
+                    parameters={"source": skill_data.get("source_file")},
+                    is_active=True,
+                )
+            )
+            mappings += 1
+    db.flush()
+    return {
+        "skills_seen": len(skills),
+        "created": created,
+        "updated": updated,
+        "tool_mappings": mappings,
+    }
 
 
 def get_skill_for_activity(db, activity_type: str, capability: str = "") -> dict[str, Any] | None:
