@@ -87,6 +87,11 @@ def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: st
 def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
     from app.models.models import ScanWorkItem
     from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
+
+    authorized_scope = authorized_scope_for_scan(db, scan_id)
+    if authorized_scope and not is_host_in_scope(_host_of(target), authorized_scope):
+        return False
 
     already = db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,

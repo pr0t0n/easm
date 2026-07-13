@@ -2546,7 +2546,12 @@ def execute_scan_work_item(item_id: int):
     from app.db.session import SessionLocal
     from app.core.config import settings
     from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem
-    from app.services.scan_work_queue import kali_inflight_release, work_item_applicability_decision, work_queue_counts
+    from app.services.scan_work_queue import (
+        enforce_work_item_scope,
+        kali_inflight_release,
+        work_item_applicability_decision,
+        work_queue_counts,
+    )
 
     db = SessionLocal()
     _execute_lock = None
@@ -2597,6 +2602,25 @@ def execute_scan_work_item(item_id: int):
                 return {"id": item.id, "status": item.status, "skipped": "execute_lock_held"}
         except Exception:
             _execute_lock = None
+
+        _scope_decision = enforce_work_item_scope(db, item, job)
+        if not _scope_decision.get("in_scope"):
+            if item.status in {"dispatched", "running", "submitted", "retry"}:
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+            counts = work_queue_counts(db, item.scan_job_id)
+            _state = dict(job.state_data or {})
+            _state["work_queue_counts"] = counts
+            job.state_data = _state
+            db.commit()
+            return {
+                "id": item.id,
+                "status": item.status,
+                "skipped": "out_of_scope",
+                "scope": _scope_decision.get("authorized_scope") or [],
+            }
 
         _state_for_applicability = dict(job.state_data or {})
         _applicability = work_item_applicability_decision(item, _state_for_applicability, at="dispatch")

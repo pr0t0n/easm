@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.models import ScanJob, ScanLog, ScanWorkItem
+from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
 
 
 # ── Global Redis semaphore — garante cap TOTAL cross-scans ───────────────────
@@ -68,6 +69,135 @@ def kali_inflight_release(rc: str, count: int = 1) -> None:
     except Exception:
         pass
 from app.services.offensive_operator_core import PHASE_CONTRACTS, PHASE_TOOL_BINDINGS, ToolCatalog
+
+
+def _scope_host_from_target(target: str) -> str:
+    raw = str(target or "").strip()
+    if not raw or raw == "__batch__":
+        return ""
+    candidate = raw if "://" in raw else f"http://{raw}"
+    try:
+        parsed = urlparse(candidate)
+        return str(parsed.hostname or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def is_target_in_authorized_scope(target: str, authorized_scope: list[str]) -> bool:
+    """Queue-side scope policy: fail closed once an authorized scope exists."""
+    if not authorized_scope:
+        return True
+    host = _scope_host_from_target(target)
+    return bool(host and is_host_in_scope(host, authorized_scope))
+
+
+def filter_targets_to_authorized_scope(
+    targets: list[str],
+    authorized_scope: list[str],
+) -> tuple[list[str], list[str]]:
+    clean: list[str] = []
+    skipped: list[str] = []
+    seen: set[str] = set()
+    for target in targets:
+        value = str(target or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        if is_target_in_authorized_scope(value, authorized_scope):
+            clean.append(value)
+        else:
+            skipped.append(value)
+    return clean, skipped
+
+
+def _mark_work_item_out_of_scope(item: ScanWorkItem, *, now: datetime, skipped_targets: list[str] | None = None) -> None:
+    metadata = dict(item.item_metadata or {})
+    if skipped_targets:
+        metadata["out_of_scope_targets_skipped"] = sorted({str(t) for t in skipped_targets if str(t)})
+    item.status = "skipped"
+    item.lease_until = None
+    item.finished_at = now
+    item.updated_at = now
+    item.last_error = "skipped:out_of_scope"
+    item.result = {
+        "status": "skipped",
+        "skipped_reason": "out_of_scope",
+        "target": item.target,
+        "out_of_scope_targets_skipped": metadata.get("out_of_scope_targets_skipped") or [],
+        "finished_at": now.isoformat(),
+    }
+    item.item_metadata = metadata
+
+
+def enforce_work_item_scope(
+    db: Session,
+    item: ScanWorkItem,
+    job: ScanJob | None = None,
+    *,
+    authorized_scope: list[str] | None = None,
+) -> dict[str, Any]:
+    scope = authorized_scope if authorized_scope is not None else authorized_scope_for_scan(db, item.scan_job_id)
+    if not scope:
+        return {"in_scope": True, "authorized_scope": []}
+
+    now = datetime.now()
+    if str(item.target or "") == "__batch__":
+        metadata = dict(item.item_metadata or {})
+        batch_targets = [str(t).strip() for t in metadata.get("batch_targets") or [] if str(t or "").strip()]
+        kept, skipped = filter_targets_to_authorized_scope(batch_targets, scope)
+        if skipped:
+            metadata["batch_targets"] = kept
+            metadata["batch_count"] = len(kept)
+            metadata["out_of_scope_targets_skipped"] = sorted(set((metadata.get("out_of_scope_targets_skipped") or []) + skipped))
+            item.item_metadata = metadata
+            item.updated_at = now
+        if not kept and batch_targets:
+            _mark_work_item_out_of_scope(item, now=now, skipped_targets=skipped)
+            db.add(ScanLog(
+                scan_job_id=item.scan_job_id,
+                source="work-queue",
+                level="WARNING",
+                message=f"work_item_scope_blocked id={item.id} tool={item.tool_name} target=__batch__ skipped={len(skipped)} scope={scope}",
+            ))
+            return {"in_scope": False, "authorized_scope": scope, "skipped_targets": skipped}
+        return {"in_scope": True, "authorized_scope": scope, "skipped_targets": skipped, "batch_targets": kept}
+
+    if is_target_in_authorized_scope(str(item.target or ""), scope):
+        return {"in_scope": True, "authorized_scope": scope}
+
+    _mark_work_item_out_of_scope(item, now=now, skipped_targets=[str(item.target or "")])
+    db.add(ScanLog(
+        scan_job_id=item.scan_job_id,
+        source="work-queue",
+        level="WARNING",
+        message=f"work_item_scope_blocked id={item.id} tool={item.tool_name} target={item.target} scope={scope}",
+    ))
+    return {"in_scope": False, "authorized_scope": scope, "skipped_targets": [str(item.target or "")]}
+
+
+def skip_out_of_scope_queued_work_items(db: Session, scan_id: int) -> int:
+    scope = authorized_scope_for_scan(db, scan_id)
+    if not scope:
+        return 0
+    items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(["queued", "retry", "blocked"]),
+        )
+        .all()
+    )
+    changed = 0
+    for item in items:
+        before_status = item.status
+        before_meta = dict(item.item_metadata or {})
+        decision = enforce_work_item_scope(db, item, authorized_scope=scope)
+        after_meta = dict(item.item_metadata or {})
+        if not decision.get("in_scope") or before_meta != after_meta or before_status != item.status:
+            changed += 1
+    if changed:
+        db.flush()
+    return changed
 
 
 MODULE_TOOL_REQUIREMENTS: dict[str, set[str]] = {
@@ -1142,7 +1272,32 @@ def enqueue_scan_work_items(
     module_status = _installed_kali_modules()
     missing_module_tools: dict[str, set[str]] = {}
 
-    clean_targets = [str(t).strip() for t in targets if str(t or "").strip()]
+    authorized_scope = authorized_scope_for_scan(db, job.id)
+    clean_targets, out_of_scope_targets = filter_targets_to_authorized_scope(
+        [str(t).strip() for t in targets if str(t or "").strip()],
+        authorized_scope,
+    )
+    if out_of_scope_targets:
+        skipped += len(out_of_scope_targets)
+        scope_events = list(state.get("out_of_scope_targets_skipped") or [])
+        scope_events.append({
+            "source": source,
+            "authorized_scope": authorized_scope,
+            "targets": sorted(out_of_scope_targets)[:100],
+            "skipped_count": len(out_of_scope_targets),
+            "at": datetime.now().isoformat(),
+        })
+        state["out_of_scope_targets_skipped"] = scope_events[-20:]
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="WARNING",
+            message=(
+                f"work_queue_scope_filtered source={source} "
+                f"authorized_scope={authorized_scope} skipped={len(out_of_scope_targets)}"
+            ),
+        ))
 
     for target in clean_targets:
         for phase_id in _eligible_phases_for_target(target, state):
@@ -1258,8 +1413,15 @@ def enqueue_scan_work_items(
                     if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
                 }
                 old_meta["learning_sources"] = sorted(old_learning_sources | new_learning_sources)[:20]
+                merged, skipped_batch_targets = filter_targets_to_authorized_scope(merged, authorized_scope)
+                if skipped_batch_targets:
+                    old_meta["out_of_scope_targets_skipped"] = sorted(
+                        set((old_meta.get("out_of_scope_targets_skipped") or []) + skipped_batch_targets)
+                    )
+                    skipped += len(skipped_batch_targets)
                 if merged != list(existing_tgts):
                     old_meta["batch_targets"] = merged
+                    old_meta["batch_count"] = len(merged)
                 existing_batch.item_metadata = old_meta
                 if existing_batch.status == "blocked" and not existing_batch.last_error:
                     existing_batch.last_error = initial_last_error_for_phase(phase_id)
@@ -1679,6 +1841,16 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             synchronize_session=False,
         )
         if _reaped:
+            db.flush()
+
+        _scope_skipped = skip_out_of_scope_queued_work_items(db, scan_id)
+        if _scope_skipped:
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="work-queue",
+                level="WARNING",
+                message=f"work_queue_scope_reaped skipped_or_filtered={_scope_skipped}",
+            ))
             db.flush()
 
         # ── Fair-share: count how many active scans are competing for capacity ──
