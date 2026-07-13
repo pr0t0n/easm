@@ -1084,26 +1084,38 @@ def unblock_phase_items(
     return int(updated)
 
 
+# Every entry here MUST have a real kali-runner profile with
+# `target_type: targets_file` (cmd uses {target_file}, not {host}/{url}/
+# {host_ip}) — verified against kali-runner/profiles/*.yaml on 2026-07-13.
+# The previous version of this set assumed "nuclei -l" batch support for
+# every nuclei-* variant and every crawler/fingerprint tool by comment
+# ("all use nuclei -l under the hood") without checking the actual profile
+# YAML. None of those had a _batch profile: the default profile's {host}/
+# {url} placeholder got resolved from the literal string "__batch__" (the
+# batch-item sentinel target), so every one of those tools silently scanned
+# the hostname "__batch__" instead of the real targets — often "succeeding"
+# with zero evidence rather than failing loudly. Only add a tool here after
+# confirming a matching `<profile>_batch` (or equivalent) profile exists.
 BATCH_CAPABLE_TOOLS: frozenset[str] = frozenset({
-    # Core network tools (support -iL / --input-file host list)
-    "naabu", "nmap", "nmap-vulscan", "nmap-ssl", "nmap-vuln", "nmap-http",
-    "httpx", "dnsx", "subjack",
-    # Crawlers (support -list / --sites / stdin)
-    "katana", "katana-js", "hakrawler", "gospider",
-    # Fingerprinting (support --input-file or equivalent)
-    "whatweb", "whatweb-basic",
-    # Passive recon (accept domain list)
-    "gau", "waybackurls",
-    # Nuclei + every variant — all use nuclei -l under the hood
-    "nuclei",
-    "nuclei-cves", "nuclei-headers", "nuclei-exposure", "nuclei-takeover",
-    "nuclei-cors", "nuclei-crlf", "nuclei-redirect", "nuclei-spoofing",
-    "nuclei-graphql", "nuclei-jwt", "nuclei-cloud",
-    "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
-    "nuclei-ssti", "nuclei-xxe", "nuclei-idor", "nuclei-csrf",
-    "nuclei-race", "nuclei-rce", "nuclei-auth",
-    "nuclei-deserialization", "nuclei-clickjacking",
+    "naabu", "nmap", "nmap-vulscan", "httpx", "dnsx", "subjack", "nuclei", "nuclei-cves",
 })
+
+# tool_name -> the batch-capable profile id to use instead of _tool_profile()'s
+# single-target default when building a "__batch__" work item.
+BATCH_PROFILE_OVERRIDE: dict[str, str] = {
+    "naabu": "naabu_top1000_batch",
+    "nmap": "nmap_service_detect_batch",
+    "nmap-vulscan": "nmap_vuln_scripts_batch",
+    "httpx": "httpx_probe_batch",
+    "dnsx": "dnsx_resolve_batch",
+    "subjack": "domain_takeover_batch",
+    "nuclei": "nuclei_cves_batch",
+    "nuclei-cves": "nuclei_cves_batch",
+}
+
+
+def _batch_tool_profile(tool_name: str) -> str:
+    return BATCH_PROFILE_OVERRIDE.get(tool_name) or _tool_profile(tool_name)
 
 
 def enqueue_scan_work_items(
@@ -1195,6 +1207,17 @@ def enqueue_scan_work_items(
     for (phase_id, tool), tset in batch_accumulator.items():
         if not tset:
             continue
+        if len(tset) == 1:
+            # execute_scan_work_item only treats an item as batch when
+            # len(batch_targets) > 1 (tasks.py) — a "__batch__" item backed
+            # by a single target would get the batch profile (needs
+            # {target_file}) but no targets list to populate it, producing
+            # an empty target file (`-list ''`) that either no-ops silently
+            # or errors depending on the tool. Route single-target
+            # accumulator entries through the normal per-target path
+            # instead, matching what execution actually does.
+            single_items.append((phase_id, tool, next(iter(tset))))
+            continue
         sorted_targets = sorted(tset)
 
         # Check for existing batch item
@@ -1270,7 +1293,7 @@ def enqueue_scan_work_items(
             phase_id=phase_id,
             target="__batch__",
             tool_name=tool[:120],
-            profile=_tool_profile(tool)[:120],
+            profile=_batch_tool_profile(tool)[:120],
             resource_class=rc,
             priority=max(1, base_priority + best_boost),
             status=_batch_status,

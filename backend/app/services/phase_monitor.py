@@ -186,6 +186,21 @@ def _normalized_phase_status(wq: dict[str, int], fallback: str = "") -> str:
     return "queued"
 
 
+def _resolve_pentest_phase_index(stored_index: int, current_pentest_phase_id: str) -> int:
+    """stored_index is only ever incremented by the LangGraph supervisor path
+    (graph/workflow.py, graph/nodes/supervisor.py), which is bypassed by
+    default (settings.offensive_operator_enabled). For the live
+    offensive_operator path it stays stuck at 0 forever, while
+    current_pentest_phase_id IS kept current — derive the index from that
+    instead of reporting whatever phase sits at index 0 (P01)."""
+    if stored_index > 0 or not current_pentest_phase_id:
+        return stored_index
+    try:
+        return int(current_pentest_phase_id.lstrip("Pp"))
+    except ValueError:
+        return stored_index
+
+
 def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     """Cross-references phase_ledger, state_data, executed_tool_runs, findings, scan_logs.
 
@@ -205,7 +220,6 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     metrics = dict(state.get("mission_metrics") or {})
     objective_met = bool(state.get("objective_met"))
     termination_reason = str(state.get("termination_reason") or "")
-    pentest_phase_index = int(state.get("pentest_phase_index") or 0)
     current_pentest_phase_id = str(state.get("current_pentest_phase_id") or "")
     capability_ledger = infer_capability_ledger(state)
     phase_ledger = _phase_ledger_map(state.get("phase_ledger") or state.get("phase_ledger_v2"))
@@ -335,6 +349,9 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     _candidates = [p for p in (wq_current_phase_id, current_pentest_phase_id, _step_phase) if p]
     effective_current_pentest_phase_id = (
         max(_candidates, key=_phase_num) if _candidates else ""
+    )
+    pentest_phase_index = _resolve_pentest_phase_index(
+        int(state.get("pentest_phase_index") or 0), effective_current_pentest_phase_id
     )
 
     obs_by_node: dict[str, list[dict[str, Any]]] = defaultdict(list)

@@ -1440,7 +1440,11 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
 
     if not req.authorized_scope:
         print(f"[scope] job for target={req.target!r} carries no authorized_scope — allowing (upstream gate only)")
-    for candidate in [req.target, *req.targets]:
+    # "__batch__" is a sentinel for batch jobs — the real hosts to validate
+    # live in req.targets, not req.target itself (see _is_unsafe_target's
+    # own handling of the same sentinel a few lines up).
+    _scope_candidates = [t for t in [req.target, *req.targets] if t != "__batch__"]
+    for candidate in _scope_candidates:
         in_scope, scope_reason = _is_target_in_scope(candidate, req.authorized_scope)
         if not in_scope:
             raise HTTPException(status_code=400, detail=f"target out of authorized scope: {scope_reason}")

@@ -3,11 +3,22 @@ import client, { getWsBaseUrl } from "../api/client";
 import LogTerminal from "../components/LogTerminal";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
-const FASES_IDS  = ["P01","P02","P03","P04","P05","P06","P07","P08"];
+const FASES_IDS  = [
+  "P01","P02","P03","P04","P05","P06","P07","P08","P09","P10","P11",
+  "P12","P13","P14","P15","P16","P17","P18","P19","P20","P21","P22",
+];
 const FASE_NOMES = {
-  P01: "Recon & OSINT", P02: "Descoberta", P03: "Enumeração",
-  P04: "Exploração",    P05: "Pós-exploração", P06: "Validação",
-  P07: "Aprendizado",   P08: "Relatório",
+  P01: "Enumeração de subdomínios",   P02: "Descoberta de portas/serviços",
+  P03: "Descoberta de endpoints",      P04: "Descoberta de parâmetros",
+  P05: "Fingerprint de tecnologia",    P06: "Comportamento HTTP",
+  P07: "OSINT e exposição",            P08: "TLS e transporte",
+  P09: "Superfície de autenticação",   P10: "Controle de acesso",
+  P11: "Validação de entrada",         P12: "Template/Injeção",
+  P13: "Headers e roteamento",         P14: "CVEs conhecidas",
+  P15: "Paths sensíveis",              P16: "Exposição em nuvem",
+  P17: "Contratos de API",             P18: "JS e segredos client-side",
+  P19: "Tampering de métodos",         P20: "Lógica de negócio",
+  P21: "Leaks e paste intel",          P22: "Evidências e relatório",
 };
 
 const LEVEL_MAP = {

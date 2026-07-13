@@ -2476,7 +2476,14 @@ def run_offensive_operator_scan(
                 _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
                 _final_state_snapshot["work_queue_counts"] = work_queue_counts(db, job.id)
                 job.state_data = _final_state_snapshot
-                job.current_step = f"fila: aguardando work items {dict(_final_state_snapshot['work_queue_counts'])}"
+                # Prefix with the phase id: ScansPage.jsx's card badge derives
+                # the active phase by regex-matching /P(\d+)/ against
+                # current_step (extractPhase()) — without it, the badge falls
+                # back to showing the first phase (P01) regardless of how far
+                # the scan actually is.
+                _cur_phase = str(_final_state_snapshot.get("current_pentest_phase_id") or "").strip()
+                _wq_msg = f"aguardando work items {dict(_final_state_snapshot['work_queue_counts'])}"
+                job.current_step = f"{_cur_phase} · {_wq_msg}" if _cur_phase else f"fila: {_wq_msg}"
                 db.add(ScanLog(
                     scan_job_id=job.id,
                     source="work-queue",

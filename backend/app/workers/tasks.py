@@ -50,6 +50,19 @@ def _scan_is_terminal(scan_status: str | None) -> bool:
     return str(scan_status or "").lower() in TERMINAL_SCAN_STATUSES
 
 
+def _step_with_phase(state: dict, message: str) -> str:
+    """Prefix a status message with the current phase id when known.
+
+    ScansPage.jsx's card badge derives the active phase by regex-matching
+    /P(\\d+)/ against ScanJob.current_step (extractPhase()) — a generic
+    status string like "Recuperacao automatica: retomando fila persistida"
+    has no match, so the badge falls back to showing the first phase (P01)
+    regardless of how far the scan actually is.
+    """
+    phase = str((state or {}).get("current_pentest_phase_id") or "").strip()
+    return f"{phase} · {message}" if phase else message
+
+
 def _finish_work_item_for_terminal_scan(item: Any, scan_status: str | None, reason: str) -> None:
     now = datetime.now()
     item.status = "skipped"
@@ -1851,7 +1864,7 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
                 except Exception:
                     pass
                 job.status = "running"
-                job.current_step = "Recuperacao automatica: retomando fila persistida"
+                job.current_step = _step_with_phase(state, "Recuperacao automatica: retomando fila persistida")
                 job.next_retry_at = None
                 db.add(ScanLog(
                     scan_job_id=scan_id,
@@ -1874,7 +1887,7 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
 
         if count >= _SCAN_REDRIVE_MAX:
             job.status = "failed"
-            job.current_step = "Falha definitiva: scan orfao apos multiplos re-disparos"
+            job.current_step = _step_with_phase(state, "Falha definitiva: scan orfao apos multiplos re-disparos")
             job.next_retry_at = None
             job.last_error = (
                 f"Recuperacao automatica esgotada apos {count} re-disparos sem progresso "
@@ -1897,7 +1910,7 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         state["recovery"] = rec
         job.state_data = state
         job.status = "queued"
-        job.current_step = "Recuperacao automatica: re-disparando execucao"
+        job.current_step = _step_with_phase(state, "Recuperacao automatica: re-disparando execucao")
         job.next_retry_at = None
         db.add(ScanLog(
             scan_job_id=scan_id, source=source, level="WARNING",

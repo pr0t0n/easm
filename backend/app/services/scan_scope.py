@@ -25,6 +25,26 @@ def _normalize_scope_root(value: str) -> str:
     return raw.strip().strip(".")
 
 
+def is_host_in_scope(host: str, authorized_scope: list[str]) -> bool:
+    """Same policy as kali-runner's _is_target_in_scope, backend-side.
+
+    Exact root match or subdomain of an authorized root only — a sibling
+    host under the same parent domain (ri.example.com vs www.example.com)
+    is NOT in scope. This is deliberate: the operator authorized a specific
+    target string, not the whole parent domain (see the endpoint_discovery
+    surface_expansion incident this guards — waybackurls returned an
+    archived URL on a sibling subdomain, which got reinjected as an active
+    test target with no scope check at all).
+    """
+    host = _normalize_scope_root(host)
+    if not host or not authorized_scope:
+        return False
+    for root in authorized_scope:
+        if host == root or host.endswith(f".{root}"):
+            return True
+    return False
+
+
 def authorized_scope_for_scan(db: Session, scan_id: int) -> list[str]:
     """Roots (domains/IPs/CIDRs) a scan is authorized to touch.
 

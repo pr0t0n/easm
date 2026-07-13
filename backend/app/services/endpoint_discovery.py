@@ -49,11 +49,6 @@ def _host_of(url: str) -> str:
     return m.group(1).lower() if m else ""
 
 
-def _root_domain(host: str) -> str:
-    parts = (host or "").split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
-
-
 def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: str) -> set[str]:
     """Extrai URLs descobertas do resultado bruto do tool (robusto a parser)."""
     urls: set[str] = set()
@@ -129,15 +124,39 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     fetched_count = int(state.get("se_fetched_count") or 0)
     reseeded_count = int(state.get("se_reseeded_count") or 0)
 
-    root = _root_domain(_host_of(source_target) or source_target)
+    from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
+
+    authorized_scope = authorized_scope_for_scan(db, scan_id)
     found = _extract_endpoints_from_result(tool_name, result, source_target)
-    # Novos, in-scope (mesmo domínio registrável)
-    new_eps = [
-        u for u in found
-        if u not in seen and _root_domain(_host_of(u)) == root
-    ]
+    # Escopo estrito: alvo autorizado exato ou subdomínio dele — NÃO o
+    # domínio registrável inteiro. O incidente que isto corrige: waybackurls
+    # devolveu uma URL arquivada em ri.valid.com a partir de um crawl de
+    # www.valid.com; o filtro antigo (_root_domain, "mesmo domínio
+    # registrável") tratava os dois como equivalentes e reinjetava
+    # ri.valid.com como alvo de teste ativo sem nenhuma checagem real de
+    # escopo. Um scan autorizado para www.valid.com não autoriza nada em
+    # outro host do mesmo domínio pai.
+    out_of_scope: list[str] = []
+    new_eps = []
+    for u in found:
+        if u in seen:
+            continue
+        host = _host_of(u)
+        if authorized_scope and not is_host_in_scope(host, authorized_scope):
+            out_of_scope.append(u)
+            continue
+        new_eps.append(u)
+    if out_of_scope:
+        state["out_of_scope_endpoints_skipped"] = sorted(
+            set(state.get("out_of_scope_endpoints_skipped") or []) | set(out_of_scope)
+        )[:200]
+        job.state_data = state
+        logger.info(
+            "surface_expansion scan=%d fora_do_escopo=%d exemplos=%s",
+            scan_id, len(out_of_scope), out_of_scope[:5],
+        )
     if not new_eps:
-        return {"new_endpoints": 0}
+        return {"new_endpoints": 0, "out_of_scope_skipped": len(out_of_scope)}
 
     new_eps.sort(key=lambda u: (0 if _HIGH_VALUE.search(u) else 1, len(u)))
     try:
@@ -170,13 +189,15 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         if hv and fetched < _MAX_PER_EVENT_FETCH and fetched_count < _MAX_FETCH_PER_SCAN:
             try:
                 from app.services.page_analyzer import fetch_and_extract
-                info = fetch_and_extract(url, scope_root=root)
+                info = fetch_and_extract(url)
                 fetched += 1
                 fetched_count += 1
                 if info.get("ok"):
-                    # endpoints novos do corpo realimentam o conjunto
+                    # endpoints novos do corpo realimentam o conjunto — mesma
+                    # checagem estrita de escopo do filtro inicial (não
+                    # _root_domain/mesmo-domínio-registrável).
                     for e in info.get("endpoints_same_domain", []):
-                        if e not in seen and _root_domain(_host_of(e)) == root:
+                        if e not in seen and is_host_in_scope(_host_of(e), authorized_scope):
                             new_eps.append(e) if len(new_eps) < 400 else None
                             seen.add(e)
                     # segredos hardcoded → finding
@@ -248,10 +269,11 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         db.rollback()
 
     logger.info(
-        "surface_expansion scan=%d tool=%s novos=%d abertos=%d reinjetados=%d segredos+scripts=%d",
-        scan_id, tool_name, len(new_eps), fetched, reseeded, len(findings),
+        "surface_expansion scan=%d tool=%s novos=%d abertos=%d reinjetados=%d segredos+scripts=%d fora_do_escopo=%d",
+        scan_id, tool_name, len(new_eps), fetched, reseeded, len(findings), len(out_of_scope),
     )
     return {
         "new_endpoints": len(new_eps), "fetched": fetched,
         "reseeded": reseeded, "findings": len(findings),
+        "out_of_scope_skipped": len(out_of_scope),
     }
