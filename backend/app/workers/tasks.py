@@ -1932,10 +1932,17 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         db.close()
 
 
-def _run_scan_with_retry(task_ctx, scan_id: int, scan_mode: ScanMode, lock_wait: int = 0) -> dict:
+def _run_scan_with_retry(
+    task_ctx,
+    scan_id: int,
+    scan_mode: ScanMode,
+    lock_wait: int = 0,
+    *,
+    phase_queue_task: bool = False,
+) -> dict:
     # ── Acquire the per-scan chain lock before doing any work ──────────────────
     _lock_token = uuid.uuid4().hex
-    _lock_r = _acquire_scan_chain_lock(scan_id, _lock_token)
+    _lock_r = None if phase_queue_task else _acquire_scan_chain_lock(scan_id, _lock_token)
     if _lock_r is False:
         # Another task is actively executing this scan. This is either a legit
         # hand-off still tearing down, or a duplicate (watchdog/redelivery). Defer
@@ -2143,13 +2150,13 @@ def _persist_autonomy_audit_log(db: Session, scan_id: int, final_state: dict[str
 
 
 @celery.task(bind=True, name="run_scan_job_unit", queue=SCAN_UNIT_QUEUE)
-def run_scan_job_unit(self, scan_id: int, _lock_wait: int = 0):
+def run_scan_job_unit(self, scan_id: int, _lock_wait: int = 0, _phase_queue_task: bool = False):
     """
     Task para scans UNITARIOS (execucao manual/pontual).
     Consumida exclusivamente pelos workers 'worker_unit' no docker-compose.
     Prioridade alta | concurrency=1 | escopo focado.
     """
-    return _run_scan_with_retry(self, scan_id, "unit", lock_wait=_lock_wait)
+    return _run_scan_with_retry(self, scan_id, "unit", lock_wait=_lock_wait, phase_queue_task=bool(_phase_queue_task))
 
 
 @celery.task(bind=True, name="run_scan_target_subset", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
@@ -4130,13 +4137,19 @@ def poll_scan_work_item(item_id: int):
 
 
 @celery.task(bind=True, name="run_scan_job_scheduled", queue=SCAN_SCHEDULED_QUEUE)
-def run_scan_job_scheduled(self, scan_id: int, _lock_wait: int = 0):
+def run_scan_job_scheduled(self, scan_id: int, _lock_wait: int = 0, _phase_queue_task: bool = False):
     """
     Task para scans AGENDADOS (execucao periodica/batch).
     Consumida exclusivamente pelos workers 'worker_scheduled' no docker-compose.
     Prioridade normal | concurrency=2 | cobertura completa.
     """
-    return _run_scan_with_retry(self, scan_id, "scheduled", lock_wait=_lock_wait)
+    return _run_scan_with_retry(
+        self,
+        scan_id,
+        "scheduled",
+        lock_wait=_lock_wait,
+        phase_queue_task=bool(_phase_queue_task),
+    )
 
 
 # Alias retroativo — usado por fallback síncrono quando a fila nao esta disponivel

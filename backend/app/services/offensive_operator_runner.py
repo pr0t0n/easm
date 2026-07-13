@@ -157,7 +157,12 @@ def _enqueue_operator_continuation(
             return {"task_id": "", "queue": queue, "group": group, "next_phase_id": next_phase_id, "deduped": True}
     except Exception:
         pass
-    async_result = task.apply_async(args=[job.id], countdown=max(0, int(countdown or 0)), queue=queue)
+    async_result = task.apply_async(
+        args=[job.id],
+        kwargs={"_phase_queue_task": True},
+        countdown=max(0, int(countdown or 0)),
+        queue=queue,
+    )
     db.add(ScanLog(
         scan_job_id=job.id,
         source="offensive-operator",
