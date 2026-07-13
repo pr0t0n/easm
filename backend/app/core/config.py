@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     ollama_qwen_model: str = "qwen2.5:7b"
     ollama_cloudcode_model: str = "llama3.1:8b"
     llm_evaluation_model: str = "qwen2.5:7b"
+    llm_operator_enabled: bool = False
     llm_risk_enabled: bool = False
     llm_risk_provider: str = "ollama"
     llm_risk_ollama_model: str = "qwen2.5:7b"

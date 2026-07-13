@@ -16,6 +16,7 @@ split) so each can be tested and swapped on its own:
 from __future__ import annotations
 
 import re
+import secrets
 import unicodedata
 
 _ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
@@ -72,6 +73,23 @@ def is_adversarial(text: str) -> bool:
     if not text:
         return False
     return any(pattern.search(text) for pattern in _ADVERSARIAL_PATTERNS)
+
+
+def generate_canary_token() -> str:
+    """A unique marker to detect after-the-fact whether an injection
+    attempt successfully manipulated the model into leaking internal
+    instructions back into its own output (rebuff's canary pattern).
+
+    Not a defense by itself — pair with a system-prompt instruction never
+    to repeat it, then call `check_canary_leak()` on the response.
+    """
+    return f"CANARY-{secrets.token_hex(8)}"
+
+
+def check_canary_leak(response_text: str, canary: str) -> bool:
+    """True if a canary token planted in the system prompt leaked into the
+    model's own output — a signal the prompt boundary was crossed."""
+    return bool(canary) and canary in (response_text or "")
 
 
 def wrap_untrusted(text: str, *, label: str = "dado_do_alvo") -> str:

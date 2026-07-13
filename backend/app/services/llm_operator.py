@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 OLLAMA_DEFAULT_URL = "http://ollama:11434"
 DEFAULT_MODEL = "llama3.2:3b"
 
+# Blast-radius limiter: this call creates new ScanWorkItems from an LLM
+# response built from attacker-influenced findings/tech-stack text (see
+# untrusted_content.py quarantine on the prompt side). The 15-minute rate
+# limit below bounds frequency, not total spend over a long scan — cap the
+# cumulative total too, so a compromised/hallucinating response can't drive
+# unbounded tool execution across the scan's lifetime.
+MAX_LLM_OPERATOR_CALLS_PER_SCAN = 10
+MAX_LLM_OPERATOR_ITEMS_PER_SCAN = 30
+
 OPERATOR_SYSTEM_PROMPT = """You are an expert penetration tester analyzing an attack surface.
 Your role is to identify novel attack chains based on evidence from automated scanning tools.
 
@@ -285,6 +294,13 @@ def run_llm_operator(db, job) -> dict[str, Any]:
 
     state = dict(job.state_data or {})
 
+    call_count = int(state.get("llm_operator_call_count") or 0)
+    items_total = int(state.get("llm_operator_items_total") or 0)
+    if call_count >= MAX_LLM_OPERATOR_CALLS_PER_SCAN:
+        return {"skipped": "call_budget_exhausted", "call_count": call_count}
+    if items_total >= MAX_LLM_OPERATOR_ITEMS_PER_SCAN:
+        return {"skipped": "item_budget_exhausted", "items_total": items_total}
+
     # Rate limit: don't run more than once per 15 minutes per scan
     import time
     last_run = state.get("llm_operator_last_run", 0)
@@ -351,9 +367,11 @@ def run_llm_operator(db, job) -> dict[str, Any]:
     chains = parse_attack_chains(llm_response)
     items_created = seed_attack_chain_items(db, job, chains)
 
-    # Update rate limit timestamp
+    # Update rate limit timestamp + cumulative budget counters
     state["llm_operator_last_run"] = now
     state["llm_operator_last_chains"] = chains
+    state["llm_operator_call_count"] = call_count + 1
+    state["llm_operator_items_total"] = items_total + items_created
     job.state_data = state
     db.commit()
 

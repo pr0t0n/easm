@@ -352,6 +352,12 @@ def hackerone_learning_tick():
     POST /api/management/learning/vulnerabilities/github-crawler. O consumo
     em runtime (supervisor/scan_work_queue/tech_vuln_correlator) já é vivo;
     faltava só agendar a ingestão.
+
+    purge_source=False aqui: o default da task é True (apaga e recria TODAS
+    as linhas dessa fonte a cada chamada), o que faria uma rodada semanal
+    sem supervisão apagar decisões de accept/reject que um admin já tomou
+    na semana anterior. Purga completa continua disponível via o endpoint
+    manual — só não é o comportamento automático.
     """
     from app.models.models import User
 
@@ -362,7 +368,7 @@ def hackerone_learning_tick():
             admin = db.query(User).filter(User.is_admin.is_(True)).order_by(User.id).first()
         if not admin:
             return {"error": "no admin user found to own scheduled learning ingest"}
-        return create_github_hackerone_learning_task(admin.id)
+        return create_github_hackerone_learning_task(admin.id, purge_source=False)
     except Exception as exc:
         import logging as _hlog
         _hlog.getLogger(__name__).error("hackerone_learning_tick failed: %s", exc)

@@ -1,4 +1,6 @@
 from app.services.untrusted_content import (
+    check_canary_leak,
+    generate_canary_token,
     is_adversarial,
     normalize_adversarial_text,
     wrap_untrusted,
@@ -45,3 +47,15 @@ def test_wrap_untrusted_handles_empty_text() -> None:
     wrapped = wrap_untrusted("")
     assert "<dado_do_alvo>" in wrapped
     assert "</dado_do_alvo>" in wrapped
+
+
+def test_canary_tokens_are_unique_and_detected_when_leaked() -> None:
+    a, b = generate_canary_token(), generate_canary_token()
+    assert a != b
+    assert check_canary_leak(f"here is the internal marker: {a}", a) is True
+    assert check_canary_leak("a clean, unrelated response", a) is False
+
+
+def test_canary_leak_check_handles_empty_inputs() -> None:
+    assert check_canary_leak("", "CANARY-abc") is False
+    assert check_canary_leak("some text", "") is False

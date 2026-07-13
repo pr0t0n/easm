@@ -360,9 +360,14 @@ def _rank_reports_for_skill(reports: list[dict[str, Any]], skill_id: str, skill:
 
 
 def _counts(db) -> tuple[dict[str, int], dict[str, int]]:
+    # Count pending rows too, or the min_per_phase/min_per_skill floor below
+    # (which only ever sees "accepted" rows) would never be satisfied by
+    # crawled content sitting in review — the crawler would keep creating
+    # more pending duplicates every week trying to reach a floor that
+    # crawled rows alone can no longer fill until an admin accepts them.
     phase_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
-    rows = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.status == "accepted").all()
+    rows = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.status.in_(("accepted", "pending"))).all()
     for row in rows:
         for phase in list(row.affected_phases or []):
             phase_counts[str(phase)] += 1
@@ -431,7 +436,15 @@ def _build_learning(
     now = datetime.utcnow()
     return VulnerabilityLearning(
         owner_id=owner_id,
-        status="accepted",
+        # Crawled from a public index, not authored/reviewed by us — stays
+        # "pending" until an admin reviews it via PUT .../accept, same gate
+        # the manually-submitted learning path already goes through. Only
+        # "accepted" rows feed live skill selection (build_runtime_learning_
+        # playbook) and semantic RAG seeding (tech_vuln_correlator) — this
+        # crawler is scheduled to run unattended weekly now, so content an
+        # attacker could seed into a public GitHub/HackerOne index must not
+        # auto-promote into something that steers live scans.
+        status="pending",
         source_kind=SOURCE_KIND,
         source_urls=[url for url in [source_url, report_url] if url],
         url_count=len([url for url in [source_url, report_url] if url]),
