@@ -44,19 +44,72 @@ def rag_enrichment_node(state: AgentState) -> AgentState:
         else:
             context_type = "vulnerability_analysis"
 
-        patterns = mcp_client.query_knowledge_sync(
-            query=f"{context_type} target {target_info['target']} phase {phase}",
-            top_k=5,
-            skill=str(state.get("current_phase") or "") or None,
+        strategy = dict(state.get("operational_strategy") or {})
+        rag_policy = dict(strategy.get("rag_policy") or {})
+        selected_skill = dict(state.get("selected_skill") or {})
+        capability = str(
+            state.get("pending_capability_node")
+            or selected_skill.get("capability")
+            or state.get("current_phase")
+            or context_type
         )
+        skill_id = str(selected_skill.get("skill_id") or state.get("current_skill") or capability)
+        top_k = int(rag_policy.get("top_k") or 5)
+        templates = list(rag_policy.get("query_templates") or [])
+        queries = [
+            f"{context_type} target {target_info['target']} phase {phase}",
+            *[
+                str(template).format(
+                    capability=capability,
+                    skill_id=skill_id,
+                    target=target_info["target"],
+                    phase=phase,
+                )
+                for template in templates
+            ],
+        ]
+
+        patterns = []
+        for query in list(dict.fromkeys(queries))[:4]:
+            hits = mcp_client.query_knowledge_sync(
+                query=query,
+                top_k=top_k,
+                skill=skill_id or str(state.get("current_phase") or "") or None,
+            )
+            for hit in hits:
+                if isinstance(hit, dict):
+                    hit = dict(hit)
+                    hit.setdefault("strategy_query", query)
+                    hit.setdefault("capability", capability)
+                    hit.setdefault("skill_id", skill_id)
+                    patterns.append(hit)
+        patterns = patterns[:top_k]
 
         if patterns:
             state["logs_terminais"].append(
-                f"[RAG] Found {len(patterns)} relevant patterns for {context_type}"
+                f"[RAG] Found {len(patterns)} strategic patterns for capability={capability} skill={skill_id}"
             )
 
             # Store patterns in state for use by other nodes
             state.setdefault("rag_patterns", []).extend(patterns[:5])
+            state.setdefault("strategic_rag_context", []).extend(patterns[:8])
+            state["strategic_rag_context"] = list(state.get("strategic_rag_context") or [])[-80:]
+
+            try:
+                from app.services.operational_strategy import append_strategy_event
+
+                append_strategy_event(
+                    state,
+                    "rag_enriched",
+                    {
+                        "capability": capability,
+                        "skill_id": skill_id,
+                        "patterns": len(patterns),
+                        "queries": queries[:4],
+                    },
+                )
+            except Exception:
+                pass
 
             # Store learning insights for future use
             for pattern in patterns[:3]:
@@ -124,6 +177,12 @@ def _candidate_tools_for_skill_bootstrap(state: AgentState, group: str) -> list[
             tools = [t for t in tools if t not in heavy_active_brute]
     elif group == "risk_assessment":
         tools = _adapt_vuln_tools_for_target(target, tools)
+    try:
+        from app.services.operational_strategy import prioritize_tools
+
+        tools = prioritize_tools(dict(state.get("operational_strategy") or {}), group, tools)
+    except Exception:
+        pass
     return _select_tool_batch_for_iteration(state, group=group, tools=tools)
 
 
@@ -406,6 +465,9 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "skill_id": resolved_skill_id,
                 "worker_group": group,
                 "phase": phase_label,
+                "strategy_profile_id": (state.get("operational_strategy") or {}).get("id"),
+                "strategy_blueprint": supervisor_selected.get("strategy_blueprint"),
+                "specialist_agent": dict(supervisor_selected.get("specialist_agent") or {}),
                 "purpose": "skill_selector",
                 "tactic_id": supervisor_selected.get("tactic_id"),
                 "hypothesis": supervisor_selected.get("hypothesis"),
@@ -414,6 +476,8 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "control_objectives": control_objectives,
                 "expected_telemetry": expected_telemetry,
                 "detection_proof_pack": detection_proof_pack,
+                "agent_contract": dict(supervisor_selected.get("agent_contract") or {}),
+                "multi_agent": bool(supervisor_selected.get("multi_agent")),
                 "source": runtime_invocation.get("source") or "supervisor_selected",
                 "matched_by": list(dict.fromkeys(["supervisor_selected_skill", *list(runtime_invocation.get("matched_by") or [])])),
                 "candidate_tools": candidate_tools,
@@ -452,10 +516,15 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "tactic_id": supervisor_selected.get("tactic_id"),
                 "hypothesis": supervisor_selected.get("hypothesis"),
                 "strategy_source": supervisor_selected.get("strategy_source"),
+                "strategy_profile_id": supervisor_selected.get("strategy_profile_id"),
+                "strategy_blueprint": supervisor_selected.get("strategy_blueprint"),
+                "specialist_agent": dict(supervisor_selected.get("specialist_agent") or {}),
                 "adversary_technique": adversary_technique,
                 "control_objectives": control_objectives,
                 "expected_telemetry": expected_telemetry,
                 "detection_proof_pack": detection_proof_pack,
+                "agent_contract": dict(supervisor_selected.get("agent_contract") or {}),
+                "multi_agent": bool(supervisor_selected.get("multi_agent")),
             }
             _append_action(state, "skill_invoked", invocation_record)
             _mark_capability_runtime(
@@ -537,6 +606,7 @@ def skill_selector_node(state: AgentState) -> AgentState:
                 "allowed_tools": guided_tools,
                 "preferred_tool": guided_tools[0] if guided_tools else "",
                 "reason": "inferred from accepted learning + skill catalog",
+                "strategy_profile_id": (state.get("operational_strategy") or {}).get("id"),
             }
             _append_action(state, "skill_invoked", invocation_record)
             _mark_capability_runtime(
@@ -637,6 +707,8 @@ def skill_planner_node(state: AgentState) -> AgentState:
         "control_objectives": list(invocation.get("control_objectives") or selected_technique.get("control_objectives") or []),
         "expected_telemetry": list(invocation.get("expected_telemetry") or selected_technique.get("expected_telemetry") or []),
         "detection_proof_pack": dict(invocation.get("detection_proof_pack") or selected_technique.get("detection_proof_pack") or {}),
+        "agent_contract": dict(invocation.get("agent_contract") or contract.get("agent_contract") or {}),
+        "multi_agent": bool(invocation.get("multi_agent") or contract.get("multi_agent")),
         "candidate_tools": list(gate.get("candidate_tools") or invocation.get("candidate_tools") or []),
         "recommended_tools": list(gate.get("recommended_tools") or invocation.get("recommended_tools") or []),
         "worker_rules": dict(contract.get("worker_rules") or invocation.get("worker_rules") or {}),
@@ -646,6 +718,75 @@ def skill_planner_node(state: AgentState) -> AgentState:
         "playbook_title": contract.get("playbook_title") or gate.get("playbook_title"),
         "decision_source": "skill_planner",
     }
+    try:
+        from app.core.config import settings
+
+        if bool(getattr(settings, "llm_reasoning_enabled", True)):
+            from app.agents.supervisor_runtime import BlockedDecision, decide_next_technique
+            from app.services.tool_catalog import tool_summary_for_agent
+
+            execution_context = {
+                "target": str(state.get("target") or ""),
+                "phase": str(plan.get("phase") or ""),
+                "skill": str(plan.get("skill_id") or ""),
+                "authorized_scope": True,
+                "auth_available": bool((state.get("auth_summary") or {}).get("ready")),
+                "max_risk_allowed": "medium",
+                "capability": capability,
+                "agent_contract": dict(plan.get("agent_contract") or {}),
+                "operational_strategy": {
+                    "id": (state.get("operational_strategy") or {}).get("id"),
+                    "active_modules": (state.get("operational_strategy") or {}).get("active_modules"),
+                },
+            }
+            skill_memory = {
+                "knowledge_items": list(state.get("strategic_rag_context") or state.get("rag_patterns") or [])[:6],
+                "recommended_tools": list(plan.get("recommended_tools") or [])[:10],
+                "retrieval_query": f"{capability} {plan.get('skill_id')} {state.get('target')}",
+            }
+            try:
+                decision = decide_next_technique(
+                    playbook={
+                        "title": plan.get("playbook_title") or "skill plan",
+                        "vulnerability_type": plan.get("skill_id") or capability,
+                        "techniques": [selected_technique],
+                        "evidence_signals": list(plan.get("evidence_required") or []),
+                    },
+                    execution_context=execution_context,
+                    tool_catalog=tool_summary_for_agent(only_installed=True)[:80],
+                    skill_memory=skill_memory,
+                    timeout=45,
+                )
+                plan["llm_reasoning"] = decision
+                plan["decision_source"] = "llm_supervisor_runtime"
+                selected_from_llm = dict(decision.get("selected_technique") or {})
+                if selected_from_llm.get("name"):
+                    plan["technique"] = {**selected_technique, **selected_from_llm}
+                plan["evidence_required"] = list(decision.get("signals_to_validate") or plan.get("evidence_required") or [])
+                plan["constraints"] = list(decision.get("constraints") or plan.get("constraints") or [])
+                llm_history = list(state.get("llm_reasoning") or [])
+                llm_history.append({
+                    "phase": plan.get("phase"),
+                    "capability": capability,
+                    "skill_id": plan.get("skill_id"),
+                    "decision": decision,
+                    "source": "supervisor_runtime",
+                    "created_at": datetime.now().isoformat(),
+                })
+                state["llm_reasoning"] = llm_history[-120:]
+                state.setdefault("logs_terminais", []).append(
+                    f"[LLM] reasoning decision={decision.get('execution_decision')} "
+                    f"skill={plan.get('skill_id')} confidence={decision.get('confidence')}"
+                )
+            except BlockedDecision as exc:
+                plan["llm_reasoning"] = dict(exc.raw)
+                plan["decision_source"] = "llm_blocked"
+                plan["blocked_by_llm"] = True
+                state.setdefault("logs_terminais", []).append(f"[LLM] blocked skill plan: {exc}")
+    except Exception as exc:
+        plan["llm_reasoning"] = {"execution_decision": "fallback", "notes": f"llm_reasoning_error: {exc}"}
+        state.setdefault("logs_terminais", []).append(f"[LLM] reasoning unavailable: {exc}")
+
     state["skill_plan_contract"] = plan
     _append_action(state, "skill_planned", plan)
     _mark_capability_runtime(
@@ -696,6 +837,24 @@ def tool_selector_node(state: AgentState) -> AgentState:
 
     plan = dict(state.get("skill_plan_contract") or {})
     capability = str(plan.get("capability") or state.get("pending_capability_node") or _bootstrap_skill_group(state))
+    if plan.get("blocked_by_llm"):
+        selection = {
+            "capability": capability,
+            "selected_tools": [],
+            "candidate_tools": [],
+            "skill_id": plan.get("skill_id"),
+            "skill_invocation_id": plan.get("skill_invocation_id"),
+            "skill_contract": dict(plan.get("skill_contract") or {}),
+            "technique": dict(plan.get("technique") or {}),
+            "evidence_required": [],
+            "constraints": ["blocked_by_llm_reasoning"],
+            "decision_source": "llm_blocked",
+            "llm_reasoning": dict(plan.get("llm_reasoning") or {}),
+        }
+        state["tool_selection_contract"] = selection
+        _append_action(state, "tool_selection_blocked", selection)
+        _metric_end(state, "tool_selector", started_at)
+        return state
     gate = dict(state.get("skill_selector_gate") or {})
     contract = dict(plan.get("skill_contract") or state.get("skill_contract") or {})
     invocation = dict(state.get("skill_invocation") or {})
@@ -828,6 +987,20 @@ def tool_selector_node(state: AgentState) -> AgentState:
     technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
     evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])
     constraints = list(plan.get("constraints") or technique.get("safe_validation_steps") or [])
+    try:
+        from app.services.operational_strategy import build_mcp_adapter_contract, prioritize_tools
+
+        selected_tools = prioritize_tools(dict(state.get("operational_strategy") or {}), capability, selected_tools)
+        adapter_contract = build_mcp_adapter_contract(
+            strategy=dict(state.get("operational_strategy") or {}),
+            capability=capability,
+            skill_id=str(plan.get("skill_id") or contract.get("skill_id") or invocation.get("skill_id") or ""),
+            tools=selected_tools,
+            evidence_required=evidence_required,
+        )
+        selected_tool = selected_tools[0] if selected_tools else selected_tool
+    except Exception:
+        adapter_contract = {}
 
     selection = {
         "capability": capability,
@@ -841,6 +1014,10 @@ def tool_selector_node(state: AgentState) -> AgentState:
         "control_objectives": list(plan.get("control_objectives") or technique.get("control_objectives") or []),
         "expected_telemetry": list(plan.get("expected_telemetry") or technique.get("expected_telemetry") or []),
         "detection_proof_pack": dict(plan.get("detection_proof_pack") or technique.get("detection_proof_pack") or {}),
+        "agent_contract": dict(plan.get("agent_contract") or {}),
+        "multi_agent": bool(plan.get("multi_agent")),
+        "llm_reasoning": dict(plan.get("llm_reasoning") or {}),
+        "mcp_adapter_contract": adapter_contract,
         "evidence_required": evidence_required,
         "constraints": constraints,
         "worker_rules": dict(plan.get("worker_rules") or contract.get("worker_rules") or invocation.get("worker_rules") or {}),
@@ -849,6 +1026,10 @@ def tool_selector_node(state: AgentState) -> AgentState:
         "decision_source": "skill_selector",
     }
     state["tool_selection_contract"] = selection
+    if adapter_contract:
+        contracts = list(state.get("mcp_adapter_contracts") or [])
+        contracts.append(adapter_contract)
+        state["mcp_adapter_contracts"] = contracts[-120:]
     _append_action(state, "tool_selected", selection)
     _mark_capability_runtime(
         state,
@@ -1495,6 +1676,8 @@ def tool_executor_node(state: AgentState) -> AgentState:
     if capability in TOOL_CAPABILITY_NODES and capability not in completed:
         completed.append(capability)
     state["completed_capabilities"] = completed
+    _findings_now_post = len(state.get("vulnerabilidades_encontradas") or [])
+    _findings_delta_post = max(0, _findings_now_post - _executor_findings_before)
     if capability in TOOL_CAPABILITY_NODES:
         _mark_capability_runtime(
             state,
@@ -1509,8 +1692,6 @@ def tool_executor_node(state: AgentState) -> AgentState:
     if capability == "risk_assessment" and state.get("validation_backlog"):
         state["validation_backlog"] = []
     _complete_delegation_task(state, capability, f"skill_tool_executed:{','.join(selected_tools) or 'none'}")
-    _findings_now_post = len(state.get("vulnerabilidades_encontradas") or [])
-    _findings_delta_post = max(0, _findings_now_post - _executor_findings_before)
     _mark_pentest_tactic(
         "success" if all_results else "skipped",
         findings_added=_findings_delta_post,

@@ -1021,6 +1021,7 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
     No phase is skipped. No randomness. P01, then P02, ... then P22.
     Returns None only when all 22 phases are done.
     """
+    from app.core.config import settings
     from app.graph.mission import PENTEST_PHASES, SKILL_CATALOG
     from app.services.tool_catalog import is_tool_installed
 
@@ -1066,6 +1067,22 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
         ph_id = str(phase.get("id") or f"P{idx + 1:02d}")
         node = str(phase.get("node") or "asset_discovery")
         all_tools = [str(t) for t in (phase.get("tools") or [])]
+        agent_contract: dict[str, Any] = {}
+        if bool(getattr(settings, "agent_orchestrator_enabled", True)):
+            try:
+                from app.agents.orchestrator import AgentOrchestrator
+
+                agent_contract = AgentOrchestrator(ph_id).build_execution_contract()
+                agent_tools = [str(t) for t in list(agent_contract.get("mandatory_tools") or []) if str(t)]
+                if agent_tools:
+                    all_tools = list(dict.fromkeys([*agent_tools, *all_tools]))
+                orchestration = dict(state.get("agent_orchestration") or {})
+                orchestration[ph_id] = agent_contract
+                state["agent_orchestration"] = orchestration
+            except Exception as exc:
+                state.setdefault("logs_terminais", []).append(
+                    f"[agent-orchestrator] phase={ph_id} error={type(exc).__name__}: {exc}"
+                )
         installed = [t for t in all_tools if is_tool_installed(t)]
         not_installed = [t for t in all_tools if t not in installed]
         pending = [t for t in installed if not _phase_tool_done(ph_id, t)]
@@ -1122,6 +1139,8 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
                 f"{len(pending)} pendente(s) de {len(installed)} — {', '.join(pending[:12])}"
                 + (f" | sem profile: {', '.join(not_installed)}" if not_installed else "")
             ),
+            "agent_contract": agent_contract,
+            "multi_agent": bool(agent_contract),
             "lock_skill": True,
             "bypass_stage_gate": True,
         }
@@ -1130,6 +1149,7 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
             "phase": ph_id, "title": phase.get("title"), "node": node,
             "pending": pending, "installed": len(installed),
             "not_installed": not_installed,
+            "agent_contract": agent_contract,
         })
         return tactic
 
@@ -1236,6 +1256,8 @@ def _selected_skill_from_tactic(tactic: dict[str, Any]) -> dict[str, Any]:
         "constraints": list(tactic.get("constraints") or []),
         "phase_refs": list(tactic.get("phase_refs") or []),
         "targets": list(tactic.get("targets") or []),
+        "agent_contract": dict(tactic.get("agent_contract") or {}),
+        "multi_agent": bool(tactic.get("multi_agent")),
         # Per-tool extra_args propagated to the Kali runner via the workflow's
         # `technique_extra_args_by_tool` extractor (see _run_tools_and_collect).
         "extra_args": dict(tactic.get("extra_args") or {}),
@@ -1512,6 +1534,20 @@ def supervisor_node(state: AgentState) -> AgentState:
             "pending_tactics": len((state.get("pentest_strategy") or {}).get("queue") or []),
         },
     )
+    try:
+        from app.services.operational_strategy import append_strategy_event
+
+        append_strategy_event(
+            state,
+            "supervisor_iteration",
+            {
+                "iteration": int(state.get("loop_iteration", 0)) + 1,
+                "kill_chain_stage": str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
+                "current_phase": str(state.get("current_phase") or ""),
+            },
+        )
+    except Exception:
+        pass
 
     # Kill switch: proteção contra loops infinitos
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
@@ -1672,6 +1708,32 @@ def supervisor_node(state: AgentState) -> AgentState:
         )
         next_node = "risk_assessment"
 
+    if next_node in TOOL_CAPABILITY_NODES:
+        try:
+            from app.services.operational_strategy import agent_for_capability, append_strategy_event, policy_for_capability
+
+            strategy = dict(state.get("operational_strategy") or {})
+            agent = agent_for_capability(strategy, next_node)
+            policy = policy_for_capability(strategy, next_node)
+            append_strategy_event(
+                state,
+                "capability_routed",
+                {
+                    "capability": next_node,
+                    "agent_id": agent.get("id"),
+                    "agent_name": agent.get("name"),
+                    "blueprint": policy.get("blueprint"),
+                    "preferred_skills": list(policy.get("preferred_skills") or [])[:5],
+                    "preferred_tools": list(policy.get("preferred_tools") or [])[:6],
+                },
+            )
+            state.setdefault("logs_terminais", []).append(
+                f"[strategy] route capability={next_node} agent={agent.get('name') or '-'} "
+                f"blueprint={policy.get('blueprint') or '-'}"
+            )
+        except Exception:
+            pass
+
     if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
         _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
         next_node = "threat_intel"
@@ -1774,6 +1836,43 @@ def supervisor_node(state: AgentState) -> AgentState:
                             kill_chain_stage=str(state.get("kill_chain_stage") or "RECONNAISSANCE"),
                         )
         if chosen_skill:
+            try:
+                from app.services.operational_strategy import agent_for_capability, append_strategy_event, policy_for_capability
+
+                strategy = dict(state.get("operational_strategy") or {})
+                policy = policy_for_capability(strategy, next_node)
+                agent = agent_for_capability(strategy, next_node)
+                preferred_tools = [str(t) for t in list(policy.get("preferred_tools") or [])]
+                allowed = [str(t) for t in list(chosen_skill.get("allowed_tools") or [])]
+                if preferred_tools and allowed:
+                    chosen_skill["allowed_tools"] = [
+                        *[tool for tool in preferred_tools if tool in allowed],
+                        *[tool for tool in allowed if tool not in preferred_tools],
+                    ]
+                    chosen_skill["preferred_tool"] = chosen_skill["allowed_tools"][0] if chosen_skill["allowed_tools"] else chosen_skill.get("preferred_tool", "")
+                chosen_skill["strategy_profile_id"] = strategy.get("id")
+                chosen_skill["strategy_blueprint"] = policy.get("blueprint")
+                chosen_skill["specialist_agent"] = agent
+                chosen_skill["strategy_evidence_required"] = list(policy.get("evidence_required") or [])
+                chosen_skill["matched_by"] = list(dict.fromkeys([
+                    *list(chosen_skill.get("matched_by") or []),
+                    "operational_strategy",
+                    str(policy.get("blueprint") or ""),
+                ]))
+                append_strategy_event(
+                    state,
+                    "skill_committed",
+                    {
+                        "capability": next_node,
+                        "skill_id": chosen_skill.get("skill_id"),
+                        "agent_id": agent.get("id"),
+                        "preferred_tool": chosen_skill.get("preferred_tool"),
+                        "allowed_tools": list(chosen_skill.get("allowed_tools") or [])[:8],
+                        "strategy_source": chosen_skill.get("strategy_source"),
+                    },
+                )
+            except Exception:
+                pass
             state["selected_skill"] = chosen_skill
             if chosen_skill.get("tactic_id"):
                 state["capability_context"] = {
@@ -1783,6 +1882,9 @@ def supervisor_node(state: AgentState) -> AgentState:
                     "tactic_id": chosen_skill.get("tactic_id"),
                     "hypothesis": chosen_skill.get("hypothesis"),
                     "strategy_source": chosen_skill.get("strategy_source"),
+                    "strategy_profile_id": chosen_skill.get("strategy_profile_id"),
+                    "strategy_blueprint": chosen_skill.get("strategy_blueprint"),
+                    "specialist_agent": dict(chosen_skill.get("specialist_agent") or {}),
                     "adversary_technique": dict(chosen_skill.get("adversary_technique") or {}),
                     "control_objectives": list(chosen_skill.get("control_objectives") or []),
                     "expected_telemetry": list(chosen_skill.get("expected_telemetry") or []),

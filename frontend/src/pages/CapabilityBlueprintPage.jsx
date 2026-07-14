@@ -156,9 +156,28 @@ function ListBlock({ title, items }) {
   );
 }
 
+function RuntimeBlock({ title, value, lines }) {
+  return (
+    <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 12, background: "var(--canvas-soft, var(--canvas))", minWidth: 0 }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>{title}</div>
+      <div style={{ marginTop: 5, fontSize: 18, fontWeight: 800, color: "var(--ink)", overflowWrap: "anywhere" }}>{value}</div>
+      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+        {(lines || []).length ? lines.map((line) => (
+          <div key={line} style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-muted)", overflowWrap: "anywhere" }}>{line}</div>
+        )) : (
+          <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>sem dados ainda</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function CapabilityBlueprintPage() {
   const [payload, setPayload] = useState(null);
   const [category, setCategory] = useState("all");
+  const [scans, setScans] = useState([]);
+  const [selectedScan, setSelectedScan] = useState("");
+  const [runtime, setRuntime] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -168,6 +187,25 @@ export default function CapabilityBlueprintPage() {
       .then(({ data }) => setPayload(data))
       .catch((e) => setError(e?.response?.data?.detail || "Falha ao carregar blueprint de capacidades."));
   }, [category]);
+
+  useEffect(() => {
+    client
+      .get("/api/scans")
+      .then(({ data }) => {
+        const rows = Array.isArray(data) ? data : [];
+        setScans(rows);
+        if (!selectedScan && rows[0]?.id) setSelectedScan(String(rows[0].id));
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selectedScan) return;
+    client
+      .get(`/api/pentest/scans/${selectedScan}/strategy-runtime`)
+      .then(({ data }) => setRuntime(data))
+      .catch(() => setRuntime(null));
+  }, [selectedScan]);
 
   const capabilities = payload?.capabilities || [];
   const summary = payload?.summary || {};
@@ -233,6 +271,85 @@ export default function CapabilityBlueprintPage() {
             {CATEGORY_LABELS[key] || key}
           </button>
         ))}
+      </section>
+
+      <section style={{
+        background: "var(--surface)",
+        border: "1px solid var(--line)",
+        borderRadius: 10,
+        padding: 16,
+        boxShadow: "var(--shadow-card)",
+        marginBottom: 16,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+              Runtime por scan
+            </div>
+            <h3 style={{ margin: "3px 0 0", color: "var(--ink)", fontSize: 16 }}>Estratégia aplicada na execução</h3>
+          </div>
+          <select value={selectedScan} onChange={(e) => setSelectedScan(e.target.value)} style={{
+            border: "1px solid var(--line)",
+            borderRadius: 8,
+            padding: "8px 10px",
+            background: "var(--surface)",
+            color: "var(--ink)",
+            minWidth: 260,
+          }}>
+            {scans.map((scan) => (
+              <option key={scan.id} value={String(scan.id)}>
+                #{scan.id} · {String(scan.target_query || "").slice(0, 46)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {runtime ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginTop: 14 }}>
+            <RuntimeBlock
+              title="Agente atual"
+              value={runtime.current?.agent?.name || "Aguardando rota"}
+              lines={[
+                `capability: ${runtime.current?.capability || "-"}`,
+                `skill: ${runtime.current?.selected_skill?.skill_id || runtime.current?.skill_invocation?.skill_id || "-"}`,
+                `strategy: ${runtime.strategy?.id || "-"}`,
+              ]}
+            />
+            <RuntimeBlock
+              title="LLM reasoning"
+              value={`${(runtime.llm_reasoning || []).length} decisão(ões)`}
+              lines={(runtime.llm_reasoning || []).slice(-3).map((item) =>
+                `${item.phase || "-"} · ${item.skill_id || "-"} · ${item.decision?.execution_decision || item.decision?.notes || "-"}`
+              )}
+            />
+            <RuntimeBlock
+              title="MCP adapters"
+              value={`${(runtime.mcp_adapter_contracts || []).length} contrato(s)`}
+              lines={(runtime.mcp_adapter_contracts || []).slice(-3).map((item) =>
+                `${item.capability || "-"} · ${item.skill_id || "-"} · ${(item.tools || []).slice(0, 3).join(", ")}`
+              )}
+            />
+            <div style={{ gridColumn: "span 3" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>
+                Orquestração multi-agente por fase
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
+                {Object.entries(runtime.agent_orchestration || {}).slice(-8).map(([phase, contract]) => (
+                  <div key={phase} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 10, background: "var(--canvas-soft, var(--canvas))" }}>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: "var(--ink)" }}>{phase}</div>
+                    <div style={{ marginTop: 4, fontSize: 12, color: "var(--ink-soft)" }}>
+                      obrigatórios: {(contract.mandatory_agents || []).length} · tools: {(contract.mandatory_tools || []).slice(0, 4).join(", ") || "-"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginTop: 12, color: "var(--ink-muted)", fontSize: 13 }}>
+            Selecione um scan com estado persistido para ver agentes, LLM e contratos MCP.
+          </div>
+        )}
       </section>
 
       <section style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 14 }}>

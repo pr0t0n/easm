@@ -117,8 +117,14 @@ Return JSON array only."""
 
 def query_llm(prompt: str, model: str | None = None) -> str:
     """Send prompt to Ollama and return raw response text."""
-    ollama_url = str(getattr(settings, "ollama_url", "") or OLLAMA_DEFAULT_URL)
-    model_name = model or str(getattr(settings, "llm_model", "") or DEFAULT_MODEL)
+    ollama_url = str(getattr(settings, "ollama_base_url", "") or OLLAMA_DEFAULT_URL)
+    model_name = (
+        model
+        or str(getattr(settings, "llm_primary_model", "") or "")
+        or str(getattr(settings, "ollama_qwen_model", "") or "")
+        or str(getattr(settings, "ollama_model", "") or "")
+        or DEFAULT_MODEL
+    )
 
     try:
         resp = requests.post(

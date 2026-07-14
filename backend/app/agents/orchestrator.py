@@ -34,11 +34,34 @@ class AgentOrchestrator:
         if not agent:
             return False, f"Agent {agent_id} not found"
 
-        missing_skills = [s for s in agent.required_skills if s]  # Placeholder check
-        if missing_skills:
-            return False, f"Missing skills: {', '.join(missing_skills[:3])}"
+        # required_skills are taxonomy/coverage requirements declared by the
+        # agent manifest. They are not Python plugins that need to be installed
+        # at runtime, so they must not block execution by themselves. The phase
+        # validator/evidence gate decides whether the agent produced enough
+        # evidence.
+        return True, f"requires={','.join(agent.required_skills[:5])}"
 
-        return True, ""
+    def build_execution_contract(self) -> dict[str, Any]:
+        """Return the multi-agent contract that a phase must satisfy."""
+        agents = sorted(self.agents, key=lambda a: a.priority, reverse=True)
+        mandatory = set(self.get_mandatory_agents())
+        return {
+            "phase_id": self.phase_id,
+            "enabled": True,
+            "agents": [
+                {
+                    **agent.to_dict(),
+                    "mandatory": agent.agent_id in mandatory,
+                    "prerequisites": self.validate_prerequisites(agent.agent_id)[1],
+                }
+                for agent in agents
+            ],
+            "mandatory_agents": list(mandatory),
+            "all_tools": list(dict.fromkeys([tool for agent in agents for tool in agent.tools])),
+            "mandatory_tools": list(dict.fromkeys([
+                tool for agent in agents if agent.agent_id in mandatory for tool in agent.tools
+            ])),
+        }
 
     def record_execution(
         self,

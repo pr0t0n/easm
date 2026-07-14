@@ -61,6 +61,7 @@ def execute_tool_with_workers(
         except Exception:
             scan_id = None
     auth_context = _resolve_auth_context(scan_id, skill_contract)
+    adapter_contract = dict((skill_contract or {}).get("mcp_adapter_contract") or {})
     if norm_tool in {"code-analyzer", "semgrep"}:
         if norm_tool == "code-analyzer":
             from app.services.code_analyzer import run_as_tool
@@ -83,6 +84,8 @@ def execute_tool_with_workers(
             result.setdefault("playbook", playbook or "")
         if auth_context:
             result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", source_agent_name)
         result.setdefault("worker_group", worker_group)
@@ -99,6 +102,8 @@ def execute_tool_with_workers(
             result.setdefault("evidence_required", evidence_required or [])
         if auth_context:
             result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", "Backend Business Logic Tester")
         result.setdefault("worker_group", "risk_assessment")
@@ -150,6 +155,10 @@ def execute_tool_with_workers(
                     "constraints": constraints or [],
                     "playbook": playbook or "",
                     "auth_context": auth_context,
+                    "mcp_adapter_contract": adapter_contract,
+                    "agent_contract": dict((skill_contract or {}).get("agent_contract") or {}),
+                    "multi_agent": bool((skill_contract or {}).get("multi_agent")),
+                    "llm_reasoning": dict((skill_contract or {}).get("llm_reasoning") or {}),
                 },
             )
     else:
@@ -167,6 +176,10 @@ def execute_tool_with_workers(
                 "constraints": constraints or [],
                 "playbook": playbook or "",
                 "auth_context": auth_context,
+                "mcp_adapter_contract": adapter_contract,
+                "agent_contract": dict((skill_contract or {}).get("agent_contract") or {}),
+                "multi_agent": bool((skill_contract or {}).get("multi_agent")),
+                "llm_reasoning": dict((skill_contract or {}).get("llm_reasoning") or {}),
             },
         )
     if skill_id:
@@ -178,6 +191,13 @@ def execute_tool_with_workers(
         result.setdefault("worker_rules", worker_rules or {})
         result.setdefault("sub_agent_plan", sub_agent_plan or [])
         result.setdefault("playbook", playbook or "")
+    if adapter_contract:
+        result.setdefault("mcp_adapter_contract", adapter_contract)
+    if (skill_contract or {}).get("agent_contract"):
+        result.setdefault("agent_contract", dict((skill_contract or {}).get("agent_contract") or {}))
+        result.setdefault("multi_agent", bool((skill_contract or {}).get("multi_agent")))
+    if (skill_contract or {}).get("llm_reasoning"):
+        result.setdefault("llm_reasoning", dict((skill_contract or {}).get("llm_reasoning") or {}))
     try:
         agent = find_agent_by_tool(tool_name, mode="scheduled" if str(scan_mode).lower() == "scheduled" else "unit")
         result.setdefault("source_agent_id", agent.get("agent_id"))

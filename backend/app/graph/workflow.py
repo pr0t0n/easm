@@ -67,6 +67,7 @@ from app.services.risk_service import (
 )
 from app.services.cyber_autoagent_alignment import build_supervisor_prompt_contract
 from app.services.worker_dispatcher import execute_tool_with_workers
+from app.services.operational_strategy import build_operational_strategy
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
@@ -1394,7 +1395,14 @@ def _run_tools_and_collect(
                 scan_mode=state["scan_mode"],
                 scan_id=scan_id if isinstance(scan_id, int) else None,
                 skill_id=skill_id or None,
-                skill_contract=dict(skill_context.get("skill_contract") or {}),
+                skill_contract={
+                    **dict(skill_context.get("skill_contract") or {}),
+                    "mcp_adapter_contract": dict(skill_context.get("mcp_adapter_contract") or {}),
+                    "agent_contract": dict(skill_context.get("agent_contract") or {}),
+                    "multi_agent": bool(skill_context.get("multi_agent")),
+                    "llm_reasoning": dict(skill_context.get("llm_reasoning") or {}),
+                    "operational_strategy_id": (state.get("operational_strategy") or {}).get("id"),
+                },
                 technique=dict(skill_context.get("technique") or {}),
                 evidence_required=list(skill_context.get("evidence_required") or []),
                 constraints=list(skill_context.get("constraints") or []),
@@ -2210,6 +2218,12 @@ def initial_state(
         discovered_ports=[],
         max_skills=5,
     )
+    operational_strategy = build_operational_strategy(
+        target=primary_target,
+        target_type=target_type,
+        scan_mode=str(scan_mode),
+        segment=segment,
+    )
     # Exhaustive sweep: each stage runs EVERY applicable tool before
     # advancing (recon ~6 batches, vuln-analysis ~3, exploitation ~4),
     # plus governance/executive. 18 was too tight and forced premature
@@ -2293,6 +2307,11 @@ def initial_state(
         "capability_context": {},
         "tool_selection_contract": {},
         "tool_execution_results": [],
+        "operational_strategy": operational_strategy,
+        "strategic_rag_context": [],
+        "mcp_adapter_contracts": [],
+        "agent_orchestration": {},
+        "llm_reasoning": [],
         "pentest_strategy": {},
         "pending_pentest_tactic": {},
         "pentest_tactics_completed": [],
