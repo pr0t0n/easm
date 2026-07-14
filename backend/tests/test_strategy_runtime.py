@@ -68,6 +68,22 @@ def test_public_target_without_authorization_is_blocked() -> None:
     assert decision["approved"] is False
     assert decision["mode"] == "blocked_missing_authorization"
     assert decision["public_targets"] == ["www.valid.com"]
+    assert decision["authorization_attested"] is False
+
+
+def test_public_target_with_operator_attestation_is_approved() -> None:
+    decision = evaluate_scan_authorization(
+        _FakeDb([]),
+        owner_id=1,
+        target_query="www.valid.com",
+        authorization_attested=True,
+        enforce_public_targets=True,
+    )
+
+    assert decision["approved"] is True
+    assert decision["mode"] == "operator_attestation"
+    assert decision["authorization_attested"] is True
+    assert decision["authorized_scope"] == ["www.valid.com"]
 
 
 def test_public_target_with_matching_authorization_is_approved() -> None:

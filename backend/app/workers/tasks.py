@@ -515,6 +515,7 @@ def scheduler_tick():
                                 "status": "approved" if authorization_gate.get("approved") else "blocked",
                                 "reason": authorization_gate.get("reason"),
                                 "mode": authorization_gate.get("mode"),
+                                "authorization_attested": bool(authorization_gate.get("authorization_attested")),
                                 "public_targets": authorization_gate.get("public_targets") or [],
                                 "authorized_scope": authorization_gate.get("authorized_scope") or [],
                             }

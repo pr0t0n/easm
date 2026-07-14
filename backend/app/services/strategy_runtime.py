@@ -52,6 +52,7 @@ def evaluate_scan_authorization(
     owner_id: int,
     target_query: str,
     authorization_code: str | None = None,
+    authorization_attested: bool = False,
     enforce_public_targets: bool = True,
 ) -> dict[str, Any]:
     targets = parse_scope_targets(target_query)
@@ -65,7 +66,21 @@ def evaluate_scan_authorization(
             "authorized_scope": targets,
             "authorization_id": None,
             "authorization_code": authorization_code,
+            "authorization_attested": bool(authorization_attested),
             "reason": "local/test targets do not require external authorization gate",
+        }
+
+    if authorization_attested:
+        return {
+            "approved": True,
+            "mode": "operator_attestation",
+            "targets": targets,
+            "public_targets": public_targets,
+            "authorized_scope": public_targets,
+            "authorization_id": None,
+            "authorization_code": authorization_code,
+            "authorization_attested": True,
+            "reason": "operator explicitly attested authorization for every public target in scope",
         }
 
     query = db.query(ScanAuthorization).filter(
@@ -91,6 +106,7 @@ def evaluate_scan_authorization(
                 "authorized_scope": roots,
                 "authorization_id": candidate.id,
                 "authorization_code": candidate.authorization_code,
+                "authorization_attested": bool(authorization_attested),
                 "reason": "approved authorization covers every public target",
             }
 
@@ -102,7 +118,8 @@ def evaluate_scan_authorization(
         "authorized_scope": [],
         "authorization_id": None,
         "authorization_code": authorization_code,
-        "reason": "public target requires approved authorization that exactly covers the scan scope",
+        "authorization_attested": False,
+        "reason": "public target requires explicit operator authorization attestation",
     }
 
 

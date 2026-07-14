@@ -2464,6 +2464,7 @@ def create_scan(
         owner_id=current_user.id,
         target_query=payload.target_query,
         authorization_code=getattr(payload, "authorization_code", None),
+        authorization_attested=bool(getattr(payload, "scope_authorization_attested", False)),
         enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
     )
     compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
@@ -2503,6 +2504,7 @@ def create_scan(
                 "status": "approved" if authorization_gate.get("approved") else "blocked",
                 "reason": authorization_gate.get("reason"),
                 "mode": authorization_gate.get("mode"),
+                "authorization_attested": bool(authorization_gate.get("authorization_attested")),
                 "public_targets": authorization_gate.get("public_targets") or [],
                 "authorized_scope": authorization_gate.get("authorized_scope") or [],
             }
