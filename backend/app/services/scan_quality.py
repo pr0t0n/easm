@@ -32,6 +32,65 @@ QUALITY_GATE_SCORE_THRESHOLD = 70.0
 QUALITY_GATE_MAX_ROUNDS = 2
 QUALITY_GATE_MAX_POC_PER_ROUND = 12
 QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
+QUALITY_GATE_MAX_FALLBACKS_PER_ROUND = 20
+
+QUALITY_TOOL_FALLBACKS: dict[str, list[str]] = {
+    "httpx": ["curl-headers", "whatweb"],
+    "whatweb": ["httpx", "curl-headers"],
+    "curl-headers": ["httpx", "whatweb"],
+    "sslscan": ["testssl", "nmap-ssl-vuln"],
+    "testssl": ["sslscan", "nmap-ssl-vuln"],
+    "nmap-ssl-vuln": ["testssl", "sslscan"],
+    "katana": ["hakrawler", "gospider", "gau"],
+    "katana-js": ["katana", "hakrawler", "linkfinder"],
+    "hakrawler": ["katana", "gospider", "gau"],
+    "gospider": ["katana", "hakrawler", "gau"],
+    "gau": ["waybackurls", "katana", "hakrawler"],
+    "waybackurls": ["gau", "katana"],
+    "arjun": ["ffuf-params", "paramspider", "wfuzz"],
+    "ffuf-params": ["arjun", "paramspider", "wfuzz"],
+    "paramspider": ["arjun", "ffuf-params"],
+    "nuclei": ["nikto", "wapiti", "curl-headers"],
+    "nuclei-cves": ["nuclei", "nmap-vulscan", "nikto"],
+    "nuclei-headers": ["curl-headers", "nikto"],
+    "nuclei-exposure": ["nikto", "ffuf-files", "curl-headers"],
+    "nuclei-sqli": ["sqlmap", "wapiti", "nuclei"],
+    "nuclei-xss": ["dalfox", "wapiti", "nuclei"],
+    "nuclei-ssrf": ["wapiti", "interactsh-client", "nuclei"],
+    "nuclei-lfi": ["wapiti", "ffuf-files", "nuclei"],
+    "nuclei-ssti": ["wapiti", "nuclei"],
+    "nuclei-xxe": ["wapiti", "nuclei"],
+    "nuclei-redirect": ["wapiti", "nuclei"],
+    "nuclei-idor": ["wapiti", "nuclei"],
+    "nuclei-csrf": ["wapiti", "nuclei"],
+    "nuclei-rce": ["wapiti", "nuclei"],
+    "nuclei-auth": ["nikto", "nuclei"],
+    "nuclei-jwt": ["nuclei", "curl-headers"],
+    "nuclei-graphql": ["nuclei", "curl-headers"],
+    "nikto": ["nuclei", "curl-headers", "wapiti"],
+    "wapiti": ["nuclei", "nikto", "dalfox", "sqlmap"],
+    "sqlmap": ["nuclei-sqli", "wapiti", "ffuf-params"],
+    "dalfox": ["nuclei-xss", "wapiti", "ffuf-params"],
+    "ffuf": ["feroxbuster", "dirsearch", "gobuster"],
+    "ffuf-files": ["feroxbuster", "dirsearch", "gobuster"],
+    "feroxbuster": ["ffuf", "dirsearch", "gobuster"],
+    "dirsearch": ["ffuf", "feroxbuster", "gobuster"],
+    "gobuster": ["ffuf", "feroxbuster", "dirsearch"],
+}
+
+QUALITY_PHASE_FALLBACKS: dict[str, list[str]] = {
+    "P03": ["katana", "hakrawler", "gospider", "gau", "waybackurls"],
+    "P04": ["arjun", "ffuf-params", "paramspider", "wfuzz"],
+    "P05": ["whatweb", "httpx", "curl-headers"],
+    "P06": ["httpx", "wafw00f", "curl-headers"],
+    "P09": ["nuclei", "nuclei-cves", "subjack"],
+    "P11": ["nuclei", "nmap-vulscan", "nmap-http-enum"],
+    "P12": ["nuclei", "nikto", "wapiti", "sqlmap", "dalfox"],
+    "P15": ["ffuf", "ffuf-files", "feroxbuster", "dirsearch", "gobuster"],
+    "P16": ["ffuf-params", "wfuzz", "wapiti", "nuclei"],
+    "P18": ["sslscan", "testssl", "nmap-ssl-vuln"],
+    "P20": ["wpscan", "nuclei", "nikto"],
+}
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -423,6 +482,10 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     if requeued:
         actions.append({"type": "requeue_failed_work_items", "requeued": requeued})
 
+    fallback_result = _schedule_fallback_quality_items(db, job, weak_phase_ids)
+    if int(fallback_result.get("scheduled", 0) or 0) > 0:
+        actions.append({"type": "schedule_fallback_work_items", **fallback_result})
+
     passed = not actions
     gate_state.update({
         "status": "passed" if passed else "remediation_scheduled",
@@ -543,3 +606,132 @@ def _requeue_failed_quality_items(db: Session, job: ScanJob, weak_phase_ids: set
         db.add(item)
         requeued += 1
     return requeued
+
+
+def _fallback_candidates_for_item(item: ScanWorkItem) -> list[str]:
+    tool = str(item.tool_name or "").strip().lower()
+    phase_id = str(item.phase_id or "").strip()
+    candidates: list[str] = []
+    candidates.extend(QUALITY_TOOL_FALLBACKS.get(tool, []))
+    if tool.startswith("nuclei-"):
+        candidates.extend(["nuclei", "nikto", "wapiti"])
+    candidates.extend(QUALITY_PHASE_FALLBACKS.get(phase_id, []))
+
+    seen: set[str] = {tool}
+    out: list[str] = []
+    for candidate in candidates:
+        normalized = str(candidate or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out[:5]
+
+
+def _schedule_fallback_quality_items(db: Session, job: ScanJob, weak_phase_ids: set[str]) -> dict[str, Any]:
+    if not weak_phase_ids:
+        return {"scheduled": 0, "skipped": 0}
+    try:
+        from app.services.scan_work_queue import (
+            PHASE_PRIORITY,
+            _tool_profile,
+            apply_phase_tool_metadata,
+            resource_class_for_tool,
+        )
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"quality_fallback_import_failed error={exc!s}"[:2000],
+        ))
+        return {"scheduled": 0, "skipped": 0}
+
+    rows = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id.in_(sorted(weak_phase_ids)),
+            ScanWorkItem.status.in_(["failed", "timeout"]),
+        )
+        .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.id.asc())
+        .limit(QUALITY_GATE_MAX_FALLBACKS_PER_ROUND * 3)
+        .all()
+    )
+    scheduled = 0
+    skipped = 0
+    fallback_tools: list[dict[str, Any]] = []
+    for item in rows:
+        if scheduled >= QUALITY_GATE_MAX_FALLBACKS_PER_ROUND:
+            break
+        meta = dict(item.item_metadata or {})
+        if meta.get("poc_validation"):
+            skipped += 1
+            continue
+        if int(meta.get("quality_gate_retries") or 0) < 1:
+            skipped += 1
+            continue
+        chain = list(meta.get("quality_gate_fallback_chain") or [])
+        if len(chain) >= 2:
+            skipped += 1
+            continue
+        for candidate in _fallback_candidates_for_item(item):
+            existing = (
+                db.query(ScanWorkItem.id)
+                .filter(
+                    ScanWorkItem.scan_job_id == job.id,
+                    ScanWorkItem.phase_id == item.phase_id,
+                    ScanWorkItem.tool_name == candidate[:120],
+                    ScanWorkItem.target == item.target,
+                )
+                .first()
+            )
+            if existing:
+                continue
+            rc = resource_class_for_tool(candidate)
+            base_priority = PHASE_PRIORITY.get(str(item.phase_id or ""), int(item.priority or 100))
+            fallback_meta = apply_phase_tool_metadata({
+                "source": "quality_gate",
+                "engine": "quality_gate_fallback",
+                "quality_gate_fallback": True,
+                "quality_gate_fallback_for_item_id": int(item.id),
+                "quality_gate_original_tool": str(item.tool_name or ""),
+                "quality_gate_original_status": str(item.status or ""),
+                "quality_gate_original_error": str(item.last_error or "")[:500],
+                "quality_gate_fallback_chain": chain + [str(item.tool_name or "")],
+                "quality_gate_reason": "alternate_tool_for_repeated_phase_gap",
+            }, str(item.phase_id or ""), candidate, source="quality_gate")
+            fallback_item = ScanWorkItem(
+                scan_job_id=job.id,
+                phase_id=str(item.phase_id or "")[:10],
+                target=str(item.target or "")[:500],
+                tool_name=candidate[:120],
+                profile=_tool_profile(candidate)[:120],
+                resource_class=rc,
+                priority=max(1, min(int(item.priority or base_priority), base_priority) - 1),
+                status="queued",
+                attempts=0,
+                max_attempts=1,
+                item_metadata=fallback_meta,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+            db.add(fallback_item)
+            scheduled += 1
+            fallback_tools.append({
+                "phase_id": item.phase_id,
+                "target": item.target,
+                "from": item.tool_name,
+                "to": candidate,
+            })
+            break
+        else:
+            skipped += 1
+    if scheduled:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="INFO",
+            message=f"quality_fallback_scheduled scheduled={scheduled} skipped={skipped}",
+        ))
+    return {"scheduled": scheduled, "skipped": skipped, "fallback_tools": fallback_tools[:10]}

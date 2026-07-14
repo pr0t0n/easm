@@ -21,6 +21,7 @@ Gera HTML rico com:
 from __future__ import annotations
 
 import json
+import html as _html
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -999,6 +1000,53 @@ def generate_pentest_report(
             '</div>'
         )
 
+    # ── Quality gate / report readiness ─────────────────────────────────────
+    quality_html = ""
+    try:
+        from app.services.scan_quality import build_scan_quality
+
+        _quality = build_scan_quality(db, job)
+        _score = float(_quality.get("score") or 0)
+        _grade = _html.escape(str(_quality.get("grade") or "—"))
+        _label = _html.escape(str(_quality.get("label") or ""))
+        _gate = dict(_quality.get("quality_gate") or {})
+        _gate_status = _html.escape(str(_gate.get("status") or "not_run").replace("_", " "))
+        _gate_bg = "#fff3cd" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#eafaf1"
+        _gate_border = "#f39c12" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#27ae60"
+        _gaps = list(_quality.get("gaps") or [])[:6]
+        _gap_rows = "".join(
+            "<li>"
+            f"<strong>{_html.escape(str(gap.get('title') or 'Gap de qualidade'))}</strong>: "
+            f"{_html.escape(str(gap.get('action') or gap.get('detail') or 'Revisar evidência/cobertura.'))}"
+            "</li>"
+            for gap in _gaps
+        )
+        _components = dict(_quality.get("components") or {})
+        _component_bits = " · ".join(
+            f"{_html.escape(name.replace('_', ' '))}: {float(item.get('score') or 0):.0f}%"
+            for name, item in _components.items()
+        )
+        quality_html = (
+            f'<div class="section" style="border-left:4px solid {_gate_border};background:{_gate_bg}">'
+            '<h2>Quality Gate do Pentest</h2>'
+            f'<p style="font-size:13px;color:#555;margin-bottom:8px">'
+            f'Score de qualidade: <strong>{_score:.1f}% ({_grade} — {_label})</strong> · '
+            f'Gate: <strong>{_gate_status}</strong>'
+            f'{(" · rodada " + str(_gate.get("rounds"))) if _gate.get("rounds") else ""}'
+            '</p>'
+            f'<p style="font-size:11px;color:#777;margin-bottom:8px">{_html.escape(_component_bits)}</p>'
+            + (f'<ul style="font-size:12px;color:#555;margin-left:18px">{_gap_rows}</ul>' if _gap_rows else
+               '<p style="font-size:12px;color:#555">Sem gaps automáticos pendentes.</p>')
+            + (
+                '<p style="font-size:11px;color:#8a6d3b;margin-top:8px">'
+                'Relatório qualificado: findings não confirmados permanecem como candidatos/hipóteses até EvidenceArtifact + ValidationRun suficientes.'
+                '</p>'
+            )
+            + '</div>'
+        )
+    except Exception:
+        quality_html = ""
+
     # ── Kill chain phase coverage HTML ───────────────────────────────────────
     phase_coverage_html = ""
     if phase_coverage:
@@ -1406,6 +1454,9 @@ def generate_pentest_report(
     <span style="font-size:10px;color:#bbb;margin-left:auto">+ {info_count} itens informativos (headers/cobertura) · contagem idêntica ao inventário e dashboard</span>
   </div>
 
+  <!-- QUALITY GATE -->
+  {quality_html}
+
   <!-- P21 POC SANDBOX STRIP -->
   {poc_strip_html}
 
@@ -1437,7 +1488,7 @@ def generate_pentest_report(
   {crown_jewels_html}
 
   <!-- NO CONFIRMED FINDINGS NOTICE -->
-  {'<div class="section" style="border-left:4px solid #27ae60"><h2 style="color:#27ae60">✅ Nenhuma Vulnerabilidade Confirmada com PoC</h2><p style="font-size:13px;color:#666">Nenhuma ferramenta de exploração ativa (sqlmap, dalfox, nuclei-confirmed) confirmou vulnerabilidades exploráveis. Existem ' + str(len(candidate_list)) + ' findings candidatos que requerem verificação manual na fase P17.</p></div>' if not confirmed_list and not chain_findings else ''}
+  {'<div class="section" style="border-left:4px solid #27ae60"><h2 style="color:#27ae60">✅ Nenhuma Vulnerabilidade Confirmada com PoC</h2><p style="font-size:13px;color:#666">Nenhuma ferramenta de exploração ativa (sqlmap, dalfox, nuclei-confirmed) confirmou vulnerabilidades exploráveis. Existem ' + str(len(candidate_list)) + ' findings candidatos que requerem verificação P21 ou revisão manual.</p></div>' if not confirmed_list and not chain_findings else ''}
 
   <!-- PENTEST: CONFIRMED VULNERABILITIES -->
   {pentest_confirmed_section}

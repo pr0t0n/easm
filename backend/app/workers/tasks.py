@@ -4026,10 +4026,13 @@ def poll_scan_work_item(item_id: int):
                                 try:
                                     from app.services.exploitation_evidence import (
                                         enrich_confirmed_finding,
+                                        persist_p21_validation_record,
                                         propagate_to_vulnerability,
                                     )
                                     _orig.details = _orig_details  # base p/ enrich
                                     _orig_details = enrich_confirmed_finding(_orig, item)
+                                    _validation_record = persist_p21_validation_record(db, job, _orig, item, confirmed=True)
+                                    _orig_details["p21_validation_record"] = _validation_record
                                     _orig.details = _orig_details
                                     propagate_to_vulnerability(db, _orig, _orig_details)
                                 except Exception as _ee:
@@ -4044,6 +4047,16 @@ def poll_scan_work_item(item_id: int):
                             _orig_details = dict(_orig.details or {})
                             _orig_details["verification_status"] = "refuted"
                             _orig_details["refuted_by_tool"] = item.tool_name
+                            if item.phase_id == "P21":
+                                try:
+                                    from app.services.exploitation_evidence import persist_p21_validation_record
+                                    _validation_record = persist_p21_validation_record(db, job, _orig, item, confirmed=False)
+                                    _orig_details["p21_validation_record"] = _validation_record
+                                except Exception as _ee:
+                                    import logging as _eelog
+                                    _eelog.getLogger(__name__).debug(
+                                        "p21_refutation_record failed: %s", _ee
+                                    )
                             _orig.details = _orig_details
                         db.flush()
 
