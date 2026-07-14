@@ -1485,16 +1485,11 @@ def has_auth(state: dict[str, Any]) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ASM mode: only run passive recon and surface mapping. Skips exploitation.
-ASM_PHASES = {"P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P18", "P21", "P22"}
-FULL_PHASES = set()  # empty = run all
-
-
 def phases_for_scan_level(scan_level: str | None) -> set[str] | None:
     """Return phase IDs to execute. None means 'all phases'."""
-    level = str(scan_level or "full").lower().strip()
-    if level == "asm":
-        return ASM_PHASES
-    return None
+    from app.services.scan_profiles import phases_for_scan_level as _phases_for_scan_level
+
+    return _phases_for_scan_level(scan_level)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

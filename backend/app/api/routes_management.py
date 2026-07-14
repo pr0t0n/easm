@@ -21,6 +21,7 @@ from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
 from app.services.strategy_runtime import evaluate_scan_authorization
+from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task, create_github_hackerone_learning_task
@@ -299,8 +300,11 @@ def _create_scan_from_schedule(
     authorization_code: str | None,
     access_group_id: int | None,
     mode: str = "scheduled",
+    scan_level: str = "full",
 ) -> ScanJob:
     batch_targets = _parse_targets(target)
+    scan_level = normalize_scan_level(scan_level)
+    profile = scan_profile(scan_level)
     authorization_gate = evaluate_scan_authorization(
         db,
         owner_id=owner_id,
@@ -321,6 +325,8 @@ def _create_scan_from_schedule(
         authorization_id=authorization_gate.get("authorization_id"),
         current_step="1. Amass Subdomain Recon",
         state_data={
+            "scan_level": scan_level,
+            "scan_profile": profile,
             "authorization_gate": authorization_gate,
             "strategy_runtime_timeline": [
                 {
@@ -961,7 +967,7 @@ def create_schedule(payload: dict, db: Session = Depends(get_db), current_user: 
         access_group_id=access_group_id,
         authorization_code=None,
         targets_text="; ".join(valid_targets),
-        scan_type=(payload.get("scan_type") or "full").strip().lower(),
+        scan_type=normalize_scan_level(payload.get("scan_type") or "full"),
         frequency=frequency,
         run_time=(payload.get("run_time") or "00:00").strip(),
         day_of_week=(payload.get("day_of_week") or None),
@@ -1067,6 +1073,7 @@ def execute_schedule_now(schedule_id: int, db: Session = Depends(get_db), curren
         authorization_code=None,
         access_group_id=row.access_group_id,
         mode="scheduled",
+        scan_level=row.scan_type,
     )
     db.commit()
 

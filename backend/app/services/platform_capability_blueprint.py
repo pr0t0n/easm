@@ -48,7 +48,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Autonomia por objetivo",
         category="agent_execution",
         priority=1,
-        status="partial",
+        status="runtime_active",
         inspired_by=("PentAGI", "Pentest Swarm AI", "NetworkAttackSimulator"),
         product_goal=(
             "Executar pentest automatizado por objetivos mensuraveis, nao apenas "
@@ -81,7 +81,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Agentes especialistas",
         category="agent_execution",
         priority=2,
-        status="partial",
+        status="runtime_active",
         inspired_by=("Pentest Swarm AI", "pentest-ai-agents", "Pentest Copilot"),
         product_goal=(
             "Tornar explicitos os papeis ja existentes: escopo, recon, API, auth, "
@@ -114,7 +114,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Adapter seguro de ferramentas",
         category="tooling",
         priority=3,
-        status="partial",
+        status="runtime_active",
         inspired_by=("HexStrike AI", "kali_mcp", "Burp MCP Toolkit", "trivy-mcp", "semgrep-mcp"),
         product_goal=(
             "Absorver o melhor do ecossistema MCP e CLI sem virar um wrapper livre "
@@ -148,7 +148,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Pentest de IA, RAG e agentes",
         category="ai_security",
         priority=4,
-        status="emerging",
+        status="runtime_active",
         inspired_by=("promptfoo", "garak", "PyRIT", "AI-Infra-Guard", "Rebuff", "GhostPrompt"),
         product_goal=(
             "Tratar aplicacoes de IA como superficie de pentest: prompts, RAG, "
@@ -180,7 +180,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Benchmark e regressao",
         category="quality",
         priority=5,
-        status="partial",
+        status="runtime_active",
         inspired_by=("vuln-bank", "AIGoat", "DVAIA", "DVMCP", "NetworkAttackSimulator"),
         product_goal=(
             "Medir se a autonomia melhorou de verdade: cobertura, falso positivo, "
@@ -212,7 +212,7 @@ CAPABILITY_BLUEPRINTS: tuple[CapabilityBlueprint, ...] = (
         name="Fusao DAST, SAST e evidencia",
         category="evidence",
         priority=6,
-        status="partial",
+        status="runtime_active",
         inspired_by=("llm-sast-scanner", "semgrep-mcp", "trivy-mcp", "codesucks-ai", "vulnfix"),
         product_goal=(
             "Conectar achado dinamico, rota/codigo, dependencia vulneravel, causa raiz "

@@ -251,5 +251,6 @@ def scan_strategy_snapshot(scan_job: Any) -> dict[str, Any]:
             "mcp_adapter_contract": selection.get("mcp_adapter_contract") or {},
             "last_events": list(strategy.get("events") or [])[-12:],
             "authorization_gate": dict(state.get("authorization_gate") or {}),
+            "scan_profile": dict(state.get("scan_profile") or {}),
         },
     }

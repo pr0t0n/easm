@@ -731,7 +731,7 @@ def skill_planner_node(state: AgentState) -> AgentState:
                 "skill": str(plan.get("skill_id") or ""),
                 "authorized_scope": True,
                 "auth_available": bool((state.get("auth_summary") or {}).get("ready")),
-                "max_risk_allowed": "medium",
+                "max_risk_allowed": str((state.get("scan_profile") or {}).get("max_risk_allowed") or "medium"),
                 "capability": capability,
                 "agent_contract": dict(plan.get("agent_contract") or {}),
                 "operational_strategy": {
@@ -983,6 +983,14 @@ def tool_selector_node(state: AgentState) -> AgentState:
         # Todas ja rodaram — manter 1 para o supervisor seguir; o dedup
         # interno vai pular a execucao mas a iteracao avanca.
         selected_tools = selected_tools[:1]
+    profile = dict(state.get("scan_profile") or {})
+    tool_depth_limit = max(1, int(profile.get("tool_depth_limit") or 6))
+    if selected_tools and len(selected_tools) > tool_depth_limit:
+        state["logs_terminais"].append(
+            f"[selector] depth profile={profile.get('id') or state.get('scan_level') or 'full'} "
+            f"limitou ferramentas {len(selected_tools)}->{tool_depth_limit}"
+        )
+        selected_tools = selected_tools[:tool_depth_limit]
     selected_tool = selected_tools[0] if selected_tools else ""
     technique = dict(plan.get("technique") or {}) or _technique_for_selected_tool(invocation, selected_tool)
     evidence_required = list(plan.get("evidence_required") or technique.get("evidence_signals") or [])

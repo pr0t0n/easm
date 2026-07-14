@@ -33,9 +33,9 @@ const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
 const TERMINAL_STATUS  = new Set(["completed", "failed", "cancelled", "stopped"]);
 
 const SCAN_PERFIL = {
-  Recon:     { c: "var(--sev-info-text)",  bg: "var(--sev-info-bg)",  bd: "var(--sev-info-border)",  d: "só descoberta, sem exploração" },
-  Padrão:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "exploração com evidence gate" },
-  Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "pós-exploração habilitada" },
+  Recon:     { c: "var(--sev-info-text)",  bg: "var(--sev-info-bg)",  bd: "var(--sev-info-border)",  d: "P01-P08 + P18/P21/P22, profundidade baixa" },
+  Padrão:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "P01-P22, profundidade média" },
+  Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "P01-P22, profundidade alta" },
 };
 const CRIT_CSS = {
   Crítica: { c: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", bd: "var(--sev-critical-border)" },

@@ -27,6 +27,7 @@ from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
 from app.services.strategy_runtime import evaluate_scan_authorization
+from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.risk_service import (
     build_priority_reason,
     build_rating_timeline,
@@ -2486,13 +2487,13 @@ def create_scan(
         "response_field": str(payload.llm_risk_response_field or "").strip(),
     }
 
-    scan_level = str(payload.scan_level or "full").lower().strip()
-    if scan_level not in {"full", "asm"}:
-        scan_level = "full"
+    scan_level = normalize_scan_level(payload.scan_level)
+    profile = scan_profile(scan_level)
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
     initial_state: dict[str, Any] = {
         "llm_risk": llm_risk_state,
         "scan_level": scan_level,
+        "scan_profile": profile,
         "parallelize": bool(settings.scan_parallelize_default),
         "parallel_target_batch_size": int(settings.scan_parallel_target_batch_size or 1024),
         "parallel_wait_seconds": int(settings.scan_parallel_wait_seconds or 60),

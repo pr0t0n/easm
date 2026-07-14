@@ -22,6 +22,7 @@ from app.services.cyber_autoagent_alignment import evaluate_execution_quality
 from app.services.cve_enrichment_service import enrichment_service
 from app.services.llm_risk_service import parse_scan_llm_risk_config, run_llm_risk_assessment
 from app.services.strategy_runtime import evaluate_scan_authorization
+from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.tool_adapters import run_tool_execution
 from app.workers.celery_app import celery
 from app.workers.worker_groups import (
@@ -495,6 +496,8 @@ def scheduler_tick():
                 enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
             )
             compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
+            scan_level = normalize_scan_level(getattr(sched, "scan_type", None) or "full")
+            profile = scan_profile(scan_level)
 
             job = ScanJob(
                     owner_id=sched.owner_id,
@@ -507,6 +510,8 @@ def scheduler_tick():
                     compliance_status=compliance_status,
                     current_step="Aguardando worker",
                     state_data={
+                        "scan_level": scan_level,
+                        "scan_profile": profile,
                         "authorization_gate": authorization_gate,
                         "strategy_runtime_timeline": [
                             {
@@ -1084,18 +1089,20 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 ))
                 db.commit()
 
+            existing_state = dict(job.state_data or {})
             state = initial_state(
                 scan_id=job.id,
                 owner_id=job.owner_id,
                 target=batch_target,
                 scan_mode=scan_mode,
                 known_vulnerability_patterns=known_patterns,
+                scan_level=str(existing_state.get("scan_level") or "full"),
             )
-            existing_state = dict(job.state_data or {})
             for _runtime_key in (
                 "authorization_gate",
                 "llm_risk",
                 "scan_level",
+                "scan_profile",
                 "auth_config",
                 "parallelize",
                 "parallel_target_batch_size",

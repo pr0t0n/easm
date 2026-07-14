@@ -68,6 +68,7 @@ from app.services.risk_service import (
 from app.services.cyber_autoagent_alignment import build_supervisor_prompt_contract
 from app.services.worker_dispatcher import execute_tool_with_workers
 from app.services.operational_strategy import build_operational_strategy
+from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.workers.worker_groups import ScanMode, get_worker_groups
 
 
@@ -2211,6 +2212,7 @@ def initial_state(
     scan_mode: ScanMode = "unit",
     known_vulnerability_patterns: list[str] | None = None,
     segment: str | None = None,
+    scan_level: str | None = "full",
 ) -> AgentState:
     parsed_targets = _split_input_targets(target)
     primary_target = parsed_targets[0] if parsed_targets else str(target or "").strip()
@@ -2231,11 +2233,9 @@ def initial_state(
         scan_mode=str(scan_mode),
         segment=segment,
     )
-    # Exhaustive sweep: each stage runs EVERY applicable tool before
-    # advancing (recon ~6 batches, vuln-analysis ~3, exploitation ~4),
-    # plus governance/executive. 18 was too tight and forced premature
-    # finalize while RECON still had subdomain-enum pending.
-    max_iterations = 45
+    normalized_scan_level = normalize_scan_level(scan_level)
+    profile = scan_profile(normalized_scan_level)
+    max_iterations = int(profile.get("max_iterations") or 45)
     mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
     return {
         "trace_id": trace_id,
@@ -2243,6 +2243,8 @@ def initial_state(
         "owner_id": owner_id,
         "target": primary_target,
         "scan_mode": scan_mode,
+        "scan_level": normalized_scan_level,
+        "scan_profile": profile,
         "target_type": target_type,
         "easm_segment": segment or "Digital Services",
         "input_targets": parsed_targets or ([primary_target] if primary_target else []),
@@ -2384,7 +2386,8 @@ def initial_state(
         "validated_chains": [],
         "offensive_observations": [],
         "post_exploitation_queue": [],
-        "noise_profile": "balanced",
+        "noise_profile": str(profile.get("noise_profile") or "balanced"),
+        "post_exploitation_enabled": bool(profile.get("post_exploitation")),
         "offensive_priority_queue": [],
         "chaining_candidates": [],
     }

@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 
 const STATUS = {
-  partial: { label: "Em construcao", color: "#d4a500", bg: "rgba(212,165,0,.12)" },
-  emerging: { label: "Novo modulo", color: "#6aa7ff", bg: "rgba(106,167,255,.12)" },
+  runtime_active: { label: "Runtime ativo", color: "#229160", bg: "rgba(34,145,96,.12)" },
+  roadmap: { label: "Evolucao planejada", color: "#6aa7ff", bg: "rgba(106,167,255,.12)" },
+  partial: { label: "Evolucao planejada", color: "#6aa7ff", bg: "rgba(106,167,255,.12)" },
+  emerging: { label: "Evolucao planejada", color: "#6aa7ff", bg: "rgba(106,167,255,.12)" },
   ready: { label: "Pronto", color: "#229160", bg: "rgba(34,145,96,.12)" },
 };
 
@@ -258,8 +260,8 @@ export default function CapabilityBlueprintPage() {
     const keys = Object.keys(summary.by_category || {});
     return ["all", ...keys];
   }, [summary.by_category]);
-  const partial = summary.by_status?.partial || 0;
-  const emerging = summary.by_status?.emerging || 0;
+  const runtimeActive = summary.by_status?.runtime_active || summary.by_status?.ready || 0;
+  const roadmap = (summary.by_status?.roadmap || 0) + (summary.by_status?.partial || 0) + (summary.by_status?.emerging || 0);
 
   return (
     <main className="dpage">
@@ -292,8 +294,8 @@ export default function CapabilityBlueprintPage() {
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12, marginBottom: 16 }}>
         <Metric label="capacidades mapeadas" value={summary.total ?? 0} />
-        <Metric label="em construcao" value={partial} />
-        <Metric label="novos modulos" value={emerging} />
+        <Metric label="runtime ativo" value={runtimeActive} />
+        <Metric label="evolucao planejada" value={roadmap} />
         <Metric label="categorias" value={Object.keys(summary.by_category || {}).length} />
       </section>
 
