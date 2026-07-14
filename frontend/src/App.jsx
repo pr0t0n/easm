@@ -22,6 +22,7 @@ import AttackGraphPage from "./pages/AttackGraphPage";
 import CrownJewelsPage from "./pages/CrownJewelsPage";
 import LearningPage from "./pages/LearningPage";
 import GuardrailsPage from "./pages/GuardrailsPage";
+import CapabilityBlueprintPage from "./pages/CapabilityBlueprintPage";
 import SchedulingPage from "./pages/SchedulingPage";
 import SettingsPage from "./pages/SettingsPage";
 import { authStore } from "./store/auth";
@@ -109,6 +110,7 @@ export default function App() {
                     <Route path="/agent-flow" element={<Navigate to="/operacional?module=phases_agents" replace />} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
                     <Route path="/guardrails" element={<AdminOnly><GuardrailsPage /></AdminOnly>} />
+                    <Route path="/estrategia" element={<AdminOnly><CapabilityBlueprintPage /></AdminOnly>} />
                     <Route path="/configuracoes" element={<AdminOnly><SettingsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
