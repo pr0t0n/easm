@@ -348,15 +348,41 @@ PORT_REQUIRED_TOOLS: dict[str, set[int]] = {
 TECH_REQUIRED_TOOLS: dict[str, set[str]] = {
     "wpscan": {"wordpress", "wp-content", "wp-includes"},
 }
-# Tools that are structurally useless without a specific prior finding (e.g.
-# sqlmap has nothing to inject into without a discovered parameter). Unlike
-# PORT/TECH_REQUIRED_TOOLS above, "unknown yet" and "known empty" are treated
-# the same way here on purpose: these tools' own skill docs (sqli.md) require
-# P04 parameter discovery before firing, and the whole point of this gate is
-# to stop them firing before that evidence exists — not just once it's
-# proven absent.
+# Tools that are structurally useless without a specific prior finding. Unlike
+# PORT/TECH_REQUIRED_TOOLS, unknown context is not enough here: these tools need
+# proof that there is something concrete to test. Each inner tuple is an OR
+# clause; if any key in any clause has target-relevant evidence, the tool may run.
+TOOL_EVIDENCE_CONTRACTS: dict[str, list[tuple[str, ...]]] = {
+    "sqlmap": [("discovered_parameterized_urls", "known_parameters", "parameterized_endpoints")],
+    "dalfox": [("discovered_parameterized_urls", "known_parameters", "reflected_parameters", "xss_candidates")],
+    "nuclei-xss": [("discovered_parameterized_urls", "known_parameters", "reflected_parameters", "xss_candidates")],
+    "nuclei-sqli": [("discovered_parameterized_urls", "known_parameters", "parameterized_endpoints")],
+    "nuclei-ssrf": [("ssrf_candidate_params", "url_like_parameters", "callback_parameters")],
+    "nuclei-lfi": [("file_path_parameters", "path_traversal_candidates", "discovered_parameterized_urls")],
+    "nuclei-ssti": [("template_parameters", "template_injection_candidates", "discovered_parameterized_urls")],
+    "nuclei-xxe": [("xml_endpoints", "soap_endpoints", "xml_upload_forms")],
+    "nuclei-redirect": [("redirect_parameters", "url_like_parameters", "discovered_parameterized_urls")],
+    "nuclei-idor": [("object_reference_endpoints", "id_parameters", "known_parameters")],
+    "nuclei-csrf": [("discovered_forms", "state_changing_endpoints", "post_endpoints")],
+    "nuclei-race": [("state_changing_endpoints", "transaction_endpoints", "race_condition_candidates")],
+    "nuclei-rce": [("command_parameters", "upload_endpoints", "rce_candidates")],
+    "nuclei-auth": [("login_forms", "auth_endpoints", "default_credential_targets")],
+    "nuclei-auth-bypass": [("login_forms", "auth_endpoints", "auth_config")],
+    "nuclei-default-credentials": [("login_forms", "auth_endpoints", "default_credential_targets")],
+    "nuclei-jwt": [("jwt_tokens", "jwt_endpoints", "auth_config")],
+    "nuclei-oauth": [("oauth_endpoints", "oidc_metadata_urls", "auth_config")],
+    "nuclei-graphql": [("graphql_endpoints", "graphql_schema_urls")],
+    "nuclei-deserialization": [("serialized_parameters", "deserialization_candidates", "java_endpoints")],
+    "nuclei-crlf": [("header_reflection_candidates", "redirect_parameters", "discovered_parameterized_urls")],
+    "ffuf-values": [("known_parameters", "discovered_parameterized_urls", "parameterized_endpoints")],
+    "ffuf-post": [("discovered_forms", "post_endpoints", "fuzz_post_templates")],
+    "zap-active": [("discovered_endpoints", "crawled_endpoints", "discovered_forms", "discovered_parameterized_urls")],
+    "zap-api": [("openapi_urls", "swagger_urls", "api_specs", "openapi_specs")],
+    "wapiti": [("discovered_endpoints", "crawled_endpoints", "discovered_forms", "discovered_parameterized_urls")],
+}
 EVIDENCE_REQUIRED_TOOLS: dict[str, str] = {
-    "sqlmap": "discovered_parameterized_urls",
+    tool: "|".join(dict.fromkeys(key for clause in clauses for key in clause))
+    for tool, clauses in TOOL_EVIDENCE_CONTRACTS.items()
 }
 SKILL_SELECTION_THRESHOLD = 0.35
 
@@ -817,6 +843,80 @@ def _target_context(state: dict[str, Any], target: str) -> dict[str, Any]:
     }
 
 
+def _state_value_present_for_target(value: Any, target: str) -> bool:
+    """Return True when a state evidence value exists and is relevant to target."""
+    if value in (None, "", [], {}, ()):
+        return False
+    target_host = _target_host(target)
+
+    def _matches(raw: Any) -> bool:
+        if raw in (None, "", [], {}, ()):
+            return False
+        if isinstance(raw, dict):
+            nested_values = []
+            for key in (
+                "url", "endpoint", "target", "host", "asset", "base_url", "action",
+                "page", "openapi_url", "swagger_url", "value", "name",
+            ):
+                if key in raw:
+                    nested_values.append(raw.get(key))
+            if not nested_values:
+                nested_values = list(raw.values())
+            return any(_matches(v) for v in nested_values)
+        if isinstance(raw, (list, tuple, set)):
+            return any(_matches(v) for v in raw)
+        text_value = str(raw).strip()
+        if not text_value:
+            return False
+        if not target_host:
+            return True
+        raw_host = _target_host(text_value)
+        if raw_host:
+            return raw_host == target_host or raw_host.endswith(f".{target_host}")
+        if "/" not in text_value and "?" not in text_value and "=" not in text_value:
+            return True
+        return target_host in text_value.lower()
+
+    return _matches(value)
+
+
+def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) -> dict[str, Any]:
+    tool = str(tool_name or "").strip().lower()
+    clauses = TOOL_EVIDENCE_CONTRACTS.get(tool) or []
+    if not clauses:
+        return {
+            "required": False,
+            "present": True,
+            "matched_keys": [],
+            "missing_keys": [],
+            "reason": "evidence_not_required",
+        }
+
+    missing_keys: list[str] = []
+    for clause in clauses:
+        matched = [
+            key for key in clause
+            if _state_value_present_for_target(state.get(key), target)
+        ]
+        if matched:
+            return {
+                "required": True,
+                "present": True,
+                "matched_keys": matched,
+                "missing_keys": [],
+                "reason": f"required_evidence_present:{','.join(matched)}",
+            }
+        missing_keys.extend([key for key in clause if key not in missing_keys])
+
+    return {
+        "required": True,
+        "present": False,
+        "matched_keys": [],
+        "missing_keys": missing_keys,
+        "reason": f"required_evidence_absent:{','.join(missing_keys)}",
+    }
+
+
 def _requires_http_surface(phase_id: str, tool_name: str) -> bool:
     tool = str(tool_name or "").strip().lower()
     return phase_id in WEB_HEAVY_PHASES or tool in HTTP_SURFACE_TOOLS or tool in HTTP_NUCLEI_TOOLS or tool.startswith("nuclei-")
@@ -903,14 +1003,17 @@ def validate_skill_applicability(
             )
             return decision
 
-    required_evidence_key = EVIDENCE_REQUIRED_TOOLS.get(tool_l)
-    if required_evidence_key and not state.get(required_evidence_key):
+    evidence_decision = _tool_evidence_decision(tool_l, target, state)
+    decision["evidence"] = evidence_decision
+    if evidence_decision.get("required") and not evidence_decision.get("present"):
         decision.update(
             applicable=False,
             score=0.0,
-            reason=f"required_evidence_absent:{required_evidence_key}",
+            reason=str(evidence_decision.get("reason") or "required_evidence_absent"),
         )
         return decision
+    if evidence_decision.get("required"):
+        decision["reason"] = str(evidence_decision.get("reason") or "required_evidence_present")
 
     if not ctx["preflight_known"] and at == "enqueue":
         decision["score"] = 0.65
@@ -1079,6 +1182,62 @@ def work_item_applicability_decision(
         "skipped_batch_targets": skipped_targets[:100],
         "target_decisions": decisions[:50],
     }
+
+
+def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
+    """Requeue tools that were skipped only because required evidence was absent."""
+    state = dict(job.state_data or {})
+    now = datetime.now()
+    candidates = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.status == "skipped",
+            ScanWorkItem.last_error.like("skipped:applicability:required_evidence_absent:%"),
+        )
+        .all()
+    )
+    requeued = 0
+    for item in candidates:
+        decision = work_item_applicability_decision(item, state, at="requeue")
+        if not decision.get("applicable"):
+            meta = dict(item.item_metadata or {})
+            meta["applicability_requeue"] = decision
+            item.item_metadata = meta
+            item.updated_at = now
+            continue
+        meta = dict(item.item_metadata or {})
+        meta["applicability_requeue"] = decision
+        meta["requeued_after_evidence"] = True
+        meta["requeued_after_evidence_at"] = now.isoformat()
+        item.status = "queued"
+        item.lease_until = None
+        item.finished_at = None
+        item.last_error = None
+        item.result = {
+            "status": "requeued",
+            "reason": "required_evidence_now_present",
+            "applicability": decision,
+            "requeued_at": now.isoformat(),
+        }
+        item.item_metadata = meta
+        item.updated_at = now
+        requeued += 1
+    if requeued:
+        evidence_requeues = list(state.get("evidence_requeues") or [])
+        evidence_requeues.append({
+            "count": requeued,
+            "at": now.isoformat(),
+        })
+        state["evidence_requeues"] = evidence_requeues[-20:]
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="INFO",
+            message=f"evidence_ready_requeue scan={job.id} requeued={requeued}",
+        ))
+    return requeued
 
 
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
@@ -1555,11 +1714,17 @@ def enqueue_scan_work_items(
             db.rollback()
             skipped += 1
 
+    requeued = requeue_evidence_ready_work_items(db, job)
+
     db.add(ScanLog(
         scan_job_id=job.id,
         source="work-queue",
         level="INFO",
-        message=f"work_queue_seed source={source} targets={len(targets)} created={created} existing={existing} skipped={skipped} batch_groups={len(batch_accumulator)}",
+        message=(
+            f"work_queue_seed source={source} targets={len(targets)} "
+            f"created={created} existing={existing} skipped={skipped} "
+            f"requeued_after_evidence={requeued} batch_groups={len(batch_accumulator)}"
+        ),
     ))
     if missing_module_tools:
         db.add(ScanLog(
@@ -1575,7 +1740,7 @@ def enqueue_scan_work_items(
             ),
         ))
     db.commit()
-    return {"created": created, "existing": existing, "skipped": skipped}
+    return {"created": created, "existing": existing, "skipped": skipped, "requeued": requeued}
 
 
 def work_queue_counts(db: Session, scan_id: int) -> dict[str, int]:
@@ -1843,6 +2008,12 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         if _reaped:
             db.flush()
 
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if job:
+            _evidence_requeued = requeue_evidence_ready_work_items(db, job)
+            if _evidence_requeued:
+                db.flush()
+
         _scope_skipped = skip_out_of_scope_queued_work_items(db, scan_id)
         if _scope_skipped:
             db.add(ScanLog(
@@ -2064,9 +2235,23 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
         .all()
     )
 
+    state = dict((job.state_data if job else {}) or {})
     cancelled = 0
+    kept_by_evidence = 0
     now = datetime.now()
     for wi in items_to_cancel:
+        evidence_decision = _tool_evidence_decision(str(wi.tool_name or ""), str(wi.target or ""), state)
+        if evidence_decision.get("required") and evidence_decision.get("present"):
+            meta = dict(wi.item_metadata or {})
+            meta["triage_post_p09"] = {
+                "decision": "kept_by_direct_evidence",
+                "evidence": evidence_decision,
+                "at": now.isoformat(),
+            }
+            wi.item_metadata = meta
+            wi.updated_at = now
+            kept_by_evidence += 1
+            continue
         wi.status = "skipped"
         wi.result = {
             "skipped_reason": "triage_post_p09_no_p09_findings",
@@ -2077,7 +2262,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
         wi.updated_at = now
         cancelled += 1
 
-    if cancelled:
+    if cancelled or kept_by_evidence:
         db.add(ScanLog(
             scan_job_id=scan_id,
             source="work-queue",
@@ -2085,7 +2270,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
             message=(
                 f"triage_post_p09 scan={scan_id} "
                 f"targets_with_findings={len(targets_with_findings)} "
-                f"cancelled={cancelled}"
+                f"cancelled={cancelled} kept_by_direct_evidence={kept_by_evidence}"
             ),
         ))
         db.commit()
@@ -2103,6 +2288,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
     return {
         "cancelled": cancelled,
         "kept": int(kept),
+        "kept_by_direct_evidence": kept_by_evidence,
         "targets_with_findings": sorted(targets_with_findings),
     }
 
