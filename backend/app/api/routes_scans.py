@@ -19,7 +19,9 @@ from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
     WorkerHeartbeat, Asset, Vulnerability, AssetRatingHistory, EASMAlert, ExecutedToolRun,
     ScanAuditLog, AgentTraceEvent, AgentActivityLog, SkillScore, VulnerabilityLearning, AccessGroup,
-    ScanWorkItem, SkillLibrary,
+    ScanWorkItem, SkillLibrary, ScanIdentity, ScanAuthSession, EvidenceArtifact, OffensiveAsset,
+    OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
+    OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.ai_recommendation_service import generate_portuguese_recommendations
@@ -3057,6 +3059,13 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_scan_jobs = 0
         deleted_assets = 0
         deleted_vulnerabilities = 0
+        deleted_evidence_artifacts = 0
+        deleted_validation_runs = 0
+        deleted_retest_runs = 0
+        deleted_coverage_items = 0
+        deleted_offensive_assets = 0
+        deleted_offensive_inventory = 0
+        deleted_scan_embeddings = 0
 
         if resettable_scan_ids:
             finding_ids_subquery = (
@@ -3069,6 +3078,76 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             _asset_ids_reset = [
                 row[0] for row in db.query(Asset.id).filter(Asset.last_scan_id.in_(resettable_scan_ids)).all()
             ]
+
+            deleted_scan_embeddings = int(
+                db.execute(
+                    text("DELETE FROM scan_embeddings WHERE scan_job_id = ANY(:scan_ids)"),
+                    {"scan_ids": resettable_scan_ids},
+                ).rowcount
+                or 0
+            )
+            deleted_retest_runs = (
+                db.query(RetestRun)
+                .filter(RetestRun.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_coverage_items = (
+                db.query(CoverageItem)
+                .filter(CoverageItem.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_validation_runs = (
+                db.query(ValidationRun)
+                .filter(ValidationRun.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveParameter)
+                .filter(OffensiveParameter.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveJsAsset)
+                .filter(OffensiveJsAsset.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveEndpoint)
+                .filter(OffensiveEndpoint.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveService)
+                .filter(OffensiveService.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveApiSpec)
+                .filter(OffensiveApiSpec.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_inventory += (
+                db.query(OffensiveHypothesis)
+                .filter(OffensiveHypothesis.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_offensive_assets = (
+                db.query(OffensiveAsset)
+                .filter(OffensiveAsset.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_evidence_artifacts = (
+                db.query(EvidenceArtifact)
+                .filter(EvidenceArtifact.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            db.query(ScanAuthSession).filter(ScanAuthSession.scan_job_id.in_(resettable_scan_ids)).delete(
+                synchronize_session=False,
+            )
+            db.query(ScanIdentity).filter(ScanIdentity.scan_job_id.in_(resettable_scan_ids)).delete(
+                synchronize_session=False,
+            )
+
             vulnerability_filters = [Vulnerability.finding_id.in_(finding_ids_subquery)]
             if _asset_ids_reset:
                 vulnerability_filters.append(Vulnerability.asset_id.in_(_asset_ids_reset))
@@ -3078,6 +3157,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .delete(synchronize_session=False)
             )
             if _asset_ids_reset:
+                db.query(EASMAlert).filter(EASMAlert.asset_id.in_(_asset_ids_reset)).delete(
+                    synchronize_session=False,
+                )
                 db.query(AssetRatingHistory).filter(AssetRatingHistory.asset_id.in_(_asset_ids_reset)).delete(
                     synchronize_session=False,
                 )
@@ -3154,6 +3236,13 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                     "findings": deleted_findings,
                     "vulnerabilities": deleted_vulnerabilities,
                     "assets": deleted_assets,
+                    "evidence_artifacts": deleted_evidence_artifacts,
+                    "validation_runs": deleted_validation_runs,
+                    "retest_runs": deleted_retest_runs,
+                    "coverage_items": deleted_coverage_items,
+                    "offensive_assets": deleted_offensive_assets,
+                    "offensive_inventory": deleted_offensive_inventory,
+                    "scan_embeddings": deleted_scan_embeddings,
                     "executed_tool_runs": deleted_executed_tool_runs,
                     "scan_audit_logs": deleted_scan_audit_logs,
                     "scan_logs": deleted_scan_logs,
@@ -3170,6 +3259,13 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "findings": deleted_findings,
                 "vulnerabilities": deleted_vulnerabilities,
                 "assets": deleted_assets,
+                "evidence_artifacts": deleted_evidence_artifacts,
+                "validation_runs": deleted_validation_runs,
+                "retest_runs": deleted_retest_runs,
+                "coverage_items": deleted_coverage_items,
+                "offensive_assets": deleted_offensive_assets,
+                "offensive_inventory": deleted_offensive_inventory,
+                "scan_embeddings": deleted_scan_embeddings,
                 "executed_tool_runs": deleted_executed_tool_runs,
                 "scan_audit_logs": deleted_scan_audit_logs,
                 "scan_logs": deleted_scan_logs,
