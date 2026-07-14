@@ -2428,8 +2428,8 @@ def run_offensive_operator_scan(
                     node_history.append(cap)
             state["node_history"] = node_history
             # completed_capabilities for fully-completed phase
+            completed_caps = list(state.get("completed_capabilities") or [])
             if result["phase_ledger"].get("status") == "completed":
-                completed_caps = list(state.get("completed_capabilities") or [])
                 for cap in PHASE_TO_CAPABILITIES.get(phase_id, []):
                     if cap not in completed_caps:
                         completed_caps.append(cap)
@@ -2445,7 +2445,18 @@ def run_offensive_operator_scan(
                                 "skill_ids": selected_skill_ids,
                             },
                         )
-                state["completed_capabilities"] = completed_caps
+            state["completed_capabilities"] = completed_caps
+
+            # Mark the phase-target checkpoint before persisting derived findings.
+            # Finding persistence is best-effort and can be slow/noisy on large
+            # crawls or duplicate endpoints; it must not keep a completed phase
+            # from advancing to the next unit.
+            completed_work.add(_work_key)
+            if phase_id in NETWORK_PHASES:
+                _done_ip = host_ip_map.get(target)
+                if _done_ip:
+                    completed_work.add(f"{phase_id}:ip:{_done_ip}")
+            state["completed_work"] = sorted(completed_work)
 
             job.state_data = state
             # REAL-TIME PERSISTENCE: update progress + persist findings after each phase
@@ -2866,7 +2877,13 @@ def run_offensive_operator_scan(
                 db.commit()
                 _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
                 _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
-                _next_phase = (_next_unit or ("P02", target))[0]
+                _next_phase, _next_target = _next_unit or ("P02", target)
+                _state = dict(job.state_data or {})
+                _state["current_pentest_phase_id"] = _next_phase
+                _state["current_pentest_target"] = _next_target
+                _state["offensive_operator_phase_queue_enabled"] = True
+                _state["offensive_operator_phase_task_budget"] = _phase_task_budget
+                job.state_data = _state
                 queued = _enqueue_operator_continuation(
                     db,
                     job,
@@ -2883,6 +2900,12 @@ def run_offensive_operator_scan(
                 _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
                 if _next_unit:
                     _next_phase, _next_target = _next_unit
+                    _state = dict(job.state_data or {})
+                    _state["current_pentest_phase_id"] = _next_phase
+                    _state["current_pentest_target"] = _next_target
+                    _state["offensive_operator_phase_queue_enabled"] = True
+                    _state["offensive_operator_phase_task_budget"] = _phase_task_budget
+                    job.state_data = _state
                     job.current_step = f"checkpoint: next {_next_phase} {PHASE_CONTRACTS[_next_phase]['name']} ({_next_target})"
                     queued = _enqueue_operator_continuation(
                         db,

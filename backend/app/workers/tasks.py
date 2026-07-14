@@ -2056,6 +2056,22 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
 
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return _halted_scan_result(job.status)
+        if str(job.status or "").lower() == "completed":
+            db.add(
+                ScanLog(
+                    scan_job_id=scan_id,
+                    source="worker.retry",
+                    level="WARNING",
+                    message=(
+                        "erro_tardio_ignorado status=completed "
+                        f"error={str(result.get('error') or '')[:1000]}"
+                    ),
+                )
+            )
+            job.last_error = None
+            job.next_retry_at = None
+            db.commit()
+            return {"ok": True, "scan_id": scan_id, "status": "completed", "late_error_ignored": True}
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:

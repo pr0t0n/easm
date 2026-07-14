@@ -25,18 +25,18 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://ollama:11434"
     llm_primary_provider: str = "ollama"
-    llm_primary_model: str = "qwen2.5:7b"
-    ollama_model: str = "llama3"
-    ollama_qwen_model: str = "qwen2.5:7b"
-    ollama_cloudcode_model: str = "llama3.1:8b"
-    llm_evaluation_model: str = "qwen2.5:7b"
+    llm_primary_model: str = "llama3.2:3b"
+    ollama_model: str = "llama3.2:3b"
+    ollama_qwen_model: str = "llama3.2:3b"
+    ollama_cloudcode_model: str = "llama3.2:3b"
+    llm_evaluation_model: str = "llama3.2:3b"
     agent_orchestrator_enabled: bool = True
     llm_reasoning_enabled: bool = True
     llm_operator_enabled: bool = True
     enforce_scan_authorization_for_public_targets: bool = True
     llm_risk_enabled: bool = False
     llm_risk_provider: str = "ollama"
-    llm_risk_ollama_model: str = "qwen2.5:7b"
+    llm_risk_ollama_model: str = "llama3.2:3b"
     llm_risk_strategy_profile: str = "balanced"
     llm_risk_strategies: str = "prompt-injection,jailbreak,jailbreak:composite"
     llm_risk_num_tests: int = 5

@@ -229,7 +229,7 @@ httpx_probe:
   cmd: ["httpx", "-u", "{url}", "-silent",
         "-status-code", "-title", "-tech-detect", "-tls-probe",
         "-follow-redirects", "-no-color", "-json",
-        "-threads", "50"]
+        "-threads", "15", "-rate-limit", "40"]
   timeout: 180
   parser: jsonl
 
@@ -341,10 +341,10 @@ arjun_param_discover:
   category: recon
   phase: RECONNAISSANCE
   description: "Hidden HTTP parameter discoverer (GET/POST/JSON)."
-  # -t 10 threads + rate-limit 50: completes the small quick-params list well
+  # -t 10 threads + rate-limit 20: completes the small quick-params list well
   # within the 180s wrapper so it exits 'completed' instead of being killed
   # (= 'timeout'). -T 4 per-request timeout rides out slow WAF responses.
-  cmd: ["arjun", "-u", "{url}", "-w", "/app/profiles/quick-params.txt", "--stable", "-t", "10", "-T", "4", "-c", "20", "--rate-limit", "50"]
+  cmd: ["arjun", "-u", "{url}", "-w", "/app/profiles/quick-params.txt", "--stable", "-t", "10", "-T", "4", "-c", "20", "--rate-limit", "20"]
   timeout: 180
   parser: raw
 

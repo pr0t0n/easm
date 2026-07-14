@@ -191,7 +191,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-takeover"]),  # HackerOne: 49 subdomain takeover reports
         ("P02", "Port Service Discovery", "Discover exposed ports and services; keep the gate fast so downstream web phases can start",
          ["skill.recon.port_service_discovery"], ["naabu"],
-         ["nmap"]),
+         ["nmap", "shodan-cli"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
          # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken tool in Kali).
@@ -212,15 +212,13 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["feroxbuster", "katana", "httpx", "whatweb", "curl-headers", "wafw00f"]),
         ("P06", "HTTP Fingerprinting & WAF Detection", "Fingerprint HTTP behavior, headers, WAF profile and evasion clues",
          ["skill.recon.port_service_discovery"], ["httpx"],
-         ["wafw00f", "curl-headers", "nmap-http", "whatweb",
-          "nuclei-headers",      # HackerOne: 27 missing security headers reports (CSP, HSTS, X-Content-Type)
-          "nuclei-cors",         # HackerOne: 8 CORS misconfiguration reports
-          "nuclei-clickjacking", # HackerOne: 19 clickjacking / X-Frame-Options reports
-          "nuclei-spoofing",     # HackerOne: 53 spoofing/email-spoofing reports (SPF/DMARC/DKIM)
-          "nuclei-crlf"]),       # HackerOne: CRLF/header injection — detected via HTTP response
+         # Keep P06 as fast fingerprinting. Template-driven nuclei checks stay in
+         # validation phases; when templates are unavailable they add failures,
+         # not evidence.
+         ["wafw00f", "curl-headers", "whatweb"]),
         ("P07", "Technology Detection", "Identify services and technology versions",
          ["skill.recon.port_service_discovery"], ["whatweb"],
-         ["httpx", "whatweb-basic", "nmap-http", "wpscan"]),
+         ["httpx", "whatweb-basic"]),
         ("P08", "JavaScript Endpoint Analysis", "Analyze JS bundles, API routes, and SPA endpoints",
          ["skill.discovery.endpoint_discovery"], ["linkfinder", "chromium-capture"],
          # katana-js/hakrawler/gospider removed: no DOM rendering, captures less than P03

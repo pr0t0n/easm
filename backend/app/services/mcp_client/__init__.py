@@ -68,9 +68,10 @@ _PROFILE_TIMEOUT_HINTS: dict[str, int] = {
     "nmap_http_enum": 900,
     "nmap_ssl_vuln": 600,
     "nmap_smb_vuln": 600,
-    "ffuf_dirs": 600,
-    "ffuf_files": 600,
-    "ffuf_param_names": 600,
+    "ffuf_dirs": 240,
+    "ffuf_files": 240,
+    "ffuf_param_names": 240,
+    "feroxbuster_recursive": 180,
     "wfuzz_param_names": 600,
 }
 

@@ -46,17 +46,17 @@ def normalize_crawler_result(
         if url in browser_urls:
             continue
         method = _method_for_url(raw, url)
-        ep = inv.ingest_url(
+        ep = inv.upsert_endpoint(
             url,
+            method=method,
             source_tool=tool_name,
             discovered_from=target,
             auth_context=auth_context,
+            tags=[],
             metadata={"source": "crawler_result_normalizer", "source_artifact_id": source_artifact_id},
         )
         if source_artifact_id:
             ep.source_artifact_id = source_artifact_id
-        if method != "GET":
-            ep.method = method
         endpoints.append(ep)
 
     captured_params = 0

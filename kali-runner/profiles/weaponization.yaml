@@ -246,8 +246,8 @@ nuclei_clickjacking:
   description: "Nuclei clickjacking templates — missing X-Frame-Options, CSP frame-ancestors bypass (19 HackerOne reports)."
   cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
         "-tags", "clickjacking,xfo,x-frame-options",
-        "-rate-limit", "100"]
-  timeout: 300
+        "-rate-limit", "25"]
+  timeout: 180
   parser: jsonl
 
 nuclei_headers:
@@ -257,8 +257,8 @@ nuclei_headers:
   description: "Nuclei missing security headers — CSP, HSTS, X-Content-Type-Options, DMARC/SPF/DKIM (27 HackerOne reports)."
   cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
         "-tags", "headers,missing-headers,security-misconfiguration,csp,hsts,dmarc,spf",
-        "-rate-limit", "100"]
-  timeout: 300
+        "-rate-limit", "25"]
+  timeout: 180
   parser: jsonl
 
 nuclei_spoofing:
@@ -268,6 +268,6 @@ nuclei_spoofing:
   description: "Nuclei spoofing/impersonation templates — email spoofing via missing SPF/DMARC, content spoofing (53 HackerOne reports)."
   cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
         "-tags", "spoofing,email-spoofing,content-spoofing,spf,dmarc,dkim",
-        "-rate-limit", "100"]
-  timeout: 300
+        "-rate-limit", "25"]
+  timeout: 180
   parser: jsonl
