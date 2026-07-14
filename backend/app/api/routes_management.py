@@ -20,6 +20,7 @@ from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, Ap
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
+from app.services.strategy_runtime import evaluate_scan_authorization
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task, create_github_hackerone_learning_task
@@ -300,18 +301,39 @@ def _create_scan_from_schedule(
     mode: str = "scheduled",
 ) -> ScanJob:
     batch_targets = _parse_targets(target)
-    compliance_status = "approved"
+    authorization_gate = evaluate_scan_authorization(
+        db,
+        owner_id=owner_id,
+        target_query=target,
+        authorization_code=authorization_code,
+        enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
+    )
+    compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
 
     job = ScanJob(
         owner_id=owner_id,
         access_group_id=access_group_id,
         target_query=target,
-        authorization_code=authorization_code,
+        authorization_code=authorization_gate.get("authorization_code"),
         mode=mode,
         status="queued" if compliance_status == "approved" else "blocked",
         compliance_status=compliance_status,
-        authorization_id=None,
+        authorization_id=authorization_gate.get("authorization_id"),
         current_step="1. Amass Subdomain Recon",
+        state_data={
+            "authorization_gate": authorization_gate,
+            "strategy_runtime_timeline": [
+                {
+                    "type": "authorization_gate",
+                    "ts": datetime.now().isoformat(),
+                    "status": "approved" if authorization_gate.get("approved") else "blocked",
+                    "reason": authorization_gate.get("reason"),
+                    "mode": authorization_gate.get("mode"),
+                    "public_targets": authorization_gate.get("public_targets") or [],
+                    "authorized_scope": authorization_gate.get("authorized_scope") or [],
+                }
+            ],
+        },
     )
     db.add(job)
     db.flush()

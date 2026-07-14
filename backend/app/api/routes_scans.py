@@ -26,6 +26,7 @@ from app.services.ai_recommendation_service import generate_portuguese_recommend
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
+from app.services.strategy_runtime import evaluate_scan_authorization
 from app.services.risk_service import (
     build_priority_reason,
     build_rating_timeline,
@@ -2458,7 +2459,14 @@ def create_scan(
         payload.access_group_name,
     )
 
-    compliance_status = "approved"
+    authorization_gate = evaluate_scan_authorization(
+        db,
+        owner_id=current_user.id,
+        target_query=payload.target_query,
+        authorization_code=getattr(payload, "authorization_code", None),
+        enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
+    )
+    compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
 
     llm_risk_auth_type = str(payload.llm_risk_auth_type or "none").strip().lower()
     if payload.llm_risk_enabled and not str(payload.llm_risk_url or "").strip():
@@ -2487,6 +2495,18 @@ def create_scan(
         "parallelize": bool(settings.scan_parallelize_default),
         "parallel_target_batch_size": int(settings.scan_parallel_target_batch_size or 1024),
         "parallel_wait_seconds": int(settings.scan_parallel_wait_seconds or 60),
+        "authorization_gate": authorization_gate,
+        "strategy_runtime_timeline": [
+            {
+                "type": "authorization_gate",
+                "ts": datetime.now().isoformat(),
+                "status": "approved" if authorization_gate.get("approved") else "blocked",
+                "reason": authorization_gate.get("reason"),
+                "mode": authorization_gate.get("mode"),
+                "public_targets": authorization_gate.get("public_targets") or [],
+                "authorized_scope": authorization_gate.get("authorized_scope") or [],
+            }
+        ],
     }
     if auth_config:
         initial_state["auth_config"] = auth_config
@@ -2495,10 +2515,11 @@ def create_scan(
         owner_id=current_user.id,
         access_group_id=access_group_id,
         target_query=payload.target_query,
+        authorization_code=authorization_gate.get("authorization_code"),
         mode=payload.mode,
         status="queued" if compliance_status == "approved" else "blocked",
         compliance_status=compliance_status,
-        authorization_id=None,
+        authorization_id=authorization_gate.get("authorization_id"),
         current_step="1. Amass Subdomain Recon",
         state_data=initial_state,
     )

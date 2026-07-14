@@ -291,6 +291,13 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
                 sd["recon_reanalyze_queue"] = list(state.get("recon_reanalyze_queue") or [])[:50]
                 sd["recon_coverage"] = dict(state.get("recon_coverage") or {})
                 sd["recon_coverage_gaps"] = list(state.get("recon_coverage_gaps") or [])
+                sd["operational_strategy"] = dict(state.get("operational_strategy") or {})
+                sd["strategic_rag_context"] = list(state.get("strategic_rag_context") or [])[-40:]
+                sd["mcp_adapter_contracts"] = list(state.get("mcp_adapter_contracts") or [])[-80:]
+                sd["agent_orchestration"] = dict(state.get("agent_orchestration") or {})
+                sd["llm_reasoning"] = list(state.get("llm_reasoning") or [])[-120:]
+                sd["llm_reasoning_feedback"] = list(state.get("llm_reasoning_feedback") or [])[-120:]
+                sd["strategy_runtime_timeline"] = list(state.get("strategy_runtime_timeline") or [])[-240:]
                 sd["subdomain_coverage"] = {
                     "total_discovered": len(lista_ativos),
                     "scanned": len(scanned_assets),
@@ -2312,6 +2319,17 @@ def initial_state(
         "mcp_adapter_contracts": [],
         "agent_orchestration": {},
         "llm_reasoning": [],
+        "llm_reasoning_feedback": [],
+        "strategy_runtime_timeline": [
+            {
+                "type": "workflow_initialized",
+                "ts": datetime.now().isoformat(),
+                "strategy_id": operational_strategy.get("id"),
+                "agent_orchestrator": True,
+                "llm_reasoning": True,
+                "mcp_adapter_policy": operational_strategy.get("mcp_adapter_policy") or {},
+            }
+        ],
         "pentest_strategy": {},
         "pending_pentest_tactic": {},
         "pentest_tactics_completed": [],

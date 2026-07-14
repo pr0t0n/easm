@@ -172,6 +172,51 @@ function RuntimeBlock({ title, value, lines }) {
   );
 }
 
+function Timeline({ events = [] }) {
+  const rows = events.slice(-18).reverse();
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {rows.length === 0 ? (
+        <div style={{ color: "var(--ink-muted)", fontSize: 12 }}>Sem eventos de runtime persistidos.</div>
+      ) : rows.map((event, idx) => (
+        <div key={`${event.source || "event"}-${event.ts || idx}-${idx}`} style={{
+          display: "grid",
+          gridTemplateColumns: "110px minmax(0, 1fr)",
+          gap: 10,
+          border: "1px solid var(--line)",
+          borderRadius: 8,
+          padding: 10,
+          background: "var(--canvas-soft, var(--canvas))",
+        }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", textTransform: "uppercase" }}>
+              {event.source || "runtime"}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 11, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}>
+              {event.ts ? new Date(event.ts).toLocaleTimeString() : "-"}
+            </div>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)" }}>
+              {event.type || event.status || "evento"}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.45, overflowWrap: "anywhere" }}>
+              {event.message || event.reason || event.decision || event.skill_id || event.node || "-"}
+            </div>
+            {(event.capability || event.status || event.tools?.length > 0) && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+                {event.capability && <Pill>{event.capability}</Pill>}
+                {event.status && <Pill>{event.status}</Pill>}
+                {(event.tools || []).slice(0, 3).map((tool) => <Pill key={tool}>{tool}</Pill>)}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function CapabilityBlueprintPage() {
   const [payload, setPayload] = useState(null);
   const [category, setCategory] = useState("all");
@@ -329,6 +374,22 @@ export default function CapabilityBlueprintPage() {
                 `${item.capability || "-"} · ${item.skill_id || "-"} · ${(item.tools || []).slice(0, 3).join(", ")}`
               )}
             />
+            <RuntimeBlock
+              title="Gate de autorização"
+              value={runtime.current?.authorization_gate?.approved ? "Aprovado" : runtime.current?.authorization_gate ? "Bloqueado" : "Sem gate"}
+              lines={[
+                `modo: ${runtime.current?.authorization_gate?.mode || "-"}`,
+                `motivo: ${runtime.current?.authorization_gate?.reason || "-"}`,
+                `escopo: ${(runtime.current?.authorization_gate?.authorized_scope || []).slice(0, 3).join(", ") || "-"}`,
+              ]}
+            />
+            <RuntimeBlock
+              title="Feedback do reasoning"
+              value={`${(runtime.llm_reasoning_feedback || []).length} feedback(s)`}
+              lines={(runtime.llm_reasoning_feedback || []).slice(-3).map((item) =>
+                `${item.status || "-"} · ${item.skill_id || "-"} · findings=${item.findings_added ?? 0}`
+              )}
+            />
             <div style={{ gridColumn: "span 3" }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>
                 Orquestração multi-agente por fase
@@ -343,6 +404,12 @@ export default function CapabilityBlueprintPage() {
                   </div>
                 ))}
               </div>
+            </div>
+            <div style={{ gridColumn: "span 3" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>
+                Timeline operacional
+              </div>
+              <Timeline events={runtime.timeline || []} />
             </div>
           </div>
         ) : (

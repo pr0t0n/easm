@@ -1678,6 +1678,29 @@ def tool_executor_node(state: AgentState) -> AgentState:
     state["completed_capabilities"] = completed
     _findings_now_post = len(state.get("vulnerabilidades_encontradas") or [])
     _findings_delta_post = max(0, _findings_now_post - _executor_findings_before)
+    try:
+        from app.services.strategy_runtime import build_reasoning_feedback, persist_operational_memory
+
+        build_reasoning_feedback(
+            state=state,
+            capability=capability,
+            skill_id=skill_id,
+            selected_tools=selected_tools,
+            execution_results=all_results,
+            findings_added=_findings_delta_post,
+        )
+        _scan_id_for_memory = state.get("scan_id")
+        if _scan_id_for_memory:
+            from app.db.session import SessionLocal
+
+            _db = SessionLocal()
+            try:
+                persist_operational_memory(_db, int(_scan_id_for_memory), state, limit=1)
+                _db.commit()
+            finally:
+                _db.close()
+    except Exception:
+        pass
     if capability in TOOL_CAPABILITY_NODES:
         _mark_capability_runtime(
             state,

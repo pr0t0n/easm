@@ -21,6 +21,7 @@ from app.services.audit_service import log_audit
 from app.services.cyber_autoagent_alignment import evaluate_execution_quality
 from app.services.cve_enrichment_service import enrichment_service
 from app.services.llm_risk_service import parse_scan_llm_risk_config, run_llm_risk_assessment
+from app.services.strategy_runtime import evaluate_scan_authorization
 from app.services.tool_adapters import run_tool_execution
 from app.workers.celery_app import celery
 from app.workers.worker_groups import (
@@ -485,15 +486,40 @@ def scheduler_tick():
             if not raw_targets:
                 continue
 
+            target_query = "; ".join(raw_targets)
+            authorization_gate = evaluate_scan_authorization(
+                db,
+                owner_id=sched.owner_id,
+                target_query=target_query,
+                authorization_code=getattr(sched, "authorization_code", None),
+                enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
+            )
+            compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
+
             job = ScanJob(
                     owner_id=sched.owner_id,
                     access_group_id=sched.access_group_id,
-                    target_query="; ".join(raw_targets),
-                    status="pending",
+                    target_query=target_query,
+                    authorization_code=authorization_gate.get("authorization_code"),
+                    authorization_id=authorization_gate.get("authorization_id"),
+                    status="pending" if compliance_status == "approved" else "blocked",
                     mode="scheduled",
-                    compliance_status="approved",
+                    compliance_status=compliance_status,
                     current_step="Aguardando worker",
-                    state_data={},
+                    state_data={
+                        "authorization_gate": authorization_gate,
+                        "strategy_runtime_timeline": [
+                            {
+                                "type": "authorization_gate",
+                                "ts": datetime.now().isoformat(),
+                                "status": "approved" if authorization_gate.get("approved") else "blocked",
+                                "reason": authorization_gate.get("reason"),
+                                "mode": authorization_gate.get("mode"),
+                                "public_targets": authorization_gate.get("public_targets") or [],
+                                "authorized_scope": authorization_gate.get("authorized_scope") or [],
+                            }
+                        ],
+                    },
                 )
 
             db.add(job)
@@ -517,9 +543,10 @@ def scheduler_tick():
             db.add(sched)
             db.commit()
 
-            # A1 — admissão: agendado NUNCA preempta. Se há vaga dispara; senão
-            # fica em espera (queued) e o promotor do watchdog o sobe depois.
-            admit_or_defer_scan(job.id, mode="scheduled")
+            if compliance_status == "approved":
+                # A1 — admissão: agendado NUNCA preempta. Se há vaga dispara; senão
+                # fica em espera (queued) e o promotor do watchdog o sobe depois.
+                admit_or_defer_scan(job.id, mode="scheduled")
 
             fired += 1
 
@@ -1063,6 +1090,22 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 scan_mode=scan_mode,
                 known_vulnerability_patterns=known_patterns,
             )
+            existing_state = dict(job.state_data or {})
+            for _runtime_key in (
+                "authorization_gate",
+                "llm_risk",
+                "scan_level",
+                "auth_config",
+                "parallelize",
+                "parallel_target_batch_size",
+                "parallel_wait_seconds",
+            ):
+                if _runtime_key in existing_state:
+                    state[_runtime_key] = existing_state[_runtime_key]
+            state["strategy_runtime_timeline"] = (
+                list(existing_state.get("strategy_runtime_timeline") or [])
+                + list(state.get("strategy_runtime_timeline") or [])
+            )[-240:]
             if batch_index == 1:
                 trace_id = str(state.get("trace_id") or trace_id)
                 db.add(ScanLog(

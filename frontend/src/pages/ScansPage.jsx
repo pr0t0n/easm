@@ -263,6 +263,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [crit,     setCrit]     = useState("Alta");
   const [janela,   setJanela]   = useState("imediato");
   const [target,   setTarget]   = useState("");
+  const [authorizationCode, setAuthorizationCode] = useState("");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
@@ -286,7 +287,14 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
       if (janela === "agendar") {
         await onSchedule({ target, accessGroupId: "", accessGroupName: "", scheduleForm });
       } else {
-        await onCreate({ target, scanLevel: LEVEL_REVERSE[perfil] || "full", accessGroupId: "", accessGroupName: "", authPayload: buildAuth() });
+        await onCreate({
+          target,
+          scanLevel: LEVEL_REVERSE[perfil] || "full",
+          accessGroupId: "",
+          accessGroupName: "",
+          authorizationCode,
+          authPayload: buildAuth(),
+        });
       }
     } finally {
       setSubmitting(false);
@@ -379,6 +387,21 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
 
       {/* Autenticação (expansível) */}
       <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line-soft)" }}>
+        <div style={{ marginBottom: 12, display: "grid", gridTemplateColumns: "220px minmax(0, 1fr)", gap: 10, alignItems: "end" }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Autorização de escopo</label>
+            <input
+              className="sk-mono"
+              placeholder="código aprovado"
+              value={authorizationCode}
+              onChange={(e) => setAuthorizationCode(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45 }}>
+            Alvos públicos exigem autorização aprovada. Alvos locais/teste continuam liberados para validação controlada.
+          </div>
+        </div>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--ink-soft)" }}>
           <input type="checkbox" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
           Autenticação no scanner
@@ -785,12 +808,13 @@ export default function ScansPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
   const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
 
-  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, authPayload }) => {
+  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, authorizationCode, authPayload }) => {
     const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
     for (const tgt of targets) {
-      const payload = { target_query: tgt, level: scanLevel || "full" };
+      const payload = { target_query: tgt, scan_level: scanLevel || "full" };
       if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
       if (accessGroupName) payload.access_group_name = accessGroupName;
+      if (authorizationCode) payload.authorization_code = authorizationCode.trim();
       if (authPayload)     payload.auth_config        = authPayload;
       await client.post("/api/scans", payload);
     }

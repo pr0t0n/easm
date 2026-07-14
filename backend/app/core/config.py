@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     agent_orchestrator_enabled: bool = True
     llm_reasoning_enabled: bool = True
     llm_operator_enabled: bool = True
+    enforce_scan_authorization_for_public_targets: bool = True
     llm_risk_enabled: bool = False
     llm_risk_provider: str = "ollama"
     llm_risk_ollama_model: str = "qwen2.5:7b"
