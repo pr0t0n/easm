@@ -527,6 +527,7 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     rounds = int(gate_state.get("rounds") or 0)
 
     validation_changes = _apply_promotion_gate(db, job)
+    validation_changes["p21_audits_recorded"] = _record_p21_evidence_audits(db, job)
     quality = build_scan_quality(db, job)
     actions: list[dict[str, Any]] = []
 
@@ -646,6 +647,138 @@ def _schedule_quality_poc_validations(db: Session, job: ScanJob) -> dict[str, in
             message=f"p21_quality_schedule_failed error={exc!s}"[:2000],
         ))
         return {"scheduled": 0, "skipped_confirmed": 0, "skipped_cap": 0, "skipped_no_tool": 0}
+
+
+def _record_p21_evidence_audits(db: Session, job: ScanJob, max_rows: int = 12) -> int:
+    """Record P21 validation rows for already-validated evidence contracts.
+
+    Active PoC items remain the path for HIGH/CRITICAL candidates. This audit
+    covers the other legitimate path: evidence/validation services already
+    produced proof, but no P21 row exists for visibility/reporting.
+    """
+    artifacts = db.query(EvidenceArtifact).filter(EvidenceArtifact.scan_job_id == job.id).all()
+    artifact_by_finding: dict[int, EvidenceArtifact] = {}
+    for artifact in artifacts:
+        if artifact.finding_id is None:
+            continue
+        status = str(artifact.validation_status or "").strip().lower()
+        if status not in {"confirmed", "validated", "success", "proven", "candidate"}:
+            continue
+        artifact_by_finding.setdefault(int(artifact.finding_id), artifact)
+    if not artifact_by_finding:
+        return 0
+
+    existing_finding_ids = {
+        int(v.finding_id)
+        for v in db.query(ValidationRun)
+        .filter(ValidationRun.scan_job_id == job.id, ValidationRun.finding_id.isnot(None))
+        .all()
+        if v.finding_id is not None and str((dict(v.run_metadata or {})).get("phase_id") or "").upper() == "P21"
+    }
+
+    findings = (
+        db.query(Finding)
+        .filter(
+            Finding.scan_job_id == job.id,
+            Finding.id.in_(list(artifact_by_finding.keys())),
+            Finding.is_false_positive.is_(False),
+        )
+        .order_by(Finding.risk_score.desc(), Finding.id.asc())
+        .limit(max_rows * 3)
+        .all()
+    )
+    recorded = 0
+    for finding in findings:
+        if recorded >= max_rows:
+            break
+        if int(finding.id) in existing_finding_ids:
+            continue
+        source_artifact = artifact_by_finding.get(int(finding.id))
+        if not source_artifact:
+            continue
+        details = dict(finding.details or {})
+        target = str(finding.url or details.get("matched_at") or details.get("asset") or finding.domain or source_artifact.target or job.target_query or "")[:500]
+        status = str(finding.verification_status or "").strip().lower()
+        result = "confirmed" if status in VERIFIED_STATUSES else "validated"
+        audit_artifact = EvidenceArtifact(
+            scan_job_id=job.id,
+            finding_id=finding.id,
+            phase_id="P21",
+            skill_id="evidence_quality_review",
+            tool_name="quality-gate-audit",
+            target=target,
+            artifact_type="p21_validation",
+            validation_status=result,
+            confidence_score=max(int(source_artifact.confidence_score or 0), int(finding.confidence_score or 0), 70),
+            baseline_request=dict(source_artifact.baseline_request or {}),
+            exploit_request=dict(source_artifact.exploit_request or {}),
+            payload=source_artifact.payload,
+            diff_summary=source_artifact.diff_summary or "P21 evidence audit linked an existing proof-pack to this finding.",
+            reproduction_steps=list(source_artifact.reproduction_steps or []),
+            workspace_path=source_artifact.workspace_path,
+            artifact_metadata={
+                "phase_id": "P21",
+                "quality_gate_evidence_audit": True,
+                "source_artifact_id": int(source_artifact.id),
+                "finding_id": int(finding.id),
+                "target": target,
+            },
+            created_at=datetime.now(),
+        )
+        db.add(audit_artifact)
+        db.flush()
+        validation = ValidationRun(
+            scan_job_id=job.id,
+            finding_id=finding.id,
+            validator_name="quality-gate-audit",
+            attempt_artifact_id=audit_artifact.id,
+            result=result,
+            reason="EvidenceArtifact contract validated; P21 audit row recorded for reporting visibility.",
+            run_metadata={
+                "phase_id": "P21",
+                "target": target,
+                "artifact_id": int(audit_artifact.id),
+                "source_artifact_id": int(source_artifact.id),
+                "quality_gate_evidence_audit": True,
+            },
+            created_at=datetime.now(),
+        )
+        db.add(validation)
+        existing_cov = (
+            db.query(CoverageItem)
+            .filter(
+                CoverageItem.scan_job_id == job.id,
+                CoverageItem.coverage_type == "finding_validation",
+                CoverageItem.target_ref == target,
+                CoverageItem.test_class == "P21",
+            )
+            .first()
+        )
+        if not existing_cov:
+            db.add(CoverageItem(
+                scan_job_id=job.id,
+                coverage_type="finding_validation",
+                target_ref=target,
+                test_class="P21",
+                status="validated",
+                finding_id=finding.id,
+                coverage_metadata={
+                    "quality_gate_evidence_audit": True,
+                    "artifact_id": int(audit_artifact.id),
+                },
+                updated_at=datetime.now(),
+            ))
+        recorded += 1
+
+    if recorded:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="INFO",
+            message=f"p21_evidence_audit_recorded count={recorded}",
+        ))
+        db.flush()
+    return recorded
 
 
 def _requeue_failed_quality_items(db: Session, job: ScanJob, weak_phase_ids: set[str]) -> int:

@@ -193,6 +193,34 @@ def _should_run_subdomain_enumeration(target: str) -> bool:
     return not _is_absolute_http_url(target)
 
 
+def _is_local_or_lab_target(target: str) -> bool:
+    """Identify local/lab targets where deterministic browser inventory is safer."""
+    from ipaddress import ip_address
+    from urllib.parse import urlparse
+
+    raw = str(target or "").strip()
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = (parsed.hostname or raw.split("/")[0].split(":")[0]).strip().lower()
+    if not host:
+        return False
+    if host in {"localhost", "host.docker.internal", "juice_shop", "dvwa", "idor_api"}:
+        return True
+    if "." not in host:
+        return True
+    try:
+        ip = ip_address(host)
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+    except ValueError:
+        return False
+
+
+def _is_lab_fast_scan(state: dict[str, Any], target: str) -> bool:
+    scan_level = str(state.get("scan_level") or "").strip().lower()
+    if state.get("disable_lab_fast_path"):
+        return False
+    return scan_level in {"asm", "recon", "standard", "padrao", "padrão"} and _is_local_or_lab_target(target)
+
+
 def _should_apply_syn_gate(target: str) -> bool:
     """The SYN gate is only authoritative for explicit web URLs.
 
@@ -775,6 +803,236 @@ def _record_direct_url_p01_skip(
     state["target_set"] = list(all_targets)
     job.state_data = state
     db.commit()
+
+
+def _ensure_runtime_visibility_contracts(
+    state: dict[str, Any],
+    phase_id: str,
+    target: str,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose the real runtime contract for legacy-runner scans."""
+    from datetime import datetime
+
+    contract: dict[str, Any] = {"phase_id": phase_id, "enabled": False, "agents": [], "mandatory_agents": [], "all_tools": [], "mandatory_tools": []}
+    if bool(getattr(settings, "agent_orchestrator_enabled", True)):
+        try:
+            from app.agents.orchestrator import AgentOrchestrator
+
+            contract = AgentOrchestrator(phase_id).build_execution_contract()
+        except Exception as exc:  # noqa: BLE001
+            contract = {**contract, "error": str(exc)[:300]}
+
+    orchestration = dict(state.get("agent_orchestration") or {})
+    existing_contract = dict(orchestration.get(phase_id) or {})
+    orchestration[phase_id] = {**contract, **existing_contract, "phase_id": phase_id, "target": target}
+    state["agent_orchestration"] = orchestration
+
+    selected_skills = list(((result or {}).get("skill_plan") or {}).get("selected_skills") or [])
+    mcp_results = [row for row in ((result or {}).get("mcp_results") or []) if isinstance(row, dict)]
+    tools = list(dict.fromkeys(
+        [str(row.get("tool_name") or "").strip() for row in mcp_results if str(row.get("tool_name") or "").strip()]
+        + [str(tool or "").strip() for tool in contract.get("mandatory_tools") or [] if str(tool or "").strip()]
+    ))
+    contracts = list(state.get("mcp_adapter_contracts") or [])
+    key = f"{phase_id}:{target}"
+    if not any(str(row.get("contract_key") or "") == key for row in contracts if isinstance(row, dict)):
+        contracts.append({
+            "contract_key": key,
+            "phase_id": phase_id,
+            "target": target,
+            "adapter": "legacy_offensive_operator",
+            "source": "offensive_operator_runner",
+            "selected_skills": selected_skills,
+            "tools": tools[:30],
+            "mcp_results": len(mcp_results),
+            "agent_contract_enabled": bool(contract.get("enabled")),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        })
+    state["mcp_adapter_contracts"] = contracts[-250:]
+    return state
+
+
+def _append_llm_reasoning_decision(
+    db,
+    job: ScanJob,
+    state: dict[str, Any],
+    phase_id: str,
+    target: str,
+    mcp_results: list[dict[str, Any]] | None = None,
+    tech_stack: dict[str, Any] | None = None,
+    env_profile: dict[str, Any] | None = None,
+    reason: str = "legacy_runner_phase_decision",
+) -> dict[str, Any]:
+    key = f"{phase_id}:{target}"
+    existing = [
+        row for row in list(state.get("llm_reasoning") or [])
+        if isinstance(row, dict) and str(row.get("decision_key") or "") == key
+    ]
+    if existing:
+        return state
+
+    reasoning: dict[str, Any] | None = None
+    try:
+        tool_evidence = []
+        for mcp_res in list(mcp_results or []):
+            if isinstance(mcp_res, dict) and mcp_res.get("status") in ("success", "done"):
+                tool_evidence.append(_extract_evidence(phase_id, mcp_res.get("tool_name", ""), mcp_res))
+        reasoning = llm_phase_reasoning(state, phase_id, target, tool_evidence, tech_stack or {}, env_profile)
+    except Exception:  # noqa: BLE001
+        reasoning = None
+
+    fallback = not bool(reasoning)
+    if fallback:
+        reasoning = {
+            "decision_key": key,
+            "source_phase": phase_id,
+            "target": target,
+            "source": "legacy_offensive_operator",
+            "model": "policy-fallback",
+            "fallback": True,
+            "injected_tools": {},
+            "payloads_hint": [],
+            "reasoning": (
+                "Sem sinal suficiente ou modelo indisponivel; manter progressao controlada, "
+                "registrar cobertura e acionar validacao/evidence gate ao final."
+            ),
+            "reason": reason,
+        }
+        feedback = list(state.get("llm_reasoning_feedback") or [])
+        feedback.append({
+            "phase_id": phase_id,
+            "target": target,
+            "status": "fallback",
+            "reason": reason,
+        })
+        state["llm_reasoning_feedback"] = feedback[-250:]
+    else:
+        reasoning = {**reasoning, "decision_key": key, "target": target, "source": "scan_intelligence_llm", "fallback": False}
+
+    state["llm_reasoning"] = list(state.get("llm_reasoning") or []) + [reasoning]
+    merged = state.get("llm_injected_tools") or {}
+    for ph, tools in (reasoning.get("injected_tools") or {}).items():
+        merged.setdefault(ph, [])
+        for tool in tools:
+            if tool not in merged[ph]:
+                merged[ph].append(tool)
+    state["llm_injected_tools"] = merged
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="scan-intelligence",
+        level="INFO",
+        message=(
+            f"llm_reasoning after={phase_id} fallback={fallback} "
+            f"suggested_phases={list((reasoning.get('injected_tools') or {}).keys())} "
+            f"reason=\"{str(reasoning.get('reasoning') or '')[:120]}\""
+        ),
+    ))
+    return state
+
+
+def _run_lab_browser_capture_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    state = dict(job.state_data or {})
+    done = set(state.get("_lab_browser_capture_done_targets") or [])
+    if target in done:
+        return {"skipped": True, "reason": "already_captured"}
+    try:
+        from app.services.browser_capture_service import run_browser_capture_for_scan
+
+        result = run_browser_capture_for_scan(db, job, target=target)
+        done.add(target)
+        state = dict(job.state_data or {})
+        state["_lab_browser_capture_done_targets"] = sorted(done)
+        state["lab_browser_capture"] = result
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=f"lab_fast_browser_capture target={target} endpoints={result.get('endpoints_created') or result.get('endpoints') or 0}",
+        ))
+        db.commit()
+        return dict(result or {})
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"lab_fast_browser_capture_failed target={target} error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
+def _record_lab_fast_phase(
+    db,
+    job: ScanJob,
+    phase_ledgers: list[dict[str, Any]],
+    completed_work: set[str],
+    phase_id: str,
+    target: str,
+    status: str = "partial",
+    details: dict[str, Any] | None = None,
+) -> None:
+    from datetime import datetime
+
+    work_key = f"{phase_id}:{target}"
+    if work_key in completed_work:
+        return
+    now = datetime.utcnow().isoformat() + "Z"
+    ledger = {
+        "phase_id": phase_id,
+        "phase_name": PHASE_CONTRACTS.get(phase_id, {}).get("name", phase_id),
+        "target": target,
+        "status": status,
+        "started_at": now,
+        "finished_at": now,
+        "selected_skills": [],
+        "skills_planned": [],
+        "skills_attempted": [],
+        "skills_success": [],
+        "tools_attempted": [],
+        "tools_success": [],
+        "tools_failed": [],
+        "mcp_results": [],
+        "tier": "lab_fast_path",
+        "skip_reason": "local_lab_browser_inventory_replaces_heavy_discovery",
+        "validation_result": {"reason": "lab fast path", "details": dict(details or {})},
+    }
+    phase_ledgers.append(ledger)
+    completed_work.add(work_key)
+    with _SUBTASK_STATE_LOCK:
+        try:
+            db.refresh(job)
+        except Exception:  # noqa: BLE001
+            pass
+        state = dict(job.state_data or {})
+        state = _ensure_runtime_visibility_contracts(state, phase_id, target, {"mcp_results": [], "skill_plan": {"selected_skills": []}})
+        state = _append_llm_reasoning_decision(
+            db,
+            job,
+            state,
+            phase_id,
+            target,
+            [],
+            dict(state.get("tech_stack") or {}),
+            dict(state.get("environment_profile") or {}),
+            reason="lab_fast_path",
+        )
+        state["completed_work"] = sorted(set(state.get("completed_work") or []) | completed_work)
+        state["phase_ledger_v2"] = _merge_phase_ledgers(list(state.get("phase_ledger_v2") or []), [ledger])
+        lab_fast = list(state.get("lab_fast_path") or [])
+        lab_fast.append({"phase_id": phase_id, "target": target, "status": status, "details": dict(details or {})})
+        state["lab_fast_path"] = lab_fast[-200:]
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=f"lab_fast_phase phase={phase_id} target={target} status={status}",
+        ))
+        db.commit()
 
 
 def _phase_ids_for_target_subset(allowed_phases: set[str] | None) -> list[str]:
@@ -1428,9 +1686,41 @@ def run_offensive_operator_scan(
                     "operation_events": events,
                 }
             )
+            state = _ensure_runtime_visibility_contracts(state, phase_id, _effective_target)
             job.state_data = state
             db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO", message=f"dispatch phase_id={phase_id} tool=kali target={_effective_target}"))
             db.commit()
+
+            if _is_lab_fast_scan(state, _effective_target) and phase_id in {"P03", "P04", "P05", "P06", "P07", "P08", "P18"}:
+                _lab_details: dict[str, Any] = {"mode": "lab_fast_path"}
+                _lab_status = "partial"
+                if phase_id == "P03":
+                    _lab_capture = _run_lab_browser_capture_once(db, job, _effective_target)
+                    _lab_details["browser_capture"] = _lab_capture
+                    if not _lab_capture.get("error"):
+                        _lab_status = "completed"
+                _record_lab_fast_phase(
+                    db,
+                    job,
+                    phase_ledgers,
+                    completed_work,
+                    phase_id,
+                    target,
+                    status=_lab_status,
+                    details=_lab_details,
+                )
+                events.append(create_operation_event(
+                    "phase_completed",
+                    offensive_state["campaign_id"],
+                    str(job.id),
+                    phase_id,
+                    status=_lab_status,
+                    details={"reason": "lab_fast_path", **_lab_details},
+                ))
+                job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
+                db.commit()
+                _phase_units_this_task += 1
+                continue
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             _phase_unit_start = _time.monotonic()
@@ -1672,6 +1962,7 @@ def run_offensive_operator_scan(
                     "last_evidence": result.get("evidence"),
                 }
             )
+            state = _ensure_runtime_visibility_contracts(state, phase_id, _effective_target, result)
 
             # ─ Populate runtime evidence so capability ledger inference works ─
             # strategic_planning needs: supervisor_route, selected_skill, operation_plan, pentest_strategy
@@ -1908,25 +2199,17 @@ def run_offensive_operator_scan(
                 validations = validate_critical_findings(state, mcp_list, call_curl=_call_curl)
                 # LLM reasoning between phases — only after high-signal phases
                 try:
-                    _tool_evs_for_llm = []
-                    for m in mcp_list:
-                        if isinstance(m, dict) and m.get("status") in ("success", "done"):
-                            _tool_evs_for_llm.append(_extract_evidence(phase_id, m.get("tool_name", ""), m))
-                    _reasoning = llm_phase_reasoning(state, phase_id, target, _tool_evs_for_llm, tech_stack, env_profile)
-                    if _reasoning:
-                        state["llm_reasoning"] = (state.get("llm_reasoning") or []) + [_reasoning]
-                        # Merge injected_tools into per-phase plans
-                        merged = state.get("llm_injected_tools") or {}
-                        for ph, tools in (_reasoning.get("injected_tools") or {}).items():
-                            merged.setdefault(ph, [])
-                            for t in tools:
-                                if t not in merged[ph]:
-                                    merged[ph].append(t)
-                        state["llm_injected_tools"] = merged
-                        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="INFO",
-                                       message=(f"llm_reasoning after={phase_id} "
-                                                f"suggested_phases={list((_reasoning.get('injected_tools') or {}).keys())} "
-                                                f"reason=\"{_reasoning.get('reasoning','')[:120]}\"")))
+                    state = _append_llm_reasoning_decision(
+                        db,
+                        job,
+                        state,
+                        phase_id,
+                        target,
+                        mcp_list,
+                        tech_stack,
+                        env_profile,
+                        reason="phase_post_processing",
+                    )
                 except Exception:  # noqa: BLE001
                     pass
                 if validations:
@@ -2781,6 +3064,8 @@ def run_offensive_operator_scan(
     else:
         job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
         job.current_step = "P22 Campaign Report"
+    if job.status == "completed":
+        job.mission_progress = 100
     db.commit()
 
     # ── Persist findings from phase evidence into the Finding table ────────
@@ -3989,6 +4274,18 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 if selected_skill_ids:
                     cur["selected_skill"] = selected_skill_ids[0]
                     cur["selected_skills"] = selected_skill_ids
+                cur = _ensure_runtime_visibility_contracts(cur, phase_id, target, result)
+                cur = _append_llm_reasoning_decision(
+                    db,
+                    job,
+                    cur,
+                    phase_id,
+                    target,
+                    result.get("mcp_results") or [],
+                    dict(cur.get("tech_stack") or {}),
+                    dict(cur.get("environment_profile") or {}),
+                    reason="parallel_target_subset",
+                )
                 _emit_skill_runtime_telemetry(db, job, phase_id, target, result)
                 skill_coverage_state = dict(cur.get("skill_coverage") or {})
                 skill_coverage_state[f"{phase_id}:{target}"] = ledger.get("skill_coverage") or {}
