@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.models.models import (
     OffensiveEndpoint,
     RetestRun,
     ScanJob,
+    ScanLog,
     ScanWorkItem,
     ValidationRun,
 )
@@ -26,6 +28,10 @@ VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_posit
 CANDIDATE_STATUSES = {"candidate", "needs_review", "hypothesis"}
 SUCCESS_VALIDATION_RESULTS = {"confirmed", "validated", "success", "proven", "positive", "true_positive"}
 TESTED_COVERAGE_STATUSES = {"tested", "covered", "validated", "completed", "done", "confirmed"}
+QUALITY_GATE_SCORE_THRESHOLD = 70.0
+QUALITY_GATE_MAX_ROUNDS = 2
+QUALITY_GATE_MAX_POC_PER_ROUND = 12
+QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -345,6 +351,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "score": total_score,
         "grade": grade,
         "label": label,
+        "quality_gate": dict((job.state_data or {}).get("quality_gate") or {}),
         "components": components,
         "summary": {
             "findings_total": len(findings),
@@ -367,3 +374,172 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "Reexecutar fases com work items falhos antes de concluir o relatório executivo.",
         ],
     }
+
+
+def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
+    """Run the active post-scan quality gate.
+
+    The gate is intentionally conservative: it only extends a scan when it can
+    enqueue concrete extra work. If it cannot improve the scan automatically, it
+    records the quality state and allows completion with visible gaps.
+    """
+    state = dict(job.state_data or {})
+    gate_state = dict(state.get("quality_gate") or {})
+    rounds = int(gate_state.get("rounds") or 0)
+
+    validation_changes = _apply_promotion_gate(db, job)
+    quality = build_scan_quality(db, job)
+    actions: list[dict[str, Any]] = []
+
+    if rounds >= QUALITY_GATE_MAX_ROUNDS:
+        gate_state.update({
+            "status": "exhausted",
+            "last_score": quality.get("score"),
+            "last_grade": quality.get("grade"),
+            "reason": "max_quality_gate_rounds_reached",
+        })
+        state["quality_gate"] = gate_state
+        job.state_data = state
+        db.add(job)
+        return {
+            "passed": True,
+            "status": "exhausted",
+            "actions": actions,
+            "validation_changes": validation_changes,
+            "quality": quality,
+        }
+
+    poc_result = _schedule_quality_poc_validations(db, job)
+    if int(poc_result.get("scheduled", 0) or 0) > 0:
+        actions.append({"type": "schedule_p21_validation", **poc_result})
+
+    weak_phase_ids = {
+        str(gap.get("title") or "").split(" ", 1)[0]
+        for gap in quality.get("gaps") or []
+        if gap.get("area") == "phase_coverage"
+    }
+    weak_phase_ids = {pid for pid in weak_phase_ids if pid.startswith("P")}
+    requeued = _requeue_failed_quality_items(db, job, weak_phase_ids)
+    if requeued:
+        actions.append({"type": "requeue_failed_work_items", "requeued": requeued})
+
+    passed = not actions
+    gate_state.update({
+        "status": "passed" if passed else "remediation_scheduled",
+        "rounds": rounds + (0 if passed else 1),
+        "last_score": quality.get("score"),
+        "last_grade": quality.get("grade"),
+        "threshold": QUALITY_GATE_SCORE_THRESHOLD,
+        "validation_changes": validation_changes,
+        "last_actions": actions,
+    })
+    history = list(gate_state.get("history") or [])
+    history.append({
+        "round": rounds + 1,
+        "score": quality.get("score"),
+        "grade": quality.get("grade"),
+        "actions": actions,
+    })
+    gate_state["history"] = history[-10:]
+    state["quality_gate"] = gate_state
+    job.state_data = state
+    db.add(job)
+
+    return {
+        "passed": passed,
+        "status": gate_state["status"],
+        "actions": actions,
+        "validation_changes": validation_changes,
+        "quality": quality,
+    }
+
+
+def _apply_promotion_gate(db: Session, job: ScanJob) -> dict[str, int]:
+    try:
+        from app.services.evidence_contract_service import apply_finding_validation, link_artifacts_to_findings
+
+        link_result = link_artifacts_to_findings(db, job)
+        findings = (
+            db.query(Finding)
+            .filter(Finding.scan_job_id == job.id, Finding.is_false_positive.is_(False))
+            .all()
+        )
+        updated = 0
+        capped = 0
+        for finding in findings:
+            before_status = str(finding.verification_status or "")
+            before_severity = str(finding.severity or "")
+            decision = apply_finding_validation(db, finding)
+            if str(decision.status or "") != before_status:
+                updated += 1
+            if str(finding.severity or "") != before_severity:
+                capped += 1
+        db.flush()
+        return {"linked_artifacts": int(link_result.get("linked", 0) or 0), "updated_findings": updated, "severity_capped": capped}
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"promotion_gate_failed error={exc!s}"[:2000],
+        ))
+        return {"linked_artifacts": 0, "updated_findings": 0, "severity_capped": 0}
+
+
+def _schedule_quality_poc_validations(db: Session, job: ScanJob) -> dict[str, int]:
+    try:
+        from app.services.poc_validator import batch_schedule_poc_validations
+
+        return batch_schedule_poc_validations(
+            db,
+            int(job.id),
+            max_findings=QUALITY_GATE_MAX_POC_PER_ROUND,
+        )
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"p21_quality_schedule_failed error={exc!s}"[:2000],
+        ))
+        return {"scheduled": 0, "skipped_confirmed": 0, "skipped_cap": 0, "skipped_no_tool": 0}
+
+
+def _requeue_failed_quality_items(db: Session, job: ScanJob, weak_phase_ids: set[str]) -> int:
+    if not weak_phase_ids:
+        return 0
+    rows = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id.in_(sorted(weak_phase_ids)),
+            ScanWorkItem.status.in_(["failed", "timeout"]),
+        )
+        .order_by(ScanWorkItem.priority.asc(), ScanWorkItem.id.asc())
+        .limit(QUALITY_GATE_MAX_REQUEUES_PER_ROUND)
+        .all()
+    )
+    requeued = 0
+    for item in rows:
+        meta = dict(item.item_metadata or {})
+        if meta.get("poc_validation"):
+            continue
+        retries = int(meta.get("quality_gate_retries") or 0)
+        if retries >= 1:
+            continue
+        meta["quality_gate_retries"] = retries + 1
+        meta["quality_gate_reason"] = "phase_coverage_gap_retry"
+        item.item_metadata = meta
+        item.status = "queued"
+        item.lease_until = None
+        item.finished_at = None
+        item.updated_at = datetime.now()
+        item.attempts = 0
+        item.max_attempts = max(int(item.max_attempts or 1), 1)
+        item.last_error = None
+        result = dict(item.result or {})
+        result["quality_gate_requeued"] = True
+        item.result = result
+        db.add(item)
+        requeued += 1
+    return requeued

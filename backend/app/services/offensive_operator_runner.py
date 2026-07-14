@@ -2786,6 +2786,34 @@ def run_offensive_operator_scan(
     # ── Persist findings from phase evidence into the Finding table ────────
     _persist_offensive_findings(db, job, phase_ledgers, targets)
 
+    try:
+        from app.services.scan_quality import run_scan_quality_gate
+
+        _quality_gate = run_scan_quality_gate(db, job)
+    except Exception as exc:  # noqa: BLE001
+        _quality_gate = {"passed": True, "status": "error_bypass", "actions": [], "error": str(exc)[:500]}
+        db.add(ScanLog(scan_job_id=job.id, source="quality-gate", level="WARNING",
+                       message=f"quality_gate_failed_open error={exc!s}"[:2000]))
+
+    if not _quality_gate.get("passed"):
+        state = dict(job.state_data or {})
+        state["quality_gate_active"] = True
+        state["completion_source"] = "quality_gate"
+        job.state_data = state
+        job.status = "running"
+        job.mission_progress = 99
+        job.current_step = "P21 Quality Gate · validação e retry automático"
+        db.add(ScanLog(scan_job_id=job.id, source="quality-gate", level="WARNING",
+                       message=(f"QUALITY GATE acionado — conclusão adiada actions={_quality_gate.get('actions')}"[:2000])))
+        db.commit()
+        try:
+            from app.workers.tasks import dispatch_scan_work_items
+
+            dispatch_scan_work_items.apply_async(args=[job.id], countdown=5)
+        except Exception:
+            pass
+        return campaign
+
     db.commit()
     return campaign
 

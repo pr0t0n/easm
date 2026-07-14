@@ -328,6 +328,7 @@ def batch_schedule_poc_validations(
         {"scheduled": N, "skipped_confirmed": N, "skipped_cap": N, "skipped_no_tool": N}
     """
     from app.models.models import Finding as _Finding, ScanJob as _ScanJob
+    from sqlalchemy import or_ as _or
 
     job = db.query(_ScanJob).filter(_ScanJob.id == scan_job_id).first()
     if not job:
@@ -339,7 +340,7 @@ def batch_schedule_poc_validations(
         .filter(
             _Finding.scan_job_id == scan_job_id,
             _Finding.severity.in_(["critical", "high"]),
-            _Finding.verification_status != "confirmed",
+            _or_(_Finding.verification_status.is_(None), _Finding.verification_status != "confirmed"),
             _Finding.is_false_positive.is_(False),
         )
         .order_by(_Finding.risk_score.desc())

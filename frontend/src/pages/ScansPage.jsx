@@ -479,6 +479,8 @@ function QualityPanel({ quality }) {
     : "var(--sev-critical-solid)";
   const components = Object.entries(quality.components || {});
   const gaps = Array.isArray(quality.gaps) ? quality.gaps : [];
+  const gate = quality.quality_gate || {};
+  const gateStatus = gate.status ? String(gate.status).replace(/_/g, " ") : "";
 
   return (
     <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "13px 14px", marginBottom: 14, background: "var(--surface)" }}>
@@ -498,6 +500,18 @@ function QualityPanel({ quality }) {
       <div style={{ height: 7, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden", marginBottom: 10 }}>
         <div style={{ width: `${score}%`, height: "100%", background: gradeColor, borderRadius: 99 }} />
       </div>
+
+      {gateStatus && (
+        <div style={{
+          border: "1px solid var(--line-soft)", borderRadius: 8, padding: "7px 9px",
+          marginBottom: 10, background: gate.status === "remediation_scheduled" ? "var(--sev-medium-bg)" : "var(--surface-soft)",
+          color: gate.status === "remediation_scheduled" ? "var(--sev-medium-text)" : "var(--ink-soft)",
+          fontSize: 11.5, lineHeight: 1.4,
+        }}>
+          Quality Gate: <strong>{gateStatus}</strong>
+          {gate.rounds ? ` · rodada ${gate.rounds}` : ""}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginBottom: gaps.length ? 12 : 0 }}>
         {components.map(([key, item]) => (

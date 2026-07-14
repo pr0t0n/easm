@@ -2554,8 +2554,49 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                     "scan_complete: scan_id=%d total_items=%d terminal=%d — marking completed",
                     scan_id, _total, _done,
                 )
+                try:
+                    from app.services.scan_quality import run_scan_quality_gate
+
+                    _quality_gate = run_scan_quality_gate(db, job)
+                except Exception as exc:  # noqa: BLE001
+                    _quality_gate = {
+                        "passed": True,
+                        "status": "error_bypass",
+                        "actions": [],
+                        "error": str(exc)[:500],
+                    }
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source="quality-gate",
+                        level="WARNING",
+                        message=f"quality_gate_failed_open error={exc!s}"[:2000],
+                    ))
+
+                if not _quality_gate.get("passed"):
+                    _actions = list(_quality_gate.get("actions") or [])
+                    _final_state = dict(job.state_data or {})
+                    _final_state["completion_source"] = "quality_gate"
+                    _final_state["quality_gate_active"] = True
+                    job.state_data = _final_state
+                    job.status = "running"
+                    job.mission_progress = 99
+                    job.current_step = "P21 Quality Gate · validação e retry automático"
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source="quality-gate",
+                        level="WARNING",
+                        message=(
+                            "QUALITY GATE acionado — conclusão adiada para melhorar evidência/cobertura "
+                            f"actions={_actions}"
+                        )[:2000],
+                    ))
+                    db.commit()
+                    dispatch_scan_work_items.apply_async(args=[scan_id, limit], countdown=5)
+                    return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
+
                 _final_state = dict(job.state_data or {})
                 _final_state["completion_source"] = "work_queue_dispatcher"
+                _final_state["quality_gate_active"] = False
                 _final_state["items_total"] = _total
                 _final_state["items_terminal"] = _done
                 job.state_data = _final_state
