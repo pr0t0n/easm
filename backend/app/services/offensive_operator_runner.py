@@ -277,6 +277,36 @@ def _scope_from_job(job: ScanJob, target: str, execution_mode: str = "controlled
     )
 
 
+def _parameterized_urls_in_authorized_scope(db, job: ScanJob, urls: list[str]) -> tuple[list[str], list[str]]:
+    """Keep active test upgrades inside the exact authorized scan scope."""
+    if not urls:
+        return [], []
+    try:
+        from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
+
+        authorized_scope = authorized_scope_for_scan(db, job.id)
+    except Exception:  # noqa: BLE001
+        authorized_scope = []
+        is_host_in_scope = None  # type: ignore[assignment]
+    if not authorized_scope or is_host_in_scope is None:
+        return list(urls), []
+
+    kept: list[str] = []
+    skipped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        raw = str(url or "").strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        host = _normalize_asset_host(raw)
+        if host and is_host_in_scope(host, authorized_scope):
+            kept.append(raw)
+        else:
+            skipped.append(raw)
+    return kept, skipped
+
+
 def _mcp_available() -> bool:
     try:
         response = requests.get(f"{settings.mcp_server_url.rstrip('/')}/health", timeout=3)
@@ -1812,6 +1842,32 @@ def run_offensive_operator_scan(
             _effective_target = target
             if phase_id in {"P10", "P12", "P13"}:
                 _p03_urls = list(dict(job.state_data or {}).get("discovered_parameterized_urls") or [])
+                _p03_urls, _out_of_scope_urls = _parameterized_urls_in_authorized_scope(db, job, _p03_urls)
+                if _out_of_scope_urls:
+                    _scope_state = dict(job.state_data or {})
+                    _scope_state["discovered_parameterized_urls"] = _p03_urls[:100]
+                    _scope_events = list(_scope_state.get("out_of_scope_parameterized_urls_skipped") or [])
+                    _scope_events.append(
+                        {
+                            "phase": phase_id,
+                            "skipped_count": len(_out_of_scope_urls),
+                            "sample": _out_of_scope_urls[:10],
+                        }
+                    )
+                    _scope_state["out_of_scope_parameterized_urls_skipped"] = _scope_events[-20:]
+                    job.state_data = _scope_state
+                    db.add(
+                        ScanLog(
+                            scan_job_id=job.id,
+                            source="scan-intelligence",
+                            level="WARNING",
+                            message=(
+                                f"target_upgrade_scope_filtered phase={phase_id} "
+                                f"skipped={len(_out_of_scope_urls)}"
+                            ),
+                        )
+                    )
+                    db.commit()
                 if _p03_urls:
                     # P10 (sqlmap): prefer URLs with `id=` or numeric params (SQLi-likely)
                     # P12 (dalfox): prefer URLs with text/string params (XSS-likely)

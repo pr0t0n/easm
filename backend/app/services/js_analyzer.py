@@ -15,6 +15,7 @@ endpoint_discovery (fecha o loop).
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -126,7 +127,10 @@ def run_js_analysis_for_scan(db, job) -> dict:
     from app.services.offensive_inventory_service import OffensiveInventoryService, sha256_text
 
     state = dict(getattr(job, "state_data", None) or {})
-    root = _root_domain(str(getattr(job, "target_query", "") or "").split(",")[0].strip())
+    target_raw = str(getattr(job, "target_query", "") or "").split(",")[0].strip()
+    target_url = target_raw if target_raw.startswith(("http://", "https://")) else f"https://{target_raw}"
+    allowed_host = (urlparse(target_url).hostname or "").lower()
+    root = _root_domain(allowed_host or target_raw)
     urls = list(state.get("discovered_endpoints") or [])
     try:
         for (det,) in db.query(Finding.details).filter(Finding.scan_job_id == job.id).limit(800).all():
@@ -139,7 +143,10 @@ def run_js_analysis_for_scan(db, job) -> dict:
     except Exception:
         pass
 
-    js_files = _candidate_js(urls)
+    js_files = [
+        u for u in _candidate_js(urls)
+        if (urlparse(u).hostname or "").lower() == allowed_host
+    ]
     if not js_files:
         return {"skipped": "no_js"}
 

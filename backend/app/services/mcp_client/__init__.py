@@ -59,7 +59,7 @@ _PROFILE_TIMEOUT_HINTS: dict[str, int] = {
     # runner kept working in the background. Keep the MCP wait aligned with
     # the runner profile so the backend receives the real result.
     "nuclei_cves": 900,
-    "nikto_basic": 900,
+    "nikto_basic": 360,
     "sqlmap_basic": 600,
     "dalfox_xss": 600,
     "wapiti_scan": 1200,

@@ -328,7 +328,7 @@ def batch_schedule_poc_validations(
         {"scheduled": N, "skipped_confirmed": N, "skipped_cap": N, "skipped_no_tool": N}
     """
     from app.models.models import Finding as _Finding, ScanJob as _ScanJob
-    from sqlalchemy import or_ as _or
+    from sqlalchemy import or_ as _or_
 
     job = db.query(_ScanJob).filter(_ScanJob.id == scan_job_id).first()
     if not job:

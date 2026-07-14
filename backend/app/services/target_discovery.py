@@ -84,7 +84,7 @@ def profile_target(base: str, max_pages: int = 25, max_depth: int = 2,
     queue: list[tuple[str, int]] = [(base + "/", 0)] + [(s, 1) for s in (seeds or [])]
     pages, forms, param_endpoints, js_files = [], [], [], set()
 
-    with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
+    with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False,
                       headers=_UA, cookies=cookies or {}) as c:
         while queue and len(pages) < max_pages:
             url, depth = queue.pop(0)

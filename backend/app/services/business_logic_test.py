@@ -83,22 +83,30 @@ def _collections_from_wordlist(c: httpx.Client, base: str, deadline: float = 0.0
     — esta wordlist pode gerar ~620 probes × 15s contra um alvo lento."""
     found = []
     seen = set()
+    redirect_only = 0
 
-    def _probe(url: str) -> None:
+    def _probe(url: str) -> bool:
+        nonlocal redirect_only
         if url in seen:
-            return
+            return True
         seen.add(url)
         try:
             r = c.get(url)
         except Exception:
-            return
+            return True
+        if r.status_code in {301, 302, 303, 307, 308}:
+            redirect_only += 1
+            if redirect_only >= 80 and not found:
+                return False
         if r.status_code == 200:
+            redirect_only = 0
             try:
                 data = r.json().get("data")
             except Exception:
                 data = None
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 found.append(url)
+        return True
 
     # 1) wordlist embutida (termos de negócio) + variações de caso
     prefixes = ["/api/", "/rest/"]
@@ -107,13 +115,15 @@ def _collections_from_wordlist(c: httpx.Client, base: str, deadline: float = 0.0
             break
         for variant in _case_variants(word):
             for pre in prefixes:
-                _probe(base.rstrip("/") + pre + variant)
+                if not _probe(base.rstrip("/") + pre + variant):
+                    return found
 
     # 2) SecLists api-endpoints.txt — paths reais de APIs (sondagem direta, baixo volume)
     for entry in _load_wordlist("api-endpoints.txt", [])[:300]:
         if deadline > 0 and time.monotonic() > deadline:
             break
-        _probe(base.rstrip("/") + "/" + entry.lstrip("/"))
+        if not _probe(base.rstrip("/") + "/" + entry.lstrip("/")):
+            break
 
     return found
 # Parâmetros de negócio em query string (wordlist → regex de borda).
@@ -153,6 +163,17 @@ def _capture(base: str, token: str = "", creds: dict | None = None) -> dict:
     injeção de token. Navega rotas de negócio p/ disparar XHRs autenticadas
     (basket/{id}, cupom…). Retorna o dict cru (api_requests + storage)."""
     try:
+        from urllib.parse import urljoin, urlparse
+
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False) as probe:
+            pre = probe.get(base)
+        location = pre.headers.get("location") or ""
+        if location:
+            target_host = (urlparse(base).hostname or "").lower()
+            redirect_host = (urlparse(urljoin(base + "/", location)).hostname or "").lower()
+            if redirect_host and redirect_host != target_host:
+                return {"login_status": "skipped-cross-host-redirect", "redirect_location": location}
+
         from app.services.kali_executor import execute_via_kali
         user = (creds or {}).get("user", "")
         pw = (creds or {}).get("pass", "")
@@ -426,7 +447,7 @@ def _token_reuse_after_logout(base: str, token: str, cookies: dict) -> list[dict
         return []
     out = []
     headers = {"Authorization": f"Bearer {token}"}
-    with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
+    with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False,
                       headers=headers, cookies=dict(cookies or {})) as c:
         # (a) baseline autenticado
         whoami, ident = None, ""
@@ -628,7 +649,7 @@ def run_as_tool(target: str, extra_urls: list[str] | None = None, max_seconds: i
         injected_tok = (token or "") if "inject" in login_status else ""
         findings += _sensitive_storage(cap, base, injected_tok)
 
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False,
                           cookies=cookies, headers=headers) as c:
             # coleções: chromium-capture (reais) + SWAGGER/OpenAPI (spec real,
             # SecLists Swagger.txt) + WORDLIST (autenticado, SecLists api-endpoints

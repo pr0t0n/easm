@@ -259,7 +259,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          # bl-test já faz a captura chromium internamente (não duplicar como required).
          ["skill.idor_object_authorization", "skill.vuln.business_logic",
           "skill.vuln.bola_bfla", "skill.vuln.csrf", "skill.vuln.api_security"], ["bl-test"],
-         ["ffuf", "arjun", "chromium-capture", "curl",
+         ["arjun", "chromium-capture", "curl",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
           "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries without brute-force",
@@ -267,28 +267,20 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          # hydra/medusa REMOVED: they were being skipped (noisy brute-force, blocked by WAF/rate-limit)
          # Replaced with template-based auth testing — deterministic, not brute-force:
          # nuclei-auth-bypass: 400+ ProjectDiscovery templates for auth bypass patterns
-         # nuclei-default-credentials: tests known default passwords per detected technology
          # jwt_tool: JWT alg:none, RS256→HS256 confusion, weak HMAC key, expired token acceptance
          # nuclei-jwt: JWT/OAuth misconfig templates (alg:none, token leak via referrer/log)
-         # nuclei-oauth: OAuth open redirect, PKCE bypass, implicit flow token leakage
-         # crackmapexec KEPT for internal network scope only (AD/SMB testing)
-         ["jwt_tool", "crackmapexec", "ffuf",
-          "nuclei-auth",            # HackerOne: 119 auth bypass reports — default creds, 2FA bypass
-          "nuclei-jwt",             # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
-          "nuclei-default-credentials",  # Known default passwords by technology stack
-          "nuclei-oauth"]),         # OAuth misconfig: open redirect, PKCE, implicit flow
+         ["jwt_tool",
+          "nuclei-jwt"]),           # HackerOne: 19 JWT/OAuth reports — alg:none, token leak
         ("P15", "File Handling Testing", "Validate exposed files, git/secret leaks, supply chain and upload risks",
-         ["skill.chain.exposed_git_to_credential_leak"], ["gitleaks"],
-         ["trufflehog", "gau", "waybackurls",
+         ["skill.chain.exposed_git_to_credential_leak"], ["nuclei-exposure"],
+         ["gau", "waybackurls",
           "nuclei-lfi",             # HackerOne: 13 path traversal/LFI reports
           "nuclei-exposure",        # HackerOne: 78 info/secret exposure — .env, config files
           "nuclei-misconfiguration",# .env, .git, .DS_Store, backup files, CI/CD artifacts
-          "semgrep",                # SAST: secrets in JS bundles, exposed config
-          "nuclei-file-upload",     # Unrestricted file upload → WebShell chain
-          "trivy"]),                # Supply chain: CVEs in Docker images, npm/pip packages
+          "nuclei-file-upload"]),    # Unrestricted file upload → WebShell chain
         ("P16", "API Input Surface Review", "Validate API, GraphQL, and parameterized endpoint coverage",
          ["skill.discovery.parameter_discovery"], ["arjun"],
-         ["paramspider", "ffuf", "wfuzz", "gau", "waybackurls",
+         ["paramspider", "ffuf-params", "wfuzz", "gau", "waybackurls",
           "nuclei-graphql",         # HackerOne: 25 GraphQL introspection / API disclosure reports
           "nuclei-exposure",        # HackerOne: hardcoded API keys, token leaks in API responses
           "nuclei-swagger"]),       # Swagger/OpenAPI exposure → API schema dump for auth bypass
@@ -546,7 +538,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("dirsearch", "dirsearch_paths", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("wfuzz", "wfuzz_param_names", ["parameter_discovery", "fuzzing"], "ffuf_parser"),
         # Vulnerability scanning
-        entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=1800),
+        entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=360),
         entry("wpscan", "wpscan_basic", ["cms_audit", "vuln_scanning"], "generic_json_parser", default_timeout=900),
         # Credential / brute-force
         entry("crackmapexec", "crackmapexec_smb", ["smb_enumeration", "auth_validation"], "generic_json_parser"),
@@ -1736,7 +1728,10 @@ class OffensiveSkillRuntime:
         mcp_results: list[dict[str, Any]] = []
         executed_tool_keys: set[str] = set()
         executed_tool_signatures: dict[str, dict[str, Any]] = {}
-        reuse_equivalent_tools = phase_id in {"P03", "P04", "P05", "P06", "P07", "P08"}
+        reuse_equivalent_tools = phase_id in {
+            "P03", "P04", "P05", "P06", "P07", "P08",
+            "P09", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20",
+        }
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
         required_skill_set = set(contract.get("required_skills") or [])
@@ -1747,7 +1742,6 @@ class OffensiveSkillRuntime:
                 {
                     "phase_id": phase_id,
                     "target": target,
-                    "tool_name": tool.get("tool_name"),
                     "profile": tool.get("profile"),
                     "arguments": tool.get("arguments") or {},
                     "backend": tool.get("execution_backend") or "mcp",

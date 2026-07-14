@@ -65,7 +65,7 @@ def fetch_and_extract(url: str, scope_root: str | None = None) -> dict:
         "secrets": [], "external_scripts": [],
     }
     try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False) as c:
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False) as c:
             r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (pentest-discovery)"})
             out["status"] = r.status_code
             body = r.text[: _MAX_BYTES] if r.text else ""
