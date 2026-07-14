@@ -462,15 +462,87 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   );
 }
 
+function QualityPanel({ quality }) {
+  if (!quality) {
+    return (
+      <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "12px 14px", marginBottom: 14, background: "var(--surface-soft)" }}>
+        <div className="sk-eyebrow" style={{ marginBottom: 6 }}>Qualidade do teste</div>
+        <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>Calculando cobertura, evidências e validação…</div>
+      </div>
+    );
+  }
+
+  const score = Math.max(0, Math.min(100, Number(quality.score || 0)));
+  const gradeColor = score >= 85 ? "var(--sev-low-solid)"
+    : score >= 70 ? "var(--brand-500)"
+    : score >= 55 ? "var(--sev-medium-solid)"
+    : "var(--sev-critical-solid)";
+  const components = Object.entries(quality.components || {});
+  const gaps = Array.isArray(quality.gaps) ? quality.gaps : [];
+
+  return (
+    <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "13px 14px", marginBottom: 14, background: "var(--surface)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+        <div>
+          <div className="sk-eyebrow" style={{ marginBottom: 3 }}>Qualidade do teste</div>
+          <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+            {quality.profile?.label || "Perfil"} · profundidade {quality.profile?.depth || "—"}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="sk-mono" style={{ fontSize: 24, lineHeight: 1, fontWeight: 800, color: gradeColor }}>{quality.grade || "—"}</div>
+          <div className="sk-mono" style={{ fontSize: 11, color: "var(--ink-soft)", marginTop: 2 }}>{score.toFixed(1)}%</div>
+        </div>
+      </div>
+
+      <div style={{ height: 7, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden", marginBottom: 10 }}>
+        <div style={{ width: `${score}%`, height: "100%", background: gradeColor, borderRadius: 99 }} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginBottom: gaps.length ? 12 : 0 }}>
+        {components.map(([key, item]) => (
+          <div key={key} style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "8px 9px", background: "var(--surface-soft)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "baseline" }}>
+              <span style={{ fontSize: 10.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                {key.replace(/_/g, " ")}
+              </span>
+              <b className="sk-mono" style={{ fontSize: 12, color: "var(--ink)" }}>{Number(item.score || 0).toFixed(0)}%</b>
+            </div>
+            <div style={{ height: 4, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden", marginTop: 6 }}>
+              <div style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0)))}%`, height: "100%", background: Number(item.score || 0) >= 70 ? "var(--sev-low-solid)" : "var(--sev-medium-solid)" }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {gaps.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-soft)", marginBottom: 6 }}>Gaps principais</div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {gaps.slice(0, 4).map((gap, idx) => (
+              <div key={`${gap.area}-${idx}`} style={{ borderLeft: `3px solid ${gap.severity === "high" ? "var(--sev-critical-solid)" : gap.severity === "medium" ? "var(--sev-medium-solid)" : "var(--line)"}`, paddingLeft: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>{gap.title}</div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.45 }}>{gap.action}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Painel de detalhe lateral ────────────────────────────────────────────────
 function DetailPanel({ scan, logs, onClose }) {
   const [phases, setPhases] = useState([]);
   const [breakdown, setBreakdown] = useState(null);
+  const [quality, setQuality] = useState(null);
   const [progress, setProgress] = useState(scan?.mission_progress ?? 0);
 
   useEffect(() => {
     if (!scan?.id) return;
     let cancelled = false;
+    setQuality(null);
     const load = async () => {
       try {
         const { data } = await client.get(`/api/scans/${scan.id}/phase-monitor`, { _skipToast: true });
@@ -481,6 +553,10 @@ function DetailPanel({ scan, logs, onClose }) {
       try {
         const { data } = await client.get(`/api/scans/${scan.id}/phase-breakdown`, { _skipToast: true });
         if (!cancelled && data?.phases) setBreakdown(data);
+      } catch { /* silencioso */ }
+      try {
+        const { data } = await client.get(`/api/scans/${scan.id}/quality`, { _skipToast: true });
+        if (!cancelled) setQuality(data || null);
       } catch { /* silencioso */ }
     };
     load();
@@ -565,6 +641,8 @@ function DetailPanel({ scan, logs, onClose }) {
 
         {/* fases */}
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
+          <QualityPanel quality={quality} />
+
           {rows.length === 0 ? (
             <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 12, padding: "32px 0" }}>Aguardando dados das fases…</div>
           ) : (

@@ -30,6 +30,7 @@ from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
 from app.services.strategy_runtime import evaluate_scan_authorization
 from app.services.scan_profiles import normalize_scan_level, scan_profile
+from app.services.scan_quality import build_scan_quality
 from app.services.risk_service import (
     build_priority_reason,
     build_rating_timeline,
@@ -5232,6 +5233,23 @@ def scan_phase_monitor(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
     return build_phase_monitor(db, job)
+
+
+@router.get("/scans/{scan_id}/quality")
+def scan_quality(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+    if not current_user.is_admin:
+        allowed_ids = [g.id for g in current_user.groups]
+        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+
+    return build_scan_quality(db, job)
 
 
 @router.get("/scans/{scan_id}/report", response_model=ReportResponse)
