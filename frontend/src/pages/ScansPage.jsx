@@ -480,6 +480,16 @@ function QualityPanel({ quality }) {
   const components = Object.entries(quality.components || {});
   const gaps = Array.isArray(quality.gaps) ? quality.gaps : [];
   const gate = quality.quality_gate || {};
+  const runtime = quality.runtime_visibility || {};
+  const gateRuntime = runtime.quality_gate || {};
+  const p21 = runtime.p21_validation || {};
+  const agentRuntime = runtime.agent_runtime || {};
+  const gateActions = Array.isArray(gateRuntime.last_actions) ? gateRuntime.last_actions : [];
+  const gateHistory = Array.isArray(gateRuntime.history) ? gateRuntime.history : [];
+  const fallbackItems = Array.isArray(gateRuntime.fallback_items) ? gateRuntime.fallback_items : [];
+  const p21Recent = Array.isArray(p21.recent) ? p21.recent : [];
+  const llmRecent = Array.isArray(agentRuntime.recent_llm_reasoning) ? agentRuntime.recent_llm_reasoning : [];
+  const mcpRecent = Array.isArray(agentRuntime.recent_mcp_contracts) ? agentRuntime.recent_mcp_contracts : [];
   const gateStatus = gate.status ? String(gate.status).replace(/_/g, " ") : "";
 
   return (
@@ -510,6 +520,92 @@ function QualityPanel({ quality }) {
         }}>
           Quality Gate: <strong>{gateStatus}</strong>
           {gate.rounds ? ` · rodada ${gate.rounds}` : ""}
+        </div>
+      )}
+
+      {(gateActions.length > 0 || fallbackItems.length > 0 || gateHistory.length > 0) && (
+        <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "9px 10px", marginBottom: 10, background: "var(--surface-soft)" }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 7 }}>Ações do Quality Gate</div>
+          {gateActions.length > 0 && (
+            <div style={{ display: "grid", gap: 5, marginBottom: fallbackItems.length ? 8 : 0 }}>
+              {gateActions.slice(-4).map((action, idx) => (
+                <div key={`gate-action-${idx}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11.5, color: "var(--ink-muted)" }}>
+                  <span style={{ fontWeight: 700, color: "var(--ink)" }}>{String(action.type || "ação").replace(/_/g, " ")}</span>
+                  <span className="sk-mono">
+                    {action.scheduled != null ? `${action.scheduled} agendado(s)` : action.requeued != null ? `${action.requeued} requeue` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {fallbackItems.length > 0 && (
+            <div style={{ display: "grid", gap: 5 }}>
+              {fallbackItems.slice(0, 4).map((item) => (
+                <div key={`fallback-${item.id}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
+                  <span className="sk-mono" style={{ color: "var(--ink)", fontWeight: 700 }}>{item.phase_id}</span>{" "}
+                  {item.from || "tool"} → <strong style={{ color: "var(--ink)" }}>{item.to}</strong>
+                  <span className="sk-mono" style={{ marginLeft: 6 }}>{item.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {gateHistory.length > 0 && (
+            <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {gateHistory.slice(-4).map((row, idx) => (
+                <span key={`gate-history-${idx}`} className="sk-mono" style={{ fontSize: 10.5, color: "var(--ink-soft)", border: "1px solid var(--line)", borderRadius: 6, padding: "2px 5px", background: "var(--surface)" }}>
+                  r{row.round}: {Number(row.score || 0).toFixed(0)}% {row.grade || ""}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, marginBottom: 10 }}>
+        <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "8px 9px", background: "var(--surface-soft)" }}>
+          <div style={{ fontSize: 10.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>P21 validação</div>
+          <div className="sk-mono" style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", marginTop: 3 }}>{p21.total || 0}</div>
+          <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>
+            {p21.confirmed || 0} confirmados · {p21.refuted || 0} refutados · {p21.artifacts || 0} artefatos
+          </div>
+        </div>
+        <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "8px 9px", background: "var(--surface-soft)" }}>
+          <div style={{ fontSize: 10.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>Agente / MCP / LLM</div>
+          <div className="sk-mono" style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", marginTop: 3 }}>{agentRuntime.llm_reasoning_count || 0}</div>
+          <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>
+            {agentRuntime.mcp_contract_count || 0} MCP · {agentRuntime.orchestrated_phases || 0} fases · {agentRuntime.skill_invocation_count || 0} skills
+          </div>
+        </div>
+      </div>
+
+      {(p21Recent.length > 0 || llmRecent.length > 0 || mcpRecent.length > 0) && (
+        <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "9px 10px", marginBottom: 10, background: "var(--surface)" }}>
+          {p21Recent.length > 0 && (
+            <div style={{ marginBottom: llmRecent.length || mcpRecent.length ? 8 : 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 5 }}>Últimas validações P21</div>
+              {p21Recent.slice(0, 3).map((row) => (
+                <div key={`p21-${row.id}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
+                  <span className="sk-mono" style={{ color: "var(--ink)", fontWeight: 700 }}>#{row.finding_id}</span>{" "}
+                  {row.validator || "validator"} · <strong style={{ color: row.result === "confirmed" ? "var(--sev-low-text)" : "var(--sev-medium-text)" }}>{row.result}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+          {(llmRecent.length > 0 || mcpRecent.length > 0) && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 5 }}>Decisão IA / MCP recente</div>
+              {llmRecent.slice(-2).map((row, idx) => (
+                <div key={`llm-${idx}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
+                  LLM: <strong style={{ color: "var(--ink)" }}>{row.execution_decision || row.decision || row.action || "decisão registrada"}</strong>
+                </div>
+              ))}
+              {mcpRecent.slice(-2).map((row, idx) => (
+                <div key={`mcp-${idx}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
+                  MCP: <strong style={{ color: "var(--ink)" }}>{row.adapter || row.tool || row.skill_id || "contrato registrado"}</strong>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -290,7 +290,11 @@ def test_tool_execution_dispatch_receives_skill_contract(monkeypatch) -> None:
     )
 
     assert captured["skill_id"] == "vuln-injection"
-    assert captured["skill_contract"] == {"skill_id": "vuln-injection"}
+    assert captured["skill_contract"]["skill_id"] == "vuln-injection"
+    assert "mcp_adapter_contract" in captured["skill_contract"]
+    assert "agent_contract" in captured["skill_contract"]
+    assert "llm_reasoning" in captured["skill_contract"]
+    assert "multi_agent" in captured["skill_contract"]
     assert captured["technique"] == {"name": "SQLi validation"}
     assert captured["evidence_required"] == ["sql error"]
     assert captured["constraints"] == ["safe batch mode"]

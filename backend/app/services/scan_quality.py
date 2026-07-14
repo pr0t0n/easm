@@ -411,6 +411,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "grade": grade,
         "label": label,
         "quality_gate": dict((job.state_data or {}).get("quality_gate") or {}),
+        "runtime_visibility": _runtime_visibility(job, validations, artifacts, work_items),
         "components": components,
         "summary": {
             "findings_total": len(findings),
@@ -432,6 +433,85 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "Persistir CoverageItem por endpoint/parâmetro para medir cobertura real.",
             "Reexecutar fases com work items falhos antes de concluir o relatório executivo.",
         ],
+    }
+
+
+def _runtime_visibility(
+    job: ScanJob,
+    validations: list[ValidationRun],
+    artifacts: list[EvidenceArtifact],
+    work_items: list[ScanWorkItem],
+) -> dict[str, Any]:
+    state = dict(job.state_data or {})
+    gate = dict(state.get("quality_gate") or {})
+    p21_validations: list[dict[str, Any]] = []
+    for validation in validations:
+        meta = dict(validation.run_metadata or {})
+        if str(meta.get("phase_id") or "").upper() != "P21":
+            continue
+        p21_validations.append({
+            "id": validation.id,
+            "finding_id": validation.finding_id,
+            "validator": validation.validator_name,
+            "result": validation.result,
+            "target": meta.get("target"),
+            "artifact_id": meta.get("artifact_id") or validation.attempt_artifact_id,
+            "work_item_id": meta.get("work_item_id"),
+            "created_at": validation.created_at.isoformat() if getattr(validation, "created_at", None) else None,
+        })
+    p21_validations.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+
+    p21_artifact_count = 0
+    for artifact in artifacts:
+        if str(artifact.phase_id or "").upper() == "P21" or str(artifact.artifact_type or "") == "p21_validation":
+            p21_artifact_count += 1
+
+    fallback_items: list[dict[str, Any]] = []
+    for item in work_items:
+        meta = dict(item.item_metadata or {})
+        if not meta.get("quality_gate_fallback"):
+            continue
+        fallback_items.append({
+            "id": item.id,
+            "phase_id": item.phase_id,
+            "target": item.target,
+            "from": meta.get("quality_gate_original_tool"),
+            "to": item.tool_name,
+            "status": item.status,
+            "reason": meta.get("quality_gate_reason"),
+            "created_at": item.created_at.isoformat() if getattr(item, "created_at", None) else None,
+        })
+    fallback_items.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+
+    llm_reasoning = list(state.get("llm_reasoning") or [])
+    mcp_contracts = list(state.get("mcp_adapter_contracts") or [])
+    feedback = list(state.get("llm_reasoning_feedback") or [])
+    orchestration = dict(state.get("agent_orchestration") or {})
+    skill_invocations = list(state.get("skill_invocation") or state.get("skill_invocations") or [])
+
+    return {
+        "quality_gate": {
+            "last_actions": list(gate.get("last_actions") or [])[-8:],
+            "history": list(gate.get("history") or [])[-6:],
+            "fallback_items": fallback_items[:8],
+        },
+        "p21_validation": {
+            "total": len(p21_validations),
+            "confirmed": len([row for row in p21_validations if str(row.get("result") or "").lower() == "confirmed"]),
+            "refuted": len([row for row in p21_validations if str(row.get("result") or "").lower() == "refuted"]),
+            "artifacts": p21_artifact_count,
+            "recent": p21_validations[:8],
+        },
+        "agent_runtime": {
+            "llm_reasoning_count": len(llm_reasoning),
+            "mcp_contract_count": len(mcp_contracts),
+            "reasoning_feedback_count": len(feedback),
+            "orchestrated_phases": len(orchestration),
+            "skill_invocation_count": len(skill_invocations),
+            "recent_llm_reasoning": llm_reasoning[-5:],
+            "recent_mcp_contracts": mcp_contracts[-5:],
+            "recent_feedback": feedback[-5:],
+        },
     }
 
 
