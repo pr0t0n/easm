@@ -189,29 +189,27 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "ghdb-public-indexes",
           "sublist3r", "findomain", "dnsrecon-brt", "dnsrecon-zt", "dnsenum", "shuffledns", "alterx",
           "nuclei-takeover"]),  # HackerOne: 49 subdomain takeover reports
-        ("P02", "Port Service Discovery", "Discover exposed ports and services; enrich with OSINT banners",
+        ("P02", "Port Service Discovery", "Discover exposed ports and services; keep the gate fast so downstream web phases can start",
          ["skill.recon.port_service_discovery"], ["naabu"],
-         ["shodan-cli", "nmap", "nmap-vuln", "nmap-ssl", "nmap-ssh", "nmap-smb", "nmap-dns",
-          "masscan", "sslscan", "testssl"]),
+         ["nmap"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
          # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken tool in Kali).
          # feroxbuster is Rust-based, 10x faster, smart status filtering, automatic recursion.
          # ffuf remains as primary (most flexible); feroxbuster as fast fallback.
          ["feroxbuster", "katana", "hakrawler", "gospider", "dirsearch",
-          "gau", "waybackurls", "nmap-http",
-          "nuclei-lfi"]),  # HackerOne: 13 path traversal reports — scan dirs for exposed paths
+          "gau", "waybackurls"]),
         ("P04", "Parameter Discovery", "Discover input points and parameters",
          ["skill.discovery.parameter_discovery"], ["arjun"],
          # ffuf: use fingerprint-first gate — P07 tech_stack selects wordlist before ffuf runs.
          # Generic 220k wordlist replaced by stack-specific 500-1200 entry lists.
          # This reduces ffuf avg from 497s → ~45s per target.
-         ["paramspider", "ffuf", "ffuf-params", "ffuf-content", "gau", "waybackurls"]),
+         ["paramspider", "ffuf-params", "gau", "waybackurls"]),
         ("P05", "Surface Expansion", "Expand hidden routes and crawlable content via HTTP headers + OWASP fingerprint",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
          # gobuster REPLACED by feroxbuster (same reason as P03: 0 completions, broken).
-         # nikto KEPT for banner-grabbing but findings auto-tagged as candidate (high FP rate).
-         ["feroxbuster", "katana", "httpx", "whatweb", "nikto", "curl-headers", "sslscan", "wafw00f"]),
+         # Deep vuln/TLS scanners live in P09/P18; P05 stays discovery/fingerprint only.
+         ["feroxbuster", "katana", "httpx", "whatweb", "curl-headers", "wafw00f"]),
         ("P06", "HTTP Fingerprinting & WAF Detection", "Fingerprint HTTP behavior, headers, WAF profile and evasion clues",
          ["skill.recon.port_service_discovery"], ["httpx"],
          ["wafw00f", "curl-headers", "nmap-http", "whatweb",
@@ -1739,9 +1737,25 @@ class OffensiveSkillRuntime:
 
         mcp_results: list[dict[str, Any]] = []
         executed_tool_keys: set[str] = set()
+        executed_tool_signatures: dict[str, dict[str, Any]] = {}
+        reuse_equivalent_tools = phase_id in {"P03", "P04", "P05", "P06", "P07", "P08"}
         ran_skills: list[str] = []
         tool_plans: list[dict[str, Any]] = []
         required_skill_set = set(contract.get("required_skills") or [])
+
+        def _dedupe_signature(tool: dict[str, Any]) -> str:
+            return stable_id(
+                "PTS",
+                {
+                    "phase_id": phase_id,
+                    "target": target,
+                    "tool_name": tool.get("tool_name"),
+                    "profile": tool.get("profile"),
+                    "arguments": tool.get("arguments") or {},
+                    "backend": tool.get("execution_backend") or "mcp",
+                },
+            )
+
         for sid in ordered_sids:
             skill = registry_skills[sid]
             try:
@@ -1753,15 +1767,31 @@ class OffensiveSkillRuntime:
             tool_plans.append(tp)
             ran_skills.append(sid)
             new_tools: list[dict[str, Any]] = []
+            signature_by_key: dict[str, str] = {}
             for t in tp["tools"]:
                 execution_key = str(t.get("execution_key") or "")
                 if execution_key in executed_tool_keys:
                     continue
                 executed_tool_keys.add(execution_key)
+                signature = _dedupe_signature(t)
+                if reuse_equivalent_tools and signature in executed_tool_signatures:
+                    reused = dict(executed_tool_signatures[signature])
+                    reused["execution_key"] = execution_key
+                    reused["skill_id"] = sid
+                    reused["deduped_from_execution_key"] = executed_tool_signatures[signature].get("execution_key")
+                    mcp_results.append(reused)
+                    continue
+                signature_by_key[execution_key] = signature
                 new_tools.append(t)
             if not new_tools:
                 continue
-            mcp_results.extend(self.executor.execute({**tp, "tools": new_tools}, target))
+            phase_results = self.executor.execute({**tp, "tools": new_tools}, target)
+            for result in phase_results:
+                rkey = str(result.get("execution_key") or "")
+                signature = signature_by_key.get(rkey)
+                if reuse_equivalent_tools and signature:
+                    executed_tool_signatures[signature] = dict(result)
+            mcp_results.extend(phase_results)
         if not tool_plans:
             ledger = create_phase_ledger(contract)
             ledger.update(status="blocked", blocking_reason="no_skill_compiled", retrieved_rag_context=retrieved["retrieved_skills"])

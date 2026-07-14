@@ -186,11 +186,12 @@ nmap_service_detect:
   tool: nmap
   category: recon
   phase: RECONNAISSANCE
-  description: "Service/version detection + default scripts + OS fingerprint (article §8: `nmap -sV -sC -O`)."
-  # -sV service version, -sC default scripts, -O OS detection (-O may need root in some envs),
-  # --top-ports 1000 ensures broad coverage but still fast, -T4 aggressive timing.
-  cmd: ["nmap", "-sV", "-sC", "-Pn", "--top-ports", "1000", "-T4", "--max-retries", "2", "{host}"]
-  timeout: 900
+  description: "Bounded ASM service/version discovery for the P02 gate. Deeper NSE scripts run in later vulnerability phases."
+  # P02 is a gate for crawling/fingerprinting. Keep it fast and bounded on
+  # public/WAF targets; heavyweight NSE checks belong to P09/P11/P18.
+  cmd: ["nmap", "-sV", "--version-light", "-Pn", "--open", "--top-ports", "200", "-T4",
+        "--max-retries", "1", "--max-rtt-timeout", "2s", "--host-timeout", "240s", "{host}"]
+  timeout: 300
   parser: raw
 
 # Batch variant: one nmap run across multiple hosts from a file.
@@ -200,10 +201,11 @@ nmap_service_detect_batch:
   category: recon
   phase: RECONNAISSANCE
   target_type: targets_file
-  description: "Batch service detection across multiple hosts via -iL."
-  cmd: ["nmap", "-sV", "-Pn", "--top-ports", "200", "-T4", "--max-retries", "2",
+  description: "Bounded batch service detection across multiple hosts via -iL."
+  cmd: ["nmap", "-sV", "--version-light", "-Pn", "--top-ports", "200", "-T4",
+        "--max-retries", "1", "--max-rtt-timeout", "2s", "--host-timeout", "240s",
         "--open", "-oG", "-", "-iL", "{target_file}"]
-  timeout: 900
+  timeout: 300
   parser: raw
 
 masscan_full:
