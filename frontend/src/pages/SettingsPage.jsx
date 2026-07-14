@@ -11,8 +11,8 @@ const INPUT = {
 };
 const BTN = (variant = "primary") => ({
   padding: "8px 18px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13,
-  background: variant === "primary" ? "var(--brand-600)" : "var(--surface-alt)",
-  color: variant === "primary" ? "#fff" : "var(--ink)",
+  background: variant === "primary" ? "var(--brand-600)" : variant === "danger" ? "#b91c1c" : "var(--surface-alt)",
+  color: variant === "primary" || variant === "danger" ? "#fff" : "var(--ink)",
 });
 const CHIP = (ok) => ({
   display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11,
@@ -24,6 +24,32 @@ const CARD = {
 };
 
 export default function SettingsPage() {
+  // ── Limpeza operacional ───────────────────────────────────────────────────
+  const [resettingOperational, setResettingOperational] = useState(false);
+  const [resetSummary, setResetSummary] = useState(null);
+
+  const resetOperationalData = async () => {
+    const confirmation = window.prompt(
+      "Esta ação remove scans executados, vulnerabilidades, alvos/ativos descobertos, logs e evidências associadas. Agendamentos e configurações serão preservados.\n\nDigite LIMPAR para confirmar."
+    );
+    if (confirmation !== "LIMPAR") return;
+
+    setResettingOperational(true);
+    try {
+      const { data } = await client.post("/api/scans/reset-operational");
+      setResetSummary(data);
+      const deleted = data.deleted || {};
+      const preserved = data.preserved || {};
+      toastSuccess(
+        `Limpeza concluída: ${deleted.scan_jobs || 0} scans, ${deleted.vulnerabilities || 0} vulnerabilidades e ${deleted.assets || 0} alvos/ativos removidos. ${preserved.enabled_schedules || 0} agendamentos preservados.`
+      );
+    } catch (e) {
+      toastError(e?.response?.data?.detail || "Falha ao limpar scans e vulnerabilidades.");
+    } finally {
+      setResettingOperational(false);
+    }
+  };
+
   // ── Shodan ────────────────────────────────────────────────────────────────
   const [shodanKey, setShodanKey] = useState("");
   const [shodanStatus, setShodanStatus] = useState(null); // {configured, enabled, status}
@@ -167,6 +193,38 @@ export default function SettingsPage() {
       <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 28 }}>
         Integrações e chaves de API utilizadas pelos scanners.
       </p>
+
+      {/* ── Manutenção operacional ──────────────────────────────────── */}
+      <div style={CARD}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>Manutenção operacional</span>
+          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-muted)" }}>
+            somente administradores
+          </span>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 18, lineHeight: 1.5 }}>
+          Limpa scans já executados, vulnerabilidades, alvos/ativos descobertos, logs,
+          evidências e trilhas de agentes associadas. A configuração de agendamento,
+          integrações, usuários e parâmetros da plataforma permanece intacta.
+        </p>
+
+        {resetSummary && (
+          <div style={{
+            border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px",
+            marginBottom: 14, background: "var(--surface-alt)",
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Última limpeza</div>
+            <div style={{ fontSize: 12.5, color: "var(--ink-muted)", lineHeight: 1.5 }}>
+              Scans removidos: {resetSummary.deleted?.scan_jobs || 0} · Vulnerabilidades removidas: {resetSummary.deleted?.vulnerabilities || 0} · Alvos/ativos removidos: {resetSummary.deleted?.assets || 0} ·
+              Agendamentos preservados: {resetSummary.preserved?.enabled_schedules || 0} · Scans em fila preservados: {resetSummary.preserved?.queued_scans || 0}
+            </div>
+          </div>
+        )}
+
+        <button type="button" style={BTN("danger")} onClick={resetOperationalData} disabled={resettingOperational}>
+          {resettingOperational ? "Limpando…" : "Limpar scans e vulnerabilidades"}
+        </button>
+      </div>
 
       {/* ── Shodan ──────────────────────────────────────────────────── */}
       <div style={CARD}>

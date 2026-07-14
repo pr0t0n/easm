@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import case as sa_case, func, text
+from sqlalchemy import case as sa_case, func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -3055,6 +3055,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_executed_tool_runs = 0
         deleted_scan_audit_logs = 0
         deleted_scan_jobs = 0
+        deleted_assets = 0
+        deleted_vulnerabilities = 0
 
         if resettable_scan_ids:
             finding_ids_subquery = (
@@ -3062,24 +3064,24 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .filter(Finding.scan_job_id.in_(resettable_scan_ids))
                 .subquery()
             )
-            # Nullify nullable FKs pointing at findings
-            db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids_subquery)).update(
-                {Vulnerability.finding_id: None},
-                synchronize_session=False,
-            )
             # Assets pertencentes a estes scans — deletar completamente para
             # evitar orphãos visíveis na superfície após o reset.
             _asset_ids_reset = [
                 row[0] for row in db.query(Asset.id).filter(Asset.last_scan_id.in_(resettable_scan_ids)).all()
             ]
+            vulnerability_filters = [Vulnerability.finding_id.in_(finding_ids_subquery)]
             if _asset_ids_reset:
-                db.query(Vulnerability).filter(Vulnerability.asset_id.in_(_asset_ids_reset)).delete(
-                    synchronize_session=False,
-                )
+                vulnerability_filters.append(Vulnerability.asset_id.in_(_asset_ids_reset))
+            deleted_vulnerabilities = (
+                db.query(Vulnerability)
+                .filter(or_(*vulnerability_filters))
+                .delete(synchronize_session=False)
+            )
+            if _asset_ids_reset:
                 db.query(AssetRatingHistory).filter(AssetRatingHistory.asset_id.in_(_asset_ids_reset)).delete(
                     synchronize_session=False,
                 )
-                db.query(Asset).filter(Asset.id.in_(_asset_ids_reset)).delete(synchronize_session=False)
+                deleted_assets = db.query(Asset).filter(Asset.id.in_(_asset_ids_reset)).delete(synchronize_session=False)
             db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id.in_(resettable_scan_ids)).update(
                 {AssetRatingHistory.scan_id: None},
                 synchronize_session=False,
@@ -3150,6 +3152,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "deleted": {
                     "scan_jobs": deleted_scan_jobs,
                     "findings": deleted_findings,
+                    "vulnerabilities": deleted_vulnerabilities,
+                    "assets": deleted_assets,
                     "executed_tool_runs": deleted_executed_tool_runs,
                     "scan_audit_logs": deleted_scan_audit_logs,
                     "scan_logs": deleted_scan_logs,
@@ -3164,6 +3168,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             "deleted": {
                 "scan_jobs": deleted_scan_jobs,
                 "findings": deleted_findings,
+                "vulnerabilities": deleted_vulnerabilities,
+                "assets": deleted_assets,
                 "executed_tool_runs": deleted_executed_tool_runs,
                 "scan_audit_logs": deleted_scan_audit_logs,
                 "scan_logs": deleted_scan_logs,
