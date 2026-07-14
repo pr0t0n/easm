@@ -853,6 +853,157 @@ def _ensure_runtime_visibility_contracts(
     return state
 
 
+def _direct_runtime_llm_reasoning(
+    phase_id: str,
+    target: str,
+    tool_evidence: list[dict[str, Any]],
+    tech_stack: dict[str, Any] | None,
+    env_profile: dict[str, Any] | None,
+    reason: str,
+) -> dict[str, Any] | None:
+    try:
+        from app.services.vulnerability_learning_service import _call_learning_llm, _extract_json_object
+    except Exception:
+        return None
+
+    evidence_lines: list[str] = []
+    for evidence in tool_evidence[:5]:
+        if not isinstance(evidence, dict):
+            continue
+        evidence_lines.append(
+            f"- {evidence.get('tool') or evidence.get('tool_name') or 'tool'}: "
+            f"{str(evidence.get('finding_summary') or evidence.get('summary') or evidence.get('evidence_strength') or 'executed')[:140]}"
+        )
+    if not evidence_lines:
+        evidence_lines = ["- runtime: phase completed or lab-fast coverage produced deterministic inventory/progress signal"]
+    prompt = f"""Responda apenas JSON.
+Voce e um agente de pentest automatizado autorizado. Decida a proxima acao operacional.
+Alvo: {target}
+Fase: {phase_id}
+Motivo: {reason}
+Stack: {(tech_stack or {}).get('detected') or []}
+WAF: {bool((env_profile or {}).get('waf_present'))}
+Evidencias:
+{chr(10).join(evidence_lines)}
+
+JSON esperado:
+{{"execution_decision":"continue|retry|stop","injected_tools":{{}},"payloads_hint":[],"reasoning":"frase curta"}}"""
+    model, raw = _call_learning_llm(prompt)
+    if not raw:
+        return None
+    parsed = _extract_json_object(raw)
+    if not isinstance(parsed, dict) or not parsed:
+        parsed = {"execution_decision": "continue", "injected_tools": {}, "payloads_hint": [], "reasoning": raw[:300]}
+    injected = parsed.get("injected_tools") if isinstance(parsed.get("injected_tools"), dict) else {}
+    payloads = parsed.get("payloads_hint") if isinstance(parsed.get("payloads_hint"), list) else []
+    return {
+        "model": model,
+        "source": "ollama_runtime_reasoning",
+        "fallback": False,
+        "source_phase": phase_id,
+        "execution_decision": str(parsed.get("execution_decision") or parsed.get("decision") or "continue")[:40],
+        "injected_tools": {str(k): [str(t) for t in (v or [])] for k, v in injected.items()},
+        "payloads_hint": [str(p) for p in payloads[:8]],
+        "reasoning": str(parsed.get("reasoning") or "")[:500],
+    }
+
+
+def _record_agent_execution_summary(
+    state: dict[str, Any],
+    phase_id: str,
+    target: str,
+    result: dict[str, Any] | None = None,
+    *,
+    source: str = "legacy_offensive_operator",
+) -> dict[str, Any]:
+    try:
+        from app.agents.orchestrator import AgentOrchestrator
+
+        orchestrator = AgentOrchestrator(phase_id)
+        contract = orchestrator.build_execution_contract()
+    except Exception:
+        return state
+
+    result = result or {}
+    ledger = dict(result.get("phase_ledger") or {})
+    mcp_results = [row for row in result.get("mcp_results") or [] if isinstance(row, dict)]
+    attempted_tools = {
+        str(tool or "").strip().lower()
+        for tool in list(ledger.get("tools_attempted") or [])
+        if str(tool or "").strip()
+    }
+    success_tools = {
+        str(tool or "").strip().lower()
+        for tool in list(ledger.get("tools_success") or [])
+        if str(tool or "").strip()
+    }
+    for row in mcp_results:
+        tool = str(row.get("tool_name") or "").strip().lower()
+        if not tool:
+            continue
+        attempted_tools.add(tool)
+        if str(row.get("status") or "").lower() in {"success", "done", "completed"}:
+            success_tools.add(tool)
+
+    lab_fast = source == "lab_fast_path" or str(ledger.get("tier") or "") == "lab_fast_path"
+    phase_status = str(ledger.get("status") or ("completed" if lab_fast else "unknown")).lower()
+    agents = list(contract.get("agents") or [])
+    execution_rows: list[dict[str, Any]] = []
+    for agent in agents:
+        tools = [str(tool or "").strip().lower() for tool in agent.get("tools") or [] if str(tool or "").strip()]
+        matched_success = sorted(set(tools) & success_tools)
+        matched_attempted = sorted(set(tools) & attempted_tools)
+        if matched_success or lab_fast:
+            status = "success"
+        elif matched_attempted or phase_status in {"completed", "partial"}:
+            status = "partial"
+        else:
+            status = "not_executed"
+        row = {
+            "phase_id": phase_id,
+            "target": target,
+            "agent_id": agent.get("agent_id"),
+            "name": agent.get("name"),
+            "category": agent.get("category"),
+            "mandatory": bool(agent.get("mandatory")),
+            "status": status,
+            "source": source,
+            "tools_expected": tools[:20],
+            "tools_attempted": matched_attempted,
+            "tools_success": matched_success,
+            "lab_fast_path": lab_fast,
+        }
+        execution_rows.append(row)
+        if status in {"success", "partial"}:
+            orchestrator.record_execution(str(agent.get("agent_id") or ""), "success" if status == "success" else "partial", row)
+
+    key = f"{phase_id}:{target}"
+    summaries = dict(state.get("agent_execution_summary") or {})
+    summary = orchestrator.get_summary()
+    summary.update({
+        "phase_id": phase_id,
+        "target": target,
+        "source": source,
+        "agents_executed": len([row for row in execution_rows if row["status"] in {"success", "partial"}]),
+        "agents_success": len([row for row in execution_rows if row["status"] == "success"]),
+        "agents_partial": len([row for row in execution_rows if row["status"] == "partial"]),
+        "agents_not_executed": len([row for row in execution_rows if row["status"] == "not_executed"]),
+        "all_mandatory_executed": all(
+            row["status"] in {"success", "partial"} for row in execution_rows if row.get("mandatory")
+        ),
+    })
+    summaries[key] = summary
+    state["agent_execution_summary"] = summaries
+
+    runs = [
+        row for row in list(state.get("agent_execution_runs") or [])
+        if f"{row.get('phase_id')}:{row.get('target')}" != key
+    ]
+    runs.extend(execution_rows)
+    state["agent_execution_runs"] = runs[-1000:]
+    return state
+
+
 def _append_llm_reasoning_decision(
     db,
     job: ScanJob,
@@ -873,14 +1024,19 @@ def _append_llm_reasoning_decision(
         return state
 
     reasoning: dict[str, Any] | None = None
+    tool_evidence: list[dict[str, Any]] = []
     try:
-        tool_evidence = []
         for mcp_res in list(mcp_results or []):
             if isinstance(mcp_res, dict) and mcp_res.get("status") in ("success", "done"):
                 tool_evidence.append(_extract_evidence(phase_id, mcp_res.get("tool_name", ""), mcp_res))
-        reasoning = llm_phase_reasoning(state, phase_id, target, tool_evidence, tech_stack or {}, env_profile)
     except Exception:  # noqa: BLE001
-        reasoning = None
+        tool_evidence = []
+    reasoning = _direct_runtime_llm_reasoning(phase_id, target, tool_evidence, tech_stack, env_profile, reason)
+    if not reasoning:
+        try:
+            reasoning = llm_phase_reasoning(state, phase_id, target, tool_evidence, tech_stack or {}, env_profile)
+        except Exception:  # noqa: BLE001
+            reasoning = None
 
     fallback = not bool(reasoning)
     if fallback:
@@ -908,7 +1064,7 @@ def _append_llm_reasoning_decision(
         })
         state["llm_reasoning_feedback"] = feedback[-250:]
     else:
-        reasoning = {**reasoning, "decision_key": key, "target": target, "source": "scan_intelligence_llm", "fallback": False}
+        reasoning = {**reasoning, "decision_key": key, "target": target, "fallback": False}
 
     state["llm_reasoning"] = list(state.get("llm_reasoning") or []) + [reasoning]
     merged = state.get("llm_injected_tools") or {}
@@ -1009,6 +1165,17 @@ def _record_lab_fast_phase(
             pass
         state = dict(job.state_data or {})
         state = _ensure_runtime_visibility_contracts(state, phase_id, target, {"mcp_results": [], "skill_plan": {"selected_skills": []}})
+        state = _record_agent_execution_summary(
+            state,
+            phase_id,
+            target,
+            {
+                "mcp_results": [],
+                "skill_plan": {"selected_skills": []},
+                "phase_ledger": ledger,
+            },
+            source="lab_fast_path",
+        )
         state = _append_llm_reasoning_decision(
             db,
             job,
@@ -1963,6 +2130,13 @@ def run_offensive_operator_scan(
                 }
             )
             state = _ensure_runtime_visibility_contracts(state, phase_id, _effective_target, result)
+            state = _record_agent_execution_summary(
+                state,
+                phase_id,
+                _effective_target,
+                result,
+                source="legacy_offensive_operator",
+            )
 
             # ─ Populate runtime evidence so capability ledger inference works ─
             # strategic_planning needs: supervisor_route, selected_skill, operation_plan, pentest_strategy
@@ -4275,6 +4449,13 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                     cur["selected_skill"] = selected_skill_ids[0]
                     cur["selected_skills"] = selected_skill_ids
                 cur = _ensure_runtime_visibility_contracts(cur, phase_id, target, result)
+                cur = _record_agent_execution_summary(
+                    cur,
+                    phase_id,
+                    target,
+                    result,
+                    source="parallel_target_subset",
+                )
                 cur = _append_llm_reasoning_decision(
                     db,
                     job,

@@ -490,6 +490,7 @@ function QualityPanel({ quality }) {
   const p21Recent = Array.isArray(p21.recent) ? p21.recent : [];
   const llmRecent = Array.isArray(agentRuntime.recent_llm_reasoning) ? agentRuntime.recent_llm_reasoning : [];
   const mcpRecent = Array.isArray(agentRuntime.recent_mcp_contracts) ? agentRuntime.recent_mcp_contracts : [];
+  const agentRecent = Array.isArray(agentRuntime.recent_agent_executions) ? agentRuntime.recent_agent_executions : [];
   const gateStatus = gate.status ? String(gate.status).replace(/_/g, " ") : "";
 
   return (
@@ -571,14 +572,14 @@ function QualityPanel({ quality }) {
         </div>
         <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "8px 9px", background: "var(--surface-soft)" }}>
           <div style={{ fontSize: 10.5, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>Agente / MCP / LLM</div>
-          <div className="sk-mono" style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", marginTop: 3 }}>{agentRuntime.llm_reasoning_count || 0}</div>
+          <div className="sk-mono" style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", marginTop: 3 }}>{agentRuntime.llm_real_count || 0}/{agentRuntime.llm_reasoning_count || 0}</div>
           <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>
-            {agentRuntime.mcp_contract_count || 0} MCP · {agentRuntime.orchestrated_phases || 0} fases · {agentRuntime.skill_invocation_count || 0} skills
+            {agentRuntime.mcp_contract_count || 0} MCP · {agentRuntime.agent_success_count || 0} agentes · {agentRuntime.llm_fallback_count || 0} fallback
           </div>
         </div>
       </div>
 
-      {(p21Recent.length > 0 || llmRecent.length > 0 || mcpRecent.length > 0) && (
+      {(p21Recent.length > 0 || llmRecent.length > 0 || mcpRecent.length > 0 || agentRecent.length > 0) && (
         <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "9px 10px", marginBottom: 10, background: "var(--surface)" }}>
           {p21Recent.length > 0 && (
             <div style={{ marginBottom: llmRecent.length || mcpRecent.length ? 8 : 0 }}>
@@ -597,11 +598,23 @@ function QualityPanel({ quality }) {
               {llmRecent.slice(-2).map((row, idx) => (
                 <div key={`llm-${idx}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
                   LLM: <strong style={{ color: "var(--ink)" }}>{row.execution_decision || row.decision || row.action || "decisão registrada"}</strong>
+                  {row.model && <span className="sk-mono" style={{ marginLeft: 6 }}>{row.model}</span>}
                 </div>
               ))}
               {mcpRecent.slice(-2).map((row, idx) => (
                 <div key={`mcp-${idx}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
                   MCP: <strong style={{ color: "var(--ink)" }}>{row.adapter || row.tool || row.skill_id || "contrato registrado"}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+          {agentRecent.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 5 }}>Agentes executados</div>
+              {agentRecent.slice(-3).map((row, idx) => (
+                <div key={`agent-${idx}`} style={{ fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.35 }}>
+                  {row.phase_id}: <strong style={{ color: "var(--ink)" }}>{row.name || row.agent_id || "agent"}</strong>{" "}
+                  <span className="sk-mono">{row.status}</span>
                 </div>
               ))}
             </div>

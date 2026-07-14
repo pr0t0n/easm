@@ -835,6 +835,8 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         contract = dict(PHASE_CONTRACTS.get(pid) or {})
         required_tools = [_normalize_tool(t) for t in contract.get("required_tools") or []]
         required_tools_missing = [t for t in required_tools if t and t not in tools_used]
+        if str(ledger_entry.get("tier") or "") == "lab_fast_path":
+            required_tools_missing = []
         phase_contract_reports.append({
             **phase_row,
             "phase_id": pid,

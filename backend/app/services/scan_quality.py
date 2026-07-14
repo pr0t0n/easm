@@ -487,7 +487,11 @@ def _runtime_visibility(
     mcp_contracts = list(state.get("mcp_adapter_contracts") or [])
     feedback = list(state.get("llm_reasoning_feedback") or [])
     orchestration = dict(state.get("agent_orchestration") or {})
+    agent_runs = [row for row in list(state.get("agent_execution_runs") or []) if isinstance(row, dict)]
+    agent_summaries = dict(state.get("agent_execution_summary") or {})
     skill_invocations = list(state.get("skill_invocation") or state.get("skill_invocations") or [])
+    llm_real = [row for row in llm_reasoning if isinstance(row, dict) and not bool(row.get("fallback"))]
+    llm_fallback = [row for row in llm_reasoning if isinstance(row, dict) and bool(row.get("fallback"))]
 
     return {
         "quality_gate": {
@@ -504,12 +508,20 @@ def _runtime_visibility(
         },
         "agent_runtime": {
             "llm_reasoning_count": len(llm_reasoning),
+            "llm_real_count": len(llm_real),
+            "llm_fallback_count": len(llm_fallback),
             "mcp_contract_count": len(mcp_contracts),
             "reasoning_feedback_count": len(feedback),
             "orchestrated_phases": len(orchestration),
+            "agent_execution_count": len([row for row in agent_runs if str(row.get("status") or "") in {"success", "partial"}]),
+            "agent_success_count": len([row for row in agent_runs if str(row.get("status") or "") == "success"]),
+            "agent_partial_count": len([row for row in agent_runs if str(row.get("status") or "") == "partial"]),
+            "agent_execution_phases": len(agent_summaries),
             "skill_invocation_count": len(skill_invocations),
             "recent_llm_reasoning": llm_reasoning[-5:],
             "recent_mcp_contracts": mcp_contracts[-5:],
+            "recent_agent_executions": agent_runs[-8:],
+            "recent_agent_summaries": list(agent_summaries.values())[-5:],
             "recent_feedback": feedback[-5:],
         },
     }
