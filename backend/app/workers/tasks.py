@@ -2283,7 +2283,11 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
     """Capacity-aware dispatcher for persistent scan_work_items."""
     from app.db.session import SessionLocal
     from app.models.models import ExecutedToolRun, ScanJob, ScanLog, ScanWorkItem
-    from app.services.scan_work_queue import claim_work_items, work_queue_counts
+    from app.services.scan_work_queue import (
+        claim_work_items,
+        finalize_orphaned_blocked_work_items,
+        work_queue_counts,
+    )
     from app.workers.worker_groups import phase_queue
 
     # ── Distributed lock: prevent concurrent dispatchers for the same scan ──
@@ -2523,6 +2527,13 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 "poller_rehydration failed: %s", _poll_rehydrate_exc
             )
 
+        # If the executable queue has drained and only gate-blocked items remain,
+        # those items can no longer be unblocked by a future phase completion.
+        # Finalize them here so scans do not loop forever at 98-99%.
+        _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
+        if _orphaned_blocked:
+            db.commit()
+
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
         try:
@@ -2615,10 +2626,11 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 _final_state["quality_gate_active"] = False
                 _final_state["items_total"] = _total
                 _final_state["items_terminal"] = _done
+                _final_state["current_pentest_phase_id"] = "P22"
                 job.state_data = _final_state
                 job.status = "completed"
                 job.mission_progress = 100
-                job.current_step = "Scan completed"
+                job.current_step = "P22 Campaign Report"
                 # Trigger post-scan CVE enrichment pass
                 try:
                     from app.services.cve_enrichment_service import enrichment_service as _enrich

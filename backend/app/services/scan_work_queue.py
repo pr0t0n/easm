@@ -2309,3 +2309,69 @@ def has_pending_work(db: Session, scan_id: int) -> bool:
             and_(ScanWorkItem.status.in_(["dispatched", "running", "submitted"]), ScanWorkItem.lease_until <= now),
         ),
     ).first() is not None
+
+
+def finalize_orphaned_blocked_work_items(db: Session, scan_id: int) -> int:
+    """Terminalize dependency-blocked items once the executable queue is drained.
+
+    Blocked items are legitimate while their gate phase is still running. They
+    become orphaned when no queued/retry/in-flight work remains: there is no
+    future gate event that can unblock them, so keeping them as ``blocked``
+    causes scans to loop forever at 98-99%.
+    """
+    active_statuses = ("queued", "retry", "dispatched", "running", "submitted")
+    active_left = (
+        db.query(func.count(ScanWorkItem.id))
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(active_statuses),
+        )
+        .scalar() or 0
+    )
+    if int(active_left) > 0:
+        return 0
+
+    blocked_count = (
+        db.query(func.count(ScanWorkItem.id))
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status == "blocked",
+        )
+        .scalar() or 0
+    )
+    if int(blocked_count) <= 0:
+        return 0
+
+    now = datetime.now()
+    updated = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status == "blocked",
+        )
+        .update(
+            {
+                "status": "skipped",
+                "last_error": "skipped:dependency_gate_drained_at_finalization",
+                "finished_at": now,
+                "updated_at": now,
+                "result": {
+                    "skip_reason": "dependency_gate_drained_at_finalization",
+                    "finalized_at": now.isoformat(),
+                },
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated:
+        db.add(ScanLog(
+            scan_job_id=scan_id,
+            source="work-queue",
+            level="WARNING",
+            message=(
+                "work_queue_orphaned_blocked_finalized "
+                f"skipped={int(updated)} reason=dependency_gate_drained_at_finalization"
+            ),
+        ))
+        db.flush()
+    return int(updated)
