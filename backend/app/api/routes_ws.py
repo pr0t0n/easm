@@ -3,6 +3,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
+from app.api.deps import apply_company_scope
 from app.core.security import decode_access_token
 from app.db.session import SessionLocal
 from app.models.models import AgentTraceEvent, ScanJob, ScanLog, SkillScore, User
@@ -27,9 +28,7 @@ async def ws_scan_logs(websocket: WebSocket, scan_id: int):
             return
 
         query = db.query(ScanJob).filter(ScanJob.id == scan_id)
-        if not user.is_admin:
-            allowed_ids = [g.id for g in user.groups]
-            query = query.filter((ScanJob.owner_id == user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, user, ScanJob)
         job = query.first()
         if not job:
             await websocket.close(code=4403)
@@ -76,9 +75,7 @@ def _auth_scan(db: Session, scan_id: int, token: str):
     if not user:
         return None, None
     q = db.query(ScanJob).filter(ScanJob.id == scan_id)
-    if not user.is_admin:
-        allowed_ids = [g.id for g in user.groups]
-        q = q.filter((ScanJob.owner_id == user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+    q = apply_company_scope(q, user, ScanJob)
     return user, q.first()
 
 

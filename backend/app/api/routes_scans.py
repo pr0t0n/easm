@@ -13,7 +13,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import (
+    apply_company_scope,
+    can_access_company_resource,
+    get_current_user,
+    require_admin,
+    resolve_company_group_id,
+)
 from app.db.session import get_db
 from app.models.models import (
     AuditEvent, FalsePositiveMemory, Finding, ScanJob, ScanLog, ScheduledScan, User,
@@ -308,19 +314,19 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
 
 
 def _authorized_scan_query(db: Session, current_user: User):
-    query = db.query(ScanJob)
-    if not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
-    return query
+    return apply_company_scope(db.query(ScanJob), current_user, ScanJob)
 
 
 def _authorized_finding_query(db: Session, current_user: User):
-    query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id)
-    if not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
-    return query
+    return apply_company_scope(db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id), current_user, ScanJob)
+
+
+def _authorized_asset_query(db: Session, current_user: User):
+    query = db.query(Asset)
+    if current_user.is_admin:
+        return query
+    scoped_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id)
+    return query.filter(Asset.last_scan_id.in_(scoped_scan_ids))
 
 
 def _resolve_access_group_id(
@@ -329,22 +335,7 @@ def _resolve_access_group_id(
     access_group_id: int | None,
     access_group_name: str | None = None,
 ) -> int | None:
-    group_name = str(access_group_name or "").strip()
-    if group_name:
-        existing = db.query(AccessGroup).filter(AccessGroup.name == group_name).first()
-        if existing is None:
-            if not current_user.is_admin:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
-            existing = AccessGroup(owner_id=current_user.id, name=group_name, description="")
-            db.add(existing)
-            db.flush()
-        access_group_id = existing.id
-
-    if access_group_id is not None and not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        if access_group_id not in allowed_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
-    return access_group_id
+    return resolve_company_group_id(db, current_user, access_group_id, access_group_name, required=True)
 
 
 def _sev_weight(severity: str) -> int:
@@ -4774,10 +4765,8 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
     row = db.execute(sql, {"scan_id": scan_id}).mappings().first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
-    if not current_user.is_admin:
-        allowed_ids = {g.id for g in current_user.groups}
-        if row["owner_id"] != current_user.id and row["access_group_id"] not in allowed_ids:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+    if not can_access_company_resource(current_user, row["access_group_id"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
     raw_progress = int(row["mission_progress"] or 0)
     ledger_count = int(row["ledger_count"] or 0)
@@ -4809,7 +4798,7 @@ def scan_logs(scan_id: int, db: Session = Depends(get_db), current_user: User = 
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -4833,7 +4822,7 @@ def scan_autonomy(scan_id: int, db: Session = Depends(get_db), current_user: Use
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -4891,7 +4880,7 @@ def scan_runtime_feed(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -5163,7 +5152,7 @@ def scan_work_queue_status(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -5227,7 +5216,7 @@ def scan_phase_monitor(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -5244,7 +5233,7 @@ def scan_quality(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -5264,7 +5253,7 @@ def scan_report(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
@@ -6069,7 +6058,7 @@ def mark_false_positive(
     query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id == finding_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     finding = query.first()
     if not finding:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding nao encontrado")
@@ -6134,7 +6123,7 @@ def request_retest(
     query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id == finding_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     finding = query.first()
     if not finding:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding nao encontrado")
@@ -6176,7 +6165,7 @@ def bulk_mark_false_positive(
     query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id.in_(finding_ids))
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
     findings = query.all()
 
     updated_ids = []
@@ -6228,11 +6217,11 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
         findings = db.query(Finding).all()
     else:
         allowed_ids = [g.id for g in current_user.groups]
-        jobs = db.query(ScanJob).filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids))).all()
+        jobs = apply_company_scope(db.query(ScanJob), current_user, ScanJob).all()
         findings = (
             db.query(Finding)
             .join(ScanJob, ScanJob.id == Finding.scan_job_id)
-            .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+            .filter(ScanJob.access_group_id.in_(allowed_ids))
             .all()
         )
 
@@ -6270,11 +6259,11 @@ def dashboard_insights(
         findings_query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id)
     else:
         allowed_ids = [g.id for g in current_user.groups]
-        jobs_query = db.query(ScanJob).filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        jobs_query = db.query(ScanJob).filter(ScanJob.access_group_id.in_(allowed_ids))
         findings_query = (
             db.query(Finding)
             .join(ScanJob, ScanJob.id == Finding.scan_job_id)
-            .filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+            .filter(ScanJob.access_group_id.in_(allowed_ids))
         )
 
     normalized_target = (target or "").strip()
@@ -7678,8 +7667,7 @@ def get_easm_assets(
         "last_seen": "2026-03-25T10:00:00Z",
     }]
     """
-    query = db.query(Asset).filter(
-        Asset.owner_id == current_user.id if not current_user.is_admin else True,
+    query = _authorized_asset_query(db, current_user).filter(
         Asset.status == status_filter,
         Asset.criticality_score >= min_criticality,
     )
@@ -7764,7 +7752,8 @@ def get_easm_vulnerabilities(
     query = db.query(Vulnerability).join(Asset, Asset.id == Vulnerability.asset_id)
 
     if not current_user.is_admin:
-        query = query.filter(Asset.owner_id == current_user.id)
+        scoped_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id)
+        query = query.filter(Asset.last_scan_id.in_(scoped_scan_ids))
 
     if open_only:
         query = query.filter(Vulnerability.remediated_at == None)
@@ -8323,7 +8312,10 @@ def get_vulnerability_alerts(
     severity_filter: str = Query("", regex="^(|critical|high|medium)$"),
 ):
     """Lista alertas de desvio de postura de vulnerabilidade"""
-    query = db.query(EASMAlert).filter(EASMAlert.owner_id == current_user.id)
+    query = db.query(EASMAlert)
+    if not current_user.is_admin:
+        scoped_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id)
+        query = query.join(Asset, Asset.id == EASMAlert.asset_id).filter(Asset.last_scan_id.in_(scoped_scan_ids))
 
     if unresolved_only:
         query = query.filter(EASMAlert.is_resolved == False)
@@ -8358,10 +8350,11 @@ def resolve_vulnerability_alert(
     current_user: User = Depends(get_current_user),
 ):
     """Marca alerta como resolvido"""
-    alert = db.query(EASMAlert).filter(
-        EASMAlert.id == alert_id,
-        EASMAlert.owner_id == current_user.id,
-    ).first()
+    alert_query = db.query(EASMAlert).filter(EASMAlert.id == alert_id)
+    if not current_user.is_admin:
+        scoped_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id)
+        alert_query = alert_query.join(Asset, Asset.id == EASMAlert.asset_id).filter(Asset.last_scan_id.in_(scoped_scan_ids))
+    alert = alert_query.first()
 
     if not alert:
         raise HTTPException(status_code=404, detail="Alerta não encontrado")
@@ -8392,10 +8385,7 @@ def get_executive_report(
     from app.models.models import ScanJob
     from app.services.report_generator import generate_executive_report
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -8436,13 +8426,9 @@ def get_learning_usage(
     from app.models.models import ScanJob, ScanWorkItem, Finding
     import sqlalchemy as _sa
 
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
-    if not current_user.is_admin and job.owner_id != current_user.id:
-        allowed = [g.id for g in current_user.groups]
-        if job.access_group_id not in allowed:
-            raise HTTPException(status_code=403, detail="Sem acesso")
 
     # Work items semeados pelo aprendizado (metadata.source = hackerone_learnings)
     seeded = (
@@ -8587,9 +8573,7 @@ def get_phase_breakdown(
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
         allowed = [g.id for g in current_user.groups]
-        query = query.filter(
-            (ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed))
-        )
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
@@ -8824,13 +8808,10 @@ def get_pentest_report(
     from app.models.models import ScanJob
     from app.services.report_generator import generate_pentest_report
 
-    # Allow access: owner or admin
+    # Access follows company/tenant scope.
     query = db.query(ScanJob).filter(ScanJob.id == scan_id)
     if not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter(
-            (ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids))
-        )
+        query = apply_company_scope(query, current_user, ScanJob)
     job = query.first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
@@ -8878,10 +8859,7 @@ def run_scan_intelligence(
     from app.models.models import ScanJob
     from app.services.finding_intelligence import run_all_intelligence
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -8918,10 +8896,7 @@ def enrich_scan_cve_findings(
     from app.models.models import ScanJob
     from app.services.cve_enricher import enrich_scan_cves
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -8979,10 +8954,7 @@ def get_attack_graph(
     from app.models.models import ScanJob
     from app.services.attack_graph import build_attack_graph
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9000,10 +8972,7 @@ def get_scan_uncertainty(
     from app.models.models import ScanJob
     from app.services.scan_uncertainty import build_scan_uncertainty
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return build_scan_uncertainty(db, job)
@@ -9028,10 +8997,7 @@ def run_business_logic_analysis(
     from app.models.models import ScanJob
     from app.services.business_logic_analyzer import run_business_logic_scan
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9056,10 +9022,7 @@ def get_js_pollution_results(
     """
     from app.models.models import Finding, ScanJob
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9126,10 +9089,7 @@ def run_js_pollution_analysis(
     from app.models.models import ScanJob
     from app.services.js_pollution_analyzer import run_js_pollution_scan
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9155,10 +9115,7 @@ def get_exploit_chains(
     from app.models.models import ScanJob
     from app.services.exploit_chain import correlate_chains
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9193,10 +9150,7 @@ def run_supply_chain_analysis(
     from app.models.models import ScanJob
     from app.services.supply_chain_analyzer import run_supply_chain_scan
 
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9214,10 +9168,7 @@ def get_attack_narrative(
 ):
     """Retorna a narrativa de ataque gerada para o scan (L6)."""
     from app.models.models import ScanJob
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     state = dict(job.state_data or {})
@@ -9241,10 +9192,7 @@ def generate_attack_narrative(
     """Gera (ou regenera) a narrativa de ataque para o scan via LLM (L6)."""
     from app.models.models import ScanJob
     from app.services.attack_narrative import run_attack_narrative
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     result = run_attack_narrative(db, job)
@@ -9261,10 +9209,7 @@ def get_crown_jewels(
 ):
     """Retorna os ativos de alto valor identificados pelo crown jewel analyzer (M1)."""
     from app.models.models import ScanJob
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     state = dict(job.state_data or {})
@@ -9307,8 +9252,7 @@ def get_cockpit(
     # _score_to_grade é definido neste módulo (linha ~393)
 
     scan_rows = (
-        db.query(ScanJob)
-        .filter(ScanJob.owner_id == current_user.id)
+        _authorized_scan_query(db, current_user)
         .order_by(ScanJob.id.desc())
         .limit(50)
         .all()
@@ -9327,8 +9271,8 @@ def get_cockpit(
     selected = None
     if scan_id is not None:
         selected = next((s for s in scan_rows if s.id == scan_id), None) or (
-            db.query(ScanJob)
-            .filter(ScanJob.id == scan_id, ScanJob.owner_id == current_user.id)
+            _authorized_scan_query(db, current_user)
+            .filter(ScanJob.id == scan_id)
             .first()
         )
     if selected is None:
@@ -9382,7 +9326,8 @@ def get_cockpit(
     # alto valor REAIS com achados (api-connect, dev-fatura, dev-api-*) sumiam.
     try:
         from app.services.crown_jewel_analyzer import identify_crown_jewels
-        _asset_q = db.query(Asset.domain_or_ip).filter(Asset.owner_id == current_user.id)
+        allowed_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id).subquery()
+        _asset_q = db.query(Asset.domain_or_ip).filter(Asset.last_scan_id.in_(allowed_scan_ids))
         if not aggregate:
             _asset_q = _asset_q.filter(Asset.last_scan_id == selected.id)
         _hosts = sorted({str(_d) for (_d,) in _asset_q.all() if _d})
@@ -9543,10 +9488,7 @@ def get_osint_results(
     3. 404 apenas se P18 nunca rodou para este scan
     """
     from app.models.models import Finding, ScanJob, ScanWorkItem
-    job = db.query(ScanJob).filter(
-        ScanJob.id == scan_id,
-        ScanJob.owner_id == current_user.id,
-    ).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
 
@@ -9635,12 +9577,10 @@ def get_verification_stats(
 
     # Count per verification_status — NULL counts as "none"
     rows = (
-        db.query(
+        query.with_entities(
             Finding.verification_status,
             sql_func.count(Finding.id).label("cnt"),
         )
-        .join(ScanJob, ScanJob.id == Finding.scan_job_id)
-        .filter(ScanJob.owner_id == current_user.id)
         .group_by(Finding.verification_status)
         .all()
     )

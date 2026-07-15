@@ -338,7 +338,7 @@ export default function OperationsCenterPage() {
                   <div style={{ borderTop: `1px solid ${TV.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
                     <span style={{ fontSize: 9.5, color: TV.label, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>A seguir</span>
                     {schedules.slice(0,3).map((s) => {
-                      const grp = s.access_group_name || (s.access_group_id ? `grupo #${s.access_group_id}` : "sem grupo");
+                      const grp = s.access_group_name || (s.access_group_id ? `grupo #${s.access_group_id}` : "empresa não definida");
                       const alvo = String(s.targets_text || s.target_query || "").split(/[;,\n]/)[0].trim();
                       return (
                       <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, minWidth: 0 }}>

@@ -263,6 +263,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [crit,     setCrit]     = useState("Alta");
   const [janela,   setJanela]   = useState("imediato");
   const [target,   setTarget]   = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const [scopeAuthorizationAttested, setScopeAuthorizationAttested] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "" });
@@ -270,6 +271,12 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [submitting, setSubmitting] = useState(false);
 
   const LEVEL_REVERSE = { Recon: "asm", Padrão: "full", Agressivo: "aggressive" };
+
+  useEffect(() => {
+    if (!accessGroupId && groups.length === 1) {
+      setAccessGroupId(String(groups[0].id));
+    }
+  }, [accessGroupId, groups]);
 
   const buildAuth = () => {
     if (!authEnabled) return null;
@@ -284,14 +291,15 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
     if (!target.trim()) return;
     setSubmitting(true);
     try {
+      const selectedGroup = groups.find((g) => String(g.id) === String(accessGroupId));
       if (janela === "agendar") {
-        await onSchedule({ target, accessGroupId: "", accessGroupName: "", scheduleForm });
+        await onSchedule({ target, accessGroupId, accessGroupName: selectedGroup?.name || "", scheduleForm });
       } else {
         await onCreate({
           target,
           scanLevel: LEVEL_REVERSE[perfil] || "full",
-          accessGroupId: "",
-          accessGroupName: "",
+          accessGroupId,
+          accessGroupName: selectedGroup?.name || "",
           scopeAuthorizationAttested,
           authPayload: buildAuth(),
         });
@@ -320,7 +328,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr auto", gap: 14, alignItems: "end" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1fr auto", gap: 14, alignItems: "end" }}>
         {/* Alvo */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Escopo / alvo</label>
@@ -330,6 +338,20 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
             style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5, padding: "9px 12px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)", background: "#fff" }}
           />
           <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4 }}>separe múltiplos alvos com ;</div>
+        </div>
+
+        {/* Empresa */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Empresa</label>
+          <select
+            value={accessGroupId}
+            onChange={(e) => setAccessGroupId(e.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", fontSize: 12.5, padding: "9px 12px", borderRadius: 8, border: "1px solid var(--line)", color: "var(--ink)", background: "#fff" }}
+          >
+            <option value="">Selecione</option>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>limite de visibilidade</div>
         </div>
 
         {/* Perfil */}
@@ -380,7 +402,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>guardrails aplicam automaticamente</div>
         </div>
 
-        <button className="sk-btn-primary" style={{ padding: "10px 22px", whiteSpace: "nowrap" }} disabled={submitting || !target.trim()} onClick={handleLancar}>
+        <button className="sk-btn-primary" style={{ padding: "10px 22px", whiteSpace: "nowrap" }} disabled={submitting || !target.trim() || !accessGroupId} onClick={handleLancar}>
           {submitting ? "Lançando…" : "Lançar"}
         </button>
       </div>
@@ -832,6 +854,7 @@ function EditScheduleModal({ schedule, groups, onSave, onClose }) {
   };
 
   const handleSave = () => {
+    if (!form.access_group_id) return;
     const payload = {
       targets_text: form.targets_text.trim(),
       scan_type:    form.scan_type,
@@ -843,8 +866,6 @@ function EditScheduleModal({ schedule, groups, onSave, onClose }) {
     if (form.frequency === "monthly") payload.day_of_month = Number(form.day_of_month);
     if (form.access_group_id !== "" && form.access_group_id !== null) {
       payload.access_group_id = Number(form.access_group_id);
-    } else {
-      payload.access_group_id = null;
     }
     onSave(payload);
   };
@@ -879,8 +900,8 @@ function EditScheduleModal({ schedule, groups, onSave, onClose }) {
             {/* Grupo */}
             <div>
               <label style={labelStyle}>Grupo de acesso</label>
-              <select value={form.access_group_id} onChange={(e) => set("access_group_id", e.target.value)} style={inputStyle}>
-                <option value="">— sem grupo —</option>
+              <select value={form.access_group_id} onChange={handleGroupChange} style={inputStyle}>
+                <option value="">Selecione a empresa</option>
                 {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
             </div>
@@ -1032,7 +1053,7 @@ export default function ScansPage() {
   };
 
   const createSchedule = async ({ target, accessGroupId, accessGroupName, scheduleForm }) => {
-    const payload = { target_query: target.trim(), ...scheduleForm };
+    const payload = { targets_text: target.trim(), ...scheduleForm };
     if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
     if (accessGroupName) payload.access_group_name = accessGroupName;
     await client.post("/api/schedules", payload);
@@ -1186,7 +1207,7 @@ export default function ScansPage() {
                           {gName}
                         </span>
                       ) : (
-                        <span style={{ fontSize: 10, fontWeight: 600, color: "var(--ink-muted)" }}>sem grupo</span>
+                        <span style={{ fontSize: 10, fontWeight: 600, color: "var(--sev-critical-text)" }}>empresa não definida</span>
                       );
                     })()}
                     <PerfilBadge perfil={LEVEL_MAP[f.scan_type] || LEVEL_MAP[f.level] || "Padrão"} />

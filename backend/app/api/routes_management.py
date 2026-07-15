@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import apply_company_scope, get_current_user, require_admin, resolve_company_group_id
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
@@ -47,22 +47,7 @@ def _resolve_access_group_id(
     access_group_id: int | None,
     access_group_name: str | None = None,
 ) -> int | None:
-    group_name = str(access_group_name or "").strip()
-    if group_name:
-        existing = db.query(AccessGroup).filter(AccessGroup.name == group_name).first()
-        if existing is None:
-            if not current_user.is_admin:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
-            existing = AccessGroup(owner_id=current_user.id, name=group_name, description="")
-            db.add(existing)
-            db.flush()
-        access_group_id = existing.id
-
-    if access_group_id is not None and not current_user.is_admin:
-        allowed_ids = [g.id for g in current_user.groups]
-        if access_group_id not in allowed_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Grupo de acesso nao permitido")
-    return access_group_id
+    return resolve_company_group_id(db, current_user, access_group_id, access_group_name, required=True)
 
 
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
@@ -305,6 +290,12 @@ def _create_scan_from_schedule(
     batch_targets = _parse_targets(target)
     scan_level = normalize_scan_level(scan_level)
     profile = scan_profile(scan_level)
+    if access_group_id is None:
+        owner = db.query(User).filter(User.id == owner_id).first()
+        if owner and len(owner.groups or []) == 1:
+            access_group_id = owner.groups[0].id
+    if access_group_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empresa/grupo obrigatorio para scan agendado")
     authorization_gate = evaluate_scan_authorization(
         db,
         owner_id=owner_id,
@@ -870,7 +861,7 @@ def dashboard_scans(
     query = db.query(ScanJob)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScanJob.owner_id == current_user.id) | (ScanJob.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScanJob)
 
     if target:
         query = query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
@@ -903,7 +894,7 @@ def list_schedules(db: Session = Depends(get_db), current_user: User = Depends(g
     query = db.query(ScheduledScan)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScheduledScan.owner_id == current_user.id) | (ScheduledScan.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScheduledScan)
     rows = query.order_by(ScheduledScan.created_at.desc()).all()
     # Resolve nomes de grupo numa única query (evita N+1 e o front não precisa
     # buscar /access-groups só pra exibir o nome).
@@ -986,7 +977,7 @@ def update_schedule(schedule_id: int, payload: dict, db: Session = Depends(get_d
     query = db.query(ScheduledScan).filter(ScheduledScan.id == schedule_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScheduledScan.owner_id == current_user.id) | (ScheduledScan.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScheduledScan)
     row = query.first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento nao encontrado")
@@ -1037,7 +1028,7 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
     query = db.query(ScheduledScan).filter(ScheduledScan.id == schedule_id)
     if not current_user.is_admin:
         allowed_ids = [g.id for g in current_user.groups]
-        query = query.filter((ScheduledScan.owner_id == current_user.id) | (ScheduledScan.access_group_id.in_(allowed_ids)))
+        query = apply_company_scope(query, current_user, ScheduledScan)
     row = query.first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agendamento nao encontrado")
@@ -1309,11 +1300,11 @@ def ai_status(db: Session = Depends(get_db), current_user: User = Depends(requir
     error_logs = (
         db.query(ScanLog)
         .join(ScanJob, ScanJob.id == ScanLog.scan_job_id)
-        .filter(ScanJob.owner_id == current_user.id, ScanLog.level == "ERROR")
+        .filter(ScanLog.level == "ERROR")
         .order_by(ScanLog.created_at.desc())
         .limit(20)
-        .all()
     )
+    error_logs = apply_company_scope(error_logs, current_user, ScanJob).all()
 
     # P5 — capacidade de aceleração detectada (read-only, à prova de falha).
     # A plataforma reporta sozinha se há GPU utilizável; no Docker do Mac/CI
@@ -2164,6 +2155,29 @@ def delete_access_group(group_id: int, db: Session = Depends(get_db), current_us
     return {"ok": True}
 
 
+def _load_user_groups(db: Session, group_ids: list[int] | None, *, required: bool) -> list[AccessGroup]:
+    normalized: list[int] = []
+    for raw in group_ids or []:
+        try:
+            gid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if gid and gid not in normalized:
+            normalized.append(gid)
+
+    if required and not normalized:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuario precisa estar associado a uma empresa/grupo")
+    if not normalized:
+        return []
+
+    groups = db.query(AccessGroup).filter(AccessGroup.id.in_(normalized)).all()
+    found_ids = {g.id for g in groups}
+    missing = [gid for gid in normalized if gid not in found_ids]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Empresa/grupo nao encontrado: {missing[0]}")
+    return groups
+
+
 @router.get("/users")
 def list_users(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     rows = db.query(User).order_by(User.email.asc()).all()
@@ -2174,6 +2188,7 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(requi
             "is_admin": u.is_admin,
             "is_active": u.is_active,
             "group_ids": [g.id for g in u.groups],
+            "group_names": [g.name for g in u.groups],
         }
         for u in rows
     ]
@@ -2189,11 +2204,10 @@ def create_user(payload: dict, db: Session = Depends(get_db), current_user: User
     if exists:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email ja cadastrado")
 
-    user = User(email=email, password_hash=get_password_hash(password), is_admin=bool(payload.get("is_admin", False)))
+    is_admin = bool(payload.get("is_admin", False))
+    user = User(email=email, password_hash=get_password_hash(password), is_admin=is_admin)
     group_ids = payload.get("group_ids") or []
-    if group_ids:
-        groups = db.query(AccessGroup).filter(AccessGroup.id.in_(group_ids)).all()
-        user.groups = groups
+    user.groups = _load_user_groups(db, group_ids, required=not is_admin)
 
     db.add(user)
     db.commit()
@@ -2226,8 +2240,9 @@ def update_user(user_id: int, payload: dict, db: Session = Depends(get_db), curr
         user.is_active = bool(payload["is_active"])
     if "group_ids" in payload:
         group_ids = payload.get("group_ids") or []
-        groups = db.query(AccessGroup).filter(AccessGroup.id.in_(group_ids)).all()
-        user.groups = groups
+        user.groups = _load_user_groups(db, group_ids, required=not user.is_admin)
+    if not user.is_admin and not user.groups:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuario precisa estar associado a uma empresa/grupo")
 
     db.commit()
     return {"ok": True}

@@ -145,8 +145,8 @@ export default function UserManagementPage() {
   return (
     <main className="dpage">
       <div className="page-intro">
-        <h2>Usuários e grupos.</h2>
-        <div className="sub">identidades, grupos de acesso e permissões</div>
+        <h2>Usuários e empresas.</h2>
+        <div className="sub">cada grupo representa uma empresa e limita a visibilidade dos scans</div>
       </div>
 
       {error && <div className="err-box" style={{ marginBottom: 14 }}>{error}</div>}
@@ -158,7 +158,7 @@ export default function UserManagementPage() {
 
       <div className="grid-2" style={{ marginBottom: 16 }}>
         <section className="card">
-          <div className="card-h"><div><h3>Novo usuário</h3><div className="sub">cadastro restrito a administradores</div></div></div>
+          <div className="card-h"><div><h3>Novo usuário</h3><div className="sub">operadores precisam estar em uma empresa</div></div></div>
           <div style={{ display: "grid", gap: 10 }}>
             <input style={inputStyle} placeholder="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
             <input type="password" style={inputStyle} placeholder="senha" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
@@ -171,12 +171,12 @@ export default function UserManagementPage() {
                 <span key={g.id} style={chip(newUser.group_ids.includes(g.id))} onClick={() => toggleGroupOnNewUser(g.id)}>{g.name}</span>
               ))}
             </div>
-            <button className="btn btn-primary" onClick={createUser}>Criar usuário</button>
+            <button className="btn btn-primary" onClick={createUser} disabled={!newUser.is_admin && newUser.group_ids.length === 0}>Criar usuário</button>
           </div>
         </section>
 
         <section className="card">
-          <div className="card-h"><div><h3>Grupos de acesso</h3><div className="sub">segmentação por cliente</div></div></div>
+          <div className="card-h"><div><h3>Empresas</h3><div className="sub">tenant de visibilidade dos scans</div></div></div>
           <div style={{ display: "grid", gap: 10 }}>
             <input style={inputStyle} placeholder="Nome do grupo" value={groupForm.name} onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })} />
             <input style={inputStyle} placeholder="Descrição" value={groupForm.description} onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })} />
@@ -233,7 +233,7 @@ export default function UserManagementPage() {
                 <div className="card-soft" style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>
                   <p style={{ fontWeight: 600, color: "var(--ink)" }}>#{u.id}</p>
                   <p style={{ marginTop: 4 }}>admin {String(u.is_admin)} · ativo {String(u.is_active)}</p>
-                  <p style={{ marginTop: 4 }}>grupos: {(u.group_ids || []).join(", ") || "nenhum"}</p>
+                  <p style={{ marginTop: 4 }}>empresa(s): {(u.group_names || []).join(", ") || (u.group_ids || []).join(", ") || "nenhuma"}</p>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>

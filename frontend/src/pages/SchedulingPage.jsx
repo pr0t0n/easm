@@ -37,6 +37,12 @@ export default function SchedulingPage({ embedded = false }) {
     client.get("/api/access-groups").then((res) => setGroups(res.data));
   }, []);
 
+  useEffect(() => {
+    if (!form.access_group_id && !form.access_group_name && groups.length === 1) {
+      setForm((prev) => ({ ...prev, access_group_id: groups[0].id }));
+    }
+  }, [form.access_group_id, form.access_group_name, groups]);
+
   const submit = async (e) => {
     e.preventDefault();
     try {
@@ -143,7 +149,7 @@ export default function SchedulingPage({ embedded = false }) {
           />
           <select style={{ ...fieldStyle, gridColumn: "1 / -1" }} value={form.access_group_id}
             onChange={(e) => setForm({ ...form, access_group_id: e.target.value ? Number(e.target.value) : "", access_group_name: e.target.value ? "" : form.access_group_name })}>
-            <option value="">Sem grupo</option>
+            <option value="">Selecione a empresa</option>
             {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
           <input
@@ -190,7 +196,7 @@ export default function SchedulingPage({ embedded = false }) {
             Habilitado
           </label>
           <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
-            <button className="btn btn-primary" type="submit">{editingId ? "Salvar edição" : "Criar agendamento"}</button>
+            <button className="btn btn-primary" type="submit" disabled={!form.access_group_id && !form.access_group_name.trim()}>{editingId ? "Salvar edição" : "Criar agendamento"}</button>
             {editingId && (
               <button className="btn btn-ghost" type="button" onClick={() => { setEditingId(null); setForm(emptyForm); }}>
                 Cancelar
@@ -217,6 +223,7 @@ export default function SchedulingPage({ embedded = false }) {
               </div>
             </div>
             <div className="mono-sm muted" style={{ marginTop: 5 }}>
+              empresa: {row.access_group_name || (row.access_group_id ? `#${row.access_group_id}` : "—")} ·{" "}
               domínios: {(row.targets || []).join("; ") || row.targets_text || "—"}
             </div>
             <div className="mono-sm muted" style={{ marginTop: 3 }}>

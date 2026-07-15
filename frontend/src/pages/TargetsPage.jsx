@@ -31,6 +31,8 @@ function gradeFromSeverity(sev) {
 export default function TargetsPage() {
   const [rows, setRows] = useState([]);
   const [scans, setScans] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [selectedAccessGroupId, setSelectedAccessGroupId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -71,12 +73,17 @@ export default function TargetsPage() {
     setRows(data || []);
   };
 
+  const loadGroups = async () => {
+    const { data } = await client.get("/api/access-groups");
+    setGroups(data || []);
+  };
+
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        await Promise.all([loadTargets(), loadScans()]);
+        await Promise.all([loadTargets(), loadScans(), loadGroups()]);
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar targets.");
       } finally {
@@ -92,6 +99,12 @@ export default function TargetsPage() {
     }, 3000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!selectedAccessGroupId && groups.length === 1) {
+      setSelectedAccessGroupId(String(groups[0].id));
+    }
+  }, [groups, selectedAccessGroupId]);
 
   useEffect(() => {
     if (!selectedScanId) {
@@ -165,7 +178,7 @@ export default function TargetsPage() {
       await client.post("/api/scans", {
         target_query: targetName,
         mode: scanMode,
-        access_group_id: null,
+        access_group_id: Number(selectedAccessGroupId),
       });
 
       setStatusMessage(`Scan para ${targetName} iniciado com sucesso.`);
@@ -356,6 +369,15 @@ export default function TargetsPage() {
                                 <option value="single">Unitário</option>
                                 <option value="scheduled">Agendado</option>
                               </select>
+                              <select
+                                className="w-full"
+                                value={selectedAccessGroupId}
+                                onChange={(e) => setSelectedAccessGroupId(e.target.value)}
+                                style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13, marginBottom: 10 }}
+                              >
+                                <option value="">Selecione a empresa</option>
+                                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                              </select>
                               <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ink-soft)", padding: "10px 12px", border: "1px solid var(--line)", borderRadius: 8, background: "var(--surface)", marginBottom: 10 }}>
                                 <input
                                   type="checkbox"
@@ -369,7 +391,7 @@ export default function TargetsPage() {
                                 className="btn btn-primary"
                                 style={{ width: "100%", justifyContent: "center" }}
                                 onClick={() => authorizeAndCreateScan(item.target)}
-                                disabled={!authorizationAccepted[item.target] || submitting}
+                                disabled={!authorizationAccepted[item.target] || submitting || !selectedAccessGroupId}
                               >
                                 {submitting ? "Iniciando…" : "Iniciar scan"}
                               </button>
