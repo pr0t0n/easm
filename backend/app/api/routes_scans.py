@@ -1624,9 +1624,9 @@ def _build_wef_benchmark(segment: str, fair_open_usd: float, severity_count: dic
     }
 
 
-def _build_target_evolution(db: Session, target_query: str, current_scan_id: int) -> dict:
+def _build_target_evolution(db: Session, current_user: User, target_query: str, current_scan_id: int) -> dict:
     scans = (
-        db.query(ScanJob)
+        _authorized_scan_query(db, current_user)
         .filter(ScanJob.target_query == target_query)
         .order_by(ScanJob.created_at.asc(), ScanJob.id.asc())
         .all()
@@ -5304,7 +5304,7 @@ def scan_report(
         .all()
     )
     previous_scan = (
-        db.query(ScanJob)
+        _authorized_scan_query(db, current_user)
         .filter(
             ScanJob.target_query == job.target_query,
             ScanJob.id < scan_id,
@@ -5734,7 +5734,7 @@ def scan_report(
     segment = _infer_target_segment(job.target_query)
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     evolution_target = selected_target_tokens[0] if len(selected_target_tokens) == 1 else job.target_query
-    target_evolution = _build_target_evolution(db, evolution_target, scan_id)
+    target_evolution = _build_target_evolution(db, current_user, evolution_target, scan_id)
     rating_timeline = build_rating_timeline(target_evolution.get("timeline") or [])
     continuous_rating = compute_continuous_rating(
         severity_count=severity_count_vuln,
@@ -6254,17 +6254,8 @@ def dashboard_insights(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.is_admin:
-        jobs_query = db.query(ScanJob)
-        findings_query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id)
-    else:
-        allowed_ids = [g.id for g in current_user.groups]
-        jobs_query = db.query(ScanJob).filter(ScanJob.access_group_id.in_(allowed_ids))
-        findings_query = (
-            db.query(Finding)
-            .join(ScanJob, ScanJob.id == Finding.scan_job_id)
-            .filter(ScanJob.access_group_id.in_(allowed_ids))
-        )
+    jobs_query = _authorized_scan_query(db, current_user)
+    findings_query = _authorized_finding_query(db, current_user)
 
     normalized_target = (target or "").strip()
     if normalized_target:
@@ -6276,7 +6267,7 @@ def dashboard_insights(
         try:
             group_id_int = int(access_group_id) if isinstance(access_group_id, str) else access_group_id
             group_schedules = (
-                db.query(ScheduledScan)
+                apply_company_scope(db.query(ScheduledScan), current_user, ScheduledScan)
                 .filter(ScheduledScan.access_group_id == group_id_int)
                 .all()
             )
@@ -6628,7 +6619,7 @@ def dashboard_insights(
         return round(sum(values) / len(values), 2) if values else 0.0
 
     avg_fair = round(fair_total / max(len(findings), 1), 2)
-    agg_mode = "target" if normalized_target else ("group_avg" if access_group_id is not None else "global")
+    agg_mode = "target" if normalized_target else ("group_avg" if access_group_id is not None else ("global" if current_user.is_admin else "company"))
 
     effective_scans = len(jobs)
     effective_total = total
@@ -7837,12 +7828,9 @@ def get_easm_trends(
     - Desvio de postura
     - Forecast 30 dias
     """
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    asset = _authorized_asset_query(db, current_user).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset não encontrado")
-
-    if asset.owner_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Acesso negado")
 
     # Historical ratings
     history = TemporalTracker.get_rating_history(db, asset_id, days=days)
@@ -7935,12 +7923,9 @@ def get_vulnerability_report(
     from datetime import datetime, timezone
     import json
     
-    scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    scan = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
-
-    if scan.owner_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Acesso negado")
 
     state_data = scan.state_data or {}
     report_v2 = state_data.get("report_v2", {})
@@ -7955,12 +7940,11 @@ def get_vulnerability_report(
     
     for asset_addr in discovered_assets:
         # Query vulnerabilities para este asset
-        asset_vulns = db.query(Vulnerability).filter(
-            Vulnerability.asset_id == db.query(Asset).filter(
-                Asset.owner_id == scan.owner_id,
-                Asset.domain_or_ip == asset_addr,
-            ).with_entities(Asset.id),
-        ).all()
+        asset_ids = _authorized_asset_query(db, current_user).filter(
+            Asset.domain_or_ip == asset_addr,
+            Asset.last_scan_id == scan.id,
+        ).with_entities(Asset.id)
+        asset_vulns = db.query(Vulnerability).filter(Vulnerability.asset_id.in_(asset_ids)).all()
         
         critical_ct = sum(1 for v in asset_vulns if v.severity == "critical")
         high_ct = sum(1 for v in asset_vulns if v.severity == "high")
@@ -8147,12 +8131,9 @@ def get_temporal_analysis(
     """
     from datetime import datetime, timezone, timedelta
     
-    scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    scan = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
-
-    if scan.owner_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Acesso negado")
 
     state_data = scan.state_data or {}
     easm_rating = state_data.get("easm_rating", {})
@@ -8199,9 +8180,9 @@ def get_temporal_analysis(
     historical_ratings = []
     
     for asset_addr in discovered_assets[:5]:  # Limita a 5 assets por performance
-        asset = db.query(Asset).filter(
-            Asset.owner_id == scan.owner_id,
+        asset = _authorized_asset_query(db, current_user).filter(
             Asset.domain_or_ip == asset_addr,
+            Asset.last_scan_id == scan.id,
         ).first()
         
         if asset:
@@ -9604,7 +9585,7 @@ def verify_business_logic_endpoint(
 ):
     """Testes de lógica de negócio (tampering de preço/qtd, bypass de fluxo, reuso de cupom)."""
     from app.services.business_logic_probe import run_business_logic_for_scan
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return run_business_logic_for_scan(db, job)
@@ -9618,7 +9599,7 @@ def analyze_js_endpoint(
 ):
     """Análise estática de JS: endpoints, params, sinks (eval/proto), segredos."""
     from app.services.js_analyzer import run_js_analysis_for_scan
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return run_js_analysis_for_scan(db, job)
@@ -9632,7 +9613,7 @@ def verify_api_exposure_endpoint(
 ):
     """Excessive Data Exposure (API3) + risco de Mass Assignment (API6)."""
     from app.services.api_probe import run_api_probe_for_scan
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return run_api_probe_for_scan(db, job)
@@ -9646,7 +9627,7 @@ def verify_nosql_endpoint(
 ):
     """Roda o teste de NoSQL injection (injeção de operador read-only)."""
     from app.services.nosql_probe import run_nosql_for_scan
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return run_nosql_for_scan(db, job)
@@ -9660,7 +9641,7 @@ def verify_bola_endpoint(
 ):
     """Roda o teste autenticado de BOLA/BFLA (acesso cruzado de objeto/função)."""
     from app.services.bola_probe import run_bola_for_scan
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return run_bola_for_scan(db, job)
@@ -9675,11 +9656,11 @@ def get_attack_navigator(
     """Camada oficial do MITRE ATT&CK Navigator com as técnicas observadas no scan."""
     from app.services.vuln_family import classify_family as _cf_nav
     from app.services.framework_mapping import build_navigator_layer
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     fams = []
-    for f in db.query(Finding).filter(Finding.scan_job_id == scan_id).all():
+    for f in _authorized_finding_query(db, current_user).filter(Finding.scan_job_id == scan_id).all():
         d = dict(f.details or {})
         fams.append(_cf_nav(title=f.title, tool=f.tool, owasp=str(d.get("owasp_category") or ""),
                             cve=f.cve, learning_family=(d.get("learning_source") or {}).get("vuln_family")))
@@ -9694,7 +9675,7 @@ def get_attack_paths(
 ):
     """Caminhos de ataque rumo às joias da coroa (objetivo), ordenados por tática ATT&CK."""
     from app.services.attack_path import build_attack_paths
-    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Scan não encontrado")
     return build_attack_paths(db, scan_id, job=job)
@@ -9708,6 +9689,9 @@ def get_methodology_coverage(
 ):
     """Scorecard de cobertura de metodologia (classes testadas vs catálogo)."""
     from app.services.methodology import compute_methodology_coverage
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
     return compute_methodology_coverage(db, scan_id)
 
 
