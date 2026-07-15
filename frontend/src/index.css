@@ -1446,6 +1446,27 @@ code,
     min-height: auto;
   }
 
+  .sb,
+  .app-hdr,
+  .app-sidebar,
+  .app-header {
+    display: none !important;
+  }
+
+  .app-shell {
+    display: block !important;
+    min-height: auto !important;
+    padding-left: 0 !important;
+    background: #ffffff !important;
+  }
+
+  .main-column {
+    display: block !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    background: #ffffff !important;
+  }
+
   .no-print {
     display: none !important;
   }
