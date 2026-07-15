@@ -143,6 +143,13 @@ def adjudicate_finding(
     location = url or location_from_details(details, target)
     active_web = is_active_web_vulnerability(title, tool, details)
     passive_tool = str(tool or "").lower() in PASSIVE_INVENTORY_TOOLS
+    proof_present = bool(
+        details.get("proof_pack")
+        or details.get("active_proof")
+        or details.get("poc")
+        or details.get("confirmed_origin")
+        or details.get("origin_validation")
+    )
 
     waf_seen, waf_meta = response_looks_like_waf(details, text=title)
     if waf_seen:
@@ -170,6 +177,33 @@ def adjudicate_finding(
         if str(details.get("verification_note") or "").startswith(("A resposta observada veio", "Vulnerabilidade web ativa exige")):
             details.pop("verification_note", None)
 
+    if _is_banner_cve_lead(title, tool, details) and not proof_present:
+        details.setdefault("inventory_only", True)
+        details["verification_note"] = (
+            "CVE inferida por banner/versao sem exploracao ou prova independente. "
+            "Mantida como hipotese para validacao dirigida, fora de vulnerabilidades abertas."
+        )
+        current_status = "hypothesis"
+        sev = cap_severity(sev, "medium")
+
+    if _is_unverified_waf_origin(title, tool, details) and not proof_present:
+        details.setdefault("inventory_only", True)
+        details["verification_note"] = (
+            "Origem atras do WAF ainda e candidata. Exige comparacao Host-header/body "
+            "ou proof-pack antes de virar vulnerabilidade."
+        )
+        current_status = "hypothesis"
+        sev = cap_severity(sev, "medium")
+
+    if _is_unverified_internal_ip_disclosure(title, tool, details) and not proof_present:
+        details.setdefault("inventory_only", True)
+        details["verification_note"] = (
+            "Possivel IP interno em redirect/header sem validacao independente. "
+            "Mantido como hipotese ate confirmar exposicao real e impacto."
+        )
+        current_status = "hypothesis"
+        sev = cap_severity(sev, "medium")
+
     if passive_tool:
         details.setdefault("inventory_only", True)
         current_status = "hypothesis"
@@ -184,6 +218,34 @@ def adjudicate_finding(
         sev = cap_severity(sev, "high")
 
     return current_status, sev, details
+
+
+def _is_banner_cve_lead(title: str, tool: str, details: dict[str, Any]) -> bool:
+    tool_l = str(tool or "").lower()
+    if not (tool_l.startswith("nmap") or "vulscan" in tool_l):
+        return False
+    text = " ".join([
+        str(title or ""),
+        str(details.get("cve_id") or ""),
+        str(details.get("cve") or ""),
+        str(details.get("evidence") or ""),
+    ])
+    return bool(re.search(r"\bCVE-\d{4}-\d{4,}\b", text, re.IGNORECASE))
+
+
+def _is_unverified_waf_origin(title: str, tool: str, details: dict[str, Any]) -> bool:
+    if str(tool or "").lower() != "waf_origin_discovery":
+        return False
+    if str(details.get("verification_status") or "").lower() == "confirmed":
+        return False
+    return bool(details.get("candidate_origins") or "origem potencial" in str(title or "").lower())
+
+
+def _is_unverified_internal_ip_disclosure(title: str, tool: str, details: dict[str, Any]) -> bool:
+    if str(tool or "").lower() != "nikto":
+        return False
+    text = " ".join([str(title or ""), str(details.get("evidence") or "")]).lower()
+    return "internal or real ip" in text or "10." in text and "location header" in text
 
 
 def is_actionable_for_vulnerability_inventory(

@@ -86,6 +86,48 @@ def test_security_header_resource_policy_is_not_rce() -> None:
     assert is_active_web_vulnerability("Header ausente: cross-origin-resource-policy", "curl-headers", {}) is False
 
 
+def test_nmap_cve_without_proof_is_hypothesis_inventory() -> None:
+    status, severity, details = adjudicate_finding(
+        title="CVE-2007-6750",
+        severity="high",
+        tool="nmap",
+        details={"evidence": "CVE-2007-6750 — porta 80/tcp", "verification_status": "candidate"},
+        target="example.com",
+    )
+
+    assert status == "hypothesis"
+    assert severity == "medium"
+    assert details["inventory_only"] is True
+
+
+def test_unverified_waf_origin_is_hypothesis_inventory() -> None:
+    status, severity, details = adjudicate_finding(
+        title="[WAF-BYPASS] Origem potencial exposta atrás do WAF",
+        severity="high",
+        tool="waf_origin_discovery",
+        details={"candidate_origins": [{"ip": "203.0.113.10"}], "verification_status": "candidate"},
+        target="example.com",
+    )
+
+    assert status == "hypothesis"
+    assert severity == "medium"
+    assert details["inventory_only"] is True
+
+
+def test_nikto_internal_ip_without_proof_is_hypothesis_inventory() -> None:
+    status, severity, details = adjudicate_finding(
+        title='Location header may reveal internal or real IP "10.0.0.1"',
+        severity="high",
+        tool="nikto",
+        details={"evidence": "internal or real IP in the Location header", "verification_status": "candidate"},
+        target="example.com",
+    )
+
+    assert status == "hypothesis"
+    assert severity == "medium"
+    assert details["inventory_only"] is True
+
+
 def test_local_cve_range_filter_blocks_newer_nginx_and_impossible_wordpress() -> None:
     nginx_cve = {
         "title": "nginx resolver Off-By-One Heap Write (< 1.20.1)",
