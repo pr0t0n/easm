@@ -9216,6 +9216,8 @@ def _cockpit_host(domain: str = "", url: str = "") -> str:
 @router.get("/cockpit")
 def get_cockpit(
     scan_id: int | None = Query(None),
+    access_group_id: int | None = Query(None),
+    target: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -9232,12 +9234,14 @@ def get_cockpit(
     from app.services.risk_service import _log_exposure_penalty
     # _score_to_grade é definido neste módulo (linha ~393)
 
-    scan_rows = (
-        _authorized_scan_query(db, current_user)
-        .order_by(ScanJob.id.desc())
-        .limit(50)
-        .all()
-    )
+    scan_query = _authorized_scan_query(db, current_user)
+    if access_group_id is not None:
+        scan_query = scan_query.filter(ScanJob.access_group_id == int(access_group_id))
+    normalized_target = str(target or "").strip()
+    if normalized_target:
+        scan_query = scan_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
+
+    scan_rows = scan_query.order_by(ScanJob.id.desc()).limit(50).all()
     scans_dropdown = [
         {
             "id": s.id,
@@ -9252,7 +9256,7 @@ def get_cockpit(
     selected = None
     if scan_id is not None:
         selected = next((s for s in scan_rows if s.id == scan_id), None) or (
-            _authorized_scan_query(db, current_user)
+            scan_query
             .filter(ScanJob.id == scan_id)
             .first()
         )
@@ -9276,11 +9280,12 @@ def get_cockpit(
     # scan_rows[0] (só o mais recente) → a página mostrava 1 alvo, não todos.
     aggregate = scan_id is None
     if aggregate:
-        findings = (
-            _authorized_finding_query(db, current_user)
-            .filter(Finding.is_false_positive.is_(False))
-            .all()
-        )
+        findings_query = _authorized_finding_query(db, current_user).filter(Finding.is_false_positive.is_(False))
+        if access_group_id is not None:
+            findings_query = findings_query.filter(ScanJob.access_group_id == int(access_group_id))
+        if normalized_target:
+            findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
+        findings = findings_query.all()
     else:
         findings = (
             db.query(Finding)
@@ -9307,7 +9312,7 @@ def get_cockpit(
     # alto valor REAIS com achados (api-connect, dev-fatura, dev-api-*) sumiam.
     try:
         from app.services.crown_jewel_analyzer import identify_crown_jewels
-        allowed_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id).subquery()
+        allowed_scan_ids = scan_query.with_entities(ScanJob.id).subquery()
         _asset_q = db.query(Asset.domain_or_ip).filter(Asset.last_scan_id.in_(allowed_scan_ids))
         if not aggregate:
             _asset_q = _asset_q.filter(Asset.last_scan_id == selected.id)

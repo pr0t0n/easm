@@ -17,7 +17,8 @@ const EMPTY_BAS = {
 
 function aggregationLabel(mode) {
   if (mode === "target") return "Visão por Alvo";
-  if (mode === "group_avg") return "Média do Grupo";
+  if (mode === "group_avg") return "Média da Empresa";
+  if (mode === "company") return "Minha Empresa";
   return "Visão Global · média dos scanners";
 }
 
@@ -447,11 +448,15 @@ export default function DashboardPage() {
   // ── Cockpit consolidado — dado REAL por scan (/api/cockpit): heatmap,
   //    fila com EPSS+MITRE, joias, score. Sem fabricar nada. ────────────────
   useEffect(() => {
-    const qs = selectedSubdomainScanId ? `?scan_id=${selectedSubdomainScanId}` : "";
+    const params = new URLSearchParams();
+    if (selectedSubdomainScanId) params.append("scan_id", selectedSubdomainScanId);
+    if (selectedGroup) params.append("access_group_id", selectedGroup);
+    if (selectedTarget.trim()) params.append("target", selectedTarget.trim());
+    const qs = params.toString() ? `?${params.toString()}` : "";
     client.get(`/api/cockpit${qs}`)
       .then(({ data }) => setCockpitData(data || null))
       .catch(() => setCockpitData(null));
-  }, [selectedSubdomainScanId]);
+  }, [selectedSubdomainScanId, selectedGroup, selectedTarget]);
 
   // ── Verification status breakdown (T1 Evidence Gate) ─────────────────────
   useEffect(() => {
@@ -536,7 +541,7 @@ export default function DashboardPage() {
           high: dashboard.stats?.high || 0,
           medium: dashboard.stats?.medium || 0,
           low: dashboard.stats?.low || 0,
-          aggregation_mode: dashboard.stats?.aggregation_mode || "global",
+          aggregation_mode: dashboard.stats?.aggregation_mode || "company",
           aggregation_targets: dashboard.stats?.aggregation_targets || 0,
         });
 
@@ -879,6 +884,10 @@ export default function DashboardPage() {
     ? (stats?.external_rating_grade || scopedVulnerabilityRating?.grade || gradeFromScore(cockpitScore))
     : "—";
   const cockpitTone = hasScanData ? ratingTone(cockpitScore) : "t-muted";
+  const selectedCompanyName = selectedGroup
+    ? (groups.find((g) => String(g.id) === String(selectedGroup))?.name || `Empresa #${selectedGroup}`)
+    : "";
+  const cockpitScopeLabel = selectedCompanyName || aggregationLabel(stats?.aggregation_mode || "company");
   const activeScanRows = scanRows.filter((scan) => ["running", "queued", "retrying"].includes(String(scan?.status || "").toLowerCase()));
   const scanOptions = scanRows.slice(0, 80);
   // Heatmap: dado REAL por finding vindo de /api/cockpit (classificação por
@@ -1003,7 +1012,7 @@ export default function DashboardPage() {
 
         <section className="cockpit-filter-strip">
           <div className="ctrl">
-            <label>Grupo / Cliente</label>
+            <label>Empresa</label>
             <select
               value={selectedGroup}
               onChange={(e) => {
@@ -1013,7 +1022,7 @@ export default function DashboardPage() {
                 setSelectedSubdomainScanId(null);
               }}
             >
-              <option value="">Todos os grupos</option>
+              <option value="">Todas as empresas permitidas</option>
               {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
             </select>
           </div>
@@ -1035,7 +1044,7 @@ export default function DashboardPage() {
           </div>
           {!!stats && (
             <div className="cockpit-scope-note">
-              <b>{Number(stats.aggregation_targets || 0)}</b> alvo(s) · {Number(stats.scans || 0)} ciclo(s)
+              <b>{cockpitScopeLabel}</b> · {Number(stats.aggregation_targets || 0)} alvo(s) · {Number(stats.scans || 0)} ciclo(s)
             </div>
           )}
         </section>
@@ -1055,7 +1064,7 @@ export default function DashboardPage() {
             <div>
               <div className={`score-grade ${cockpitTone}`}>
                 <b>{cockpitGrade}</b>
-                <span>{Number(ratingTimeline?.length || 0)} scans no histórico</span>
+                <span>{cockpitScopeLabel} · {Number(ratingTimeline?.length || 0)} scans no histórico</span>
               </div>
               <MiniSparkline data={ratingTimeline} />
             </div>
