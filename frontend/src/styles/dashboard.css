@@ -178,8 +178,24 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.dash .cockpit-actions select {
+.dash .cockpit-top-select {
+  display: grid;
+  gap: 4px;
+  min-width: min(220px, 32vw);
+}
+.dash .cockpit-top-select.wide {
   min-width: min(360px, 44vw);
+}
+.dash .cockpit-top-select label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.dash .cockpit-actions select {
+  width: 100%;
   height: 37px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -200,6 +216,9 @@
   border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow-card);
+}
+.dash .cockpit-filter-strip.admin-compact {
+  grid-template-columns: minmax(240px, 1fr) auto auto;
 }
 .dash .cockpit-filter-strip label {
   display: block;
@@ -239,6 +258,29 @@
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .dash .cockpit-page-head,
+  .dash .cockpit-actions {
+    align-items: stretch;
+  }
+  .dash .cockpit-actions,
+  .dash .cockpit-top-select,
+  .dash .cockpit-top-select.wide {
+    width: 100%;
+    min-width: 0;
+  }
+  .dash .cockpit-filter-strip,
+  .dash .cockpit-filter-strip.admin-compact {
+    grid-template-columns: 1fr;
+  }
+  .dash .cockpit-filter-actions {
+    flex-wrap: wrap;
+  }
+  .dash .cockpit-scope-note {
+    justify-content: flex-start;
+    white-space: normal;
+  }
 }
 .dash > .content .scope-empty,
 .dash .cockpit-shell > .scope-empty {

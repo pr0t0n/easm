@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import client from "../api/client";
+import { authStore } from "../store/auth";
 import "../styles/dashboard.css";
 
 const DAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"];
@@ -394,6 +395,8 @@ function SurfaceHeatmap({ rows = [] }) {
 }
 
 export default function DashboardPage() {
+  const currentUser = authStore.me || {};
+  const isAdmin = Boolean(currentUser?.is_admin);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [stats, setStats] = useState(null);
@@ -476,7 +479,6 @@ export default function DashboardPage() {
 
   const handleSearch = () => {
     setIsSearching(true);
-    setSelectedGroup("");
     setSelectedTarget(searchInput);
   };
 
@@ -484,6 +486,14 @@ export default function DashboardPage() {
     setSelectedTarget("");
     setSearchInput("");
     setSelectedGroup("");
+    setSelectedSubdomainScanId(null);
+  };
+
+  const handleGroupSelect = (value) => {
+    setSelectedGroup(value);
+    setSelectedTarget("");
+    setSearchInput("");
+    setSelectedSubdomainScanId(null);
   };
 
   // Carrega grupos disponíveis para o usuário
@@ -871,12 +881,17 @@ export default function DashboardPage() {
     : crownJewels;
 
   const showEmptyScanNote = Boolean(selectedTarget) && stats && stats.scans === 0;
+  const scopedScanRows = scanRows.filter((scan) => {
+    if (selectedGroup && String(scan.access_group_id || "") !== String(selectedGroup)) return false;
+    const targetFilter = selectedTarget.trim().toLowerCase();
+    if (targetFilter && !String(scan.target_query || "").toLowerCase().includes(targetFilter)) return false;
+    return true;
+  });
   const selectedScan = (
-    scanRows.find((scan) => Number(scan.id) === Number(selectedSubdomainScanId))
-    || scanRows[0]
+    scopedScanRows.find((scan) => Number(scan.id) === Number(selectedSubdomainScanId))
     || null
   );
-  const selectedScanId = selectedSubdomainScanId || selectedScan?.id || "";
+  const selectedScanId = selectedSubdomainScanId || "";
   // Sem execução no escopo não há rating: ausência de dados não é nota "F".
   const hasScanData = Number(stats?.scans || 0) > 0;
   const cockpitScore = Number(stats?.external_rating_score || scopedVulnerabilityRating?.score || 0);
@@ -888,8 +903,8 @@ export default function DashboardPage() {
     ? (groups.find((g) => String(g.id) === String(selectedGroup))?.name || `Empresa #${selectedGroup}`)
     : "";
   const cockpitScopeLabel = selectedCompanyName || aggregationLabel(stats?.aggregation_mode || "company");
-  const activeScanRows = scanRows.filter((scan) => ["running", "queued", "retrying"].includes(String(scan?.status || "").toLowerCase()));
-  const scanOptions = scanRows.slice(0, 80);
+  const activeScanRows = scopedScanRows.filter((scan) => ["running", "queued", "retrying"].includes(String(scan?.status || "").toLowerCase()));
+  const scanOptions = scopedScanRows.slice(0, 80);
   // Heatmap: dado REAL por finding vindo de /api/cockpit (classificação por
   // sinal real do achado: domínio, url, ferramenta, título). Sem fabricar
   // distribuição — se o backend ainda não respondeu, a matriz fica zerada.
@@ -981,8 +996,10 @@ export default function DashboardPage() {
     }
     const scan = scanRows.find((row) => Number(row.id) === Number(value));
     setSelectedSubdomainScanId(value);
+    if (scan?.access_group_id) {
+      setSelectedGroup(String(scan.access_group_id));
+    }
     if (scan?.target_query) {
-      setSelectedGroup("");
       setSelectedTarget(scan.target_query);
       setSearchInput(scan.target_query);
     }
@@ -997,35 +1014,41 @@ export default function DashboardPage() {
             <h1>O que atacar primeiro</h1>
           </div>
           <div className="cockpit-actions">
-            <select value={selectedScanId || ""} onChange={handleScanSelect} aria-label="Selecionar scan do cockpit">
-              <option value="">Todos os scans</option>
-              {scanOptions.map((scan) => (
-                <option key={scan.id} value={scan.id}>
-                  #{scan.id} · {scan.target_query || "alvo"} · {scan.status}
-                </option>
-              ))}
-            </select>
+            {isAdmin && (
+              <div className="cockpit-top-select">
+                <label>Visão da empresa</label>
+                <select value={selectedGroup} onChange={(e) => handleGroupSelect(e.target.value)} aria-label="Selecionar empresa do cockpit">
+                  <option value="">Todas as empresas</option>
+                  {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select>
+              </div>
+            )}
+            <div className="cockpit-top-select wide">
+              <label>Scan</label>
+              <select value={selectedScanId || ""} onChange={handleScanSelect} aria-label="Selecionar scan do cockpit">
+                <option value="">Todos os scans{selectedCompanyName ? ` · ${selectedCompanyName}` : ""}</option>
+                {scanOptions.map((scan) => (
+                  <option key={scan.id} value={scan.id}>
+                    #{scan.id} · {scan.target_query || "alvo"} · {scan.status}
+                  </option>
+                ))}
+              </select>
+            </div>
             <button type="button" className="btn btn-ghost" onClick={exportSelectedReport}>Exportar relatório</button>
             <button type="button" className="btn btn-primary" onClick={() => window.location.assign("/scan")}>Novo scan</button>
           </div>
         </section>
 
-        <section className="cockpit-filter-strip">
-          <div className="ctrl">
-            <label>Empresa</label>
-            <select
-              value={selectedGroup}
-              onChange={(e) => {
-                setSelectedGroup(e.target.value);
-                setSelectedTarget("");
-                setSearchInput("");
-                setSelectedSubdomainScanId(null);
-              }}
-            >
-              <option value="">Todas as empresas permitidas</option>
-              {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-            </select>
-          </div>
+        <section className={`cockpit-filter-strip ${isAdmin ? "admin-compact" : ""}`}>
+          {!isAdmin && (
+            <div className="ctrl">
+              <label>Empresa</label>
+              <select value={selectedGroup} onChange={(e) => handleGroupSelect(e.target.value)}>
+                <option value="">Todas as empresas permitidas</option>
+                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+          )}
           <div className="ctrl">
             <label>Alvo</label>
             <input
@@ -1100,7 +1123,7 @@ export default function DashboardPage() {
 
         <section className="cockpit-main-grid">
           <AttackGraphPanel paths={attackQueue} jewels={cockpitJewels} />
-          <MissionFeedPanel scans={activeScanRows.length ? activeScanRows : scanRows} tools={basTools} flows={basAgentFlow} selectedScan={selectedScan} />
+          <MissionFeedPanel scans={activeScanRows.length ? activeScanRows : scopedScanRows} tools={basTools} flows={basAgentFlow} selectedScan={selectedScan} />
         </section>
 
         <section className="cockpit-lower-grid">
