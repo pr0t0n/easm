@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import client, { getWsBaseUrl } from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import LogTerminal from "../components/LogTerminal";
 
 const SEV_CLASS = {
@@ -32,6 +33,7 @@ export default function TargetsPage() {
   const [rows, setRows] = useState([]);
   const [scans, setScans] = useState([]);
   const [groups, setGroups] = useState([]);
+  const [viewAccessGroupId, setViewAccessGroupId] = useState("");
   const [selectedAccessGroupId, setSelectedAccessGroupId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -69,7 +71,9 @@ export default function TargetsPage() {
   };
 
   const loadTargets = async () => {
-    const { data } = await client.get("/api/targets/summary");
+    const { data } = await client.get("/api/targets/summary", {
+      params: viewAccessGroupId ? { access_group_id: viewAccessGroupId } : {},
+    });
     setRows(data || []);
   };
 
@@ -92,6 +96,13 @@ export default function TargetsPage() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    loadTargets().catch(() => null);
+    setExpandedTarget(null);
+    setSelectedScanId(null);
+    if (viewAccessGroupId) setSelectedAccessGroupId(viewAccessGroupId);
+  }, [viewAccessGroupId]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -146,6 +157,11 @@ export default function TargetsPage() {
     const target = String(item.target || "").toLowerCase();
     return target.includes(query.trim().toLowerCase());
   });
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !viewAccessGroupId || String(scan.access_group_id || "") === String(viewAccessGroupId)),
+    [scans, viewAccessGroupId],
+  );
 
   const totals = rows.reduce(
     (acc, r) => ({
@@ -247,6 +263,7 @@ export default function TargetsPage() {
             <div className="sub">cada linha é um asset autorizado · recon contínuo, vuln e OSINT</div>
           </div>
           <div className="t-tools">
+            <CompanyScopeSelect value={viewAccessGroupId} onChange={setViewAccessGroupId} style={{ minWidth: 220 }} />
             <div className="search">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
               <input placeholder="Buscar host, IP, tag…" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -277,7 +294,7 @@ export default function TargetsPage() {
             </thead>
             <tbody>
               {filtered.map((item) => {
-                const targetScans = scans
+                const targetScans = scopedScans
                   .filter((scan) => String(scan.target_query || "") === String(item.target || ""))
                   .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
                 const grade = gradeFromSeverity(item.highest_severity);

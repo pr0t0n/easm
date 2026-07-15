@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import "../styles/dashboard.css";
 
 /* Relatório de Exposição (Red Team) — dado 100% real de /api/cockpit.
@@ -27,18 +28,22 @@ function priorityOf(f) {
 export default function RedTeamReportPage() {
   const [data, setData] = useState(null);
   const [scanId, setScanId] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     setLoading(true);
-    const qs = scanId ? `?scan_id=${scanId}` : "";
+    const params = new URLSearchParams();
+    if (scanId) params.set("scan_id", scanId);
+    if (accessGroupId) params.set("access_group_id", accessGroupId);
+    const qs = params.toString() ? `?${params.toString()}` : "";
     client
       .get(`/api/cockpit${qs}`)
       .then(({ data }) => setData(data || null))
       .catch(() => setError("Falha ao carregar o relatório."))
       .finally(() => setLoading(false));
-  }, [scanId]);
+  }, [scanId, accessGroupId]);
 
   const findings = useMemo(() => (Array.isArray(data?.findings) ? data.findings.map((f) => ({
     ...f,
@@ -63,7 +68,7 @@ export default function RedTeamReportPage() {
     const sid = data?.scan?.id;
     try {
       const res = await client.get("/api/findings/export.csv", {
-        params: sid ? { scan_id: sid } : {},
+        params: sid ? { scan_id: sid } : (accessGroupId ? { access_group_id: accessGroupId } : {}),
         responseType: "blob",
       });
       const url = URL.createObjectURL(res.data);
@@ -154,8 +159,9 @@ export default function RedTeamReportPage() {
       <div className="content report-shell">
         {/* Ações (não imprimem) */}
         <section className="report-actions no-print">
+          <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} style={{ minWidth: 220 }} />
           <select value={scanId} onChange={(e) => setScanId(e.target.value)} aria-label="Selecionar scan do relatório">
-            <option value="">Último scan</option>
+            <option value="">Último scan{accessGroupId ? " da empresa" : ""}</option>
             {(data?.scans || []).map((s) => (
               <option key={s.id} value={s.id}>#{s.id} {s.target_query}</option>
             ))}

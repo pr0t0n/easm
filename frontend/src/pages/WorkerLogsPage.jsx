@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import ExecutionCard from "../components/worker-logs/ExecutionCard";
 import LogLine from "../components/worker-logs/LogLine";
 import { copyText, getMessageText, statusColor, toolColor, toolFromMsg } from "../components/worker-logs/utils";
@@ -321,6 +322,7 @@ export default function WorkerLogsPage() {
   const [error, setError] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [activeTab, setActiveTab] = useState("cockpit");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const logEndRef = useRef(null);
   const requestIdRef = useRef(0);
 
@@ -361,7 +363,8 @@ export default function WorkerLogsPage() {
         const res = await client.get("/api/admin/worker-logs");
         const rows = res.data?.scans || [];
         setScans(rows);
-        const preferred = rows.find((scan) => ["running", "retrying", "queued"].includes(scan.status)) || rows[0];
+        const scopedRows = rows.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId));
+        const preferred = scopedRows.find((scan) => ["running", "retrying", "queued"].includes(scan.status)) || scopedRows[0];
         if (preferred && !selectedScan) {
           setSelectedScan(preferred.id);
           fetchLogs(preferred.id);
@@ -371,7 +374,20 @@ export default function WorkerLogsPage() {
       }
     };
     fetchScans();
-  }, []);
+  }, [accessGroupId]);
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+
+  useEffect(() => {
+    if (!selectedScan || scopedScans.some((scan) => Number(scan.id) === Number(selectedScan))) return;
+    setSelectedScan(null);
+    setData(null);
+    setPhaseData(null);
+    setRuntime(null);
+  }, [scopedScans, selectedScan]);
 
   useEffect(() => {
     if (!autoRefresh || !selectedScan) return;
@@ -450,9 +466,20 @@ export default function WorkerLogsPage() {
           <div className="sub">fase, comando, resposta, progresso, falhas e comunicação entre supervisor, workers, MCP e Kali</div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <CompanyScopeSelect
+            value={accessGroupId}
+            onChange={(value) => {
+              setAccessGroupId(value);
+              setSelectedScan(null);
+              setData(null);
+              setPhaseData(null);
+              setRuntime(null);
+            }}
+            style={{ minWidth: 220 }}
+          />
           <select value={selectedScan || ""} onChange={(e) => onScanChange(e.target.value)} className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 focus:outline-none">
             <option value="">selecionar scan</option>
-            {scans.map((scan) => (
+            {scopedScans.map((scan) => (
               <option key={scan.id} value={scan.id}>#{scan.id} {scan.target_query} [{scan.status}]</option>
             ))}
           </select>

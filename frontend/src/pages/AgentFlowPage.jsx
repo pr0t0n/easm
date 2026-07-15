@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 const STATUS_COLOR = {
   completed:   { bg: "rgba(34,145,96,0.08)",  border: "#1f8a59", text: "#1f8a59"  },
@@ -226,6 +227,7 @@ export default function AgentFlowPage() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [filter, setFilter]       = useState("all");
   const [search, setSearch]       = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     client.get("/api/scans").then((r) => {
@@ -233,6 +235,17 @@ export default function AgentFlowPage() {
       if (!scanId && r.data?.length) setScanId(String(r.data[0].id));
     });
   }, []);
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+
+  useEffect(() => {
+    if (scopedScans.some((scan) => String(scan.id) === String(scanId))) return;
+    setScanId(scopedScans[0]?.id ? String(scopedScans[0].id) : "");
+    setData(null);
+  }, [scopedScans, scanId]);
 
   const fetchFlow = async () => {
     if (!scanId) return;
@@ -283,8 +296,9 @@ export default function AgentFlowPage() {
 
       {/* CONTROLS */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+        <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} style={{ minWidth: 220 }} />
         <select value={scanId} onChange={(e) => setScanId(e.target.value)} style={inputStyle}>
-          {scans.map((s) => (
+          {scopedScans.map((s) => (
             <option key={s.id} value={s.id}>
               #{s.id} — {String(s.target_query || "").slice(0, 50)} — {s.status}
             </option>

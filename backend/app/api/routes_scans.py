@@ -2700,12 +2700,15 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
 @router.get("/reports/by-target")
 def list_report_targets(
     limit: int = Query(default=500, ge=1, le=5000),
+    access_group_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    query = _authorized_scan_query(db, current_user).filter(ScanJob.status == "completed")
+    if access_group_id is not None:
+        query = query.filter(ScanJob.access_group_id == int(access_group_id))
     scans = (
-        _authorized_scan_query(db, current_user)
-        .filter(ScanJob.status == "completed")
+        query
         .order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
         .limit(limit)
         .all()
@@ -2730,6 +2733,7 @@ def list_report_targets(
 def get_latest_scan_by_target(
     target: str = Query(..., min_length=1, max_length=255),
     search_limit: int = Query(default=5000, ge=1, le=20000),
+    access_group_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -2737,9 +2741,11 @@ def get_latest_scan_by_target(
     if not normalized_target:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alvo invalido")
 
+    query = _authorized_scan_query(db, current_user).filter(ScanJob.status == "completed")
+    if access_group_id is not None:
+        query = query.filter(ScanJob.access_group_id == int(access_group_id))
     scans = (
-        _authorized_scan_query(db, current_user)
-        .filter(ScanJob.status == "completed")
+        query
         .order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
         .limit(search_limit)
         .all()
@@ -3469,9 +3475,19 @@ def delete_scan_report(scan_id: int, db: Session = Depends(get_db), current_user
 
 
 @router.get("/targets/summary")
-def list_targets_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    scans = _authorized_scan_query(db, current_user).order_by(ScanJob.created_at.desc()).all()
-    findings = _authorized_finding_query(db, current_user).all()
+def list_targets_summary(
+    access_group_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scans_query = _authorized_scan_query(db, current_user)
+    findings_query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        group_id_int = int(access_group_id)
+        scans_query = scans_query.filter(ScanJob.access_group_id == group_id_int)
+        findings_query = findings_query.filter(ScanJob.access_group_id == group_id_int)
+    scans = scans_query.order_by(ScanJob.created_at.desc()).all()
+    findings = findings_query.all()
 
     findings_by_scan: dict[int, list[Finding]] = {}
     for finding in findings:
@@ -3519,9 +3535,19 @@ def list_targets_summary(db: Session = Depends(get_db), current_user: User = Dep
 
 
 @router.get("/assets")
-def list_assets(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    scans = _authorized_scan_query(db, current_user).order_by(ScanJob.created_at.desc()).all()
-    findings = _authorized_finding_query(db, current_user).all()
+def list_assets(
+    access_group_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    scans_query = _authorized_scan_query(db, current_user)
+    findings_query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        group_id_int = int(access_group_id)
+        scans_query = scans_query.filter(ScanJob.access_group_id == group_id_int)
+        findings_query = findings_query.filter(ScanJob.access_group_id == group_id_int)
+    scans = scans_query.order_by(ScanJob.created_at.desc()).all()
+    findings = findings_query.all()
 
     findings_by_scan: dict[int, list[Finding]] = {}
     for finding in findings:
@@ -4639,6 +4665,7 @@ def export_findings_csv(
     status_filter: str = "all",
     target: str | None = None,
     scan_id: int | None = Query(default=None, ge=1),
+    access_group_id: int | None = Query(default=None),
     verification_status: str | None = Query(default=None),
     dedupe: bool = Query(default=True),
     db: Session = Depends(get_db),
@@ -4649,6 +4676,8 @@ def export_findings_csv(
     vulnerabilidades repetidas (mesma família+host+CVE) entre os alvos/scans."""
     from app.services.vuln_family import classify_family, family_label
     query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        query = query.filter(ScanJob.access_group_id == int(access_group_id))
 
     _VALID_VSTATUS = {"confirmed", "candidate", "hypothesis", "refuted", "none"}
     if verification_status:

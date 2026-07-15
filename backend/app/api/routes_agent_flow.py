@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import can_access_company_resource, get_current_user, get_db
 from app.models.models import AgentActivityLog, ScanJob, SkillLibrary, SkillToolMapping, User
 
 router = APIRouter(prefix="/api/agent-flow", tags=["agent-flow"])
@@ -28,7 +28,7 @@ def get_agent_flow(
     scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if not current_user.is_admin and scan.owner_id != current_user.id:
+    if not can_access_company_resource(current_user, scan.access_group_id):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     logs = (

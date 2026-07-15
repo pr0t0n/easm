@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 const RISK_DOT = {
   critical: "bg-red-500",
@@ -13,13 +14,16 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/assets");
+        const { data } = await client.get("/api/assets", {
+          params: accessGroupId ? { access_group_id: accessGroupId } : {},
+        });
         setRows(data || []);
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar ativos.");
@@ -28,7 +32,7 @@ export default function AssetsPage() {
       }
     };
     load();
-  }, []);
+  }, [accessGroupId]);
 
   const filtered = rows.filter((item) => String(item.name || "").toLowerCase().includes(query.trim().toLowerCase()));
 
@@ -40,6 +44,7 @@ export default function AssetsPage() {
             <h2 className="text-xl font-semibold">Assets</h2>
             <p className="mt-1 text-sm text-slate-300">Ativos descobertos a partir do estado real dos scans.</p>
           </div>
+          <CompanyScopeSelect value={accessGroupId} onChange={setAccessGroupId} style={{ minWidth: 220 }} />
           <input
             className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 sm:w-80"
             placeholder="Buscar asset"

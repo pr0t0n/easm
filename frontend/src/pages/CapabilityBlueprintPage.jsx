@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 const STATUS = {
   runtime_active: { label: "Runtime ativo", color: "#229160", bg: "rgba(34,145,96,.12)" },
@@ -226,6 +227,7 @@ export default function CapabilityBlueprintPage() {
   const [selectedScan, setSelectedScan] = useState("");
   const [runtime, setRuntime] = useState(null);
   const [error, setError] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     const params = category === "all" ? "" : `?category=${encodeURIComponent(category)}`;
@@ -245,6 +247,17 @@ export default function CapabilityBlueprintPage() {
       })
       .catch(() => {});
   }, []);
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+
+  useEffect(() => {
+    if (scopedScans.some((scan) => String(scan.id) === String(selectedScan))) return;
+    setSelectedScan(scopedScans[0]?.id ? String(scopedScans[0].id) : "");
+    setRuntime(null);
+  }, [scopedScans, selectedScan]);
 
   useEffect(() => {
     if (!selectedScan) return;
@@ -335,20 +348,23 @@ export default function CapabilityBlueprintPage() {
             </div>
             <h3 style={{ margin: "3px 0 0", color: "var(--ink)", fontSize: 16 }}>Estratégia aplicada na execução</h3>
           </div>
-          <select value={selectedScan} onChange={(e) => setSelectedScan(e.target.value)} style={{
-            border: "1px solid var(--line)",
-            borderRadius: 8,
-            padding: "8px 10px",
-            background: "var(--surface)",
-            color: "var(--ink)",
-            minWidth: 260,
-          }}>
-            {scans.map((scan) => (
-              <option key={scan.id} value={String(scan.id)}>
-                #{scan.id} · {String(scan.target_query || "").slice(0, 46)}
-              </option>
-            ))}
-          </select>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "end" }}>
+            <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setSelectedScan(""); }} style={{ minWidth: 220 }} />
+            <select value={selectedScan} onChange={(e) => setSelectedScan(e.target.value)} style={{
+              border: "1px solid var(--line)",
+              borderRadius: 8,
+              padding: "8px 10px",
+              background: "var(--surface)",
+              color: "var(--ink)",
+              minWidth: 260,
+            }}>
+              {scopedScans.map((scan) => (
+                <option key={scan.id} value={String(scan.id)}>
+                  #{scan.id} · {String(scan.target_query || "").slice(0, 46)}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {runtime ? (

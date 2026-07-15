@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import client, { getWsBaseUrl } from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import LogTerminal from "../components/LogTerminal";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
@@ -978,12 +979,22 @@ export default function ScansPage() {
   const [scanStatus, setScanStatus] = useState({});
   const [filaOrder,    setFilaOrder]    = useState([]);
   const [editSchedule, setEditSchedule] = useState(null); // schedule being edited
+  const [accessGroupId, setAccessGroupId] = useState("");
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+  const scopedSchedules = useMemo(
+    () => schedules.filter((schedule) => !accessGroupId || String(schedule.access_group_id || "") === String(accessGroupId)),
+    [schedules, accessGroupId],
+  );
 
   // Split scans by lifecycle
-  const activeScans   = scans.filter((s) => [...ACTIVE_STATUS, "paused", "blocked", "stopped", "failed"].includes(s.status));
-  const terminalScans = scans.filter((s) => ["completed", "cancelled"].includes(s.status));
-  const runningCount  = scans.filter((s) => ACTIVE_STATUS.includes(s.status)).length;
-  const blockedCount  = scans.filter((s) => s.status === "blocked").length;
+  const activeScans   = scopedScans.filter((s) => [...ACTIVE_STATUS, "paused", "blocked", "stopped", "failed"].includes(s.status));
+  const terminalScans = scopedScans.filter((s) => ["completed", "cancelled"].includes(s.status));
+  const runningCount  = scopedScans.filter((s) => ACTIVE_STATUS.includes(s.status)).length;
+  const blockedCount  = scopedScans.filter((s) => s.status === "blocked").length;
 
   // ── API calls ─────────────────────────────────────────────────────────────
   const loadScans = useCallback(async () => {
@@ -1014,6 +1025,11 @@ export default function ScansPage() {
     const id = setInterval(loadScans, 3000);
     return () => clearInterval(id);
   }, [loadScans, loadSchedules, loadGroups]);
+
+  useEffect(() => {
+    if (!selected || scopedScans.some((scan) => Number(scan.id) === Number(selected.id))) return;
+    setSelected(null);
+  }, [scopedScans, selected]);
 
   // ── WebSocket logs ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1117,8 +1133,8 @@ export default function ScansPage() {
   };
 
   const sortedSchedules = filaOrder.length
-    ? filaOrder.map((id) => schedules.find((s) => s.id === id)).filter(Boolean)
-    : schedules;
+    ? filaOrder.map((id) => scopedSchedules.find((s) => s.id === id)).filter(Boolean)
+    : scopedSchedules;
 
   return (
     <div style={{ padding: "26px 32px 48px" }}>
@@ -1128,7 +1144,10 @@ export default function ScansPage() {
           <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Orquestração de scans · RedTeam</div>
           <h2 style={{ margin: 0, fontSize: 21, fontWeight: 700, letterSpacing: "-0.02em" }}>Missões</h2>
         </div>
-        <button className="sk-btn-primary" onClick={() => setComposer(true)}>+ Nova missão</button>
+        <div style={{ display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <CompanyScopeSelect value={accessGroupId} onChange={setAccessGroupId} style={{ minWidth: 220 }} />
+          <button className="sk-btn-primary" onClick={() => setComposer(true)}>+ Nova missão</button>
+        </div>
       </div>
 
       {/* ── Compositor inline ── */}
@@ -1316,7 +1335,7 @@ export default function ScansPage() {
       </div>
 
       {/* ── Estado vazio ── */}
-      {scans.length === 0 && !composer && (
+      {scopedScans.length === 0 && !composer && (
         <div style={{ textAlign: "center", padding: "64px 0", color: "var(--ink-muted)" }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>🎯</div>
           <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Nenhuma missão ativa</div>

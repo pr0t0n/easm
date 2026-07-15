@@ -1,6 +1,7 @@
 // ReportsPage: relatório único por scan ou por alvo/subdomínio.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 function resolveApiBaseUrl() {
   const byClient = String(client.defaults?.baseURL || "").trim();
@@ -80,6 +81,7 @@ export default function ReportsPage() {
   const [resolveError, setResolveError] = useState("");
   const [selectedIncludeTargets, setSelectedIncludeTargets] = useState([]);
   const [customTargetsInput, setCustomTargetsInput] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -89,24 +91,26 @@ export default function ReportsPage() {
       .get("/api/scans", { params: { limit: 300 } })
       .then(({ data }) => {
         if (!ok) return;
-        const list = Array.isArray(data) ? data : [];
+        const list = (Array.isArray(data) ? data : [])
+          .filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId));
         setScans(list);
-        if (list.length > 0) setSelectedId(String(list[0].id));
+        if (!list.some((scan) => String(scan.id) === String(selectedId))) {
+          setSelectedId(list[0]?.id ? String(list[0].id) : "");
+        }
       })
       .finally(() => ok && setLoadingScans(false));
     return () => { ok = false; };
-  }, []);
+  }, [accessGroupId, selectedId]);
 
   useEffect(() => {
-    if (targets.length > 0) return;
     let ok = true;
     setLoadingTargets(true);
     client
-      .get("/api/reports/by-target")
+      .get("/api/reports/by-target", { params: accessGroupId ? { access_group_id: accessGroupId } : {} })
       .then(({ data }) => ok && setTargets(Array.isArray(data) ? data : []))
       .finally(() => ok && setLoadingTargets(false));
     return () => { ok = false; };
-  }, [targets.length]);
+  }, [accessGroupId]);
 
   useEffect(() => {
     if (selectedTarget) setTargetInput(selectedTarget);
@@ -119,7 +123,9 @@ export default function ReportsPage() {
     setResolveError("");
     setResolvedScanId("");
     try {
-      const { data } = await client.get("/api/reports/by-target/latest", { params: { target: t } });
+      const params = { target: t };
+      if (accessGroupId) params.access_group_id = accessGroupId;
+      const { data } = await client.get("/api/reports/by-target/latest", { params });
       setResolvedScanId(String(data.scan_id));
     } catch (err) {
       setResolveError(err?.response?.data?.detail || "Nenhum scan concluído encontrado para este alvo.");
@@ -234,6 +240,18 @@ export default function ReportsPage() {
       </div>
 
       <div style={{ ...reportCard, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <CompanyScopeSelect
+          value={accessGroupId}
+          onChange={(value) => {
+            setAccessGroupId(value);
+            setResolvedScanId("");
+            setSelectedTarget("");
+            setTargetInput("");
+            setCompareScanId("");
+            setSelectedIncludeTargets([]);
+          }}
+          style={{ minWidth: 220 }}
+        />
         {["scan", "target"].map((m) => (
           <button
             key={m}
