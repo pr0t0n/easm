@@ -29,11 +29,16 @@ logger = logging.getLogger(__name__)
 INVALID_TECH_PRODUCTS = {
     "", "found", "detected", "unknown", "none", "null", "service", "performed",
     "please", "report", "incorrect", "results", "http", "https",
+    "hsts", "strict-transport-security", "content-security-policy",
+    "x-frame-options", "x-content-type-options", "referrer-policy",
+    "permissions-policy", "x-xss-protection", "cross-origin-resource-policy",
+    "cross-origin-opener-policy", "cross-origin-embedder-policy",
+    "cache-control", "set-cookie", "cookie",
 }
 INVALID_TECH_VERSIONS = {"", "0", "unknown", "none", "null"}
 INVALID_TARGETS = {"", "__batch__", "batch", "all-targets", "all_targets", "unknown"}
 LOCAL_VERSIONLESS_TECH = {
-    "cloudflare", "google", "hsts", "http", "http/3", "http 3", "react", "wix",
+    "cloudflare", "google", "http", "http/3", "http 3", "react", "wix",
     "lodash", "tls 1.0", "ssl 3.0",
 }
 
@@ -53,6 +58,94 @@ def _valid_detected_tech(product: str, version: str = "") -> bool:
         return False
     if version_clean in INVALID_TECH_VERSIONS and product_clean not in LOCAL_VERSIONLESS_TECH:
         return False
+    if product_clean == "wordpress":
+        major = _major_version(version_clean)
+        if major is not None and major > 10:
+            return False
+    return True
+
+
+def _major_version(version: str) -> int | None:
+    m = re.match(r"\s*(\d+)", str(version or ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", str(version or ""))
+    return tuple(int(p) for p in parts[:4])
+
+
+def _version_lt(version: str, limit: str) -> bool:
+    left = _version_tuple(version)
+    right = _version_tuple(limit)
+    if not left or not right:
+        return False
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) < right + (0,) * (width - len(right))
+
+
+def _version_lte(version: str, limit: str) -> bool:
+    left = _version_tuple(version)
+    right = _version_tuple(limit)
+    if not left or not right:
+        return False
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) <= right + (0,) * (width - len(right))
+
+
+def _version_eq(version: str, exact: str) -> bool:
+    left = _version_tuple(version)
+    right = _version_tuple(exact)
+    if not left or not right:
+        return False
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) == right + (0,) * (width - len(right))
+
+
+def _local_cve_applies(product: str, version: str, cve_info: dict[str, Any]) -> bool:
+    """Conservative local CVE range filter.
+
+    If the local title/remediation expresses an affected range, the detected
+    version must satisfy it. If no range is parseable, keep the lead as a
+    hypothesis for active validation.
+    """
+    title = str(cve_info.get("title") or "")
+    remediation = str(cve_info.get("remediation") or "")
+    text = f"{title} {remediation}"
+    if not _version_tuple(version):
+        return False
+
+    product_l = str(product or "").lower()
+    if "wordpress" in product_l:
+        major = _major_version(version)
+        if major is not None and major > 10:
+            return False
+
+    lt_limits = re.findall(r"<\s*([0-9]+(?:\.[0-9A-Za-z_-]+){0,3})", text)
+    if lt_limits:
+        return any(_version_lt(version, limit) for limit in lt_limits)
+
+    lte_limits = re.findall(r"<=\s*([0-9]+(?:\.[0-9A-Za-z_-]+){0,3})", text)
+    if lte_limits:
+        return any(_version_lte(version, limit) for limit in lte_limits)
+
+    range_m = re.search(
+        r"([0-9]+(?:\.[0-9A-Za-z_-]+){1,3})\s*-\s*([0-9]+(?:\.[0-9A-Za-z_-]+){1,3})",
+        text,
+    )
+    if range_m:
+        start, end = range_m.group(1), range_m.group(2)
+        return _version_lte(start, version) and _version_lte(version, end)
+
+    exacts = re.findall(r"\b([0-9]+(?:\.[0-9]+){1,3})\b", title)
+    if exacts and any(token in title.lower() for token in (" via ", " rce", " path traversal", "buffer")):
+        return any(_version_eq(version, exact) for exact in exacts)
+
     return True
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1135,7 +1228,10 @@ def correlate_tech_vulns(
         if version.lower() not in INVALID_TECH_VERSIONS:
             for kw, cves in LOCAL_TECH_CVES.items():
                 if kw in product_lower:
-                    local_cves.extend(cves)
+                    local_cves.extend([
+                        cve for cve in cves
+                        if _local_cve_applies(product, version, dict(cve))
+                    ])
 
         # ── 2. NVD live lookup (only for products with a version) ─────────────
         nvd_cves: list[dict] = []

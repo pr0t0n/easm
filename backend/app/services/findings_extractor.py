@@ -312,10 +312,15 @@ def _extract_shodan_kali_findings(
     vulns = list(data.get("vulns") or [])
     banners = list(data.get("banners") or [])
 
-    # Cloudflare proxy ports — estas são portas do proxy Cloudflare, não do servidor de origem.
-    # Quando o IP pertence à Cloudflare, essas portas não representam superfície real do alvo.
+    # CDN/WAF proxy ports — estas são portas do proxy de borda, não do servidor de origem.
+    # Quando o IP pertence a CDN/WAF, essas portas não representam superfície real do alvo.
     CLOUDFLARE_PROXY_PORTS = {2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8080, 8443, 8880}
-    is_cloudflare = any(kw in (org + isp).lower() for kw in ("cloudflare", "cloud flare"))
+    edge_org_blob = (org + " " + isp).lower()
+    is_cloudflare = any(kw in edge_org_blob for kw in ("cloudflare", "cloud flare"))
+    is_edge_proxy = any(
+        kw in edge_org_blob
+        for kw in ("cloudflare", "cloud flare", "akamai", "imperva", "incapsula", "sucuri", "fastly", "cloudfront")
+    )
 
     # Open ports finding
     if ports:
@@ -330,13 +335,15 @@ def _extract_shodan_kali_findings(
         interesting = [p for p in real_ports if p not in (80, 443)]
 
         if real_ports:
-            severity = "medium" if interesting else "info"
-            risk_score = 4 if interesting else 1
+            severity = "info" if is_edge_proxy else ("medium" if interesting else "info")
+            risk_score = 1 if is_edge_proxy else (4 if interesting else 1)
             notes = ""
             if interesting:
                 notes = f" — portas não-padrão expostas: {', '.join(str(p) for p in interesting)}"
             if cloudflare_filtered:
                 notes += f" (Cloudflare proxy: {len(cloudflare_filtered)} portas excluídas)"
+            if is_edge_proxy:
+                notes += " (IP atribuído a CDN/WAF; tratado como inventário passivo, não porta da origem)"
             findings.append({
                 "title": f"Portas expostas (Shodan): {host} — {len(real_ports)} portas",
                 "severity": severity,
@@ -355,7 +362,10 @@ def _extract_shodan_kali_findings(
                     "interesting_ports": interesting,
                     "cloudflare_filtered_ports": cloudflare_filtered,
                     "is_cloudflare_proxy": is_cloudflare,
-                    "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
+                    "is_edge_proxy": is_edge_proxy,
+                    "inventory_only": is_edge_proxy,
+                    "verification_status": "hypothesis" if is_edge_proxy else "candidate",
+                    "owasp_category": "" if is_edge_proxy else ("A05:2021 Security Misconfiguration" if interesting else ""),
                 },
             })
         elif cloudflare_filtered:
@@ -2554,7 +2564,16 @@ def persist_finding_dicts(
         # Only severity >= low (info-level coverage/header notes are not vulns).
         if severity in ("critical", "high", "medium", "low"):
             try:
-                _bridge_finding_to_vulnerability(db, job, finding, severity, title, cvss_val, confidence_score)
+                from app.services.finding_quality_gate import is_actionable_for_vulnerability_inventory
+                if is_actionable_for_vulnerability_inventory(
+                    title=title,
+                    severity=severity,
+                    tool=tool_col,
+                    details=details,
+                    verification_status=v_status,
+                    url=finding_url,
+                ):
+                    _bridge_finding_to_vulnerability(db, job, finding, severity, title, cvss_val, confidence_score)
             except Exception:
                 pass
 
@@ -2881,8 +2900,35 @@ def _bridge_finding_to_vulnerability(
         # Re-detected → bump recency + count, keep first_detected for AGE factor.
         existing.last_detected = _now
         existing.detection_count = (existing.detection_count or 1) + 1
-        if cvss and not existing.cvss_score:
-            existing.cvss_score = cvss
+        existing.finding_id = getattr(finding, "id", None)
+        existing.severity = severity
+        existing.cvss_score = cvss
+        existing.ra_score = round(float(cvss) * (max(1, confidence_score) / 100.0), 2)
+        existing.remediated_at = None
+        _tool = str(getattr(finding, "tool", "") or "")[:100] or "scan"
+        discovery, payload, remediation = _build_discovery_and_payload(details, _tool, title)
+        md = dict(existing.vulnerability_metadata or {})
+        md.update({
+            "scan_id": job.id,
+            "verification_status": str(getattr(finding, "verification_status", "") or ""),
+            "confidence_score": confidence_score,
+            "url": str(getattr(finding, "url", "") or ""),
+            "owasp_category": details.get("owasp_category"),
+            "how_discovered": discovery,
+            "payload": payload,
+            "remediation": remediation,
+            "supervisor_validation": details.get("supervisor_validation"),
+            "cve": cve_id,
+            "matched_at": details.get("matched_at") or details.get("matched-at"),
+            "parameter": details.get("parameter") or details.get("param"),
+            "evidence": str(details.get("evidence") or "")[:1000] or None,
+            "learning_source": details.get("learning_source"),
+            "edge_control_detected": details.get("edge_control_detected"),
+            "false_positive_reason": details.get("false_positive_reason"),
+        })
+        existing.vulnerability_metadata = md
+        if remediation:
+            existing.remediation_notes = remediation
         return
 
     _tool = str(getattr(finding, "tool", "") or "")[:100] or "scan"

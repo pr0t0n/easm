@@ -203,6 +203,7 @@ def apply_finding_validation(db: Session, finding: Finding) -> ValidationDecisio
         finding.severity = _cap_severity(str(finding.severity or "info"), decision.severity_cap)
     finding.details = details
     db.add(finding)
+    _sync_linked_vulnerability(db, finding)
     return decision
 
 
@@ -257,6 +258,50 @@ def _cap_severity(severity: str, cap: str) -> str:
     if order.get(severity.lower(), 0) > order.get(cap.lower(), 4):
         return cap.lower()
     return severity.lower()
+
+
+def _sync_linked_vulnerability(db: Session, finding: Finding) -> None:
+    """Keep the EASM vulnerability mirror aligned with the validated finding."""
+    try:
+        from datetime import datetime
+        from app.models.models import Vulnerability
+        from app.services.finding_quality_gate import is_actionable_for_vulnerability_inventory
+
+        vuln = db.query(Vulnerability).filter(Vulnerability.finding_id == finding.id).first()
+        if not vuln:
+            return
+        details = dict(finding.details or {})
+        status = str(finding.verification_status or details.get("verification_status") or "").lower()
+        actionable = is_actionable_for_vulnerability_inventory(
+            title=str(finding.title or ""),
+            severity=str(finding.severity or "info"),
+            tool=str(finding.tool or ""),
+            details=details,
+            verification_status=status,
+            url=str(finding.url or "") or None,
+        )
+        vuln.severity = str(finding.severity or vuln.severity or "info").lower()
+        vuln.cvss_score = finding.cvss if finding.cvss is not None else vuln.cvss_score
+        md = dict(vuln.vulnerability_metadata or {})
+        md.update({
+            "verification_status": status,
+            "confidence_score": finding.confidence_score,
+            "url": finding.url,
+            "owasp_category": details.get("owasp_category"),
+            "validation_decision": details.get("validation_decision"),
+            "edge_control_detected": details.get("edge_control_detected"),
+            "false_positive_reason": details.get("false_positive_reason"),
+        })
+        vuln.vulnerability_metadata = md
+        if not actionable:
+            vuln.remediated_at = vuln.remediated_at or datetime.utcnow()
+            vuln.remediation_notes = (
+                "Suprimida automaticamente pelo quality gate: evidência insuficiente, hipótese "
+                "ou resposta de WAF/CDN em vez da aplicação."
+            )
+        db.add(vuln)
+    except Exception:
+        return
 
 
 def _best_finding_match(artifact: EvidenceArtifact, findings: list[Finding], job: ScanJob) -> Finding | None:

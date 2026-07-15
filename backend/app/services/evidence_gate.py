@@ -272,5 +272,21 @@ def enrich_finding_with_gate(
         details["original_severity"] = original_sev
         details["severity_context_override"] = f"{original_sev} → {ctx_sev} (por contexto de endpoint)"
 
+    try:
+        from app.services.finding_quality_gate import adjudicate_finding
+        v_status, adjusted_sev, details = adjudicate_finding(
+            title=str(finding.get("title") or ""),
+            severity=str(finding.get("severity") or "info"),
+            tool=tool_name,
+            details=details,
+            target=str(details.get("asset") or finding.get("target") or ""),
+            url=url,
+        )
+        details["verification_status"] = v_status
+        finding["verification_status"] = v_status
+        finding["severity"] = adjusted_sev
+    except Exception:
+        pass
+
     finding["details"] = details
     return finding
