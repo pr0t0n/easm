@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import "../styles/domains.css";
 
 const SEVERITIES = ["critical", "high", "medium", "low", "info"];
@@ -204,8 +205,9 @@ function VerificationQualityBar({ findings = [] }) {
   );
 }
 
-export default function DomainsPage({ embedded = false, scanId = "" }) {
+export default function DomainsPage({ embedded = false, scanId = "", accessGroupId: providedAccessGroupId = "" }) {
   const [domains, setDomains] = useState([]);
+  const [localAccessGroupId, setLocalAccessGroupId] = useState("");
   const [selectedDomain, setSelectedDomain] = useState("");
   const [selectedSubdomain, setSelectedSubdomain] = useState("");
   const [portFilter, setPortFilter] = useState(null); // e.g. "443/tcp"
@@ -215,6 +217,7 @@ export default function DomainsPage({ embedded = false, scanId = "" }) {
   // New: crown jewels + OSINT per scan
   const [crownJewels, setCrownJewels] = useState([]);
   const [osintData, setOsintData] = useState(null);
+  const accessGroupId = embedded ? providedAccessGroupId : localAccessGroupId;
 
   useEffect(() => {
     let active = true;
@@ -222,7 +225,10 @@ export default function DomainsPage({ embedded = false, scanId = "" }) {
       setLoading(true);
       setError("");
       try {
-        const { data } = await client.get("/api/domains/overview", { params: scanId ? { scan_id: scanId } : {} });
+        const params = {};
+        if (scanId) params.scan_id = scanId;
+        if (accessGroupId) params.access_group_id = accessGroupId;
+        const { data } = await client.get("/api/domains/overview", { params });
         if (!active) return;
         const rows = Array.isArray(data) ? data : [];
         setDomains(rows);
@@ -239,7 +245,7 @@ export default function DomainsPage({ embedded = false, scanId = "" }) {
     };
     load();
     return () => { active = false; };
-  }, [refreshKey, scanId]);
+  }, [refreshKey, scanId, accessGroupId]);
 
   // Load crown jewels + OSINT when domain changes (uses latest scan)
   useEffect(() => {
@@ -306,13 +312,20 @@ export default function DomainsPage({ embedded = false, scanId = "" }) {
             Domínios, subdomínios, portas, origem da descoberta, joias e findings consolidados por scan.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setRefreshKey((k) => k + 1)}
-          title="Recarregar inventário"
-        >
-          Atualizar inventário
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap" }}>
+          <CompanyScopeSelect
+            value={localAccessGroupId}
+            onChange={(value) => { setLocalAccessGroupId(value); setSelectedDomain(""); setSelectedSubdomain(""); }}
+            style={{ minWidth: 220 }}
+          />
+          <button
+            type="button"
+            onClick={() => setRefreshKey((k) => k + 1)}
+            title="Recarregar inventário"
+          >
+            Atualizar inventário
+          </button>
+        </div>
       </section>
       )}
 

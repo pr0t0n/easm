@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import ScanSelect from "../components/ScanSelect";
 import DomainsPage from "./DomainsPage";
 import "../styles/dashboard.css";
@@ -29,12 +30,14 @@ export default function VulnerabilitiesPage() {
   const [selectedIntel, setSelectedIntel] = useState(null);
   const [intelLoading, setIntelLoading] = useState(false);
   const [scanId, setScanId] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     setLoading(true);
     const params = { limit: 500, sort: "severity" };
     if (sevFilter !== "todas") params.severity = sevFilter;
     if (scanId) params.scan_id = scanId;
+    if (accessGroupId) params.access_group_id = accessGroupId;
     client
       .get("/api/findings/page", { params })
       .then(({ data }) => {
@@ -43,7 +46,7 @@ export default function VulnerabilitiesPage() {
       })
       .catch(() => setError("Falha ao carregar vulnerabilidades."))
       .finally(() => setLoading(false));
-  }, [sevFilter, scanId]);
+  }, [sevFilter, scanId, accessGroupId]);
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
 
@@ -222,11 +225,14 @@ export default function VulnerabilitiesPage() {
               <button type="button" className="vuln-tab active">Por Subdomínio</button>
             </div>
             <div style={{ paddingBottom: 8 }}>
-              <ScanSelect value={scanId} onChange={setScanId} />
+              <div className="cockpit-actions">
+                <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
+                <ScanSelect value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
+              </div>
             </div>
           </div>
         </div>
-        <DomainsPage embedded scanId={scanId} />
+        <DomainsPage embedded scanId={scanId} accessGroupId={accessGroupId} />
       </div>
     );
   }
@@ -242,7 +248,8 @@ export default function VulnerabilitiesPage() {
             <p className="cockpit-sub">{total} achado(s) · clique para ver evidência e recomendação</p>
           </div>
           <div className="cockpit-actions">
-            <ScanSelect value={scanId} onChange={setScanId} />
+            <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
+            <ScanSelect value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
           </div>
         </section>
 

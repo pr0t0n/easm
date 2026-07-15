@@ -4,6 +4,44 @@
 @tailwind components;
 @tailwind utilities;
 
+.company-scope-select {
+  display: grid;
+  gap: 4px;
+}
+
+.company-scope-select label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.company-scope-select select {
+  width: 100%;
+  height: 37px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 12px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ops-company-scope label {
+  color: var(--sidebar-muted);
+}
+
+.ops-company-scope select {
+  height: 31px;
+  border-color: var(--sidebar-border);
+  background: var(--sidebar-surface);
+  color: var(--sidebar-text);
+  font-size: 11.5px;
+}
+
 /* ============================================================
    ScriptKidd.o Design System — Tokens
    Layout: dark sidebar (graphite) + light main (warm off-white)

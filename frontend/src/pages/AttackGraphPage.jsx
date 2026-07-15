@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import "../styles/app-pages.css";
 
 const NODE_LABELS = {
@@ -216,6 +217,7 @@ function KillChainList({ chains = [] }) {
 export default function AttackGraphPage() {
   const [scans, setScans] = useState([]);
   const [selectedScanId, setSelectedScanId] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const [graph, setGraph] = useState(null);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -233,8 +235,22 @@ export default function AttackGraphPage() {
       .catch(() => setScans([]));
   }, []);
 
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+
   useEffect(() => {
-    if (!selectedScanId) return;
+    if (scopedScans.some((scan) => String(scan.id) === String(selectedScanId))) return;
+    setSelectedScanId(scopedScans[0]?.id ? String(scopedScans[0].id) : "");
+  }, [scopedScans, selectedScanId]);
+
+  useEffect(() => {
+    if (!selectedScanId) {
+      setGraph(null);
+      setSelected(null);
+      return;
+    }
     setLoading(true);
     setError("");
     setSelected(null);
@@ -249,7 +265,7 @@ export default function AttackGraphPage() {
 
   const summary = graph?.risk_summary || {};
   const chains = Array.isArray(graph?.kill_chains) ? graph.kill_chains : [];
-  const selectedScan = scans.find((scan) => String(scan.id) === String(selectedScanId));
+  const selectedScan = scopedScans.find((scan) => String(scan.id) === String(selectedScanId));
 
   return (
     <div className="dpage attack-graph-page">
@@ -259,10 +275,11 @@ export default function AttackGraphPage() {
       </div>
 
       <div className="ag-toolbar card">
+        <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setSelectedScanId(""); }} style={{ minWidth: 220 }} />
         <label>
           <span>Scan</span>
           <select value={selectedScanId} onChange={(event) => setSelectedScanId(event.target.value)}>
-            {scans.map((scan) => (
+            {scopedScans.map((scan) => (
               <option key={scan.id} value={scan.id}>
                 #{scan.id} · {scan.target_query || "sem alvo"} · {scan.status}
               </option>

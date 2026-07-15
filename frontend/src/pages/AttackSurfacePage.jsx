@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import ScanSelect from "../components/ScanSelect";
 import "../styles/dashboard.css";
 
@@ -44,15 +45,19 @@ export default function AttackSurfacePage() {
   const [error, setError] = useState("");
   const [filter, setFilter] = useState("Todos");
   const [scanId, setScanId] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     setLoading(true);
+    const params = {};
+    if (scanId) params.scan_id = scanId;
+    if (accessGroupId) params.access_group_id = accessGroupId;
     client
-      .get("/api/dashboard/assets", { params: scanId ? { scan_id: scanId } : {} })
+      .get("/api/dashboard/assets", { params })
       .then(({ data }) => setAssets(Array.isArray(data) ? data : []))
       .catch(() => setError("Falha ao carregar a superfície de ataque."))
       .finally(() => setLoading(false));
-  }, [scanId]);
+  }, [scanId, accessGroupId]);
 
   const enriched = useMemo(() => {
     const now = Date.now();
@@ -119,7 +124,8 @@ export default function AttackSurfacePage() {
             <p className="cockpit-sub">{enriched.length} ativos · descoberta contínua</p>
           </div>
           <div className="cockpit-actions">
-            <ScanSelect value={scanId} onChange={setScanId} />
+            <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
+            <ScanSelect value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
           </div>
         </section>
 

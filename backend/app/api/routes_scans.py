@@ -3610,6 +3610,7 @@ def _empty_severity_counts() -> dict[str, int]:
 @router.get("/domains/overview")
 def domains_overview(
     scan_id: int | None = Query(default=None),
+    access_group_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -3617,6 +3618,9 @@ def domains_overview(
     # (lista suspensa na página de Vulnerabilidades). Sem ele, agrega todos.
     scans_q = _authorized_scan_query(db, current_user)
     findings_q = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        scans_q = scans_q.filter(ScanJob.access_group_id == int(access_group_id))
+        findings_q = findings_q.filter(ScanJob.access_group_id == int(access_group_id))
     if scan_id:
         scans_q = scans_q.filter(ScanJob.id == scan_id)
         findings_q = findings_q.filter(Finding.scan_job_id == scan_id)
@@ -4103,6 +4107,7 @@ def findings_timeline(
 def vulnerability_management_dashboard(
     target: str | None = Query(default=None),
     severity: str | None = Query(default=None),
+    access_group_id: int | None = Query(default=None),
     limit: int = Query(default=3000, ge=100, le=10000),
     period_days: int | None = Query(default=None, ge=1, le=365),
     db: Session = Depends(get_db),
@@ -4113,6 +4118,10 @@ def vulnerability_management_dashboard(
 
     query = _authorized_finding_query(db, current_user).filter(Finding.is_false_positive.is_(False))
     lifecycle_query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        group_id_int = int(access_group_id)
+        query = query.filter(ScanJob.access_group_id == group_id_int)
+        lifecycle_query = lifecycle_query.filter(ScanJob.access_group_id == group_id_int)
 
     target_filter = str(target or "").strip()
     if target_filter:
@@ -4294,6 +4303,7 @@ def vulnerability_management_dashboard(
         "filters": {
             "target": target_filter or None,
             "severity": severity_filter or None,
+            "access_group_id": access_group_id,
             "available_targets": sorted(list(available_targets))[:500],
             "selected_target_url": selected_target_url,
         },
@@ -4410,6 +4420,7 @@ def list_findings_paginated(
     status_filter: str = "all",
     target: str | None = None,
     scan_id: int | None = Query(default=None, ge=1),
+    access_group_id: int | None = Query(default=None),
     sort: str = Query(default="severity"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=50000),
@@ -4418,6 +4429,8 @@ def list_findings_paginated(
     current_user: User = Depends(get_current_user),
 ):
     query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        query = query.filter(ScanJob.access_group_id == int(access_group_id))
 
     # ── Evidence gate filter (T1 / M3) ──────────────────────────────────────
     _VALID_VSTATUS = {"confirmed", "candidate", "hypothesis", "refuted", "none"}
@@ -4443,6 +4456,8 @@ def list_findings_paginated(
         query = query.filter(Finding.scan_job_id == scan_id)
 
     lifecycle_query = _authorized_finding_query(db, current_user)
+    if access_group_id is not None:
+        lifecycle_query = lifecycle_query.filter(ScanJob.access_group_id == int(access_group_id))
     if target:
         lifecycle_query = lifecycle_query.filter(ScanJob.target_query.ilike(f"%{target.strip()}%"))
     if scan_id:
@@ -7640,6 +7655,7 @@ def get_easm_assets(
     min_criticality: float = Query(0, ge=0, le=100),
     sort_by: str = Query("last_seen", regex="^(criticality|last_seen|scan_count|rating)$"),
     scan_id: int | None = Query(None),
+    access_group_id: int | None = Query(None),
 ):
     """
     Lista ativos com rating e criticality
@@ -7662,6 +7678,13 @@ def get_easm_assets(
         Asset.status == status_filter,
         Asset.criticality_score >= min_criticality,
     )
+    if access_group_id is not None:
+        scoped_scan_ids = (
+            _authorized_scan_query(db, current_user)
+            .filter(ScanJob.access_group_id == int(access_group_id))
+            .with_entities(ScanJob.id)
+        )
+        query = query.filter(Asset.last_scan_id.in_(scoped_scan_ids))
 
     # Escopo por scan: filtra ativos cujo domínio aparece nos findings do scan
     if scan_id:
@@ -7734,6 +7757,7 @@ def get_easm_vulnerabilities(
     open_only: bool = Query(True),
     severity_filter: str = Query("", regex="^(|critical|high|medium|low|info)$"),
     asset_id: int | None = Query(None),
+    access_group_id: int | None = Query(None),
 ):
     """
     Lista vulnerabilidades com temporal tracking
@@ -7744,6 +7768,13 @@ def get_easm_vulnerabilities(
 
     if not current_user.is_admin:
         scoped_scan_ids = _authorized_scan_query(db, current_user).with_entities(ScanJob.id)
+        query = query.filter(Asset.last_scan_id.in_(scoped_scan_ids))
+    if access_group_id is not None:
+        scoped_scan_ids = (
+            _authorized_scan_query(db, current_user)
+            .filter(ScanJob.access_group_id == int(access_group_id))
+            .with_entities(ScanJob.id)
+        )
         query = query.filter(Asset.last_scan_id.in_(scoped_scan_ids))
 
     if open_only:

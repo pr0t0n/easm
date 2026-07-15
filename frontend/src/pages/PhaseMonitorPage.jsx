@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 const STATUS_STYLES = {
   completed:                      { className: "ds-badge ds-badge--low",      label: "Completa" },
@@ -102,6 +103,7 @@ export default function PhaseMonitorPage() {
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [filter, setFilter] = useState("all");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     client.get("/api/scans").then((r) => {
@@ -111,6 +113,17 @@ export default function PhaseMonitorPage() {
       }
     });
   }, []);
+
+  const scopedScans = useMemo(
+    () => scans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [scans, accessGroupId],
+  );
+
+  useEffect(() => {
+    if (scopedScans.some((scan) => String(scan.id) === String(scanId))) return;
+    setScanId(scopedScans[0]?.id ? String(scopedScans[0].id) : "");
+    setData(null);
+  }, [scopedScans, scanId]);
 
   const fetchMonitor = async () => {
     if (!scanId) return;
@@ -157,12 +170,13 @@ export default function PhaseMonitorPage() {
       </div>
 
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
+        <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} style={{ minWidth: 220 }} />
         <select
           value={scanId}
           onChange={(e) => setScanId(e.target.value)}
           style={inputStyle}
         >
-          {scans.map((s) => (
+          {scopedScans.map((s) => (
             <option key={s.id} value={s.id}>
               #{s.id} — {String(s.target_query || "").slice(0, 60)} — {s.status}
             </option>

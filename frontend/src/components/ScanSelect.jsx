@@ -3,7 +3,7 @@ import client from "../api/client";
 
 /* Dropdown de scans reutilizável (Joias, Vulnerabilidades, Superfície).
    Lista real de /api/scans. value="" = todos os scans. */
-export default function ScanSelect({ value, onChange, allLabel = "Todos os scans" }) {
+export default function ScanSelect({ value, onChange, allLabel = "Todos os scans", accessGroupId = "" }) {
   const [scans, setScans] = useState([]);
   useEffect(() => {
     client
@@ -19,7 +19,9 @@ export default function ScanSelect({ value, onChange, allLabel = "Todos os scans
       aria-label="Selecionar scan"
     >
       <option value="">{allLabel}</option>
-      {scans.map((s) => (
+      {scans
+        .filter((s) => !accessGroupId || String(s.access_group_id || "") === String(accessGroupId))
+        .map((s) => (
         <option key={s.id} value={s.id}>
           #{s.id} {s.target_query}{s.status ? ` · ${s.status}` : ""}
         </option>

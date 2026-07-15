@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 const SEV = {
   critical: { color: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", label: "Critical" },
@@ -198,8 +199,9 @@ export default function AttackEvolutionPage() {
   const [severity, setSeverity] = useState("");
   const [periodDays, setPeriodDays] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
-  const fetchDashboard = useCallback(async (tgt, sev, days) => {
+  const fetchDashboard = useCallback(async (tgt, sev, days, groupId) => {
     setLoading(true);
     setError("");
     try {
@@ -207,6 +209,7 @@ export default function AttackEvolutionPage() {
       if (tgt) params.target = tgt;
       if (sev) params.severity = sev;
       if (days && days !== "all") params.period_days = Number(days);
+      if (groupId) params.access_group_id = groupId;
       const { data } = await client.get("/api/vulnerability-management/dashboard", { params });
       setDashboard(data);
       const rows = Array.isArray(data?.vulnerabilities) ? data.vulnerabilities : [];
@@ -229,8 +232,8 @@ export default function AttackEvolutionPage() {
   }, [selectedKey, comparisonTarget]);
 
   useEffect(() => {
-    fetchDashboard(targetFilter, severity, periodDays);
-  }, [targetFilter, severity, periodDays, fetchDashboard]);
+    fetchDashboard(targetFilter, severity, periodDays, accessGroupId);
+  }, [targetFilter, severity, periodDays, accessGroupId, fetchDashboard]);
 
   useEffect(() => {
     client.get("/api/scans", { _skipToast: true })
@@ -313,11 +316,17 @@ export default function AttackEvolutionPage() {
   const selectedTargetUrl = dashboard?.filters?.selected_target_url || "";
   const dataQuality = dashboard?.data_quality || {};
 
+  const scopedOperationalScans = useMemo(
+    () => operationalScans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)),
+    [operationalScans, accessGroupId],
+  );
+
   const scopeSummary = useMemo(() => {
     const sevLabel = severity ? SEV[severity]?.label || severity : "Todas";
     const periodLabel = periodDays === "all" ? "Histórico completo" : `${periodDays} dias`;
-    return `${PERSONAS[persona]} | alvo: ${targetFilter || "todos"} | severidade: ${sevLabel} | janela: ${periodLabel}`;
-  }, [persona, targetFilter, severity, periodDays]);
+    const companyLabel = accessGroupId ? `empresa #${accessGroupId}` : "todas as empresas permitidas";
+    return `${PERSONAS[persona]} | ${companyLabel} | alvo: ${targetFilter || "todos"} | severidade: ${sevLabel} | janela: ${periodLabel}`;
+  }, [persona, accessGroupId, targetFilter, severity, periodDays]);
 
   return (
     <div className="dpage" style={{ display: "grid", gap: 16 }}>
@@ -342,6 +351,7 @@ export default function AttackEvolutionPage() {
             </button>
           ))}
           <div style={{ flex: 1 }} />
+          <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setSelectedKey(""); }} style={{ minWidth: 220 }} />
           <label style={{ fontSize: 12, color: colors.inkMuted, display: "flex", alignItems: "center", gap: 6 }}>
             Persona
             <select value={persona} onChange={(e) => setPersona(e.target.value)} style={controlStyle}>
@@ -448,6 +458,7 @@ export default function AttackEvolutionPage() {
             setSeverity("");
             setPeriodDays("all");
             setComparisonTarget("");
+            setAccessGroupId("");
           }}
           style={{ padding: "6px 12px", border: `1px solid ${colors.line}`, borderRadius: 8, background: colors.surface, color: colors.inkSoft, fontSize: 12, cursor: "pointer" }}
         >
@@ -508,14 +519,14 @@ export default function AttackEvolutionPage() {
         </div>
       )}
 
-      {vulnerabilities.length === 0 && operationalScans.length > 0 && (
+      {vulnerabilities.length === 0 && scopedOperationalScans.length > 0 && (
         <div style={panelStyle}>
           <div style={{ color: colors.ink, fontWeight: 800, fontSize: 13 }}>Evolução operacional dos testes</div>
           <div style={{ color: colors.inkMuted, fontSize: 12, marginTop: 3 }}>
             Ainda não há vulnerabilidades promovidas para o histórico, mas há execução ofensiva em andamento/recente.
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8, marginTop: 10 }}>
-            {operationalScans.slice(0, 8).map((scan) => {
+            {scopedOperationalScans.slice(0, 8).map((scan) => {
               const progress = Math.max(0, Math.min(100, Number(scan.mission_progress || 0)));
               const tone = scan.status === "running" ? colors.brand : scan.status === "failed" ? "var(--sev-critical-text)" : "var(--sev-low-text)";
               return (

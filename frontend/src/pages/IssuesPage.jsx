@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 function basFromFinding(item) {
   const details = item?.details && typeof item.details === "object" ? item.details : {};
@@ -16,6 +17,7 @@ export default function IssuesPage() {
   const [page, setPage] = useState({ total: 0, limit: 100, offset: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -23,7 +25,7 @@ export default function IssuesPage() {
       setError("");
       try {
         const { data } = await client.get("/api/findings/page", {
-          params: { status_filter: "open", limit: page.limit, offset: page.offset },
+          params: { status_filter: "open", limit: page.limit, offset: page.offset, ...(accessGroupId ? { access_group_id: accessGroupId } : {}) },
         });
         setRows(data?.items || []);
         setPage((prev) => ({ ...prev, total: Number(data?.total || 0) }));
@@ -34,7 +36,7 @@ export default function IssuesPage() {
       }
     };
     load();
-  }, [page.offset]);
+  }, [page.offset, page.limit, accessGroupId]);
 
   const hasPrev = page.offset > 0;
   const hasNext = page.offset + page.limit < page.total;
@@ -60,8 +62,20 @@ export default function IssuesPage() {
   return (
     <main className="mx-auto mt-6 w-[95%] max-w-7xl space-y-4 pb-10">
       <section className="panel p-5">
-        <h2 className="text-xl font-semibold">Issues</h2>
-        <p className="mt-1 text-sm text-slate-300">Consolidado de issues abertas por alvo, derivado de findings reais.</p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold">Issues</h2>
+            <p className="mt-1 text-sm text-slate-300">Consolidado de issues abertas por alvo, derivado de findings reais.</p>
+          </div>
+          <CompanyScopeSelect
+            value={accessGroupId}
+            onChange={(value) => {
+              setAccessGroupId(value);
+              setPage((prev) => ({ ...prev, offset: 0 }));
+            }}
+            style={{ minWidth: 220 }}
+          />
+        </div>
         <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
           <p>Mostrando {rows.length} de {page.total} findings abertos</p>
           <div className="flex gap-2">

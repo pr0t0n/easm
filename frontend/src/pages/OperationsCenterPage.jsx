@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 
 /* ── Paleta TV wall (idêntica ao protótipo) ── */
 const TV = {
@@ -90,6 +91,7 @@ export default function OperationsCenterPage() {
   const [workerHealth, setWorkerHealth] = useState({ summary: {}, capacity: {} });
   const [platformHealth, setPlatformHealth] = useState({});
   const [filtro,       setFiltro]       = useState("todos");
+  const [accessGroupId, setAccessGroupId] = useState("");
   const [lastRefresh, setLastRefresh] = useState(() => {
     const n = new Date();
     return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}:${String(n.getSeconds()).padStart(2,"0")}`;
@@ -104,7 +106,9 @@ export default function OperationsCenterPage() {
     const [sr, schr, fr, whr, phr] = await Promise.all([
       client.get("/api/scans").catch(() => ({ data: [] })),
       client.get("/api/schedules").catch(() => ({ data: [] })),
-      client.get("/api/findings/page?limit=1&offset=0&status_filter=open").catch(() => ({ data: {} })),
+      client.get("/api/findings/page", {
+        params: { limit: 1, offset: 0, status_filter: "open", ...(accessGroupId ? { access_group_id: accessGroupId } : {}) },
+      }).catch(() => ({ data: {} })),
       client.get("/api/worker-manager/health").catch(() => ({ data: {} })),
       client.get("/api/platform/health").catch(() => ({ data: {} })),
     ]);
@@ -113,7 +117,7 @@ export default function OperationsCenterPage() {
     if (fr.data?.severity_counts) setSevCounts(fr.data.severity_counts);
     if (whr.data) setWorkerHealth(whr.data);
     if (phr.data) setPlatformHealth(phr.data);
-  }, []);
+  }, [accessGroupId]);
 
   const doRefresh = useCallback(() => {
     setRefreshing(true);
@@ -139,10 +143,12 @@ export default function OperationsCenterPage() {
   const fmtCd = (s) => `${String(Math.floor(s / 60)).padStart(2,"0")}:${String(s % 60).padStart(2,"0")}`;
 
   /* ── Dados calculados ── */
-  const rodando    = scans.filter((s) => ACTIVE_STATUS.includes(s.status));
-  const pausados   = scans.filter((s) => s.status === "paused");
-  const concluidos = scans.filter((s) => ["completed","failed","cancelled","stopped"].includes(s.status));
-  const bloqueados = scans.filter((s) => s.status === "blocked");
+  const scopedScans = scans.filter((s) => !accessGroupId || String(s.access_group_id || "") === String(accessGroupId));
+  const scopedSchedules = schedules.filter((s) => !accessGroupId || String(s.access_group_id || "") === String(accessGroupId));
+  const rodando    = scopedScans.filter((s) => ACTIVE_STATUS.includes(s.status));
+  const pausados   = scopedScans.filter((s) => s.status === "paused");
+  const concluidos = scopedScans.filter((s) => ["completed","failed","cancelled","stopped"].includes(s.status));
+  const bloqueados = scopedScans.filter((s) => s.status === "blocked");
   const totalCrit  = Number(sevCounts.critical || 0);
   const totalAlto  = Number(sevCounts.high     || 0);
   const totalMed   = Number(sevCounts.medium   || 0);
@@ -151,12 +157,12 @@ export default function OperationsCenterPage() {
   // ── Escopo da seleção: quando um scan é escolhido na lista suspensa, os
   // painéis (Esteira, Heatmap, Risco por framework) se moldam a ELE; caso
   // contrário usam o agregado global. eff* são as severidades efetivas.
-  const selScan  = filtro === "todos" ? null : (scans.find((x) => String(x.id) === filtro) || null);
+  const selScan  = filtro === "todos" ? null : (scopedScans.find((x) => String(x.id) === filtro) || null);
   const effCrit  = selScan ? Number(selScan.open_critical || 0) : totalCrit;
   const effAlto  = selScan ? Number(selScan.open_high     || 0) : totalAlto;
   const effMed   = selScan ? Number(selScan.open_medium   || 0) : totalMed;
   const effBaix  = selScan ? Number(selScan.open_low      || 0) : totalBaix;
-  const escopoLabel = selScan ? `#${selScan.id} ${String(selScan.target_query||"").slice(0,18)}` : "visão global";
+  const escopoLabel = selScan ? `#${selScan.id} ${String(selScan.target_query||"").slice(0,18)}` : (accessGroupId ? `empresa #${accessGroupId}` : "visão global");
   // Intensidade de severidade (0..1) do escopo atual — pondera o risco por framework.
   const sevIntensity = (() => {
     const w = effCrit * 1.0 + effAlto * 0.6 + effMed * 0.3 + effBaix * 0.1;
@@ -165,7 +171,7 @@ export default function OperationsCenterPage() {
 
   const bigNums = filtro === "todos"
     ? [
-        { v: String(scans.length),     l: "total de missões",          c: TV.text   },
+        { v: String(scopedScans.length),     l: "total de missões",          c: TV.text   },
         { v: String(rodando.length),   l: "scans rodando",            c: "#7fe0b0" },
         { v: String(pausados.length),  l: "pausados",                 c: "#ffe08a" },
         { v: String(concluidos.length),l: "concluídos",               c: TV.muted  },
@@ -173,7 +179,7 @@ export default function OperationsCenterPage() {
         { v: String(totalAlto),        l: "achados altos abertos",    c: "#ffb377" },
       ]
     : (() => {
-        const s = scans.find((x) => String(x.id) === filtro);
+        const s = scopedScans.find((x) => String(x.id) === filtro);
         if (!s) return [];
         const pct = s.mission_progress ?? s.progress ?? 0;
         return [
@@ -196,9 +202,9 @@ export default function OperationsCenterPage() {
       ]
     : [
         { nome: "Missões ativas", qtd: rodando.length,    sub: `${pausados.length} pausadas`,  conv: rodando.length > 0 ? Math.round(rodando.reduce((a,s)=>a+(s.mission_progress??s.progress??0),0)/rodando.length) : 0 },
-        { nome: "Críticos",       qtd: totalCrit,          sub: "achados críticos",             conv: scans.length > 0 ? Math.round((totalCrit / scans.length) * 10) : 0 },
-        { nome: "Altos",          qtd: totalAlto,          sub: "achados altos",                conv: scans.length > 0 ? Math.round((totalAlto / scans.length) * 10) : 0 },
-        { nome: "Schedules",      qtd: schedules.length,   sub: `${schedules.filter(s=>s.enabled!==false).length} ativos`, conv: schedules.length },
+        { nome: "Críticos",       qtd: totalCrit,          sub: "achados críticos",             conv: scopedScans.length > 0 ? Math.round((totalCrit / scopedScans.length) * 10) : 0 },
+        { nome: "Altos",          qtd: totalAlto,          sub: "achados altos",                conv: scopedScans.length > 0 ? Math.round((totalAlto / scopedScans.length) * 10) : 0 },
+        { nome: "Schedules",      qtd: scopedSchedules.length,   sub: `${scopedSchedules.filter(s=>s.enabled!==false).length} ativos`, conv: scopedSchedules.length },
         { nome: "Concluídos",     qtd: concluidos.length,  sub: "missões terminadas",           conv: null },
       ];
 
@@ -249,6 +255,12 @@ export default function OperationsCenterPage() {
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 24px", borderBottom: `1px solid ${TV.border}`, flexWrap: "wrap" }}>
         <span style={{ color: TV.text, fontWeight: 700, fontSize: 15, flexShrink: 0 }}>Centro Operacional</span>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: TV.muted }}>telemetria do ambiente · modo TV</span>
+        <CompanyScopeSelect
+          value={accessGroupId}
+          onChange={(value) => { setAccessGroupId(value); setFiltro("todos"); }}
+          className="ops-company-scope company-scope-select"
+          style={{ minWidth: 210 }}
+        />
 
         <select value={filtro} onChange={(e) => setFiltro(e.target.value)} className="ops-tv-select" style={{
           fontSize: 11.5, padding: "6px 10px", borderRadius: 8, cursor: "pointer",
@@ -310,7 +322,7 @@ export default function OperationsCenterPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
 
             {/* Scans rodando + fila */}
-            <TvPanel title="Scans" right={`${rodando.length} rodando · ${schedules.length} na fila`}>
+            <TvPanel title="Scans" right={`${rodando.length} rodando · ${scopedSchedules.length} na fila`}>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {rodando.length === 0 ? (
                   <div style={{ fontSize: 12, color: TV.muted, padding: "8px 0" }}>Nenhum scan em execução</div>
@@ -334,10 +346,10 @@ export default function OperationsCenterPage() {
                     </div>
                   );
                 })}
-                {schedules.length > 0 && (
+                {scopedSchedules.length > 0 && (
                   <div style={{ borderTop: `1px solid ${TV.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
                     <span style={{ fontSize: 9.5, color: TV.label, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>A seguir</span>
-                    {schedules.slice(0,3).map((s) => {
+                    {scopedSchedules.slice(0,3).map((s) => {
                       const grp = s.access_group_name || (s.access_group_id ? `grupo #${s.access_group_id}` : "empresa não definida");
                       const alvo = String(s.targets_text || s.target_query || "").split(/[;,\n]/)[0].trim();
                       return (
@@ -356,7 +368,7 @@ export default function OperationsCenterPage() {
             </TvPanel>
 
             {/* Esteira · 2 cols */}
-            <TvPanel title="Esteira · da descoberta à prova" right={selScan ? escopoLabel : `${rodando.length} ativas · ${schedules.length} agendadas`} span={2}>
+            <TvPanel title="Esteira · da descoberta à prova" right={selScan ? escopoLabel : `${rodando.length} ativas · ${scopedSchedules.length} agendadas`} span={2}>
               <EsteiraView esteira={esteiraDados} />
               <div style={{ display: "flex", gap: 18, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${TV.border}`, fontSize: 10.5, color: TV.muted }}>
                 {selScan ? (
@@ -366,7 +378,7 @@ export default function OperationsCenterPage() {
                   </>
                 ) : (
                   <>
-                    <span>Total missões: <b style={{ color: "#9db4ff" }}>{scans.length}</b></span>
+                    <span>Total missões: <b style={{ color: "#9db4ff" }}>{scopedScans.length}</b></span>
                     <span>· Críticos abertos: <b style={{ color: "#ff8a8a" }}>{effCrit}</b></span>
                     <span>· Altos abertos: <b style={{ color: "#ffb377" }}>{effAlto}</b></span>
                   </>

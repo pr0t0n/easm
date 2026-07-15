@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import client from "../api/client";
+import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import ScanSelect from "../components/ScanSelect";
 import "../styles/dashboard.css";
 
@@ -27,15 +28,19 @@ export default function CrownJewelsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [scanId, setScanId] = useState("");
+  const [accessGroupId, setAccessGroupId] = useState("");
 
   useEffect(() => {
     setLoading(true);
+    const params = {};
+    if (scanId) params.scan_id = scanId;
+    if (accessGroupId) params.access_group_id = accessGroupId;
     client
-      .get("/api/cockpit", { params: scanId ? { scan_id: scanId } : {} })
+      .get("/api/cockpit", { params })
       .then(({ data }) => { setData(data || null); setSel(0); })
       .catch(() => setError("Falha ao carregar as joias da coroa."))
       .finally(() => setLoading(false));
-  }, [scanId]);
+  }, [scanId, accessGroupId]);
 
   const jewels = useMemo(() => (Array.isArray(data?.crown_jewels) ? data.crown_jewels : []), [data]);
   const findings = useMemo(() => (Array.isArray(data?.findings) ? data.findings : []), [data]);
@@ -64,7 +69,8 @@ export default function CrownJewelsPage() {
             <p className="cockpit-sub">{jewels.length} joia(s) identificada(s) · classificação automática (M1)</p>
           </div>
           <div className="cockpit-actions">
-            <ScanSelect value={scanId} onChange={setScanId} />
+            <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
+            <ScanSelect value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
           </div>
         </section>
 
