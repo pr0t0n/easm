@@ -1360,7 +1360,10 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
         return {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "exit_code": None}
 
 
-def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
+def _call_mcp_execution(
+    execution: dict[str, Any],
+    authorized_scope: list[str] | None = None,
+) -> dict[str, Any]:
     """Submit a tool to MCP and poll until completion — async submit+poll.
 
     Uses /mcp/submit (fire-and-forget) then polls /mcp/jobs/{id} until
@@ -1375,6 +1378,18 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
     arguments.setdefault("scan_id", execution.get("scan_id"))
+    # Kali Runner intentionally fails closed when no authorization boundary is
+    # supplied. The offensive-operator path predates that runner contract, so
+    # every execution must explicitly carry the roots resolved from ScanJob.
+    # This keeps P01 subdomain enumeration alive while the runner still rejects
+    # a request aimed at a sibling or unrelated domain.
+    scope_roots = [
+        str(root).strip().lower()
+        for root in (authorized_scope or arguments.get("authorized_scope") or [])
+        if str(root).strip()
+    ]
+    if scope_roots:
+        arguments["authorized_scope"] = list(dict.fromkeys(scope_roots))
     # Never pass a timeout from the backend — the Kali runner's profile timeout
     # is the authoritative limit. Passing a low value (e.g. 300) from the catalog
     # kills long-running tools (nikto, sqlmap, wapiti) before they finish.
@@ -1469,7 +1484,10 @@ def _call_mcp_execution(execution: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _call_operator_tool(mcp_available: bool):
+def _call_operator_tool(
+    mcp_available: bool,
+    authorized_scope: list[str] | None = None,
+):
     """Fábrica do call_tool do executor. Tools BACKEND-LOCAL (bl-test, code-analyzer)
     rodam SEMPRE (não dependem de MCP/kali); tools remotas são bloqueadas quando o
     MCP está indisponível. Assim o executor é criado com available=True e o gate de
@@ -1481,7 +1499,7 @@ def _call_operator_tool(mcp_available: bool):
         if not mcp_available:
             return {"status": "blocked", "error": "mcp_unavailable", "exit_code": None,
                     "stdout": "", "stderr": ""}
-        return _call_mcp_execution(execution)
+        return _call_mcp_execution(execution, authorized_scope=authorized_scope)
     return _call
 
 
@@ -1552,7 +1570,12 @@ def _dispatch_batch_phase(
         "arguments": {"scan_id": job.id, "targets": batch_list, "timeout": 1200},
     }
     try:
-        result = _call_mcp_execution(execution)
+        from app.services.scan_scope import authorized_scope_from_target_query
+
+        result = _call_mcp_execution(
+            execution,
+            authorized_scope=authorized_scope_from_target_query(str(job.target_query or "")),
+        )
         status = result.get("status", "failed")
         ledger_status = "completed" if status in {"success", "done"} else "partial"
 
@@ -1614,7 +1637,15 @@ def run_offensive_operator_scan(
         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="WARNING",
                        message="mcp_server unreachable — tools will be skipped; phases will be marked partial"))
         db.commit()
-    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_operator_tool(mcp_available), available=True))
+    from app.services.scan_scope import authorized_scope_from_target_query
+
+    authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
+    runtime = OffensiveSkillRuntime(
+        executor=MCPToolExecutor(
+            call_tool=_call_operator_tool(mcp_available, authorized_scope),
+            available=True,
+        )
+    )
 
     # Read EASM scan-level (asm/full) from state_data; default = full.
     initial_state = dict(job.state_data or {})
@@ -2028,7 +2059,9 @@ def run_offensive_operator_scan(
                             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
                         }
                         try:
-                            _supp_results.append(_call_mcp_execution(_supp_exec))
+                            _supp_results.append(
+                                _call_mcp_execution(_supp_exec, authorized_scope=authorized_scope)
+                            )
                         except Exception:
                             continue
 
@@ -2091,7 +2124,9 @@ def run_offensive_operator_scan(
                             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
                         }
                         try:
-                            _supp_results.append(_call_mcp_execution(_supp_exec))
+                            _supp_results.append(
+                                _call_mcp_execution(_supp_exec, authorized_scope=authorized_scope)
+                            )
                             _body_count += 1
                         except Exception:
                             continue
@@ -4464,7 +4499,15 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     _set_auth_headers(auth_headers_from_state(state))
 
     mcp_available = _mcp_available() if settings.mcp_execute_tools_via_mcp else False
-    runtime = OffensiveSkillRuntime(executor=MCPToolExecutor(call_tool=_call_operator_tool(mcp_available), available=True))
+    from app.services.scan_scope import authorized_scope_from_target_query
+
+    authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
+    runtime = OffensiveSkillRuntime(
+        executor=MCPToolExecutor(
+            call_tool=_call_operator_tool(mcp_available, authorized_scope),
+            available=True,
+        )
+    )
 
     completed_work: set[str] = set(state.get("completed_work") or [])
     host_ip_map: dict[str, str] = dict(state.get("host_ip_map") or {})
