@@ -4702,14 +4702,15 @@ def _persist_origin_finding(db, job: ScanJob, target: str, origin: dict[str, Any
             db, job, _waf_raw,
             default_tool="waf_origin_discovery", default_target=str(target), source_item=None,
         )
-    except Exception:
-        # Fallback to direct persist if gated path unavailable
-        db.add(Finding(
-            scan_job_id=job.id, title=title[:255], severity=severity,
-            domain=str(target)[:255], tool="waf_origin_discovery",
-            recommendation=recommendation, confidence_score=confidence,
-            risk_score=max(1, confidence // 10), details=details,
-            verification_status="candidate",
+    except Exception as exc:
+        # Fail closed.  A direct fallback here used to bypass the central scope
+        # and evidence gates whenever the gated persistence raised an error.
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="scope-guard",
+            level="ERROR",
+            message=f"waf_origin_finding_not_persisted gated_path_error={str(exc)[:1000]}",
         ))
         db.commit()
 
@@ -4721,6 +4722,11 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
     after each phase only adds new findings, never duplicates.
     """
     from app.models.models import Asset, Vulnerability
+    from app.services.scan_scope import (
+        authorized_scope_from_target_query,
+        host_from_scope_reference,
+        is_host_in_scope,
+    )
 
     # Pre-seed `seen` with (phase_id, target) keys already persisted for this scan
     # so this function is safe to call multiple times during a single scan execution.
@@ -4737,6 +4743,7 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         if pid:
             seen.add((pid, tgt))
     primary_target = targets[0] if targets else str(job.target_query or "")
+    authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
 
     PHASE_SEVERITY: dict[str, str] = {
         "P09": "medium",    # nuclei vuln templates
@@ -4764,6 +4771,15 @@ def _persist_offensive_findings(db, job: ScanJob, phase_ledgers: list[dict[str, 
         phase_name = ledger.get("phase_name", phase_id)
         status = ledger.get("status", "")
         target = ledger.get("target") or primary_target
+        target_host = host_from_scope_reference(target)
+        if not authorized_scope or not is_host_in_scope(target_host, authorized_scope):
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="scope-guard",
+                level="WARNING",
+                message=f"offensive_ledger_scope_blocked host={target_host or target} scope={authorized_scope}",
+            ))
+            continue
 
         tools_success = ledger.get("tools_success", [])
         tools_attempted = ledger.get("tools_attempted", [])

@@ -1445,6 +1445,76 @@ def _batch_tool_profile(tool_name: str) -> str:
     return BATCH_PROFILE_OVERRIDE.get(tool_name) or _tool_profile(tool_name)
 
 
+def enqueue_scope_safe_redirect_probes(
+    db: Session,
+    job: ScanJob,
+    source_item: ScanWorkItem,
+    redirects: list[dict[str, str]],
+    *,
+    max_redirects: int = 20,
+    max_depth: int = 3,
+) -> dict[str, int]:
+    """Schedule one-hop httpx probes only for redirect destinations in scope.
+
+    Raw tools never follow redirects.  Each response's Location is evaluated
+    here and an allowed destination becomes a new, independently scope-checked
+    work item.  This preserves useful redirect-chain analysis without allowing
+    a redirect to smuggle a third-party request into an authorized scan.
+    """
+    authorized_scope = authorized_scope_for_scan(db, job.id)
+    source_meta = dict(source_item.item_metadata or {})
+    depth = int(source_meta.get("redirect_depth") or 0) + 1
+    if depth > max_depth:
+        return {"created": 0, "existing": 0, "blocked": len(redirects), "depth_limited": len(redirects)}
+
+    created = 0
+    existing = 0
+    blocked = 0
+    seen: set[str] = set()
+    for redirect in redirects[:max_redirects]:
+        destination = str((redirect or {}).get("destination") or "").strip()
+        source = str((redirect or {}).get("source") or "").strip()
+        if not destination or destination in seen:
+            continue
+        seen.add(destination)
+        if not is_target_in_authorized_scope(destination, authorized_scope):
+            blocked += 1
+            continue
+        duplicate = db.query(ScanWorkItem.id).filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.tool_name == "httpx",
+            ScanWorkItem.target == destination[:500],
+        ).first()
+        if duplicate:
+            existing += 1
+            continue
+        item = ScanWorkItem(
+            scan_job_id=job.id,
+            phase_id=str(source_item.phase_id or "P07"),
+            target=destination[:500],
+            tool_name="httpx",
+            profile="httpx_probe",
+            resource_class="light",
+            priority=max(1, int(source_item.priority or 100)),
+            status="queued",
+            last_error=None,
+            max_attempts=2,
+            item_metadata={
+                "source": "scope_safe_redirect",
+                "redirect_source": source,
+                "redirect_depth": depth,
+                "parent_work_item_id": source_item.id,
+                "authorized_scope": authorized_scope,
+            },
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        db.add(item)
+        db.flush()
+        created += 1
+    return {"created": created, "existing": existing, "blocked": blocked, "depth_limited": 0}
+
+
 def enqueue_scan_work_items(
     db: Session,
     job: ScanJob,

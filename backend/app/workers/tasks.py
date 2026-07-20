@@ -1333,6 +1333,22 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 or ""
             ).strip()[:255] or None
 
+            from app.services.scan_scope import (
+                authorized_scope_from_target_query as _legacy_scope_roots,
+                host_from_scope_reference as _legacy_scope_host,
+                is_host_in_scope as _legacy_host_in_scope,
+            )
+            _legacy_scope = _legacy_scope_roots(str(job.target_query or ""))
+            _legacy_host = _legacy_scope_host(_domain_col)
+            if not _legacy_scope or not _legacy_host_in_scope(_legacy_host, _legacy_scope):
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="scope-guard",
+                    level="WARNING",
+                    message=f"legacy_finding_scope_blocked host={_legacy_host or _domain_col} scope={_legacy_scope}",
+                ))
+                continue
+
             _recommendation = str(
                 flattened_details.get("qwen_recomendacao_pt")
                 or flattened_details.get("cloudcode_recomendacao_pt")
@@ -3345,6 +3361,36 @@ def poll_scan_work_item(item_id: int):
         # Capture full stdout BEFORE truncating for storage — parsers see the whole output
         _full_stdout = str(result.get("stdout") or "")
         _parsed_result = result.get("parsed")
+        _scope_output_guard: dict[str, Any] = {}
+        if str(item.tool_name or "").strip().lower() == "httpx":
+            from app.services.scan_scope import (
+                authorized_scope_from_target_query as _scope_roots,
+                filter_httpx_output_to_authorized_scope as _filter_httpx_scope,
+            )
+            _parsed_result, _full_stdout, _scope_output_guard = _filter_httpx_scope(
+                _parsed_result,
+                _full_stdout,
+                _scope_roots(str(job.target_query or "")) if job else [],
+            )
+            if _scope_output_guard.get("rejected_count") or _scope_output_guard.get("rejected_hosts"):
+                db.add(ScanLog(
+                    scan_job_id=item.scan_job_id,
+                    source="scope-guard",
+                    level="WARNING",
+                    message=(
+                        f"tool_output_scope_blocked item={item.id} tool=httpx "
+                        f"rejected={_scope_output_guard.get('rejected_count', 0)} "
+                        f"hosts={_scope_output_guard.get('rejected_hosts', [])}"
+                    )[:4000],
+                ))
+            if _scope_output_guard.get("allowed_redirects"):
+                from app.services.scan_work_queue import enqueue_scope_safe_redirect_probes
+                _scope_output_guard["redirect_probe_schedule"] = enqueue_scope_safe_redirect_probes(
+                    db,
+                    job,
+                    item,
+                    list(_scope_output_guard.get("allowed_redirects") or []),
+                )
         from app.services.tool_output_compression import compress_tool_output as _compress_stdout
         item.result = {
             **result_state,
@@ -3359,6 +3405,7 @@ def poll_scan_work_item(item_id: int):
             "stdout_preview": _compress_stdout(_full_stdout, max_chars=3000),
             "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
             "parsed_result": _parsed_result,
+            "scope_output_guard": _scope_output_guard,
             "finished_at": datetime.now().isoformat(),
         }
         item.updated_at = datetime.now()

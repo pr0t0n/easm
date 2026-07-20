@@ -68,7 +68,7 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 - CI agora executa backend, frontend e migrations. Não adiciona execução de laboratórios vulneráveis.
 - Budgets automatizados cobrem agregação de 10 mil work items e contratos HTTP de Dashboard, relatório e qualidade.
 - Na validação implantada final após reload dos workers, o Dashboard/BFF respondeu em 0,419 s (169.269 bytes), o relatório em 0,719 s (1.823.312 bytes), qualidade em 0,022 s (16.273 bytes) e a avaliação offline de inteligência em 0,009 s (1.476 bytes).
-- O tabletop ampliado de `valid.com` aprovou 41/41 contratos, 49 endpoints descobertos únicos, dez fluxos e 165 invariantes de negócio, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
+- O tabletop ampliado de `valid.com` aprovou 43/43 contratos, incluindo bloqueio de fan-out na saída das ferramentas e redirect condicionado ao escopo; cobriu 49 endpoints descobertos únicos, dez fluxos e 165 invariantes de negócio, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
 
 ## Saneamento histórico e reversibilidade
 

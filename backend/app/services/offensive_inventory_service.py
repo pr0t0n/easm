@@ -98,6 +98,10 @@ class OffensiveInventoryService:
         metadata: dict[str, Any] | None = None,
     ) -> OffensiveAsset:
         host = host_of(target)
+        from app.services.scan_scope import authorized_scope_from_target_query, is_host_in_scope
+        authorized_scope = authorized_scope_from_target_query(str(self.scan.target_query or ""))
+        if not authorized_scope or not is_host_in_scope(host, authorized_scope):
+            raise ValueError(f"out_of_scope_inventory_target:{host or target}")
         parsed = urlparse(str(target or ""))
         # Assets represent hosts/origins; paths belong to OffensiveEndpoint.
         # Keeping the full URL here created one asset per crawled path and made

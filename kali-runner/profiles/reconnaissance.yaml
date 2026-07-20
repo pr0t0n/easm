@@ -222,13 +222,14 @@ httpx_probe:
   tool: httpx
   category: recon
   phase: RECONNAISSANCE
-  description: "Live HTTP/HTTPS prober with status, title, tech, TLS (article §6: alive/dead check)."
-  # Article: 'httpx -threads 100 -l subs.txt' uses list mode + threads. We are
-  # single-target here; -follow-redirects + -no-color + -tls-probe + -json keep
-  # the parser happy. -fr ensures redirects don't hide the real status.
+  description: "Scope-safe live HTTP/HTTPS prober with status, title and technology detection."
+  # SECURITY: do not add -tls-probe or -follow-redirects here.  httpx expands
+  # certificate SANs into active targets with -tls-probe and follows redirects
+  # across hosts with -follow-redirects.  Both behaviours can leave the exact
+  # scope that was authorized even when the original -u target is valid.
   cmd: ["httpx", "-u", "{url}", "-silent",
-        "-status-code", "-title", "-tech-detect", "-tls-probe",
-        "-follow-redirects", "-no-color", "-json",
+        "-status-code", "-title", "-tech-detect", "-location",
+        "-no-color", "-json",
         "-threads", "15", "-rate-limit", "40"]
   timeout: 180
   parser: jsonl
@@ -240,10 +241,10 @@ httpx_probe_batch:
   category: recon
   phase: RECONNAISSANCE
   target_type: targets_file
-  description: "Batch HTTP/HTTPS prober: one run for all discovered hosts."
+  description: "Scope-safe batch HTTP/HTTPS prober: one run for authorized discovered hosts."
   cmd: ["httpx", "-l", "{target_file}", "-silent",
-        "-status-code", "-title", "-tech-detect", "-tls-probe",
-        "-follow-redirects", "-no-color", "-json", "-include-response-header",
+        "-status-code", "-title", "-tech-detect", "-location",
+        "-no-color", "-json", "-include-response-header",
         "-threads", "100", "-rate-limit", "150"]
   timeout: 300
   parser: jsonl
@@ -294,7 +295,8 @@ katana_crawl:
   category: recon
   phase: RECONNAISSANCE
   description: "Headless+passive crawler with JS parser."
-  cmd: ["katana", "-u", "{url}", "-silent", "-d", "3", "-jc", "-kf", "all"]
+  cmd: ["katana", "-u", "{url}", "-silent", "-d", "3", "-jc", "-kf", "all",
+        "-fs", "fqdn", "-dr"]
   timeout: 300
   parser: lines
 
@@ -304,7 +306,8 @@ katana_crawl_batch:
   phase: RECONNAISSANCE
   target_type: targets_file
   description: "Batch crawler with JS parsing for discovered live URLs."
-  cmd: ["katana", "-list", "{target_file}", "-silent", "-d", "3", "-jc", "-kf", "all", "-c", "20", "-p", "20"]
+  cmd: ["katana", "-list", "{target_file}", "-silent", "-d", "3", "-jc", "-kf", "all",
+        "-fs", "fqdn", "-dr", "-c", "20", "-p", "20"]
   timeout: 900
   parser: lines
 
@@ -313,7 +316,7 @@ hakrawler_crawl:
   category: recon
   phase: RECONNAISSANCE
   description: "Fast Go web crawler — pulls links from JS, robots, sitemaps."
-  cmd: ["hakrawler", "-d", "3", "-u"]
+  cmd: ["hakrawler", "-d", "3", "-u", "-dr"]
   stdin_template: "{url}\n"
   timeout: 180
   parser: lines
@@ -323,7 +326,8 @@ gospider_crawl:
   category: recon
   phase: RECONNAISSANCE
   description: "Web spider with form/sitemap detection."
-  cmd: ["gospider", "-s", "{url}", "-d", "3", "-c", "5", "--quiet"]
+  cmd: ["gospider", "-s", "{url}", "-d", "3", "-c", "5", "--quiet",
+        "--no-redirect", "--whitelist-domain", "{host}"]
   allowed_return_codes: [0, 1]
   timeout: 300
   parser: lines
@@ -389,15 +393,12 @@ curl_headers:
   phase: RECONNAISSANCE
   description: "HTTP header inspection (security headers, server, WAF hints)."
   target_type: url
-  # --max-time 60: WAF/CDN-fronted targets (Incapsula, Cloudflare) are slow;
-  # 30s caused curl exit 28 (operation timeout). -A spoofs a browser UA so
-  # bot-filtering WAFs don't drop the request. --max-redirs 5 bounds WAF
-  # redirect loops; exit 47 (max redirects) is accepted — we still captured
-  # the response headers along the chain.
-  cmd: ["curl", "-sS", "-I", "-L", "--max-time", "60", "--max-redirs", "5",
+  # Redirects are intentionally not followed by curl. Location is captured and
+  # any follow-up request is scheduled only after an authorized-scope check.
+  cmd: ["curl", "-sS", "-I", "--max-time", "60",
         "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "{{url}}"]
-  allowed_return_codes: [0, 47]
+  allowed_return_codes: [0]
   timeout: 90
   parser: raw
 
@@ -407,10 +408,10 @@ curl_probe:
   phase: DELIVERY_MAPPING
   description: "Full HTTP request — status line, headers and body — for validation."
   target_type: url
-  cmd: ["curl", "-sk", "-i", "-L", "--max-time", "60", "--max-redirs", "5",
+  cmd: ["curl", "-sk", "-i", "--max-time", "60",
         "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "{{url}}"]
-  allowed_return_codes: [0, 47]
+  allowed_return_codes: [0]
   timeout: 90
   parser: raw
 

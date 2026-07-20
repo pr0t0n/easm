@@ -8,8 +8,13 @@ from urllib.parse import parse_qsl, urljoin, urlparse
 
 from sqlalchemy.orm import Session
 
-from app.models.models import ScanJob
+from app.models.models import ScanJob, ScanLog
 from app.services.offensive_inventory_service import OffensiveInventoryService
+from app.services.scan_scope import (
+    authorized_scope_from_target_query,
+    host_from_scope_reference,
+    is_host_in_scope,
+)
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+")
@@ -35,11 +40,41 @@ def normalize_crawler_result(
     payload = result if isinstance(result, dict) else {}
     raw = _raw_text(payload)
     browser_requests = _browser_requests_from_payload(payload, raw, target)
-    browser_urls = {req["url"] for req in browser_requests}
     urls = _urls_from_payload(payload, raw, target)
     forms = _forms_from_html(raw, target)
     api_candidates = _api_candidates(raw, target)
+    authorized_scope = authorized_scope_from_target_query(str(scan.target_query or ""))
+
+    def _allowed(value: str) -> bool:
+        return bool(
+            authorized_scope
+            and is_host_in_scope(host_from_scope_reference(value), authorized_scope)
+        )
+
+    raw_candidates = (
+        list(urls)
+        + list(api_candidates)
+        + [str(req.get("url") or "") for req in browser_requests]
+        + [str(form.get("action") or "") for form in forms]
+    )
+    blocked_urls = sorted({value for value in raw_candidates if value and not _allowed(value)})
+    urls = [value for value in urls if _allowed(value)]
+    api_candidates = [value for value in api_candidates if _allowed(value)]
+    browser_requests = [req for req in browser_requests if _allowed(str(req.get("url") or ""))]
+    forms = [form for form in forms if _allowed(str(form.get("action") or ""))]
+    browser_urls = {req["url"] for req in browser_requests}
     scripts = [u for u in urls if _JS_RE.search(u)]
+    if blocked_urls:
+        db.add(ScanLog(
+            scan_job_id=scan.id,
+            source="scope-guard",
+            level="WARNING",
+            message=(
+                f"crawler_inventory_scope_blocked tool={tool_name} "
+                f"count={len(blocked_urls)} hosts="
+                f"{sorted({host_from_scope_reference(url) for url in blocked_urls if host_from_scope_reference(url)})}"
+            )[:4000],
+        ))
 
     endpoints = []
     for url in sorted(set(urls + api_candidates)):
@@ -146,6 +181,7 @@ def normalize_crawler_result(
         "browser_requests": len(browser_requests),
         "captured_params": captured_params,
         "endpoints_upserted": len(endpoints),
+        "out_of_scope_urls_blocked": len(blocked_urls),
     }
 
 

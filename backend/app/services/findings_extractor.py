@@ -2343,9 +2343,16 @@ def persist_finding_dicts(
 
     Returns count of new findings created.
     """
-    from app.models.models import Finding
+    from app.models.models import Finding, ScanLog
+    from app.services.scan_scope import (
+        authorized_scope_from_target_query,
+        out_of_scope_hosts_for_finding,
+    )
 
     created = 0
+    scope_rejected = 0
+    scope_rejected_hosts: set[str] = set()
+    authorized_scope = authorized_scope_from_target_query(str(getattr(job, "target_query", "") or ""))
     for f in raw_findings:
         title = str(f.get("title") or "").strip()[:500]
         severity = str(f.get("severity") or "info").lower()
@@ -2380,6 +2387,19 @@ def persist_finding_dicts(
             pass
 
         if not title or not domain_col:
+            continue
+        outside_hosts = out_of_scope_hosts_for_finding(
+            details,
+            domain_col,
+            finding_url,
+            authorized_scope,
+        )
+        # Findings are a trust boundary: never let a tool-derived target enter
+        # inventory when the scan has no resolvable authorization scope or when
+        # any primary location points outside it.
+        if not authorized_scope or outside_hosts:
+            scope_rejected += 1
+            scope_rejected_hosts.update(outside_hosts or {domain_col})
             continue
         details["asset"] = domain_col
 
@@ -2577,7 +2597,27 @@ def persist_finding_dicts(
             except Exception:
                 pass
 
-    if created:
+    if scope_rejected:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="scope-guard",
+            level="WARNING",
+            message=(
+                f"finding_scope_blocked rejected={scope_rejected} "
+                f"hosts={sorted(scope_rejected_hosts)} scope={authorized_scope}"
+            )[:4000],
+        ))
+        state = dict(getattr(job, "state_data", None) or {})
+        guard = dict(state.get("scope_output_guard") or {})
+        guard["finding_rejections"] = int(guard.get("finding_rejections") or 0) + scope_rejected
+        guard["rejected_hosts"] = sorted(
+            set(guard.get("rejected_hosts") or []) | scope_rejected_hosts
+        )[:200]
+        guard["last_rejection_at"] = datetime.now().isoformat()
+        state["scope_output_guard"] = guard
+        job.state_data = state
+
+    if created or scope_rejected:
         db.commit()
 
     return created

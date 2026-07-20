@@ -115,12 +115,12 @@ def _is_target_in_scope(target: str, authorized_scope: list[str] | None) -> tupl
     passed down through mcp-server. This does NOT replace the upstream
     ScanAuthorization gate — it's a second, independent check so a
     compromised or hallucinating caller can't redirect an allowed tool at an
-    out-of-scope host. If the caller didn't send any scope (older/manual
-    job submissions), this fails open but the caller should log a warning.
+    out-of-scope host. Missing scope fails closed: no network tool is allowed
+    to run without an explicit authorization boundary.
     """
     scope = [str(s).strip().lower() for s in (authorized_scope or []) if str(s).strip()]
     if not scope:
-        return True, "no_authorized_scope_provided"
+        return False, "no_authorized_scope_provided"
 
     host = _target_host(target)
     if not host:
@@ -1443,7 +1443,7 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"unsafe target: {reason}")
 
     if not req.authorized_scope:
-        print(f"[scope] job for target={req.target!r} carries no authorized_scope — allowing (upstream gate only)")
+        raise HTTPException(status_code=400, detail="authorized_scope is required")
     # "__batch__" is a sentinel for batch jobs — the real hosts to validate
     # live in req.targets, not req.target itself (see _is_unsafe_target's
     # own handling of the same sentinel a few lines up).

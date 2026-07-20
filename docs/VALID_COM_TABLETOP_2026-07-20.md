@@ -6,7 +6,7 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 
 | Controle | Resultado |
 |---|---:|
-| Contratos tabletop | 41/41 aprovados |
+| Contratos tabletop | 43/43 aprovados |
 | Fases | P01–P22 |
 | Ferramentas únicas nas fases | 83/83 catalogadas |
 | Perfis carregados no runner | 118 |
@@ -22,7 +22,7 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 | Fluxos de business logic | 10 |
 | Invariantes de negócio | 165 |
 | Endpoints BL bloqueados por pré-condição | 30 |
-| Backend | 388 testes aprovados em 6,55 s |
+| Backend | 393 testes aprovados em 6,92 s |
 | Frontend | 5 testes aprovados; build de produção concluído |
 
 Status final: **aprovado**.
@@ -32,6 +32,8 @@ Status final: **aprovado**.
 1. A entrada `valid.com` é normalizada como host público.
 2. Sem atestado explícito de autorização, a plataforma bloqueia o teste antes da fila. Com atestado, o gate permite continuar.
 3. O escopo aceita `valid.com` e subdomínios como `api.valid.com`, mas rejeita confusões de prefixo/sufixo como `notvalid.com` e `valid.com.attacker.invalid`.
+   A mesma decisão é repetida após a execução: linhas produzidas internamente pela ferramenta para outro domínio são descartadas antes de achados e inventário.
+   Redirect não é seguido pela ferramenta. O `Location` é capturado, resolvido e somente gera um probe separado quando seu host pertence ao escopo autorizado; destinos externos ficam registrados como bloqueados sem receber tráfego.
 4. O perfil `full` percorre os contratos P01–P22. Cada fase tem ferramentas, evidência mínima e critério de saída.
 5. A descoberta sintética representa home, autenticação, APIs com IDs de objeto, administração, inputs, fetch/proxy, arquivos, XML/SOAP, upload/import, operações sensíveis, tokens/MFA, OpenAPI, `www.valid.com/search?search=tabletop`, execução sensível e JavaScript estático.
 6. URLs `/api/orders/42` e `/api/orders/43` convergem para a mesma rota canônica `/api/orders/{id}`; os exemplos concretos continuam disponíveis para auditoria.
