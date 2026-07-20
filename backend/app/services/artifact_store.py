@@ -33,6 +33,14 @@ def redact(value: Any) -> Any:
     if isinstance(value, str):
         value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-+/=]+", r"\1[REDACTED]", value)
         value = re.sub(r"(?i)(token|secret|password|api_key|apikey)=([^&\s]+)", r"\1=[REDACTED]", value)
+        value = re.sub(
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            "[REDACTED PRIVATE KEY]",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", "[REDACTED JWT]", value)
+        value = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED CLOUD KEY]", value)
     return value
 
 

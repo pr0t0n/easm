@@ -456,14 +456,12 @@ def propagate_certificate_sans(
     if not san_domains:
         return {"san_domains": 0}
 
-    # Obtém root domain do target
-    try:
-        root = ".".join(source_target.split(".")[-2:])
-    except Exception:
-        root = source_target
+    # Use the scan's exact authorized roots, not the registrable parent domain.
+    # Example: authorization for www.valid.com must not promote ri.valid.com.
+    from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
 
-    # Filtra apenas domínios in-scope
-    in_scope = [d for d in san_domains if d.endswith(f".{root}") or d == root]
+    authorized_scope = authorized_scope_for_scan(db, job.id)
+    in_scope = [d for d in san_domains if is_host_in_scope(d, authorized_scope)]
     if not in_scope:
         return {"san_domains": 0}
 

@@ -14,9 +14,10 @@ from app.services.business_logic_intelligence import (
     build_business_logic_portfolio,
 )
 from app.services.offensive_inventory_service import OffensiveInventoryService, parameter_risk_hint
+from app.services.sensitive_file_analyzer import classify_sensitive_file_url
 
 
-ANALYSIS_VERSION = "endpoint-intelligence-v5"
+ANALYSIS_VERSION = "endpoint-intelligence-v6"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map"}
 SENSITIVE_MARKERS = {
@@ -62,6 +63,7 @@ def analyze_endpoint_contract(
     lower = f"{path} {parsed.query} {' '.join(tags or [])} {content_type}".lower()
     suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
     is_static = suffix in STATIC_EXTENSIONS
+    sensitive_file = classify_sensitive_file_url(url)
     is_api = bool((path_tokens | normalized_tags) & API_MARKERS) or "json" in content_type.lower()
     is_auth = bool((path_tokens | normalized_tags) & AUTH_MARKERS)
     is_sensitive = bool((path_tokens | normalized_tags) & SENSITIVE_MARKERS)
@@ -99,8 +101,18 @@ def analyze_endpoint_contract(
         })
 
     tests: list[dict[str, Any]] = []
-    if not is_static:
+    if not is_static or sensitive_file.get("matched"):
         tests.append(_test("read_only_baseline", "", 40, ["read-only-validator"], [], ["request_response_pair"], "endpoint:baseline"))
+    if sensitive_file.get("matched"):
+        tests.append(_test(
+            "sensitive_file_analysis",
+            "sensitive_file_exposure",
+            int(sensitive_file.get("priority") or 60),
+            ["read-only-validator"],
+            [],
+            ["status_and_content_type", "redacted_content_indicators", "endpoint_extraction"],
+            f"extension:{sensitive_file.get('extension')}",
+        ))
     if is_auth or is_sensitive or is_api:
         test_class = "file_delivery_authorization" if is_file_delivery else "auth_requirement"
         tests.append(_test(test_class, "bfla_authz" if is_sensitive else "api_security", 72 if is_file_delivery else (68 if is_sensitive else 55), ["auth-matrix"], ["user_a", "user_b"] if is_sensitive else [], ["anonymous_vs_authenticated", "cross_identity_response"] if is_file_delivery else ["anonymous_vs_authenticated"], "endpoint:auth_boundary"))
@@ -159,7 +171,9 @@ def analyze_endpoint_contract(
             "structured_input_surface": is_structured_input,
             "state_change_candidate_surface": is_state_change_candidate,
             "token_lifecycle_surface": is_token_lifecycle,
+            "sensitive_file": bool(sensitive_file.get("matched")),
         },
+        "sensitive_file_analysis": sensitive_file,
         "risk_score": risk,
         "parameters": parameter_rows,
         "test_matrix": tests,

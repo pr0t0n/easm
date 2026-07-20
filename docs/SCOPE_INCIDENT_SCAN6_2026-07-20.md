@@ -35,6 +35,7 @@ Após a transação de limpeza, restaram zero achados e zero ativos fora de `val
 - Katana, Hakrawler e Gospider não seguem redirects automaticamente; o inventário de crawler descarta URLs externas antes do upsert;
 - cada `Location` é resolvido e validado; apenas destinos dentro do `authorized_scope` viram um novo probe, com profundidade limitada;
 - destinos externos de redirect são mantidos como evidência bloqueada, sem requisição;
+- novos subdomínios autorizados e endpoints observados continuam realimentando a fila de testes; a proteção bloqueia apenas hosts fora do escopo;
 - a saída JSONL do `httpx` é filtrada antes de ser salva e consumida;
 - achados, ativos, vulnerabilidades, inventário ofensivo e ledgers repetem o gate de escopo antes de persistir;
 - o Kali runner rejeita jobs sem `authorized_scope` explícito;
@@ -42,7 +43,7 @@ Após a transação de limpeza, restaram zero achados e zero ativos fora de `val
 
 ## Validação
 
-- backend: 393 testes aprovados;
+- backend: 402 testes aprovados;
 - frontend: 5 testes aprovados e build de produção concluído;
 - tabletop: 43/43 contratos, zero tráfego e zero escrita;
 - regressão específica: fan-out por SAN bloqueado, redirect interno permitido de forma controlada e redirect externo bloqueado.

@@ -3684,7 +3684,11 @@ def poll_scan_work_item(item_id: int):
         ):
             try:
                 from app.services.js_endpoint_extractor import process_crawl_result as _crawl_proc
-                _crawl_summary = _crawl_proc(db, job.id, item.target, item.tool_name, dict(item.result or {}))
+                _crawl_meta = dict(item.item_metadata or {})
+                _crawl_base = item.target
+                if item.target == "__batch__":
+                    _crawl_base = str((_crawl_meta.get("batch_targets") or [job.target_query])[0])
+                _crawl_summary = _crawl_proc(db, job.id, _crawl_base, item.tool_name, dict(item.result or {}))
                 if _crawl_summary.get("probes_seeded", 0) > 0 or _crawl_summary.get("high_value_found", 0) > 0:
                     import logging as _jlog
                     _jlog.getLogger(__name__).info(
@@ -4045,9 +4049,13 @@ def poll_scan_work_item(item_id: int):
                     "ffuf", "ffuf-content", "ffuf-params", "ffuf-values", "ffuf-post",
                     "feroxbuster", "gobuster", "dirsearch", "katana", "gospider",
                     "hakrawler", "gau", "waybackurls", "linkfinder", "paramspider",
-                } and item.target and item.target != "__batch__":
+                } and item.target:
                     from app.services.endpoint_discovery import expand_attack_surface
-                    expand_attack_surface(db, job.id, item.target, item.tool_name, _full_result, job)
+                    _surface_meta = dict(item.item_metadata or {})
+                    _surface_base = item.target
+                    if item.target == "__batch__":
+                        _surface_base = str((_surface_meta.get("batch_targets") or [job.target_query])[0])
+                    expand_attack_surface(db, job.id, _surface_base, item.tool_name, _full_result, job)
 
                 # ── Análise estática de JS (endpoints/params/sinks/segredos) ──
                 # Após crawl/JS phases. Uma vez por scan. Realimenta endpoints.

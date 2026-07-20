@@ -33,7 +33,7 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 
 ## Inteligência de endpoints e testes
 
-- A descoberta não agenda mais SQLMap, Dalfox ou scanners ativos apenas porque uma URL contém query string. Cada URL passa por `endpoint-intelligence-v5`, que cria uma rota canônica, classifica API, autenticação, função sensível, referência a objeto, upload e mudança de estado, infere parâmetros, monta uma matriz de testes aplicáveis e anexa um contrato de business logic.
+- A descoberta não agenda mais SQLMap, Dalfox ou scanners ativos apenas porque uma URL contém query string. Cada URL passa por `endpoint-intelligence-v6`, que cria uma rota canônica, classifica API, autenticação, função sensível, referência a objeto, upload, mudança de estado e arquivos sensíveis observados, infere parâmetros, monta uma matriz de testes aplicáveis e anexa um contrato de business logic.
 - IDs numéricos e UUIDs no path são agrupados como `{id}`. Valores de query não participam da identidade da rota; URLs concretas permanecem como amostras auditáveis.
 - A matriz de teste declara hipótese, validadores seguros, identidades, pré-condições e evidência esperada. Baselines somente leitura geram cobertura, não hipóteses artificiais.
 - O planner remove hipóteses equivalentes e prioriza impacto, confiança, joia da coroa, fronteira de autorização, disponibilidade do validador, custo e precisão/sucesso históricos.

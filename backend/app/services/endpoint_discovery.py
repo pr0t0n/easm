@@ -49,6 +49,23 @@ def _host_of(url: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def discovered_in_scope_hosts_for_testing(
+    endpoints: set[str] | list[str],
+    authorized_scope: list[str],
+    known_hosts: set[str] | list[str] | None = None,
+) -> list[str]:
+    """Return every newly observed endpoint host that must enter the test queue."""
+    from app.services.scan_scope import is_host_in_scope
+
+    known = {str(host or "").strip().lower() for host in (known_hosts or []) if str(host or "").strip()}
+    discovered = {
+        _host_of(url)
+        for url in endpoints
+        if _host_of(url) and is_host_in_scope(_host_of(url), authorized_scope)
+    }
+    return sorted(discovered - known)
+
+
 def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: str) -> set[str]:
     """Extrai URLs descobertas do resultado bruto do tool (robusto a parser)."""
     urls: set[str] = set()
@@ -181,6 +198,56 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         generate_hypotheses_for_scan(db, job)
     except Exception as exc:
         logger.debug("offensive inventory normalization falhou: %s", exc)
+
+    # Any newly observed in-scope host is a new test target, regardless of
+    # whether it came from DNS, a crawler, JS, an archive or an endpoint URL.
+    # The work queue performs its own scope check and dedup before creating the
+    # phase matrix. This closes the gap where api.valid.com/foo entered the
+    # endpoint inventory but api.valid.com never entered the host test list.
+    known_test_hosts = {
+        _host_of(str(value)) or str(value or "").strip().lower()
+        for value in (
+            list(state.get("expanded_targets") or [])
+            + list(state.get("parallel_delegated_targets") or [])
+            + [source_target]
+        )
+        if str(value or "").strip()
+    }
+    new_test_hosts = discovered_in_scope_hosts_for_testing(
+        new_eps,
+        authorized_scope,
+        known_test_hosts,
+    )
+    host_seed = {"created": 0, "existing": 0, "skipped": 0}
+    if new_test_hosts:
+        expanded_targets = list(state.get("expanded_targets") or [])
+        for host in new_test_hosts:
+            if host not in expanded_targets:
+                expanded_targets.append(host)
+        state["expanded_targets"] = expanded_targets
+        host_events = list(state.get("discovered_host_test_queue") or [])
+        host_events.append({
+            "source": "endpoint_discovery",
+            "tool": tool_name,
+            "source_target": source_target,
+            "hosts": new_test_hosts,
+            "created_at": datetime.now().isoformat(),
+        })
+        state["discovered_host_test_queue"] = host_events[-100:]
+        job.state_data = state
+        db.flush()
+        try:
+            from app.services.scan_work_queue import enqueue_scan_work_items
+
+            host_seed = enqueue_scan_work_items(
+                db,
+                job,
+                new_test_hosts,
+                source="endpoint_host_discovery",
+            )
+            state = dict(job.state_data or state)
+        except Exception as exc:
+            logger.warning("endpoint host test seeding failed scan=%d hosts=%s: %s", scan_id, new_test_hosts, exc)
     for u in new_eps:
         seen.add(u)
 
@@ -259,6 +326,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
 
     # Persistir contadores e conjunto (cap p/ não inchar state)
     state["discovered_endpoints"] = list(seen)[:5000]
+    state["endpoint_test_targets"] = list(seen)[:10000]
     state["se_fetched_count"] = fetched_count
     state["se_reseeded_count"] = reseeded_count
     job.state_data = state
@@ -278,11 +346,13 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         db.rollback()
 
     logger.info(
-        "surface_expansion scan=%d tool=%s novos=%d abertos=%d reinjetados=%d segredos+scripts=%d fora_do_escopo=%d",
-        scan_id, tool_name, len(new_eps), fetched, reseeded, len(findings), len(out_of_scope),
+        "surface_expansion scan=%d tool=%s novos=%d novos_hosts=%d host_items=%d abertos=%d reinjetados=%d segredos+scripts=%d fora_do_escopo=%d",
+        scan_id, tool_name, len(new_eps), len(new_test_hosts), int(host_seed.get("created") or 0), fetched, reseeded, len(findings), len(out_of_scope),
     )
     return {
         "new_endpoints": len(new_eps), "fetched": fetched,
         "reseeded": reseeded, "findings": len(findings),
+        "new_test_hosts": len(new_test_hosts),
+        "host_work_items_created": int(host_seed.get("created") or 0),
         "out_of_scope_skipped": len(out_of_scope),
     }

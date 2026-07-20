@@ -32,12 +32,12 @@ ENDPOINT_CASES = (
     {
         "id": "api_spec",
         "url": "https://fixture.invalid/openapi.json",
-        "expected": {"auth_requirement", "api_spec"},
+        "expected": {"auth_requirement", "api_spec", "sensitive_file_analysis"},
     },
     {
         "id": "static_asset",
         "url": "https://fixture.invalid/assets/app.js",
-        "expected": set(),
+        "expected": {"sensitive_file_analysis"},
     },
 )
 
@@ -72,7 +72,7 @@ def run_offline_intelligence_evaluation() -> dict[str, Any]:
         for key, value in dimensions.items()
     ]
     return {
-        "suite": "offline-synthetic-pentest-intelligence-v4",
+        "suite": "offline-synthetic-pentest-intelligence-v5",
         "network_access": False,
         "external_targets": False,
         "excluded_platforms": ["juice-shop", "dvwa", "idor-lab"],

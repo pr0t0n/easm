@@ -495,7 +495,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "area": "business_logic",
             "title": "Endpoints de negócio sem contrato de invariantes",
             "detail": f"{int(business_logic.get('contracted_endpoints') or 0)}/{bl_relevant} endpoints relevantes têm contrato de business logic.",
-            "action": "Reanalisar o inventário com endpoint-intelligence-v5 antes de executar testes ativos.",
+            "action": "Reanalisar o inventário com endpoint-intelligence-v6 antes de executar testes ativos.",
         })
     if int(business_logic.get("high_risk_endpoints") or 0) and int(business_logic.get("blocked_endpoints") or 0):
         gaps.append({

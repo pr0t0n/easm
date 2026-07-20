@@ -22,7 +22,7 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 | Fluxos de business logic | 10 |
 | Invariantes de negócio | 165 |
 | Endpoints BL bloqueados por pré-condição | 30 |
-| Backend | 393 testes aprovados em 6,92 s |
+| Backend | 402 testes aprovados |
 | Frontend | 5 testes aprovados; build de produção concluído |
 
 Status final: **aprovado**.
@@ -36,7 +36,7 @@ Status final: **aprovado**.
    Redirect não é seguido pela ferramenta. O `Location` é capturado, resolvido e somente gera um probe separado quando seu host pertence ao escopo autorizado; destinos externos ficam registrados como bloqueados sem receber tráfego.
 4. O perfil `full` percorre os contratos P01–P22. Cada fase tem ferramentas, evidência mínima e critério de saída.
 5. A descoberta sintética representa home, autenticação, APIs com IDs de objeto, administração, inputs, fetch/proxy, arquivos, XML/SOAP, upload/import, operações sensíveis, tokens/MFA, OpenAPI, `www.valid.com/search?search=tabletop`, execução sensível e JavaScript estático.
-6. URLs `/api/orders/42` e `/api/orders/43` convergem para a mesma rota canônica `/api/orders/{id}`; os exemplos concretos continuam disponíveis para auditoria.
+6. URLs `/api/orders/42` e `/api/orders/43` convergem para a mesma rota canônica `/api/orders/{id}`; os exemplos concretos continuam disponíveis para auditoria. Todo novo subdomínio autorizado entra na fila de hosts, e todo endpoint observado entra no inventário e na matriz de testes.
 7. Um query string sozinho não agenda SQLMap ou Dalfox. A matriz nasce da semântica do endpoint e cobre autenticação, autorização de objeto, contrato de API, upload, parâmetros e mudança de estado.
    No caso `search`, a plataforma cria baseline e hipótese diferencial `xss_sqli` em modo seguro, exigindo comparação payload/baseline e controle negativo antes de qualquer escalada específica.
 8. Testes horizontais exigem duas identidades. A simulação usa `user_a` e `user_b`; se a matriz estiver incompleta, a hipótese é bloqueada com causa explícita.
@@ -46,10 +46,11 @@ Status final: **aprovado**.
 12. O gate encerra o scan apenas com qualidade saudável. Gaps altos e remediações concretas produzem `completed_with_gaps`.
 13. Dashboard, inteligência, relatório e qualidade consomem os contratos persistidos e foram verificados com autenticação real na API interna.
 14. Cada endpoint relevante recebe um contrato de business logic com invariantes, identidades, fixtures, evidências e política de execução. O executor só aceita URLs observadas; descoberta por wordlist, IDs vizinhos, brute force de cupom, SQLi durante login e mutação automática foram removidos do caminho padrão.
+15. Arquivos observados em 101 extensões de código, configuração, API, credenciais, dados, backups e logs entram em análise read-only. O conteúdo é limitado a 128 KiB, analisado em memória e substituído por indicadores/fingerprints redigidos; URLs extraídas dentro do escopo realimentam a matriz de endpoints e hosts.
 
 ## Lote ampliado de endpoints
 
-Foram incorporados 49 paths únicos após remover repetições e normalizar `redirect` como `/redirect`. A análise usa `endpoint-intelligence-v5` e separa descoberta de superfície de hipótese executável:
+Foram incorporados 49 paths únicos após remover repetições e normalizar `redirect` como `/redirect`. A análise usa `endpoint-intelligence-v6` e separa descoberta de superfície de hipótese executável:
 
 | Categoria | Exemplos | Decisão antes de conhecer parâmetros/método |
 |---|---|---|
