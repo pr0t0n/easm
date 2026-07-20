@@ -271,7 +271,11 @@ def _parse_dnsx_line(line: str) -> tuple[str, str] | None:
     return (host, ips[0]) if ips else None
 
 
-def _resolve_hosts_via_kali_dnsx(hosts: list[str], timeout: int = 180) -> dict[str, str]:
+def _resolve_hosts_via_kali_dnsx(
+    hosts: list[str],
+    timeout: int = 180,
+    authorized_scope: list[str] | None = None,
+) -> dict[str, str]:
     """Resolve hosts in one Kali dnsx batch job.
 
     The backend resolver can produce transient false negatives under load.
@@ -300,6 +304,7 @@ def _resolve_hosts_via_kali_dnsx(hosts: list[str], timeout: int = 180) -> dict[s
                 "target": unique_hosts[0],
                 "targets": unique_hosts,
                 "timeout": timeout,
+                "authorized_scope": list(authorized_scope or []),
             },
             timeout=10,
         )
@@ -503,7 +508,10 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
     ]
     ordered = [root_norm] + scoped_subdomains
     ordered = list(dict.fromkeys(host for host in ordered if host))
-    kali_resolved = _resolve_hosts_via_kali_dnsx(ordered)
+    kali_resolved = _resolve_hosts_via_kali_dnsx(
+        ordered,
+        authorized_scope=[root_norm] if root_norm else [],
+    )
     for host in ordered:
         if cap is not None and len(live) >= cap:
             break

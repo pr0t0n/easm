@@ -147,3 +147,24 @@ def test_refine_target_set_rejects_external_hosts_and_ips_before_dns() -> None:
     )
 
     assert refined["live_targets"] == ["tarcisio.blog"]
+
+
+def test_refine_target_set_sends_root_scope_to_dnsx(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_dnsx(hosts, timeout=180, authorized_scope=None):
+        captured["hosts"] = hosts
+        captured["authorized_scope"] = authorized_scope
+        return {
+            "valid.com": "1.1.1.1",
+            "api.valid.com": "1.1.1.2",
+        }
+
+    monkeypatch.setattr(
+        "app.services.scan_intelligence._resolve_hosts_via_kali_dnsx",
+        fake_dnsx,
+    )
+    refined = refine_target_set("valid.com", ["api.valid.com"])
+
+    assert captured["authorized_scope"] == ["valid.com"]
+    assert refined["live_targets"] == ["valid.com", "api.valid.com"]
