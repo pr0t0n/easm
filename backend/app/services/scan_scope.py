@@ -129,7 +129,7 @@ def filter_httpx_output_to_authorized_scope(
     allowed_redirects: list[dict[str, str]] = []
     blocked_redirects: list[dict[str, str]] = []
 
-    def _row_allowed(row: dict[str, Any]) -> bool:
+    def _sanitize_row(row: dict[str, Any]) -> dict[str, Any] | None:
         references: list[Any] = [
             row.get("input"), row.get("url"), row.get("host"),
             row.get("final_url"), row.get("final-url"),
@@ -142,6 +142,7 @@ def filter_httpx_output_to_authorized_scope(
         outside = [host for host in observed if not is_host_in_scope(host, authorized_scope)]
         rejected_hosts.update(outside)
         allowed = bool(observed) and not outside
+        clean_row = dict(row)
         if allowed and row.get("location"):
             source = str(row.get("url") or row.get("input") or "").strip()
             destination = urljoin(source, str(row.get("location") or "").strip())
@@ -155,14 +156,18 @@ def filter_httpx_output_to_authorized_scope(
                     blocked_redirects.append(redirect)
                 if destination_host:
                     rejected_hosts.add(destination_host)
-        return allowed
+                # The source response is valid evidence, but the external
+                # destination is not part of this scan and must not survive in
+                # parsed/stdout data consumed by downstream inventory code.
+                clean_row.pop("location", None)
+        return clean_row if allowed else None
 
     rows: list[dict[str, Any]] = []
     if isinstance(parsed_result, list):
         rows = [row for row in parsed_result if isinstance(row, dict)]
     elif isinstance(parsed_result, dict):
         rows = [parsed_result]
-    kept = [row for row in rows if _row_allowed(row)]
+    kept = [clean for row in rows if (clean := _sanitize_row(row)) is not None]
     if isinstance(parsed_result, dict):
         clean_parsed: Any = kept[0] if kept else {}
     elif isinstance(parsed_result, list):
@@ -180,8 +185,8 @@ def filter_httpx_output_to_authorized_scope(
         except (TypeError, ValueError, json.JSONDecodeError):
             # httpx JSONL should be structured; fail closed for unparseable rows.
             continue
-        if isinstance(row, dict) and _row_allowed(row):
-            clean_lines.append(line)
+        if isinstance(row, dict) and (clean_row := _sanitize_row(row)) is not None:
+            clean_lines.append(json.dumps(clean_row, ensure_ascii=False, separators=(",", ":")))
 
     return clean_parsed, "\n".join(clean_lines), {
         "rejected_count": max(0, len(rows) - len(kept)),

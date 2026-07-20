@@ -3372,6 +3372,15 @@ def poll_scan_work_item(item_id: int):
                 _full_stdout,
                 _scope_roots(str(job.target_query or "")) if job else [],
             )
+            if job and _parsed_result:
+                from app.services.endpoint_discovery import promote_httpx_results_to_test_queue
+
+                _scope_output_guard["endpoint_test_promotion"] = promote_httpx_results_to_test_queue(
+                    db,
+                    job,
+                    item,
+                    _parsed_result,
+                )
             if _scope_output_guard.get("rejected_count") or _scope_output_guard.get("rejected_hosts"):
                 db.add(ScanLog(
                     scan_job_id=item.scan_job_id,

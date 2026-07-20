@@ -1445,6 +1445,72 @@ def _batch_tool_profile(tool_name: str) -> str:
     return BATCH_PROFILE_OVERRIDE.get(tool_name) or _tool_profile(tool_name)
 
 
+def enqueue_httpx_scope_candidates(
+    db: Session,
+    job: ScanJob,
+    candidates: list[str],
+    *,
+    source: str,
+    max_hosts: int = 100,
+) -> dict[str, Any]:
+    """Send newly observed hosts through HTTPX before test-list promotion.
+
+    Discovery output is only a candidate. HTTPX confirms the reachable host;
+    its post-filtered result is the sole input allowed to promote that host to
+    the broader test matrix. External hosts fail closed here as well.
+    """
+    authorized_scope = authorized_scope_for_scan(db, job.id)
+    allowed_hosts: set[str] = set()
+    rejected_hosts: set[str] = set()
+    for candidate in candidates:
+        host = _scope_host_from_target(candidate)
+        if not host:
+            continue
+        if not is_host_in_scope(host, authorized_scope):
+            rejected_hosts.add(host)
+            continue
+        allowed_hosts.add(host)
+
+    created = 0
+    existing = 0
+    for host in sorted(allowed_hosts)[:max_hosts]:
+        duplicate = db.query(ScanWorkItem.id).filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.tool_name == "httpx",
+            ScanWorkItem.target == host,
+        ).first()
+        if duplicate:
+            existing += 1
+            continue
+        db.add(ScanWorkItem(
+            scan_job_id=job.id,
+            phase_id="P05",
+            target=host,
+            tool_name="httpx",
+            profile="httpx_probe",
+            resource_class="light",
+            priority=20,
+            status="queued",
+            max_attempts=2,
+            item_metadata={
+                "source": source,
+                "promotion_pending": True,
+                "authorized_scope": authorized_scope,
+            },
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+        db.flush()
+        created += 1
+    return {
+        "created": created,
+        "existing": existing,
+        "rejected": len(rejected_hosts),
+        "rejected_hosts": sorted(rejected_hosts),
+        "candidate_hosts": sorted(allowed_hosts)[:max_hosts],
+    }
+
+
 def enqueue_scope_safe_redirect_probes(
     db: Session,
     job: ScanJob,

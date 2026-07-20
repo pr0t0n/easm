@@ -43,8 +43,9 @@ Após a transação de limpeza, restaram zero achados e zero ativos fora de `val
 
 ## Validação
 
-- backend: 402 testes aprovados;
+- backend: 404 testes aprovados;
 - perfis Nuclei forçam `-dr`, WhatWeb força `--follow-redirect=never` e o runner rejeita, em fail-closed, qualquer perfil HTTP conhecido que volte a habilitar redirects internos;
+- a saída do HTTPX é o gate de promoção: endpoint/host pertencente ao alvo autorizado entra na matriz de testes; host externo e `Location` externo são descartados antes da persistência;
 - frontend: 5 testes aprovados e build de produção concluído;
 - tabletop: 43/43 contratos, zero tráfego e zero escrita;
 - regressão específica: fan-out por SAN bloqueado, redirect interno permitido de forma controlada e redirect externo bloqueado.

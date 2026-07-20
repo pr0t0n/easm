@@ -22,7 +22,7 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 | Fluxos de business logic | 10 |
 | Invariantes de negócio | 165 |
 | Endpoints BL bloqueados por pré-condição | 30 |
-| Backend | 402 testes aprovados |
+| Backend | 404 testes aprovados |
 | Frontend | 5 testes aprovados; build de produção concluído |
 
 Status final: **aprovado**.

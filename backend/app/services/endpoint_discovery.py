@@ -66,6 +66,96 @@ def discovered_in_scope_hosts_for_testing(
     return sorted(discovered - known)
 
 
+def httpx_in_scope_endpoint_urls(parsed_result: object, authorized_scope: list[str]) -> list[str]:
+    """Return only reachable HTTPX endpoints whose host is authorized."""
+    from app.services.scan_scope import host_from_scope_reference, is_host_in_scope
+
+    if isinstance(parsed_result, dict):
+        rows = [parsed_result]
+    elif isinstance(parsed_result, list):
+        rows = [row for row in parsed_result if isinstance(row, dict)]
+    else:
+        rows = []
+    urls: set[str] = set()
+    for row in rows:
+        if row.get("failed") is True:
+            continue
+        value = str(row.get("url") or row.get("final_url") or row.get("final-url") or row.get("input") or "").strip()
+        if not value:
+            continue
+        host = host_from_scope_reference(value)
+        if not host or not is_host_in_scope(host, authorized_scope):
+            continue
+        if "://" not in value:
+            scheme = str(row.get("scheme") or "https").strip().lower()
+            scheme = scheme if scheme in {"http", "https"} else "https"
+            value = f"{scheme}://{value}/"
+        urls.add(value)
+    return sorted(urls)
+
+
+def promote_httpx_results_to_test_queue(
+    db: Session,
+    job,
+    source_item,
+    parsed_result: object,
+) -> dict[str, object]:
+    """Promote only scope-filtered HTTPX endpoints into inventory/tests."""
+    from app.services.hypothesis_rules import generate_hypotheses_for_scan
+    from app.services.offensive_inventory_service import OffensiveInventoryService
+    from app.services.scan_scope import authorized_scope_for_scan
+    from app.services.scan_work_queue import enqueue_scan_work_items
+
+    authorized_scope = authorized_scope_for_scan(db, job.id)
+    urls = httpx_in_scope_endpoint_urls(parsed_result, authorized_scope)
+    inventory = OffensiveInventoryService(db, job)
+    for url in urls:
+        inventory.ingest_url(
+            url,
+            source_tool="httpx",
+            discovered_from=str(source_item.target or job.target_query),
+            metadata={"source_work_item_id": source_item.id, "scope_validated": True},
+        )
+
+    state = dict(job.state_data or {})
+    expanded = {
+        _host_of(str(value)) or str(value or "").strip().lower()
+        for value in (state.get("expanded_targets") or [])
+        if str(value or "").strip()
+    }
+    confirmed_hosts = sorted({_host_of(url) for url in urls if _host_of(url)})
+    new_hosts = [host for host in confirmed_hosts if host not in expanded]
+    seed = {"created": 0, "existing": 0, "skipped": 0}
+    if new_hosts:
+        seed = enqueue_scan_work_items(db, job, new_hosts, source="httpx_scope_validated_endpoint")
+        expanded.update(new_hosts)
+        state = dict(job.state_data or state)
+        state["expanded_targets"] = sorted(expanded)
+        pending = [
+            str(host) for host in (state.get("httpx_candidate_hosts") or [])
+            if str(host) not in set(new_hosts)
+        ]
+        state["httpx_candidate_hosts"] = pending
+        promotions = list(state.get("httpx_endpoint_promotions") or [])
+        promotions.append({
+            "source_item_id": source_item.id,
+            "hosts": new_hosts,
+            "endpoint_count": len(urls),
+            "created_at": datetime.now().isoformat(),
+        })
+        state["httpx_endpoint_promotions"] = promotions[-100:]
+        job.state_data = state
+        db.flush()
+    if urls:
+        generate_hypotheses_for_scan(db, job)
+    return {
+        "endpoints": len(urls),
+        "confirmed_hosts": confirmed_hosts,
+        "promoted_hosts": new_hosts,
+        "work_items_created": int(seed.get("created") or 0),
+    }
+
+
 def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: str) -> set[str]:
     """Extrai URLs descobertas do resultado bruto do tool (robusto a parser)."""
     urls: set[str] = set()
@@ -186,6 +276,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     try:
         from app.services.crawler_result_normalizer import normalize_crawler_result
         from app.services.hypothesis_rules import generate_hypotheses_for_scan
+        from app.models.models import OffensiveEndpoint
 
         normalize_crawler_result(
             db,
@@ -196,19 +287,31 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
             auth_context="anonymous",
         )
         generate_hypotheses_for_scan(db, job)
+        # The normalizer understands additional tool-specific formats. Merge
+        # its in-scope inventory back into the candidate set so a URL found
+        # there cannot remain invisible to HTTPX promotion.
+        normalized_urls = (
+            db.query(OffensiveEndpoint.normalized_url)
+            .filter(OffensiveEndpoint.scan_job_id == scan_id)
+            .limit(10_000)
+            .all()
+        )
+        for (normalized_url,) in normalized_urls:
+            value = str(normalized_url or "").strip()
+            if value and value not in seen and value not in new_eps and is_host_in_scope(_host_of(value), authorized_scope):
+                new_eps.append(value)
     except Exception as exc:
         logger.debug("offensive inventory normalization falhou: %s", exc)
 
-    # Any newly observed in-scope host is a new test target, regardless of
-    # whether it came from DNS, a crawler, JS, an archive or an endpoint URL.
-    # The work queue performs its own scope check and dedup before creating the
-    # phase matrix. This closes the gap where api.valid.com/foo entered the
-    # endpoint inventory but api.valid.com never entered the host test list.
+    # A newly observed host is a candidate, not yet a broad test target. Send
+    # it through HTTPX. Only HTTPX's post-filtered in-scope output is allowed
+    # to promote it into the full test matrix.
     known_test_hosts = {
         _host_of(str(value)) or str(value or "").strip().lower()
         for value in (
             list(state.get("expanded_targets") or [])
             + list(state.get("parallel_delegated_targets") or [])
+            + list(state.get("httpx_candidate_hosts") or [])
             + [source_target]
         )
         if str(value or "").strip()
@@ -220,14 +323,14 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     )
     host_seed = {"created": 0, "existing": 0, "skipped": 0}
     if new_test_hosts:
-        expanded_targets = list(state.get("expanded_targets") or [])
+        candidate_hosts = list(state.get("httpx_candidate_hosts") or [])
         for host in new_test_hosts:
-            if host not in expanded_targets:
-                expanded_targets.append(host)
-        state["expanded_targets"] = expanded_targets
+            if host not in candidate_hosts:
+                candidate_hosts.append(host)
+        state["httpx_candidate_hosts"] = candidate_hosts
         host_events = list(state.get("discovered_host_test_queue") or [])
         host_events.append({
-            "source": "endpoint_discovery",
+            "source": "endpoint_discovery_pending_httpx",
             "tool": tool_name,
             "source_target": source_target,
             "hosts": new_test_hosts,
@@ -237,13 +340,13 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         job.state_data = state
         db.flush()
         try:
-            from app.services.scan_work_queue import enqueue_scan_work_items
+            from app.services.scan_work_queue import enqueue_httpx_scope_candidates
 
-            host_seed = enqueue_scan_work_items(
+            host_seed = enqueue_httpx_scope_candidates(
                 db,
                 job,
                 new_test_hosts,
-                source="endpoint_host_discovery",
+                source="endpoint_host_discovery_pending_httpx",
             )
             state = dict(job.state_data or state)
         except Exception as exc:

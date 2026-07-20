@@ -4,6 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from app.services.scan_work_queue import (
+    enqueue_httpx_scope_candidates,
     enqueue_scope_safe_redirect_probes,
     enforce_work_item_scope,
     filter_targets_to_authorized_scope,
@@ -143,3 +144,50 @@ def test_safe_redirect_probe_schedules_only_authorized_destination() -> None:
     assert len(created) == 1
     assert created[0].target == "https://api.www.valid.com/continue"
     assert created[0].item_metadata["source"] == "scope_safe_redirect"
+
+
+def test_discovered_hosts_must_pass_httpx_scope_candidate_gate() -> None:
+    job = SimpleNamespace(id=10, target_query="valid.com")
+
+    class _Query:
+        def __init__(self, model):
+            self.model = model
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return job if self.model is ScanJob else None
+
+    class _DB:
+        def __init__(self):
+            self.added = []
+
+        def query(self, model):
+            return _Query(model)
+
+        def add(self, value):
+            self.added.append(value)
+
+        def flush(self):
+            return None
+
+    db = _DB()
+    result = enqueue_httpx_scope_candidates(
+        db,  # type: ignore[arg-type]
+        job,  # type: ignore[arg-type]
+        [
+            "https://api.valid.com/search",
+            "https://api.valid.com/profile",
+            "https://avidabank.dk/login",
+        ],
+        source="crawler_candidate",
+    )
+
+    assert result["created"] == 1
+    assert result["rejected_hosts"] == ["avidabank.dk"]
+    created = [value for value in db.added if isinstance(value, ScanWorkItem)]
+    assert len(created) == 1
+    assert created[0].target == "api.valid.com"
+    assert created[0].profile == "httpx_probe"
+    assert created[0].item_metadata["promotion_pending"] is True
