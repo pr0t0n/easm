@@ -13,6 +13,7 @@ const SEV_CLASS = {
 
 const STATUS_DOT = {
   completed: "ok",
+  completed_with_gaps: "warning",
   running: "run",
   retrying: "warn",
   queued: "idle",

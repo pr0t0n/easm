@@ -3173,7 +3173,7 @@ def run_offensive_operator_scan(
         from app.models.models import ScanJob as _SJ
         prev_scan = (
             db.query(_SJ)
-            .filter(_SJ.target_query == job.target_query, _SJ.id != job.id, _SJ.status == "completed")
+            .filter(_SJ.target_query == job.target_query, _SJ.id != job.id, _SJ.status.in_(["completed", "completed_with_gaps"]))
             .order_by(_SJ.created_at.desc())
             .first()
         )
@@ -3325,15 +3325,25 @@ def run_offensive_operator_scan(
     _persist_offensive_findings(db, job, phase_ledgers, targets)
 
     try:
+        from app.services.scan_execution_metrics import reconcile_tool_run_ledger
         from app.services.scan_quality import run_scan_quality_gate
 
+        reconcile_tool_run_ledger(db, job)
         _quality_gate = run_scan_quality_gate(db, job)
     except Exception as exc:  # noqa: BLE001
-        _quality_gate = {"passed": True, "status": "error_bypass", "actions": [], "error": str(exc)[:500]}
+        _quality_gate = {
+            "passed": False,
+            "completion_allowed": True,
+            "requires_remediation": False,
+            "completion_status": "completed_with_gaps",
+            "status": "error",
+            "actions": [],
+            "error": str(exc)[:500],
+        }
         db.add(ScanLog(scan_job_id=job.id, source="quality-gate", level="WARNING",
                        message=f"quality_gate_failed_open error={exc!s}"[:2000]))
 
-    if not _quality_gate.get("passed"):
+    if _quality_gate.get("requires_remediation"):
         state = dict(job.state_data or {})
         state["quality_gate_active"] = True
         state["completion_source"] = "quality_gate"
@@ -3351,6 +3361,14 @@ def run_offensive_operator_scan(
         except Exception:
             pass
         return campaign
+
+    job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")
+    job.mission_progress = 100
+    try:
+        from app.services.operational_sli import persist_scan_sli_alerts
+        persist_scan_sli_alerts(db, job, dict(_quality_gate.get("quality") or {}))
+    except Exception:
+        pass
 
     db.commit()
     return campaign

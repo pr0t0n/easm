@@ -21,6 +21,7 @@ const STATUS_LABELS = {
   retrying: "Executando",
   paused: "Pausado",
   completed: "Finalizado",
+  completed_with_gaps: "Finalizado com gaps",
   finished: "Finalizado",
   failed: "Finalizado",
   stopped: "Finalizado",

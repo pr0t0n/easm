@@ -47,7 +47,7 @@ def detect_and_alert_surface_changes(db: Session, job: ScanJob) -> dict[str, Any
                 ScanJob.id != job.id,
                 ScanJob.target_query == job.target_query,
                 ScanJob.owner_id == job.owner_id,
-                ScanJob.status == "completed",
+                ScanJob.status.in_(["completed", "completed_with_gaps"]),
             )
             .order_by(ScanJob.created_at.desc())
             .first()

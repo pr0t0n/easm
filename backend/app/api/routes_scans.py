@@ -30,7 +30,6 @@ from app.models.models import (
     OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
-from app.services.ai_recommendation_service import generate_portuguese_recommendations
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
@@ -2704,7 +2703,7 @@ def list_report_targets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = _authorized_scan_query(db, current_user).filter(ScanJob.status == "completed")
+    query = _authorized_scan_query(db, current_user).filter(ScanJob.status.in_(["completed", "completed_with_gaps"]))
     if access_group_id is not None:
         query = query.filter(ScanJob.access_group_id == int(access_group_id))
     scans = (
@@ -2741,7 +2740,7 @@ def get_latest_scan_by_target(
     if not normalized_target:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Alvo invalido")
 
-    query = _authorized_scan_query(db, current_user).filter(ScanJob.status == "completed")
+    query = _authorized_scan_query(db, current_user).filter(ScanJob.status.in_(["completed", "completed_with_gaps"]))
     if access_group_id is not None:
         query = query.filter(ScanJob.access_group_id == int(access_group_id))
     scans = (
@@ -5145,7 +5144,7 @@ def scan_runtime_feed(
         phase_row["status"] = _phase_runtime_status(phase_counts, str(phase_row.get("status") or ""))
     # progresso real: terminal / (total - blocked); cap 99 enquanto rodando
     _effective = max(1, _total - _blocked)
-    if job.status in ("completed", "done", "finished"):
+    if job.status in ("completed", "completed_with_gaps", "done", "finished"):
         _wq_progress = 100
     elif _total == 0:
         _wq_progress = int(job.mission_progress or 0)
@@ -5271,6 +5270,7 @@ def scan_phase_monitor(
 @router.get("/scans/{scan_id}/quality")
 def scan_quality(
     scan_id: int,
+    refresh: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -5282,6 +5282,9 @@ def scan_quality(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
+    snapshot = dict((job.state_data or {}).get("quality_snapshot") or {})
+    if snapshot and not refresh:
+        return snapshot
     return build_scan_quality(db, job)
 
 
@@ -5290,6 +5293,8 @@ def scan_report(
     scan_id: int,
     prioritized_limit: int = Query(default=10, ge=1, le=100),
     prioritized_offset: int = Query(default=0, ge=0, le=10000),
+    findings_limit: int = Query(default=300, ge=1, le=10000),
+    findings_offset: int = Query(default=0, ge=0, le=100000),
     include_targets: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -5352,7 +5357,7 @@ def scan_report(
         .filter(
             ScanJob.target_query == job.target_query,
             ScanJob.id < scan_id,
-            ScanJob.status == "completed",
+            ScanJob.status.in_(["completed", "completed_with_gaps"]),
         )
         .order_by(ScanJob.id.desc())
         .first()
@@ -5379,19 +5384,10 @@ def scan_report(
             isinstance(details.get(key), str) and str(details.get(key)).strip()
             for key in ["qwen_recomendacao_pt", "cloudcode_recomendacao_pt"]
         )
+        # Reports are read paths: never invoke Ollama or any other remote model
+        # here. AI enrichment is persisted by the scan worker; deterministic
+        # category recommendations below are the bounded fallback.
         ai_recommendations = {}
-        if not stored_ai_recommendation:
-            try:
-                ai_recommendations = generate_portuguese_recommendations(
-                    {
-                        "title": normalized_title,
-                        "severity": sev,
-                        "cve": finding.cve,
-                        "details": details,
-                    }
-                )
-            except Exception:
-                ai_recommendations = {}
 
         recommendation_source = {**details, **ai_recommendations}
         recommendation_payload = _extract_recommendation_payload(recommendation_source)
@@ -5877,12 +5873,24 @@ def scan_report(
             }
         )
 
+    paged_findings = enriched_findings[findings_offset:findings_offset + findings_limit]
+    paged_vulnerabilities = consolidated_vulnerability_table[findings_offset:findings_offset + findings_limit]
+    compact_execution_summary = [
+        {
+            "asset": row.get("asset"),
+            "is_main_domain": row.get("is_main_domain"),
+            "findings_count": row.get("findings_count"),
+            "tool_runs_count": row.get("tool_runs_count"),
+            "analyzed": row.get("analyzed"),
+        }
+        for row in subdomain_execution_summary
+    ]
+
     return ReportResponse(
         scan_id=scan_id,
         status=job.status,
-        findings=enriched_findings,
+        findings=paged_findings,
         state_data={
-            **(job.state_data or {}),
             "report_v2": {
                 # report_v2 pode não existir em scans antigos/incompletos.
                 # Evita NameError e mantém resposta consistente.
@@ -5900,27 +5908,19 @@ def scan_report(
                 "category_scores": category_scores,
                 "assets_summary": assets_summary,
                 "mission_items": (job.state_data or {}).get("mission_items") or [],
-                "item_05_subdominios_encontrados": {
-                    "title": "5. ExecutiveAnalysis",
-                    "target": main_domain,
-                    "subdomains": subdomains_list,
-                    "total_subdomains": len(subdomains_list),
-                    "execution_summary": subdomain_execution_summary,
-                },
                 "item_05_executive_analysis": {
                     "title": "5. ExecutiveAnalysis",
                     "target": main_domain,
+                    "total_subdomains": len(subdomains_list),
                     "executive_summary": ((job.state_data or {}).get("report_v2") or {}).get("executive_summary", ""),
-                    "execution_summary": subdomain_execution_summary,
+                    "execution_summary": compact_execution_summary,
                 },
-                "findings_by_subdomain": findings_by_subdomain,
                 "tool_execution_summary": focused_tool_execution,
                 "vulnerability_analysis_evidence": vulnerability_evidence,
                 "bas_detection_validation": bas_detection_validation,
                 "bas_control_matrix": bas_detection_validation.get("control_matrix") or [],
-                "vulnerability_table": consolidated_vulnerability_table,
+                "vulnerability_table": paged_vulnerabilities,
                 "recommendations": top_recommendations,
-                "recommendations_detailed": detailed_recommendations,
                 "llm_risk": (job.state_data or {}).get("llm_risk_report") or {},
                 "agent_validation": (job.state_data or {}).get("agent_validation") or {},
                 "confidence_state": (job.state_data or {}).get("confidence_state") or {},
@@ -5969,8 +5969,11 @@ def scan_report(
                     "recon_findings": len(open_recon_table),
                     "osint_findings": len(open_osint_table),
                 },
-                "recon_findings": open_recon_table,
-                "osint_findings": open_osint_table,
+                "section_counts": {
+                    "recon_findings": len(open_recon_table),
+                    "osint_findings": len(open_osint_table),
+                    "findings_by_subdomain": sum(len(rows) for rows in findings_by_subdomain.values()),
+                },
                 "lifecycle": lifecycle,
                 "resolved_vulnerabilities": resolved_vulnerabilities,
                 "comparison": {
@@ -5984,6 +5987,13 @@ def scan_report(
                 "total": len(prioritized_actions),
                 "limit": prioritized_limit,
                 "offset": prioritized_offset,
+            },
+            "findings_page": {
+                "total": len(enriched_findings),
+                "limit": findings_limit,
+                "offset": findings_offset,
+                "returned": len(paged_findings),
+                "has_more": findings_offset + len(paged_findings) < len(enriched_findings),
             },
         },
     )
@@ -5999,6 +6009,8 @@ def scan_report_csv(
         scan_id=scan_id,
         prioritized_limit=100,
         prioritized_offset=0,
+        findings_limit=10000,
+        findings_offset=0,
         db=db,
         current_user=current_user,
     )
@@ -6161,8 +6173,7 @@ def request_retest(
 ):
     """
     Solicita retest de um finding (ex: após patch aplicado ou FP questionado).
-    Define retest_status='pending_retest' e remove is_false_positive.
-    O worker, ao encontrar este status, re-executa a verificação do finding.
+    Cria e executa um RetestRun auditável usando o mesmo serviço do contrato de pentest.
     """
     query = db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id).filter(Finding.id == finding_id)
     if not current_user.is_admin:
@@ -6185,8 +6196,13 @@ def request_retest(
         actor_user_id=current_user.id,
         metadata={"finding_id": finding.id},
     )
+    from app.services.retest_service import create_retest, run_retest
+
+    scan = db.query(ScanJob).filter(ScanJob.id == finding.scan_job_id).first()
+    retest = create_retest(db, scan, finding)
+    result = run_retest(db, retest)
     db.commit()
-    return {"ok": True, "retest_status": "pending_retest"}
+    return {"ok": bool(result.get("ok")), "retest_status": finding.retest_status, **result}
 
 
 @router.post("/findings/bulk-false-positive")
@@ -7160,7 +7176,7 @@ def dashboard_insights(
         if severity in row["severity"]:
             row["severity"][severity] = int(row["severity"].get(severity, 0)) + 1
 
-    terminal_scan_status = {"completed", "failed", "stopped", "blocked"}
+    terminal_scan_status = {"completed", "completed_with_gaps", "failed", "stopped", "blocked"}
     active_scan_status = {"queued", "running", "retrying"}
     subdomain_inventory: list[dict[str, Any]] = []
     for job in jobs[:8]:
@@ -9278,6 +9294,8 @@ def get_cockpit(
     scan_id: int | None = Query(None),
     access_group_id: int | None = Query(None),
     target: str | None = Query(None),
+    finding_limit: int = Query(200, ge=1, le=1000),
+    finding_offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -9345,16 +9363,34 @@ def get_cockpit(
             findings_query = findings_query.filter(ScanJob.access_group_id == int(access_group_id))
         if normalized_target:
             findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
-        findings = findings_query.all()
     else:
-        findings = (
-            db.query(Finding)
-            .filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
-            .all()
-        )
+        findings_query = db.query(Finding).filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
+
+    total_findings = findings_query.count()
+    summary_findings = findings_query.with_entities(
+        Finding.severity,
+        Finding.domain,
+        Finding.url,
+        Finding.tool,
+        Finding.title,
+    ).all()
+    severity_order = sa_case(
+        (func.lower(Finding.severity) == "critical", 0),
+        (func.lower(Finding.severity) == "high", 1),
+        (func.lower(Finding.severity) == "medium", 2),
+        (func.lower(Finding.severity) == "low", 3),
+        else_=4,
+    )
+    findings = (
+        findings_query
+        .order_by(severity_order.asc(), Finding.cvss.desc().nullslast(), Finding.id.desc())
+        .offset(finding_offset)
+        .limit(finding_limit)
+        .all()
+    )
 
     sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for f in findings:
+    for f in summary_findings:
         k = str(f.severity or "").lower()
         if k in sev:
             sev[k] += 1
@@ -9394,7 +9430,7 @@ def get_cockpit(
         if h:
             jewel_hosts.add(h)
 
-    heatmap = build_heatmap(findings)
+    heatmap = build_heatmap(summary_findings)
 
     cves = [f.cve for f in findings if f.cve]
     epss_map = get_epss_scores(cves)
@@ -9402,6 +9438,12 @@ def get_cockpit(
     items = []
     jewels_with_findings = set()
     exposed_hosts = set()
+    for finding in summary_findings:
+        summary_host = _cockpit_host(domain=str(finding.domain or ""), url=str(finding.url or ""))
+        if summary_host:
+            exposed_hosts.add(summary_host)
+        if summary_host in jewel_hosts:
+            jewels_with_findings.add(summary_host)
     for f in findings:
         host = _cockpit_host(domain=str(f.domain or ""), url=str(f.url or ""))
         if host:
@@ -9445,11 +9487,11 @@ def get_cockpit(
 
     # Enriquece joias da coroa com achados reais por host (sem residual)
     jewel_counts: dict[str, dict] = {}
-    for it in items:
-        h = it["target"]
+    for finding in summary_findings:
+        h = _cockpit_host(domain=str(finding.domain or ""), url=str(finding.url or ""))
         if h in jewel_hosts:
             jc = jewel_counts.setdefault(h, {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0})
-            s = it["severity"]
+            s = str(finding.severity or "info").lower()
             if s in jc:
                 jc[s] += 1
             jc["total"] += 1
@@ -9494,12 +9536,22 @@ def get_cockpit(
 
     kpis = {
         "critical_high": sev["critical"] + sev["high"],
-        "findings_open": len(findings),
+        "findings_open": total_findings,
         "jewels_total": len(crown),
         "jewels_at_risk": len(jewels_with_findings),
         "assets_exposed": len(exposed_hosts),
         "assets_total": int(state.get("subdomain_count") or len(exposed_hosts)),
     }
+
+    quality = dict(state.get("quality_snapshot") or {}) or None
+    if quality is None and not aggregate:
+        try:
+            from app.services.scan_quality import build_scan_quality
+            quality = build_scan_quality(db, selected)
+        except Exception:
+            quality = None
+
+    paged_items = items
 
     return {
         "scan": {
@@ -9516,7 +9568,87 @@ def get_cockpit(
         "kpis": kpis,
         "heatmap": heatmap,
         "crown_jewels": crown_enriched,
-        "findings": items,
+        "quality": quality,
+        "findings": paged_items,
+        "findings_page": {
+            "total": total_findings,
+            "limit": finding_limit,
+            "offset": finding_offset,
+            "returned": len(paged_items),
+            "has_more": finding_offset + len(paged_items) < total_findings,
+        },
+    }
+
+
+@router.get("/dashboard/control-plane")
+def dashboard_control_plane(
+    scan_id: int | None = Query(None),
+    access_group_id: int | None = Query(None),
+    target: str | None = Query(None),
+    finding_limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Single dashboard BFF for cockpit, verification, crown jewels and OSINT."""
+    cockpit = get_cockpit(
+        scan_id=scan_id,
+        access_group_id=access_group_id,
+        target=target,
+        finding_limit=finding_limit,
+        finding_offset=0,
+        db=db,
+        current_user=current_user,
+    )
+    finding_query = _authorized_finding_query(db, current_user).filter(Finding.is_false_positive.is_(False))
+    if access_group_id is not None:
+        finding_query = finding_query.filter(ScanJob.access_group_id == int(access_group_id))
+    if target:
+        finding_query = finding_query.filter(ScanJob.target_query.ilike(f"%{str(target).strip()}%"))
+    if scan_id is not None:
+        finding_query = finding_query.filter(Finding.scan_job_id == int(scan_id))
+    status_rows = (
+        finding_query.with_entities(Finding.verification_status, func.count(Finding.id))
+        .group_by(Finding.verification_status)
+        .all()
+    )
+    verification = {"confirmed": 0, "candidate": 0, "hypothesis": 0, "refuted": 0, "none": 0}
+    for verification_status, count in status_rows:
+        key = str(verification_status or "none").lower()
+        if key in {"verified", "validated", "proven", "true_positive"}:
+            key = "confirmed"
+        elif key not in verification:
+            key = "none"
+        verification[key] += int(count or 0)
+
+    selected_scan = cockpit.get("scan") or {}
+    selected_job = None
+    if selected_scan.get("id"):
+        selected_job = _authorized_scan_query(db, current_user).filter(ScanJob.id == int(selected_scan["id"])).first()
+    selected_state = dict(selected_job.state_data or {}) if selected_job else {}
+    alert_query = db.query(EASMAlert).filter(EASMAlert.is_resolved.is_(False))
+    if not current_user.is_admin:
+        alert_query = alert_query.filter(EASMAlert.owner_id == current_user.id)
+    alerts = alert_query.order_by(EASMAlert.created_at.desc()).limit(100).all()
+    return {
+        "cockpit": cockpit,
+        "scans": cockpit.get("scans") or [],
+        "verification": {"counts": verification, "total": sum(verification.values())},
+        "crown_jewels": cockpit.get("crown_jewels") or [],
+        "osint": selected_state.get("osint_phase_zero") or selected_state.get("osint_phase_zero_result"),
+        "operational_alerts": [
+            {
+                "id": alert.id,
+                "type": alert.alert_type,
+                "severity": alert.severity,
+                "title": alert.title,
+                "description": alert.description,
+                "trigger_value": alert.trigger_value,
+                "threshold_value": alert.threshold_value,
+                "created_at": alert.created_at.isoformat() if alert.created_at else None,
+                "metadata": alert.webhook_payload or {},
+            }
+            for alert in alerts
+        ],
     }
 
 

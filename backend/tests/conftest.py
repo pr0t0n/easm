@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+# Make `pytest backend/tests` and an IDE/root invocation behave identically.
+_BACKEND_DIR = str(Path(__file__).resolve().parents[1])
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
 # ── Inject minimal env vars before ANY app module is imported ─────────────────
 # pydantic-settings reads from os.environ at class definition time.
@@ -20,6 +26,7 @@ _TEST_ENV = {
     "ADMIN_EMAIL":          "admin@test.local",
     "ADMIN_PASSWORD":       "test-admin-pass",
     "APP_ENV":              "test",
+    "LLM_REASONING_ENABLED": "false",
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)

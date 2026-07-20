@@ -13,14 +13,21 @@ from app.models.models import (
     ExecutedToolRun,
     Finding,
     OffensiveAsset,
+    OffensiveApiSpec,
     OffensiveEndpoint,
+    OffensiveHypothesis,
+    OffensiveParameter,
+    OffensiveService,
     RetestRun,
+    ScanAuthSession,
+    ScanIdentity,
     ScanJob,
     ScanLog,
     ScanWorkItem,
     ValidationRun,
 )
 from app.services.phase_monitor import build_phase_monitor
+from app.services.scan_execution_metrics import summarize_work_items
 from app.services.scan_profiles import scan_profile
 
 
@@ -91,6 +98,25 @@ QUALITY_PHASE_FALLBACKS: dict[str, list[str]] = {
     "P18": ["sslscan", "testssl", "nmap-ssl-vuln"],
     "P20": ["wpscan", "nuclei", "nikto"],
 }
+
+
+def quality_gate_decision(
+    quality: dict[str, Any], remediation_actions: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    actions = list(remediation_actions or [])
+    score = float(quality.get("score") or 0.0)
+    hard_gaps = [
+        gap for gap in list(quality.get("gaps") or [])
+        if str(gap.get("severity") or "").lower() == "high"
+    ]
+    quality_passed = score >= QUALITY_GATE_SCORE_THRESHOLD and not hard_gaps
+    return {
+        "passed": quality_passed,
+        "completion_allowed": not actions,
+        "requires_remediation": bool(actions),
+        "completion_status": "completed" if quality_passed else "completed_with_gaps",
+        "blockers": hard_gaps,
+    }
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -215,8 +241,16 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     retests = db.query(RetestRun).filter(RetestRun.scan_job_id == job.id).all()
     coverage_items = db.query(CoverageItem).filter(CoverageItem.scan_job_id == job.id).all()
     work_items = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == job.id).all()
-    endpoints_count = db.query(OffensiveEndpoint.id).filter(OffensiveEndpoint.scan_job_id == job.id).count()
-    offensive_assets_count = db.query(OffensiveAsset.id).filter(OffensiveAsset.scan_job_id == job.id).count()
+    endpoints = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == job.id).all()
+    endpoints_count = len(endpoints)
+    assets = db.query(OffensiveAsset).filter(OffensiveAsset.scan_job_id == job.id).all()
+    offensive_assets_count = len({(str(row.asset_type or ""), str(row.host or "")) for row in assets})
+    services_count = db.query(OffensiveService.id).filter(OffensiveService.scan_job_id == job.id).count()
+    parameters_count = db.query(OffensiveParameter.id).filter(OffensiveParameter.scan_job_id == job.id).count()
+    api_specs_count = db.query(OffensiveApiSpec.id).filter(OffensiveApiSpec.scan_job_id == job.id).count()
+    hypotheses = db.query(OffensiveHypothesis).filter(OffensiveHypothesis.scan_job_id == job.id).all()
+    identities = db.query(ScanIdentity).filter(ScanIdentity.scan_job_id == job.id).all()
+    auth_sessions = db.query(ScanAuthSession).filter(ScanAuthSession.scan_job_id == job.id).all()
     tool_runs = db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == job.id).all()
 
     phase_score, phase_summary, weak_phase_rows = _phase_component(phase_monitor, expected_phase_ids)
@@ -254,18 +288,10 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     if not validations and findings:
         validation_score = min(validation_score, 45.0)
 
-    monitor_metrics = dict(phase_monitor.get("metrics") or {})
-    attempted = max(
-        int(monitor_metrics.get("tools_attempted") or 0),
-        len(tool_runs),
-        len([w for w in work_items if str(w.status or "").lower() not in {"queued", "blocked"}]),
-    )
-    succeeded = max(
-        int(monitor_metrics.get("tools_success") or 0),
-        len([r for r in tool_runs if str(r.status or "").lower() == "success"]),
-        len([w for w in work_items if str(w.status or "").lower() in {"completed", "done"}]),
-    )
-    failed_tools = len([w for w in work_items if str(w.status or "").lower() in {"failed", "timeout"}])
+    execution_metrics = summarize_work_items(work_items, job)
+    attempted = int(execution_metrics["attempted"])
+    succeeded = int(execution_metrics["succeeded"])
+    failed_tools = int(execution_metrics["failed"])
     success_ratio = _ratio(succeeded, attempted) if attempted else 0.0
     missing_required = sum(
         len(row.get("required_tools_missing") or [])
@@ -288,6 +314,17 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         covered_count = scanned
     surface_score = (coverage_ratio * 70) + (min(1.0, endpoints_count / 20.0) * 15) + (min(1.0, offensive_assets_count / 20.0) * 15)
 
+    resolved_hypotheses = [h for h in hypotheses if str(h.status or "").lower() not in {"open", "queued"}]
+    hypothesis_resolution = _ratio(len(resolved_hypotheses), len(hypotheses)) if hypotheses else 1.0
+    auth_config = dict((job.state_data or {}).get("auth_config") or {})
+    auth_required = bool(auth_config.get("required") or auth_config.get("identities"))
+    valid_sessions = [s for s in auth_sessions if str(s.status or "").lower() in {"valid", "static"}]
+    auth_depth = min(1.0, len(valid_sessions) / 2.0) if auth_required else 1.0
+    classified_auth_endpoints = len([e for e in endpoints if e.auth_required is not None])
+    endpoint_auth_depth = _ratio(classified_auth_endpoints, endpoints_count) if endpoints_count else 1.0
+    api_depth = min(1.0, api_specs_count / 1.0) if any("api" in list(e.tags or []) for e in endpoints) else 1.0
+    depth_score = (hypothesis_resolution * 45) + (auth_depth * 25) + (endpoint_auth_depth * 20) + (api_depth * 10)
+
     components = {
         "phase_coverage": {
             "score": round(_clamp(phase_score), 1),
@@ -306,12 +343,24 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         },
         "validation_depth": {
             "score": round(_clamp(validation_score), 1),
-            "weight": 20,
+            "weight": 15,
             "validation_runs": len(validations),
             "successful_validations": len(successful_validations),
             "retests": len(retests),
             "high_findings": len(high_findings),
             "high_verified": len(high_verified),
+        },
+        "test_depth": {
+            "score": round(_clamp(depth_score), 1),
+            "weight": 5,
+            "hypotheses": len(hypotheses),
+            "hypotheses_resolved": len(resolved_hypotheses),
+            "identities": len(identities),
+            "valid_auth_sessions": len(valid_sessions),
+            "endpoints_auth_classified": classified_auth_endpoints,
+            "api_specs": api_specs_count,
+            "parameters": parameters_count,
+            "services": services_count,
         },
         "tool_reliability": {
             "score": round(_clamp(tool_score), 1),
@@ -381,6 +430,30 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": "Não há CoverageItem nem endpoints ofensivos persistidos.",
             "action": "Persistir endpoints, parâmetros e cobertura por classe de teste.",
         })
+    if hypotheses and len(resolved_hypotheses) < len(hypotheses):
+        gaps.append({
+            "severity": "high" if hypothesis_resolution < 0.5 else "medium",
+            "area": "test_depth",
+            "title": "Hipóteses ainda não exercitadas",
+            "detail": f"{len(hypotheses) - len(resolved_hypotheses)} de {len(hypotheses)} hipóteses permanecem abertas.",
+            "action": "Executar validadores seguros em lotes e registrar bloqueios de autenticação ou ferramenta.",
+        })
+    if auth_required and len(valid_sessions) < 2:
+        gaps.append({
+            "severity": "high",
+            "area": "test_depth",
+            "title": "Matriz de autorização incompleta",
+            "detail": f"Há {len(valid_sessions)} sessão(ões) válida(s); testes horizontais exigem ao menos duas identidades.",
+            "action": "Configurar identidades de papéis distintos e validar suas sessões antes das fases autenticadas.",
+        })
+    if endpoints_count and endpoint_auth_depth < 0.8:
+        gaps.append({
+            "severity": "medium",
+            "area": "test_depth",
+            "title": "Requisito de autenticação não classificado",
+            "detail": f"{classified_auth_endpoints}/{endpoints_count} endpoints têm auth_required conhecido.",
+            "action": "Executar baseline anônimo e autenticado para classificar cada endpoint.",
+        })
 
     if total_score >= 85:
         grade = "A"
@@ -398,6 +471,17 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         grade = "F"
         label = "Insuficiente"
 
+    gap_rank = {"high": 0, "medium": 1, "low": 2}
+    gaps.sort(key=lambda gap: gap_rank.get(str(gap.get("severity") or "low").lower(), 3))
+    quality_gate = dict((job.state_data or {}).get("quality_gate") or {})
+    if quality_gate.get("status") == "passed" and total_score < QUALITY_GATE_SCORE_THRESHOLD:
+        quality_gate.update({
+            "status": "historical_mismatch",
+            "passed": False,
+            "completion_status": "completed_with_gaps",
+            "reason": "legacy_gate_did_not_enforce_numeric_threshold",
+        })
+
     return {
         "scan_id": job.id,
         "target": job.target_query,
@@ -410,8 +494,10 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "score": total_score,
         "grade": grade,
         "label": label,
-        "quality_gate": dict((job.state_data or {}).get("quality_gate") or {}),
+        "quality_gate": quality_gate,
+        "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
         "runtime_visibility": _runtime_visibility(job, validations, artifacts, work_items),
+        "execution_metrics": execution_metrics,
         "components": components,
         "summary": {
             "findings_total": len(findings),
@@ -541,21 +627,27 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     validation_changes = _apply_promotion_gate(db, job)
     validation_changes["p21_audits_recorded"] = _record_p21_evidence_audits(db, job)
     quality = build_scan_quality(db, job)
+    state["quality_snapshot"] = {
+        key: value for key, value in quality.items()
+        if key not in {"runtime_visibility", "phase_monitor_issues"}
+    }
     actions: list[dict[str, Any]] = []
 
     if rounds >= QUALITY_GATE_MAX_ROUNDS:
+        decision = quality_gate_decision(quality, actions)
         gate_state.update({
-            "status": "exhausted",
+            "status": "passed" if decision["passed"] else "exhausted",
             "last_score": quality.get("score"),
             "last_grade": quality.get("grade"),
             "reason": "max_quality_gate_rounds_reached",
         })
+        state["quality_snapshot"]["quality_gate"] = gate_state
         state["quality_gate"] = gate_state
         job.state_data = state
         db.add(job)
         return {
-            "passed": True,
-            "status": "exhausted",
+            **decision,
+            "status": gate_state["status"],
             "actions": actions,
             "validation_changes": validation_changes,
             "quality": quality,
@@ -579,15 +671,18 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     if int(fallback_result.get("scheduled", 0) or 0) > 0:
         actions.append({"type": "schedule_fallback_work_items", **fallback_result})
 
-    passed = not actions
+    decision = quality_gate_decision(quality, actions)
     gate_state.update({
-        "status": "passed" if passed else "remediation_scheduled",
-        "rounds": rounds + (0 if passed else 1),
+        "status": "remediation_scheduled" if actions else ("passed" if decision["passed"] else "completed_with_gaps"),
+        "rounds": rounds + (1 if actions else 0),
         "last_score": quality.get("score"),
         "last_grade": quality.get("grade"),
         "threshold": QUALITY_GATE_SCORE_THRESHOLD,
         "validation_changes": validation_changes,
         "last_actions": actions,
+        "passed": decision["passed"],
+        "completion_status": decision["completion_status"],
+        "blockers": decision["blockers"],
     })
     history = list(gate_state.get("history") or [])
     history.append({
@@ -597,12 +692,13 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
         "actions": actions,
     })
     gate_state["history"] = history[-10:]
+    state["quality_snapshot"]["quality_gate"] = gate_state
     state["quality_gate"] = gate_state
     job.state_data = state
     db.add(job)
 
     return {
-        "passed": passed,
+        **decision,
         "status": gate_state["status"],
         "actions": actions,
         "validation_changes": validation_changes,

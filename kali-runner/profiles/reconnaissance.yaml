@@ -298,6 +298,16 @@ katana_crawl:
   timeout: 300
   parser: lines
 
+katana_crawl_batch:
+  tool: katana
+  category: recon
+  phase: RECONNAISSANCE
+  target_type: targets_file
+  description: "Batch crawler with JS parsing for discovered live URLs."
+  cmd: ["katana", "-list", "{target_file}", "-silent", "-d", "3", "-jc", "-kf", "all", "-c", "20", "-p", "20"]
+  timeout: 900
+  parser: lines
+
 hakrawler_crawl:
   tool: hakrawler
   category: recon

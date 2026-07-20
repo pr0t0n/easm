@@ -224,7 +224,7 @@ def _sync_step_to_db(state: AgentState, step_label: str) -> None:
         _db = SessionLocal()
         try:
             job = _db.query(ScanJob).filter(ScanJob.id == scan_id).first()
-            if job and job.status not in ("completed", "failed", "stopped"):
+            if job and job.status not in ("completed", "completed_with_gaps", "failed", "stopped"):
                 job.current_step = step_label
                 mission_items = state.get("mission_items") or []
                 mi = state.get("mission_index", 0)

@@ -437,45 +437,37 @@ export default function DashboardPage() {
   const [verificationStats, setVerificationStats] = useState({ confirmed: 0, candidate: 0, hypothesis: 0, refuted: 0, none: 0, total: 0 });
   const [cockpitData, setCockpitData] = useState(null);
 
-  // ── Crown Jewels + OSINT Phase Zero (per selected scan) ──────────────────
-  useEffect(() => {
-    if (!selectedSubdomainScanId) return;
-    client.get(`/api/scans/${selectedSubdomainScanId}/crown-jewels`)
-      .then(({ data }) => setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []))
-      .catch(() => setCrownJewels([]));
-    client.get(`/api/scans/${selectedSubdomainScanId}/osint`, { _skipToast: true })
-      .then(({ data }) => setOsintPhaseZero(data?.osint || null))
-      .catch(() => setOsintPhaseZero(null));
-  }, [selectedSubdomainScanId]);
-
-  // ── Cockpit consolidado — dado REAL por scan (/api/cockpit): heatmap,
-  //    fila com EPSS+MITRE, joias, score. Sem fabricar nada. ────────────────
+  // BFF único do control plane: cockpit, scans, verificação, joias e OSINT.
   useEffect(() => {
     const params = new URLSearchParams();
     if (selectedSubdomainScanId) params.append("scan_id", selectedSubdomainScanId);
     if (selectedGroup) params.append("access_group_id", selectedGroup);
     if (selectedTarget.trim()) params.append("target", selectedTarget.trim());
     const qs = params.toString() ? `?${params.toString()}` : "";
-    client.get(`/api/cockpit${qs}`)
-      .then(({ data }) => setCockpitData(data || null))
-      .catch(() => setCockpitData(null));
+    client.get(`/api/dashboard/control-plane${qs}`)
+      .then(({ data }) => {
+        const cockpit = data?.cockpit || null;
+        setCockpitData(cockpit);
+        setScanRows(Array.isArray(data?.scans) ? data.scans : []);
+        setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []);
+        setOsintPhaseZero(data?.osint || null);
+        setVulnerabilityAlerts(Array.isArray(data?.operational_alerts) ? data.operational_alerts : []);
+        const counts = data?.verification?.counts || {};
+        setVerificationStats({
+          confirmed: counts.confirmed || 0,
+          candidate: counts.candidate || 0,
+          hypothesis: counts.hypothesis || 0,
+          refuted: counts.refuted || 0,
+          none: counts.none || 0,
+          total: data?.verification?.total || 0,
+        });
+      })
+      .catch(() => {
+        setCockpitData(null);
+        setCrownJewels([]);
+        setOsintPhaseZero(null);
+      });
   }, [selectedSubdomainScanId, selectedGroup, selectedTarget]);
-
-  // ── Verification status breakdown (T1 Evidence Gate) ─────────────────────
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (selectedTarget.trim()) params.append("target", selectedTarget.trim());
-    client.get(`/api/findings/verification-stats?${params.toString()}`)
-      .then(({ data }) => setVerificationStats({
-        confirmed: data?.counts?.confirmed || 0,
-        candidate: data?.counts?.candidate || 0,
-        hypothesis: data?.counts?.hypothesis || 0,
-        refuted: data?.counts?.refuted || 0,
-        none: data?.counts?.none || 0,
-        total: data?.total || 0,
-      }))
-      .catch(() => {});
-  }, [selectedTarget, selectedGroup]);
 
   const handleSearch = () => {
     setIsSearching(true);
@@ -563,12 +555,6 @@ export default function DashboardPage() {
         ]);
 
         setRecentScans(dashboard.recent_scans || []);
-        try {
-          const { data: scanList } = await client.get("/api/scans");
-          setScanRows(Array.isArray(scanList) ? scanList : []);
-        } catch {
-          setScanRows([]);
-        }
         setTopVulns(dashboard.top_vulns || []);
         setAssets(dashboard.assets || []);
         setActivity(dashboard.activity || DAY_LABELS.map((day) => ({ day, scans: 0, findings: 0 })));
@@ -648,33 +634,6 @@ export default function DashboardPage() {
           }));
         }
 
-        const hasActiveFilter = Boolean(selectedGroup || selectedTarget.trim());
-
-        try {
-          if (hasActiveFilter) {
-            setVulnerabilityAlerts([]);
-            return;
-          }
-
-          const [assetsResp, alertsResp] = await Promise.all([
-            client.get("/api/dashboard/assets").catch(() => ({ data: [] })),
-            client.get("/api/vulnerability-alerts").catch(() => ({ data: [] })),
-          ]);
-
-          setVulnerabilityAlerts(alertsResp.data || []);
-
-          if (assetsResp.data && assetsResp.data.length > 0) {
-            const topAsset = assetsResp.data[0];
-            try {
-              const trendsResp = await client.get(`/api/dashboard/trends/${topAsset.id}`);
-              setVulnerabilityTrends(trendsResp.data);
-            } catch (e) {
-              // Silent fail
-            }
-          }
-        } catch (e) {
-          console.log("Vulnerability posture endpoints not available");
-        }
       } catch (err) {
         setError(err?.response?.data?.detail || "Falha ao carregar dashboard.");
       } finally {
@@ -835,9 +794,12 @@ export default function DashboardPage() {
   const scansRunning = Number(scanStatusCounts.running || 0) + Number(scanStatusCounts.retrying || 0);
   const scansQueued = Number(scanStatusCounts.queued || 0);
   const scansStopped = Number(scanStatusCounts.stopped || 0) + Number(scanStatusCounts.paused || 0);
-  const scansCompleted = Number(scanStatusCounts.completed || 0);
+  const scansCompleted = Number(scanStatusCounts.completed || 0) + Number(scanStatusCounts.completed_with_gaps || 0);
   const scansFailed = Number(scanStatusCounts.failed || 0) + Number(scanStatusCounts.blocked || 0);
   const scansExecuting = scansRunning + scansQueued;
+  const cockpitQuality = cockpitData?.quality || null;
+  const cockpitExecution = cockpitQuality?.execution_metrics || {};
+  const cockpitSli = cockpitQuality?.operational_sli || {};
   const weakFrameworks = frameworks
     .slice()
     .sort((a, b) => Number(a.score ?? 101) - Number(b.score ?? 101))
@@ -1038,6 +1000,18 @@ export default function DashboardPage() {
             <button type="button" className="btn btn-primary" onClick={() => window.location.assign("/scan")}>Novo scan</button>
           </div>
         </section>
+
+        {cockpitQuality && (
+          <section className="cockpit-filter-strip" aria-label="Qualidade e performance do teste">
+            <div className="ctrl"><label>Qualidade</label><strong className="sk-mono">{Number(cockpitQuality.score || 0).toFixed(1)} · {cockpitQuality.grade || "—"}</strong></div>
+            <div className="ctrl"><label>Gate</label><strong>{String(cockpitQuality.quality_gate?.status || "não executado").replaceAll("_", " ")}</strong></div>
+            <div className="ctrl"><label>Execução</label><strong className="sk-mono">{Number(cockpitExecution.progress_pct || 0).toFixed(1)}%</strong></div>
+            <div className="ctrl"><label>Sucesso</label><strong className="sk-mono">{Number(cockpitExecution.success_pct || 0).toFixed(1)}%</strong></div>
+            <div className="ctrl"><label>Paralelismo</label><strong className="sk-mono">{Number(cockpitExecution.average_parallelism || 0).toFixed(1)}×</strong></div>
+            <div className="ctrl"><label>Gaps prioritários</label><strong className="sk-mono">{Array.isArray(cockpitQuality.gaps) ? cockpitQuality.gaps.length : 0}</strong></div>
+            <div className="ctrl"><label>SLIs operacionais</label><strong className="sk-mono">{cockpitSli.status || "não avaliado"}</strong></div>
+          </section>
+        )}
 
         <section className={`cockpit-filter-strip ${isAdmin ? "admin-compact" : ""}`}>
           {!isAdmin && (

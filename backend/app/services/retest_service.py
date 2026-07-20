@@ -11,6 +11,18 @@ from app.services.artifact_store import create_request_response_artifact, replay
 
 
 def create_retest(db: Session, scan: ScanJob, finding: Finding) -> RetestRun:
+    existing = (
+        db.query(RetestRun)
+        .filter(
+            RetestRun.scan_job_id == scan.id,
+            RetestRun.finding_id == finding.id,
+            RetestRun.status.in_(["queued", "running"]),
+        )
+        .order_by(RetestRun.created_at.desc())
+        .first()
+    )
+    if existing:
+        return existing
     validation = (
         db.query(ValidationRun)
         .filter(ValidationRun.scan_job_id == scan.id, ValidationRun.finding_id == finding.id)
@@ -31,6 +43,9 @@ def create_retest(db: Session, scan: ScanJob, finding: Finding) -> RetestRun:
 
 
 def run_retest(db: Session, retest: RetestRun) -> dict[str, Any]:
+    retest.status = "running"
+    db.add(retest)
+    db.flush()
     finding = db.query(Finding).filter(Finding.id == retest.finding_id).first()
     if not finding:
         retest.status = "failed"
@@ -64,7 +79,7 @@ def run_retest(db: Session, retest: RetestRun) -> dict[str, Any]:
     retest.artifact_id = artifact.id
     retest.summary = "finding_still_observable" if new_status == "confirmed" else "finding_not_reproduced"
     retest.completed_at = datetime.now()
-    finding.retest_status = "confirmed" if new_status == "refuted" else "pending_retest"
+    finding.retest_status = "confirmed" if new_status == "refuted" else "still_vulnerable"
     db.add(retest)
     db.add(finding)
     db.flush()

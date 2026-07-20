@@ -136,6 +136,16 @@ nikto_basic:
         "-maxtime", "300s", "-Tuning", "12345789abcde", "-Plugins", "@@DEFAULT;-update"]
   timeout: 360
   parser: raw
+
+nikto_basic_batch:
+  tool: nikto
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  target_type: targets_file
+  description: "Batch web-server checks using Nikto host-list mode."
+  cmd: ["nikto", "-host", "{target_file}", "-Tuning", "12345789abc", "-nointeractive", "-Format", "txt"]
+  timeout: 1800
+  parser: raw
   allowed_return_codes: [0, 1]
 
 shodan_lookup:

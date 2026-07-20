@@ -1167,6 +1167,12 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "Uso e resultado podem ser creditados por item_metadata.skill_ids, mas o supervisor ainda deve registrar a consulta RAG/decisão."
         )
 
+    try:
+        from app.services.scan_execution_metrics import build_scan_execution_metrics
+        execution_metrics = build_scan_execution_metrics(db, scan)
+    except Exception:
+        execution_metrics = {}
+
     return {
         # ── Scan metadata ──────────────────────────────────────────────────
         "scan_id": scan.id,
@@ -1185,7 +1191,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         #  - completed scans: 100%.
         #  - legacy scans: computed_progress from ledger.
         "mission_progress": (
-            100 if str(scan.status or "").lower() == "completed"
+            100 if str(scan.status or "").lower() in {"completed", "completed_with_gaps"}
             else int(computed_progress or 0) if _wq_total_all > 0
             else max(int(scan.mission_progress or 0), int(computed_progress or 0))
         ),
@@ -1202,8 +1208,13 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         },
         # ── Metrics ───────────────────────────────────────────────────────
         "metrics": {
-            "tools_attempted": max(int(metrics.get("tools_attempted", 0) or 0), sum(int(v.get("attempts", 0) or 0) for v in tool_stats.values())),
-            "tools_success": max(int(metrics.get("tools_success", 0) or 0), sum(int(v.get("success", 0) or 0) for v in tool_stats.values())),
+            "source": execution_metrics.get("source") or "legacy_ledgers",
+            "tools_attempted": int(execution_metrics.get("attempted") or 0),
+            "tools_success": int(execution_metrics.get("succeeded") or 0),
+            "tools_failed": int(execution_metrics.get("failed") or 0),
+            "tools_skipped": int(execution_metrics.get("skipped") or 0),
+            "progress_pct": float(execution_metrics.get("progress_pct") or 0),
+            "success_pct": float(execution_metrics.get("success_pct") or 0),
             "steps_done": max(int(metrics.get("steps_done", 0) or 0), ledger_completed_count),
             "steps_success": max(int(metrics.get("steps_success", 0) or 0), sum(1 for entry in phase_ledger.values() if str(entry.get("status") or "").lower() == "completed")),
             "loop_iteration": int(state.get("loop_iteration", 0) or 0),
@@ -1214,6 +1225,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "tools_installed_total": len(installed_expected),
             "tools_uninstalled_total": len(uninstalled_expected),
         },
+        "execution_metrics": execution_metrics,
         "severity_counts": dict(severity_counts),
         # ── Capability/node coverage (legacy backward compat) ──────────────
         "completed_capabilities": completed_caps,

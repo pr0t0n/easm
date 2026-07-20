@@ -38,6 +38,7 @@ _HIGH_TIMEOUT = float(os.getenv("ADAPTIVE_HIGH_TIMEOUT", "0.55"))  # >55% timeou
 _LOW_TIMEOUT = float(os.getenv("ADAPTIVE_LOW_TIMEOUT", "0.10"))    # <10% → avança
 _MIN_SAMPLES = 8
 _HIGH_MEM = float(os.getenv("ADAPTIVE_HIGH_MEM", "90"))
+_HIGH_CGROUP_MEM = float(os.getenv("ADAPTIVE_HIGH_CGROUP_MEM", "85"))
 
 
 def _redis():
@@ -72,12 +73,34 @@ def get_capacity() -> dict[str, int]:
     }
 
 
-def _mem_percent() -> float | None:
+def _host_mem_percent() -> float | None:
     try:
         import psutil
         return float(psutil.virtual_memory().percent)
     except Exception:
         return None
+
+
+def _cgroup_mem_percent() -> float | None:
+    """Container-local pressure; avoids Docker host baseline false positives."""
+    candidates = [
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ]
+    for usage_path, limit_path in candidates:
+        try:
+            with open(usage_path, encoding="utf-8") as handle:
+                usage = int(handle.read().strip())
+            with open(limit_path, encoding="utf-8") as handle:
+                raw_limit = handle.read().strip()
+            if raw_limit == "max":
+                continue
+            limit = int(raw_limit)
+            if limit > 0 and limit < (1 << 60):
+                return (usage / limit) * 100.0
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def adjust(db) -> dict:
@@ -90,14 +113,19 @@ def adjust(db) -> dict:
     )).first()
     bad, total = int(row[0] or 0), int(row[1] or 0)
     rate = (bad / total) if total >= _MIN_SAMPLES else None
-    mem = _mem_percent()
+    host_mem = _host_mem_percent()
+    cgroup_mem = _cgroup_mem_percent()
 
     level = get_level()
     old = level
-    if mem is not None and mem >= _HIGH_MEM:
+    if cgroup_mem is not None and cgroup_mem >= _HIGH_CGROUP_MEM:
         # Pressão de MEMÓRIA local (saturação real) → recuo multiplicativo.
         level = max(MIN_L, level // 2)
-        action = "decrease_mem"
+        action = "decrease_cgroup_mem"
+    elif cgroup_mem is None and host_mem is not None and host_mem >= _HIGH_MEM:
+        # Host memory is only a fallback when no container limit is observable.
+        level = max(MIN_L, level // 2)
+        action = "decrease_host_mem"
     elif rate is not None and rate > _HIGH_TIMEOUT:
         # Timeout alto = majoritariamente bloqueio REMOTO (WAF) → recuo SUAVE
         # (aditivo). Não colapsa a concorrência local com a CPU ociosa.
@@ -116,6 +144,7 @@ def adjust(db) -> dict:
     return {
         "level": level, "previous": old, "action": action,
         "timeout_rate": round(rate, 3) if rate is not None else None,
-        "samples": total, "mem_percent": mem,
+        "samples": total, "mem_percent": cgroup_mem if cgroup_mem is not None else host_mem,
+        "host_mem_percent": host_mem, "cgroup_mem_percent": cgroup_mem,
         "min": MIN_L, "max": MAX_L, "capacity": get_capacity(),
     }

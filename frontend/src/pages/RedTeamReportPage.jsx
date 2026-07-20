@@ -1,11 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import client from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
+import { remediationPriority, remediationSla } from "../lib/reportQuality";
 import "../styles/dashboard.css";
 
-/* Relatório de Exposição (Red Team) — dado 100% real de /api/cockpit.
-   Sem risco residual e sem dono/prazo/esforço (decisão: plataforma Red Team).
-   Plano P0/P1/P2 priorizado por severidade + joia + EPSS + evidência. */
+/* Relatório de Exposição (Red Team) — dado 100% real de /api/cockpit. */
 
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const STATUS_LABEL = { confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado", confirmado: "Confirmado", candidato: "Candidato" };
@@ -17,20 +16,13 @@ function heatColor(v, sev, max) {
   return `rgba(${HEAT_BASE[sev]}, ${alpha.toFixed(3)})`;
 }
 
-function priorityOf(f) {
-  const sev = String(f.severity || "").toLowerCase();
-  if (sev === "critical" || (f.isJewel && f.status === "confirmed")) return "P0";
-  if (sev === "high") return "P1";
-  if (sev === "medium") return "P2";
-  return null; // low/info não entram no plano de ação
-}
-
 export default function RedTeamReportPage() {
   const [data, setData] = useState(null);
   const [scanId, setScanId] = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [reportContract, setReportContract] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -40,7 +32,20 @@ export default function RedTeamReportPage() {
     const qs = params.toString() ? `?${params.toString()}` : "";
     client
       .get(`/api/cockpit${qs}`)
-      .then(({ data }) => setData(data || null))
+      .then(async ({ data }) => {
+        setData(data || null);
+        const selectedId = data?.scan?.id;
+        if (!selectedId) return setReportContract(null);
+        try {
+          const response = await client.get(`/api/pentest/scans/${selectedId}/report-contract`, {
+            params: { findings_limit: 200, findings_offset: 0 },
+            _skipToast: true,
+          });
+          setReportContract(response.data || null);
+        } catch {
+          setReportContract(null);
+        }
+      })
       .catch(() => setError("Falha ao carregar o relatório."))
       .finally(() => setLoading(false));
   }, [scanId, accessGroupId]);
@@ -52,7 +57,10 @@ export default function RedTeamReportPage() {
   })) : []), [data]);
 
   const plan = useMemo(() => {
-    const withP = findings.map((f) => ({ ...f, p: priorityOf(f) })).filter((f) => f.p);
+    const withP = findings.map((f) => {
+      const p = remediationPriority(f);
+      return { ...f, p, remediation: remediationSla(p) };
+    }).filter((f) => f.p);
     const order = { P0: 0, P1: 1, P2: 2 };
     return withP.sort((a, b) => order[a.p] - order[b.p] || -(a.cvss || 0) - -(b.cvss || 0) || (b.epss || 0) - (a.epss || 0));
   }, [findings]);
@@ -62,6 +70,10 @@ export default function RedTeamReportPage() {
   const kpis = data?.kpis || {};
   const jewels = data?.crown_jewels || [];
   const heatmap = data?.heatmap || null;
+  const quality = data?.quality || null;
+  const findingsPage = data?.findings_page || {};
+  const execution = quality?.execution_metrics || {};
+  const readiness = reportContract?.readiness || {};
 
   // Exporta vulnerabilidades em CSV (id, url, recomendação, cve, cvss/risco)
   const exportCsv = async () => {
@@ -175,6 +187,34 @@ export default function RedTeamReportPage() {
           </div>
         </section>
 
+        <section className="report-section">
+          <div className="sk-eyebrow">Qualidade e completude do teste</div>
+          {quality ? (
+            <div className="report-kpis" style={{ marginTop: 10 }}>
+              <div><span>Quality score</span><strong className="sk-mono">{Number(quality.score || 0).toFixed(1)} · {quality.grade || "—"}</strong></div>
+              <div><span>Gate</span><strong className="sk-mono">{String(quality.quality_gate?.status || "não executado").replaceAll("_", " ")}</strong></div>
+              <div><span>Fases saudáveis</span><strong className="sk-mono">{Number(quality.summary?.healthy_phases || 0)}/{Number(quality.summary?.expected_phases || 0)}</strong></div>
+              <div><span>Verificados</span><strong className="sk-mono">{Number(quality.summary?.verified_findings || 0)}/{Number(quality.summary?.findings_total || 0)}</strong></div>
+              <div><span>Sucesso de execução</span><strong className="sk-mono">{Number(execution.success_pct || 0).toFixed(1)}%</strong></div>
+              <div><span>Paralelismo médio</span><strong className="sk-mono">{Number(execution.average_parallelism || 0).toFixed(1)}×</strong></div>
+              <div><span>Espera p95</span><strong className="sk-mono">{execution.queue_wait_p95_seconds ? `${Math.round(execution.queue_wait_p95_seconds / 60)} min` : "—"}</strong></div>
+              <div><span>ETA</span><strong className="sk-mono">{execution.eta_seconds != null ? `${Math.round(execution.eta_seconds / 60)} min` : "concluído"}</strong></div>
+            </div>
+          ) : <div className="report-empty">Qualidade ainda não calculada.</div>}
+          {quality?.gaps?.length > 0 && (
+            <ul style={{ margin: "12px 0 0", paddingLeft: 18 }}>
+              {quality.gaps.slice(0, 5).map((gap, index) => <li key={index}><b>{gap.title}</b> — {gap.action}</li>)}
+            </ul>
+          )}
+          {reportContract && (
+            <p className="report-sub" style={{ marginTop: 10 }}>
+              Readiness: <b>{String(readiness.status || "unknown").replaceAll("_", " ")}</b>
+              {readiness.blockers?.length ? ` · ${readiness.blockers.length} blocker(s)` : ""}
+              {reportContract.auth?.required ? ` · autenticação ${reportContract.auth.ready ? "pronta" : "incompleta"}` : " · escopo anônimo"}
+            </p>
+          )}
+        </section>
+
         {/* Cabeçalho do documento */}
         <header className="report-head">
           <div>
@@ -217,10 +257,10 @@ export default function RedTeamReportPage() {
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">
               <thead>
-                <tr><th>Prio</th><th>Achado</th><th>Alvo</th><th>CVE</th><th>CVSS</th><th>EPSS</th><th>MITRE</th><th>Evidência</th></tr>
+                <tr><th>Prio</th><th>Achado</th><th>Alvo</th><th>Responsável</th><th>Prazo</th><th>Esforço</th><th>CVSS</th><th>EPSS</th><th>Evidência</th></tr>
               </thead>
               <tbody>
-                {plan.length === 0 && <tr><td colSpan={8}>Sem achados acionáveis (crítico/alto/médio) neste ciclo.</td></tr>}
+                {plan.length === 0 && <tr><td colSpan={9}>Sem achados acionáveis (crítico/alto/médio) neste ciclo.</td></tr>}
                 {plan.map((f) => (
                   <tr key={f.id}>
                     <td><span className={`prio-badge prio-${f.p}`}>{f.p}</span></td>
@@ -230,16 +270,18 @@ export default function RedTeamReportPage() {
                       <small className="report-plan-reco"><b>Recomendação:</b> {f.recommendation || "Sem recomendação registrada."}</small>
                     </td>
                     <td className="sk-mono">{f.target}</td>
-                    <td className="sk-mono">{f.cve || "—"}</td>
+                    <td>{f.remediation.owner}</td>
+                    <td className="sk-mono">{f.remediation.due}</td>
+                    <td>{f.remediation.effort}</td>
                     <td className="num sk-mono">{f.cvss ? Number(f.cvss).toFixed(1) : "—"}</td>
                     <td className="num sk-mono">{f.epss ? `${Math.round(f.epss * 100)}%` : "—"}</td>
-                    <td className="sk-mono">{f.mitreStr}</td>
                     <td><span className="evidence-pill">{STATUS_LABEL[f.status] || f.status}</span></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {findingsPage.has_more && <p className="report-sub">Exibindo {findingsPage.returned} de {findingsPage.total} achados. Use o CSV ou o relatório técnico para o inventário completo.</p>}
         </section>
 
         <div className="report-two-col">

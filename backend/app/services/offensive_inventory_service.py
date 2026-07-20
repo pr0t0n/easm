@@ -91,7 +91,13 @@ class OffensiveInventoryService:
     ) -> OffensiveAsset:
         host = host_of(target)
         parsed = urlparse(str(target or ""))
-        url = target if parsed.scheme else ""
+        # Assets represent hosts/origins; paths belong to OffensiveEndpoint.
+        # Keeping the full URL here created one asset per crawled path and made
+        # both coverage and dashboard cardinality meaningless.
+        if parsed.scheme and parsed.netloc:
+            url = urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), "", "", "", ""))
+        else:
+            url = ""
         asset = (
             self.db.query(OffensiveAsset)
             .filter(
@@ -174,6 +180,19 @@ class OffensiveInventoryService:
     ) -> OffensiveEndpoint:
         normalized = normalize_url(url)[:1000]
         asset = self.upsert_asset(url, asset_type="web", source_tool=source_tool, confidence=confidence)
+        parsed = urlparse(str(url or ""))
+        if parsed.hostname:
+            tls = parsed.scheme.lower() == "https"
+            port = parsed.port or (443 if tls else 80)
+            self.upsert_service(
+                asset=asset,
+                port=port,
+                protocol="tcp",
+                service_name="https" if tls else "http",
+                tls=tls,
+                source_tool=source_tool,
+                metadata={"inferred_from_endpoint": True},
+            )
         endpoint = (
             self.db.query(OffensiveEndpoint)
             .filter(
@@ -380,7 +399,12 @@ class OffensiveInventoryService:
         )
         self.db.add(row)
         if hypothesis:
-            hypothesis.status = "validated" if result == "confirmed" else result
+            hypothesis.status = {
+                "confirmed": "validated",
+                "candidate": "tested_candidate",
+                "refuted": "refuted",
+                "skipped": "blocked_precondition",
+            }.get(str(result or "").lower(), str(result or "tested"))
             hypothesis.updated_at = datetime.now()
             self.db.add(hypothesis)
         self.db.flush()

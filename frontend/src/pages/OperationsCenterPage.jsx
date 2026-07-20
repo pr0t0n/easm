@@ -147,7 +147,7 @@ export default function OperationsCenterPage() {
   const scopedSchedules = schedules.filter((s) => !accessGroupId || String(s.access_group_id || "") === String(accessGroupId));
   const rodando    = scopedScans.filter((s) => ACTIVE_STATUS.includes(s.status));
   const pausados   = scopedScans.filter((s) => s.status === "paused");
-  const concluidos = scopedScans.filter((s) => ["completed","failed","cancelled","stopped"].includes(s.status));
+  const concluidos = scopedScans.filter((s) => ["completed","completed_with_gaps","failed","cancelled","stopped"].includes(s.status));
   const bloqueados = scopedScans.filter((s) => s.status === "blocked");
   const totalCrit  = Number(sevCounts.critical || 0);
   const totalAlto  = Number(sevCounts.high     || 0);

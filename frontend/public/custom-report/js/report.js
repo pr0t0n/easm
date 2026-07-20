@@ -1074,6 +1074,8 @@ async function loadReportFromApi() {
     const params = new URLSearchParams({
       prioritized_limit: String(limit),
       prioritized_offset: '0',
+      findings_limit: '500',
+      findings_offset: '0',
     });
     if (INCLUDE_TARGETS) params.set('include_targets', INCLUDE_TARGETS);
     const endpoint = `${API_BASE_URL}/api/scans/${SCAN_ID}/report?${params.toString()}`;
@@ -1122,24 +1124,6 @@ async function tryRefreshToken(refreshToken) {
   return data?.access_token || null;
 }
 
-async function tryLoginByQuery() {
-  const email = query.get('email') || '';
-  const password = query.get('password') || '';
-  if (!email || !password) return null;
-
-  const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  if (data?.access_token) localStorage.setItem('token', data.access_token);
-  if (data?.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
-  return data?.access_token || null;
-}
-
 async function ensureAccessToken() {
   const token = localStorage.getItem('token');
   if (token) return token;
@@ -1150,11 +1134,8 @@ async function ensureAccessToken() {
     if (refreshed) return refreshed;
   }
 
-  const loginToken = await tryLoginByQuery();
-  if (loginToken) return loginToken;
-
   throw new Error(
-    `Sem token de acesso. Faça login na aplicação principal ou abra com parametros email/senha e opcionalmente api_url. Exemplo: ?scan_id=${SCAN_ID}&api_url=${encodeURIComponent(API_BASE_URL)}&email=admin@example.com&password=admin123`,
+    'Sem token de acesso. Faça login na aplicação principal e reabra o relatório.',
   );
 }
 

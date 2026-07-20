@@ -184,10 +184,16 @@ class AuthSessionManager:
         identity_raw = self._raw_identity(identity_key)
         headers.update({str(k): str(v) for k, v in dict(identity_raw.get("headers") or {}).items()})
         cookies.update({str(k): str(v) for k, v in dict(identity_raw.get("cookies") or {}).items()})
+        for part in str(identity_raw.get("cookie") or "").split(";"):
+            key, separator, value = part.strip().partition("=")
+            if key and separator:
+                cookies[key] = value
         bearer = str(identity_raw.get("bearer_token") or identity_raw.get("token") or "").strip()
         if bearer and "Authorization" not in headers:
             headers["Authorization"] = f"Bearer {bearer}"
         basic = identity_raw.get("basic")
+        if not isinstance(basic, dict) and str(contract.auth_type or "").lower() == "basic":
+            basic = {"username": identity_raw.get("username"), "password": identity_raw.get("password")}
         if isinstance(basic, dict) and basic.get("username") and basic.get("password") and "Authorization" not in headers:
             import base64
 

@@ -25,6 +25,8 @@ def test_batch_tool_profile_uses_the_batch_variant() -> None:
     assert _batch_tool_profile("subjack") == "domain_takeover_batch"
     assert _batch_tool_profile("nuclei") == "nuclei_cves_batch"
     assert _batch_tool_profile("nuclei-cves") == "nuclei_cves_batch"
+    assert _batch_tool_profile("katana") == "katana_crawl_batch"
+    assert _batch_tool_profile("nikto") == "nikto_basic_batch"
 
 
 def test_tools_without_a_batch_profile_are_not_batch_capable() -> None:
@@ -33,7 +35,7 @@ def test_tools_without_a_batch_profile_are_not_batch_capable() -> None:
     # dispatched per-target (single_items), never as "__batch__".
     no_batch_profile = {
         "nmap-ssl", "nmap-vuln", "nmap-http",
-        "katana", "katana-js", "hakrawler", "gospider",
+        "katana-js", "hakrawler", "gospider",
         "whatweb", "whatweb-basic", "gau", "waybackurls",
         "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
         "nuclei-exposure", "nuclei-auth", "nuclei-race", "nuclei-cors", "nuclei-csrf",

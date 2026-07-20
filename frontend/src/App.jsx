@@ -1,31 +1,30 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import client from "./api/client";
 import Sidebar from "./components/Sidebar";
 import ToastCenter from "./components/ToastCenter";
 import ErrorBoundary from "./components/ErrorBoundary";
-import AccountPage from "./pages/AccountPage";
-import DashboardPage from "./pages/DashboardPage";
 import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
-import AttackEvolutionPage from "./pages/AttackEvolutionPage";
-import ReportsPage from "./pages/ReportsPage";
-import RedTeamReportPage from "./pages/RedTeamReportPage";
-import ScanOperationsPage from "./pages/ScanOperationsPage";
-import OperationsCenterPage from "./pages/OperationsCenterPage";
-import UserManagementPage from "./pages/UserManagementPage";
-import AdminLogsPage from "./pages/AdminLogsPage";
-import VulnerabilitiesPage from "./pages/VulnerabilitiesPage";
-import DomainsPage from "./pages/DomainsPage";
-import AttackSurfacePage from "./pages/AttackSurfacePage";
-import AttackGraphPage from "./pages/AttackGraphPage";
-import CrownJewelsPage from "./pages/CrownJewelsPage";
-import LearningPage from "./pages/LearningPage";
-import GuardrailsPage from "./pages/GuardrailsPage";
-import CapabilityBlueprintPage from "./pages/CapabilityBlueprintPage";
-import SchedulingPage from "./pages/SchedulingPage";
-import SettingsPage from "./pages/SettingsPage";
 import { authStore } from "./store/auth";
+
+const AccountPage = lazy(() => import("./pages/AccountPage"));
+const DashboardPage = lazy(() => import("./pages/DashboardPage"));
+const AttackEvolutionPage = lazy(() => import("./pages/AttackEvolutionPage"));
+const RedTeamReportPage = lazy(() => import("./pages/RedTeamReportPage"));
+const ScanOperationsPage = lazy(() => import("./pages/ScanOperationsPage"));
+const OperationsCenterPage = lazy(() => import("./pages/OperationsCenterPage"));
+const UserManagementPage = lazy(() => import("./pages/UserManagementPage"));
+const AdminLogsPage = lazy(() => import("./pages/AdminLogsPage"));
+const VulnerabilitiesPage = lazy(() => import("./pages/VulnerabilitiesPage"));
+const AttackSurfacePage = lazy(() => import("./pages/AttackSurfacePage"));
+const AttackGraphPage = lazy(() => import("./pages/AttackGraphPage"));
+const CrownJewelsPage = lazy(() => import("./pages/CrownJewelsPage"));
+const LearningPage = lazy(() => import("./pages/LearningPage"));
+const GuardrailsPage = lazy(() => import("./pages/GuardrailsPage"));
+const CapabilityBlueprintPage = lazy(() => import("./pages/CapabilityBlueprintPage"));
+const SchedulingPage = lazy(() => import("./pages/SchedulingPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 function Protected({ children }) {
   // Sem sessão → cai na página índice (landing), não direto no login.
@@ -87,10 +86,11 @@ export default function App() {
                 <Sidebar />
                 <div className="main-column">
                   <RoutedBoundary>
+                  <Suspense fallback={<div style={{ padding: 24, color: "var(--ink-muted)" }}>Carregando módulo…</div>}>
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<RedTeamReportPage />} />
-                    <Route path="/relatorios-legacy" element={<ReportsPage />} />
+                    <Route path="/relatorios-legacy" element={<Navigate to="/relatorios" replace />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
@@ -114,6 +114,7 @@ export default function App() {
                     <Route path="/configuracoes" element={<AdminOnly><SettingsPage /></AdminOnly>} />
                     <Route path="/conta" element={<AdminOnly><AccountPage /></AdminOnly>} />
                   </Routes>
+                  </Suspense>
                   </RoutedBoundary>
                 </div>
               </div>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import LogTerminal from "../components/LogTerminal";
+import { buildScannerAuthConfig } from "../lib/scannerAuth";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
 const FASES_IDS  = [
@@ -31,7 +32,7 @@ const LEVEL_MAP = {
 
 const ACTIVE_STATUS    = ["queued", "running", "retrying"];
 const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
-const TERMINAL_STATUS  = new Set(["completed", "failed", "cancelled", "stopped"]);
+const TERMINAL_STATUS  = new Set(["completed", "completed_with_gaps", "failed", "cancelled", "stopped"]);
 
 const SCAN_PERFIL = {
   Recon:     { c: "var(--sev-info-text)",  bg: "var(--sev-info-bg)",  bd: "var(--sev-info-border)",  d: "P01-P08 + P18/P21/P22, profundidade baixa" },
@@ -52,6 +53,7 @@ const FASE_CSS = {
   pending: "var(--canvas-muted)",
 };
 const STATUS_CSS = {
+  completed_with_gaps: { c: "var(--sev-medium-text)", dot: "var(--sev-medium-solid)", t: "Concluído com gaps" },
   running: { c: "var(--sev-low-text)",      dot: "var(--sev-low-solid)",      t: "Rodando" },
   queued:  { c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Na fila" },
   retrying:{ c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Retentando" },
@@ -94,7 +96,7 @@ function getFaseStates(scan) {
   const cur = extractPhase(scan.current_step);
   const curIdx = FASES_IDS.indexOf(cur);
   return FASES_IDS.map((f, i) => {
-    if (scan.status === "completed") return "done";
+    if (["completed", "completed_with_gaps"].includes(scan.status)) return "done";
     if (scan.status === "blocked" && f === cur) return "blocked";
     if (scan.status === "blocked" && i > curIdx) return "pending";
     if (i < curIdx) return "done";
@@ -267,7 +269,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [accessGroupId, setAccessGroupId] = useState("");
   const [scopeAuthorizationAttested, setScopeAuthorizationAttested] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
-  const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "" });
+  const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "", multiIdentity: false, tokenB: "", cookieB: "", usernameB: "", passwordB: "", headerValueB: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
   const [submitting, setSubmitting] = useState(false);
 
@@ -280,12 +282,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   }, [accessGroupId, groups]);
 
   const buildAuth = () => {
-    if (!authEnabled) return null;
-    if (authConfig.type === "bearer" && authConfig.token) return { type: "bearer", token: authConfig.token };
-    if (authConfig.type === "cookie" && authConfig.cookie) return { type: "cookie", cookie: authConfig.cookie };
-    if (authConfig.type === "basic"  && authConfig.username) return { type: "basic", username: authConfig.username, password: authConfig.password };
-    if (authConfig.type === "header" && authConfig.headerName) return { type: "header", headers: { [authConfig.headerName]: authConfig.headerValue } };
-    return null;
+    return buildScannerAuthConfig(authEnabled, authConfig);
   };
 
   const handleLancar = async () => {
@@ -454,6 +451,17 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
               <input placeholder="X-API-Key" value={authConfig.headerName} onChange={(e) => setAuthConfig({ ...authConfig, headerName: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />
               <input placeholder="valor" value={authConfig.headerValue} onChange={(e) => setAuthConfig({ ...authConfig, headerValue: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }} />
             </>}
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 11.5, color: "var(--ink-soft)" }}>
+              <input type="checkbox" checked={authConfig.multiIdentity} onChange={(e) => setAuthConfig({ ...authConfig, multiIdentity: e.target.checked })} />
+              Testar matriz com usuário A/B
+            </label>
+            {authConfig.multiIdentity && authConfig.type === "bearer" && <input placeholder="Bearer do usuário B" value={authConfig.tokenB} onChange={(e) => setAuthConfig({ ...authConfig, tokenB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)" }} />}
+            {authConfig.multiIdentity && authConfig.type === "cookie" && <input placeholder="Cookie do usuário B" value={authConfig.cookieB} onChange={(e) => setAuthConfig({ ...authConfig, cookieB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)" }} />}
+            {authConfig.multiIdentity && authConfig.type === "basic" && <>
+              <input placeholder="username B" value={authConfig.usernameB} onChange={(e) => setAuthConfig({ ...authConfig, usernameB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
+              <input type="password" placeholder="password B" value={authConfig.passwordB} onChange={(e) => setAuthConfig({ ...authConfig, passwordB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
+            </>}
+            {authConfig.multiIdentity && authConfig.type === "header" && <input placeholder="Valor do header do usuário B" value={authConfig.headerValueB} onChange={(e) => setAuthConfig({ ...authConfig, headerValueB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)" }} />}
           </div>
         )}
         {janela === "agendar" && (
@@ -992,7 +1000,7 @@ export default function ScansPage() {
 
   // Split scans by lifecycle
   const activeScans   = scopedScans.filter((s) => [...ACTIVE_STATUS, "paused", "blocked", "stopped", "failed"].includes(s.status));
-  const terminalScans = scopedScans.filter((s) => ["completed", "cancelled"].includes(s.status));
+  const terminalScans = scopedScans.filter((s) => ["completed", "completed_with_gaps", "cancelled"].includes(s.status));
   const runningCount  = scopedScans.filter((s) => ACTIVE_STATUS.includes(s.status)).length;
   const blockedCount  = scopedScans.filter((s) => s.status === "blocked").length;
 

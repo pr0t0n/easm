@@ -974,7 +974,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
 
         # Se já terminou (ex.: via work_queue_dispatcher), não re-inicia.
         if _scan_is_terminal(job.status):
-            return {"ok": job.status == "completed", "error": f"scan_already_{job.status}", "retryable": False}
+            return {"ok": job.status in {"completed", "completed_with_gaps"}, "error": f"scan_already_{job.status}", "retryable": False}
 
         job.status = "running"
         job.current_step = "Iniciando grafo"
@@ -1047,7 +1047,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 return {"ok": True, "scan_id": job.id, "offensive_operator": True, "checkpointed": True, "result": result}
             db.add(ScanLog(scan_job_id=job.id, source="worker", level="INFO", message="Execucao offensive_operator finalizada"))
             db.commit()
-            return {"ok": job.status == "completed", "scan_id": job.id, "offensive_operator": True, "result": result}
+            return {"ok": job.status in {"completed", "completed_with_gaps"}, "scan_id": job.id, "offensive_operator": True, "result": result}
 
         stop_pulse = _start_scan_progress_pulse(scan_id=job.id, scan_mode=scan_mode, interval_seconds=20)
 
@@ -1675,7 +1675,7 @@ def admit_or_defer_scan(scan_id: int, mode: str = "unit") -> dict:
     db: Session = SessionLocal()
     try:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
-        if not job or str(job.status or "").lower() in {"completed", "failed", "stopped", "paused"}:
+        if not job or str(job.status or "").lower() in {"completed", "completed_with_gaps", "failed", "stopped", "paused"}:
             return {"scan_id": scan_id, "admitted": False, "reason": "not_admissible"}
         if _can_admit_scan(db, scan_id):
             # limpa flag de espera, se houver, e dispara
@@ -2056,7 +2056,7 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
 
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return _halted_scan_result(job.status)
-        if str(job.status or "").lower() == "completed":
+        if str(job.status or "").lower() in {"completed", "completed_with_gaps"}:
             db.add(
                 ScanLog(
                     scan_job_id=scan_id,
@@ -2582,13 +2582,18 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                     scan_id, _total, _done,
                 )
                 try:
+                    from app.services.scan_execution_metrics import reconcile_tool_run_ledger
                     from app.services.scan_quality import run_scan_quality_gate
 
+                    reconcile_tool_run_ledger(db, job)
                     _quality_gate = run_scan_quality_gate(db, job)
                 except Exception as exc:  # noqa: BLE001
                     _quality_gate = {
-                        "passed": True,
-                        "status": "error_bypass",
+                        "passed": False,
+                        "completion_allowed": True,
+                        "requires_remediation": False,
+                        "completion_status": "completed_with_gaps",
+                        "status": "error",
                         "actions": [],
                         "error": str(exc)[:500],
                     }
@@ -2599,7 +2604,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                         message=f"quality_gate_failed_open error={exc!s}"[:2000],
                     ))
 
-                if not _quality_gate.get("passed"):
+                if _quality_gate.get("requires_remediation"):
                     _actions = list(_quality_gate.get("actions") or [])
                     _final_state = dict(job.state_data or {})
                     _final_state["completion_source"] = "quality_gate"
@@ -2628,9 +2633,14 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 _final_state["items_terminal"] = _done
                 _final_state["current_pentest_phase_id"] = "P22"
                 job.state_data = _final_state
-                job.status = "completed"
+                job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")
                 job.mission_progress = 100
                 job.current_step = "P22 Campaign Report"
+                try:
+                    from app.services.operational_sli import persist_scan_sli_alerts
+                    persist_scan_sli_alerts(db, job, dict(_quality_gate.get("quality") or {}))
+                except Exception:
+                    pass
                 # Trigger post-scan CVE enrichment pass
                 try:
                     from app.services.cve_enrichment_service import enrichment_service as _enrich
@@ -3935,7 +3945,7 @@ def poll_scan_work_item(item_id: int):
                         if not _inv_state.get("pentest_safe_validators_done") and item.phase_id in ("P09", "P10", "P12", "P13", "P17"):
                             from app.services.pentest_validators import run_validators_for_scan
                             _val_res = run_validators_for_scan(db, job, limit=80)
-                            _inv_state["pentest_safe_validators_done"] = True
+                            _inv_state["pentest_safe_validators_done"] = int(_val_res.get("remaining") or 0) == 0
                             _inv_state["pentest_safe_validators_summary"] = _val_res
                             job.state_data = _inv_state
                         _cov_res = refresh_coverage(db, job)

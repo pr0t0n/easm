@@ -1387,6 +1387,7 @@ def unblock_phase_items(
 # confirming a matching `<profile>_batch` (or equivalent) profile exists.
 BATCH_CAPABLE_TOOLS: frozenset[str] = frozenset({
     "naabu", "nmap", "nmap-vulscan", "httpx", "dnsx", "subjack", "nuclei", "nuclei-cves",
+    "katana", "nikto",
 })
 
 # tool_name -> the batch-capable profile id to use instead of _tool_profile()'s
@@ -1400,6 +1401,8 @@ BATCH_PROFILE_OVERRIDE: dict[str, str] = {
     "subjack": "domain_takeover_batch",
     "nuclei": "nuclei_cves_batch",
     "nuclei-cves": "nuclei_cves_batch",
+    "katana": "katana_crawl_batch",
+    "nikto": "nikto_basic_batch",
 }
 
 
