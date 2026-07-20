@@ -6,19 +6,20 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 
 | Controle | Resultado |
 |---|---:|
-| Contratos tabletop | 23/23 aprovados |
+| Contratos tabletop | 36/36 aprovados |
 | Fases | P01–P22 |
 | Ferramentas únicas nas fases | 83/83 catalogadas |
 | Perfis carregados no runner | 118 |
 | Executáveis detectados | 951 |
-| Endpoints sintéticos | 10 |
-| Rotas canônicas | 9 |
-| Testes aplicáveis planejados | 15 |
-| Hipóteses priorizadas | 15 |
+| Endpoints descobertos adicionados | 49 únicos |
+| Endpoints sintéticos totais | 59 |
+| Rotas canônicas | 58 |
+| Testes aplicáveis planejados | 55 |
+| Hipóteses priorizadas | 55 |
 | Requisições ao alvo | 0 |
-| Jobs Kali antes/depois | 13/13, ativos 0 |
+| Jobs criados pelo tabletop | 0; ativos 0 |
 | Escritas no banco | 0 |
-| Backend | 372 testes aprovados em 6,50 s |
+| Backend | 380 testes aprovados em 6,55 s |
 | Frontend | 5 testes aprovados; build de produção concluído |
 
 Status final: **aprovado**.
@@ -29,7 +30,7 @@ Status final: **aprovado**.
 2. Sem atestado explícito de autorização, a plataforma bloqueia o teste antes da fila. Com atestado, o gate permite continuar.
 3. O escopo aceita `valid.com` e subdomínios como `api.valid.com`, mas rejeita confusões de prefixo/sufixo como `notvalid.com` e `valid.com.attacker.invalid`.
 4. O perfil `full` percorre os contratos P01–P22. Cada fase tem ferramentas, evidência mínima e critério de saída.
-5. A descoberta sintética representa home, login, API com IDs de objeto, administração, upload, OpenAPI, `www.valid.com/search?search=tabletop`, execução sensível e JavaScript estático.
+5. A descoberta sintética representa home, autenticação, APIs com IDs de objeto, administração, inputs, fetch/proxy, arquivos, XML/SOAP, upload/import, operações sensíveis, tokens/MFA, OpenAPI, `www.valid.com/search?search=tabletop`, execução sensível e JavaScript estático.
 6. URLs `/api/orders/42` e `/api/orders/43` convergem para a mesma rota canônica `/api/orders/{id}`; os exemplos concretos continuam disponíveis para auditoria.
 7. Um query string sozinho não agenda SQLMap ou Dalfox. A matriz nasce da semântica do endpoint e cobre autenticação, autorização de objeto, contrato de API, upload, parâmetros e mudança de estado.
    No caso `search`, a plataforma cria baseline e hipótese diferencial `xss_sqli` em modo seguro, exigindo comparação payload/baseline e controle negativo antes de qualquer escalada específica.
@@ -39,6 +40,24 @@ Status final: **aprovado**.
 11. A correlação de ataque só marca uma cadeia como provada quando os passos têm evidência e o objetivo é alcançável.
 12. O gate encerra o scan apenas com qualidade saudável. Gaps altos e remediações concretas produzem `completed_with_gaps`.
 13. Dashboard, inteligência, relatório e qualidade consomem os contratos persistidos e foram verificados com autenticação real na API interna.
+
+## Lote ampliado de endpoints
+
+Foram incorporados 49 paths únicos após remover repetições e normalizar `redirect` como `/redirect`. A análise usa `endpoint-intelligence-v4` e separa descoberta de superfície de hipótese executável:
+
+| Categoria | Exemplos | Decisão antes de conhecer parâmetros/método |
+|---|---|---|
+| Entrada/reflexão | `/search`, `/comments`, `/feedback`, `/support`, `/messages`, `/test` | descobrir parâmetros, métodos e content types; não presumir XSS/SQLi |
+| Fetch/SSRF | `/fetch`, `/proxy`, `/preview`, `/webhook`, `/integrations`, `/image` | descobrir parâmetro URL/callback; não presumir SSRF |
+| Redirect | `/redirect`, `/callback`, `/continue` | descobrir parâmetro de destino; não presumir open redirect |
+| Arquivo/template | `/download`, `/export`, `/file`, `/view`, `/template`, `/logs`, `/backup`, `/invoice` | exigir autorização anônimo × usuário A × usuário B |
+| Dados estruturados | `/xml`, `/soap`, `/import` | descobrir método e content type aceito; não presumir XXE |
+| Upload/import | `/upload`, `/import`, `/file` | descobrir contrato de upload; hipótese ativa somente com método de escrita observado |
+| Operação sensível | `/profile/update`, `/password/change`, `/email/change`, `/users/create`, `/payment`, `/transfer` | descobrir método real antes de afirmar mudança de estado |
+| Autenticação/token | `/saml`, `/login`, `/logout`, `/register`, `/password/reset`, `/otp`, `/mfa`, `/token`, `/refresh` | classificar fronteira de autenticação; tokens exigem evidência de emissão, rotação e replay |
+| Objeto | `/api/users/{id}`, `/accounts/{id}`, `/orders/{id}`, `/invoices/{id}`, `/documents/{id}`, `/transactions/{id}` | exigir duas identidades, mesmo objeto e controle negativo |
+
+`/logout` é a exceção semântica: mesmo quando descoberto como GET, é tratado como término de sessão. O contrato exige sessão antes, chamada de logout e sessão depois; ele não é confundido com mass assignment.
 
 ## Lacunas encontradas e corrigidas
 
@@ -69,10 +88,10 @@ Com a stack implantada, os endpoints internos responderam dentro dos budgets:
 
 | Contrato | Latência | Payload | HTTP |
 |---|---:|---:|---:|
-| Dashboard/control-plane | 0,772 s | 169.269 bytes | 200 |
-| Avaliação de inteligência | 0,006 s | 1.476 bytes | 200 |
-| Relatório unificado | 0,715 s | 1.823.310 bytes | 200 |
-| Qualidade | 0,020 s | 16.273 bytes | 200 |
+| Dashboard/control-plane | 0,419 s | 169.269 bytes | 200 |
+| Avaliação de inteligência | 0,009 s | 1.476 bytes | 200 |
+| Relatório unificado | 0,719 s | 1.823.312 bytes | 200 |
+| Qualidade | 0,022 s | 16.273 bytes | 200 |
 
 ## Como repetir com segurança
 

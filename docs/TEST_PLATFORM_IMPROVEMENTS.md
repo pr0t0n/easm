@@ -60,12 +60,12 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 
 ## Automação e critérios de aceitação
 
-- Backend: 372 testes passaram em 6,50 s. Chamadas reais de LLM foram desativadas no ambiente de teste.
+- Backend: 380 testes passaram em 6,55 s. Chamadas reais de LLM foram desativadas no ambiente de teste.
 - Frontend: 5 testes de contrato passaram e o build de produção concluiu; ambos fazem parte do CI.
 - CI agora executa backend, frontend e migrations. Não adiciona execução de laboratórios vulneráveis.
 - Budgets automatizados cobrem agregação de 10 mil work items e contratos HTTP de Dashboard, relatório e qualidade.
-- Na validação implantada final após reload dos workers, o Dashboard/BFF respondeu em 0,772 s (169.269 bytes), o relatório em 0,715 s (1.823.310 bytes), qualidade em 0,020 s (16.273 bytes) e a avaliação offline de inteligência em 0,006 s (1.476 bytes).
-- O tabletop de `valid.com` aprovou 23/23 contratos, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
+- Na validação implantada final após reload dos workers, o Dashboard/BFF respondeu em 0,419 s (169.269 bytes), o relatório em 0,719 s (1.823.312 bytes), qualidade em 0,022 s (16.273 bytes) e a avaliação offline de inteligência em 0,009 s (1.476 bytes).
+- O tabletop ampliado de `valid.com` aprovou 36/36 contratos, 49 endpoints descobertos únicos, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
 
 ## Saneamento histórico e reversibilidade
 

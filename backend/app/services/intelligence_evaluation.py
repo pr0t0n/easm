@@ -72,7 +72,7 @@ def run_offline_intelligence_evaluation() -> dict[str, Any]:
         for key, value in dimensions.items()
     ]
     return {
-        "suite": "offline-synthetic-pentest-intelligence-v2",
+        "suite": "offline-synthetic-pentest-intelligence-v4",
         "network_access": False,
         "external_targets": False,
         "excluded_platforms": ["juice-shop", "dvwa", "idor-lab"],

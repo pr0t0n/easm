@@ -12,13 +12,34 @@ from app.models.models import OffensiveEndpoint, OffensiveParameter, ScanJob
 from app.services.offensive_inventory_service import OffensiveInventoryService, parameter_risk_hint
 
 
-ANALYSIS_VERSION = "endpoint-intelligence-v2"
+ANALYSIS_VERSION = "endpoint-intelligence-v4"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map"}
-SENSITIVE_MARKERS = {"admin", "internal", "manage", "console", "account", "profile", "user", "billing", "payment", "order", "invoice"}
-AUTH_MARKERS = {"login", "signin", "auth", "oauth", "sso", "session", "token", "logout"}
+SENSITIVE_MARKERS = {
+    "admin", "internal", "manage", "console", "account", "profile", "user",
+    "billing", "payment", "order", "invoice", "document", "transaction",
+    "download", "export", "file", "view", "template", "log", "backup",
+    "message", "transfer", "upload", "import", "email", "password",
+    "accounts", "profiles", "users", "payments", "orders", "invoices",
+    "documents", "transactions", "messages", "transfers", "files", "logs",
+}
+AUTH_MARKERS = {
+    "login", "signin", "auth", "oauth", "sso", "session", "token", "logout",
+    "register", "password", "otp", "mfa", "refresh", "saml",
+}
 API_MARKERS = {"api", "graphql", "gql", "swagger", "openapi", "api-docs"}
 UPLOAD_MARKERS = {"upload", "import", "attachment", "file"}
+REDIRECT_SURFACE_MARKERS = {"redirect", "callback", "return", "continue"}
+SERVER_FETCH_SURFACE_MARKERS = {"proxy", "fetch", "preview", "webhook", "relay", "integrations", "image"}
+FILE_DELIVERY_MARKERS = {
+    "download", "export", "file", "view", "template", "image", "log", "logs",
+    "backup", "invoice", "document", "documents", "report", "reports",
+}
+SESSION_TERMINATION_MARKERS = {"logout", "signout", "logoff"}
+INPUT_SURFACE_MARKERS = {"search", "comments", "feedback", "support", "messages", "test"}
+STRUCTURED_INPUT_MARKERS = {"xml", "soap", "import"}
+STATE_CHANGE_CANDIDATE_MARKERS = {"update", "change", "create", "payment", "transfer", "register", "reset"}
+TOKEN_LIFECYCLE_MARKERS = {"token", "refresh", "otp", "mfa"}
 _OBJECT_SEGMENT = re.compile(r"/(?:\d{1,12}|[0-9a-f]{8}-[0-9a-f-]{27,}|\{id\})(?:/|$)", re.I)
 
 
@@ -32,14 +53,25 @@ def analyze_endpoint_contract(
 ) -> dict[str, Any]:
     parsed = urlparse(str(url or ""))
     path = parsed.path or "/"
+    path_tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9_-]+", path)}
+    normalized_tags = {str(tag).strip().lower() for tag in tags or []}
     lower = f"{path} {parsed.query} {' '.join(tags or [])} {content_type}".lower()
     suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
     is_static = suffix in STATIC_EXTENSIONS
-    is_api = any(marker in lower for marker in API_MARKERS) or "json" in content_type.lower()
-    is_auth = any(marker in lower for marker in AUTH_MARKERS)
-    is_sensitive = any(marker in lower for marker in SENSITIVE_MARKERS)
-    is_upload = any(marker in lower for marker in UPLOAD_MARKERS)
-    state_changing = str(method or "GET").upper() not in SAFE_METHODS
+    is_api = bool((path_tokens | normalized_tags) & API_MARKERS) or "json" in content_type.lower()
+    is_auth = bool((path_tokens | normalized_tags) & AUTH_MARKERS)
+    is_sensitive = bool((path_tokens | normalized_tags) & SENSITIVE_MARKERS)
+    is_upload = bool((path_tokens | normalized_tags) & UPLOAD_MARKERS)
+    is_redirect_surface = bool(path_tokens & REDIRECT_SURFACE_MARKERS)
+    is_server_fetch_surface = bool(path_tokens & SERVER_FETCH_SURFACE_MARKERS)
+    is_file_delivery = bool(path_tokens & FILE_DELIVERY_MARKERS)
+    is_session_termination = bool(path_tokens & SESSION_TERMINATION_MARKERS)
+    is_input_surface = bool(path_tokens & INPUT_SURFACE_MARKERS)
+    is_structured_input = bool(path_tokens & STRUCTURED_INPUT_MARKERS)
+    is_state_change_candidate = bool(path_tokens & STATE_CHANGE_CANDIDATE_MARKERS)
+    is_token_lifecycle = bool(path_tokens & TOKEN_LIFECYCLE_MARKERS)
+    method_state_changing = str(method or "GET").upper() not in SAFE_METHODS
+    state_changing = method_state_changing or is_session_termination
     object_reference = bool(_OBJECT_SEGMENT.search(path))
 
     raw_parameters = list(parameters or [])
@@ -66,17 +98,33 @@ def analyze_endpoint_contract(
     if not is_static:
         tests.append(_test("read_only_baseline", "", 40, ["read-only-validator"], [], ["request_response_pair"], "endpoint:baseline"))
     if is_auth or is_sensitive or is_api:
-        tests.append(_test("auth_requirement", "bfla_authz" if is_sensitive else "api_security", 68 if is_sensitive else 55, ["auth-matrix"], ["user_a", "user_b"] if is_sensitive else [], ["anonymous_vs_authenticated"], "endpoint:auth_boundary"))
+        test_class = "file_delivery_authorization" if is_file_delivery else "auth_requirement"
+        tests.append(_test(test_class, "bfla_authz" if is_sensitive else "api_security", 72 if is_file_delivery else (68 if is_sensitive else 55), ["auth-matrix"], ["user_a", "user_b"] if is_sensitive else [], ["anonymous_vs_authenticated", "cross_identity_response"] if is_file_delivery else ["anonymous_vs_authenticated"], "endpoint:auth_boundary"))
     if object_reference:
         tests.append(_test("object_authorization", "object_reference", 82, ["idor-validator"], ["user_a", "user_b"], ["baseline_vs_exploit", "negative_control"], "path:object_reference"))
     if "graphql" in lower or "/gql" in lower:
         tests.append(_test("graphql_contract", "api_graphql", 70, ["read-only-validator", "auth-matrix"], [], ["schema_or_introspection", "auth_matrix"], "path:graphql"))
     if any(marker in lower for marker in ("swagger", "openapi", "api-docs")):
         tests.append(_test("api_spec", "api_spec_exposure", 72, ["read-only-validator", "api-spec-ingestor"], [], ["spec_parse", "endpoint_inventory"], "path:api_spec"))
-    if is_upload:
+    if is_upload and method_state_changing:
         tests.append(_test("upload_boundary", "business_logic_mass_assignment", 65, ["mass-assignment-validator"], ["user_a"], ["safe_precondition", "read_back"], "path:upload"))
-    if state_changing:
+    elif is_upload:
+        tests.append(_test("upload_contract_discovery", "", 55, ["chromium-capture"], [], ["accepted_methods", "accepted_content_types"], "path:upload_surface"))
+    if method_state_changing:
         tests.append(_test("state_change_authorization", "business_logic_mass_assignment", 75, ["mass-assignment-validator", "auth-matrix"], ["user_a", "user_b"], ["baseline", "read_back", "negative_control"], f"method:{str(method).upper()}"))
+    if is_session_termination:
+        tests.append(_test("session_termination_boundary", "", 70, ["session-invalidation-validator"], ["user_a"], ["session_before", "logout_request", "session_after"], "path:session_termination"))
+    if (is_redirect_surface or is_server_fetch_surface or is_input_surface) and not parameter_rows:
+        surface = "server_fetch" if is_server_fetch_surface else ("redirect" if is_redirect_surface else "input")
+        validators = ["arjun", "chromium-capture"] if is_input_surface else ["arjun"]
+        tests.append(_test("surface_parameter_discovery", "", 55, validators, [], ["parameter_inventory"], f"path:{surface}_surface"))
+    if is_structured_input:
+        tests.append(_test("structured_input_contract_discovery", "", 60, ["api-spec-ingestor", "chromium-capture"], [], ["accepted_methods", "accepted_content_types"], "path:structured_input"))
+    if is_state_change_candidate and not method_state_changing:
+        identities = ["user_a"] if is_sensitive else []
+        tests.append(_test("state_change_method_discovery", "", 62, ["chromium-capture"], identities, ["observed_method", "csrf_token_behavior"], "path:state_change_candidate"))
+    if is_token_lifecycle:
+        tests.append(_test("token_lifecycle_boundary", "", 65, ["auth-matrix"], ["user_a"], ["token_before", "token_after", "replay_control"], "path:token_lifecycle"))
     for parameter in parameter_rows:
         hint = parameter["risk_hint"]
         if not hint:
@@ -99,6 +147,14 @@ def analyze_endpoint_contract(
             "state_changing": state_changing,
             "object_reference": object_reference,
             "upload_surface": is_upload,
+            "redirect_surface": is_redirect_surface,
+            "server_side_fetch_surface": is_server_fetch_surface,
+            "file_delivery_surface": is_file_delivery,
+            "session_termination_surface": is_session_termination,
+            "input_surface": is_input_surface,
+            "structured_input_surface": is_structured_input,
+            "state_change_candidate_surface": is_state_change_candidate,
+            "token_lifecycle_surface": is_token_lifecycle,
         },
         "risk_score": risk,
         "parameters": parameter_rows,
