@@ -29,10 +29,18 @@ from app.models.models import (
 
 _JS_RE = re.compile(r"\.(?:js|mjs|cjs)(?:\?|$)", re.I)
 _PATH_PARAM_RE = re.compile(r"/(?:[^/?#&=]+/)*(?:[^/?#&=]*?(?:id|uuid|guid|user|account|basket|order)[^/?#&=]*)(?:/|$)", re.I)
+_ROUTE_ID_RE = re.compile(r"(?<=/)(?:\d{1,12}|[0-9a-f]{8}-[0-9a-f-]{27,})(?=/|$)", re.I)
+_COMMON_SECOND_LEVEL_SUFFIXES = {
+    "co.uk", "org.uk", "gov.uk", "ac.uk",
+    "com.br", "net.br", "org.br", "gov.br",
+    "com.au", "net.au", "org.au", "co.nz", "co.jp", "co.za", "com.mx",
+}
 
 
 def root_domain(host: str) -> str:
-    parts = (host or "").split(".")
+    parts = [part for part in (host or "").split(".") if part]
+    if len(parts) >= 3 and ".".join(parts[-2:]) in _COMMON_SECOND_LEVEL_SUFFIXES:
+        return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
@@ -50,7 +58,7 @@ def normalize_url(url: str, base: str | None = None) -> str:
         return raw.split("#", 1)[0]
     scheme = (parsed.scheme or "https").lower()
     netloc = (parsed.netloc or "").lower()
-    path = parsed.path or "/"
+    path = _ROUTE_ID_RE.sub("{id}", parsed.path or "/")
     pairs = parse_qsl(parsed.query, keep_blank_values=True)
     query = "&".join(f"{k}=" for k, _ in sorted(pairs))
     return urlunparse((scheme, netloc, path, "", query, ""))
@@ -224,6 +232,10 @@ class OffensiveInventoryService:
         endpoint.confidence = max(int(endpoint.confidence or 0), int(confidence or 0))
         endpoint.tags = sorted(set(list(endpoint.tags or []) + list(tags or []) + _auto_tags(url)))
         endpoint.endpoint_metadata = _merge(endpoint.endpoint_metadata, metadata)
+        samples = list((endpoint.endpoint_metadata or {}).get("sample_urls") or [])
+        if url not in samples:
+            samples.append(url)
+        endpoint.endpoint_metadata = _merge(endpoint.endpoint_metadata, {"sample_urls": samples[-12:]})
         endpoint.last_seen = datetime.now()
         self.db.add(endpoint)
         self.db.flush()

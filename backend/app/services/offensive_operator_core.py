@@ -1580,23 +1580,37 @@ class HypothesisEngine:
 
 class AttackPathEngine:
     def correlate(self, evidence: list[dict[str, Any]], hypotheses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        paths: list[dict[str, Any]] = []
+        from app.services.attack_path_correlation import correlate_attack_signals
+
+        signals: list[dict[str, Any]] = []
         for ev in evidence:
             parsed = ev.get("parsed_json") if isinstance(ev.get("parsed_json"), dict) else {}
-            if parsed.get("exposed_git") or "git" in json.dumps(parsed).lower():
-                paths.append(
-                    {
-                        "attack_path_id": stable_id("AP", {"evidence": ev["evidence_id"], "chain": "exposed_git"}),
-                        "title": "Exposed Git to Credential Reuse",
-                        "status": "candidate",
-                        "confidence": 0.82,
-                        "steps": [{"step": 1, "description": "Exposed .git found", "evidence_id": ev["evidence_id"]}],
-                        "required_conditions": ["credentials_present", "authenticated_access_allowed"],
-                        "impact": "",
-                        "next_actions": ["extract controlled test credential candidates", "request human review before credential testing"],
-                    }
-                )
-        return paths
+            blob = json.dumps(parsed).lower()
+            family = str(parsed.get("family") or parsed.get("vulnerability_type") or "")
+            if not family and (parsed.get("exposed_git") or ".git" in blob):
+                family = "exposed_git"
+            if not family and any(token in blob for token in ("credential", "api_key", "secret", "token")):
+                family = "secret_exposure"
+            signals.append({
+                "id": ev.get("evidence_id"),
+                "family": family,
+                "target": ev.get("target"),
+                "title": parsed.get("title") or ev.get("finding_summary"),
+                "status": ev.get("validation_status") or "candidate",
+                "confidence": ev.get("confidence") or 0.6,
+                "evidence_ids": [ev.get("evidence_id")] if ev.get("evidence_id") else [],
+            })
+        for hypothesis in hypotheses:
+            signals.append({
+                "id": hypothesis.get("hypothesis_id"),
+                "family": hypothesis.get("family"),
+                "target": (hypothesis.get("test_plan") or {}).get("target"),
+                "title": hypothesis.get("title"),
+                "status": hypothesis.get("status"),
+                "confidence": hypothesis.get("confidence"),
+                "evidence_ids": hypothesis.get("source_evidence_ids") or [],
+            })
+        return correlate_attack_signals(signals)
 
 
 class OperationLearningEngine:

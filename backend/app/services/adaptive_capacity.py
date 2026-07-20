@@ -106,13 +106,14 @@ def _cgroup_mem_percent() -> float | None:
 def adjust(db) -> dict:
     """Mede a saúde e aplica AIMD. Chamado periodicamente (watchdog)."""
     row = db.execute(text(
-        "SELECT count(*) FILTER (WHERE status IN ('timeout','failed')) AS bad, "
-        "count(*) AS total FROM scan_work_items "
-        "WHERE updated_at > now() - interval '3 minutes' "
-        "AND status IN ('completed','done','skipped','failed','timeout')"
+        "SELECT count(*) FILTER (WHERE status = 'timeout') AS timed_out, "
+        "count(*) FILTER (WHERE status = 'failed') AS failed, count(*) AS attempted "
+        "FROM scan_work_items WHERE updated_at > now() - interval '3 minutes' "
+        "AND status IN ('completed','done','failed','timeout')"
     )).first()
-    bad, total = int(row[0] or 0), int(row[1] or 0)
-    rate = (bad / total) if total >= _MIN_SAMPLES else None
+    timed_out, failed, total = int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+    rate = (timed_out / total) if total >= _MIN_SAMPLES else None
+    failure_rate = (failed / total) if total >= _MIN_SAMPLES else None
     host_mem = _host_mem_percent()
     cgroup_mem = _cgroup_mem_percent()
 
@@ -144,6 +145,7 @@ def adjust(db) -> dict:
     return {
         "level": level, "previous": old, "action": action,
         "timeout_rate": round(rate, 3) if rate is not None else None,
+        "failure_rate": round(failure_rate, 3) if failure_rate is not None else None,
         "samples": total, "mem_percent": cgroup_mem if cgroup_mem is not None else host_mem,
         "host_mem_percent": host_mem, "cgroup_mem_percent": cgroup_mem,
         "min": MIN_L, "max": MAX_L, "capacity": get_capacity(),

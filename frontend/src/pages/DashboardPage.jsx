@@ -436,6 +436,7 @@ export default function DashboardPage() {
   const [osintPhaseZero, setOsintPhaseZero] = useState(null);
   const [verificationStats, setVerificationStats] = useState({ confirmed: 0, candidate: 0, hypothesis: 0, refuted: 0, none: 0, total: 0 });
   const [cockpitData, setCockpitData] = useState(null);
+  const [cockpitIntelligence, setCockpitIntelligence] = useState({});
 
   // BFF único do control plane: cockpit, scans, verificação, joias e OSINT.
   useEffect(() => {
@@ -452,6 +453,7 @@ export default function DashboardPage() {
         setCrownJewels(Array.isArray(data?.crown_jewels) ? data.crown_jewels : []);
         setOsintPhaseZero(data?.osint || null);
         setVulnerabilityAlerts(Array.isArray(data?.operational_alerts) ? data.operational_alerts : []);
+        setCockpitIntelligence(data?.intelligence || {});
         const counts = data?.verification?.counts || {};
         setVerificationStats({
           confirmed: counts.confirmed || 0,
@@ -466,6 +468,7 @@ export default function DashboardPage() {
         setCockpitData(null);
         setCrownJewels([]);
         setOsintPhaseZero(null);
+        setCockpitIntelligence({});
       });
   }, [selectedSubdomainScanId, selectedGroup, selectedTarget]);
 
@@ -1010,6 +1013,11 @@ export default function DashboardPage() {
             <div className="ctrl"><label>Paralelismo</label><strong className="sk-mono">{Number(cockpitExecution.average_parallelism || 0).toFixed(1)}×</strong></div>
             <div className="ctrl"><label>Gaps prioritários</label><strong className="sk-mono">{Array.isArray(cockpitQuality.gaps) ? cockpitQuality.gaps.length : 0}</strong></div>
             <div className="ctrl"><label>SLIs operacionais</label><strong className="sk-mono">{cockpitSli.status || "não avaliado"}</strong></div>
+            <div className="ctrl"><label>Endpoints analisados</label><strong className="sk-mono">{Number(cockpitIntelligence.endpoint_analysis?.endpoints_analyzed || 0)}</strong></div>
+            <div className="ctrl"><label>Hipóteses abertas</label><strong className="sk-mono">{Number(cockpitIntelligence.current?.hypotheses_open ?? cockpitIntelligence.hypothesis_drain?.remaining ?? cockpitIntelligence.hypothesis_planner?.open_before ?? 0)}</strong></div>
+            <div className="ctrl"><label>Hipóteses drenadas</label><strong className="sk-mono">{Number(cockpitIntelligence.hypothesis_drain?.processed_total ?? cockpitIntelligence.hypothesis_drain?.processed ?? 0)}</strong></div>
+            <div className="ctrl"><label>Hipóteses bloqueadas</label><strong className="sk-mono">{Number(cockpitIntelligence.current?.hypotheses_blocked || 0)}</strong></div>
+            <div className="ctrl"><label>Auth pendente</label><strong className="sk-mono">{Number(cockpitIntelligence.current?.endpoints?.auth_pending || 0)}</strong></div>
           </section>
         )}
 

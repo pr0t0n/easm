@@ -894,6 +894,40 @@ class SkillScore(Base):
     scan_job = relationship("ScanJob", foreign_keys=[scan_id])
 
 
+class PentestOutcomeMetric(Base):
+    """Feedback calibrado por resultado para planners, validators e ferramentas."""
+
+    __tablename__ = "pentest_outcome_metrics"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "owner_id", "dimension", "metric_key", "context_key",
+            name="uq_pentest_outcome_owner_dimension_key_context",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    last_scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True, index=True)
+    dimension: Mapped[str] = mapped_column(String(40), index=True)
+    metric_key: Mapped[str] = mapped_column(String(160), index=True)
+    context_key: Mapped[str] = mapped_column(String(160), default="global", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    executed: Mapped[int] = mapped_column(Integer, default=0)
+    successes: Mapped[int] = mapped_column(Integer, default=0)
+    confirmations: Mapped[int] = mapped_column(Integer, default=0)
+    refutations: Mapped[int] = mapped_column(Integer, default=0)
+    false_positives: Mapped[int] = mapped_column(Integer, default=0)
+    timeouts: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    ema_success: Mapped[float] = mapped_column(Float, default=0.5)
+    ema_precision: Mapped[float] = mapped_column(Float, default=0.5)
+    average_duration_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    last_outcome: Mapped[str] = mapped_column(String(40), default="unknown")
+    metric_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+
+
 class ToolHealthSnapshot(Base):
     """Snapshot operacional de disponibilidade e prontidão de uma ferramenta."""
     __tablename__ = "tool_health_snapshots"

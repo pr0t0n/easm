@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,7 @@ def schedule_poc_validation(
         "original_tool": tool_name,
         "original_verification_status": v_status,
         "poc_validation": True,
+        "queue_ready_at": datetime.now().isoformat(),
         "poc_scheduled_reason": (
             f"Auto-PoC: {tool_name} {severity} candidate → validate with {val_tool}"
         ),

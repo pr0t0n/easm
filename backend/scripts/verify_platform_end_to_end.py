@@ -21,6 +21,7 @@ def main() -> None:
     scan_id = int(scan_rows[0]["id"]) if scan_rows else None
     endpoints = [
         ("control_plane", f"{base}/api/dashboard/control-plane?finding_limit=200", 3.0, 500_000),
+        ("intelligence_evaluation", f"{base}/api/pentest/intelligence-evaluation", 1.0, 100_000),
     ]
     if scan_id:
         endpoints.extend([
@@ -37,6 +38,15 @@ def main() -> None:
             raise RuntimeError(f"{name} exceeded latency budget: {elapsed:.3f}s > {max_seconds:.3f}s")
         if size > max_bytes:
             raise RuntimeError(f"{name} exceeded payload budget: {size} > {max_bytes}")
+        payload = response.json()
+        if name == "control_plane" and "current" not in dict(payload.get("intelligence") or {}):
+            raise RuntimeError("control_plane missing current intelligence metrics")
+        if name == "report_contract" and "intelligence" not in payload:
+            raise RuntimeError("report_contract missing intelligence section")
+        if name == "intelligence_evaluation" and not (
+            payload.get("status") == "passed" and payload.get("network_access") is False
+        ):
+            raise RuntimeError("offline intelligence evaluation did not pass")
         print({"endpoint": name, "seconds": round(elapsed, 3), "bytes": size, "status": response.status_code})
 
 

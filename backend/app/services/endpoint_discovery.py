@@ -6,8 +6,8 @@ katana/gospider/hakrawler/gobuster/dirsearch) descobre páginas, este motor:
      parser de findings ter funcionado);
   2. abre as páginas de alto valor (page_analyzer) → novos endpoints + segredos
      hardcoded + scripts de domínio externo;
-  3. REINJETA os endpoints in-scope como novos alvos de teste (nuclei/dalfox/
-     sqlmap por endpoint com parâmetro);
+  3. REINJETA apenas probes amplos aplicáveis; validadores ativos são escolhidos
+     depois pela matriz persistida do endpoint;
   4. gera findings para segredos expostos e para referência cross-domain
      (possível script injection).
 
@@ -103,11 +103,13 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
         return False
     rc = resource_class_for_tool(tool_name)
     pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 12}.get(rc, 0)
+    item_metadata = apply_phase_tool_metadata(metadata, phase_id, tool_name, source=str((metadata or {}).get("source") or "endpoint_discovery"))
+    item_metadata["queue_ready_at"] = datetime.now().isoformat()
     db.add(ScanWorkItem(
         scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
         tool_name=tool_name, profile=tool_name, resource_class=rc,
         priority=pri - 10, status="queued", max_attempts=2,
-        item_metadata=apply_phase_tool_metadata(metadata, phase_id, tool_name, source=str((metadata or {}).get("source") or "endpoint_discovery")),
+        item_metadata=item_metadata,
         created_at=datetime.now(), updated_at=datetime.now(),
     ))
     try:
@@ -214,7 +216,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                                 "tool": "page_analyzer", "asset": url, "matched_at": url,
                                 "evidence": f"{sec['type']}: {sec['match']}",
                                 "owasp_category": "A05:2021 Security Misconfiguration",
-                                "verification_status": "confirmed",
+                                "verification_status": "candidate",
                                 "discovery_method": "page fetch (GET) + regex de segredos",
                             },
                         })
@@ -227,7 +229,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                                 "tool": "page_analyzer", "asset": url, "matched_at": url,
                                 "evidence": f"<script src=\"{ext}\"> em {url}",
                                 "owasp_category": "A08:2021 Software and Data Integrity Failures",
-                                "verification_status": "confirmed",
+                                "verification_status": "candidate",
                                 "external_domain": _host_of(ext),
                                 "discovery_method": "page fetch (GET) + análise de <script src>",
                             },
@@ -242,10 +244,12 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                 "discovered_by": tool_name, "discovered_from": source_target,
                 "rationale": f"Endpoint descoberto por {tool_name} → reinjetado para teste ativo.",
             }
-            # endpoint com parâmetro → injeção; senão → nuclei genérico
-            tools = ["nuclei"]
-            if has_param:
-                tools = ["nuclei-sqli", "dalfox", "nuclei-xss"]
+            # Active validators are selected later from the persisted endpoint
+            # test matrix. Discovery only seeds context-safe broad probes.
+            from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract, recommended_execution_tools
+
+            analysis = analyze_endpoint_contract(url)
+            tools = recommended_execution_tools(analysis)
             for tn in tools:
                 if _seed_test_item(db, scan_id, "P09", url, tn, meta):
                     reseeded += 1

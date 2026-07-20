@@ -39,7 +39,7 @@ from app.workers.worker_groups import (
 
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
 HALTED_SCAN_STATUSES = {"stopped", "paused"}
-TERMINAL_SCAN_STATUSES = {"completed", "failed", "cancelled", "canceled"}
+TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps", "failed", "cancelled", "canceled"}
 
 
 def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
@@ -2770,6 +2770,72 @@ def execute_scan_work_item(item_id: int):
                 "scope": _scope_decision.get("authorized_scope") or [],
             }
 
+        # Internal, read-only validators are first-class persistent work items.
+        # This keeps large hypothesis sets resumable and observable without
+        # sending a fake tool profile to the Kali runner.
+        _internal_meta = dict(item.item_metadata or {})
+        if _internal_meta.get("internal_hypothesis_batch"):
+            now = datetime.now()
+            item.status = "running"
+            item.attempts = int(item.attempts or 0) + 1
+            item.started_at = item.started_at or now
+            item.lease_until = now + timedelta(seconds=1800)
+            item.updated_at = now
+            db.commit()
+            try:
+                from app.services.hypothesis_planner import ensure_hypothesis_drain_work_item
+                from app.services.pentest_validators import run_validators_for_scan
+
+                batch_size = max(1, min(250, int(_internal_meta.get("batch_size") or 100)))
+                validation_result = run_validators_for_scan(db, job, limit=batch_size)
+                success_state = dict(job.state_data or {})
+                success_state["hypothesis_drain_failures"] = 0
+                job.state_data = success_state
+                finished_at = datetime.now()
+                item.status = "completed"
+                item.lease_until = None
+                item.finished_at = finished_at
+                item.updated_at = finished_at
+                item.result = {"status": "completed", **validation_result, "finished_at": finished_at.isoformat()}
+                db.flush()
+                continuation = ensure_hypothesis_drain_work_item(db, job, batch_size=batch_size)
+                db.add(ScanLog(
+                    scan_job_id=item.scan_job_id,
+                    source="hypothesis-validator",
+                    level="INFO",
+                    message=(
+                        f"hypothesis_batch completed item={item.id} processed={validation_result.get('seen', 0)} "
+                        f"remaining={validation_result.get('remaining', 0)} continuation={continuation.get('active_work_item_id')}"
+                    )[:2000],
+                ))
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                db.commit()
+                dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
+                return {"id": item.id, "status": item.status, "validation": validation_result, "continuation": continuation}
+            except Exception as exc:  # noqa: BLE001
+                finished_at = datetime.now()
+                item.status = "failed"
+                item.lease_until = None
+                item.finished_at = finished_at
+                item.updated_at = finished_at
+                item.last_error = f"internal_hypothesis_validator_failed:{exc!s}"[:2000]
+                item.result = {"status": "failed", "error": str(exc)[:1000], "finished_at": finished_at.isoformat()}
+                failure_state = dict(job.state_data or {})
+                failure_state["hypothesis_drain_failures"] = int(failure_state.get("hypothesis_drain_failures") or 0) + 1
+                failure_state["hypothesis_drain_last_error"] = str(exc)[:500]
+                failure_state["hypothesis_drain_last_failed_at"] = finished_at.isoformat()
+                job.state_data = failure_state
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                db.commit()
+                dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
+                return {"id": item.id, "status": item.status, "error": str(exc)[:500]}
+
         _state_for_applicability = dict(job.state_data or {})
         _applicability = work_item_applicability_decision(item, _state_for_applicability, at="dispatch")
         _meta_for_applicability = dict(item.item_metadata or {})
@@ -3381,6 +3447,23 @@ def poll_scan_work_item(item_id: int):
         # back to the supervisor which skill(s) it served and whether it yielded
         # actionable evidence.
         try:
+            from app.services.pentest_outcome_learning import record_outcome as _record_outcome
+
+            if job:
+                _record_outcome(
+                    db,
+                    job,
+                    dimension="tool",
+                    metric_key=str(item.tool_name or "unknown"),
+                    outcome=str(item.status or "unknown"),
+                    context=f"phase:{item.phase_id or 'unknown'}",
+                    duration_seconds=float(result.get("duration_seconds") or 0.0),
+                    metadata={
+                        "profile": item.profile,
+                        "resource_class": item.resource_class,
+                        "findings_created_unvalidated": int(findings_created or 0),
+                    },
+                )
             _feedback_meta = dict(item.item_metadata or {})
             _feedback_skill_ids = [str(s) for s in _feedback_meta.get("skill_ids") or [] if str(s)]
             if not _feedback_skill_ids and _feedback_meta.get("skill_id"):
@@ -3437,7 +3520,7 @@ def poll_scan_work_item(item_id: int):
                 from app.services.scan_work_queue import update_skill_execution_score as _upd_score
                 if job and _feedback_skill_ids:
                     _score_state = dict(job.state_data or {})
-                    _score_result = "positive" if _promoted else ("skipped" if item.status == "skipped" else "negative")
+                    _score_result = "skipped" if item.status == "skipped" else str(item.status or "unknown")
                     for _sid in _feedback_skill_ids:
                         _upd_score(
                             _score_state,
@@ -3940,11 +4023,12 @@ def poll_scan_work_item(item_id: int):
                     try:
                         from app.services.hypothesis_rules import generate_hypotheses_for_scan
                         from app.services.pentest_coverage_service import refresh_coverage
-                        _inv_state = dict(job.state_data or {})
                         _hyp_res = generate_hypotheses_for_scan(db, job)
+                        _inv_state = dict(job.state_data or {})
                         if not _inv_state.get("pentest_safe_validators_done") and item.phase_id in ("P09", "P10", "P12", "P13", "P17"):
                             from app.services.pentest_validators import run_validators_for_scan
                             _val_res = run_validators_for_scan(db, job, limit=80)
+                            _inv_state = dict(job.state_data or {})
                             _inv_state["pentest_safe_validators_done"] = int(_val_res.get("remaining") or 0) == 0
                             _inv_state["pentest_safe_validators_summary"] = _val_res
                             job.state_data = _inv_state
@@ -4049,10 +4133,19 @@ def poll_scan_work_item(item_id: int):
                     from app.models.models import Finding as _Finding
                     _orig = db.query(_Finding).filter(_Finding.id == _orig_finding_id).first()
                     if _orig:
-                        if item.status in ("completed", "done"):
-                            # Verification succeeded → confirmed
+                        from app.services.poc_outcome import classify_poc_work_item
+
+                        _poc_decision = classify_poc_work_item(item)
+                        _poc_result = str(_poc_decision.get("result") or "candidate")
+                        _orig_details = dict(_orig.details or {})
+                        _orig_details["poc_outcome"] = {
+                            **_poc_decision,
+                            "item_id": item.id,
+                            "tool": item.tool_name,
+                            "evaluated_at": datetime.now().isoformat(),
+                        }
+                        if _poc_result == "confirmed":
                             _orig.verification_status = "confirmed"
-                            _orig_details = dict(_orig.details or {})
                             _orig_details["verification_status"] = "confirmed"
                             _orig_details["verified_by_item_id"] = item.id
                             _orig_details["verified_by_tool"] = item.tool_name
@@ -4079,10 +4172,9 @@ def poll_scan_work_item(item_id: int):
                                         "exploitation_evidence failed: %s", _ee
                                     )
                             _orig.details = _orig_details
-                        else:
-                            # Verification tool failed to reproduce → refuted
+                        elif _poc_result == "refuted":
+                            # Only an explicit negative observation refutes a candidate.
                             _orig.verification_status = "refuted"
-                            _orig_details = dict(_orig.details or {})
                             _orig_details["verification_status"] = "refuted"
                             _orig_details["refuted_by_tool"] = item.tool_name
                             if item.phase_id == "P21":
@@ -4095,14 +4187,45 @@ def poll_scan_work_item(item_id: int):
                                     _eelog.getLogger(__name__).debug(
                                         "p21_refutation_record failed: %s", _ee
                                     )
-                            _orig.details = _orig_details
+                        else:
+                            # Tool failure/timeout or exit 0 without proof remains candidate.
+                            _orig.verification_status = "candidate"
+                            _orig_details["verification_status"] = "candidate"
+                            _orig_details["needs_verification"] = True
+                            if item.phase_id == "P21":
+                                from app.models.models import ValidationRun as _ValidationRun
+                                db.add(_ValidationRun(
+                                    scan_job_id=job.id,
+                                    finding_id=_orig.id,
+                                    validator_name=str(item.tool_name or "p21-validator")[:120],
+                                    result="candidate",
+                                    reason=str(_poc_decision.get("reason") or "inconclusive")[:2000],
+                                    run_metadata={"phase_id": "P21", "work_item_id": item.id, "poc_outcome": _poc_decision},
+                                    created_at=datetime.now(),
+                                ))
+                        _orig.details = _orig_details
+                        try:
+                            from app.services.pentest_outcome_learning import record_outcome as _record_poc_outcome
+                            _record_poc_outcome(
+                                db, job, dimension="validator", metric_key=str(item.tool_name or "unknown"),
+                                outcome=_poc_result,
+                                duration_seconds=float((item.result or {}).get("duration_seconds") or 0.0),
+                                metadata={"finding_id": _orig.id, "phase_id": item.phase_id, "reason": _poc_decision.get("reason")},
+                            )
+                            _record_poc_outcome(
+                                db, job, dimension="tool", metric_key=str(item.tool_name or "unknown"),
+                                outcome=_poc_result,
+                                metadata={"finding_id": _orig.id, "validation_observation": True},
+                            )
+                        except Exception:
+                            pass
                         db.flush()
 
                         # ── P21 confirmation → re-correlate exploit chains ────────
                         # A newly-confirmed finding may complete a chain pattern
                         # (e.g., SQLi confirmed + admin panel → full takeover chain).
                         # Re-run correlate_chains() so chains reflect live confirmed state.
-                        if item.status in ("completed", "done") and item.phase_id == "P21":
+                        if _poc_result == "confirmed" and item.phase_id == "P21":
                             try:
                                 from app.services.exploit_chain import correlate_chains as _cc_p21
                                 _cc_p21(db, job.id)

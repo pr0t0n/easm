@@ -314,8 +314,17 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         covered_count = scanned
     surface_score = (coverage_ratio * 70) + (min(1.0, endpoints_count / 20.0) * 15) + (min(1.0, offensive_assets_count / 20.0) * 15)
 
-    resolved_hypotheses = [h for h in hypotheses if str(h.status or "").lower() not in {"open", "queued"}]
-    hypothesis_resolution = _ratio(len(resolved_hypotheses), len(hypotheses)) if hypotheses else 1.0
+    tested_hypothesis_statuses = {"validated", "tested_candidate", "refuted"}
+    blocked_hypothesis_statuses = {
+        "blocked_precondition", "blocked_missing_auth", "blocked_missing_validator",
+        "blocked_missing_authorization", "blocked_historical_not_reexecuted",
+    }
+    tested_hypotheses = [h for h in hypotheses if str(h.status or "").lower() in tested_hypothesis_statuses]
+    superseded_hypotheses = [h for h in hypotheses if str(h.status or "").lower() == "superseded"]
+    blocked_hypotheses = [h for h in hypotheses if str(h.status or "").lower() in blocked_hypothesis_statuses]
+    resolved_hypotheses = tested_hypotheses + superseded_hypotheses
+    hypothesis_depth_points = len(tested_hypotheses) + len(superseded_hypotheses) + (len(blocked_hypotheses) * 0.25)
+    hypothesis_resolution = _ratio(hypothesis_depth_points, len(hypotheses)) if hypotheses else 1.0
     auth_config = dict((job.state_data or {}).get("auth_config") or {})
     auth_required = bool(auth_config.get("required") or auth_config.get("identities"))
     valid_sessions = [s for s in auth_sessions if str(s.status or "").lower() in {"valid", "static"}]
@@ -355,6 +364,9 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "weight": 5,
             "hypotheses": len(hypotheses),
             "hypotheses_resolved": len(resolved_hypotheses),
+            "hypotheses_tested": len(tested_hypotheses),
+            "hypotheses_superseded": len(superseded_hypotheses),
+            "hypotheses_blocked": len(blocked_hypotheses),
             "identities": len(identities),
             "valid_auth_sessions": len(valid_sessions),
             "endpoints_auth_classified": classified_auth_endpoints,
@@ -430,12 +442,13 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": "Não há CoverageItem nem endpoints ofensivos persistidos.",
             "action": "Persistir endpoints, parâmetros e cobertura por classe de teste.",
         })
-    if hypotheses and len(resolved_hypotheses) < len(hypotheses):
+    hypotheses_not_exercised = len(hypotheses) - len(tested_hypotheses) - len(superseded_hypotheses)
+    if hypotheses_not_exercised > 0:
         gaps.append({
             "severity": "high" if hypothesis_resolution < 0.5 else "medium",
             "area": "test_depth",
             "title": "Hipóteses ainda não exercitadas",
-            "detail": f"{len(hypotheses) - len(resolved_hypotheses)} de {len(hypotheses)} hipóteses permanecem abertas.",
+            "detail": f"{hypotheses_not_exercised} de {len(hypotheses)} hipóteses não foram exercitadas ({len(blocked_hypotheses)} bloqueadas).",
             "action": "Executar validadores seguros em lotes e registrar bloqueios de autenticação ou ferramenta.",
         })
     if auth_required and len(valid_sessions) < 2:
@@ -624,15 +637,49 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     gate_state = dict(state.get("quality_gate") or {})
     rounds = int(gate_state.get("rounds") or 0)
 
+    actions: list[dict[str, Any]] = []
     validation_changes = _apply_promotion_gate(db, job)
     validation_changes["p21_audits_recorded"] = _record_p21_evidence_audits(db, job)
+    try:
+        from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
+        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+        from app.services.hypothesis_planner import ensure_hypothesis_drain_work_item
+
+        validation_changes["endpoint_intelligence"] = analyze_endpoints_for_scan(db, job)
+        validation_changes["hypothesis_generation"] = generate_hypotheses_for_scan(db, job)
+        hypothesis_drain = ensure_hypothesis_drain_work_item(db, job, batch_size=100)
+        validation_changes["hypothesis_drain"] = hypothesis_drain
+        if int(hypothesis_drain.get("remaining", 0) or 0) > 0 and not hypothesis_drain.get("blocked"):
+            actions.append({"type": "drain_hypotheses", **hypothesis_drain})
+    except Exception as exc:  # noqa: BLE001
+        validation_changes["hypothesis_drain"] = {"error": str(exc)[:500]}
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"hypothesis_drain_schedule_failed error={exc!s}"[:2000],
+        ))
+    try:
+        from app.services.finding_validation_lifecycle import enforce_high_risk_lifecycle
+
+        lifecycle = enforce_high_risk_lifecycle(db, job, limit=QUALITY_GATE_MAX_POC_PER_ROUND)
+        validation_changes["high_risk_lifecycle"] = lifecycle
+        if int(lifecycle.get("scheduled", 0) or 0) > 0:
+            actions.append({"type": "schedule_p21_validation", **lifecycle})
+    except Exception as exc:  # noqa: BLE001
+        lifecycle = {"error": str(exc)[:500]}
+        validation_changes["high_risk_lifecycle"] = lifecycle
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"high_risk_lifecycle_failed error={exc!s}"[:2000],
+        ))
     quality = build_scan_quality(db, job)
     state["quality_snapshot"] = {
         key: value for key, value in quality.items()
         if key not in {"runtime_visibility", "phase_monitor_issues"}
     }
-    actions: list[dict[str, Any]] = []
-
     if rounds >= QUALITY_GATE_MAX_ROUNDS:
         decision = quality_gate_decision(quality, actions)
         gate_state.update({
@@ -652,10 +699,6 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
             "validation_changes": validation_changes,
             "quality": quality,
         }
-
-    poc_result = _schedule_quality_poc_validations(db, job)
-    if int(poc_result.get("scheduled", 0) or 0) > 0:
-        actions.append({"type": "schedule_p21_validation", **poc_result})
 
     weak_phase_ids = {
         str(gap.get("title") or "").split(" ", 1)[0]

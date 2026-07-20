@@ -6143,6 +6143,15 @@ def mark_false_positive(
             memory_metadata={"severity": finding.severity, "fp_notes": fp_notes},
         )
         db.add(fp_mem)
+        from app.services.pentest_outcome_learning import record_outcome
+
+        scan_job = db.query(ScanJob).filter(ScanJob.id == finding.scan_job_id).first()
+        if scan_job:
+            record_outcome(
+                db, scan_job, dimension="tool", metric_key=str(finding.tool or "unknown"),
+                outcome="false_positive",
+                metadata={"finding_id": finding.id, "reviewed_by": current_user.id},
+            )
     else:
         # Desmarcando FP: remove da memória vetorial se existir
         try:
@@ -6229,6 +6238,7 @@ def bulk_mark_false_positive(
     findings = query.all()
 
     updated_ids = []
+    jobs_by_id: dict[int, ScanJob] = {}
     for finding in findings:
         finding.is_false_positive = new_fp_value
         finding.fp_notes = fp_notes
@@ -6245,6 +6255,19 @@ def bulk_mark_false_positive(
                 embedding_ref=vector_id,
                 memory_metadata={"severity": finding.severity, "fp_notes": fp_notes},
             ))
+            from app.services.pentest_outcome_learning import record_outcome
+
+            scan_job = jobs_by_id.get(int(finding.scan_job_id))
+            if scan_job is None:
+                scan_job = db.query(ScanJob).filter(ScanJob.id == finding.scan_job_id).first()
+                if scan_job:
+                    jobs_by_id[int(finding.scan_job_id)] = scan_job
+            if scan_job:
+                record_outcome(
+                    db, scan_job, dimension="tool", metric_key=str(finding.tool or "unknown"),
+                    outcome="false_positive",
+                    metadata={"finding_id": finding.id, "reviewed_by": current_user.id, "bulk": True},
+                )
         updated_ids.append(finding.id)
 
     log_audit(
@@ -9625,6 +9648,27 @@ def dashboard_control_plane(
     if selected_scan.get("id"):
         selected_job = _authorized_scan_query(db, current_user).filter(ScanJob.id == int(selected_scan["id"])).first()
     selected_state = dict(selected_job.state_data or {}) if selected_job else {}
+    hypothesis_counts: dict[str, int] = {}
+    endpoint_counts = {"total": 0, "auth_classified": 0, "auth_pending": 0}
+    if selected_job:
+        for hypothesis_status, count in (
+            db.query(OffensiveHypothesis.status, func.count(OffensiveHypothesis.id))
+            .filter(OffensiveHypothesis.scan_job_id == selected_job.id)
+            .group_by(OffensiveHypothesis.status)
+            .all()
+        ):
+            hypothesis_counts[str(hypothesis_status or "unknown")] = int(count or 0)
+        endpoint_counts["total"] = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == selected_job.id).count()
+        endpoint_counts["auth_classified"] = (
+            db.query(OffensiveEndpoint)
+            .filter(OffensiveEndpoint.scan_job_id == selected_job.id, OffensiveEndpoint.auth_required.is_not(None))
+            .count()
+        )
+        endpoint_counts["auth_pending"] = endpoint_counts["total"] - endpoint_counts["auth_classified"]
+    hypothesis_blocked = sum(
+        count for status_key, count in hypothesis_counts.items()
+        if status_key.startswith("blocked_")
+    )
     alert_query = db.query(EASMAlert).filter(EASMAlert.is_resolved.is_(False))
     if not current_user.is_admin:
         alert_query = alert_query.filter(EASMAlert.owner_id == current_user.id)
@@ -9635,6 +9679,18 @@ def dashboard_control_plane(
         "verification": {"counts": verification, "total": sum(verification.values())},
         "crown_jewels": cockpit.get("crown_jewels") or [],
         "osint": selected_state.get("osint_phase_zero") or selected_state.get("osint_phase_zero_result"),
+        "intelligence": {
+            "endpoint_analysis": selected_state.get("endpoint_intelligence") or {},
+            "hypothesis_planner": selected_state.get("hypothesis_planner") or {},
+            "hypothesis_drain": selected_state.get("hypothesis_drain") or {},
+            "outcome_learning": selected_state.get("pentest_outcome_learning") or {},
+            "current": {
+                "hypotheses_by_status": hypothesis_counts,
+                "hypotheses_open": int(hypothesis_counts.get("open", 0)) + int(hypothesis_counts.get("queued", 0)),
+                "hypotheses_blocked": hypothesis_blocked,
+                "endpoints": endpoint_counts,
+            },
+        },
         "operational_alerts": [
             {
                 "id": alert.id,

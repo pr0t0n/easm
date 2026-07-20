@@ -1022,21 +1022,36 @@ def validate_skill_applicability(
         decision["score"] = 0.7
         decision["reason"] = "insufficient_context_allow_conservative"
 
-    # ── Score real feedback: modulate by within-scan execution history ────────
-    # After ≥2 real runs of skill+tool in this scan, their EMA positive rate
-    # adjusts the score. A tool that never found anything gets a floor reduction;
-    # one that consistently fires findings is boosted.
+    # ── Outcome-calibrated feedback ──────────────────────────────────────────
+    # Raw finding creation is deliberately not treated as a true positive.
+    # Applicability is modulated by executed reliability plus confirmed/refuted
+    # validation outcomes persisted by pentest_outcome_learning.
     _exec_scores = (state or {}).get("skill_execution_scores") or {}
     _hist_key = f"{skill_id}:{tool_l}"
     _hist = _exec_scores.get(_hist_key) or {}
-    if _hist and int(_hist.get("runs") or 0) >= 2:
+    if _hist and int(_hist.get("validated_observations") or 0) >= 2:
         _hist_rate = float(_hist.get("positive_rate") or 0.0)
         # Blend: 50% static score + 50% historical signal; floor at 0.1
         _adj = round(max(0.1, float(decision["score"]) * (0.5 + 0.5 * _hist_rate)), 4)
         decision["score"] = _adj
         decision["score_history_adjusted"] = True
         decision["history_positive_rate"] = _hist_rate
-        decision["history_runs"] = int(_hist.get("runs") or 0)
+        decision["history_runs"] = int(_hist.get("validated_observations") or 0)
+
+    _learned_metrics = ((state or {}).get("pentest_outcome_learning") or {}).get("metrics") or {}
+    _tool_rows = [
+        row for key, row in _learned_metrics.items()
+        if str(key).startswith(f"tool:{tool_l}:") and isinstance(row, dict)
+    ]
+    _learned_attempts = sum(int(row.get("attempts") or 0) for row in _tool_rows)
+    if _tool_rows and _learned_attempts >= 3:
+        _success = sum(float(row.get("ema_success") or 0.5) * int(row.get("attempts") or 0) for row in _tool_rows) / _learned_attempts
+        _precision = sum(float(row.get("ema_precision") or 0.5) * int(row.get("attempts") or 0) for row in _tool_rows) / _learned_attempts
+        decision["score"] = round(max(0.1, float(decision["score"]) * (0.45 + 0.30 * _success + 0.25 * _precision)), 4)
+        decision["outcome_calibrated"] = True
+        decision["outcome_attempts"] = _learned_attempts
+        decision["outcome_success"] = round(_success, 4)
+        decision["outcome_precision"] = round(_precision, 4)
 
     return decision
 
@@ -1065,12 +1080,17 @@ def update_skill_execution_score(
 
     runs = int(cur.get("runs") or 0) + 1
     used = int(cur.get("used") or 0) + (0 if result == "skipped" else 1)
-    positives = int(cur.get("positives") or 0) + (1 if findings_count > 0 else 0)
+    validated_positive = result in {"confirmed", "validated"}
+    validated_negative = result in {"refuted", "false_positive"}
+    positives = int(cur.get("positives") or 0) + (1 if validated_positive else 0)
 
     prev_rate = float(cur.get("positive_rate") or 0.5)
     alpha = min(0.4, 2.0 / (runs + 1))
-    obs = 1.0 if findings_count > 0 else 0.0
-    positive_rate = round(prev_rate * (1 - alpha) + obs * alpha, 4)
+    if validated_positive or validated_negative:
+        obs = 1.0 if validated_positive else 0.0
+        positive_rate = round(prev_rate * (1 - alpha) + obs * alpha, 4)
+    else:
+        positive_rate = prev_rate
 
     record: dict[str, Any] = {
         "skill_id": skill_id,
@@ -1078,6 +1098,8 @@ def update_skill_execution_score(
         "runs": runs,
         "used": used,
         "positives": positives,
+        "validated_observations": int(cur.get("validated_observations") or 0) + (1 if validated_positive or validated_negative else 0),
+        "raw_findings": int(cur.get("raw_findings") or 0) + max(0, int(findings_count or 0)),
         "positive_rate": positive_rate,
         "applicability_score": round(max(0.1, positive_rate), 4),
         "last_result": result,
@@ -1352,7 +1374,7 @@ def unblock_phase_items(
     now = datetime.now()
     # Inclui batch items cujos batch_targets intersectam com os targets dados
     # Para batch: target='__batch__', batch_targets em item_metadata
-    updated = (
+    rows = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
@@ -1363,14 +1385,20 @@ def unblock_phase_items(
                 ScanWorkItem.target == "__batch__",
             ),
         )
-        .update(
-            {"status": "queued", "last_error": None, "updated_at": now},
-            synchronize_session=False,
-        )
+        .all()
     )
-    if updated:
+    for item in rows:
+        metadata = dict(item.item_metadata or {})
+        metadata["queue_ready_at"] = now.isoformat()
+        metadata["unblocked_by_gate"] = gate_phase
+        item.item_metadata = metadata
+        item.status = "queued"
+        item.last_error = None
+        item.updated_at = now
+        db.add(item)
+    if rows:
         db.flush()
-    return int(updated)
+    return len(rows)
 
 
 # Every entry here MUST have a real kali-runner profile with
@@ -1612,18 +1640,7 @@ def enqueue_scan_work_items(
             for src in c.get("learning_sources") or []
             if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
         })[:20]
-        item = ScanWorkItem(
-            scan_job_id=job.id,
-            phase_id=phase_id,
-            target="__batch__",
-            tool_name=tool[:120],
-            profile=_batch_tool_profile(tool)[:120],
-            resource_class=rc,
-            priority=max(1, base_priority + best_boost),
-            status=_batch_status,
-            last_error=initial_last_error_for_phase(phase_id),
-            max_attempts=2,
-            item_metadata=apply_phase_tool_metadata({
+        _batch_metadata = apply_phase_tool_metadata({
                 "source": source,
                 "engine": "capacity_work_queue",
                 "skill_ids": _batch_skill_ids,
@@ -1636,7 +1653,21 @@ def enqueue_scan_work_items(
                 "batch_count": len(sorted_targets),
                 "high_risk": best_boost < 0,
                 "applicability": _tool_applicability_decision(phase_id, tool, "__batch__", state, at="enqueue"),
-            }, phase_id, tool, source=source),
+            }, phase_id, tool, source=source)
+        if _batch_status == "queued":
+            _batch_metadata["queue_ready_at"] = datetime.now().isoformat()
+        item = ScanWorkItem(
+            scan_job_id=job.id,
+            phase_id=phase_id,
+            target="__batch__",
+            tool_name=tool[:120],
+            profile=_batch_tool_profile(tool)[:120],
+            resource_class=rc,
+            priority=max(1, base_priority + best_boost),
+            status=_batch_status,
+            last_error=initial_last_error_for_phase(phase_id),
+            max_attempts=2,
+            item_metadata=_batch_metadata,
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )
@@ -1694,6 +1725,8 @@ def enqueue_scan_work_items(
         if _to is not None:
             _item_meta["timeout_override"] = _to
         _single_status = initial_status_for_phase(phase_id)
+        if _single_status == "queued":
+            _item_meta["queue_ready_at"] = datetime.now().isoformat()
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,

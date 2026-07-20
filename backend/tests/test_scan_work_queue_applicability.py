@@ -118,19 +118,21 @@ def test_batch_applicability_keeps_only_targets_that_still_apply() -> None:
 # ── Score real (Frente B) ────────────────────────────────────────────────────
 
 
-def test_update_skill_execution_score_first_positive() -> None:
+def test_raw_finding_does_not_inflate_validated_precision() -> None:
     state: dict = {}
     record = update_skill_execution_score(state, "skill.vuln.xss", "dalfox", "positive", findings_count=3)
     assert record["runs"] == 1
-    assert record["positives"] == 1
-    assert record["positive_rate"] > 0.5  # pulled up from neutral 0.5
+    assert record["positives"] == 0
+    assert record["validated_observations"] == 0
+    assert record["raw_findings"] == 3
+    assert record["positive_rate"] == 0.5
     assert "skill_execution_scores" in state
 
 
 def test_update_skill_execution_score_accumulates() -> None:
     state: dict = {}
     for _ in range(5):
-        update_skill_execution_score(state, "skill.vuln.xss", "dalfox", "negative", findings_count=0)
+        update_skill_execution_score(state, "skill.vuln.xss", "dalfox", "refuted", findings_count=0)
     record = state["skill_execution_scores"]["skill.vuln.xss:dalfox"]
     assert record["runs"] == 5
     assert record["positives"] == 0
@@ -172,7 +174,7 @@ def test_validate_skill_adjusts_score_after_history() -> None:
 def test_validate_skill_score_adjusted_for_low_yield_tool() -> None:
     state: dict = {}
     for _ in range(3):
-        update_skill_execution_score(state, "skill.vuln.sqli", "sqlmap", "negative")
+        update_skill_execution_score(state, "skill.vuln.sqli", "sqlmap", "refuted")
     state["preflight"] = {
         "targets": {"target.example.com": {"status": "http_live", "open_ports": [443], "http": [{}]}}
     }

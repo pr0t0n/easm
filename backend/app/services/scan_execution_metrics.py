@@ -29,6 +29,16 @@ def _duration_seconds(item: ScanWorkItem) -> float:
     return max(0.0, (finished - started).total_seconds())
 
 
+def _queue_ready_at(item: ScanWorkItem) -> datetime | None:
+    raw = dict(getattr(item, "item_metadata", None) or {}).get("queue_ready_at")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            pass
+    return getattr(item, "created_at", None)
+
+
 def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = None) -> dict[str, Any]:
     """Canonical execution accounting used by API, quality and reports.
 
@@ -49,9 +59,9 @@ def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = No
     attempted = terminal + active
     worker_seconds = sum(_duration_seconds(row) for row in rows)
     queue_waits = sorted(
-        max(0.0, (row.started_at - row.created_at).total_seconds())
+        max(0.0, (row.started_at - ready_at).total_seconds())
         for row in rows
-        if getattr(row, "started_at", None) and getattr(row, "created_at", None)
+        if getattr(row, "started_at", None) and (ready_at := _queue_ready_at(row))
     )
 
     created = [getattr(row, "created_at", None) for row in rows if getattr(row, "created_at", None)]
@@ -113,6 +123,7 @@ def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = No
         "throughput_per_minute": round(throughput_per_minute, 2),
         "queue_wait_avg_seconds": round(sum(queue_waits) / len(queue_waits), 1) if queue_waits else 0.0,
         "queue_wait_p95_seconds": round(queue_waits[min(len(queue_waits) - 1, int(len(queue_waits) * 0.95))], 1) if queue_waits else 0.0,
+        "queue_wait_semantics": "actionable_ready_to_started",
         "eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
         "distinct_targets": len({str(getattr(row, "target", "") or "") for row in rows}),
         "distinct_tools": len({str(getattr(row, "tool_name", "") or "") for row in rows}),
