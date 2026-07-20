@@ -65,16 +65,17 @@ def test_safe_validation_default_scope_keeps_high_noise_tools_blocked() -> None:
 def test_p01_operator_forwards_scan_authorized_scope(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_call(execution, authorized_scope=None):
+    def fake_call(execution, authorized_scope=None, scan_id=None):
         captured["phase_id"] = execution["phase_id"]
         captured["authorized_scope"] = authorized_scope
+        captured["scan_id"] = scan_id
         return {"status": "success", "exit_code": 0}
 
     monkeypatch.setattr(
         "app.services.offensive_operator_runner._call_mcp_execution",
         fake_call,
     )
-    call_tool = _call_operator_tool(True, ["valid.com"])
+    call_tool = _call_operator_tool(True, ["valid.com"], 8)
     result = call_tool(
         {
             "phase_id": "P01",
@@ -87,7 +88,11 @@ def test_p01_operator_forwards_scan_authorized_scope(monkeypatch) -> None:
     )
 
     assert result["status"] == "success"
-    assert captured == {"phase_id": "P01", "authorized_scope": ["valid.com"]}
+    assert captured == {
+        "phase_id": "P01",
+        "authorized_scope": ["valid.com"],
+        "scan_id": 8,
+    }
 
 
 def test_mcp_payload_contains_authorized_scope(monkeypatch) -> None:
@@ -120,10 +125,12 @@ def test_mcp_payload_contains_authorized_scope(monkeypatch) -> None:
             "arguments": {"target": "valid.com"},
         },
         authorized_scope=["valid.com"],
+        scan_id=8,
     )
 
     payload = captured["payload"]
     assert payload["arguments"]["authorized_scope"] == ["valid.com"]
+    assert payload["arguments"]["scan_id"] == 8
 
 
 def test_all_controlled_pentest_phases_can_advance_with_successful_tool_results() -> None:

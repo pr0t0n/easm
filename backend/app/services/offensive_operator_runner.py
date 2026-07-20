@@ -1363,6 +1363,7 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
 def _call_mcp_execution(
     execution: dict[str, Any],
     authorized_scope: list[str] | None = None,
+    scan_id: int | None = None,
 ) -> dict[str, Any]:
     """Submit a tool to MCP and poll until completion — async submit+poll.
 
@@ -1377,7 +1378,9 @@ def _call_mcp_execution(
         return _run_backend_local_tool(execution)
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
-    arguments.setdefault("scan_id", execution.get("scan_id"))
+    execution_scan_id = execution.get("scan_id") or arguments.get("scan_id") or scan_id
+    if execution_scan_id is not None:
+        arguments["scan_id"] = int(execution_scan_id)
     # Kali Runner intentionally fails closed when no authorization boundary is
     # supplied. The offensive-operator path predates that runner contract, so
     # every execution must explicitly carry the roots resolved from ScanJob.
@@ -1487,6 +1490,7 @@ def _call_mcp_execution(
 def _call_operator_tool(
     mcp_available: bool,
     authorized_scope: list[str] | None = None,
+    scan_id: int | None = None,
 ):
     """Fábrica do call_tool do executor. Tools BACKEND-LOCAL (bl-test, code-analyzer)
     rodam SEMPRE (não dependem de MCP/kali); tools remotas são bloqueadas quando o
@@ -1499,7 +1503,11 @@ def _call_operator_tool(
         if not mcp_available:
             return {"status": "blocked", "error": "mcp_unavailable", "exit_code": None,
                     "stdout": "", "stderr": ""}
-        return _call_mcp_execution(execution, authorized_scope=authorized_scope)
+        return _call_mcp_execution(
+            execution,
+            authorized_scope=authorized_scope,
+            scan_id=scan_id,
+        )
     return _call
 
 
@@ -1642,7 +1650,7 @@ def run_offensive_operator_scan(
     authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
     runtime = OffensiveSkillRuntime(
         executor=MCPToolExecutor(
-            call_tool=_call_operator_tool(mcp_available, authorized_scope),
+            call_tool=_call_operator_tool(mcp_available, authorized_scope, job.id),
             available=True,
         )
     )
@@ -4504,7 +4512,7 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
     authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
     runtime = OffensiveSkillRuntime(
         executor=MCPToolExecutor(
-            call_tool=_call_operator_tool(mcp_available, authorized_scope),
+            call_tool=_call_operator_tool(mcp_available, authorized_scope, job.id),
             available=True,
         )
     )
