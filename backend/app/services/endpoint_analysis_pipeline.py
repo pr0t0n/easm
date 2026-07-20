@@ -8,11 +8,15 @@ from urllib.parse import parse_qsl, urlparse
 
 from sqlalchemy.orm import Session
 
-from app.models.models import OffensiveEndpoint, OffensiveParameter, ScanJob
+from app.models.models import OffensiveEndpoint, OffensiveParameter, ScanAuthSession, ScanJob
+from app.services.business_logic_intelligence import (
+    build_business_logic_contract,
+    build_business_logic_portfolio,
+)
 from app.services.offensive_inventory_service import OffensiveInventoryService, parameter_risk_hint
 
 
-ANALYSIS_VERSION = "endpoint-intelligence-v4"
+ANALYSIS_VERSION = "endpoint-intelligence-v5"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map"}
 SENSITIVE_MARKERS = {
@@ -135,7 +139,7 @@ def analyze_endpoint_contract(
 
     tests = _dedupe_tests(tests)
     risk = min(100, 15 + (20 if is_api else 0) + (20 if is_sensitive else 0) + (12 if is_auth else 0) + (15 if state_changing else 0) + min(25, len([row for row in tests if row["hypothesis_type"] not in {"information_disclosure", "api_security"}]) * 5))
-    return {
+    result = {
         "version": ANALYSIS_VERSION,
         "route_template": _route_template(path),
         "method": str(method or "GET").upper(),
@@ -162,6 +166,14 @@ def analyze_endpoint_contract(
         "recommended_tools": sorted({tool for test in tests for tool in test["validators"]}),
         "analyzed_at": datetime.now().isoformat(),
     }
+    result["business_logic"] = build_business_logic_contract(
+        url,
+        method=result["method"],
+        classification=result["classification"],
+        parameters=result["parameters"],
+        test_matrix=result["test_matrix"],
+    )
+    return result
 
 
 def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000, force: bool = False) -> dict[str, Any]:
@@ -230,7 +242,23 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
             tests_planned += 1
             tests_current += 1
         analyzed += 1
+    analyses = [
+        dict((dict(endpoint.endpoint_metadata or {}).get("analysis") or {}))
+        for endpoint in endpoints
+        if (dict(endpoint.endpoint_metadata or {}).get("analysis") or {}).get("version") == ANALYSIS_VERSION
+    ]
     state = dict(job.state_data or {})
+    valid_session_count = db.query(ScanAuthSession).filter(
+        ScanAuthSession.scan_job_id == job.id,
+        ScanAuthSession.status.in_(["valid", "static"]),
+    ).count()
+    available_identities = (["user_a", "user_b"] if valid_session_count >= 2
+                            else (["user_a"] if valid_session_count else []))
+    state["business_logic_intelligence"] = build_business_logic_portfolio(
+        analyses,
+        available_identities=available_identities,
+        mutation_plan=state.get("business_logic_mutation_plan"),
+    )
     state["endpoint_intelligence"] = {
         "version": ANALYSIS_VERSION,
         "endpoints_seen": len(endpoints),
@@ -239,6 +267,8 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
         "already_current": skipped_current,
         "tests_planned": tests_current,
         "tests_planned_now": tests_planned,
+        "business_logic_relevant": state["business_logic_intelligence"]["relevant_endpoints"],
+        "business_logic_invariants": state["business_logic_intelligence"]["invariants"],
         "updated_at": datetime.now().isoformat(),
     }
     job.state_data = state

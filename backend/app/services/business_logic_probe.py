@@ -1,4 +1,4 @@
-"""Testes de LÓGICA DE NEGÓCIO — com DISCIPLINA DE BASELINE (questiona o próprio achado).
+"""Legacy business-logic verification helpers behind evidence-led contracts.
 
 Lição aprendida validando no OWASP JuiceShop: um SPA devolve o MESMO index.html
 (HTTP 200) para QUALQUER rota — então "etapa de fluxo acessível, HTTP 200" é
@@ -19,8 +19,9 @@ Por isso, todo achado aqui passa por um CONTROLE/BASELINE antes de ser reportado
      que o servidor guardou (prova), e reverte. Respeita o guardrail (nunca
      completa transação, nunca extrai dados, só alvos com consentimento).
 
-Confirmação read-only é POSSIBILIDADE (candidate); mutação com leitura-de-volta
-do valor adversário é CONFIRMAÇÃO (confirmed).
+The current scan entry point delegates to the canonical observed-endpoint
+executor. Direct verification is blocked without an explicit execution plan;
+workflow, parameter and mutation checks never run from guessed inputs.
 """
 
 from __future__ import annotations
@@ -98,9 +99,19 @@ def _biz_param_endpoints(urls: list[str]) -> list[str]:
 
 
 def verify_business_logic(endpoints: list[str], base_url: str, auth_headers: dict | None = None,
-                          *, mutation_plan: dict | None = None) -> dict:
+                          *, mutation_plan: dict | None = None,
+                          execution_plan: dict | None = None) -> dict:
     """Read-only por padrão. Se `mutation_plan` for fornecido (opt-in por alvo
     autorizado), executa a prova de mutação reversível de valor negativo."""
+    plan = dict(execution_plan or {})
+    if not plan:
+        return {
+            "findings": [], "attempts": 0, "safe_proof": True,
+            "status": "blocked_precondition", "blocked": ["business_logic_execution_plan_required"],
+            "suppressed_false_positives": 0,
+        }
+    allowed_urls = {str(row.get("endpoint") or "") for row in plan.get("actions") or [] if isinstance(row, dict)}
+    endpoints = [url for url in endpoints if str(url) in allowed_urls]
     auth = {k: v for k, v in (auth_headers or {}).items() if v}
     ua = {"User-Agent": "Mozilla/5.0 (easm-bizlogic-probe)", **auth}
     result = {"findings": [], "attempts": 0, "safe_proof": True,
@@ -109,39 +120,23 @@ def verify_business_logic(endpoints: list[str], base_url: str, auth_headers: dic
 
     try:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False) as c:
-            # ── BASELINE: estabelece o controle ANTES de qualquer julgamento ──
-            baseline = _establish_baseline(c, base, ua)
-            result["baseline"] = {"catch_all": baseline["catch_all"],
-                                  "control_size": baseline["control_size"]}
+            # No route controls are guessed here. The canonical executor records
+            # baselines only for endpoints already present in the execution plan.
+            baseline = {"catch_all": False, "fingerprints": set(), "control_size": 0}
+            result["baseline"] = {"status": "observed_endpoints_only", "control_size": 0}
 
-            # ── 1. Bypass de fluxo — só conta se DIFERIR do controle + marcador real ──
-            for step in _FLOW_STEPS:
-                result["attempts"] += 1
-                try:
-                    r = c.get(base + step, headers=ua)
-                except Exception:
-                    continue
-                if r.status_code != 200:
-                    continue
-                fp = _fingerprint(r)
-                body = r.text or ""
-                # SPA catch-all OU corpo idêntico ao controle → NÃO é bypass real
-                if baseline["catch_all"] or fp in baseline["fingerprints"]:
-                    result["suppressed_false_positives"] += 1
-                    continue
-                # tem que PARECER mesmo uma etapa de fluxo (não só "200 grande")
-                if len(body) > 600 and not _looks_like_login(body) and _FLOW_MARKER_RE.search(body):
-                    result["findings"].append({
-                        "type": "workflow_bypass", "vuln_family": "business_logic",
-                        "endpoint": base + step, "verification_status": "candidate",
-                        "evidence": (f"Etapa final de fluxo {step} acessível DIRETAMENTE com conteúdo "
-                                     f"DISTINTO do controle e marcadores de pedido/fatura/pagamento "
-                                     f"(difere do baseline) — possível bypass de fluxo."),
-                        "severity": "high",
-                    })
+            # A discovered final-looking route is not proof of workflow bypass.
+            # A dedicated validator must supply an observed valid flow and an
+            # observed negative control before it may compare transition states.
+            observed_flow_steps = [
+                url for url in endpoints
+                if re.search(r"(?i)/(checkout|order|payment|invoice|receipt|thank-you|obrigado)(?:/|$)", url)
+            ]
+            result["workflow_candidates_blocked"] = len(observed_flow_steps)
 
             # ── 2. Tampering de parâmetro — sinal por DIFERENÇA vs valor original ──
-            for url in _biz_param_endpoints(endpoints):
+            parameter_differential_allowed = bool(plan.get("allow_parameter_differential"))
+            for url in (_biz_param_endpoints(endpoints) if parameter_differential_allowed else []):
                 pm = _QUERY.search(url)
                 if not pm:
                     continue
@@ -181,25 +176,15 @@ def verify_business_logic(endpoints: list[str], base_url: str, auth_headers: dic
                     break
 
             # ── 3. MUTAÇÃO de valor negativo (a falha real) — OPT-IN reversível ──
-            if mutation_plan:
+            if mutation_plan and bool(plan.get("mutation_authorized")):
                 mut = _mutation_negative_value(c, base, ua, mutation_plan)
                 result["mutation"] = {k: v for k, v in mut.items() if k != "finding"}
                 result["attempts"] += mut.get("attempts", 0)
                 if mut.get("finding"):
                     result["findings"].append(mut["finding"])
 
-            # ── 4. Reuso de cupom (read-only, possibilidade) ──
-            for url in endpoints[:60]:
-                if isinstance(url, str) and re.search(r"(?i)(coupon|cupom|promo|voucher)=", url):
-                    if not re.search(r"(?i)(nonce|csrf|token|sig|hmac)=", url):
-                        result["findings"].append({
-                            "type": "coupon_reuse", "vuln_family": "business_logic",
-                            "endpoint": url, "verification_status": "candidate",
-                            "evidence": "Parâmetro de cupom/voucher sem nonce/uso-único aparente — "
-                                        "possível reuso/empilhamento de cupom (validar manualmente).",
-                            "severity": "medium",
-                        })
-                        break
+            # Cupom sem nonce aparente is not proof. Replay/brute force remains
+            # blocked until a dedicated disposable coupon fixture is supplied.
     except Exception as exc:
         result["note"] = f"erro: {type(exc).__name__}"
         return result
@@ -290,47 +275,34 @@ def _mutation_negative_value(client: httpx.Client, base: str, ua: dict, plan: di
 
 
 def run_business_logic_for_scan(db, job) -> dict:
-    from app.models.models import Finding
-
     state = dict(getattr(job, "state_data", None) or {})
-    try:
-        from app.services.scan_intelligence import auth_headers_from_state
-        auth = auth_headers_from_state(state) or {}
-    except Exception:
-        auth = {}
-    urls = list(state.get("discovered_endpoints") or [])
-    try:
-        for (det,) in db.query(Finding.details).filter(Finding.scan_job_id == job.id).limit(800).all():
-            if isinstance(det, dict) and (det.get("matched_at") or det.get("url")):
-                urls.append(str(det.get("matched_at") or det.get("url")))
-    except Exception:
-        pass
     base = str(getattr(job, "target_query", "") or "").split(",")[0].strip()
+    from app.models.models import OffensiveEndpoint, ScanAuthSession
+    from app.services.business_logic_intelligence import build_business_logic_execution_plan
+    from app.services.business_logic_test import run_as_tool
 
-    # mutação só com opt-in explícito no state (alvo autorizado p/ teste de mutação)
-    mutation_plan = state.get("business_logic_mutation_plan") if isinstance(state, dict) else None
-
-    res = verify_business_logic(urls, base, auth, mutation_plan=mutation_plan)
-    created = 0
-    if res.get("findings"):
-        raw = [{
-            "title": f"Lógica de Negócio ({f['type']}): {f['endpoint'][:100]}",
-            "severity": f.get("severity", "medium"),
-            "risk_score": 8 if f.get("severity") == "high" else 5,
-            "details": {
-                "tool": "business_logic_probe", "asset": f.get("endpoint"), "matched_at": f.get("endpoint"),
-                "payload": f.get("payload"), "evidence": f.get("evidence"),
-                "owasp_category": "A04:2021 Insecure Design",
-                "verification_status": f.get("verification_status", "candidate"),
-                "vuln_family": "business_logic",
-                "discovery_method": "teste de lógica de negócio com baseline (sem completar transação)",
-            },
-        } for f in res["findings"]]
-        try:
-            from app.services.findings_extractor import persist_finding_dicts
-            created = persist_finding_dicts(db, job, raw, default_tool="business_logic_probe",
-                                            default_target=base, source_item=None)
-        except Exception:
-            pass
-    res["findings_created"] = created
+    endpoints = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == job.id).all()
+    analyses = [
+        dict((dict(row.endpoint_metadata or {}).get("analysis") or {}))
+        for row in endpoints
+        if (dict(row.endpoint_metadata or {}).get("analysis") or {}).get("business_logic")
+    ]
+    valid_sessions = db.query(ScanAuthSession).filter(
+        ScanAuthSession.scan_job_id == job.id,
+        ScanAuthSession.status.in_(["valid", "static"]),
+    ).limit(2).all()
+    identities = ["user_a", "user_b"] if len(valid_sessions) >= 2 else (["user_a"] if valid_sessions else [])
+    plan = build_business_logic_execution_plan(
+        analyses,
+        available_identities=identities,
+        mutation_plan=state.get("business_logic_mutation_plan"),
+    )
+    primary_session = valid_sessions[0] if valid_sessions else None
+    res = run_as_tool(
+        base,
+        execution_plan=plan,
+        auth_headers=dict(primary_session.headers or {}) if primary_session else {},
+        auth_cookies=dict(primary_session.cookies or {}) if primary_session else {},
+    )
+    res["findings_created"] = 0
     return res

@@ -1,21 +1,10 @@
-"""Teste ATIVO de Business Logic — tool de backend (como code-analyzer).
+"""Evidence-led business-logic baseline executor for phase P13.
 
-Dirigido por DESCOBERTA (chromium-capture → endpoints reais do SPA) + AUTENTICAÇÃO
-genérica (generic_auth). SEM rotas hardcoded. Técnica aprendida (JuiceShop/DVWA),
-genérica e com guardrail (read-back + REVERTE, sem dump em massa, sem destruição):
-
-  - Manipulação de valor (REST-CRUD): muta campo de NEGÓCIO numérico (quantity/
-    price/amount/discount/balance…) de um objeto para valor adversário (-1) e
-    LÊ DE VOLTA; distingue campo de negócio de FK/id. CONFIRMA se o servidor
-    armazenou o valor inválido. Reverte ao valor original.
-  - Manipulação de valor (GET param) p/ apps onde a BL está em query string.
-  - Mass assignment: campo privilegiado (role/isAdmin/status) aceito do cliente.
-  - IDOR/BOLA ativo: com BASELINE — só confirma se a listagem está escopada a mim
-    mas consigo ler objeto de OUTRO dono por id direto (read-only, controlado).
-  - Exposição de dados sensíveis: JWT/keys/senha/PII em localStorage/sessionStorage
-    capturados via chromium (CDP) — exfiltráveis por XSS.
-
-Despachado via worker_dispatcher (tool 'bl-test'), fase P13.
+The live entry point accepts only a persisted execution plan produced from
+observed endpoints. It records response metadata/fingerprints and never guesses
+routes or object IDs, brute-forces values, authenticates with injection, or
+performs generic mutations. Historical pure helpers remain for compatibility;
+all legacy speculative network probes are hard-disabled.
 """
 
 from __future__ import annotations
@@ -23,11 +12,14 @@ from __future__ import annotations
 import os
 import re
 import json
-import random
 import time
 import httpx
 
 _TIMEOUT = httpx.Timeout(connect=6.0, read=15.0, write=8.0, pool=6.0)
+# Kept only for backwards-compatible pure helpers and historical tests. Active
+# execution is permanently routed through the evidence-led plan at the end of
+# this module; speculative legacy probes must not be callable accidentally.
+_LEGACY_SPECULATIVE_PROBES_ENABLED = False
 
 _WORDLIST_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "wordlists")
 
@@ -81,6 +73,8 @@ def _collections_from_wordlist(c: httpx.Client, base: str, deadline: float = 0.0
     uma lista de objetos (data:[...]). Baixo volume, dirigido por wordlist.
     `deadline` (time.monotonic) corta a varredura se o orçamento da fase estourar
     — esta wordlist pode gerar ~620 probes × 15s contra um alvo lento."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     found = []
     seen = set()
     redirect_only = 0
@@ -162,6 +156,8 @@ def _capture(base: str, token: str = "", creds: dict | None = None) -> dict:
     (o app grava o próprio storage → finding de storage genuíno); fallback p/
     injeção de token. Navega rotas de negócio p/ disparar XHRs autenticadas
     (basket/{id}, cupom…). Retorna o dict cru (api_requests + storage)."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return {"login_status": "blocked_observed_endpoint_plan_required"}
     try:
         from urllib.parse import urljoin, urlparse
 
@@ -289,6 +285,8 @@ def _bola_active(c: httpx.Client, collections: list[str], token: str) -> list[di
     """Acesso indevido a objeto de OUTRO usuário (BOLA/IDOR). Lê meu id no JWT,
     enumera POUCOS ids (brute force controlado) numa coleção com campo de dono e
     confirma se um objeto de dono DIFERENTE retorna p/ mim. Somente leitura."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     out = []
     my_id = _jwt_self_id(token)
     if my_id is None:
@@ -346,6 +344,8 @@ def _bola_single_resource(c: httpx.Client, cap: dict, base: str, token: str) -> 
     coleção não pega. Pega os GET /<...>/<num> que o PRÓPRIO app fez por mim
     (esse num é MEU), confirma o campo de dono = meu id, e prova que o vizinho
     (num±1) devolve objeto de OUTRO dono. Baseline = meu próprio recurso."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     out = []
     my_id = _jwt_self_id(token)
     if my_id is None:
@@ -443,6 +443,8 @@ def _token_reuse_after_logout(base: str, token: str, cookies: dict) -> list[dict
     confirma se (a) existe baseline autenticado, (b) o endpoint de logout existe
     e retorna 2xx (app reconhece o logout) e (c) o MESMO token ainda autentica a
     mesma identidade. Sem logout server-side de verdade, não afirmamos nada."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     if not token:
         return []
     out = []
@@ -493,6 +495,8 @@ def _coupon_brute(c: httpx.Client, cap: dict, base: str) -> list[dict]:
     """Brute force CONTROLADO de cupom: acha endpoint/param de cupom (captura ou
     wordlist), manda 1 código claramente inválido (baseline) e uma wordlist curta
     de códigos comuns. Confirma só se um código difere do baseline inválido."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     from urllib.parse import urlparse
     COMMON = ["WELCOME", "WELCOME10", "DISCOUNT", "DISCOUNT10", "SAVE10", "PROMO",
               "FREE", "TEST", "OFF10", "NEWUSER", "SUMMER", "BLACKFRIDAY"]
@@ -539,6 +543,8 @@ def _coupon_brute(c: httpx.Client, cap: dict, base: str) -> list[dict]:
 
 def _rest_crud_negative(c: httpx.Client, collections: list[str]) -> list[dict]:
     """Muta campo de negócio numérico de um objeto p/ -1 e lê de volta. Reverte."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     out = []
     for col in collections[:15]:
         try:
@@ -601,6 +607,8 @@ _load_wordlist = _wl  # alias — callers below use _load_wordlist name
 def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:
     """Acha a spec OpenAPI/Swagger (wordlist SecLists Swagger.txt) e extrai os
     endpoints REAIS — fonte definitiva (sem adivinhar). Genérico."""
+    if not _LEGACY_SPECULATIVE_PROBES_ENABLED:
+        return []
     cols, seen = [], set()
     paths = _load_wordlist("swagger.txt", ["api-docs/swagger.json", "swagger.json", "openapi.json", "v2/api-docs"])
     spec = None
@@ -624,107 +632,104 @@ def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:
     return cols
 
 
-def run_as_tool(target: str, extra_urls: list[str] | None = None, max_seconds: int = 1200) -> dict:
-    from app.services.target_discovery import profile_target
-    from app.services.generic_auth import authenticate
+def run_as_tool(
+    target: str,
+    extra_urls: list[str] | None = None,
+    max_seconds: int = 1200,
+    *,
+    execution_plan: dict | None = None,
+    auth_headers: dict | None = None,
+    auth_cookies: dict | None = None,
+) -> dict:
+    """Execute only read-only baselines from an observed-endpoint contract.
+
+    Legacy helpers remain available to dedicated validators, but this phase no
+    longer guesses routes/IDs, brute-forces coupons, performs SQLi authentication,
+    navigates hardcoded SPA routes, or mutates arbitrary objects.
+    """
+    from urllib.parse import urlparse
+
     base = (target if str(target).startswith("http") else f"http://{target}").rstrip("/")
-    _deadline = time.monotonic() + max(60, int(max_seconds or 0))
-    findings = []
-    # P03-discovered parameterized URLs — merged into param-tampering coverage
-    # so bl-test tests the real endpoint surface, not just chromium+wordlist.
-    _extra_param_urls = [u for u in (extra_urls or []) if isinstance(u, str) and "?" in u and "=" in u]
+    plan = dict(execution_plan or {})
+    actions = [dict(row) for row in plan.get("actions") or [] if isinstance(row, dict)]
+    blocked = [dict(row) for row in plan.get("blocked") or [] if isinstance(row, dict)]
+    common = {
+        "tool": "bl-test",
+        "target": base,
+        "scan_mode": "unit",
+        "command": f"bl-test observed-evidence-only {base}",
+        "open_ports": [],
+        "findings_extracted": [],
+        "execution_policy": plan.get("policy") or "observed-evidence-only",
+        "guardrails": plan.get("guardrails") or {
+            "guess_routes": False,
+            "guess_object_ids": False,
+            "brute_force": False,
+            "try_sqli_auth": False,
+        },
+    }
+    if not actions:
+        return {
+            **common,
+            "status": "blocked_precondition",
+            "return_code": 0,
+            "stdout": "business_logic: 0 ações; pré-condições/contratos pendentes",
+            "stderr": "",
+            "parsed": {"summary": {"observed": 0, "failed": 0, "blocked": len(blocked)}, "observations": [], "blocked": blocked},
+        }
+
+    base_parsed = urlparse(base)
+    deadline = time.monotonic() + max(1, min(120, int(max_seconds or 0)))
+    observations: list[dict] = []
+    failures = 0
+    headers = {str(key): str(value) for key, value in dict(auth_headers or {}).items() if value}
+    cookies = {str(key): str(value) for key, value in dict(auth_cookies or {}).items() if value}
     try:
-        prof = profile_target(base, authorized=True)
-        auth = authenticate(base, prof, try_sqli=True)
-        cookies = auth.get("session_cookies") or {}
-        token = auth.get("token")
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        # captura client-side UMA vez: LOGIN REAL via form (preferível) ou injeção
-        # de token; navega rotas de negócio → SPA dispara XHRs autenticadas.
-        cap = _capture(base, token or "", auth.get("creds"))
-        collections = _collections_from_capture(cap, base)
-        # dados sensíveis em storage. Só excluo o token quando foi INJEÇÃO minha;
-        # com login real, o token no storage foi gravado pelo APP → finding genuíno.
-        login_status = str(cap.get("login_status", ""))
-        injected_tok = (token or "") if "inject" in login_status else ""
-        findings += _sensitive_storage(cap, base, injected_tok)
-
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False,
-                          cookies=cookies, headers=headers) as c:
-            # coleções: chromium-capture (reais) + SWAGGER/OpenAPI (spec real,
-            # SecLists Swagger.txt) + WORDLIST (autenticado, SecLists api-endpoints
-            # + termos de negócio). Swagger é a fonte definitiva quando existe.
-            merged = collections + _collections_from_swagger(c, base) + _collections_from_wordlist(c, base, _deadline)
-            # dedupe case-insensitive: roteadores case-insensitive (ex.: JuiceShop)
-            # resolvem /api/Products == /api/products → MESMO recurso. Mantém 1 só
-            # para não gerar findings duplicados. API case-sensitive não é afetada
-            # (só o caso correto devolve data:[...]).
-            collections, _low = [], set()
-            for u in merged:
-                k = u.lower()
-                if k not in _low:
-                    _low.add(k); collections.append(u)
-            # 1) manipulação de valor via REST-CRUD (corpo) — a técnica principal
-            if time.monotonic() < _deadline:
-                findings += _rest_crud_negative(c, collections)
-
-            # 1b) IDOR/BOLA ativo: acesso a objeto de outro dono (controlado, read-only)
-            if time.monotonic() < _deadline:
-                findings += _bola_active(c, collections, token)
-            # 1c) BOLA em recurso único (ex.: basket/{id}) — baseado na captura
-            if time.monotonic() < _deadline:
-                findings += _bola_single_resource(c, cap, base, token)
-            # 1d) brute force CONTROLADO de cupom (baseline = código inválido)
-            if time.monotonic() < _deadline:
-                findings += _coupon_brute(c, cap, base)
-
-            # 2) manipulação de valor via GET param (apps onde BL está na query)
-            # Merge P03-discovered URLs with target_discovery's own param endpoints.
-            from urllib.parse import urlparse, parse_qs, urlunparse
-            _param_endpoints = list(dict.fromkeys(
-                (prof.get("param_endpoints") or []) + _extra_param_urls
-            ))
-            for u in _param_endpoints[:40]:
-                if time.monotonic() > _deadline:
-                    break
-                pr = urlparse(u); q = parse_qs(pr.query)
-                for pn in q:
-                    if not _BIZ_PARAM.search(pn):
-                        continue
-                    bu = urlunparse(pr._replace(query="")); pp = {k: v[0] for k, v in q.items()}
-                    try:
-                        good = c.get(bu, params=pp); bad = c.get(bu, params={**pp, pn: "-1"})
-                    except Exception:
-                        continue
-                    if bad.status_code < 400 and not _VALIDATION.search((bad.text or "")[:3000]) and bad.text != good.text:
-                        findings.append(_finding("manipulacao_valor_query", "confirmada", "high", bu,
-                                                 f"Param de negócio '{pn}' aceitou -1 (HTTP {bad.status_code}).", f"{pn}=-1"))
-
-            # 3) mass assignment em forms de criação/perfil
-            for f in (prof.get("forms") or []):
-                if f.get("method") != "post" or not re.search(r"(?i)user|account|profile|register|cadastr", f.get("action", "")):
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False, headers=headers, cookies=cookies) as client:
+            for action in actions[:50]:
+                if time.monotonic() > deadline:
+                    blocked.append({"endpoint": action.get("endpoint"), "reasons": ["execution_budget_exhausted"]})
                     continue
-                data = {i["name"]: (i.get("value") or f"x{random.randint(100,999)}") for i in f.get("inputs", []) if i.get("name")}
-                data.update(PRIV_FIELDS)
+                endpoint = str(action.get("endpoint") or "")
+                parsed = urlparse(endpoint)
+                if not endpoint or parsed.scheme not in {"http", "https"} or parsed.hostname != base_parsed.hostname:
+                    blocked.append({"endpoint": endpoint, "reasons": ["outside_target_scope"]})
+                    continue
+                if str(action.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}:
+                    blocked.append({"endpoint": endpoint, "reasons": ["state_change_not_allowed_in_baseline_executor"]})
+                    continue
                 try:
-                    r = c.post(f["action"], data=data)
-                    if r.status_code in (200, 201) and ('"role":"admin"' in r.text.replace(" ", "") or '"isAdmin":true' in r.text.replace(" ", "")):
-                        findings.append(_finding("mass_assignment", "confirmada", "critical", f["action"],
-                                                 "Campo privilegiado (role=admin/isAdmin) aceito do cliente.", "role=admin"))
-                except Exception:
-                    pass
+                    response = client.request(str(action.get("method") or "GET").upper(), endpoint)
+                    body = response.content or b""
+                    observations.append({
+                        "endpoint": endpoint,
+                        "method": str(action.get("method") or "GET").upper(),
+                        "status_code": response.status_code,
+                        "content_type": str(response.headers.get("content-type") or "")[:160],
+                        "content_length": len(body),
+                        "body_fingerprint": __import__("hashlib").sha256(body).hexdigest()[:16],
+                        "redirect_location": str(response.headers.get("location") or "")[:500],
+                        "flows": action.get("flows") or [],
+                        "invariants": action.get("invariants") or [],
+                        "evidence_status": "baseline_observed",
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    failures += 1
+                    observations.append({"endpoint": endpoint, "method": action.get("method"), "evidence_status": "request_failed", "error": type(exc).__name__})
+    except Exception as exc:  # noqa: BLE001
+        return {**common, "status": "failed", "stdout": "", "stderr": f"{type(exc).__name__}: {exc}", "dispatch_error": type(exc).__name__}
 
-        # 1e) reuso de token pós-logout (cliente próprio — logout pode limpar cookie)
-        findings += _token_reuse_after_logout(base, token, cookies)
-
-        summary = {"confirmada": sum(1 for x in findings if "[CONFIRMADA]" in x["title"]),
-                   "hipotese": sum(1 for x in findings if "[HIPOTESE]" in x["title"])}
-        return {"tool": "bl-test", "target": base, "scan_mode": "unit", "status": "done",
-                "command": f"bl-test (chromium-capture+auth+REST-CRUD) {base}", "return_code": 0,
-                "stdout": f"business_logic: {summary} | auth={auth.get('where')} | coleções={len(collections)}",
-                "stderr": "", "open_ports": [], "parsed": {"summary": summary, "collections": collections},
-                "findings_extracted": findings}
-    except Exception as exc:
-        return {"tool": "bl-test", "target": base, "scan_mode": "unit", "status": "failed",
-                "command": f"bl-test {base}", "stdout": "", "stderr": f"{type(exc).__name__}: {exc}",
-                "open_ports": [], "dispatch_error": f"{type(exc).__name__}: {exc}"}
+    return {
+        **common,
+        "status": "done" if observations and failures == 0 else ("partial" if observations else "blocked_precondition"),
+        "return_code": 0,
+        "stdout": f"business_logic: {len(observations)} baselines observados; {len(blocked)} bloqueados; {failures} falhas",
+        "stderr": "",
+        "parsed": {
+            "summary": {"observed": len([row for row in observations if row.get("evidence_status") == "baseline_observed"]), "failed": failures, "blocked": len(blocked)},
+            "observations": observations,
+            "blocked": blocked,
+            "mutation_authorized": bool(plan.get("mutation_authorized")),
+            "mutation_executed": False,
+        },
+    }

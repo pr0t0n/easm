@@ -93,9 +93,18 @@ def execute_tool_with_workers(
         return result
 
     if norm_tool == "bl-test":
-        # Teste ATIVO de business logic — backend-local (descoberta+auth, sem kali).
+        # Business logic is evidence-led: the backend executor only consumes an
+        # observed-endpoint plan assembled from this scan's persisted inventory.
         from app.services.business_logic_test import run_as_tool as _bl_run
-        result = _bl_run(target)
+        execution_plan = _business_logic_execution_plan(scan_id)
+        request_headers = dict(auth_context.get("headers") or {}) if isinstance(auth_context, dict) else {}
+        request_cookies = dict(auth_context.get("cookies") or {}) if isinstance(auth_context, dict) else {}
+        result = _bl_run(
+            target,
+            execution_plan=execution_plan,
+            auth_headers=request_headers,
+            auth_cookies=request_cookies,
+        )
         if skill_id:
             result.setdefault("skill_id", skill_id)
             result.setdefault("skill_contract", skill_contract or {})
@@ -249,6 +258,44 @@ def _resolve_auth_context(scan_id: int | None, skill_contract: dict[str, Any] | 
             db.close()
     except Exception:
         return {}
+
+
+def _business_logic_execution_plan(scan_id: int | None) -> dict[str, Any]:
+    """Build a no-guessing execution plan from persisted endpoint evidence."""
+    if not scan_id:
+        return {"version": "business-logic-v1", "policy": "observed-evidence-only", "actions": [], "blocked": [{"reasons": ["scan_id_required"]}]}
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import OffensiveEndpoint, ScanAuthSession, ScanJob
+        from app.services.business_logic_intelligence import build_business_logic_execution_plan
+
+        db = SessionLocal()
+        try:
+            scan = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+            if not scan:
+                return {"version": "business-logic-v1", "policy": "observed-evidence-only", "actions": [], "blocked": [{"reasons": ["scan_not_found"]}]}
+            endpoints = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == int(scan_id)).all()
+            analyses = [
+                dict((dict(row.endpoint_metadata or {}).get("analysis") or {}))
+                for row in endpoints
+                if (dict(row.endpoint_metadata or {}).get("analysis") or {}).get("business_logic")
+            ]
+            valid_sessions = db.query(ScanAuthSession).filter(
+                ScanAuthSession.scan_job_id == int(scan_id),
+                ScanAuthSession.status.in_(["valid", "static"]),
+            ).count()
+            identities = ["user_a", "user_b"] if valid_sessions >= 2 else (["user_a"] if valid_sessions else [])
+            state = dict(scan.state_data or {})
+            return build_business_logic_execution_plan(
+                analyses,
+                available_identities=identities,
+                mutation_plan=state.get("business_logic_mutation_plan"),
+            )
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("business logic execution plan unavailable scan_id=%s: %s", scan_id, exc)
+        return {"version": "business-logic-v1", "policy": "observed-evidence-only", "actions": [], "blocked": [{"reasons": ["execution_plan_unavailable"]}]}
 
 
 def _persist_result_artifact(

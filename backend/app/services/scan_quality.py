@@ -332,7 +332,24 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     classified_auth_endpoints = len([e for e in endpoints if e.auth_required is not None])
     endpoint_auth_depth = _ratio(classified_auth_endpoints, endpoints_count) if endpoints_count else 1.0
     api_depth = min(1.0, api_specs_count / 1.0) if any("api" in list(e.tags or []) for e in endpoints) else 1.0
-    depth_score = (hypothesis_resolution * 45) + (auth_depth * 25) + (endpoint_auth_depth * 20) + (api_depth * 10)
+    from app.services.business_logic_intelligence import build_business_logic_portfolio
+
+    bl_analyses = [
+        dict((dict(endpoint.endpoint_metadata or {}).get("analysis") or {}))
+        for endpoint in endpoints
+        if (dict(endpoint.endpoint_metadata or {}).get("analysis") or {}).get("business_logic")
+    ]
+    bl_identities = ["user_a", "user_b"] if len(valid_sessions) >= 2 else (["user_a"] if valid_sessions else [])
+    business_logic = build_business_logic_portfolio(
+        bl_analyses,
+        available_identities=bl_identities,
+        mutation_plan=dict(job.state_data or {}).get("business_logic_mutation_plan"),
+    )
+    bl_relevant = int(business_logic.get("relevant_endpoints") or 0)
+    bl_contract_ratio = _ratio(int(business_logic.get("contracted_endpoints") or 0), bl_relevant) if bl_relevant else 1.0
+    bl_ready_ratio = _ratio(int(business_logic.get("ready_read_only") or 0), bl_relevant) if bl_relevant else 1.0
+    business_logic_depth = (bl_contract_ratio * 0.6) + (bl_ready_ratio * 0.4)
+    depth_score = (hypothesis_resolution * 35) + (auth_depth * 20) + (endpoint_auth_depth * 15) + (api_depth * 10) + (business_logic_depth * 20)
 
     components = {
         "phase_coverage": {
@@ -373,6 +390,11 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "api_specs": api_specs_count,
             "parameters": parameters_count,
             "services": services_count,
+            "business_logic_relevant_endpoints": bl_relevant,
+            "business_logic_contracted_endpoints": int(business_logic.get("contracted_endpoints") or 0),
+            "business_logic_invariants": int(business_logic.get("invariants") or 0),
+            "business_logic_ready_read_only": int(business_logic.get("ready_read_only") or 0),
+            "business_logic_blocked_endpoints": int(business_logic.get("blocked_endpoints") or 0),
         },
         "tool_reliability": {
             "score": round(_clamp(tool_score), 1),
@@ -467,6 +489,22 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": f"{classified_auth_endpoints}/{endpoints_count} endpoints têm auth_required conhecido.",
             "action": "Executar baseline anônimo e autenticado para classificar cada endpoint.",
         })
+    if bl_relevant and bl_contract_ratio < 1.0:
+        gaps.append({
+            "severity": "high" if int(business_logic.get("high_risk_endpoints") or 0) else "medium",
+            "area": "business_logic",
+            "title": "Endpoints de negócio sem contrato de invariantes",
+            "detail": f"{int(business_logic.get('contracted_endpoints') or 0)}/{bl_relevant} endpoints relevantes têm contrato de business logic.",
+            "action": "Reanalisar o inventário com endpoint-intelligence-v5 antes de executar testes ativos.",
+        })
+    if int(business_logic.get("high_risk_endpoints") or 0) and int(business_logic.get("blocked_endpoints") or 0):
+        gaps.append({
+            "severity": "high",
+            "area": "business_logic",
+            "title": "Invariantes de alto risco bloqueados por pré-condições",
+            "detail": f"{int(business_logic.get('blocked_endpoints') or 0)} endpoints aguardam identidade validada, parâmetro observado ou fixture reversível.",
+            "action": "Fornecer duas identidades, objeto controlado e plano de rollback; não substituir essas evidências por enumeração especulativa.",
+        })
 
     if total_score >= 85:
         grade = "A"
@@ -508,6 +546,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "grade": grade,
         "label": label,
         "quality_gate": quality_gate,
+        "business_logic": business_logic,
         "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
         "runtime_visibility": _runtime_visibility(job, validations, artifacts, work_items),
         "execution_metrics": execution_metrics,
@@ -530,6 +569,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "Exigir EvidenceArtifact para findings high/critical antes de promovê-los no relatório.",
             "Rodar validação segura com controle positivo/negativo para candidatos críticos.",
             "Persistir CoverageItem por endpoint/parâmetro para medir cobertura real.",
+            "Exercitar invariantes de negócio somente com identidades e fixtures reversíveis documentadas.",
             "Reexecutar fases com work items falhos antes de concluir o relatório executivo.",
         ],
     }

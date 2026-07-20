@@ -29,10 +29,11 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 - Retestes são deduplicados enquanto estão em fila/em execução e atualizam um `RetestRun` real e o estado final do finding.
 - LFI, SSTI, path traversal, XSS e SQLi usam validação diferencial segura (baseline, canário e controle negativo); RCE sem autorização explícita é bloqueado e auditado.
 - Gates históricos que apareciam como aprovados abaixo de 70 são exibidos como `historical_mismatch`.
+- A profundidade agora inclui contratos de business logic: fluxo, invariantes, identidade, objeto controlado, fixture descartável, read-back, idempotência e rollback. Pré-condição ausente é gap explícito, não teste aprovado.
 
 ## Inteligência de endpoints e testes
 
-- A descoberta não agenda mais SQLMap, Dalfox ou scanners ativos apenas porque uma URL contém query string. Cada URL passa por `endpoint-intelligence-v2`, que cria uma rota canônica, classifica API, autenticação, função sensível, referência a objeto, upload e mudança de estado, infere parâmetros e monta uma matriz de testes aplicáveis.
+- A descoberta não agenda mais SQLMap, Dalfox ou scanners ativos apenas porque uma URL contém query string. Cada URL passa por `endpoint-intelligence-v5`, que cria uma rota canônica, classifica API, autenticação, função sensível, referência a objeto, upload e mudança de estado, infere parâmetros, monta uma matriz de testes aplicáveis e anexa um contrato de business logic.
 - IDs numéricos e UUIDs no path são agrupados como `{id}`. Valores de query não participam da identidade da rota; URLs concretas permanecem como amostras auditáveis.
 - A matriz de teste declara hipótese, validadores seguros, identidades, pré-condições e evidência esperada. Baselines somente leitura geram cobertura, não hipóteses artificiais.
 - O planner remove hipóteses equivalentes e prioriza impacto, confiança, joia da coroa, fronteira de autorização, disponibilidade do validador, custo e precisão/sucesso históricos.
@@ -44,11 +45,13 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 - Caminhos de ataque correlacionam famílias genericamente por host e evidência. Uma cadeia só recebe estado `proven` quando todos os passos estão confirmados, têm evidência e o impacto foi demonstrado no objetivo correto.
 - O aprendizado persistente separa execução de precisão. Achado bruto nunca aumenta true-positive rate; confirmação, refutação e falso positivo calibram planners, validadores e seleção de ferramenta.
 - A avaliação determinística `/api/pentest/intelligence-evaluation` mede precisão, recall e F1 de classificação de endpoint, priorização, resultado de PoC e correlação de caminhos sem rede e sem alvos externos.
+- O executor P13 consome somente endpoints persistidos no inventário. Ele não autentica com SQLi, não enumera rotas por wordlist/Swagger, não tenta IDs vizinhos, não brute-força cupons, não navega rotas SPA hardcoded e não altera objetos arbitrários. Escrita permanece bloqueada até plano explícito com fixture e rollback.
 
 ## Relatórios e dashboards
 
 - Cockpit retorna `quality`, `execution_metrics`, gaps e paginação de findings.
 - Dashboard mostra score/grade, estado do gate, progresso, sucesso, paralelismo e quantidade de gaps.
+- Dashboard e relatório mostram quantidade de fluxos, invariantes e endpoints de business logic bloqueados por pré-condição.
 - SLIs de fila p95, sucesso de execução e score de qualidade são persistidos no scan; desvios criam alertas deduplicados, e a recuperação do indicador resolve o alerta correspondente.
 - Relatório principal mostra completude do teste, fases saudáveis, achados verificados, p95 de espera e ETA.
 - Plano de ação inclui prioridade, responsável sugerido, SLA e esforço, além de evidência.
@@ -60,12 +63,12 @@ Implementação concluída em 20/07/2026. O trabalho exclui, conforme solicitado
 
 ## Automação e critérios de aceitação
 
-- Backend: 380 testes passaram em 6,55 s. Chamadas reais de LLM foram desativadas no ambiente de teste.
+- Backend: 388 testes passaram em 6,55 s. Chamadas reais de LLM foram desativadas no ambiente de teste.
 - Frontend: 5 testes de contrato passaram e o build de produção concluiu; ambos fazem parte do CI.
 - CI agora executa backend, frontend e migrations. Não adiciona execução de laboratórios vulneráveis.
 - Budgets automatizados cobrem agregação de 10 mil work items e contratos HTTP de Dashboard, relatório e qualidade.
 - Na validação implantada final após reload dos workers, o Dashboard/BFF respondeu em 0,419 s (169.269 bytes), o relatório em 0,719 s (1.823.312 bytes), qualidade em 0,022 s (16.273 bytes) e a avaliação offline de inteligência em 0,009 s (1.476 bytes).
-- O tabletop ampliado de `valid.com` aprovou 36/36 contratos, 49 endpoints descobertos únicos, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
+- O tabletop ampliado de `valid.com` aprovou 41/41 contratos, 49 endpoints descobertos únicos, dez fluxos e 165 invariantes de negócio, P01–P22 e 83 ferramentas com zero requisições ao alvo e zero jobs criados. O roteiro e a evidência estão em [`VALID_COM_TABLETOP_2026-07-20.md`](VALID_COM_TABLETOP_2026-07-20.md).
 
 ## Saneamento histórico e reversibilidade
 

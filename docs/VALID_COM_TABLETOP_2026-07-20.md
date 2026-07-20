@@ -6,7 +6,7 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 
 | Controle | Resultado |
 |---|---:|
-| Contratos tabletop | 36/36 aprovados |
+| Contratos tabletop | 41/41 aprovados |
 | Fases | P01–P22 |
 | Ferramentas únicas nas fases | 83/83 catalogadas |
 | Perfis carregados no runner | 118 |
@@ -19,7 +19,10 @@ Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde
 | Requisições ao alvo | 0 |
 | Jobs criados pelo tabletop | 0; ativos 0 |
 | Escritas no banco | 0 |
-| Backend | 380 testes aprovados em 6,55 s |
+| Fluxos de business logic | 10 |
+| Invariantes de negócio | 165 |
+| Endpoints BL bloqueados por pré-condição | 30 |
+| Backend | 388 testes aprovados em 6,55 s |
 | Frontend | 5 testes aprovados; build de produção concluído |
 
 Status final: **aprovado**.
@@ -40,10 +43,11 @@ Status final: **aprovado**.
 11. A correlação de ataque só marca uma cadeia como provada quando os passos têm evidência e o objetivo é alcançável.
 12. O gate encerra o scan apenas com qualidade saudável. Gaps altos e remediações concretas produzem `completed_with_gaps`.
 13. Dashboard, inteligência, relatório e qualidade consomem os contratos persistidos e foram verificados com autenticação real na API interna.
+14. Cada endpoint relevante recebe um contrato de business logic com invariantes, identidades, fixtures, evidências e política de execução. O executor só aceita URLs observadas; descoberta por wordlist, IDs vizinhos, brute force de cupom, SQLi durante login e mutação automática foram removidos do caminho padrão.
 
 ## Lote ampliado de endpoints
 
-Foram incorporados 49 paths únicos após remover repetições e normalizar `redirect` como `/redirect`. A análise usa `endpoint-intelligence-v4` e separa descoberta de superfície de hipótese executável:
+Foram incorporados 49 paths únicos após remover repetições e normalizar `redirect` como `/redirect`. A análise usa `endpoint-intelligence-v5` e separa descoberta de superfície de hipótese executável:
 
 | Categoria | Exemplos | Decisão antes de conhecer parâmetros/método |
 |---|---|---|
@@ -58,6 +62,19 @@ Foram incorporados 49 paths únicos após remover repetições e normalizar `red
 | Objeto | `/api/users/{id}`, `/accounts/{id}`, `/orders/{id}`, `/invoices/{id}`, `/documents/{id}`, `/transactions/{id}` | exigir duas identidades, mesmo objeto e controle negativo |
 
 `/logout` é a exceção semântica: mesmo quando descoberto como GET, é tratado como término de sessão. O contrato exige sessão antes, chamada de logout e sessão depois; ele não é confundido com mass assignment.
+
+## Inteligência de business logic
+
+O tabletop agora valida dez famílias de fluxo: ownership de objeto, movimentação financeira, arquivo/exportação, autenticação, mudança de conta, fetch server-side, redirect, ingestão estruturada, conteúdo de usuário e transição de estado. No cenário, esses fluxos produziram 165 invariantes verificáveis.
+
+- `/payment` e `/transfer`: valor positivo, conservação de saldo, commit único/idempotência e destinatário autorizado;
+- rotas `{id}`: duas identidades, o mesmo objeto controlado, consistência lista/detalhe e controle negativo;
+- logout/token/refresh/MFA: transição de estado, invalidação server-side, rotação, replay do token antigo e impossibilidade de pular MFA;
+- arquivos/exports: escopo do proprietário e seleção de path controlada pelo servidor;
+- fetch/redirect: nenhum teste ativo até observar o parâmetro de destino;
+- escrita/importação: fixture descartável, read-back e rollback obrigatórios.
+
+Um template `{id}` não é tratado como objeto executável: o plano fica bloqueado até existir um ID concreto pertencente à fixture. Ausência de pré-condição reduz a profundidade no Quality Gate e aparece como gap no relatório/Dashboard; nunca vira sucesso artificial.
 
 ## Lacunas encontradas e corrigidas
 

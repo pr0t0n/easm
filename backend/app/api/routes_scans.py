@@ -9681,6 +9681,7 @@ def dashboard_control_plane(
         "osint": selected_state.get("osint_phase_zero") or selected_state.get("osint_phase_zero_result"),
         "intelligence": {
             "endpoint_analysis": selected_state.get("endpoint_intelligence") or {},
+            "business_logic": selected_state.get("business_logic_intelligence") or {},
             "hypothesis_planner": selected_state.get("hypothesis_planner") or {},
             "hypothesis_drain": selected_state.get("hypothesis_drain") or {},
             "outcome_learning": selected_state.get("pentest_outcome_learning") or {},

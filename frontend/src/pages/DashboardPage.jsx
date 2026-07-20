@@ -1014,6 +1014,9 @@ export default function DashboardPage() {
             <div className="ctrl"><label>Gaps prioritários</label><strong className="sk-mono">{Array.isArray(cockpitQuality.gaps) ? cockpitQuality.gaps.length : 0}</strong></div>
             <div className="ctrl"><label>SLIs operacionais</label><strong className="sk-mono">{cockpitSli.status || "não avaliado"}</strong></div>
             <div className="ctrl"><label>Endpoints analisados</label><strong className="sk-mono">{Number(cockpitIntelligence.endpoint_analysis?.endpoints_analyzed || 0)}</strong></div>
+            <div className="ctrl"><label>Fluxos de negócio</label><strong className="sk-mono">{Number(cockpitIntelligence.business_logic?.flow_count || 0)}</strong></div>
+            <div className="ctrl"><label>Invariantes</label><strong className="sk-mono">{Number(cockpitIntelligence.business_logic?.invariants || 0)}</strong></div>
+            <div className="ctrl"><label>BL bloqueados</label><strong className="sk-mono">{Number(cockpitIntelligence.business_logic?.blocked_endpoints || 0)}</strong></div>
             <div className="ctrl"><label>Hipóteses abertas</label><strong className="sk-mono">{Number(cockpitIntelligence.current?.hypotheses_open ?? cockpitIntelligence.hypothesis_drain?.remaining ?? cockpitIntelligence.hypothesis_planner?.open_before ?? 0)}</strong></div>
             <div className="ctrl"><label>Hipóteses drenadas</label><strong className="sk-mono">{Number(cockpitIntelligence.hypothesis_drain?.processed_total ?? cockpitIntelligence.hypothesis_drain?.processed ?? 0)}</strong></div>
             <div className="ctrl"><label>Hipóteses bloqueadas</label><strong className="sk-mono">{Number(cockpitIntelligence.current?.hypotheses_blocked || 0)}</strong></div>
