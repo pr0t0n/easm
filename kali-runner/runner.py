@@ -1046,6 +1046,8 @@ def trigger_cleanup(ttl_hours: int = WORKSPACE_TTL_HOURS) -> dict[str, Any]:
 def list_profiles() -> dict[str, Any]:
     def _profile_payload(name: str, spec: dict[str, Any]) -> dict[str, Any]:
         command = list(spec.get("cmd") or [])
+        executable = str(command[0] if command else spec.get("tool", name))
+        executable_path = shutil.which(executable)
         return {
             "tool": spec.get("tool", name),
             "category": spec.get("category"),
@@ -1054,7 +1056,9 @@ def list_profiles() -> dict[str, Any]:
             "timeout": spec.get("timeout", DEFAULT_TIMEOUT),
             "source": spec.get("source_file"),
             "command": command,
-            "command_executable": command[0] if command else spec.get("tool", name),
+            "command_executable": executable,
+            "command_executable_available": bool(executable_path),
+            "command_executable_path": executable_path,
         }
 
     return {

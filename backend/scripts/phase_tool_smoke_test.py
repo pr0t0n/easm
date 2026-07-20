@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Phase Tool Smoke Test — P01..P22.
 
-Validates, for every tool referenced by every phase contract, that:
+In its safe default mode, validates the full pipeline contract without sending
+traffic to the target. In explicit active mode, validates for every tool that:
   1. the tool's kali profile resolves
   2. the tool actually executes on the kali runner
   3. it produces parseable output (not just exit 0 with empty stdout)
 
 Run inside the worker/backend container:
-    python3 /app/scripts/phase_tool_smoke_test.py [target]
+    python3 -m scripts.phase_tool_smoke_test [target]
 
-Default target: valid.com
+Explicit active execution (authorized targets only):
+    python3 -m scripts.phase_tool_smoke_test [target] \
+        --execute --authorization-attested
+
+Default target: valid.com. The default never starts Kali jobs or contacts it.
 
 Output: a P01-P22 matrix + a unique-tool verdict table. Tools that fail are
 listed with the captured error so the failure can be investigated and fixed.
@@ -20,6 +25,7 @@ not "full-volume enumeration".
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -28,9 +34,10 @@ import urllib.request
 sys.path.insert(0, "/app")
 
 from app.services.offensive_operator_core import PHASE_CONTRACTS, default_tool_catalog  # noqa: E402
+from app.services.pentest_tabletop import run_valid_com_tabletop  # noqa: E402
 
 KALI_URL = "http://kali_runner:8088"
-TARGET = sys.argv[1] if len(sys.argv) > 1 else "valid.com"
+TARGET = "valid.com"
 POLL_TIMEOUT = 75  # seconds to wait per tool before declaring it "still running"
 
 
@@ -118,7 +125,40 @@ def _classify(result: dict) -> tuple[str, str]:
     return "EMPTY", f"ran rc={rc} but no stdout"
 
 
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Safe tabletop by default; active tool execution requires two explicit flags.",
+    )
+    parser.add_argument("target", nargs="?", default="valid.com")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="start real Kali jobs against the target",
+    )
+    parser.add_argument(
+        "--authorization-attested",
+        action="store_true",
+        help="attest that the operator is authorized to test the target",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    global TARGET
+    args = _arguments()
+    TARGET = str(args.target).strip()
+    if not args.execute:
+        result = run_valid_com_tabletop(TARGET)
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0 if result["status"] == "passed" else 1
+    if not args.authorization_attested:
+        print(
+            "BLOCKED: active execution requires --authorization-attested. "
+            "No Kali jobs were started.",
+            file=sys.stderr,
+        )
+        return 2
+
     catalog = {e.tool_name: e for e in default_tool_catalog()}
     # Collect unique tools across all phases
     phase_tools: dict[str, list[str]] = {}

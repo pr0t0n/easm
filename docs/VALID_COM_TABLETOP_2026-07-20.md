@@ -1,0 +1,100 @@
+# Smoke/tabletop do fluxo de pentest — `valid.com`
+
+Validação concluída em 20/07/2026. O cenário percorre o fluxo completo desde a autorização até relatório e Dashboard, mas não envia tráfego ao `valid.com`, não cria scan, não grava no banco e não inicia jobs no Kali runner. Juice Shop, DVWA e o laboratório IDOR não fazem parte desta validação.
+
+## Resultado executivo
+
+| Controle | Resultado |
+|---|---:|
+| Contratos tabletop | 23/23 aprovados |
+| Fases | P01–P22 |
+| Ferramentas únicas nas fases | 83/83 catalogadas |
+| Perfis carregados no runner | 118 |
+| Executáveis detectados | 951 |
+| Endpoints sintéticos | 10 |
+| Rotas canônicas | 9 |
+| Testes aplicáveis planejados | 15 |
+| Hipóteses priorizadas | 15 |
+| Requisições ao alvo | 0 |
+| Jobs Kali antes/depois | 13/13, ativos 0 |
+| Escritas no banco | 0 |
+| Backend | 372 testes aprovados em 6,50 s |
+| Frontend | 5 testes aprovados; build de produção concluído |
+
+Status final: **aprovado**.
+
+## Como o fluxo se comportaria
+
+1. A entrada `valid.com` é normalizada como host público.
+2. Sem atestado explícito de autorização, a plataforma bloqueia o teste antes da fila. Com atestado, o gate permite continuar.
+3. O escopo aceita `valid.com` e subdomínios como `api.valid.com`, mas rejeita confusões de prefixo/sufixo como `notvalid.com` e `valid.com.attacker.invalid`.
+4. O perfil `full` percorre os contratos P01–P22. Cada fase tem ferramentas, evidência mínima e critério de saída.
+5. A descoberta sintética representa home, login, API com IDs de objeto, administração, upload, OpenAPI, `www.valid.com/search?search=tabletop`, execução sensível e JavaScript estático.
+6. URLs `/api/orders/42` e `/api/orders/43` convergem para a mesma rota canônica `/api/orders/{id}`; os exemplos concretos continuam disponíveis para auditoria.
+7. Um query string sozinho não agenda SQLMap ou Dalfox. A matriz nasce da semântica do endpoint e cobre autenticação, autorização de objeto, contrato de API, upload, parâmetros e mudança de estado.
+   No caso `search`, a plataforma cria baseline e hipótese diferencial `xss_sqli` em modo seguro, exigindo comparação payload/baseline e controle negativo antes de qualquer escalada específica.
+8. Testes horizontais exigem duas identidades. A simulação usa `user_a` e `user_b`; se a matriz estiver incompleta, a hipótese é bloqueada com causa explícita.
+9. O planner ordena as hipóteses por impacto, confiança, fronteira de autenticação, joia da coroa, prontidão do validador, custo e histórico. No cenário, BFLA no host administrativo vem primeiro; RCE só avança com evidência de autorização do operador.
+10. Exit code zero sem prova fica como candidato. Sinal positivo específico pode confirmar, mas achado crítico sem proof pack não é promovido.
+11. A correlação de ataque só marca uma cadeia como provada quando os passos têm evidência e o objetivo é alcançável.
+12. O gate encerra o scan apenas com qualidade saudável. Gaps altos e remediações concretas produzem `completed_with_gaps`.
+13. Dashboard, inteligência, relatório e qualidade consomem os contratos persistidos e foram verificados com autenticação real na API interna.
+
+## Lacunas encontradas e corrigidas
+
+O tabletop detectou cinco aliases usados pelas fases sem entrada no catálogo/perfil executável:
+
+- `nuclei-js-secrets`;
+- `nuclei-js-analysis`;
+- `nuclei-misconfiguration`;
+- `nuclei-file-upload`;
+- `nuclei-swagger`.
+
+Os cinco foram adicionados ao catálogo, às classes de carga/família de vulnerabilidade e aos perfis Nuclei do runner. O runner passou de 113 para 118 perfis carregados.
+
+A auditoria do caminho de despacho encontrou ainda 30 nomes de ferramenta presentes nas fases e no catálogo, mas ausentes em `TOOL_TO_PROFILE`. Na prática, o supervisor podia descartá-los e o worker retornava `no_profile_mapping`. Todos os aliases foram ligados aos respectivos perfis e o tabletop passou a exigir igualdade entre contrato, catálogo e mapa de despacho. A entrada genérica `amass` foi mantida no perfil passivo `amass_enum`; brute force permanece no alias explícito `amass-brute`.
+
+O verificador também detectou que o inventário de ferramentas omitia executáveis-base (`python3` e `bash`) e caminhos absolutos, embora estivessem instalados. `/profiles` agora informa `command_executable_available` e o caminho resolvido pelo próprio runner, eliminando falsos negativos sem executar a ferramenta.
+
+O antigo `phase_tool_smoke_test.py` iniciava ferramentas ativas por padrão. Agora:
+
+- o modo padrão executa apenas o tabletop determinístico;
+- `--execute` é obrigatório para iniciar jobs reais;
+- `--authorization-attested` também é obrigatório;
+- sem ambos, a execução ativa é bloqueada antes do primeiro job.
+
+## Evidência de integração
+
+Com a stack implantada, os endpoints internos responderam dentro dos budgets:
+
+| Contrato | Latência | Payload | HTTP |
+|---|---:|---:|---:|
+| Dashboard/control-plane | 0,772 s | 169.269 bytes | 200 |
+| Avaliação de inteligência | 0,006 s | 1.476 bytes | 200 |
+| Relatório unificado | 0,715 s | 1.823.310 bytes | 200 |
+| Qualidade | 0,020 s | 16.273 bytes | 200 |
+
+## Como repetir com segurança
+
+Tabletop com contratos ao vivo do runner e zero tráfego ao alvo:
+
+```bash
+docker exec -w /app scriptkiddo_backend \
+  /opt/venv/bin/python -m scripts.tabletop_valid_com valid.com
+```
+
+Tabletop totalmente offline:
+
+```bash
+docker exec -w /app scriptkiddo_backend \
+  /opt/venv/bin/python -m scripts.tabletop_valid_com valid.com --offline
+```
+
+O smoke ativo existe somente para um alvo que o operador esteja autorizado a testar:
+
+```bash
+python3 -m scripts.phase_tool_smoke_test alvo-autorizado.example \
+  --execute --authorization-attested
+```
+
+Esse último comando é deliberadamente destravado apenas por duas opções explícitas e não foi executado contra `valid.com` nesta validação.

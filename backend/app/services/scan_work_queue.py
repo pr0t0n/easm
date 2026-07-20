@@ -297,6 +297,11 @@ MEDIUM_TOOLS = {
     "nuclei-auth",
     "nuclei-jwt",
     "nuclei-exposure",
+    "nuclei-js-secrets",
+    "nuclei-js-analysis",
+    "nuclei-misconfiguration",
+    "nuclei-file-upload",
+    "nuclei-swagger",
     "nuclei-cloud",
     "nuclei-deserialization",
     "nuclei-clickjacking",
@@ -330,6 +335,8 @@ HTTP_SURFACE_TOOLS = {
 }
 HTTP_NUCLEI_TOOLS = {
     "nuclei", "nuclei-cves", "nuclei-headers", "nuclei-exposure",
+    "nuclei-js-secrets", "nuclei-js-analysis", "nuclei-misconfiguration",
+    "nuclei-file-upload", "nuclei-swagger",
     "nuclei-cors", "nuclei-crlf", "nuclei-redirect", "nuclei-graphql",
     "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
     "nuclei-ssti", "nuclei-xxe", "nuclei-idor", "nuclei-csrf",

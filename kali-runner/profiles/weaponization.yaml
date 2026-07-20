@@ -227,6 +227,61 @@ nuclei_exposure:
   timeout: 600
   parser: jsonl
 
+nuclei_js_secrets:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei JavaScript secret exposure templates for bundles, source maps, tokens and API keys."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "javascript,js,source-map,token,api-key,secret",
+        "-rate-limit", "60"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_js_analysis:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei JavaScript and source-map exposure analysis."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "javascript,js,source-map,webpack,debug",
+        "-rate-limit", "60"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_misconfiguration:
+  tool: nuclei
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Nuclei security misconfiguration and exposed configuration templates."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "misconfig,security-misconfiguration,config-exposure,exposure",
+        "-rate-limit", "80"]
+  timeout: 600
+  parser: jsonl
+
+nuclei_file_upload:
+  tool: nuclei
+  category: vuln
+  phase: EXPLOITATION_VALIDATION
+  description: "Nuclei file-upload exposure templates with bounded request rate."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "file-upload,upload,unrestricted-upload",
+        "-rate-limit", "40"]
+  timeout: 300
+  parser: jsonl
+
+nuclei_swagger:
+  tool: nuclei
+  category: vuln
+  phase: EXPLOITATION_VALIDATION
+  description: "Nuclei Swagger/OpenAPI exposure and API documentation templates."
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+        "-tags", "swagger,openapi,api-docs,api",
+        "-rate-limit", "50"]
+  timeout: 300
+  parser: jsonl
+
 nuclei_cloud:
   tool: nuclei
   category: vuln

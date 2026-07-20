@@ -498,7 +498,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("git", "curl_probe", ["git_exposure_review"], "http_parser"),
         entry("gitleaks", "gitleaks_secrets", ["secret_detection"], "secret_parser"),
         entry("trufflehog-filesystem", "trufflehog_secrets", ["secret_detection"], "secret_parser"),
-        entry("amass", "amass_brute", ["subdomain_enumeration", "passive_recon", "osint"], "subfinder_parser"),
+        entry("amass", "amass_enum", ["subdomain_enumeration", "passive_recon", "osint"], "subfinder_parser"),
         entry("shodan-cli", "shodan_lookup", ["port_service_discovery", "osint", "banner_grabbing"], "generic_json_parser"),
         entry("theharvester", "theharvester_passive", ["osint", "email_harvesting"], "generic_json_parser"),
         # === Expanded catalog — Kali tools now reachable from offensive operator ===
@@ -592,6 +592,11 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("nuclei-oauth", "nuclei_jwt", ["oauth_validation"], "nuclei_parser"),
         # Information/Secret Exposure — 78 reports: API keys, tokens, stack traces, debug
         entry("nuclei-exposure", "nuclei_exposure", ["information_disclosure", "secret_detection"], "nuclei_parser"),
+        entry("nuclei-js-secrets", "nuclei_js_secrets", ["js_analysis", "secret_detection"], "nuclei_parser"),
+        entry("nuclei-js-analysis", "nuclei_js_analysis", ["js_analysis", "source_map_exposure"], "nuclei_parser"),
+        entry("nuclei-misconfiguration", "nuclei_misconfiguration", ["security_misconfiguration", "information_disclosure"], "nuclei_parser"),
+        entry("nuclei-file-upload", "nuclei_file_upload", ["file_upload", "web_validation"], "nuclei_parser"),
+        entry("nuclei-swagger", "nuclei_swagger", ["openapi_scan", "api_spec_exposure"], "nuclei_parser"),
         # Cloud/S3 Exposure — 15 reports: open buckets, AWS metadata, GCP/Azure
         entry("nuclei-cloud", "nuclei_cloud", ["cloud_exposure", "s3_audit"], "nuclei_parser"),
         # Deserialization — 13 reports: Java, PHP, Python unsafe deserialize
