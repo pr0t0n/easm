@@ -257,7 +257,7 @@ whatweb_fingerprint:
   # '--log-json=-' makes whatweb's Ruby logger write to a stdout stream the
   # runner already owns → 'closed stream (IOError)'. Use the default verbose
   # stdout output (parser: raw) instead — it is fully parseable.
-  cmd: ["whatweb", "--no-errors", "-a", "3", "--colour=never", "{url}"]
+  cmd: ["whatweb", "--no-errors", "-a", "3", "--colour=never", "--follow-redirect=never", "{url}"]
   timeout: 120
   parser: raw
 
@@ -446,7 +446,7 @@ nuclei_takeover:
   category: recon
   phase: RECONNAISSANCE
   description: "Nuclei subdomain takeover templates — dangling CNAME, unclaimed services, fingerprint-based detection."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "takeover,subdomain-takeover,dns-takeover",
         "-rate-limit", "100"]
   timeout: 300

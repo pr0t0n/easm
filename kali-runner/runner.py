@@ -51,6 +51,43 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Profile loading ──────────────────────────────────────────────────────────
+def _redirect_safety_violation(name: str, spec: dict[str, Any]) -> str:
+    """Reject profiles capable of following a response to an unvetted host.
+
+    Redirect destinations are evaluated by the backend and, when still in
+    scope, scheduled as a separate one-hop job. A tool profile must therefore
+    never follow redirects internally where the runner cannot re-check scope.
+    """
+    command = [str(token) for token in (spec.get("cmd") or [])]
+    tool = str(spec.get("tool") or (command[0] if command else name)).lower()
+    tokens = set(command)
+
+    if tool == "httpx" and tokens.intersection({"-fr", "-follow-redirects", "-fhr", "-follow-host-redirects"}):
+        return "httpx redirect following must be handled by the scope-safe one-hop queue"
+    if tool == "nuclei" and "-dr" not in tokens:
+        return "nuclei profiles must include -dr"
+    if tool == "whatweb" and "--follow-redirect=never" not in tokens:
+        return "whatweb profiles must include --follow-redirect=never"
+    if tool == "katana" and not {"-dr", "-fs"}.issubset(tokens):
+        return "katana profiles must disable redirects and enforce a host scope field"
+    if tool == "hakrawler" and "-dr" not in tokens:
+        return "hakrawler profiles must include -dr"
+    if tool == "gospider" and not {"--no-redirect", "--whitelist-domain"}.issubset(tokens):
+        return "gospider profiles must disable redirects and include a domain whitelist"
+    if tool == "curl" and tokens.intersection({"-L", "--location"}):
+        return "curl profiles may not follow redirects"
+    if tool == "nikto" and "-followredirects" in tokens:
+        return "nikto profiles may not follow redirects"
+    if tool == "ffuf" and tokens.intersection({"-r", "-recursion"}):
+        # ffuf -recursion follows discovered paths on the same supplied host,
+        # while -r follows HTTP redirects. Do not confuse the two.
+        if "-r" in tokens:
+            return "ffuf profiles may not follow redirects"
+    if tool == "feroxbuster" and tokens.intersection({"-r", "--redirects"}):
+        return "feroxbuster profiles may not follow redirects"
+    return ""
+
+
 def _load_profiles() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     if not PROFILES_DIR.exists():
@@ -60,6 +97,10 @@ def _load_profiles() -> dict[str, dict[str, Any]]:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             for name, spec in data.items():
                 if not isinstance(spec, dict):
+                    continue
+                redirect_violation = _redirect_safety_violation(str(name), spec)
+                if redirect_violation:
+                    print(f"[profiles] rejected unsafe redirect profile {name}: {redirect_violation}")
                     continue
                 spec.setdefault("source_file", path.name)
                 out[name] = spec

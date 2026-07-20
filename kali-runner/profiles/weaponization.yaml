@@ -6,7 +6,7 @@ nuclei_cves:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "CVE & misconfiguration template-driven scan (8000+ checks)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-severity", "critical,high,medium", "-rate-limit", "150"]
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr", "-severity", "critical,high,medium", "-rate-limit", "150"]
   timeout: 900
   parser: jsonl
 
@@ -18,7 +18,7 @@ nuclei_cves_batch:
   phase: WEAPONIZATION_SIMULATION
   target_type: targets_file
   description: "Batch nuclei CVE/misconfiguration scan across multiple URLs."
-  cmd: ["nuclei", "-list", "{target_file}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-list", "{target_file}", "-silent", "-jsonl", "-dr",
         "-severity", "critical,high,medium", "-rate-limit", "200",
         "-bulk-size", "25", "-concurrency", "25"]
   timeout: 1200
@@ -188,7 +188,7 @@ nuclei_rce:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei RCE/command injection templates — critical severity only (HackerOne injection class: 135 reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "rce,command-injection,code-injection,os-command-injection",
         "-severity", "critical,high", "-rate-limit", "50"]
   timeout: 600
@@ -199,7 +199,7 @@ nuclei_auth:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei auth/default-credentials templates — broken auth, default logins, 2FA bypass (119 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "auth,authentication,default-login,default-credentials,auth-bypass,2fa-bypass",
         "-rate-limit", "60"]
   timeout: 600
@@ -210,7 +210,7 @@ nuclei_jwt:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei JWT/OAuth templates — alg:none, weak HS256, token leak, OAuth state bypass (19 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "jwt,oauth,oauth2,token",
         "-rate-limit", "80"]
   timeout: 300
@@ -221,7 +221,7 @@ nuclei_exposure:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei information/secret exposure templates — API keys, tokens, stack traces, debug endpoints (78 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "exposure,token,api-key,secret,debug,stack-trace,config-exposure",
         "-rate-limit", "100"]
   timeout: 600
@@ -232,7 +232,7 @@ nuclei_js_secrets:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei JavaScript secret exposure templates for bundles, source maps, tokens and API keys."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "javascript,js,source-map,token,api-key,secret",
         "-rate-limit", "60"]
   timeout: 300
@@ -243,7 +243,7 @@ nuclei_js_analysis:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei JavaScript and source-map exposure analysis."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "javascript,js,source-map,webpack,debug",
         "-rate-limit", "60"]
   timeout: 300
@@ -254,7 +254,7 @@ nuclei_misconfiguration:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei security misconfiguration and exposed configuration templates."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "misconfig,security-misconfiguration,config-exposure,exposure",
         "-rate-limit", "80"]
   timeout: 600
@@ -265,7 +265,7 @@ nuclei_file_upload:
   category: vuln
   phase: EXPLOITATION_VALIDATION
   description: "Nuclei file-upload exposure templates with bounded request rate."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "file-upload,upload,unrestricted-upload",
         "-rate-limit", "40"]
   timeout: 300
@@ -276,7 +276,7 @@ nuclei_swagger:
   category: vuln
   phase: EXPLOITATION_VALIDATION
   description: "Nuclei Swagger/OpenAPI exposure and API documentation templates."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "swagger,openapi,api-docs,api",
         "-rate-limit", "50"]
   timeout: 300
@@ -287,7 +287,7 @@ nuclei_cloud:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei cloud/S3 exposure templates — open buckets, AWS metadata, GCP/Azure exposure (15 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "s3,cloud,aws,gcp,azure,bucket,instance-metadata,ec2-metadata",
         "-rate-limit", "80"]
   timeout: 300
@@ -298,7 +298,7 @@ nuclei_deserialization:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei deserialization templates — Java, PHP, Python unsafe deserialize (13 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "deserialization,insecure-deserialization,unsafe-deserialization",
         "-severity", "critical,high", "-rate-limit", "50"]
   timeout: 300
@@ -309,7 +309,7 @@ nuclei_clickjacking:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei clickjacking templates — missing X-Frame-Options, CSP frame-ancestors bypass (19 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "clickjacking,xfo,x-frame-options",
         "-rate-limit", "25"]
   timeout: 180
@@ -320,7 +320,7 @@ nuclei_headers:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei missing security headers — CSP, HSTS, X-Content-Type-Options, DMARC/SPF/DKIM (27 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "headers,missing-headers,security-misconfiguration,csp,hsts,dmarc,spf",
         "-rate-limit", "25"]
   timeout: 180
@@ -331,7 +331,7 @@ nuclei_spoofing:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nuclei spoofing/impersonation templates — email spoofing via missing SPF/DMARC, content spoofing (53 HackerOne reports)."
-  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl",
+  cmd: ["nuclei", "-u", "{url}", "-silent", "-jsonl", "-dr",
         "-tags", "spoofing,email-spoofing,content-spoofing,spf,dmarc,dkim",
         "-rate-limit", "25"]
   timeout: 180
