@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from app.services.artifact_store import redact
 from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract
+from app.services.hypothesis_planner import _prefetch_read_only_observations
 from app.services.pentest_validators import _safe_request
 from app.services.sensitive_file_analyzer import (
     ALL_SENSITIVE_EXTENSIONS,
@@ -102,3 +105,42 @@ def test_sensitive_fetch_never_follows_redirects_and_stops_at_byte_limit(monkeyp
     assert result["body_len"] == 80
     assert result["analysis_text"] == ("a" * 64) + ("b" * 16)
     assert ("closed", True) in calls
+
+
+def test_read_only_hypotheses_are_prefetched_without_threaded_db_access(monkeypatch) -> None:
+    db = object()
+    hypotheses = [
+        SimpleNamespace(id=1, hypothesis_type="sensitive_file_exposure"),
+        SimpleNamespace(id=2, hypothesis_type="information_disclosure"),
+        SimpleNamespace(id=3, hypothesis_type="idor_bola"),
+        SimpleNamespace(id=4, hypothesis_type="sensitive_file_exposure"),
+    ]
+    endpoint_calls = []
+    request_calls = []
+
+    def fake_endpoint_for_hypothesis(received_db, hypothesis):
+        endpoint_calls.append((received_db, hypothesis.id))
+        if hypothesis.id == 4:
+            return SimpleNamespace(url="https://external.example/leak.env")
+        return SimpleNamespace(url=f"https://valid.com/{hypothesis.id}.txt")
+
+    def fake_safe_request(url, headers, cookies, *, follow_redirects, analysis_bytes):
+        request_calls.append((url, follow_redirects, analysis_bytes))
+        return {"ok": True, "status_code": 200, "analysis_text": ""}
+
+    monkeypatch.setattr(
+        "app.services.pentest_validators._endpoint_for_hypothesis",
+        fake_endpoint_for_hypothesis,
+    )
+    monkeypatch.setattr("app.services.pentest_validators._safe_request", fake_safe_request)
+
+    scan = SimpleNamespace(target_query="valid.com")
+    observations = _prefetch_read_only_observations(db, scan, hypotheses)
+
+    assert set(observations) == {1, 2, 4}
+    assert observations[4]["error"] == "OutOfScope"
+    assert endpoint_calls == [(db, 1), (db, 2), (db, 4)]
+    assert sorted(request_calls) == [
+        ("https://valid.com/1.txt", False, 131072),
+        ("https://valid.com/2.txt", False, 0),
+    ]

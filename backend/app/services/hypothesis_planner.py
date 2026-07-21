@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -202,10 +203,16 @@ def drain_hypotheses(
         rows = list(plan.get("rows") or [])
         if not rows:
             break
+        prefetched = _prefetch_read_only_observations(db, job, rows)
         progressed = 0
         for hypothesis in rows:
             before = str(hypothesis.status or "")
-            result = validate_hypothesis(db, job, hypothesis)
+            result = validate_hypothesis(
+                db,
+                job,
+                hypothesis,
+                prefetched_observation=prefetched.get(int(hypothesis.id)),
+            )
             outcome = str(result.get("result") or "skipped")
             after = str(hypothesis.status or "")
             record_outcome(
@@ -246,6 +253,70 @@ def drain_hypotheses(
     db.add(job)
     db.flush()
     return summary
+
+
+def _prefetch_read_only_observations(
+    db: Session,
+    job: ScanJob,
+    hypotheses: list[OffensiveHypothesis],
+) -> dict[int, dict[str, Any]]:
+    """Fetch read-only probes concurrently while DB writes remain serial."""
+    from app.services.pentest_validators import _endpoint_for_hypothesis, _safe_request
+    from app.services.scan_scope import authorized_scope_from_target_query, host_from_scope_reference, is_host_in_scope
+
+    read_only_types = {
+        "api_security", "api_graphql", "api_spec_exposure",
+        "information_disclosure", "sensitive_file_exposure",
+    }
+    probes: list[tuple[int, str, int]] = []
+    observations: dict[int, dict[str, Any]] = {}
+    scope = authorized_scope_from_target_query(str(job.target_query or ""))
+    for hypothesis in hypotheses:
+        hypothesis_type = str(hypothesis.hypothesis_type or "")
+        if hypothesis_type not in read_only_types:
+            continue
+        endpoint = _endpoint_for_hypothesis(db, hypothesis)
+        if endpoint:
+            endpoint_url = str(endpoint.url)
+            if not is_host_in_scope(host_from_scope_reference(endpoint_url), scope):
+                observations[int(hypothesis.id)] = {
+                    "ok": False,
+                    "error": "OutOfScope",
+                    "detail": "read_only_probe_discarded_by_scope_guard",
+                }
+                continue
+            probes.append((
+                int(hypothesis.id),
+                endpoint_url,
+                131072 if hypothesis_type == "sensitive_file_exposure" else 0,
+            ))
+    if not probes:
+        return observations
+
+    worker_count = max(1, min(32, int(os.getenv("PENTEST_HYPOTHESIS_HTTP_WORKERS", "12"))))
+    with ThreadPoolExecutor(max_workers=min(worker_count, len(probes))) as pool:
+        futures = {
+            pool.submit(
+                _safe_request,
+                url,
+                {},
+                {},
+                follow_redirects=False,
+                analysis_bytes=analysis_bytes,
+            ): hypothesis_id
+            for hypothesis_id, url, analysis_bytes in probes
+        }
+        for future in as_completed(futures):
+            hypothesis_id = futures[future]
+            try:
+                observations[hypothesis_id] = future.result()
+            except Exception as exc:  # pragma: no cover - _safe_request catches network failures
+                observations[hypothesis_id] = {
+                    "ok": False,
+                    "error": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                }
+    return observations
 
 
 def ensure_hypothesis_drain_work_item(
