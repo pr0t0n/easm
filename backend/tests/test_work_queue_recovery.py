@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 def test_recover_orphaned_capacity_work_queue_resumes_dispatcher(monkeypatch) -> None:
     from app.models.models import ScanJob
+    from app.services import scan_work_queue
     from app.workers import tasks
 
     job = SimpleNamespace(
@@ -53,6 +54,7 @@ def test_recover_orphaned_capacity_work_queue_resumes_dispatcher(monkeypatch) ->
     monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
     monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: False)
     monkeypatch.setattr(tasks, "dispatch_scan_work_items", FakeDispatcher)
+    monkeypatch.setattr(scan_work_queue, "has_pending_work", lambda db, scan_id: True)
 
     result = tasks.recover_scan_if_orphaned(5, source="test")
 
@@ -61,6 +63,72 @@ def test_recover_orphaned_capacity_work_queue_resumes_dispatcher(monkeypatch) ->
     assert delayed == [5]
     assert job.status == "running"
     assert job.current_step == "Recuperacao automatica: retomando fila persistida"
+
+
+def test_recover_terminal_capacity_queue_requests_finalization_only(monkeypatch) -> None:
+    from app.models.models import ScanJob
+    from app.services import scan_work_queue
+    from app.workers import tasks
+
+    job = SimpleNamespace(
+        id=8,
+        status="running",
+        state_data={"parallel_engine": "capacity_work_queue", "current_pentest_phase_id": "P21"},
+        current_step="stale",
+        next_retry_at="later",
+    )
+    delayed: list[int] = []
+
+    class FakeQuery:
+        def __init__(self, first_value=None, count_value=0):
+            self.first_value = first_value
+            self.count_value = count_value
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return self.first_value
+
+        def count(self):
+            return self.count_value
+
+    class FakeSession:
+        def query(self, model):
+            if model is ScanJob:
+                return FakeQuery(first_value=job)
+            return FakeQuery(count_value=4358)
+
+        def add(self, obj):
+            return None
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeDispatcher:
+        @staticmethod
+        def delay(scan_id: int):
+            delayed.append(scan_id)
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: False)
+    monkeypatch.setattr(tasks, "dispatch_scan_work_items", FakeDispatcher)
+    monkeypatch.setattr(scan_work_queue, "has_pending_work", lambda db, scan_id: False)
+
+    result = tasks.recover_scan_if_orphaned(8, source="test")
+
+    assert result == {
+        "scan_id": 8,
+        "action": "work_queue_finalization_queued",
+        "work_items": 4358,
+    }
+    assert delayed == [8]
+    assert job.status == "running"
+    assert job.current_step == "P21 · Finalizacao automatica: fila terminal enviada ao Quality Gate"
+    assert "work_queue_finalization_requested_at" in job.state_data["recovery"]
 
 
 def test_recover_does_not_redrive_active_phase_queue_task(monkeypatch) -> None:

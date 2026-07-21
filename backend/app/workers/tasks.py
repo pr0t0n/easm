@@ -1934,6 +1934,7 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         state = dict(job.state_data or {})
         if state.get("parallel_engine") == "capacity_work_queue":
             from app.models.models import ScanWorkItem
+            from app.services.scan_work_queue import has_pending_work
 
             total_items = db.query(ScanWorkItem.id).filter(ScanWorkItem.scan_job_id == scan_id).count()
             if total_items:
@@ -1941,6 +1942,31 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
                     dispatch_scan_work_items.delay(scan_id)
                 except Exception:
                     pass
+                if not has_pending_work(db, scan_id):
+                    recovery = dict(state.get("recovery") or {})
+                    recovery["work_queue_finalization_requested_at"] = datetime.now().isoformat()
+                    state["recovery"] = recovery
+                    job.state_data = state
+                    job.current_step = _step_with_phase(
+                        state,
+                        "Finalizacao automatica: fila terminal enviada ao Quality Gate",
+                    )
+                    job.next_retry_at = None
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source=source,
+                        level="INFO",
+                        message=(
+                            "Scan orfao com fila totalmente terminal; "
+                            "dispatcher acionado apenas para finalizacao/Quality Gate"
+                        ),
+                    ))
+                    db.commit()
+                    return {
+                        "scan_id": scan_id,
+                        "action": "work_queue_finalization_queued",
+                        "work_items": int(total_items),
+                    }
                 job.status = "running"
                 job.current_step = _step_with_phase(state, "Recuperacao automatica: retomando fila persistida")
                 job.next_retry_at = None
@@ -2832,6 +2858,15 @@ def execute_scan_work_item(item_id: int):
                 dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
                 return {"id": item.id, "status": item.status, "validation": validation_result, "continuation": continuation}
             except Exception as exc:  # noqa: BLE001
+                # Flush errors leave the SQLAlchemy transaction aborted. Reload
+                # the controller after rollback before persisting the visible
+                # failure, otherwise this handler raises PendingRollbackError
+                # and strands the scan at the final quality gate.
+                db.rollback()
+                item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+                job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first() if item else None
+                if not item or not job:
+                    return {"id": item_id, "status": "failed", "error": str(exc)[:500]}
                 finished_at = datetime.now()
                 item.status = "failed"
                 item.lease_until = None
