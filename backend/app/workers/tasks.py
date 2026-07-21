@@ -1938,6 +1938,23 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
 
             total_items = db.query(ScanWorkItem.id).filter(ScanWorkItem.scan_job_id == scan_id).count()
             if total_items:
+                active_leased_item = (
+                    db.query(ScanWorkItem.id)
+                    .filter(
+                        ScanWorkItem.scan_job_id == scan_id,
+                        ScanWorkItem.status.in_(["running", "submitted"]),
+                        ScanWorkItem.lease_until.isnot(None),
+                        ScanWorkItem.lease_until > datetime.now(),
+                    )
+                    .first()
+                )
+                if active_leased_item:
+                    return {
+                        "scan_id": scan_id,
+                        "action": "work_queue_active",
+                        "work_items": int(total_items),
+                        "active_work_item_id": int(active_leased_item[0]),
+                    }
                 try:
                     dispatch_scan_work_items.delay(scan_id)
                 except Exception:

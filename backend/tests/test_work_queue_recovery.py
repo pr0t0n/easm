@@ -131,6 +131,65 @@ def test_recover_terminal_capacity_queue_requests_finalization_only(monkeypatch)
     assert "work_queue_finalization_requested_at" in job.state_data["recovery"]
 
 
+def test_recover_does_not_interfere_with_valid_leased_work_item(monkeypatch) -> None:
+    from app.models.models import ScanJob, ScanWorkItem
+    from app.workers import tasks
+
+    job = SimpleNamespace(
+        id=8,
+        status="running",
+        state_data={"parallel_engine": "capacity_work_queue"},
+        current_step="P21 · validando hipoteses",
+        next_retry_at=None,
+    )
+    delayed: list[int] = []
+
+    class FakeQuery:
+        def __init__(self, *, first_value=None, count_value=0):
+            self.first_value = first_value
+            self.count_value = count_value
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return self.first_value
+
+        def count(self):
+            return self.count_value
+
+    class FakeSession:
+        def query(self, model):
+            if model is ScanJob:
+                return FakeQuery(first_value=job)
+            if model is ScanWorkItem.id:
+                return FakeQuery(first_value=(22499,), count_value=4358)
+            raise AssertionError(model)
+
+        def close(self):
+            return None
+
+    class FakeDispatcher:
+        @staticmethod
+        def delay(scan_id: int):
+            delayed.append(scan_id)
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: False)
+    monkeypatch.setattr(tasks, "dispatch_scan_work_items", FakeDispatcher)
+
+    result = tasks.recover_scan_if_orphaned(8, source="test")
+
+    assert result == {
+        "scan_id": 8,
+        "action": "work_queue_active",
+        "work_items": 4358,
+        "active_work_item_id": 22499,
+    }
+    assert delayed == []
+    assert job.current_step == "P21 · validando hipoteses"
+
+
 def test_recover_does_not_redrive_active_phase_queue_task(monkeypatch) -> None:
     from app.models.models import ScanJob
     from app.workers import tasks
