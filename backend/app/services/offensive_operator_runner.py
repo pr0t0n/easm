@@ -4460,9 +4460,25 @@ def _persist_discovery_inventory(db, job: ScanJob, target: str, mcp_results: lis
         "katana", "katana-js", "gospider", "hakrawler", "gau", "waybackurls", "linkfinder",
         "chromium-capture", "chromium_capture",
     }
+    # Ferramentas de subdomain enum (mesmo conjunto de _extract_evidence:3440)
+    # emitem hostnames nus, não URLs — normalize_crawler_result/upsert_endpoint
+    # exigem esquema+netloc e nunca as reconhecem, então os hosts descobertos
+    # nunca viravam OffensiveAsset (só sobreviviam em Finding.details e no
+    # state_data em memória). Persistem aqui via upsert_asset diretamente.
+    subdomain_enum_tools = {
+        "subfinder", "amass", "amass-brute", "amass-intel", "assetfinder",
+        "dnsx", "dnsrecon", "dnsrecon-brt", "dnsenum", "findomain", "sublist3r",
+        "ghdb-public-indexes",
+    }
     try:
         from app.services.crawler_result_normalizer import normalize_crawler_result
         from app.services.hypothesis_rules import generate_hypotheses_for_scan
+        from app.services.offensive_inventory_service import OffensiveInventoryService
+        from app.services.scan_scope import (
+            authorized_scope_from_target_query,
+            host_from_scope_reference,
+            is_host_in_scope,
+        )
     except Exception:
         return
 
@@ -4471,18 +4487,36 @@ def _persist_discovery_inventory(db, job: ScanJob, target: str, mcp_results: lis
         if not isinstance(mcp_res, dict):
             continue
         tool_name = str(mcp_res.get("tool_name") or "").strip().lower()
-        if tool_name not in discovery_tools:
-            continue
         if str(mcp_res.get("status") or "").lower() not in {"success", "done", "completed"}:
             continue
-        normalize_crawler_result(
-            db,
-            job,
-            target=str(mcp_res.get("target") or target or job.target_query or ""),
-            tool_name=tool_name,
-            result=mcp_res,
-        )
-        changed = True
+        if tool_name in discovery_tools:
+            normalize_crawler_result(
+                db,
+                job,
+                target=str(mcp_res.get("target") or target or job.target_query or ""),
+                tool_name=tool_name,
+                result=mcp_res,
+            )
+            changed = True
+        elif tool_name in subdomain_enum_tools:
+            stdout = str(mcp_res.get("stdout") or "")
+            domains = _extract_domains_from_output(stdout)
+            authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
+            blocked = []
+            inv = OffensiveInventoryService(db, job)
+            for domain in domains:
+                if not authorized_scope or not is_host_in_scope(host_from_scope_reference(domain), authorized_scope):
+                    blocked.append(domain)
+                    continue
+                inv.upsert_asset(domain, asset_type="web", source_tool=tool_name, confidence=60)
+                changed = True
+            if blocked:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="scope-guard",
+                    level="WARNING",
+                    message=f"subdomain_inventory_scope_blocked tool={tool_name} count={len(blocked)} hosts={sorted(blocked)}"[:4000],
+                ))
     if changed:
         generate_hypotheses_for_scan(db, job)
         db.flush()
