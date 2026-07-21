@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from app.services.artifact_store import redact
 from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract
 from app.services.hypothesis_planner import _prefetch_read_only_observations
-from app.services.pentest_validators import _safe_request
+from app.services.pentest_validators import _deduplicate_followup_urls, _safe_request
 from app.services.sensitive_file_analyzer import (
     ALL_SENSITIVE_EXTENSIONS,
     analyze_sensitive_file_content,
@@ -144,3 +144,24 @@ def test_read_only_hypotheses_are_prefetched_without_threaded_db_access(monkeypa
         ("https://valid.com/1.txt", False, 131072),
         ("https://valid.com/2.txt", False, 0),
     ]
+
+
+def test_sensitive_followup_urls_are_deduplicated_across_the_batch() -> None:
+    context = {"seen_extracted_urls": set(), "extracted_urls": set()}
+
+    first = _deduplicate_followup_urls(
+        ["https://valid.com/a", "https://valid.com/b", "https://valid.com/a"],
+        context,
+    )
+    second = _deduplicate_followup_urls(
+        ["https://valid.com/b", "https://valid.com/c"],
+        context,
+    )
+
+    assert first == ["https://valid.com/a", "https://valid.com/b"]
+    assert second == ["https://valid.com/c"]
+    assert context["extracted_urls"] == {
+        "https://valid.com/a",
+        "https://valid.com/b",
+        "https://valid.com/c",
+    }

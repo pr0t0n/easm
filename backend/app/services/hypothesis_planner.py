@@ -204,6 +204,10 @@ def drain_hypotheses(
         if not rows:
             break
         prefetched = _prefetch_read_only_observations(db, job, rows)
+        followup_context: dict[str, Any] = {
+            "seen_extracted_urls": set(),
+            "extracted_urls": set(),
+        }
         progressed = 0
         for hypothesis in rows:
             before = str(hypothesis.status or "")
@@ -212,6 +216,7 @@ def drain_hypotheses(
                 job,
                 hypothesis,
                 prefetched_observation=prefetched.get(int(hypothesis.id)),
+                followup_context=followup_context,
             )
             outcome = str(result.get("result") or "skipped")
             after = str(hypothesis.status or "")
@@ -226,6 +231,10 @@ def drain_hypotheses(
             total += 1
             if after != before and after in TERMINAL_STATUSES:
                 progressed += 1
+        if followup_context["extracted_urls"]:
+            from app.services.hypothesis_rules import generate_hypotheses_for_scan
+
+            generate_hypotheses_for_scan(db, job)
         db.flush()
         if progressed == 0:
             no_progress = True
