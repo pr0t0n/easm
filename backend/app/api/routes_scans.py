@@ -27,7 +27,7 @@ from app.models.models import (
     ScanAuditLog, AgentTraceEvent, AgentActivityLog, SkillScore, VulnerabilityLearning, AccessGroup,
     ScanWorkItem, SkillLibrary, ScanIdentity, ScanAuthSession, EvidenceArtifact, OffensiveAsset,
     OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
-    OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun,
+    OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun, PentestOutcomeMetric,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.audit_service import log_audit
@@ -3001,9 +3001,36 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         synchronize_session=False,
     )
 
+    # 4) Cadeia do fluxo de pentest ofensivo (hypothesis/validation/coverage/
+    #    evidence) referencia findings e/ou scan_jobs sem cascade ORM; sem isso
+    #    o DELETE de findings (disparado pelo cascade "all, delete-orphan" de
+    #    ScanJob.findings) viola FK em evidence_artifacts/validation_runs/etc.
+    #    Ordem importa: filhos antes dos pais.
+    db.query(RetestRun).filter(RetestRun.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(CoverageItem).filter(CoverageItem.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ValidationRun).filter(ValidationRun.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveParameter).filter(OffensiveParameter.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveJsAsset).filter(OffensiveJsAsset.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveService).filter(OffensiveService.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveApiSpec).filter(OffensiveApiSpec.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveHypothesis).filter(OffensiveHypothesis.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(OffensiveAsset).filter(OffensiveAsset.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(EvidenceArtifact).filter(EvidenceArtifact.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ScanAuthSession).filter(ScanAuthSession.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ScanIdentity).filter(ScanIdentity.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.execute(text("DELETE FROM scan_embeddings WHERE scan_job_id = :scan_id"), {"scan_id": scan_id})
+
+    # PentestOutcomeMetric é aprendizado agregado por owner/dimension — não deve
+    # ser apagado junto do scan, apenas perder a referência ao último scan.
+    db.query(PentestOutcomeMetric).filter(PentestOutcomeMetric.last_scan_job_id == scan_id).update(
+        {PentestOutcomeMetric.last_scan_job_id: None}, synchronize_session=False,
+    )
+
     # Limpar referências de audit_events antes de deletar o scan
     db.query(AuditEvent).filter(AuditEvent.scan_job_id == scan_id).delete(synchronize_session=False)
-    
+
     db.delete(job)
     log_audit(
         db,
