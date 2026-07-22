@@ -576,11 +576,12 @@ def _target_context(
     resolve_ip: bool = False,
 ) -> dict[str, str]:
     raw = str(target or "").strip()
-    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    has_scheme = "://" in raw
+    parsed = urlparse(raw if has_scheme else f"http://{raw}")
     host = parsed.hostname or raw.replace("http://", "").replace("https://", "").split("/")[0]
     port = str(parsed.port or "")
     netloc = f"{host}:{parsed.port}" if parsed.port else host
-    scheme = parsed.scheme if "://" in raw else "http"
+    scheme = parsed.scheme if has_scheme else _probe_live_scheme(host)
     path = parsed.path or ""
     query = parsed.query or ""
     url = urlunparse((scheme, netloc, path, "", query, ""))
@@ -621,6 +622,44 @@ def _target_context(
     if not context.get("env_SCAN_HTTP_METHOD", "").strip():
         context["env_SCAN_HTTP_METHOD"] = "POST"
     return context
+
+
+_SCHEME_PROBE_CACHE: dict[str, tuple[str, float]] = {}
+_SCHEME_PROBE_CACHE_TTL = 300.0
+_SCHEME_PROBE_LOCK = threading.Lock()
+
+
+def _probe_live_scheme(host: str, timeout: float = 2.0) -> str:
+    """TCP-connect probe to pick a scheme when the caller passed a bare host.
+
+    Previously `_target_context` always defaulted to "http" when no scheme was
+    given, regardless of whether the host was HTTPS-only. This was the direct
+    cause of curl-headers (and other {{url}}-based tools) failing on ~77% of
+    targets on a live scan: `curl --max-time 60 http://host` hangs the full
+    60s (curl exit 28) on a host that only answers on 443, since nothing is
+    listening on 80. A plain TCP connect (no TLS handshake needed) to 443 is
+    enough to tell "port open" from "port closed/filtered" cheaply. Falls back
+    to "http" (the old default) if the probe itself errors, so behavior for a
+    genuinely http-only or unreachable host is unchanged. Cached briefly per
+    host since a single job can resolve the same target's context more than
+    once (command build, stdin template, scheme-promotion check).
+    """
+    now = time.monotonic()
+    with _SCHEME_PROBE_LOCK:
+        cached = _SCHEME_PROBE_CACHE.get(host)
+        if cached and now - cached[1] < _SCHEME_PROBE_CACHE_TTL:
+            return cached[0]
+    scheme = "http"
+    for port, candidate in ((443, "https"), (80, "http")):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                scheme = candidate
+                break
+        except Exception:
+            continue
+    with _SCHEME_PROBE_LOCK:
+        _SCHEME_PROBE_CACHE[host] = (scheme, now)
+    return scheme
 
 
 def _resolve_host_ip(host: str) -> str:
@@ -883,19 +922,101 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             pgid = proc.pid
         _set_job_fields(job_id, subprocess_pid=proc.pid, subprocess_pgid=pgid)
 
-        try:
-            raw_stdout, raw_stderr = proc.communicate(input=stdin_bytes, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # Kill process group (catches all children) then drain remaining output
+        # ── Heartbeat-aware wait ─────────────────────────────────────────────
+        # proc.communicate(timeout=N) is a blind, fixed-deadline kill: it can't
+        # tell "genuinely hung" from "slow but still producing output" (a rate-
+        # limited API doing backoff, a crawler on a large site). That
+        # indistinguishability was flagging real, working calls as timeouts —
+        # observed live on scan #1 for shodan-cli/curl-headers/paramspider.
+        # Fix: track wall-clock time since the LAST byte of stdout/stderr
+        # arrived via background reader threads. Kill early only if truly
+        # silent for `silence_limit`; a hard ceiling (multiple of the
+        # configured timeout) remains as an absolute backstop so nothing can
+        # run forever even if it dribbles out a byte occasionally.
+        if stdin_bytes and proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin_bytes)
+            except Exception:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        _activity = [time.monotonic()]
+        _activity_lock = threading.Lock()
+        _stdout_chunks: list[bytes] = []
+        _stderr_chunks: list[bytes] = []
+
+        def _pump(stream, sink: list[bytes]) -> None:
+            try:
+                while True:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break
+                    with _activity_lock:
+                        sink.append(chunk)
+                        _activity[0] = time.monotonic()
+            except Exception:
+                pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        _t_out = threading.Thread(target=_pump, args=(proc.stdout, _stdout_chunks), daemon=True)
+        _t_err = threading.Thread(target=_pump, args=(proc.stderr, _stderr_chunks), daemon=True)
+        _t_out.start()
+        _t_err.start()
+
+        silence_limit = min(timeout, max(30, int(timeout * 0.5)))
+        hard_ceiling = timeout * 3
+        wait_started = time.monotonic()
+        kill_reason: str | None = None
+        while True:
+            if proc.poll() is not None:
+                break
+            now = time.monotonic()
+            with _activity_lock:
+                idle_for = now - _activity[0]
+            if idle_for > silence_limit:
+                kill_reason = f"no_output_for_{int(idle_for)}s_silence_limit_{silence_limit}s"
+                break
+            if now - wait_started > hard_ceiling:
+                kill_reason = f"hard_ceiling_{hard_ceiling}s_exceeded_despite_activity"
+                break
+            time.sleep(1.0)
+
+        if kill_reason:
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except Exception:
                 proc.kill()
-            raw_stdout, raw_stderr = proc.communicate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            _t_out.join(timeout=2)
+            _t_err.join(timeout=2)
             _set_job_fields(job_id, subprocess_pid=None, subprocess_pgid=None)
-            raise
+            with _activity_lock:
+                partial_stdout = b"".join(_stdout_chunks).decode("utf-8", errors="replace")
+                partial_stderr = b"".join(_stderr_chunks).decode("utf-8", errors="replace")
+            raise subprocess.TimeoutExpired(
+                cmd=argv,
+                timeout=int(time.monotonic() - wait_started),
+                output=partial_stdout,
+                stderr=f"{kill_reason}\n{partial_stderr}",
+            )
 
+        _t_out.join(timeout=5)
+        _t_err.join(timeout=5)
         _set_job_fields(job_id, subprocess_pid=None, subprocess_pgid=None)
+        with _activity_lock:
+            raw_stdout = b"".join(_stdout_chunks)
+            raw_stderr = b"".join(_stderr_chunks)
         stdout = raw_stdout.decode("utf-8", errors="replace") if raw_stdout else ""
         stderr = raw_stderr.decode("utf-8", errors="replace") if raw_stderr else ""
         return_code = proc.returncode
