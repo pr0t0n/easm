@@ -88,6 +88,7 @@ export default function OperationsCenterPage() {
   const [scans,        setScans]        = useState([]);
   const [schedules,    setSchedules]    = useState([]);
   const [sevCounts,    setSevCounts]    = useState({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+  const [familyCounts, setFamilyCounts] = useState([]);
   const [workerHealth, setWorkerHealth] = useState({ summary: {}, capacity: {} });
   const [platformHealth, setPlatformHealth] = useState({});
   const [filtro,       setFiltro]       = useState("todos");
@@ -139,6 +140,21 @@ export default function OperationsCenterPage() {
     }, 1000);
     return () => clearInterval(tick);
   }, [intervalo, doRefresh]);
+
+  // Heatmap real: family_counts é agregado no backend a partir da classificação
+  // por finding (vuln_family.classify_family — título+ferramenta+OWASP+CVE),
+  // não da matemática de porcentagem fixa que existia antes. Escopo acompanha
+  // a mesma seleção (scan específico via filtro, ou empresa/global).
+  useEffect(() => {
+    const scanId = filtro !== "todos" ? filtro : null;
+    client.get("/api/findings/page", {
+      params: {
+        limit: 1, offset: 0, status_filter: "open",
+        ...(scanId ? { scan_id: scanId } : accessGroupId ? { access_group_id: accessGroupId } : {}),
+      },
+    }).then((r) => setFamilyCounts(Array.isArray(r.data?.family_counts) ? r.data.family_counts : []))
+      .catch(() => setFamilyCounts([]));
+  }, [filtro, accessGroupId, lastRefresh]);
 
   const fmtCd = (s) => `${String(Math.floor(s / 60)).padStart(2,"0")}:${String(s % 60).padStart(2,"0")}`;
 
@@ -209,13 +225,20 @@ export default function OperationsCenterPage() {
       ];
 
   const sevCols = ["critical","high","medium","low"];
-  const heat = [
-    { classe: "Aplicações web",     critical: effCrit, high: effAlto, medium: effMed, low: effBaix },
-    { classe: "APIs",               critical: Math.round(effCrit*.4), high: Math.round(effAlto*.3), medium: Math.round(effMed*.3), low: Math.round(effBaix*.2) },
-    { classe: "Infraestrutura",     critical: 0, high: Math.round(effAlto*.2), medium: Math.round(effMed*.2), low: Math.round(effBaix*.3) },
-    { classe: "Auth & credenciais", critical: Math.round(effCrit*.6), high: Math.round(effAlto*.5), medium: Math.round(effMed*.1), low: Math.round(effBaix*.1) },
-    { classe: "DNS & headers",      critical: 0, high: Math.round(effAlto*.1), medium: Math.round(effMed*.2), low: Math.round(effBaix*.4) },
-  ];
+  // Linhas reais por família de vulnerabilidade (classify_family no backend),
+  // não mais uma distribuição fake do total por porcentagens fixas por linha
+  // (a mesma vulnerabilidade não pode mais contar em duas classes ao mesmo
+  // tempo). Cada finding pertence a exatamente UMA família.
+  const heat = familyCounts
+    .filter((f) => sevCols.some((s) => Number(f[s] || 0) > 0))
+    .slice(0, 8)
+    .map((f) => ({
+      classe: f.label || f.family,
+      critical: Number(f.critical || 0),
+      high: Number(f.high || 0),
+      medium: Number(f.medium || 0),
+      low: Number(f.low || 0),
+    }));
   const heatMax = Math.max(...heat.flatMap(r => sevCols.map(s => r[s])), 1);
   // Frameworks: cobertura/técnicas são capacidade da plataforma (estática); o
   // RISCO se molda à severidade do escopo selecionado (intensidade 0..1).
@@ -388,6 +411,11 @@ export default function OperationsCenterPage() {
 
             {/* Heatmap · 2 cols */}
             <TvPanel title="Heatmap · vulnerabilidades por classe" right={selScan ? escopoLabel : "classe × severidade"} span={2}>
+              {heat.length === 0 ? (
+                <div style={{ fontSize: 11, color: TV.muted, padding: "12px 4px" }}>
+                  Sem achados critical/high/medium/low abertos no escopo atual.
+                </div>
+              ) : (
               <div style={{ display: "grid", gridTemplateColumns: "180px repeat(4, 1fr) 44px", gap: 4, alignItems: "center" }}>
                 {/* header */}
                 <span />
@@ -414,6 +442,7 @@ export default function OperationsCenterPage() {
                   ];
                 })}
               </div>
+              )}
             </TvPanel>
 
             {/* Frameworks */}

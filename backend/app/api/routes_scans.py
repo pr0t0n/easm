@@ -4567,8 +4567,20 @@ def list_findings_paginated(
             title=_f.title, tool=_f.tool, owasp=str(_d.get("owasp_category") or ""),
             cve=_f.cve, learning_family=(_d.get("learning_source") or {}).get("vuln_family"),
         )
-        _slot = family_counts.setdefault(_famc, {"family": _famc, "label": _fl_count(_famc), "count": 0})
+        # Per-severity breakdown alongside the flat `count` — the Operations
+        # Center heatmap (classe × severidade) used to fake this distribution
+        # by multiplying the scope's total severity counts by fixed made-up
+        # percentages per row (e.g. "Auth & credenciais" always = 50% of highs)
+        # instead of reading real per-finding classification. This is the real
+        # per-family, per-severity count backing that panel now.
+        _slot = family_counts.setdefault(
+            _famc,
+            {"family": _famc, "label": _fl_count(_famc), "count": 0,
+             "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+        )
         _slot["count"] += 1
+        if _sev in _slot:
+            _slot[_sev] += 1
 
     rows = rows[offset:offset + limit]
 
