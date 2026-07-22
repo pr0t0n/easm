@@ -2262,7 +2262,11 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             if room <= 0:
                 break
             to_claim = min(available, room)
-            rows = (
+            # Wider candidate pool than `to_claim` so the per-phase fairness pass
+            # below has something to redistribute from — a strict `.limit(to_claim)`
+            # on the priority-sorted query would just hand the fairness logic the
+            # same starved slice it's meant to fix.
+            candidates = (
                 db.query(ScanWorkItem)
                 .filter(
                     ScanWorkItem.scan_job_id == scan_id,
@@ -2282,10 +2286,49 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                     ScanWorkItem.created_at.asc(),
                     ScanWorkItem.id.asc(),
                 )
-                .limit(to_claim)
+                .limit(max(to_claim * 6, 60))
                 .with_for_update(skip_locked=True)
                 .all()
             )
+            if not candidates:
+                continue
+            # ── Per-phase fairness (root cause of scan #1's P14/P19/P20 stall) ──
+            # A strict priority sort starves any phase whose priority number is
+            # higher than another phase's, if that other phase has enough
+            # queued/retry churn (e.g. P16 continuously re-queuing timed-out
+            # paramspider/wfuzz items) to keep winning every single dispatch
+            # cycle's LIMIT — confirmed live: P14 (jwt_tool, priority 70) and
+            # P20 (gitleaks/trufflehog, priority 60/90) sat at a fixed queued
+            # count for 20+ minutes while P16 (priority 45/50) kept claiming
+            # every "light" slot every cycle. Gate phases keep unconditional
+            # priority (unbounded here, same as before); non-gate phases each
+            # get a fair share of `to_claim` per cycle instead of whichever has
+            # the lowest priority number monopolizing every slot.
+            gate_rows = [r for r in candidates if r.phase_id in _GATE_TARGET_PHASES]
+            other_rows = [r for r in candidates if r.phase_id not in _GATE_TARGET_PHASES]
+            rows = list(gate_rows[:to_claim])
+            remaining_room = to_claim - len(rows)
+            if remaining_room > 0 and other_rows:
+                distinct_phases = list(dict.fromkeys(r.phase_id for r in other_rows))
+                per_phase_cap = max(1, remaining_room // len(distinct_phases))
+                per_phase_count: dict[str, int] = {}
+                fair_picks: list[ScanWorkItem] = []
+                for r in other_rows:
+                    if len(fair_picks) >= remaining_room:
+                        break
+                    if per_phase_count.get(r.phase_id, 0) >= per_phase_cap:
+                        continue
+                    fair_picks.append(r)
+                    per_phase_count[r.phase_id] = per_phase_count.get(r.phase_id, 0) + 1
+                if len(fair_picks) < remaining_room:
+                    picked_ids = {r.id for r in fair_picks}
+                    for r in other_rows:
+                        if len(fair_picks) >= remaining_room:
+                            break
+                        if r.id in picked_ids:
+                            continue
+                        fair_picks.append(r)
+                rows.extend(fair_picks)
             if not rows:
                 continue
             # Reserva os slots no semáforo Redis atomicamente.
