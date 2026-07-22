@@ -134,12 +134,31 @@ def _enqueue_operator_continuation(
     # ── Idempotent continuation dedup (defense-in-depth atop the chain lock) ──
     # Key on the next phase-UNIT (scan:mode:phase:target), NOT on `reason`, so two
     # independent code paths that compute the same next-unit dedupe against each
-    # other. The TTL is wide enough to absorb concurrent bursts (duplicate chains,
-    # broker redeliveries) but far below the ~50min checkpoint cadence, so a
-    # legitimate checkpoint-resume of the same unit is never suppressed.
+    # other.
+    #
+    # countdown=0 (immediate re-enqueue, e.g. phase_queue_start/time_checkpoint):
+    # TTL only needs to absorb a short concurrent burst (duplicate chains, broker
+    # redeliveries), so a fixed floor is fine — nothing is scheduled to collide
+    # with later.
+    #
+    # countdown>0 (self-rescheduling poll loops: parallel_checkpoint_after_p01,
+    # work_queue_wait, parallel_wait, all using ~60s countdowns to wait for the
+    # parallel work-queue to drain): the TTL MUST expire *before* the scheduled
+    # continuation fires, or that continuation's own attempt to reschedule the
+    # next hop collides with the key it is currently holding and gets suppressed
+    # — killing the loop after exactly one hop (current_step/mission_progress
+    # freeze forever, since nothing else re-arms it). Bug found live 2026-07-22:
+    # the previous formula (`max(90, countdown+30)`) guaranteed ttl > countdown,
+    # i.e. guaranteed self-suppression on every countdown>0 call — introduced in
+    # 5a5b9b2 under the wrong assumption that all callers use a ~50min cadence;
+    # the three poll-loop reasons above use ~60s and hit this every time.
     _next_target = str((job.state_data or {}).get("current_pentest_target") or "")
     import os as _os
-    dedupe_ttl = max(int(_os.getenv("OPERATOR_CONTINUATION_DEDUP_TTL", "90")), int(countdown or 0) + 30)
+    _countdown_i = int(countdown or 0)
+    if _countdown_i > 0:
+        dedupe_ttl = max(5, _countdown_i - 10)
+    else:
+        dedupe_ttl = int(_os.getenv("OPERATOR_CONTINUATION_DEDUP_TTL", "90"))
     dedupe_key = f"operator_continuation:{job.id}:{mode}:{next_phase_id}:{_next_target}"
     try:
         from app.services.scan_work_queue import _redis_client
