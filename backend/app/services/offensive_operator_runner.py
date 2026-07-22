@@ -3078,13 +3078,45 @@ def run_offensive_operator_scan(
             if has_pending_work(db, job.id):
                 _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
                 _final_state_snapshot["work_queue_counts"] = work_queue_counts(db, job.id)
+                _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
+                _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
+                _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                # `completed_work` only ever gets entries from the operator's own
+                # sequential P01 pass — the parallel work-queue engine (tasks.py)
+                # never writes to it — so it stays frozen at ~whatever it had at
+                # the P01→parallel handoff (grep confirms zero references to
+                # `completed_work` in workers/tasks.py). Deriving the phase label
+                # from `_next_unit`/this set would just report an equally stale
+                # early phase forever (e.g. "P02:valid.com" regardless of the scan
+                # having moved on to P09-P20 for real). Compute the true frontier
+                # instead from live scan_work_items: the earliest PHASE_ORDER
+                # phase that still has any non-terminal item, across ALL targets.
+                _cur_phase = ""
+                try:
+                    from app.models.models import ScanWorkItem as _CP_SWI
+                    _cp_active = ("queued", "retry", "dispatched", "running", "submitted", "blocked")
+                    _cp_phases_pending = {
+                        r[0] for r in db.query(_CP_SWI.phase_id)
+                        .filter(_CP_SWI.scan_job_id == job.id, _CP_SWI.status.in_(_cp_active))
+                        .distinct().all()
+                    }
+                    for _cp_p in PHASE_ORDER:
+                        if _cp_p in _cp_phases_pending:
+                            _cur_phase = _cp_p
+                            break
+                except Exception:
+                    pass
+                if not _cur_phase and _next_unit:
+                    _cur_phase = _next_unit[0]
+                if _next_unit:
+                    _final_state_snapshot["current_pentest_phase_id"] = _next_unit[0]
+                    _final_state_snapshot["current_pentest_target"] = _next_unit[1]
                 job.state_data = _final_state_snapshot
                 # Prefix with the phase id: ScansPage.jsx's card badge derives
                 # the active phase by regex-matching /P(\d+)/ against
                 # current_step (extractPhase()) — without it, the badge falls
                 # back to showing the first phase (P01) regardless of how far
                 # the scan actually is.
-                _cur_phase = str(_final_state_snapshot.get("current_pentest_phase_id") or "").strip()
                 _wq_msg = f"aguardando work items {dict(_final_state_snapshot['work_queue_counts'])}"
                 job.current_step = f"{_cur_phase} · {_wq_msg}" if _cur_phase else f"fila: {_wq_msg}"
                 db.add(ScanLog(
@@ -3096,9 +3128,6 @@ def run_offensive_operator_scan(
                 db.commit()
                 from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
                 _dispatch_wq.delay(job.id)
-                _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
-                _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
-                _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
                 queued = _enqueue_operator_continuation(
                     db,
                     job,
