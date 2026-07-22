@@ -2423,17 +2423,43 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 )
                 if _blocked_deps == 0:
                     continue
-                # P09 gate: triage first (skip exploitation on targets w/o findings)
+                # P09 gate: triage_post_p09_injection was designed (and is still
+                # documented, scan_work_queue.py:2331-2340) to prune only the
+                # HIGH-COST tools (wapiti/sqlmap/dalfox/nikto/wpscan/zap) inside
+                # P10/P12/P13 for targets nuclei found nothing on — it explicitly
+                # is NOT meant to gate P11/P14/P17/P19/P20 at all. Reusing its
+                # narrow `targets_with_findings` set to filter every P09
+                # dependent was blocking those phases for ~97% of targets on a
+                # live scan (confirmed: a target with WordPress fingerprinted —
+                # tech_tokens containing "wordpress", applicability score 0.65,
+                # applicable=True — never got wpscan because the apex host
+                # wasn't in the 7-target findings set, even though its own
+                # sibling subdomains were). Each item's own applicability/skill
+                # decision (already computed per-tool, per-target at enqueue and
+                # re-validated at dispatch) is the correct place to decide
+                # relevance — this reconciler should only narrow the specific
+                # phases triage_post_p09_injection actually targets.
+                _TRIAGE_SCOPED_PHASES = {"P10", "P12", "P13"}
                 _unb_targets = _gr_targets
+                _triage_targets = None
                 if _gate_pid == "P09":
                     try:
                         _tr = _gr_triage(db, scan_id)
                         _twf = _tr.get("targets_with_findings") or []
                         if _twf:
-                            _unb_targets = _twf + ["__batch__"]
+                            _triage_targets = _twf + ["__batch__"]
                     except Exception:
                         pass
-                _n = _gr_unblock(db, scan_id, _unb_targets, _gate_pid)
+                _n = 0
+                if _gate_pid == "P09" and _triage_targets is not None:
+                    _scoped_deps = [p for p in _deps if p in _TRIAGE_SCOPED_PHASES]
+                    _broad_deps = [p for p in _deps if p not in _TRIAGE_SCOPED_PHASES]
+                    if _scoped_deps:
+                        _n += _gr_unblock(db, scan_id, _triage_targets, _gate_pid, phases=_scoped_deps)
+                    if _broad_deps:
+                        _n += _gr_unblock(db, scan_id, _unb_targets, _gate_pid, phases=_broad_deps)
+                else:
+                    _n = _gr_unblock(db, scan_id, _unb_targets, _gate_pid)
                 if _n:
                     db.commit()
                     import logging as _grlog

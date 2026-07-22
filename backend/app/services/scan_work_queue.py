@@ -1368,13 +1368,20 @@ def unblock_phase_items(
     scan_id: int,
     targets: list[str],
     gate_phase: str,
+    *,
+    phases: list[str] | None = None,
 ) -> int:
     """
     Desbloqueia items de fases que dependem de gate_phase para os targets dados.
     Ex: gate_phase='P02' → desbloqueia P03/P04/P05/P06/P07/P15 para esses targets.
     Retorna quantos items foram desbloqueados.
+
+    `phases`: subset override of the phases that depend on gate_phase — lets a
+    caller unblock only some dependents (e.g. gate_reconciler narrowing P10/
+    P12/P13 by triage while unblocking P11/P14/P17/P19/P20 unconditionally for
+    the same gate) instead of always unlocking every _GATE_UNLOCKS entry.
     """
-    phases_to_unlock = _GATE_UNLOCKS.get(gate_phase, [])
+    phases_to_unlock = phases if phases is not None else _GATE_UNLOCKS.get(gate_phase, [])
     if not phases_to_unlock or not targets:
         return 0
 
