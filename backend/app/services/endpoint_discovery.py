@@ -340,6 +340,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         normalized_urls = (
             db.query(OffensiveEndpoint.normalized_url)
             .filter(OffensiveEndpoint.scan_job_id == scan_id)
+            .order_by(OffensiveEndpoint.id.asc())
             .limit(10_000)
             .all()
         )

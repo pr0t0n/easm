@@ -4,6 +4,7 @@ import time
 import httpx
 
 from app.core.config import settings
+from app.services.llm_determinism import ollama_generate_payload
 from app.services.resilience import SimpleCircuitBreaker, guarded_call
 
 
@@ -99,11 +100,7 @@ def _call_ollama(model: str, prompt: str) -> str:
                 _OLLAMA_BREAKER,
                 lambda: client.post(
                     f"{settings.ollama_base_url}/api/generate",
-                    json={
-                        "model": resolved_model,
-                        "prompt": prompt,
-                        "stream": False,
-                    },
+                    json=ollama_generate_payload(resolved_model, prompt, stream=False, format="json"),
                 ),
                 on_open_error=RuntimeError("circuit_open: ollama indisponivel temporariamente"),
             )

@@ -157,13 +157,13 @@ def replay_artifact_pair(
     exploit_request = dict(artifact.exploit_request or {})
     if not exploit_request:
         return {"ok": False, "error": "artifact_has_no_exploit_request", "artifact_id": artifact.id}
-    baseline = _execute_request(
+    baseline = _execute_request_stable(
         baseline_request or {"method": "GET", "url": artifact.target},
         timeout=timeout,
         operational_headers=baseline_operational_headers or operational_headers,
         operational_cookies=baseline_operational_cookies or operational_cookies,
     )
-    exploit = _execute_request(
+    exploit = _execute_request_stable(
         exploit_request,
         timeout=timeout,
         operational_headers=exploit_operational_headers or operational_headers,
@@ -181,7 +181,7 @@ def replay_artifact_pair(
     )
     metadata = dict(artifact.artifact_metadata or {})
     negative_url = str(metadata.get("negative_control_url") or "")
-    negative = _execute_request(
+    negative = _execute_request_stable(
         {"method": exploit_request.get("method") or "GET", "url": negative_url},
         timeout=timeout,
         operational_headers=exploit_operational_headers or operational_headers,
@@ -207,6 +207,13 @@ def replay_artifact_pair(
         and str(baseline.get("body_preview") or "")
         and baseline.get("body_preview") == exploit.get("body_preview")
     )
+    unstable = bool(
+        baseline.get("unstable")
+        or exploit.get("unstable")
+        or negative.get("unstable")
+        or not baseline.get("ok")
+        or not exploit.get("ok")
+    )
     replay = {
         "ok": bool(baseline.get("ok") and exploit.get("ok")),
         "artifact_id": artifact.id,
@@ -217,7 +224,9 @@ def replay_artifact_pair(
         "negative_control_distinct": negative_distinct,
         "indicator_match": indicator_match,
         "same_object_cross_identity": same_object_cross_identity,
-        "confirmed": bool((delta or indicator_match or same_object_cross_identity) and negative_distinct),
+        "inconclusive": unstable,
+        "inconclusive_reason": "unstable_or_failed_replay_sample" if unstable else "",
+        "confirmed": bool(not unstable and (delta or indicator_match or same_object_cross_identity) and negative_distinct),
     }
     path = write_artifact_file(artifact.scan_job_id, "retest-pair", replay)
     metadata.setdefault("retests", []).append({
@@ -229,6 +238,51 @@ def replay_artifact_pair(
     db.add(artifact)
     db.flush()
     return replay
+
+
+def _response_signature(row: dict[str, Any]) -> tuple[Any, ...]:
+    if not row.get("ok"):
+        return ("error", str(row.get("error") or ""), str(row.get("detail") or "")[:120])
+    return (
+        "ok",
+        int(row.get("status_code") or 0),
+        str(row.get("content_type") or "").split(";", 1)[0].strip().lower(),
+        str(row.get("location") or ""),
+        int(row.get("body_len") or 0) // 100,
+        tuple(row.get("json_keys") or []),
+    )
+
+
+def _execute_request_stable(
+    request_data: dict[str, Any],
+    *,
+    timeout: int,
+    operational_headers: dict[str, str] | None = None,
+    operational_cookies: dict[str, str] | None = None,
+    samples: int = 2,
+) -> dict[str, Any]:
+    attempts = [
+        _execute_request(
+            request_data,
+            timeout=timeout,
+            operational_headers=operational_headers,
+            operational_cookies=operational_cookies,
+        )
+        for _ in range(max(1, int(samples or 1)))
+    ]
+    signatures = [_response_signature(row) for row in attempts]
+    if len(set(signatures)) > 1:
+        return {
+            **attempts[-1],
+            "ok": False,
+            "unstable": True,
+            "error": "unstable_replay_response",
+            "samples": attempts,
+        }
+    stable = dict(attempts[-1])
+    stable["samples"] = len(attempts)
+    stable["stable_signature"] = signatures[-1]
+    return stable
 
 
 def _execute_request(

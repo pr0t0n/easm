@@ -1031,6 +1031,7 @@ def _discovered_endpoints(db: Session, scan_id: int, limit: int = 20) -> list[st
         rows = (
             db.query(Finding.details)
             .filter(Finding.scan_job_id == scan_id)
+            .order_by(Finding.id.asc())
             .limit(400)
             .all()
         )

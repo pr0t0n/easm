@@ -3734,6 +3734,7 @@ def dispatch_scan_work_items(
                     _SWI_retry.status == "timeout",
                     _SWI_retry.attempts < _SWI_retry.max_attempts,
                 )
+                .order_by(_SWI_retry.priority.asc(), _SWI_retry.updated_at.asc(), _SWI_retry.id.asc())
                 .limit(200)
                 .all()
             )
@@ -4384,12 +4385,16 @@ def execute_scan_work_item(item_id: int):
                 )
             )
             stdout = str(result.get("stdout") or "")
+            _parser_stdout_limit = 200_000
             item.result = {
                 "status": raw_status or terminal,
                 "exit_code": exit_code,
                 "command": result.get("command") or f"{item.tool_name} {_dispatch_target}",
                 "stdout_preview": stdout[:3000],
-                "stdout_full": stdout[:200_000],
+                "stdout_full": stdout[:_parser_stdout_limit],
+                "stdout_full_chars": len(stdout),
+                "stdout_parser_limit_chars": _parser_stdout_limit,
+                "stdout_truncated_for_parser": len(stdout) > _parser_stdout_limit,
                 "stderr": result.get("stderr") or "",
                 "parsed_result": result.get("parsed") or {},
                 "findings_extracted": result.get("findings_extracted") or [],
@@ -4743,6 +4748,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
 
         # Capture full stdout BEFORE truncating for storage — parsers see the whole output
         _full_stdout = str(result.get("stdout") or "")
+        _parser_stdout_limit = 200_000
         _parsed_result = result.get("parsed")
         _scope_output_guard: dict[str, Any] = {}
         if str(item.tool_name or "").strip().lower() == "httpx":
@@ -4796,7 +4802,10 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             "stderr_preview": str(result.get("stderr") or "")[:3000] or None,
             # display only — never fed to a parser, safe to lossily compact
             "stdout_preview": _compress_stdout(_full_stdout, max_chars=3000),
-            "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
+            "stdout_full": _full_stdout[:_parser_stdout_limit],        # parser input (bounded for JSONB safety)
+            "stdout_full_chars": len(_full_stdout),
+            "stdout_parser_limit_chars": _parser_stdout_limit,
+            "stdout_truncated_for_parser": len(_full_stdout) > _parser_stdout_limit,
             "parsed_result": _parsed_result,
             "batch_targets": list(result.get("batch_targets") or []),
             "batch_target_count": int(result.get("batch_target_count") or 0),

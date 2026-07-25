@@ -29,6 +29,7 @@ from app.agents.supervisor_prompt import (
     build_supervisor_orchestration_prompt,
     validate_orchestration_decision,
 )
+from app.services.llm_determinism import ollama_chat_payload
 
 logger = logging.getLogger(__name__)
 _OLLAMA_MODELS_CACHE: dict[str, Any] = {"expires_at": 0.0, "models": []}
@@ -75,8 +76,9 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
     models = _candidate_ollama_models()
 
-    # P4 — opções base. num_predict cap a saída; temperature baixa p/ decisão.
-    _options: dict[str, Any] = {"temperature": 0.1, "num_predict": 1024}
+    # P4 — opções base. num_predict cap a saída; sampling determinístico para
+    # decisões operacionais reproduzíveis.
+    _options: dict[str, Any] = {"num_predict": 1024}
     # num_ctx (janela de contexto) é configurável por env. Por padrão fica
     # AUSENTE = comportamento atual do Ollama (default ~2048). Setar OLLAMA_NUM_CTX
     # > 0 amplia a janela p/ não truncar o prompt do supervisor — mas custa RAM
@@ -92,16 +94,16 @@ def _ollama_chat(system: str, user: str, *, timeout: int = 60) -> str:
 
     last_error: Exception | None = None
     for model_name in models:
-        payload = {
-            "model": model_name,
-            "stream": False,
-            "format": "json",
-            "messages": [
+        payload = ollama_chat_payload(
+            model_name,
+            [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "options": _options,
-        }
+            stream=False,
+            format="json",
+            options=_options,
+        )
         try:
             _t0 = time.perf_counter()
             r = httpx.post(url, json=payload, timeout=timeout)

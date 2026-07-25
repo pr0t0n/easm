@@ -562,7 +562,12 @@ function QualityPanel({ quality }) {
     if (key === "evidence_quality") return `${item.findings_with_evidence || 0}/${item.findings_total || 0} com evidência · ${item.verified_findings || 0} verificados`;
     if (key === "validation_depth") return `${item.successful_validations || 0}/${item.validation_runs || 0} validações conclusivas · ${item.high_verified || 0}/${item.high_findings || 0} HIGH verificados`;
     if (key === "test_depth") return `${item.hypotheses_resolved || 0}/${item.active_hypotheses ?? item.hypotheses ?? 0} aplicáveis · ${item.hypotheses_blocked_reachability || 0} reachability`;
-    if (key === "tool_reliability") return `${item.tools_succeeded || 0}/${item.tools_attempted || 0} execuções úteis · ${item.failed_work_items || 0} falhas`;
+    if (key === "tool_reliability") {
+      const parserBits = [];
+      if (item.parser_error_items) parserBits.push(`${item.parser_error_items} parser`);
+      if (item.parser_truncated_items) parserBits.push(`${item.parser_truncated_items} trunc.`);
+      return `${item.tools_succeeded || 0}/${item.tools_attempted || 0} execuções úteis · ${item.failed_work_items || 0} falhas${parserBits.length ? ` · ${parserBits.join(" · ")}` : ""}`;
+    }
     if (key === "surface_coverage") return `${item.covered_items || 0}/${item.coverage_items || 0} aplicáveis · ${item.coverage_items_inventory_only || 0} inventário · ${item.coverage_items_external_precondition || 0} pré-cond.`;
     return "";
   };

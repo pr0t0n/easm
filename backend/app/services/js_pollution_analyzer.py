@@ -717,6 +717,7 @@ def run_js_pollution_scan(
                 Finding.severity.in_(["critical", "high", "medium"]),
             )
             .distinct()
+            .order_by(Finding.domain.asc())
             .limit(max_domains)
             .all()
         )

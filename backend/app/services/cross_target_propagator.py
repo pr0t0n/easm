@@ -157,6 +157,7 @@ def _get_all_scan_targets(db: Session, scan_id: int) -> list[str]:
         rows = (
             db.query(distinct(ScanWorkItem.target))
             .filter(ScanWorkItem.scan_job_id == scan_id)
+            .order_by(ScanWorkItem.target.asc())
             .limit(500)
             .all()
         )

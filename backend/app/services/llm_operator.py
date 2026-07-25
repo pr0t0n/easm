@@ -26,6 +26,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
+from app.services.llm_determinism import ollama_generate_payload
 from app.services.untrusted_content import normalize_adversarial_text, wrap_untrusted
 
 logger = logging.getLogger(__name__)
@@ -179,18 +180,13 @@ def query_llm(prompt: str, model: str | None = None) -> str:
     try:
         resp = requests.post(
             f"{ollama_url}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "system": OPERATOR_SYSTEM_PROMPT,
-                "stream": False,
-                "options": {
-                    "temperature": 0,
-                    "top_p": 1,
-                    "seed": int(getattr(settings, "llm_deterministic_seed", 424242) or 424242),
-                    "num_predict": 1024,
-                },
-            },
+            json=ollama_generate_payload(
+                model_name,
+                prompt,
+                system=OPERATOR_SYSTEM_PROMPT,
+                stream=False,
+                options={"num_predict": 1024},
+            ),
             timeout=120,  # LLM generation can take a while
         )
         resp.raise_for_status()
@@ -405,6 +401,7 @@ def run_llm_operator(db, job) -> dict[str, Any]:
         db.query(ScanWorkItem.target)
         .filter(ScanWorkItem.scan_job_id == job.id, ScanWorkItem.target != "__batch__")
         .distinct()
+        .order_by(ScanWorkItem.target.asc())
         .limit(20)
         .all()
     )

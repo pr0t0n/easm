@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Re-use existing parsers from the LangGraph path
@@ -2070,6 +2071,18 @@ def extract_findings_from_work_item(
     parsed = result.get("parsed_result")
     step = f"{phase_id}.{tool_name}"
     tool = tool_name.lower().strip()
+    parser_meta: dict[str, Any] = {
+        "tool": tool,
+        "phase_id": phase_id,
+        "target": target,
+        "stdout_input_chars": len(stdout),
+        "stdout_full_chars": int(result.get("stdout_full_chars") or len(stdout) or 0),
+        "stdout_parser_limit_chars": int(result.get("stdout_parser_limit_chars") or 0),
+        "stdout_truncated_for_parser": bool(result.get("stdout_truncated_for_parser")),
+        "parsed_result_present": parsed is not None,
+        "status": "started",
+    }
+    result["findings_extractor_meta"] = parser_meta
 
     findings: list[dict[str, Any]] = []
 
@@ -2197,9 +2210,15 @@ def extract_findings_from_work_item(
     except Exception as exc:  # noqa: BLE001
         # Never let parser failure crash the work queue
         import logging
+        parser_meta["status"] = "parser_error"
+        parser_meta["parser_error"] = f"{type(exc).__name__}: {exc}"[:1000]
         logging.getLogger(__name__).warning(
             "findings_extractor: parser error tool=%s target=%s: %s", tool, target, exc
         )
+    else:
+        parser_meta["status"] = "parsed"
+
+    parser_meta["findings_candidate_count"] = len(findings)
 
     # Inject standard fields missing from some parsers
     for f in findings:
@@ -2213,6 +2232,22 @@ def extract_findings_from_work_item(
         f["details"] = details
 
     return findings
+
+
+def _persist_extractor_meta(db: Session, item: Any, result: dict[str, Any]) -> bool:
+    meta = result.get("findings_extractor_meta")
+    if not isinstance(meta, dict):
+        return False
+    updated = dict(item.result or {})
+    updated["findings_extractor_meta"] = dict(meta)
+    item.result = updated
+    try:
+        flag_modified(item, "result")
+    except Exception:
+        pass
+    db.add(item)
+    db.flush()
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2548,6 +2583,7 @@ def persist_finding_dicts(
                 Finding.domain == domain_col,
                 Finding.tool == tool_col,
             )
+            .order_by(Finding.id.asc())
             .limit(500)
             .all()
         )
@@ -3080,7 +3116,10 @@ def persist_findings_from_work_item(
     phase_id = str(item.phase_id or "")
 
     raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
+    meta_persisted = _persist_extractor_meta(db, item, result)
     if not raw_findings:
+        if meta_persisted:
+            db.commit()
         return 0
 
     # ── P3b: provenance de aprendizado — se o work item foi semeado pelos 10k
@@ -3112,10 +3151,13 @@ def persist_findings_from_work_item(
             _d["learning_source"] = _prov
             _rf["details"] = _d
 
-    return persist_finding_dicts(
+    created = persist_finding_dicts(
         db, job, raw_findings,
         default_tool=tool, default_target=target, source_item=item,
     )
+    if meta_persisted and not created:
+        db.commit()
+    return created
 
 
 # ── T1: Evidence gate stage 2 helpers ─────────────────────────────────────────

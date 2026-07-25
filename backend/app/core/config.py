@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_risk_strategies: str = "prompt-injection,jailbreak,jailbreak:composite"
     llm_risk_num_tests: int = 5
     llm_risk_timeout_seconds: int = 60
+    llm_deterministic_seed: int = 424242
     ai_recommendations_use_ollama: bool = True
     ai_recommendations_timeout_seconds: int = 60
     frontend_origin: str = "http://localhost:5173"

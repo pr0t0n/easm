@@ -742,6 +742,7 @@ def run_supply_chain_scan(
             db.query(Finding.domain)
             .filter(Finding.scan_job_id == scan_id)
             .distinct()
+            .order_by(Finding.domain.asc())
             .limit(max_domains)
             .all()
         )

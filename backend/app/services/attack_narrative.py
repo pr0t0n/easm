@@ -29,6 +29,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
+from app.services.llm_determinism import ollama_generate_payload
 from app.services.untrusted_content import (
     check_canary_leak,
     generate_canary_token,
@@ -185,17 +186,13 @@ def generate_narrative_with_llm(
     try:
         resp = requests.post(
             f"{ollama_url}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "system": system_prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.95,
-                    "num_predict": 3000,
-                },
-            },
+            json=ollama_generate_payload(
+                model_name,
+                prompt,
+                system=system_prompt,
+                stream=False,
+                options={"num_predict": 3000},
+            ),
             timeout=300,  # Narrative generation can take 3-5 minutes
         )
         resp.raise_for_status()

@@ -70,6 +70,7 @@ O bug recorrente não era apenas “scan travado”. A causa raiz era a existên
 - P15 deve aparecer como “File Handling Testing” / “Arquivos e exposição web”, não como recon histórico.
 - Fases com `skipped` por não aplicabilidade contam como término operacional, mas reduzem `success_pct`; isso evita “travado falso” sem fingir sucesso.
 - Quality deve mostrar explicitamente quando a baixa profundidade vem de reachability (`p06_no_http_targets`, `hypotheses_blocked_reachability`) e não de ausência de vulnerabilidade.
+- Falhas de parser e stdout truncado entram em `tool_reliability`/gaps; “zero findings” não deve mais ser interpretado sozinho como “zero vulnerabilidade”.
 
 ## Como isso deve aparecer na análise final
 
@@ -104,6 +105,17 @@ O bug recorrente não era apenas “scan travado”. A causa raiz era a existên
   - artifact candidate sozinho não confirma finding.
 - `backend/tests/test_pentest_intelligence_refactor.py`
   - auth classification instável fica inconclusiva.
+- `backend/tests/test_llm_determinism_contract.py`
+  - todas as chamadas Ollama de runtime usam helper determinístico (`temperature=0`, `top_p=1`, `seed` fixo);
+  - novos call-sites `/api/generate` ou `/api/chat` fora do helper falham teste.
+- `backend/tests/test_stable_query_contract.py`
+  - consultas `.limit(...).all()` precisam ter `ORDER BY` explícito.
+- `backend/tests/test_findings_extractor_nuclei.py`
+  - erro de parser e stdout truncado geram `findings_extractor_meta`.
+- `backend/tests/test_phase_validator_single_judge_contract.py`
+  - runtime produtivo não pode importar o validator legado de `app.services.phase_validator`.
+- `backend/tests/test_artifact_replay_stability.py`
+  - replay de evidence pack exige duas amostras estáveis; divergência vira `inconclusive`.
 
 ## Resultado de validação
 
@@ -121,6 +133,11 @@ Resultado: `61 passed, 1 skipped`.
 Após validação dos pontos adicionais do Claude:
 
 - Resultado atualizado: `100 passed, 1 skipped`.
+
+Após a continuação desta correção:
+
+- Recortes novos: `10 passed` para LLM determinístico, parser/truncamento, consultas estáveis e single-judge guard.
+- Replay de evidence pack: `2 passed`.
 
 ## Classificação final dos pontos do Claude
 
@@ -154,6 +171,12 @@ Esta rodada não tentou “zerar 109 achados” em um único commit. O foco foi 
 - Auth classifier com amostra única.
 - Fallback LLM mascarando falha como ausência normal de decisão.
 - Fallback P18 de `mission.py` desatualizado.
+- Wrapper único de LLM/Ollama determinístico aplicado aos call-sites de supervisor, learning, operator, ranking de estratégia, recomendação IA, risco LLM, narrativa e relatório.
+- Consultas com `LIMIT` sem `ORDER BY` estabilizadas nos caminhos de retry, target sampling, dedup, enriquecimento CVE e análises auxiliares.
+- Falha de parser agora persiste `findings_extractor_meta.parser_error` no work item e aparece como gap de qualidade.
+- Saída truncada antes do parser agora persiste `stdout_truncated_for_parser` e aparece como gap de qualidade.
+- Replay de par baseline/exploit agora exige duas amostras estáveis; instabilidade ou falha vira `inconclusive`, não refutação/confirmado por jitter.
+- Guard de single-judge impede runtime produtivo de importar `app.services.phase_validator`.
 
 ### Já mitigados antes desta rodada
 
@@ -167,16 +190,14 @@ Esta rodada não tentou “zerar 109 achados” em um único commit. O foco foi 
 
 ### Débito estrutural restante
 
-- Criar um wrapper único para chamadas LLM/Ollama determinísticas e substituir chamadas espalhadas em serviços de risco, narrativa, estratégia, relatório e agents.
-- Unificar validadores de fase (`phase_validator.py`, `graph/workflow.py`, `offensive_operator_core.PhaseValidator`) em uma única fonte efetiva.
-- Resolver truncamento de stdout do runner/backend com artifact completo lido por path, sem inflar JSONB.
-- Tornar falha de parser visível como gap de qualidade estruturado, não apenas warning de log.
+- Unificar fisicamente validadores de fase (`phase_validator.py`, `graph/workflow.py`, `offensive_operator_core.PhaseValidator`). O runtime foi protegido contra importar o legado, mas ainda existe código duplicado para testes/helpers.
+- Resolver truncamento de stdout do runner/backend com artifact completo lido por path, sem inflar JSONB. A visibilidade/gap foi corrigida; a leitura integral por path ainda é melhoria de profundidade.
 - Estabilizar denominadores de coverage com snapshot de escopo por geração.
 - Auditar títulos específicos de parsers restantes, como `wpscan`, para remover qualquer campo não ordenado/volátil.
 - Separar aprendizado global por owner em janelas com decaimento e contexto de alvo/tecnologia para evitar envenenamento permanente.
 - Revisar caches globais e caches de processo (`NVD`, DNS, RAG/embedding fallback, websocket/admin logs) para escopo, TTL e sinalização de fallback.
 - Reduzir “dois juízes” restantes em API/frontend: mission progress, scan status agregado e timeline/final report devem consumir a mesma síntese de execução.
-- Trocar validadores/probes restantes de amostra única por política de estabilidade com retry/conclusão `inconclusive`, especialmente probes de API, NoSQL, BOLA/IDOR e business logic.
+- Trocar probes auxiliares restantes de amostra única por política de estabilidade com retry/conclusão `inconclusive`, especialmente probes de API, NoSQL, BOLA/IDOR e business logic. O replay de evidence pack já foi corrigido.
 
 `git diff --check`: sem erros.
 

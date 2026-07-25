@@ -925,6 +925,7 @@ def run_business_logic_scan(
                 Finding.severity.in_(["critical", "high"]),
             )
             .distinct()
+            .order_by(Finding.domain.asc())
             .limit(max_domains)
             .all()
         )

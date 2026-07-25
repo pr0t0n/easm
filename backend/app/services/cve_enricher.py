@@ -380,6 +380,7 @@ def enrich_scan_cves(db: Session, scan_id: int, *, limit: int = 200) -> int:
             Finding.scan_job_id == scan_id,
             Finding.cve.isnot(None),
         )
+        .order_by(Finding.risk_score.desc(), Finding.id.asc())
         .limit(limit)
         .all()
     )

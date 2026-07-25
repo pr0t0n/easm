@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from app.graph.state import AgentState
+from app.services.llm_determinism import ollama_generate_payload
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ def executive_analyst_node(state: AgentState) -> AgentState:
         )
         resp = httpx.post(
             f"{settings.ollama_base_url}/api/generate",
-            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
+            json=ollama_generate_payload(settings.ollama_model, prompt, stream=False),
             timeout=20.0,
         )
         if resp.status_code == 200:

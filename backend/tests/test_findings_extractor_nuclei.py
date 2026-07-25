@@ -53,3 +53,40 @@ def test_nuclei_parser_normalizes_string_tags_and_non_mapping_info() -> None:
         "",
         "app.example.test",
     )[0]["title"] == "minimal"
+
+
+def test_work_item_extractor_records_parser_error_metadata(monkeypatch) -> None:
+    from app.services import findings_extractor as fe
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("bad tool output")
+
+    monkeypatch.setattr(fe, "_extract_whatweb_findings", boom)
+    result = {"stdout_full": "broken", "stdout_full_chars": 6}
+
+    findings = fe.extract_findings_from_work_item("whatweb", "app.example.test", "P07", result)
+
+    assert findings == []
+    meta = result["findings_extractor_meta"]
+    assert meta["status"] == "parser_error"
+    assert "ValueError" in meta["parser_error"]
+    assert meta["findings_candidate_count"] == 0
+
+
+def test_work_item_extractor_records_truncated_stdout_metadata() -> None:
+    from app.services.findings_extractor import extract_findings_from_work_item
+
+    result = {
+        "stdout_full": "",
+        "stdout_full_chars": 250_000,
+        "stdout_parser_limit_chars": 200_000,
+        "stdout_truncated_for_parser": True,
+        "parsed_result": [],
+    }
+
+    extract_findings_from_work_item("httpx", "app.example.test", "P06", result)
+
+    meta = result["findings_extractor_meta"]
+    assert meta["stdout_full_chars"] == 250_000
+    assert meta["stdout_parser_limit_chars"] == 200_000
+    assert meta["stdout_truncated_for_parser"] is True

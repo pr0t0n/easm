@@ -378,7 +378,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .options(load_only(
             ScanWorkItem.id, ScanWorkItem.status, ScanWorkItem.phase_id,
             ScanWorkItem.tool_name, ScanWorkItem.target, ScanWorkItem.resource_class,
-            ScanWorkItem.item_metadata, ScanWorkItem.created_at,
+            ScanWorkItem.item_metadata, ScanWorkItem.result, ScanWorkItem.created_at,
             ScanWorkItem.updated_at, ScanWorkItem.started_at, ScanWorkItem.finished_at,
         ))
         .filter(ScanWorkItem.scan_job_id == job.id)
@@ -515,6 +515,18 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     success_ratio = _ratio(succeeded, attempted) if attempted else 0.0
     work_status_counts = Counter(str(item.status or "").lower() for item in work_items)
     infrastructure_failure_items = int(work_status_counts.get("failed", 0) + work_status_counts.get("timeout", 0))
+    parser_error_items = [
+        item for item in work_items
+        if isinstance(item.result, dict)
+        and isinstance(item.result.get("findings_extractor_meta"), dict)
+        and dict(item.result.get("findings_extractor_meta") or {}).get("parser_error")
+    ]
+    parser_truncated_items = [
+        item for item in work_items
+        if isinstance(item.result, dict)
+        and isinstance(item.result.get("findings_extractor_meta"), dict)
+        and dict(item.result.get("findings_extractor_meta") or {}).get("stdout_truncated_for_parser")
+    ]
     preflight_profiles = dict(((state.get("preflight") or {}).get("targets") or {}))
     preflight_total = len(preflight_profiles)
     p02_positive_targets = sum(1 for p in preflight_profiles.values() if isinstance(p, dict) and p.get("p02_positive_evidence"))
@@ -713,6 +725,8 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "tools_succeeded": succeeded,
             "failed_work_items": failed_tools,
             "infrastructure_failure_items": infrastructure_failure_items,
+            "parser_error_items": len(parser_error_items),
+            "parser_truncated_items": len(parser_truncated_items),
             "work_status_counts": dict(sorted(work_status_counts.items())),
             "missing_required_tools": missing_required,
             "preflight_targets": preflight_total,
@@ -776,6 +790,28 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "title": "Falhas operacionais das ferramentas abaixo do ideal",
             "detail": f"{succeeded}/{attempted} execuções com sucesso; {infrastructure_failure_items} item(ns) falharam ou deram timeout.",
             "action": "Revisar módulos Kali, timeouts, concorrência e dependências do runner.",
+        })
+    if parser_error_items:
+        examples = ", ".join(
+            f"{item.phase_id}/{item.tool_name}/{item.target}" for item in parser_error_items[:5]
+        )
+        gaps.append({
+            "severity": "high",
+            "area": "parser_reliability",
+            "title": "Falha de parser mascararia achados",
+            "detail": f"{len(parser_error_items)} item(ns) concluídos tiveram erro de parser ({examples}).",
+            "action": "Corrigir parser/tool output antes de interpretar ausência de findings como ausência de vulnerabilidade.",
+        })
+    if parser_truncated_items:
+        examples = ", ".join(
+            f"{item.phase_id}/{item.tool_name}/{item.target}" for item in parser_truncated_items[:5]
+        )
+        gaps.append({
+            "severity": "medium",
+            "area": "parser_reliability",
+            "title": "Saída de ferramenta truncada antes do parser",
+            "detail": f"{len(parser_truncated_items)} item(ns) excederam o limite de entrada do parser ({examples}).",
+            "action": "Usar parsed_result estruturado ou artifact/stdout_path completo para ferramentas volumosas.",
         })
     if not validations and findings:
         gaps.append({
