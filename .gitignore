@@ -17,6 +17,7 @@ asm-rules/
 backend/asm-rules/
 backend/nuclei-templates/
 mcp-server/knowledge_store.json
+backend/scripts/stability_reports/
 
 # Temp files
 .DS_Store
