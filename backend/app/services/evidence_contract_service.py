@@ -149,7 +149,7 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
             required_artifacts=required,
             missing_artifacts=missing,
         )
-    if status == "confirmed" or confirmed_artifacts or (artifacts and not needs_repro):
+    if status == "confirmed" or confirmed_artifacts or has_repro_pair:
         return ValidationDecision(
             status="confirmed",
             can_promote=True,

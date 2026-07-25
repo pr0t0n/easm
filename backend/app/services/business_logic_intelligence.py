@@ -12,13 +12,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-CONTRACT_VERSION = "business-logic-v1"
+CONTRACT_VERSION = "business-logic-v2"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 _FLOW_TOKENS: dict[str, set[str]] = {
     "object_ownership": {"users", "accounts", "orders", "invoices", "documents", "transactions"},
     "money_movement": {"payment", "payments", "transfer", "transfers", "transaction", "transactions"},
-    "file_and_export": {"download", "export", "file", "view", "template", "logs", "backup", "invoice", "image"},
+    "file_and_export": {"download", "export", "file", "logs", "backup", "invoice", "document"},
     "authentication": {"login", "logout", "register", "reset", "otp", "mfa", "token", "refresh", "saml"},
     "account_change": {"profile", "password", "email", "users", "create"},
     "server_side_fetch": {"fetch", "proxy", "preview", "webhook", "integrations", "callback", "image"},
@@ -97,14 +97,40 @@ def build_business_logic_contract(
     classification: dict[str, Any],
     parameters: list[dict[str, Any]] | None = None,
     test_matrix: list[dict[str, Any]] | None = None,
+    auth_required: bool | None = None,
 ) -> dict[str, Any]:
     """Build an auditable contract without inventing endpoints or test data."""
     path = urlparse(str(url or "")).path or "/"
     tokens = {part.lower() for part in path.replace("-", "/").replace("_", "/").split("/") if part}
-    flows = [name for name, markers in _FLOW_TOKENS.items() if tokens & markers]
+    verb = str(method or "GET").upper()
+    observed_parameters = [str(row.get("name") or "") for row in parameters or [] if row.get("name")]
+    is_static = bool(classification.get("static_asset"))
+    auth_observed = auth_required is True
+
+    # A token in a public page path is not evidence of an application workflow.
+    # Require method/parameter/auth context appropriate to each flow family.
+    flows: list[str] = []
+    token_flows = {name for name, markers in _FLOW_TOKENS.items() if tokens & markers}
+    if not is_static:
+        if "authentication" in token_flows:
+            flows.append("authentication")
+        if "user_content" in token_flows:
+            flows.append("user_content")
+        if "redirect_navigation" in token_flows:
+            flows.append("redirect_navigation")
+        if "server_side_fetch" in token_flows:
+            flows.append("server_side_fetch")
+        if "structured_ingestion" in token_flows and verb not in SAFE_METHODS:
+            flows.append("structured_ingestion")
+        if "file_and_export" in token_flows:
+            flows.append("file_and_export")
+        if "money_movement" in token_flows and verb not in SAFE_METHODS:
+            flows.append("money_movement")
+        if "account_change" in token_flows and verb not in SAFE_METHODS:
+            flows.append("account_change")
     if classification.get("object_reference") and "object_ownership" not in flows:
         flows.append("object_ownership")
-    if classification.get("state_changing") and "state_transition" not in flows:
+    if classification.get("state_changing") and verb not in SAFE_METHODS and "state_transition" not in flows:
         flows.append("state_transition")
     flows = sorted(set(flows), key=lambda name: (-_FLOW_PRIORITY.get(name, 0), name))
 
@@ -115,19 +141,18 @@ def build_business_logic_contract(
                 invariants.append({**invariant, "flow": flow})
 
     identities: set[str] = set()
-    if any(flow in flows for flow in ("object_ownership", "file_and_export", "money_movement", "user_content")):
-        identities.update({"user_a", "user_b"})
-    elif any(flow in flows for flow in ("authentication", "account_change", "state_transition")):
-        identities.add("user_a")
-    for test in test_matrix or []:
-        identities.update(str(item) for item in test.get("required_identities") or [] if item)
+    if auth_observed:
+        if any(flow in flows for flow in ("object_ownership", "file_and_export", "money_movement")):
+            identities.update({"user_a", "user_b"})
+        elif any(flow in flows for flow in ("authentication", "account_change", "state_transition")):
+            identities.add("user_a")
+        for test in test_matrix or []:
+            identities.update(str(item) for item in test.get("required_identities") or [] if item)
 
-    verb = str(method or "GET").upper()
-    mutation_candidate = verb not in SAFE_METHODS or any(flow in flows for flow in ("money_movement", "account_change", "structured_ingestion", "state_transition"))
-    observed_parameters = [str(row.get("name") or "") for row in parameters or [] if row.get("name")]
+    mutation_candidate = verb not in SAFE_METHODS or bool(classification.get("state_changing"))
     parameter_required = any(flow in flows for flow in ("server_side_fetch", "redirect_navigation"))
     fixtures: list[str] = []
-    if "object_ownership" in flows or "file_and_export" in flows:
+    if auth_observed and ("object_ownership" in flows or "file_and_export" in flows):
         fixtures.append("same_object_owned_by_user_a")
     if mutation_candidate:
         fixtures.extend(["disposable_entity", "read_back", "rollback"])

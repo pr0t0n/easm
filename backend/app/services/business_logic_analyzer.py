@@ -683,16 +683,28 @@ def test_race_condition_financial(base_url: str, domain: str) -> list[BusinessLo
     return findings
 
 
-def test_cache_deception(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+def test_cache_deception(
+    base_url: str,
+    domain: str,
+    *,
+    observed_private_paths: list[str] | None = None,
+    authenticated_baseline: bool = False,
+) -> list[BusinessLogicFinding]:
     """
     Detecta Web Cache Deception: endpoints autenticados cacheados por extensão de arquivo.
     Sem autenticação, apenas detecta se headers de cache são permissivos em rotas privadas.
     """
     findings = []
+    # Never invent "private" routes. A 200 from a guessed /api/me path may be
+    # only an SPA fallback, and Cache MISS is not cache-deception evidence.
+    # The validator requires an endpoint observed under an authenticated
+    # session before probing cache-key behavior.
     private_paths = [
-        "/api/me", "/api/profile", "/api/v1/me", "/api/account",
-        "/api/user/profile", "/api/settings",
+        str(path) for path in observed_private_paths or []
+        if str(path).startswith("/")
     ]
+    if not authenticated_baseline or not private_paths:
+        return []
     # Extensões que CDNs costumam cachear
     cache_extensions = [".css", ".js", ".png", ".jpg", ".gif", ".woff"]
 
@@ -709,7 +721,8 @@ def test_cache_deception(base_url: str, domain: str) -> list[BusinessLogicFindin
             has_no_store = "no-store" in cc or "private" in cc
             cached_header = r.headers.get("X-Cache", "") or r.headers.get("CF-Cache-Status", "")
 
-            if not has_no_store:
+            cache_state = str(cached_header or "").strip().upper()
+            if not has_no_store and cache_state in {"HIT", "CACHED", "TCP_HIT"}:
                 findings.append(BusinessLogicFinding(
                     title=f"Web Cache Deception — Endpoint Privado Sem Cache-Control: {path}",
                     severity="high",

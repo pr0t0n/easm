@@ -19,12 +19,16 @@ from app.services.business_logic_test import (
 from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract
 
 
-def _analysis(path: str, method: str = "GET") -> dict:
-    return analyze_endpoint_contract(f"https://www.valid.com{path}", method=method)
+def _analysis(path: str, method: str = "GET", *, auth_required: bool | None = None) -> dict:
+    return analyze_endpoint_contract(
+        f"https://www.valid.com{path}",
+        method=method,
+        auth_required=auth_required,
+    )
 
 
 def test_object_contract_requires_two_identities_same_object_and_negative_control() -> None:
-    contract = _analysis("/orders/{id}")["business_logic"]
+    contract = _analysis("/orders/{id}", auth_required=True)["business_logic"]
 
     assert "object_ownership" in contract["flows"]
     assert set(contract["required_identities"]) == {"user_a", "user_b"}
@@ -60,7 +64,7 @@ def test_unparameterized_fetch_is_contracted_but_blocked_until_parameter_observe
 def test_execution_plan_contains_only_observed_read_only_endpoints() -> None:
     observed = [
         _analysis("/search?search=tabletop"),
-        _analysis("/orders/{id}"),
+        _analysis("/orders/{id}", auth_required=True),
         _analysis("/payment", "POST"),
     ]
     plan = build_business_logic_execution_plan(observed, available_identities=["user_a", "user_b"])
@@ -77,14 +81,19 @@ def test_execution_plan_contains_only_observed_read_only_endpoints() -> None:
 
 
 def test_portfolio_exposes_contract_depth_and_missing_preconditions() -> None:
-    analyses = [_analysis("/orders/{id}"), _analysis("/payment"), _analysis("/logout")]
+    analyses = [
+        _analysis("/orders/{id}", auth_required=True),
+        _analysis("/payment", "POST"),
+        _analysis("/logout"),
+    ]
     portfolio = build_business_logic_portfolio(analyses)
 
     assert portfolio["contracted_endpoints"] == portfolio["relevant_endpoints"] == 3
     assert portfolio["invariants"] >= 8
     assert portfolio["high_risk_endpoints"] == 3
     assert portfolio["ready_read_only"] == 0
-    assert portfolio["blocked"]["missing_validated_identities"] == 3
+    assert portfolio["blocked"]["missing_validated_identities"] == 1
+    assert portfolio["blocked"]["mutation_plan_or_fixture_missing"] == 2
     assert portfolio["execution_guardrails"]["mutation_default"] == "blocked"
 
 

@@ -14,7 +14,9 @@ ACTIVE_STATUSES = {"dispatched", "running", "submitted"}
 QUEUED_STATUSES = {"queued", "retry"}
 BLOCKED_STATUSES = {"blocked"}
 TERMINAL_STATUSES = SUCCESS_STATUSES | FAILURE_STATUSES | SKIPPED_STATUSES
-ATTEMPTED_STATUSES = TERMINAL_STATUSES | ACTIVE_STATUSES
+# Applicability skips are terminal for progress, but no tool was actually
+# attempted. They must not reduce reliability.
+ATTEMPTED_STATUSES = SUCCESS_STATUSES | FAILURE_STATUSES | ACTIVE_STATUSES
 
 
 def _pct(value: int | float, total: int | float) -> float:
@@ -56,7 +58,7 @@ def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = No
     queued = sum(statuses[s] for s in QUEUED_STATUSES)
     blocked = sum(statuses[s] for s in BLOCKED_STATUSES)
     terminal = succeeded + failed + skipped
-    attempted = terminal + active
+    attempted = succeeded + failed + active
     worker_seconds = sum(_duration_seconds(row) for row in rows)
     queue_waits = sorted(
         max(0.0, (row.started_at - ready_at).total_seconds())
@@ -91,13 +93,15 @@ def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = No
             dim_success = sum(counts[s] for s in SUCCESS_STATUSES)
             dim_failed = sum(counts[s] for s in FAILURE_STATUSES)
             dim_skipped = sum(counts[s] for s in SKIPPED_STATUSES)
+            dim_attempted = dim_success + dim_failed + sum(counts[s] for s in ACTIVE_STATUSES)
             result.append({
                 "name": name,
                 "total": dim_total,
+                "attempted": dim_attempted,
                 "succeeded": dim_success,
                 "failed": dim_failed,
                 "skipped": dim_skipped,
-                "success_pct": _pct(dim_success, dim_total),
+                "success_pct": _pct(dim_success, dim_attempted),
                 "statuses": dict(counts),
             })
         return sorted(result, key=lambda row: (-int(row["total"]), str(row["name"])))
@@ -116,7 +120,7 @@ def summarize_work_items(items: Iterable[ScanWorkItem], job: ScanJob | None = No
         "progress_pct": _pct(terminal, total),
         "success_pct": _pct(succeeded, attempted),
         "failure_pct": _pct(failed, attempted),
-        "skip_pct": _pct(skipped, attempted),
+        "skip_pct": _pct(skipped, terminal),
         "worker_seconds": round(worker_seconds, 1),
         "wall_seconds": round(wall_seconds, 1),
         "average_parallelism": round(worker_seconds / wall_seconds, 2) if wall_seconds else 0.0,

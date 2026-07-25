@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.models import (
@@ -25,6 +27,27 @@ from app.models.models import (
     ScanJob,
     ValidationRun,
 )
+
+
+_COVERAGE_STATUS_RANK = {
+    "unknown": 0,
+    "discovered": 1,
+    "planned": 2,
+    "not_tested": 2,
+    "queued": 3,
+    "blocked": 3,
+    "blocked_missing_auth": 3,
+    "blocked_tool_unavailable": 3,
+    "candidate": 4,
+    "hypothesis": 4,
+    "tested": 5,
+    "tested_no_issue": 5,
+    "completed": 5,
+    "done": 5,
+    "refuted": 6,
+    "validated": 7,
+    "confirmed": 7,
+}
 
 
 _JS_RE = re.compile(r"\.(?:js|mjs|cjs)(?:\?|$)", re.I)
@@ -355,6 +378,7 @@ class OffensiveInventoryService:
         required_identities: list[str] | None = None,
         evidence_requirements: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        replace_contract: bool = False,
     ) -> OffensiveHypothesis:
         target_ref = str(target_ref or "")[:1000]
         row = (
@@ -377,9 +401,14 @@ class OffensiveInventoryService:
             )
         row.title = title[:255]
         row.confidence = max(int(row.confidence or 0), int(confidence or 0))
-        row.recommended_tools = list(dict.fromkeys((row.recommended_tools or []) + list(recommended_tools or [])))
-        row.required_identities = list(dict.fromkeys((row.required_identities or []) + list(required_identities or [])))
-        row.evidence_requirements = list(dict.fromkeys((row.evidence_requirements or []) + list(evidence_requirements or [])))
+        if replace_contract:
+            row.recommended_tools = list(dict.fromkeys(recommended_tools or []))
+            row.required_identities = list(dict.fromkeys(required_identities or []))
+            row.evidence_requirements = list(dict.fromkeys(evidence_requirements or []))
+        else:
+            row.recommended_tools = list(dict.fromkeys((row.recommended_tools or []) + list(recommended_tools or [])))
+            row.required_identities = list(dict.fromkeys((row.required_identities or []) + list(required_identities or [])))
+            row.evidence_requirements = list(dict.fromkeys((row.evidence_requirements or []) + list(evidence_requirements or [])))
         row.hypothesis_metadata = _merge(row.hypothesis_metadata, metadata)
         row.updated_at = datetime.now()
         self.db.add(row)
@@ -439,6 +468,18 @@ class OffensiveInventoryService:
         blocking_reason: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> CoverageItem:
+        if _is_postgresql_session(self.db):
+            return self._upsert_coverage_postgres(
+                coverage_type=coverage_type,
+                target_ref=target_ref,
+                test_class=test_class,
+                status=status,
+                endpoint_id=endpoint_id,
+                hypothesis_id=hypothesis_id,
+                finding_id=finding_id,
+                blocking_reason=blocking_reason,
+                metadata=metadata,
+            )
         row = (
             self.db.query(CoverageItem)
             .filter(
@@ -449,18 +490,113 @@ class OffensiveInventoryService:
             )
             .first()
         )
+        if row is None and hasattr(self.db, "new"):
+            row = next(
+                (
+                    candidate for candidate in getattr(self.db, "new", [])
+                    if isinstance(candidate, CoverageItem)
+                    and candidate.scan_job_id == self.scan.id
+                    and candidate.coverage_type == coverage_type
+                    and candidate.target_ref == target_ref
+                    and candidate.test_class == test_class
+                ),
+                None,
+            )
         if row is None:
             row = CoverageItem(scan_job_id=self.scan.id, coverage_type=coverage_type, target_ref=target_ref, test_class=test_class)
-        row.status = status
+        current_status = str(row.status or "unknown")
+        incoming_status = str(status or "unknown")
+        if (
+            row.id is None
+            or _COVERAGE_STATUS_RANK.get(incoming_status, 0)
+            >= _COVERAGE_STATUS_RANK.get(current_status, 0)
+        ):
+            row.status = incoming_status
         row.endpoint_id = endpoint_id or row.endpoint_id
         row.hypothesis_id = hypothesis_id or row.hypothesis_id
         row.finding_id = finding_id or row.finding_id
         row.blocking_reason = blocking_reason or row.blocking_reason
         row.coverage_metadata = _merge(row.coverage_metadata, metadata)
         row.updated_at = datetime.now()
-        self.db.add(row)
-        self.db.flush()
+        if hasattr(self.db, "add"):
+            self.db.add(row)
+        if hasattr(self.db, "flush"):
+            self.db.flush()
         return row
+
+    def _upsert_coverage_postgres(
+        self,
+        *,
+        coverage_type: str,
+        target_ref: str,
+        test_class: str,
+        status: str,
+        endpoint_id: int | None = None,
+        hypothesis_id: int | None = None,
+        finding_id: int | None = None,
+        blocking_reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> CoverageItem:
+        """Atomic CoverageItem upsert.
+
+        Scan #12 exposed the previous SELECT-then-INSERT pattern: two
+        finalization paths could observe the same missing coverage row and then
+        collide on uq_coverage_items_scan_target_test.  PostgreSQL must be the
+        arbiter here so the quality gate cannot poison its transaction with an
+        IntegrityError after all work items have already drained.
+        """
+        now = datetime.now()
+        table = CoverageItem.__table__
+        metadata_col = table.c["metadata"]
+        empty_jsonb = sa.text("'{}'::jsonb")
+        incoming_status = str(status or "unknown")
+        incoming_rank = int(_COVERAGE_STATUS_RANK.get(incoming_status, 0))
+        current_rank = sa.case(_COVERAGE_STATUS_RANK, value=table.c.status, else_=0)
+        stmt = pg_insert(table).values(
+            scan_job_id=self.scan.id,
+            coverage_type=coverage_type,
+            target_ref=target_ref,
+            test_class=test_class,
+            status=incoming_status,
+            endpoint_id=endpoint_id,
+            hypothesis_id=hypothesis_id,
+            finding_id=finding_id,
+            blocking_reason=blocking_reason or None,
+            metadata=metadata or {},
+            updated_at=now,
+        )
+        excluded = stmt.excluded
+        excluded_metadata = excluded["metadata"]
+        upsert = stmt.on_conflict_do_update(
+            constraint="uq_coverage_items_scan_target_test",
+            set_={
+                "status": sa.case(
+                    (incoming_rank >= current_rank, excluded.status),
+                    else_=table.c.status,
+                ),
+                "endpoint_id": sa.func.coalesce(excluded.endpoint_id, table.c.endpoint_id),
+                "hypothesis_id": sa.func.coalesce(excluded.hypothesis_id, table.c.hypothesis_id),
+                "finding_id": sa.func.coalesce(excluded.finding_id, table.c.finding_id),
+                "blocking_reason": sa.case(
+                    (
+                        sa.func.length(sa.func.coalesce(excluded.blocking_reason, "")) > 0,
+                        excluded.blocking_reason,
+                    ),
+                    else_=table.c.blocking_reason,
+                ),
+                "metadata": sa.func.coalesce(metadata_col, empty_jsonb).op("||")(
+                    sa.func.coalesce(excluded_metadata, empty_jsonb)
+                ),
+                "updated_at": now,
+            },
+        ).returning(table.c.id)
+        row_id = self.db.execute(upsert).scalar_one()
+        return (
+            self.db.query(CoverageItem)
+            .populate_existing()
+            .filter(CoverageItem.id == row_id)
+            .one()
+        )
 
     def ingest_url(self, url: str, *, source_tool: str, discovered_from: str = "", auth_context: str = "anonymous", metadata: dict[str, Any] | None = None) -> OffensiveEndpoint:
         tags = ["js"] if _JS_RE.search(url) else []
@@ -501,3 +637,11 @@ def _merge(*items: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(item, dict):
             out.update(item)
     return out
+
+
+def _is_postgresql_session(db: Session) -> bool:
+    try:
+        bind = db.get_bind()
+        return str(bind.dialect.name).lower() == "postgresql"
+    except Exception:
+        return False

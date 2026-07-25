@@ -191,7 +191,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-takeover"]),  # HackerOne: 49 subdomain takeover reports
         ("P02", "Port Service Discovery", "Discover exposed ports and services; keep the gate fast so downstream web phases can start",
          ["skill.recon.port_service_discovery"], ["naabu"],
-         ["nmap", "shodan-cli"]),
+         ["nmap", "shodan-cli", "masscan"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
          # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken tool in Kali).
@@ -326,6 +326,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
             "minimum_evidence": ["tool_output", "raw_tool_output", "parsed_result"],
             "exit_criteria": {
                 "minimum_required_tools_attempted": 1,
+                "all_applicable_skill_objectives_required": True,
                 "evidence_required": True,
                 "validator_required": True,
                 "allow_partial": True,
@@ -1748,7 +1749,7 @@ class OffensiveSkillRuntime:
         executed_tool_keys: set[str] = set()
         executed_tool_signatures: dict[str, dict[str, Any]] = {}
         reuse_equivalent_tools = phase_id in {
-            "P03", "P04", "P05", "P06", "P07", "P08",
+            "P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08",
             "P09", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20",
         }
         ran_skills: list[str] = []

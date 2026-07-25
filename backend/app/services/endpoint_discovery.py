@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime
 
 from sqlalchemy.orm import Session
+
+from app.models.models import ScanJob
 
 logger = logging.getLogger("endpoint_discovery")
 
@@ -42,6 +45,32 @@ _HIGH_VALUE = re.compile(
     r"account|user|profile|dashboard|console|manage|setting|secret|key)"
 )
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+")
+
+
+def _emit_surface_progress(scan_id: int, message: str) -> None:
+    """Write progress from a separate transaction.
+
+    Surface expansion can spend minutes normalizing/fetching thousands of
+    archived URLs. A separate short-lived session keeps that work visible
+    without committing or holding locks from the caller's transaction.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ScanLog
+
+        progress_db = SessionLocal()
+        try:
+            progress_db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="endpoint-discovery",
+                level="INFO",
+                message=message[:4000],
+            ))
+            progress_db.commit()
+        finally:
+            progress_db.close()
+    except Exception:
+        pass
 
 
 def _host_of(url: str) -> str:
@@ -233,6 +262,15 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     if str(tool_name or "").lower() not in _DISCOVERY_TOOLS:
         return {"skipped": "not_discovery_tool"}
 
+    locked_job = (
+        db.query(ScanJob)
+        .filter(ScanJob.id == scan_id)
+        .with_for_update()
+        .first()
+    )
+    if locked_job is not None:
+        job = locked_job
+
     state = dict(job.state_data or {})
     seen: set[str] = set(state.get("discovered_endpoints") or [])
     fetched_count = int(state.get("se_fetched_count") or 0)
@@ -272,7 +310,16 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     if not new_eps:
         return {"new_endpoints": 0, "out_of_scope_skipped": len(out_of_scope)}
 
-    new_eps.sort(key=lambda u: (0 if _HIGH_VALUE.search(u) else 1, len(u)))
+    new_eps.sort(key=lambda u: (0 if _HIGH_VALUE.search(u) else 1, len(u), u))
+    _surface_started = time.monotonic()
+    _surface_last_progress = _surface_started
+    _emit_surface_progress(
+        scan_id,
+        (
+            f"surface_expansion_started tool={tool_name} target={source_target} "
+            f"candidates={len(found)} new_in_scope={len(new_eps)}"
+        ),
+    )
     try:
         from app.services.crawler_result_normalizer import normalize_crawler_result
         from app.services.hypothesis_rules import generate_hypotheses_for_scan
@@ -358,7 +405,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     reseeded = 0
     fetched = 0
 
-    for url in new_eps:
+    for url_index, url in enumerate(new_eps, start=1):
         hv = bool(_HIGH_VALUE.search(url))
         has_param = "?" in url and "=" in url
 
@@ -427,6 +474,18 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                 if reseeded >= _MAX_PER_EVENT_RESEED:
                     break
 
+        _surface_now = time.monotonic()
+        if _surface_now - _surface_last_progress >= 30:
+            _emit_surface_progress(
+                scan_id,
+                (
+                    f"surface_expansion_progress tool={tool_name} "
+                    f"processed={url_index}/{len(new_eps)} fetched={fetched} "
+                    f"reseeded={reseeded} elapsed={int(_surface_now - _surface_started)}s"
+                ),
+            )
+            _surface_last_progress = _surface_now
+
     # Persistir contadores e conjunto (cap p/ não inchar state)
     state["discovered_endpoints"] = list(seen)[:5000]
     state["endpoint_test_targets"] = list(seen)[:10000]
@@ -451,6 +510,14 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     logger.info(
         "surface_expansion scan=%d tool=%s novos=%d novos_hosts=%d host_items=%d abertos=%d reinjetados=%d segredos+scripts=%d fora_do_escopo=%d",
         scan_id, tool_name, len(new_eps), len(new_test_hosts), int(host_seed.get("created") or 0), fetched, reseeded, len(findings), len(out_of_scope),
+    )
+    _emit_surface_progress(
+        scan_id,
+        (
+            f"surface_expansion_finished tool={tool_name} target={source_target} "
+            f"new={len(new_eps)} fetched={fetched} reseeded={reseeded} "
+            f"findings={len(findings)} elapsed={int(time.monotonic() - _surface_started)}s"
+        ),
     )
     return {
         "new_endpoints": len(new_eps), "fetched": fetched,

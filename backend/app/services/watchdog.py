@@ -30,12 +30,65 @@ _STUCK_MINUTES = int(os.getenv("WATCHDOG_STUCK_MINUTES", "12"))
 # Cobre o caso real: restart do worker/backend perde a mensagem .delay() e o scan
 # fica 'queued' para sempre, invisível à recuperação antiga (que só via 'running').
 _LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
-# Item 27 (definitivo) — recuperação baseada em PROGRESSO REAL (último scan_log),
-# SEM depender do celery inspect (instável → deixava o scan travado até o TTL de
-# 90min do lock). Sem nenhum scan_log por este tempo num scan não-terminal = órfão
-# → libera o lock e re-dispara. Threshold > maior ferramenta legítima (ZAP active
-# ~30min é gated/raro; o operador loga mcp/checkpoint constantemente quando vivo).
-_ORPHAN_NO_PROGRESS_SECONDS = int(os.getenv("WATCHDOG_ORPHAN_NO_PROGRESS", "720"))  # 12min
+# Item 27 — recuperação baseada no último scan_log, corroborada pela atividade
+# do Kali Runner. O limiar precisa ser maior que o maior job normal do P01
+# (amass_brute=900s); 720s fazia o watchdog roubar um lock ainda legítimo.
+_ORPHAN_NO_PROGRESS_SECONDS = int(os.getenv("WATCHDOG_ORPHAN_NO_PROGRESS", "1200"))  # 20min
+
+
+def _kali_scan_has_active_jobs(scan_id: int) -> bool | None:
+    """Return runner proof-of-life for one scan without Celery inspect.
+
+    ``None`` means the runner could not be inspected. Running/queued responses
+    are intentionally requested separately: those rows have no captured stdout,
+    so the response remains small even when the historical job store is large.
+    """
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=3.0, read=6.0, write=3.0, pool=3.0)) as client:
+            for job_status in ("running", "queued"):
+                response = client.get(
+                    f"{_KALI_URL}/jobs",
+                    params={"status": job_status, "limit": 1000},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                for item in payload.get("items") or []:
+                    if int(item.get("scan_id") or -1) == int(scan_id):
+                        return True
+        return False
+    except Exception:
+        return None
+
+
+def _no_progress_recovery_blocker(
+    scan_id: int,
+    runner_active: bool | None,
+    active_ids: set[int] | list[int] | tuple[int, ...],
+    inspect_ok: bool | None,
+) -> str | None:
+    """Return why the no-progress watchdog must *not* redrive a scan yet.
+
+    The no-progress pass exists to recover truly orphaned scans, but scan #22
+    exposed a narrow race: a long P01 had just finished in Kali Runner and the
+    Celery phase task was still consolidating/persisting results. Runner looked
+    idle for a few seconds, so the watchdog force-released the chain lock and
+    launched a duplicate P01.
+
+    Redrive is only safe when we have positive proof that neither execution
+    plane is active: no Kali job and Celery inspect succeeded with no active
+    scan task.
+    """
+    if runner_active is True:
+        return "kali_runner_active"
+    if inspect_ok is not True:
+        return "celery_inspect_unknown"
+    try:
+        normalized_active_ids = {int(sid) for sid in active_ids}
+    except Exception:
+        normalized_active_ids = set()
+    if int(scan_id) in normalized_active_ids:
+        return "celery_task_active"
+    return None
 
 
 def _kali_functional_ok() -> bool:
@@ -179,9 +232,9 @@ def run_watchdog(db) -> dict:
     if report["requeued"] or stale_repaired:
         db.commit()
         try:
-            from app.workers.tasks import dispatch_scan_work_items
+            from app.workers.tasks import _schedule_scan_work_dispatch
             for item in stale_repaired:
-                dispatch_scan_work_items.delay(int(item["scan_id"]))
+                _schedule_scan_work_dispatch(int(item["scan_id"]))
         except Exception as exc:
             logger.error("watchdog: falha ao acordar dispatcher apos reparo stale: %s", exc)
 
@@ -214,15 +267,19 @@ def run_watchdog(db) -> dict:
         logger.error("watchdog: pass de limbo falhou: %s", exc)
     report["limbo_recovered"] = limbo_revived
 
-    # ── 3b. Item 27 (DEFINITIVO) — órfão por FALTA DE PROGRESSO real ─────────
-    # Não depende de celery inspect (instável). Para cada scan não-terminal: se
-    # NÃO há scan_log há > _ORPHAN_NO_PROGRESS_SECONDS, está morto (o operador
-    # loga mcp/dispatch/checkpoint o tempo todo quando vivo) → ROUBA o lock
-    # (force release) e re-dispara. É exatamente o que era feito na mão.
+    # ── 3b. Item 27 — órfão por FALTA DE PROGRESSO real ──────────────────────
+    # Antes de roubar o lock exige ausência comprovada nos dois planos:
+    #   (1) sem job ativo no Kali Runner;
+    #   (2) celery inspect respondeu e não há task ativa do scan.
+    # Isso fecha a janela vista no scan #22: o Runner terminou o último job P01,
+    # mas a task Celery ainda estava consolidando/persistindo P01; re-disparar
+    # nessa janela duplicava a fase.
     progress_revived = []
+    progress_runner_active = []
     try:
-        from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running
+        from app.workers.tasks import _force_release_chain_lock, ensure_scan_chain_running, active_scan_task_ids
         from app.models.models import ScanLog
+        active_ids, inspect_ok = active_scan_task_ids()
         # Relógio ÚNICO (-03): created_at agora é gravado pelo app em -03 (naive,
         # via datetime.now() com TZ=America/Sao_Paulo) e now() do PG também é -03 →
         # comparar direto é consistente, idle real. Exclui os próprios logs do
@@ -241,13 +298,24 @@ def run_watchdog(db) -> dict:
         for sid, idle_s in stuck:
             idle = int(idle_s or 0)
             if idle >= _ORPHAN_NO_PROGRESS_SECONDS:
+                runner_active = _kali_scan_has_active_jobs(int(sid))
+                blocker = _no_progress_recovery_blocker(int(sid), runner_active, active_ids, inspect_ok)
+                if blocker:
+                    progress_runner_active.append({"scan_id": int(sid), "idle_s": idle, "blocker": blocker})
+                    logger.info(
+                        "watchdog: scan %s sem scan_log ha %ss, mas %s; preservando lock",
+                        sid,
+                        idle,
+                        blocker,
+                    )
+                    continue
                 _force_release_chain_lock(int(sid))
                 _res = ensure_scan_chain_running(int(sid), mode="unit")
                 progress_revived.append({"scan_id": int(sid), "idle_s": idle, "redispatch": _res})
                 db.add(ScanLog(
                     scan_job_id=int(sid), source="watchdog", level="WARNING",
                     message=(f"orfao por SEM-PROGRESSO ({idle}s sem scan_log) → lock liberado "
-                             f"e scan re-disparado (item 27, sem depender de celery inspect)"),
+                             f"e scan re-disparado (item 27, sem runner/celery ativo)"),
                 ))
                 logger.warning("watchdog: scan %s SEM PROGRESSO %ss → lock liberado + re-disparado", sid, idle)
         if progress_revived:
@@ -256,6 +324,7 @@ def run_watchdog(db) -> dict:
         db.rollback()
         logger.error("watchdog: pass de progresso (item 27) falhou: %s", exc)
     report["progress_recovered"] = progress_revived
+    report["progress_runner_active"] = progress_runner_active
 
     # ── 3c. A3 — CADEIA MORTA por AUSÊNCIA DE LOCK (não depende de log) ───────
     # Bug real (scan #15): a cadeia principal (run_scan_job_unit, que avança as
@@ -264,8 +333,11 @@ def run_watchdog(db) -> dict:
     # sinal de vida é o PRÓPRIO chain lock (com B1 ele expira em ≤TTL quando o
     # worker morre). Para todo scan running SEM lock → recupera (o helper cruza
     # com celery inspect e tem orçamento de re-disparo, então é seguro mesmo na
-    # janela curta entre phase-units).
+    # janela curta entre phase-units). Também precisa cruzar com o Kali Runner:
+    # scan #23 provou que P01 pode ficar sem lock/work_items enquanto uma
+    # ferramenta longa ainda está viva; sem esse sinal, o deadchain duplicava P01.
     deadchain_revived = []
+    deadchain_preserved = []
     try:
         from app.workers.tasks import recover_scan_if_orphaned, _chain_lock_alive, active_scan_task_ids
         running_ids = [int(r[0]) for r in db.execute(text(
@@ -277,16 +349,34 @@ def run_watchdog(db) -> dict:
             # CADEIA MORTA de verdade exige TRÊS sinais (senão é falso-positivo):
             #  (1) sem chain lock;
             #  (2) sem task run_scan_job ATIVA no celery (inspect_ok=True);
-            #  (3) FILA OCIOSA — nenhum work item tocado há > _ORPHAN_NO_PROGRESS.
+            #  (3) FILA OCIOSA — nenhum work item tocado há > _ORPHAN_NO_PROGRESS;
+            #  (4) KALI OCIOSO — nenhum job running/queued para o scan.
             # O (3) é o que faltava: em modo PARALELO a cadeia solta o lock e se
             # re-enfileira por countdown enquanto espera a fila drenar
             # (work_queue_wait) — estado legítimo. Se há itens sendo despachados/
-            # polados (updated_at recente), o scan está VIVO mesmo sem lock. Só
-            # re-dispara quando o lock sumiu E a fila parou de fato.
+            # polados (updated_at recente), o scan está VIVO mesmo sem lock.
+            # Se há job no Kali, P01/P02 ainda está vivo mesmo sem work item.
+            # Só re-dispara quando o lock sumiu, a fila parou de fato e o Kali
+            # não tem execução ativa.
             _idle_cut = datetime.now() - timedelta(seconds=_ORPHAN_NO_PROGRESS_SECONDS)
             truly_orphan = []
             for sid in no_lock:
                 if not inspect_ok or sid in active_ids:
+                    continue
+                runner_active = _kali_scan_has_active_jobs(sid)
+                if runner_active is True:
+                    deadchain_preserved.append({"scan_id": sid, "blocker": "kali_runner_active"})
+                    logger.info(
+                        "watchdog: scan %s running sem lock, mas Kali Runner tem job ativo; preservando deadchain",
+                        sid,
+                    )
+                    continue
+                if runner_active is None:
+                    deadchain_preserved.append({"scan_id": sid, "blocker": "kali_runner_unknown"})
+                    logger.info(
+                        "watchdog: scan %s running sem lock, mas Kali Runner nao pode ser inspecionado; preservando deadchain",
+                        sid,
+                    )
                     continue
                 last_item = db.execute(text(
                     "SELECT max(updated_at) FROM scan_work_items WHERE scan_job_id=:s"
@@ -307,6 +397,7 @@ def run_watchdog(db) -> dict:
         db.rollback()
         logger.error("watchdog: pass de cadeia-morta (A3) falhou: %s", exc)
     report["deadchain_recovered"] = deadchain_revived
+    report["deadchain_preserved"] = deadchain_preserved
 
     # ── 3d. A1 — PROMOTOR de scans em espera (admissão) ──────────────────────
     # Sobe scans diferidos por limite de concorrência quando abre vaga (FIFO).

@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -40,6 +41,7 @@ from app.workers.worker_groups import (
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
 HALTED_SCAN_STATUSES = {"stopped", "paused"}
 TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps", "failed", "cancelled", "canceled"}
+NON_EXECUTABLE_SCAN_STATUSES = TERMINAL_SCAN_STATUSES | HALTED_SCAN_STATUSES | {"blocked"}
 
 
 def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
@@ -50,6 +52,449 @@ def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
 
 def _scan_is_terminal(scan_status: str | None) -> bool:
     return str(scan_status or "").lower() in TERMINAL_SCAN_STATUSES
+
+
+def _scan_execution_preflight(scan_id: int) -> dict[str, Any] | None:
+    """Return a skip result when a delayed scan task must not execute.
+
+    Celery redeliveries and handoff retries can arrive minutes or hours after a
+    user stopped a scan.  Historically ``run_scan_job_unit`` acquired/logged the
+    chain lock before checking DB status, so terminal scans showed fresh
+    ``chain_lock_acquired`` events and looked alive/stuck in the UI.  This guard
+    is intentionally before lock acquisition and before contention requeue.
+    """
+    db: Session | None = None
+    try:
+        db = SessionLocal()
+        job = db.query(ScanJob.id, ScanJob.status).filter(ScanJob.id == int(scan_id)).first()
+        if not job:
+            return {"ok": False, "scan_id": int(scan_id), "error": "scan_not_found", "retryable": False}
+        status = str(job.status or "").lower()
+        if status in HALTED_SCAN_STATUSES:
+            return _halted_scan_result(status)
+        if status in TERMINAL_SCAN_STATUSES or status == "blocked":
+            return {
+                "ok": True,
+                "scan_id": int(scan_id),
+                "skipped": True,
+                "reason": f"scan_{status}",
+                "status": status,
+            }
+        return None
+    except Exception:
+        # Fail open: the locked path still performs a DB status check.
+        return None
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
+
+def _patch_scan_state(db: Session, scan_id: int, patch: dict[str, Any]) -> ScanJob | None:
+    """Apply only changed state keys under a row lock.
+
+    Work-item post-processors can run for minutes. Assigning the full
+    ``job.state_data`` snapshot afterwards erases qualification and queue
+    updates committed by other workers in the meantime. Patch-on-fresh-state
+    makes these hooks composable without turning the JSON document into a
+    last-writer-wins race.
+    """
+    locked_job = (
+        db.query(ScanJob)
+        .filter(ScanJob.id == int(scan_id))
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if not locked_job:
+        return None
+    current = dict(locked_job.state_data or {})
+    current.update(dict(patch or {}))
+    locked_job.state_data = current
+    try:
+        flag_modified(locked_job, "state_data")
+    except Exception:
+        # Unit tests use SimpleNamespace fakes; real SQLAlchemy rows still get
+        # explicit dirty tracking above.
+        pass
+    db.flush()
+    return locked_job
+
+
+def _set_scan_postprocessor_status(
+    db: Session,
+    scan_id: int,
+    kind: str,
+    target: str,
+    status: str,
+    *,
+    item_id: int | None = None,
+    error: str = "",
+) -> ScanJob | None:
+    """Persist the completion barrier independently of volatile Redis keys."""
+    locked_job = (
+        db.query(ScanJob)
+        .filter(ScanJob.id == int(scan_id))
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if not locked_job:
+        return None
+    state = dict(locked_job.state_data or {})
+    ledger = dict(state.get("postprocessor_ledger") or {})
+    key = f"{kind}:{target}"
+    previous = dict(ledger.get(key) or {})
+    ledger[key] = {
+        **previous,
+        "kind": str(kind),
+        "target": str(target),
+        "item_id": int(item_id) if item_id is not None else previous.get("item_id"),
+        "status": str(status),
+        "error": str(error or "")[:500] or None,
+        "updated_at": datetime.now().isoformat(),
+    }
+    state["postprocessor_ledger"] = ledger
+    locked_job.state_data = state
+    flag_modified(locked_job, "state_data")
+    db.flush()
+    return locked_job
+
+
+def _finish_scan_postprocessor_state(
+    db: Session,
+    scan_id: int,
+    kind: str,
+    target: str,
+    status: str,
+    *,
+    item_id: int | None = None,
+    error: str = "",
+    done: bool = True,
+) -> ScanJob | None:
+    """Atomically persist a postprocessor terminal state and its done marker.
+
+    Completion uses ``postprocessor_ledger`` as the durable source of truth.
+    Writing ``postprocessor_done:*`` separately from the terminal ledger status
+    creates a last-writer-wins window: logs can say the hook finished while the
+    UI/quality barrier still sees ``running``. Keep both fields in one JSONB
+    update under the scan row lock.
+    """
+    locked_job = (
+        db.query(ScanJob)
+        .filter(ScanJob.id == int(scan_id))
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if not locked_job:
+        return None
+    state = dict(locked_job.state_data or {})
+    ledger = dict(state.get("postprocessor_ledger") or {})
+    key = f"{kind}:{target}"
+    previous = dict(ledger.get(key) or {})
+    ledger[key] = {
+        **previous,
+        "kind": str(kind),
+        "target": str(target),
+        "item_id": int(item_id) if item_id is not None else previous.get("item_id"),
+        "status": str(status),
+        "error": str(error or "")[:500] or None,
+        "updated_at": datetime.now().isoformat(),
+    }
+    state["postprocessor_ledger"] = ledger
+    if done:
+        state[f"postprocessor_done:{kind}:{target}"] = True
+    locked_job.state_data = state
+    flag_modified(locked_job, "state_data")
+    db.flush()
+    return locked_job
+
+
+def _postprocessor_outcome_from_result(result: dict[str, Any]) -> tuple[str, str]:
+    """Map a best-effort hook result to durable ledger status + reason."""
+    raw_status = str(result.get("status") or "").strip().lower()
+    skipped_reason = str(result.get("skipped") or result.get("reason") or "").strip()
+    if raw_status in {"skipped", "not_applicable"} or skipped_reason:
+        return "skipped", skipped_reason or raw_status or "skipped"
+    return "completed", ""
+
+
+_POSTPROCESSOR_TERMINAL_STATUSES = {"completed", "failed", "skipped"}
+
+
+def _merge_postprocessor_ledger(
+    incoming: dict[str, Any],
+    durable: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge postprocessor ledger entries without resurrecting stale running rows."""
+    merged = dict(incoming or {})
+    for key, durable_entry_raw in dict(durable or {}).items():
+        durable_entry = dict(durable_entry_raw or {})
+        current_entry = dict(merged.get(key) or {})
+        durable_status = str(durable_entry.get("status") or "")
+        current_status = str(current_entry.get("status") or "")
+        if durable_status in _POSTPROCESSOR_TERMINAL_STATUSES and current_status not in _POSTPROCESSOR_TERMINAL_STATUSES:
+            merged[key] = durable_entry
+            continue
+        if current_status not in _POSTPROCESSOR_TERMINAL_STATUSES:
+            merged[key] = {**current_entry, **durable_entry}
+    return merged
+
+
+def _merge_runtime_scan_state(
+    incoming: dict[str, Any] | None,
+    durable: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge long-lived runtime keys into a snapshot before assigning JSONB.
+
+    Several scan subsystems run concurrently and historically assign
+    ``job.state_data = snapshot``.  If that snapshot predates a postprocessor or
+    dispatcher update, it can erase terminal evidence and make the platform show
+    stale ``running`` states.  This helper keeps runtime ledgers monotonic.
+    """
+    result = dict(incoming or {})
+    current = dict(durable or {})
+    result["postprocessor_ledger"] = _merge_postprocessor_ledger(
+        dict(result.get("postprocessor_ledger") or {}),
+        dict(current.get("postprocessor_ledger") or {}),
+    )
+    for key, value in current.items():
+        if str(key).startswith("postprocessor_done:") and value:
+            result[key] = value
+    # P01/P02/P06 target production is monotonic for a scan generation: once
+    # the operator has refined the target set or sealed the producer barrier, a
+    # concurrent dispatcher/postprocessor snapshot must not move it backwards.
+    # Scan #24 exposed this exact race: P01 enqueued work and set
+    # work_producers_sealed=True in memory, while the dispatcher loaded the old
+    # P01_discovery/False JSONB snapshot and later wrote it back over the fresh
+    # producer state.  Preserve the newest durable producer contract here.
+    def _stage_rank(value: Any) -> int:
+        stage = str(value or "").strip()
+        if stage.startswith("sealed") or stage in {"legacy_requalification"}:
+            return 30
+        if stage in {"P02_P06_qualification"}:
+            return 20
+        if stage in {"P01_discovery"}:
+            return 10
+        return 0
+
+    if current.get("work_producers_sealed") is True and result.get("work_producers_sealed") is not True:
+        result["work_producers_sealed"] = True
+    if _stage_rank(current.get("work_producer_stage")) > _stage_rank(result.get("work_producer_stage")):
+        result["work_producer_stage"] = current.get("work_producer_stage")
+
+    def _ordered_union(left: Any, right: Any) -> list[Any]:
+        out: list[Any] = []
+        seen: set[str] = set()
+        for values in (left, right):
+            for value in list(values or []) if isinstance(values, list) else []:
+                key = str(value)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(value)
+        return out
+
+    def _merge_preflight_state(incoming_pf: Any, durable_pf: Any) -> dict[str, Any]:
+        merged = dict(incoming_pf or {}) if isinstance(incoming_pf, dict) else {}
+        durable_map = dict(durable_pf or {}) if isinstance(durable_pf, dict) else {}
+        merged_targets = dict(merged.get("targets") or {})
+        durable_targets = dict(durable_map.get("targets") or {})
+
+        positive_bool_keys = {
+            "dns_resolves",
+            "p02_complete",
+            "p02_input_covered",
+            "p02_positive_evidence",
+            "p06_complete",
+            "p06_input_covered",
+            "p06_http_live",
+            "p06_positive_evidence",
+            "non_public_rejected",
+        }
+        union_list_keys = {
+            "open_ports",
+            "ports",
+            "http",
+            "p02_success_tools",
+            "p02_terminal_tools",
+            "p06_success_tools",
+            "p06_terminal_tools",
+        }
+        status_rank = {
+            "": 0,
+            "dns_inconclusive": 5,
+            "p02_inconclusive": 8,
+            "p06_inconclusive": 9,
+            "dns_live": 10,
+            "tcp_scanned_no_open_ports": 20,
+            "tcp_closed": 20,
+            "no_http_response": 25,
+            "tcp_live": 30,
+            "http_live": 40,
+            "non_public_rejected": 50,
+        }
+        terminal_negative = {"invalid", "dns_dead", "dead", "unresolved", "no_tcp"}
+        for target, durable_profile_raw in durable_targets.items():
+            durable_profile = dict(durable_profile_raw or {})
+            incoming_profile = dict(merged_targets.get(target) or {})
+            combined = {**durable_profile, **incoming_profile}
+            for key in positive_bool_keys:
+                if durable_profile.get(key) is True or incoming_profile.get(key) is True:
+                    combined[key] = True
+            for key in union_list_keys:
+                combined[key] = _ordered_union(incoming_profile.get(key), durable_profile.get(key))
+            durable_status = str(durable_profile.get("status") or "").lower()
+            incoming_status = str(incoming_profile.get("status") or "").lower()
+            if durable_status in terminal_negative and not incoming_profile.get("p02_complete") and not incoming_profile.get("p06_complete"):
+                combined["status"] = durable_status
+            elif status_rank.get(durable_status, 0) > status_rank.get(incoming_status, 0):
+                combined["status"] = durable_status
+            merged_targets[target] = combined
+        if merged_targets:
+            merged["targets"] = merged_targets
+        for key, value in durable_map.items():
+            if key not in merged and key != "targets":
+                merged[key] = value
+        return merged
+
+    if current.get("preflight"):
+        result["preflight"] = _merge_preflight_state(result.get("preflight"), current.get("preflight"))
+
+    for key in (
+        "target_set",
+        "host_ip_map",
+        "dead_targets",
+        "non_public_targets",
+        "dns_inconclusive_targets",
+        "dns_resolved_targets",
+        "tcp_live_targets",
+        "http_live_targets",
+        "qualified_target_set",
+        "ip_groups",
+        "parallel_delegated_targets",
+    ):
+        durable_value = current.get(key)
+        incoming_value = result.get(key)
+        if key in {"dns_resolved_targets", "tcp_live_targets", "http_live_targets", "qualified_target_set"}:
+            result[key] = _ordered_union(incoming_value, durable_value)
+        elif durable_value and not incoming_value:
+            result[key] = durable_value
+
+    for key in (
+        "dns_resolution_complete",
+        "dns_resolution_reason",
+        "parallel_engine",
+        "parallel_batch_size",
+        "target_inventory_generation",
+        "qualification_contract_version",
+        "target_set_semantics",
+    ):
+        if key == "qualification_contract_version":
+            result[key] = max(int(result.get(key) or 0), int(current.get(key) or 0))
+        elif key in current and key not in result:
+            result[key] = current.get(key)
+    return result
+
+
+def _assign_scan_state(db: Session, job: ScanJob, state: dict[str, Any]) -> dict[str, Any]:
+    """Assign JSONB state preserving concurrent runtime updates."""
+    try:
+        db.refresh(job)
+    except Exception:
+        pass
+    merged = _merge_runtime_scan_state(state, dict(job.state_data or {}))
+    job.state_data = merged
+    flag_modified(job, "state_data")
+    return merged
+
+
+def _reconcile_postprocessor_ledger_from_logs(db: Session, scan_id: int) -> int:
+    """Self-heal postprocessor ledger from durable terminal ScanLog entries."""
+    import re as _re
+
+    job = (
+        db.query(ScanJob)
+        .filter(ScanJob.id == int(scan_id))
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if not job:
+        return 0
+    state = dict(job.state_data or {})
+    ledger = dict(state.get("postprocessor_ledger") or {})
+    pattern = _re.compile(r"postprocessor_(finished|failed) kind=([^ ]+) item=([^ ]+) target=(.*?)(?: error=(.*))?$")
+    updates = 0
+    logs = (
+        db.query(ScanLog)
+        .filter(
+            ScanLog.scan_job_id == int(scan_id),
+            or_(
+                ScanLog.message.ilike("postprocessor_finished%"),
+                ScanLog.message.ilike("postprocessor_failed%"),
+            ),
+        )
+        .order_by(ScanLog.created_at.asc(), ScanLog.id.asc())
+        .limit(1000)
+        .all()
+    )
+    for log in logs:
+        match = pattern.search(str(log.message or ""))
+        if not match:
+            continue
+        action, kind, item_id, target, error = match.groups()
+        status = "failed" if action == "failed" else "completed"
+        key = f"{kind}:{target}"
+        previous = dict(ledger.get(key) or {})
+        if str(previous.get("status") or "") == status and int(previous.get("item_id") or 0) == int(item_id):
+            continue
+        if str(previous.get("status") or "") in _POSTPROCESSOR_TERMINAL_STATUSES and int(previous.get("item_id") or 0) > int(item_id):
+            continue
+        previous.update({
+            "kind": kind,
+            "target": target,
+            "item_id": int(item_id),
+            "status": status,
+            "error": str(error or "")[:500] or None,
+            "updated_at": log.created_at.isoformat(),
+        })
+        ledger[key] = previous
+        if status == "completed":
+            state[f"postprocessor_done:{kind}:{target}"] = True
+        updates += 1
+    if updates:
+        state["postprocessor_ledger"] = ledger
+        state["postprocessor_ledger_reconciled_at"] = datetime.now().isoformat()
+        job.state_data = state
+        flag_modified(job, "state_data")
+        db.add(ScanLog(
+            scan_job_id=int(scan_id),
+            source="postprocessor",
+            level="INFO",
+            message=f"postprocessor_ledger_reconciled updates={updates} source=terminal_scan_logs",
+        ))
+        db.flush()
+    return updates
+
+
+def _scan_work_producers_sealed(state: dict[str, Any] | None) -> bool:
+    """Return whether the operator can no longer add first-generation work.
+
+    The work-item queue is a consumer.  An empty consumer queue is not a
+    completion signal while P01/P02/P06 are still discovering and qualifying
+    targets.  New scans explicitly open this barrier when the phase queue starts
+    and seal it only after the qualified target set has been enqueued.
+
+    States created before this contract do not contain the marker.  They retain
+    the legacy behavior so a deployment does not strand already-running scans.
+    """
+    current = dict(state or {})
+    if "work_producers_sealed" in current:
+        return bool(current.get("work_producers_sealed"))
+    return True
 
 
 def _step_with_phase(state: dict, message: str) -> str:
@@ -89,6 +534,275 @@ def _work_item_tool_is_required(item: Any) -> bool:
         return str(getattr(item, "tool_name", "") or "") in set(phase.get("required_tools") or [])
     except Exception:
         return True
+
+
+def _terminal_result_error(result: dict[str, Any], raw_status: str, exit_code: Any) -> str | None:
+    """Return an explicit terminal reason; failures must never be opaque."""
+    detail = str(
+        result.get("error")
+        or result.get("stderr")
+        or result.get("message")
+        or ""
+    ).strip()
+    if detail:
+        return detail[:2000]
+    status = str(raw_status or "").strip().lower()
+    if status in {"failed", "timeout", "skipped"}:
+        code = "unknown" if exit_code is None else str(exit_code)
+        return f"runner_{status}_without_detail exit_code={code}"
+    return None
+
+
+def _backend_local_terminal_status(raw_status: str, exit_code: Any, error: str = "") -> str:
+    """Map an in-process result without converting preconditions into failures."""
+    normalized = str(raw_status or "").strip().lower()
+    detail = str(error or "").strip()
+    if detail == "source_code_required":
+        return "skipped"
+    if normalized in {"blocked", "blocked_precondition", "not_applicable"}:
+        return "skipped"
+    if normalized in {"done", "success", "completed", "partial"} and int(exit_code or 0) == 0:
+        return "completed"
+    return "failed"
+
+
+def _singleflight_publish(
+    key: str,
+    *,
+    countdown: int,
+    publish: Any,
+    ttl_seconds: int | None = None,
+) -> bool:
+    """Publish at most one future Celery message for a logical operation."""
+    token = uuid.uuid4().hex
+    redis_client = None
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        redis_client = _redis_client()
+        ttl = max(90, int(ttl_seconds or 0), int(countdown) + 120)
+        if not redis_client.set(key, token, nx=True, ex=ttl):
+            return False
+    except Exception:
+        # Redis is a coordination layer. Keep recovery fail-open if it is down.
+        redis_client = None
+
+    try:
+        publish(token)
+        return True
+    except Exception:
+        if redis_client is not None:
+            try:
+                if _redis_value_text(redis_client.get(key) or "") == token:
+                    redis_client.delete(key)
+            except Exception:
+                pass
+        raise
+
+
+def _redis_value_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _singleflight_claim(key: str, token: str | None) -> bool:
+    """Claim the exact pending token carried by a scheduled message."""
+    if not token:
+        return True
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        redis_client = _redis_client()
+        current = redis_client.get(key)
+        if current is None:
+            # Redis may have restarted or the coordination key may have expired
+            # after the broker accepted the message.  Fail open only once per
+            # short guard window; otherwise a backlog of old tokened messages
+            # can recreate the same poll storm single-flight was meant to avoid.
+            return _legacy_delivery_allowed(f"{key}:missing_token_guard", ttl=10)
+        if _redis_value_text(current) != str(token):
+            return False
+        redis_client.delete(key)
+        return True
+    except Exception:
+        return True
+
+
+def _legacy_delivery_allowed(key: str, ttl: int = 5) -> bool:
+    """Rate-limit tokenless messages created before single-flight deployment."""
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        return bool(_redis_client().set(key, uuid.uuid4().hex, nx=True, ex=max(1, ttl)))
+    except Exception:
+        return True
+
+
+def _schedule_scan_postprocessor(
+    scan_id: int,
+    item_id: int,
+    kind: str,
+    target: str,
+    *,
+    queue: str,
+    countdown: int = 1,
+    db: Session | None = None,
+) -> bool:
+    if db is not None:
+        current_job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        current = dict((current_job.state_data or {}).get("postprocessor_ledger") or {}) if current_job else {}
+        current_status = str((current.get(f"{kind}:{target}") or {}).get("status") or "")
+        if current_status in {"completed", "skipped"}:
+            return False
+        _set_scan_postprocessor_status(
+            db, scan_id, kind, target, "pending", item_id=item_id
+        )
+        db.commit()
+    key = f"scan_postprocessor_pending:{int(scan_id)}:{kind}:{target}"
+    try:
+        return _singleflight_publish(
+            key,
+            countdown=countdown,
+            ttl_seconds=3600,
+            publish=lambda token: run_scan_postprocessor.apply_async(
+                args=[int(scan_id), int(item_id), str(kind), str(target)],
+                kwargs={"_postprocess_token": token},
+                queue=queue,
+                countdown=countdown,
+            ),
+        )
+    except Exception as exc:
+        if db is not None:
+            _set_scan_postprocessor_status(
+                db, scan_id, kind, target, "failed", item_id=item_id, error=f"publish_failed:{exc!s}"
+            )
+            db.commit()
+        raise
+
+
+def _scan_postprocessors_pending(scan_id: int, state: dict[str, Any] | None = None) -> bool:
+    ledger = dict((state or {}).get("postprocessor_ledger") or {})
+    now = datetime.now()
+    saw_durable_ledger = bool(ledger)
+    for entry in ledger.values():
+        row = dict(entry or {})
+        if str(row.get("status") or "") not in {"pending", "running"}:
+            continue
+        try:
+            updated = datetime.fromisoformat(str(row.get("updated_at") or "").replace("Z", "+00:00")).replace(tzinfo=None)
+            if (now - updated).total_seconds() > 3600:
+                continue
+        except (TypeError, ValueError):
+            pass
+        return True
+    if saw_durable_ledger:
+        # Redis keys are best-effort single-flight coordination.  They may
+        # legitimately outlive a completed task if a worker retries around the
+        # claim/delete boundary; once the durable DB ledger is terminal, a stale
+        # Redis key must not hold the scan completion barrier.
+        return False
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        redis_client = _redis_client()
+        patterns = (
+            f"scan_postprocessor_pending:{int(scan_id)}:*",
+            f"scan_postprocessor_running:{int(scan_id)}:*",
+        )
+        return any(next(redis_client.scan_iter(match=pattern), None) is not None for pattern in patterns)
+    except Exception:
+        return False
+
+
+def _schedule_scan_work_dispatch(
+    scan_id: int,
+    limit: int | None = None,
+    *,
+    countdown: int = 0,
+) -> bool:
+    key = f"dispatch_pending:{int(scan_id)}"
+    return _singleflight_publish(
+        key,
+        countdown=countdown,
+        publish=lambda token: dispatch_scan_work_items.apply_async(
+            args=[int(scan_id), limit],
+            kwargs={"_dispatch_token": token},
+            countdown=countdown,
+        ),
+    )
+
+
+def _schedule_work_item_poll(item_id: int, *, countdown: int) -> bool:
+    key = f"poll_pending:{int(item_id)}"
+    return _singleflight_publish(
+        key,
+        countdown=countdown,
+        publish=lambda token: poll_scan_work_item.apply_async(
+            args=[int(item_id)],
+            kwargs={"_poll_token": token},
+            countdown=countdown,
+        ),
+    )
+
+
+def _schedule_pentest_inventory_refresh(
+    scan_id: int,
+    *,
+    mode: str = "unit",
+    countdown: int = 2,
+) -> bool:
+    from app.workers.worker_groups import phase_queue
+
+    key = f"pentest_inventory_pending:{int(scan_id)}"
+    cooldown_key = f"pentest_inventory_cooldown:{int(scan_id)}"
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        if _redis_client().get(cooldown_key):
+            return False
+    except Exception:
+        pass
+    queue = phase_queue("P21", mode="scheduled" if mode == "scheduled" else "unit")
+    return _singleflight_publish(
+        key,
+        countdown=countdown,
+        ttl_seconds=900,
+        publish=lambda token: refresh_pentest_inventory.apply_async(
+            args=[int(scan_id)],
+            kwargs={"_inventory_token": token},
+            countdown=countdown,
+            queue=queue,
+        ),
+    )
+
+
+def _schedule_business_logic_analysis(
+    scan_id: int,
+    item_id: int,
+    target: str,
+    *,
+    mode: str = "unit",
+    countdown: int = 1,
+) -> bool:
+    import hashlib
+    from app.workers.worker_groups import phase_queue
+
+    target_key = hashlib.sha256(str(target).encode()).hexdigest()[:20]
+    key = f"business_logic_pending:{int(scan_id)}:{target_key}"
+    queue = phase_queue("P13", mode="scheduled" if mode == "scheduled" else "unit")
+    return _singleflight_publish(
+        key,
+        countdown=countdown,
+        ttl_seconds=3600,
+        publish=lambda token: run_business_logic_analysis_postprocess.apply_async(
+            args=[int(scan_id), int(item_id), str(target)],
+            kwargs={"_postprocess_token": token},
+            countdown=countdown,
+            queue=queue,
+        ),
+    )
+
 
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
@@ -965,7 +1679,12 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         _touch_worker_heartbeat(db, scan_mode=scan_mode, status="alive")
         db.commit()
 
-        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        job = (
+            db.query(ScanJob)
+            .filter(ScanJob.id == scan_id)
+            .with_for_update()
+            .first()
+        )
         if not job:
             return {"ok": False, "error": "scan not found", "retryable": False}
 
@@ -976,8 +1695,15 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         if _scan_is_terminal(job.status):
             return {"ok": job.status in {"completed", "completed_with_gaps"}, "error": f"scan_already_{job.status}", "retryable": False}
 
+        previous_status = str(job.status or "").lower()
+        previous_step = str(job.current_step or "").strip()
         job.status = "running"
-        job.current_step = "Iniciando grafo"
+        # Do not overwrite a more specific step written by the phase queue or
+        # work-queue dispatcher when this task is re-entered by watchdog/retry.
+        # The old unconditional reset made active scans appear to jump back to
+        # "Iniciando grafo", hiding the real P02-P06/P15 state.
+        if previous_status in {"queued", "pending", ""} or not previous_step:
+            job.current_step = "Iniciando grafo"
         _touch_worker_heartbeat(
             db,
             scan_mode=scan_mode,
@@ -1479,7 +2205,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                         "deferring completion to dispatcher", job.id
                     )
                     job.current_step = "5. ExecutiveAnalysis"
-                    job.state_data = final_state
+                    final_state = _assign_scan_state(db, job, final_state)
                     db.commit()
                     return {"checkpointed": True, "reason": "work_queue_still_active"}
             except Exception as _guard_exc:
@@ -1492,7 +2218,7 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         progress_ctx["ui_progress"] = 100
         final_state["mission_progress_context"] = progress_ctx
         final_state["mission_progress"] = 100
-        job.state_data = final_state
+        final_state = _assign_scan_state(db, job, final_state)
         job.mission_progress = 100
         job.current_step = "5. ExecutiveAnalysis"
         job.status = "completed"
@@ -1590,7 +2316,12 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         return {"ok": True, "scan_id": scan_id, "scan_mode": scan_mode, "retryable": False}
     except Exception as exc:
         db.rollback()
-        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        job = (
+            db.query(ScanJob)
+            .filter(ScanJob.id == scan_id)
+            .with_for_update()
+            .first()
+        )
         if job:
             if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
                 _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
@@ -1759,7 +2490,7 @@ def _release_scan_chain_lock(r, scan_id: int, token: str) -> None:
     if r is None:
         return
     try:
-        if r.get(_chain_lock_key(scan_id)) == token:
+        if _redis_value_text(r.get(_chain_lock_key(scan_id)) or "") == str(token):
             r.delete(_chain_lock_key(scan_id))
     except Exception:
         pass
@@ -1827,8 +2558,23 @@ def _force_release_chain_lock(scan_id: int) -> bool:
     há task ativa para o scan."""
     try:
         from app.services.scan_work_queue import _redis_client
-        _redis_client().delete(_chain_lock_key(scan_id))
-        return True
+        r = _redis_client()
+        key = _chain_lock_key(scan_id)
+        observed = _redis_value_text(r.get(key) or "")
+        if not observed:
+            return False
+        released = r.eval(
+            """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+              return redis.call('del', KEYS[1])
+            end
+            return 0
+            """,
+            1,
+            key,
+            observed,
+        )
+        return bool(released)
     except Exception:
         return False
 
@@ -1863,6 +2609,33 @@ def active_scan_task_ids(timeout: float = 3.0) -> tuple[set[int], bool]:
     return ids, True
 
 
+def _kali_scan_has_active_jobs(scan_id: int) -> bool | None:
+    """Corroborate chain liveness with runner jobs for this exact scan.
+
+    Celery inspect does not reliably expose long phase drivers while they wait
+    on Kali. Stealing a chain lock solely because inspect returned no task
+    duplicated P01/P02 in scan #12. Runner rows in volatile states are an
+    independent, scan-scoped proof of life.
+    """
+    import requests
+
+    base = str(os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088")).rstrip("/")
+    try:
+        for job_status in ("running", "queued"):
+            response = requests.get(
+                f"{base}/jobs",
+                params={"status": job_status, "limit": 1000},
+                timeout=(3, 6),
+            )
+            response.raise_for_status()
+            for item in (response.json().get("items") or []):
+                if int(item.get("scan_id") or -1) == int(scan_id):
+                    return True
+        return False
+    except Exception:
+        return None
+
+
 def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "watchdog",
                              active_ids: set[int] | None = None, inspect_ok: bool | None = None) -> dict:
     """Recupera, de forma idempotente e limitada, um scan não-terminal que parou.
@@ -1883,7 +2656,10 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
     """
     db: Session = SessionLocal()
     try:
-        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        job_query = db.query(ScanJob).filter(ScanJob.id == scan_id)
+        if hasattr(job_query, "with_for_update"):
+            job_query = job_query.with_for_update()
+        job = job_query.first()
         if not job:
             return {"scan_id": scan_id, "action": "missing"}
 
@@ -1893,6 +2669,22 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
 
         if active_ids is None:
             active_ids, inspect_ok = active_scan_task_ids()
+
+        if scan_id not in active_ids:
+            runner_active = _kali_scan_has_active_jobs(scan_id)
+            if runner_active is True:
+                state = dict(job.state_data or {})
+                rec = dict(state.get("recovery") or {})
+                if rec.get("redrive_count"):
+                    rec["redrive_count"] = 0
+                    state["recovery"] = rec
+                    job.state_data = state
+                    db.commit()
+                return {
+                    "scan_id": scan_id,
+                    "action": "runner_active",
+                    "reason": "kali_job_active_without_celery_inspect_visibility",
+                }
 
         # Chain lock vivo NÃO basta como prova de vida: se o worker é morto (ex.:
         # restart) o finally que solta o lock não roda e o lock sobrevive até o TTL
@@ -1956,7 +2748,7 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
                         "active_work_item_id": int(active_leased_item[0]),
                     }
                 try:
-                    dispatch_scan_work_items.delay(scan_id)
+                    _schedule_scan_work_dispatch(scan_id)
                 except Exception:
                     pass
                 if not has_pending_work(db, scan_id):
@@ -2061,14 +2853,39 @@ def _run_scan_with_retry(
     *,
     phase_queue_task: bool = False,
 ) -> dict:
+    _preflight = _scan_execution_preflight(scan_id)
+    if _preflight is not None:
+        return _preflight
+
     # ── Acquire the per-scan chain lock before doing any work ──────────────────
     _lock_token = uuid.uuid4().hex
-    _lock_r = None if phase_queue_task else _acquire_scan_chain_lock(scan_id, _lock_token)
+    # Continuation tasks must participate in the same lock as entry/recovery
+    # tasks.  Bypassing the lock for `_phase_queue_task=True` allowed several P01
+    # continuations for one scan to execute concurrently and overwrite target_set
+    # with whichever DNS snapshot committed last (scan #8/#9).
+    _lock_r = _acquire_scan_chain_lock(scan_id, _lock_token)
     if _lock_r is False:
+        _preflight = _scan_execution_preflight(scan_id)
+        if _preflight is not None:
+            return _preflight
         # Another task is actively executing this scan. This is either a legit
         # hand-off still tearing down, or a duplicate (watchdog/redelivery). Defer
         # briefly and retry; give up after N waits so duplicates die instead of
         # spinning forever.
+        if int(lock_wait or 0) == 0:
+            try:
+                from app.services.recon_observability import emit_recon_event_standalone
+
+                emit_recon_event_standalone(
+                    scan_id,
+                    "chain_lock_contended",
+                    level="INFO",
+                    phase_queue_task=bool(phase_queue_task),
+                    action="defer_duplicate_or_handoff",
+                    retry_in_seconds=8,
+                )
+            except Exception:
+                pass
         if int(lock_wait or 0) < _SCAN_CHAIN_MAX_WAITS:
             try:
                 task_ctx.apply_async(args=[scan_id], kwargs={"_lock_wait": int(lock_wait or 0) + 1}, countdown=8)
@@ -2076,12 +2893,52 @@ def _run_scan_with_retry(
                 pass
             return {"ok": True, "skipped": True, "reason": "scan_chain_lock_held",
                     "scan_id": scan_id, "lock_wait": int(lock_wait or 0)}
+        try:
+            from app.services.recon_observability import emit_recon_event_standalone
+
+            emit_recon_event_standalone(
+                scan_id,
+                "chain_lock_giveup",
+                level="WARNING",
+                phase_queue_task=bool(phase_queue_task),
+                waits=int(lock_wait or 0),
+                interpretation="duplicate task discarded after lock remained owned",
+            )
+        except Exception:
+            pass
         return {"ok": True, "skipped": True, "reason": "scan_chain_lock_giveup", "scan_id": scan_id}
 
     # B1 — heartbeat de renovação: mantém o lock vivo enquanto a unit roda. Se o
     # worker morre, a thread morre junto → o lock expira em ≤TTL e a recuperação
     # re-dispara. _lock_r é o cliente redis (truthy) quando o lock foi de fato
     # adquirido; None = redis down (sem lock, nada a renovar).
+    if _lock_r is None:
+        try:
+            from app.services.recon_observability import emit_recon_event_standalone
+
+            emit_recon_event_standalone(
+                scan_id,
+                "chain_lock_fail_open",
+                level="WARNING",
+                phase_queue_task=bool(phase_queue_task),
+                interpretation="Redis unavailable; chain continued without mutual exclusion",
+            )
+        except Exception:
+            pass
+    elif int(lock_wait or 0) > 0 or not phase_queue_task:
+        try:
+            from app.services.recon_observability import emit_recon_event_standalone
+
+            emit_recon_event_standalone(
+                scan_id,
+                "chain_lock_acquired",
+                level="INFO",
+                phase_queue_task=bool(phase_queue_task),
+                waits=int(lock_wait or 0),
+                ttl_seconds=_SCAN_CHAIN_LOCK_TTL,
+            )
+        except Exception:
+            pass
     _stop_renew = threading.Event()
     _renew_thread = None
     if _lock_r not in (None, False):
@@ -2090,7 +2947,7 @@ def _run_scan_with_retry(
             while not _stop_renew.wait(_SCAN_CHAIN_LOCK_RENEW):
                 try:
                     r = _redis_client()
-                    if r.get(_chain_lock_key(scan_id)) == _lock_token:
+                    if _redis_value_text(r.get(_chain_lock_key(scan_id)) or "") == str(_lock_token):
                         r.expire(_chain_lock_key(scan_id), _SCAN_CHAIN_LOCK_TTL)
                     else:
                         break  # perdemos o lock (expirou/roubado) → para de renovar
@@ -2121,10 +2978,7 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
                     scan_job_id=scan_id,
                     source="worker.retry",
                     level="WARNING",
-                    message=(
-                        "erro_tardio_ignorado status=completed "
-                        f"error={str(result.get('error') or '')[:1000]}"
-                    ),
+                    message="tarefa_tardia_ignorada status=completed",
                 )
             )
             job.last_error = None
@@ -2337,8 +3191,319 @@ def correlate_tech_vulns(scan_id: int, target: str, tool_name: str, work_item_id
         db.close()
 
 
+@celery.task(name="refresh_pentest_inventory", ignore_result=True)
+def refresh_pentest_inventory(scan_id: int, _inventory_token: str | None = None):
+    """Run scan-wide hypothesis/coverage analysis outside the poll consumer."""
+    pending_key = f"pentest_inventory_pending:{int(scan_id)}"
+    if _inventory_token and not _singleflight_claim(pending_key, _inventory_token):
+        return {"scan_id": scan_id, "skipped": "stale_inventory_token"}
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        _redis_client().set(
+            f"pentest_inventory_cooldown:{int(scan_id)}",
+            datetime.now().isoformat(),
+            ex=max(30, int(os.getenv("PENTEST_INVENTORY_REFRESH_COOLDOWN_SECONDS", "120"))),
+        )
+    except Exception:
+        pass
+
+    from app.db.session import SessionLocal
+    from app.models.models import ScanJob, ScanLog
+
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        if not job or _scan_is_terminal(job.status):
+            return {"scan_id": scan_id, "skipped": "scan_missing_or_terminal"}
+
+        from app.services.hypothesis_planner import ensure_hypothesis_drain_work_item
+        from app.services.hypothesis_rules import generate_hypotheses_for_scan
+        from app.services.pentest_coverage_service import refresh_coverage
+
+        hypotheses = generate_hypotheses_for_scan(db, job)
+        drain = ensure_hypothesis_drain_work_item(db, job, batch_size=80)
+        coverage = refresh_coverage(db, job)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="pentest-inventory",
+            level="INFO",
+            message=(
+                f"inventory_refresh hypotheses={hypotheses.get('hypotheses_created_or_seen', 0)} "
+                f"coverage={coverage.get('coverage_percent')} drain={drain}"
+            )[:2000],
+        ))
+        db.commit()
+        if int(drain.get("scheduled") or 0) > 0:
+            _schedule_scan_work_dispatch(job.id, countdown=1)
+        return {
+            "scan_id": job.id,
+            "hypotheses": hypotheses,
+            "coverage": coverage,
+            "drain": drain,
+        }
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        try:
+            db.add(ScanLog(
+                scan_job_id=int(scan_id),
+                source="pentest-inventory",
+                level="WARNING",
+                message=f"inventory_refresh_failed error={exc!s}"[:2000],
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        return {"scan_id": scan_id, "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
+@celery.task(name="run_business_logic_analysis_postprocess", ignore_result=True)
+def run_business_logic_analysis_postprocess(
+    scan_id: int,
+    item_id: int,
+    target: str,
+    _postprocess_token: str | None = None,
+):
+    """Run per-target active business-logic analysis outside the poll queue."""
+    import hashlib
+    from app.db.session import SessionLocal
+    from app.models.models import ScanJob, ScanLog
+
+    target_key = hashlib.sha256(str(target).encode()).hexdigest()[:20]
+    pending_key = f"business_logic_pending:{int(scan_id)}:{target_key}"
+    if _postprocess_token and not _singleflight_claim(pending_key, _postprocess_token):
+        return {"scan_id": scan_id, "item_id": item_id, "skipped": "stale_postprocess_token"}
+
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        if not job or _scan_is_terminal(job.status):
+            return {"scan_id": scan_id, "item_id": item_id, "skipped": "scan_missing_or_terminal"}
+        done_key = f"bla_done_{target}"
+        if dict(job.state_data or {}).get(done_key):
+            return {"scan_id": scan_id, "item_id": item_id, "skipped": "already_completed"}
+
+        from app.services.business_logic_analyzer import run_business_logic_scan
+
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="business-logic",
+            level="INFO",
+            message=f"business_logic_started item={item_id} target={target}",
+        ))
+        db.commit()
+        result = run_business_logic_scan(db, job.id, target_domains=[target], max_domains=1)
+        job = _patch_scan_state(db, job.id, {done_key: True}) or job
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="business-logic",
+            level="INFO",
+            message=(
+                f"business_logic_finished item={item_id} target={target} "
+                f"findings={result.get('total_findings', 0)}"
+            )[:2000],
+        ))
+        db.commit()
+        return {"scan_id": job.id, "item_id": item_id, "target": target, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        try:
+            db.add(ScanLog(
+                scan_job_id=int(scan_id),
+                source="business-logic",
+                level="WARNING",
+                message=f"business_logic_failed item={item_id} target={target} error={exc!s}"[:2000],
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        return {"scan_id": scan_id, "item_id": item_id, "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
+@celery.task(name="run_scan_postprocessor", queue="worker.unit.reporting", ignore_result=True)
+def run_scan_postprocessor(
+    scan_id: int,
+    item_id: int,
+    kind: str,
+    target: str,
+    _postprocess_token: str | None = None,
+):
+    """Run heavy optional hooks outside the work-item poll critical path."""
+    pending_key = f"scan_postprocessor_pending:{int(scan_id)}:{kind}:{target}"
+    if not _singleflight_claim(pending_key, _postprocess_token):
+        return {"skipped": True, "reason": "stale_postprocessor_token"}
+    running_key = f"scan_postprocessor_running:{int(scan_id)}:{kind}:{target}"
+    redis_client = None
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        redis_client = _redis_client()
+        if not redis_client.set(running_key, str(item_id), nx=True, ex=3600):
+            return {"skipped": True, "reason": "postprocessor_already_running"}
+    except Exception:
+        redis_client = None
+
+    db = SessionLocal()
+    result: dict[str, Any] = {}
+    try:
+        from app.models.models import ScanWorkItem
+
+        job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == int(item_id)).first()
+        if not job or not item:
+            return {"skipped": True, "reason": "scan_or_item_missing"}
+        _set_scan_postprocessor_status(
+            db, scan_id, kind, target, "running", item_id=item_id
+        )
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="postprocessor",
+            level="INFO",
+            message=f"postprocessor_started kind={kind} item={item_id} target={target}"[:2000],
+        ))
+        db.commit()
+
+        if kind == "multi_identity":
+            from app.services.multi_identity_tester import run_multi_identity_test
+
+            result = run_multi_identity_test(db, job, target)
+        elif kind == "llm_operator":
+            from app.services.llm_operator import run_llm_operator
+
+            result = run_llm_operator(db, job)
+        elif kind == "js_pollution":
+            from app.services.js_pollution_analyzer import run_js_pollution_scan
+
+            result = run_js_pollution_scan(db, job.id, target_domains=[target], max_domains=1)
+        elif kind == "exploit_chain":
+            try:
+                from app.services.attack_graph import build_attack_graph
+
+                graph = build_attack_graph(db, job.id)
+            except Exception:
+                graph = {}
+            from app.services.exploit_chain import correlate_chains
+
+            chains = correlate_chains(db, job.id)
+            result = {"graph": graph, "chains": chains}
+        elif kind == "zap":
+            from app.services.zap_scanner import is_zap_available, run_zap_active_scan, run_zap_baseline
+
+            if not is_zap_available():
+                result = {"status": "skipped", "reason": "zap_unavailable"}
+            else:
+                state = dict(job.state_data or {})
+                url = target if str(target).startswith("http") else f"https://{target}"
+                target_l = str(target).lower()
+                crown_hosts = {
+                    str(c.get("host") if isinstance(c, dict) else c).lower()
+                    for c in state.get("crown_jewels") or []
+                }
+                high_value = target_l in crown_hosts or any(
+                    token in target_l
+                    for token in ("bank", "invoice", "pay", "auth", "sso", "login", "admin", "token", "api", "account")
+                )
+                active_count = int(state.get("zap_active_count") or 0)
+                auth_headers: dict[str, str] = {}
+                try:
+                    from app.services.scan_intelligence import auth_headers_from_state
+
+                    auth_headers = auth_headers_from_state(state) or {}
+                except Exception:
+                    pass
+                if high_value and active_count < 8:
+                    result = run_zap_active_scan(url, auth_headers=auth_headers or None)
+                    patch = {"zap_active_count": active_count + 1}
+                else:
+                    result = run_zap_baseline(url, auth_headers=auth_headers or None)
+                    patch = {}
+                findings = [
+                    finding for finding in list(result.get("findings") or [])
+                    if str(finding.get("title") or "").strip().lower() not in {"", "zap finding", "[zap]", "zap"}
+                    or bool((finding.get("details") or {}).get("cwe_id"))
+                ]
+                if findings:
+                    from app.services.findings_extractor import persist_finding_dicts
+
+                    result["findings_created"] = persist_finding_dicts(
+                        db,
+                        job,
+                        findings,
+                        default_tool=str(result.get("scan_type") or "zap-baseline"),
+                        default_target=target,
+                        source_item=None,
+                    )
+                patch.update({
+                    f"zap_done_{target}": True,
+                    "zap_run_count": int(state.get("zap_run_count") or 0) + 1,
+                })
+                _patch_scan_state(db, job.id, patch)
+        else:
+            _set_scan_postprocessor_status(
+                db, scan_id, kind, target, "skipped", item_id=item_id,
+                error=f"unknown_postprocessor:{kind}",
+            )
+            db.commit()
+            return {"skipped": True, "reason": f"unknown_postprocessor:{kind}"}
+
+        outcome, outcome_reason = _postprocessor_outcome_from_result(result)
+        _finish_scan_postprocessor_state(
+            db, scan_id, kind, target, outcome, item_id=item_id,
+            error=outcome_reason if outcome == "skipped" else "",
+            done=True,
+        )
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="postprocessor",
+            level="INFO",
+            message=f"postprocessor_finished kind={kind} item={item_id} target={target}"[:2000],
+        ))
+        db.commit()
+        return {"scan_id": scan_id, "item_id": item_id, "kind": kind, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        try:
+            _set_scan_postprocessor_status(
+                db, scan_id, kind, target, "failed", item_id=item_id, error=str(exc)
+            )
+            db.add(ScanLog(
+                scan_job_id=int(scan_id),
+                source="postprocessor",
+                level="WARNING",
+                message=f"postprocessor_failed kind={kind} item={item_id} target={target} error={exc!s}"[:2000],
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        return {"scan_id": scan_id, "item_id": item_id, "kind": kind, "error": str(exc)[:500]}
+    finally:
+        db.close()
+        if redis_client is not None:
+            try:
+                redis_client.delete(running_key)
+            except Exception:
+                pass
+        try:
+            _schedule_scan_work_dispatch(int(scan_id), countdown=1)
+        except Exception:
+            pass
+
+
+def _p09_gate_release_targets(qualified_targets: list[str]) -> list[str]:
+    """Keep P09 findings as a priority signal, not an authorization gate."""
+    return list(qualified_targets)
+
+
 @celery.task(name="dispatch_scan_work_items", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
-def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
+def dispatch_scan_work_items(
+    scan_id: int,
+    limit: int | None = None,
+    _dispatch_token: str | None = None,
+):
     """Capacity-aware dispatcher for persistent scan_work_items."""
     from app.db.session import SessionLocal
     from app.models.models import ExecutedToolRun, ScanJob, ScanLog, ScanWorkItem
@@ -2348,6 +3513,13 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         work_queue_counts,
     )
     from app.workers.worker_groups import phase_queue
+
+    _pending_key = f"dispatch_pending:{int(scan_id)}"
+    if _dispatch_token:
+        if not _singleflight_claim(_pending_key, _dispatch_token):
+            return {"skipped": True, "reason": "stale_dispatch_token", "scan_id": scan_id}
+    elif not _legacy_delivery_allowed(f"dispatch_legacy_guard:{int(scan_id)}", ttl=5):
+        return {"skipped": True, "reason": "duplicate_legacy_dispatch", "scan_id": scan_id}
 
     # ── Distributed lock: prevent concurrent dispatchers for the same scan ──
     # Multiple dispatch chains accumulate after worker restarts, starving poll/execute
@@ -2361,8 +3533,9 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         _r_lock = _rl_fn()
         _acquired = _r_lock.set(_lock_key, "1", nx=True, ex=_lock_ttl)
         if not _acquired:
-            # Another dispatch is already running for this scan — skip silently.
-            # The running one will re-schedule itself in 30 s.
+            # This message may have consumed the canonical pending token. Keep
+            # exactly one continuation alive after lock contention.
+            _schedule_scan_work_dispatch(scan_id, limit, countdown=5)
             return {"skipped": True, "reason": "dispatch_lock_held", "scan_id": scan_id}
     except Exception:
         pass  # Redis unavailable — proceed without the lock (fail-open)
@@ -2374,6 +3547,8 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
             return {"error": f"scan {scan_id} not found"}
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return {"scan_id": scan_id, "status": job.status, "paused": job.status == "paused"}
+        if _scan_is_terminal(job.status):
+            return {"scan_id": scan_id, "status": job.status, "terminal": True}
 
         # ── Gate reconciler (self-healing) ───────────────────────────────────────
         # The per-item gate-unblock hook lives in poll_scan_work_item, but items
@@ -2387,22 +3562,42 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 unblock_phase_items as _gr_unblock,
                 _GATE_UNLOCKS as _gr_unlocks,
                 triage_post_p09_injection as _gr_triage,
+                qualified_targets_for_gate as _gr_qualified,
             )
             from app.models.models import ScanWorkItem as _GR_SWI
             from sqlalchemy import func as _gr_func
             _GR_TERM = ["completed", "done", "failed", "timeout", "skipped"]
-            _gr_targets = [
-                r[0] for r in db.query(_GR_SWI.target)
+            _gr_targets_set = {
+                str(r[0])
+                for r in db.query(_GR_SWI.target)
                 .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target != "__batch__")
                 .distinct().all()
-            ] + ["__batch__"]
+                if str(r[0] or "")
+            }
+            # Fully-batched scans may have no individual work-item row for a
+            # target.  Reconciliation must use the durable batch membership too,
+            # otherwise a completed P02/P06 batch cannot release those targets
+            # after a worker restart between result persistence and gate opening.
+            for (_gr_meta,) in (
+                db.query(_GR_SWI.item_metadata)
+                .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target == "__batch__")
+                .all()
+            ):
+                for _gr_target in dict(_gr_meta or {}).get("batch_targets") or []:
+                    if str(_gr_target or ""):
+                        _gr_targets_set.add(str(_gr_target))
+            _gr_targets = sorted(_gr_targets_set)
             for _gate_pid in ("P02", "P06", "P09"):
                 # Is this gate phase fully terminal (and has items)?
-                _gp = dict(
-                    db.query(_GR_SWI.status, _gr_func.count(_GR_SWI.id))
-                    .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.phase_id == _gate_pid)
-                    .group_by(_GR_SWI.status).all()
+                _gp_query = db.query(_GR_SWI.status, _gr_func.count(_GR_SWI.id)).filter(
+                    _GR_SWI.scan_job_id == scan_id,
+                    _GR_SWI.phase_id == _gate_pid,
                 )
+                if _gate_pid == "P02":
+                    _gp_query = _gp_query.filter(_GR_SWI.tool_name.in_(["naabu", "nmap"]))
+                elif _gate_pid == "P06":
+                    _gp_query = _gp_query.filter(_GR_SWI.tool_name == "httpx")
+                _gp = dict(_gp_query.group_by(_GR_SWI.status).all())
                 _gp_total = sum(_gp.values())
                 if _gp_total == 0:
                     continue
@@ -2423,43 +3618,24 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 )
                 if _blocked_deps == 0:
                     continue
-                # P09 gate: triage_post_p09_injection was designed (and is still
-                # documented, scan_work_queue.py:2331-2340) to prune only the
-                # HIGH-COST tools (wapiti/sqlmap/dalfox/nikto/wpscan/zap) inside
-                # P10/P12/P13 for targets nuclei found nothing on — it explicitly
-                # is NOT meant to gate P11/P14/P17/P19/P20 at all. Reusing its
-                # narrow `targets_with_findings` set to filter every P09
-                # dependent was blocking those phases for ~97% of targets on a
-                # live scan (confirmed: a target with WordPress fingerprinted —
-                # tech_tokens containing "wordpress", applicability score 0.65,
-                # applicable=True — never got wpscan because the apex host
-                # wasn't in the 7-target findings set, even though its own
-                # sibling subdomains were). Each item's own applicability/skill
-                # decision (already computed per-tool, per-target at enqueue and
-                # re-validated at dispatch) is the correct place to decide
-                # relevance — this reconciler should only narrow the specific
-                # phases triage_post_p09_injection actually targets.
-                _TRIAGE_SCOPED_PHASES = {"P10", "P12", "P13"}
-                _unb_targets = _gr_targets
-                _triage_targets = None
+                # P09 is a positive priority signal, never a negative gate.
+                # triage_post_p09_injection records the signal and preserves
+                # independent methodologies even when Nuclei found nothing.
+                # A former compatibility branch still used
+                # `targets_with_findings` to release P10/P12/P13, contradicting
+                # that policy and silently stranding business-logic, IDOR and
+                # injection tests. Applicability/evidence contracts make the
+                # per-tool decision after every qualified P09 target is released.
+                _unb_targets = _gr_qualified(job.state_data, _gate_pid, _gr_targets)
+                if not _unb_targets and _gate_pid in {"P02", "P06"}:
+                    continue
                 if _gate_pid == "P09":
                     try:
-                        _tr = _gr_triage(db, scan_id)
-                        _twf = _tr.get("targets_with_findings") or []
-                        if _twf:
-                            _triage_targets = _twf + ["__batch__"]
+                        _gr_triage(db, scan_id)
                     except Exception:
                         pass
-                _n = 0
-                if _gate_pid == "P09" and _triage_targets is not None:
-                    _scoped_deps = [p for p in _deps if p in _TRIAGE_SCOPED_PHASES]
-                    _broad_deps = [p for p in _deps if p not in _TRIAGE_SCOPED_PHASES]
-                    if _scoped_deps:
-                        _n += _gr_unblock(db, scan_id, _triage_targets, _gate_pid, phases=_scoped_deps)
-                    if _broad_deps:
-                        _n += _gr_unblock(db, scan_id, _unb_targets, _gate_pid, phases=_broad_deps)
-                else:
-                    _n = _gr_unblock(db, scan_id, _unb_targets, _gate_pid)
+                    _unb_targets = _p09_gate_release_targets(_unb_targets)
+                _n = _gr_unblock(db, scan_id, _unb_targets, _gate_pid)
                 if _n:
                     db.commit()
                     import logging as _grlog
@@ -2506,12 +3682,14 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                         .all()
                     )
 
-                    def _item_priority(info: tuple) -> int:
+                    _claimed_order = {int(item_id): idx for idx, item_id in enumerate(item_ids)}
+
+                    def _item_priority(info: tuple) -> tuple[int, int, int]:
                         item_id, target, phase_id = info
                         target_score = _target_scores.get(str(target), 0)
                         phase_bonus = 100 if phase_id in _EXPLOIT_PHASES else 0
                         # Higher score = higher priority (sort ascending = lower first so negate)
-                        return -(target_score * 10 + phase_bonus)
+                        return (-(target_score * 10 + phase_bonus), _claimed_order.get(int(item_id), 10**9), int(item_id))
 
                     _items_info_sorted = sorted(_items_info, key=_item_priority)
                     item_ids = [info[0] for info in _items_info_sorted]
@@ -2597,8 +3775,8 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 .all()
             )
             for (_poll_item_id,) in _submitted_to_poll:
-                poll_scan_work_item.apply_async(args=[int(_poll_item_id)], countdown=1)
-                _rehydrated_polls += 1
+                if _schedule_work_item_poll(int(_poll_item_id), countdown=1):
+                    _rehydrated_polls += 1
             if _rehydrated_polls:
                 db.add(ScanLog(
                     scan_job_id=scan_id,
@@ -2615,7 +3793,9 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         # If the executable queue has drained and only gate-blocked items remain,
         # those items can no longer be unblocked by a future phase completion.
         # Finalize them here so scans do not loop forever at 98-99%.
-        _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
+        _orphaned_blocked = 0
+        if _scan_work_producers_sealed(job.state_data):
+            _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
         if _orphaned_blocked:
             db.commit()
 
@@ -2630,6 +3810,17 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         _prev_dispatch = dict(state.get("work_queue_last_dispatch") or {})
         _prev_counts = dict(_prev_dispatch.get("counts") or {})
         _should_log_dispatch = bool(item_ids) or counts != _prev_counts or int(_prev_dispatch.get("claimed") or 0) != len(item_ids)
+        try:
+            _reconciled_postprocessors = _reconcile_postprocessor_ledger_from_logs(db, scan_id)
+            if _reconciled_postprocessors:
+                db.flush()
+                db.refresh(job)
+                state = dict(job.state_data or {})
+        except Exception as _pp_reconcile_exc:
+            import logging as _pp_reconcile_log
+            _pp_reconcile_log.getLogger(__name__).debug(
+                "postprocessor_ledger_reconcile failed: %s", _pp_reconcile_exc
+            )
         state["work_queue_counts"] = counts
         state["work_queue_last_dispatch"] = {
             "claimed": len(item_ids),
@@ -2638,7 +3829,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
             "counts": counts,
             "updated_at": datetime.now().isoformat(),
         }
-        job.state_data = state
+        state = _assign_scan_state(db, job, state)
         if _should_log_dispatch:
             db.add(ScanLog(
                 scan_job_id=scan_id,
@@ -2651,8 +3842,77 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
         # "blocked" items are pending (waiting for their gate to open) — keep polling
         _has_active = item_ids or any(counts.get(st, 0) for st in _active_statuses) or counts.get("blocked", 0) > 0
         if _has_active:
-            dispatch_scan_work_items.apply_async(args=[scan_id, limit], countdown=30)
+            _schedule_scan_work_dispatch(scan_id, limit, countdown=30)
         else:
+            if not _scan_work_producers_sealed(job.state_data):
+                # The current queue generation drained before P01/P02/P06 sealed
+                # target production.  Poll, but never publish a terminal scan.
+                _barrier_state = dict(job.state_data or {})
+                _barrier_state["completion_waiting_for"] = "work_producers"
+                _barrier_state["completion_waiting_since"] = (
+                    _barrier_state.get("completion_waiting_since")
+                    or datetime.now().isoformat()
+                )
+                _barrier_state = _assign_scan_state(db, job, _barrier_state)
+                job.status = "running"
+                job.mission_progress = min(99, int(job.mission_progress or 0))
+                job.current_step = _step_with_phase(
+                    _barrier_state,
+                    "Aguardando fechamento de descoberta e qualificação de alvos",
+                )
+                db.add(ScanLog(
+                    scan_job_id=scan_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=(
+                        "completion_barrier_wait producer=offensive_operator "
+                        f"counts={counts}"
+                    ),
+                ))
+                db.commit()
+                _schedule_scan_work_dispatch(scan_id, limit, countdown=30)
+                return {
+                    "claimed": len(item_ids),
+                    "counts": counts,
+                    "completion_waiting_for": "work_producers",
+                }
+            try:
+                _reconciled_postprocessors = _reconcile_postprocessor_ledger_from_logs(db, scan_id)
+                if _reconciled_postprocessors:
+                    db.flush()
+                    db.refresh(job)
+            except Exception:
+                pass
+            if _scan_postprocessors_pending(scan_id, dict(job.state_data or {})):
+                # Optional analyzers can persist findings, hypotheses and even
+                # new work after the executable queue drains. Their durable
+                # ledger is therefore part of the same completion barrier.
+                _barrier_state = dict(job.state_data or {})
+                _barrier_state["completion_waiting_for"] = "postprocessors"
+                _barrier_state["completion_waiting_since"] = (
+                    _barrier_state.get("completion_waiting_since")
+                    or datetime.now().isoformat()
+                )
+                _barrier_state = _assign_scan_state(db, job, _barrier_state)
+                job.status = "running"
+                job.mission_progress = min(99, int(job.mission_progress or 0))
+                job.current_step = _step_with_phase(
+                    _barrier_state,
+                    "Aguardando analisadores e correlações pós-execução",
+                )
+                db.add(ScanLog(
+                    scan_job_id=scan_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=f"completion_barrier_wait producer=postprocessors counts={counts}",
+                ))
+                db.commit()
+                _schedule_scan_work_dispatch(scan_id, limit, countdown=15)
+                return {
+                    "claimed": len(item_ids),
+                    "counts": counts,
+                    "completion_waiting_for": "postprocessors",
+                }
             # ── Scan completion: all work items reached a terminal state ─────
             # "blocked" is NOT terminal — if we land here, any residual blocked items
             # are orphaned (their gate phase never ran). Treat them as skipped for
@@ -2694,7 +3954,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                     _final_state = dict(job.state_data or {})
                     _final_state["completion_source"] = "quality_gate"
                     _final_state["quality_gate_active"] = True
-                    job.state_data = _final_state
+                    _final_state = _assign_scan_state(db, job, _final_state)
                     job.status = "running"
                     job.mission_progress = 99
                     job.current_step = "P21 Quality Gate · validação e retry automático"
@@ -2708,7 +3968,7 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                         )[:2000],
                     ))
                     db.commit()
-                    dispatch_scan_work_items.apply_async(args=[scan_id, limit], countdown=5)
+                    _schedule_scan_work_dispatch(scan_id, limit, countdown=5)
                     return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
 
                 _final_state = dict(job.state_data or {})
@@ -2717,34 +3977,10 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                 _final_state["items_total"] = _total
                 _final_state["items_terminal"] = _done
                 _final_state["current_pentest_phase_id"] = "P22"
-                job.state_data = _final_state
+                _final_state = _assign_scan_state(db, job, _final_state)
                 job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")
                 job.mission_progress = 100
                 job.current_step = "P22 Campaign Report"
-                try:
-                    from app.services.operational_sli import persist_scan_sli_alerts
-                    persist_scan_sli_alerts(db, job, dict(_quality_gate.get("quality") or {}))
-                except Exception:
-                    pass
-                # Trigger post-scan CVE enrichment pass
-                try:
-                    from app.services.cve_enrichment_service import enrichment_service as _enrich
-                    _enrich.enrich_scan_findings(db, scan_id)
-                except Exception:
-                    pass
-                # Feature 5 — diff contínuo de superfície: alerta novos
-                # subdomínios vs o scan anterior do mesmo alvo.
-                try:
-                    from app.services.surface_diff import detect_and_alert_surface_changes
-                    detect_and_alert_surface_changes(db, job)
-                except Exception:
-                    pass
-                # P2/P7 — síntese de PENTEST.
-                try:
-                    from app.services.pentest_synthesis import synthesize_pentest
-                    synthesize_pentest(db, job)
-                except Exception:
-                    pass
                 db.add(ScanLog(
                     scan_job_id=scan_id,
                     source="work-queue",
@@ -2759,7 +3995,43 @@ def dispatch_scan_work_items(scan_id: int, limit: int | None = None):
                         f"blocked={counts.get('blocked',0)})"
                     ),
                 ))
+                # Commit terminal scan state before optional enrichment/synthesis.
+                # Those post-completion steps can touch external services or
+                # lazy-load local models; they must not hold the scan_jobs row
+                # lock and block reporting/handoff workers from updating status.
                 db.commit()
+                try:
+                    from app.services.operational_sli import persist_scan_sli_alerts
+                    persist_scan_sli_alerts(db, job, dict(_quality_gate.get("quality") or {}))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    pass
+                # Trigger post-scan CVE enrichment pass
+                try:
+                    from app.services.cve_enrichment_service import enrichment_service as _enrich
+                    _enrich.enrich_scan_findings(db, scan_id)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    pass
+                # Feature 5 — diff contínuo de superfície: alerta novos
+                # subdomínios vs o scan anterior do mesmo alvo.
+                try:
+                    from app.services.surface_diff import detect_and_alert_surface_changes
+                    detect_and_alert_surface_changes(db, job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    pass
+                # P2/P7 — síntese de PENTEST.
+                try:
+                    from app.services.pentest_synthesis import synthesize_pentest
+                    synthesize_pentest(db, job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    pass
         return {"claimed": len(item_ids), "counts": counts}
     finally:
         db.close()
@@ -2824,7 +4096,11 @@ def execute_scan_work_item(item_id: int):
             from app.services.scan_work_queue import _redis_client as _work_item_redis
 
             _execute_lock = _work_item_redis()
-            if not _execute_lock.set(_execute_lock_key, _execute_lock_token, nx=True, ex=7200):
+            # Never let the Redis lock outlive the durable DB lease. Lease
+            # expiry/pause also deletes this exact key, so a worker OOM can be
+            # retried without a second multi-hour lockout.
+            _execute_lock_ttl = max(60, int(settings.scan_work_queue_lease_seconds))
+            if not _execute_lock.set(_execute_lock_key, _execute_lock_token, nx=True, ex=_execute_lock_ttl):
                 db.add(ScanLog(
                     scan_job_id=item.scan_job_id,
                     source="work-queue",
@@ -2898,7 +4174,7 @@ def execute_scan_work_item(item_id: int):
                 except Exception:
                     pass
                 db.commit()
-                dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
                 return {"id": item.id, "status": item.status, "validation": validation_result, "continuation": continuation}
             except Exception as exc:  # noqa: BLE001
                 # Flush errors leave the SQLAlchemy transaction aborted. Reload
@@ -2927,7 +4203,7 @@ def execute_scan_work_item(item_id: int):
                 except Exception:
                     pass
                 db.commit()
-                dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
                 return {"id": item.id, "status": item.status, "error": str(exc)[:500]}
 
         _state_for_applicability = dict(job.state_data or {})
@@ -3018,7 +4294,11 @@ def execute_scan_work_item(item_id: int):
         _item_meta = dict(item.item_metadata or {})
         _batch_targets: list[str] = list(_item_meta.get("batch_targets") or [])
         _is_batch = item.target == "__batch__" and len(_batch_targets) > 1
-        _dispatch_target = _batch_targets[0] if _is_batch else item.target
+        _dispatch_target = (
+            _batch_targets[0]
+            if _is_batch
+            else str(_item_meta.get("execution_target") or item.target)
+        )
         _skill_ids = [str(s) for s in _item_meta.get("skill_ids") or [] if str(s)]
         if not _skill_ids and _item_meta.get("skill_id"):
             _skill_ids = [str(_item_meta.get("skill_id"))]
@@ -3078,14 +4358,31 @@ def execute_scan_work_item(item_id: int):
             )
             raw_status = str(result.get("status") or "").lower()
             exit_code = result.get("return_code", result.get("exit_code", 0))
-            terminal = "completed" if raw_status in {"done", "success", "completed"} and int(exit_code or 0) == 0 else "failed"
+            _local_error = str(
+                result.get("stderr")
+                or result.get("error")
+                or result.get("dispatch_error")
+                or ""
+            ).strip()
+            terminal = _backend_local_terminal_status(raw_status, exit_code, _local_error)
             if terminal == "failed" and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
                 terminal = "retry"
+            if terminal == "failed" and not _local_error:
+                _local_error = f"backend_local_failed_without_detail exit_code={exit_code}"
             now_done = datetime.now()
             item.status = terminal
             item.finished_at = now_done if terminal != "retry" else None
             item.lease_until = None if terminal != "retry" else now_done + timedelta(seconds=120)
-            item.last_error = str(result.get("stderr") or result.get("error") or result.get("dispatch_error") or "")[:2000] or None
+            item.last_error = (
+                "skipped:applicability:source_code_required"
+                if terminal == "skipped"
+                and _local_error == "source_code_required"
+                else (
+                    "skipped:backend_local:blocked_precondition"
+                    if terminal == "skipped"
+                    else _local_error[:2000] or None
+                )
+            )
             stdout = str(result.get("stdout") or "")
             item.result = {
                 "status": raw_status or terminal,
@@ -3209,7 +4506,7 @@ def execute_scan_work_item(item_id: int):
                 "execution_path": result.get("execution_path"),
                 "submitted_at": datetime.now().isoformat(),
             }
-            poll_scan_work_item.apply_async(args=[item.id], countdown=5)
+            _schedule_work_item_poll(item.id, countdown=5)
         item.updated_at = datetime.now()
         try:
             execution_key = f"wi-{item.id}"
@@ -3290,7 +4587,7 @@ def execute_scan_work_item(item_id: int):
 
 
 @celery.task(name="poll_scan_work_item", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
-def poll_scan_work_item(item_id: int):
+def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
     """Poll an async MCP/Kali job and persist the terminal result."""
     from datetime import datetime, timedelta
     import requests
@@ -3298,6 +4595,13 @@ def poll_scan_work_item(item_id: int):
     from app.core.config import settings
     from app.models.models import ExecutedToolRun, ScanJob, ScanLog, ScanWorkItem
     from app.services.scan_work_queue import work_queue_counts
+
+    _pending_key = f"poll_pending:{int(item_id)}"
+    if _poll_token:
+        if not _singleflight_claim(_pending_key, _poll_token):
+            return {"id": item_id, "status": "duplicate_poll", "reason": "stale_poll_token"}
+    elif not _legacy_delivery_allowed(f"poll_legacy_guard:{int(item_id)}", ttl=10):
+        return {"id": item_id, "status": "duplicate_poll", "reason": "legacy_poll_rate_limited"}
 
     db = SessionLocal()
     try:
@@ -3347,7 +4651,8 @@ def poll_scan_work_item(item_id: int):
         raw_status = str(status_payload.get("status") or "").lower()
         if raw_status not in {"done", "failed", "timeout", "skipped"}:
             _now = datetime.now()
-            item.lease_until = _now + timedelta(seconds=300)
+            _runner_timeout = max(60, int(result_state.get("timeout") or 300))
+            item.lease_until = _now + timedelta(seconds=max(600, _runner_timeout + 300))
             result_state["last_poll"] = _now.isoformat()
             result_state["kali_status"] = raw_status or "running"
             # P1 — heartbeat de progresso VISÍVEL. O updated_at já era tocado a
@@ -3373,7 +4678,7 @@ def poll_scan_work_item(item_id: int):
                     ),
                 ))
             db.commit()
-            poll_scan_work_item.apply_async(args=[item.id], countdown=15)
+            _schedule_work_item_poll(item.id, countdown=15)
             return {"id": item.id, "status": "submitted", "kali_status": raw_status}
 
         result_response = requests.get(
@@ -3413,7 +4718,7 @@ def poll_scan_work_item(item_id: int):
         item.status = terminal
         item.finished_at = datetime.now() if terminal != "retry" else None
         item.lease_until = None if terminal != "retry" else datetime.now() + timedelta(seconds=120)
-        item.last_error = str(result.get("error") or "")[:2000] or None
+        item.last_error = _terminal_result_error(result, raw_status, exit_code)
 
         # Libera slot no semáforo Redis global quando tarefa termina (não é retry)
         if terminal != "retry":
@@ -3488,10 +4793,14 @@ def poll_scan_work_item(item_id: int):
             "stderr_path": result.get("stderr_path"),
             "duration_seconds": result.get("duration_seconds"),
             "error": result.get("error"),
+            "stderr_preview": str(result.get("stderr") or "")[:3000] or None,
             # display only — never fed to a parser, safe to lossily compact
             "stdout_preview": _compress_stdout(_full_stdout, max_chars=3000),
             "stdout_full": _full_stdout[:200_000],        # parser input (200 KB cap)
             "parsed_result": _parsed_result,
+            "batch_targets": list(result.get("batch_targets") or []),
+            "batch_target_count": int(result.get("batch_target_count") or 0),
+            "batch_target_file_sha256": result.get("batch_target_file_sha256"),
             "scope_output_guard": _scope_output_guard,
             "finished_at": datetime.now().isoformat(),
         }
@@ -3499,7 +4808,7 @@ def poll_scan_work_item(item_id: int):
         db.commit()
         db.refresh(item)
         if job:
-            db.refresh(job)
+            job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
 
         run_status = "success" if item.status == "completed" else ("failed" if item.status in {"failed", "timeout", "skipped"} else "timeout")
         try:
@@ -3653,8 +4962,22 @@ def poll_scan_work_item(item_id: int):
             try:
                 from app.services.scan_work_queue import update_skill_execution_score as _upd_score
                 if job and _feedback_skill_ids:
+                    job = (
+                        db.query(ScanJob)
+                        .filter(ScanJob.id == item.scan_job_id)
+                        .populate_existing()
+                        .with_for_update()
+                        .first()
+                    )
                     _score_state = dict(job.state_data or {})
-                    _score_result = "skipped" if item.status == "skipped" else str(item.status or "unknown")
+                    if item.status == "skipped":
+                        _score_result = "skipped"
+                    elif item.status == "completed":
+                        _score_result = "productive" if int(findings_created or 0) > 0 else "unproductive"
+                    elif item.status in {"failed", "timeout"}:
+                        _score_result = "unproductive"
+                    else:
+                        _score_result = str(item.status or "unknown")
                     for _sid in _feedback_skill_ids:
                         _upd_score(
                             _score_state,
@@ -3670,17 +4993,83 @@ def poll_scan_work_item(item_id: int):
         except Exception:
             db.rollback()
 
+        # Fold the just-finished authoritative recon result into the durable
+        # per-target qualification map before deciding whether a gate can open.
+        if job and item.phase_id in {"P02", "P06"}:
+            try:
+                from app.services.scan_work_queue import record_recon_work_item_evidence as _record_recon_evidence
+                from app.services.recon_observability import emit_recon_event as _emit_recon_event
+
+                # Qualification state is a shared JSON document. Acquire this
+                # immediately before the fold (after feedback commits/rollbacks)
+                # so concurrent P02/P06 pollers cannot overwrite each other's
+                # per-target evidence.
+                job = (
+                    db.query(ScanJob)
+                    .filter(ScanJob.id == item.scan_job_id)
+                    .with_for_update()
+                    .first()
+                )
+                _evidence_summary = _record_recon_evidence(job, item)
+                if _evidence_summary:
+                    _emit_recon_event(
+                        db,
+                        job.id,
+                        "qualification_evidence_folded",
+                        level=(
+                            "INFO"
+                            if int(_evidence_summary.get("covered_targets") or 0) > 0
+                            else "WARNING"
+                        ),
+                        **_evidence_summary,
+                    )
+                    _item_meta_recon = dict(item.item_metadata or {})
+                    if (
+                        item.phase_id == "P06"
+                        and _item_meta_recon.get("source") == "p02_open_port_origin"
+                        and int(_evidence_summary.get("qualified_targets") or 0) > 0
+                    ):
+                        from app.services.scan_work_queue import enqueue_scan_work_items as _enqueue_origin_matrix
+
+                        _origin_seed = _enqueue_origin_matrix(
+                            db,
+                            job,
+                            [str(item.target)],
+                            source="p06_nonstandard_origin_promoted",
+                        )
+                        _emit_recon_event(
+                            db,
+                            job.id,
+                            "p06_origin_promoted_to_test_matrix",
+                            origin=str(item.target),
+                            work_items_created=int(_origin_seed.get("created") or 0),
+                            work_items_existing=int(_origin_seed.get("existing") or 0),
+                        )
+                db.flush()
+            except Exception as _recon_state_err:
+                import logging as _recon_state_log
+                _recon_state_log.getLogger(__name__).warning(
+                    "recon evidence fold failed scan=%s item=%s: %s",
+                    item.scan_job_id,
+                    item.id,
+                    _recon_state_err,
+                )
+
         # ── Camada 2: Phase gate unblocking ──────────────────────────────────────
         # Progressive unlock: when a gate phase reaches terminal state for a target,
         # unblock all dependent phases for that target.
-        #   P02 done → unlock P03/P04/P05/P06/P07/P15
-        #   P06 done → unlock P08/P09/P16
+        #   P02 conclusivo → unlock P06/P15
+        #   P06/httpx live → unlock P03-P05/P07-P09/P16
         #   P09 done → triage + unlock P10-P14/P17/P19/P20 for targets WITH findings
-        # Also handles failed/timeout gate items — downstream phases get a chance.
+        # Failed/timeout/skipped items close their attempt but do NOT qualify a
+        # target.  Their dependents remain blocked and become explicit gaps.
         _GATE_PHASES = {"P02", "P06", "P09"}
         if item.phase_id in _GATE_PHASES and item.status in ("completed", "failed", "timeout", "skipped") and job:
             try:
-                from app.services.scan_work_queue import unblock_phase_items as _unblock
+                from app.services.scan_work_queue import (
+                    unblock_phase_items as _unblock,
+                    qualified_targets_for_gate as _qualified_gate_targets,
+                )
                 from sqlalchemy import func as _sfunc2
 
                 _imeta_gate = dict(item.item_metadata or {})
@@ -3702,6 +5091,10 @@ def poll_scan_work_item(item_id: int):
                             _SWI_gate.id != item.id,  # exclude the just-finished item
                         )
                     )
+                    if item.phase_id == "P02":
+                        _still_q = _still_q.filter(_SWI_gate.tool_name.in_(["naabu", "nmap"]))
+                    elif item.phase_id == "P06":
+                        _still_q = _still_q.filter(_SWI_gate.tool_name == "httpx")
                     if not _is_batch_gate:
                         # Individual item: only check same target
                         _still_q = _still_q.filter(_SWI_gate.target == item.target)
@@ -3709,9 +5102,25 @@ def poll_scan_work_item(item_id: int):
 
                     if _still_pending_gate == 0:
                         # All gate items done → unblock dependents
-                        _unblock_targets = _gate_targets
+                        _unblock_targets = _qualified_gate_targets(
+                            job.state_data,
+                            item.phase_id,
+                            _gate_targets,
+                        )
+                        if not _unblock_targets and item.phase_id in {"P02", "P06"}:
+                            db.add(ScanLog(
+                                scan_job_id=job.id,
+                                source="work-queue",
+                                level="WARNING",
+                                message=(
+                                    f"phase_gate_not_qualified gate={item.phase_id} "
+                                    f"targets={len(_gate_targets)} reason=no_authoritative_evidence"
+                                ),
+                            ))
+                            db.flush()
                         if item.phase_id == "P09":
-                            # P09 special: triage first (cancel P10+ for targets without findings)
+                            # P09 is a positive priority signal, not a negative
+                            # gate for unrelated methodologies.
                             from app.services.scan_work_queue import triage_post_p09_injection as _triage_p09
                             _triage_result = _triage_p09(db, job.id)
                             if _triage_result.get("cancelled", 0) > 0:
@@ -3721,11 +5130,55 @@ def poll_scan_work_item(item_id: int):
                                     job.id, _triage_result["cancelled"], _triage_result["kept"],
                                     len(_triage_result.get("targets_with_findings", [])),
                                 )
-                            # Only unblock for targets that survived triage
-                            _twf = _triage_result.get("targets_with_findings") or []
-                            _unblock_targets = _twf if _twf else _gate_targets
+                        if item.phase_id == "P02" and _unblock_targets:
+                            try:
+                                from app.services.scan_work_queue import (
+                                    enqueue_p06_discovered_port_origins as _seed_p06_origins,
+                                )
+
+                                _origin_seed = _seed_p06_origins(db, job, _unblock_targets)
+                                if int(_origin_seed.get("created") or 0) > 0:
+                                    from app.services.recon_observability import (
+                                        emit_recon_event as _emit_origin_event,
+                                    )
+                                    _emit_origin_event(
+                                        db,
+                                        job.id,
+                                        "p06_port_origins_seeded",
+                                        source_item_id=item.id,
+                                        targets=len(_unblock_targets),
+                                        origins_created=int(_origin_seed.get("created") or 0),
+                                        origins_existing=int(_origin_seed.get("existing") or 0),
+                                    )
+                            except Exception as _origin_err:
+                                import logging as _origin_log
+                                _origin_log.getLogger(__name__).warning(
+                                    "p06 port-origin seeding failed scan=%s: %s",
+                                    job.id,
+                                    _origin_err,
+                                )
 
                         _unblocked = _unblock(db, job.id, _unblock_targets, item.phase_id)
+                        try:
+                            from app.services.recon_observability import emit_recon_event as _emit_gate_event
+                            _emit_gate_event(
+                                db,
+                                job.id,
+                                "phase_gate_decision",
+                                level=(
+                                    "INFO"
+                                    if _unblock_targets or item.phase_id == "P09"
+                                    else "WARNING"
+                                ),
+                                gate_phase=item.phase_id,
+                                source_item_id=item.id,
+                                candidate_targets=len(_gate_targets),
+                                qualified_targets=len(_unblock_targets),
+                                unblocked_items=int(_unblocked or 0),
+                                still_pending_gate_items=int(_still_pending_gate or 0),
+                            )
+                        except Exception:
+                            pass
                         if _unblocked > 0:
                             import logging as _gatelog
                             _gatelog.getLogger(__name__).info(
@@ -3808,16 +5261,11 @@ def poll_scan_work_item(item_id: int):
         # Run after web app scanning phases complete for targets with auth endpoints
         if item.status == "completed" and job and item.phase_id in ("P09", "P10", "P12"):
             try:
-                from app.services.multi_identity_tester import run_multi_identity_test as _bola_test
-                _bola_meta = dict(item.item_metadata or {})
-                if not _bola_meta.get("bola_tested"):
-                    _bola_result = _bola_test(db, job, item.target)
-                    if _bola_result.get("bola_findings", 0) > 0:
-                        import logging as _bolog
-                        _bolog.getLogger(__name__).info(
-                            "bola_test scan=%d target=%s findings=%d",
-                            job.id, item.target, _bola_result["bola_findings"],
-                        )
+                _schedule_scan_postprocessor(
+                    job.id, item.id, "multi_identity", item.target,
+                    queue="worker.unit.reporting",
+                    db=db,
+                )
             except Exception as _bola_err:
                 import logging as _bolog2
                 _bolog2.getLogger(__name__).debug("multi_identity_tester failed: %s", _bola_err)
@@ -3825,14 +5273,11 @@ def poll_scan_work_item(item_id: int):
         # ── L3: LLM operator — proposes novel attack chains after key phases ────
         if item.status == "completed" and job and item.phase_id in ("P09", "P10", "P11"):
             try:
-                from app.services.llm_operator import run_llm_operator as _llm_op
-                _llm_result = _llm_op(db, job)
-                if _llm_result.get("items_created", 0) > 0:
-                    import logging as _llmlog
-                    _llmlog.getLogger(__name__).info(
-                        "llm_operator scan=%d chains=%d items=%d",
-                        job.id, _llm_result.get("chains_proposed", 0), _llm_result.get("items_created", 0),
-                    )
+                _schedule_scan_postprocessor(
+                    job.id, item.id, "llm_operator", item.target,
+                    queue="worker.unit.reporting",
+                    db=db,
+                )
             except Exception as _llme:
                 import logging as _llmlog2
                 _llmlog2.getLogger(__name__).debug("llm_operator failed: %s", _llme)
@@ -3845,19 +5290,20 @@ def poll_scan_work_item(item_id: int):
                 _state_bla = dict(job.state_data or {})
                 _bla_done_key = f"bla_done_{item.target}"
                 if not _state_bla.get(_bla_done_key):
-                    from app.services.business_logic_analyzer import run_business_logic_scan as _bla_run
-                    _bla_result = _bla_run(db, job.id, target_domains=[item.target], max_domains=1)
-                    _state_bla[_bla_done_key] = True
-                    job.state_data = _state_bla
-                    if _bla_result.get("total_findings", 0) > 0:
-                        import logging as _blalog
-                        _blalog.getLogger(__name__).info(
-                            "business_logic scan=%d target=%s findings=%d",
-                            job.id, item.target, _bla_result["total_findings"],
-                        )
+                    _schedule_business_logic_analysis(
+                        job.id,
+                        item.id,
+                        item.target,
+                        mode=(
+                            "scheduled"
+                            if str(getattr(job, "mode", "") or "").lower() == "scheduled"
+                            else "unit"
+                        ),
+                        countdown=1,
+                    )
             except Exception as _bla_err:
                 import logging as _blalog2
-                _blalog2.getLogger(__name__).debug("business_logic_analyzer failed: %s", _bla_err)
+                _blalog2.getLogger(__name__).debug("business_logic_analyzer scheduling failed: %s", _bla_err)
 
         # ── JSP: JS Prototype Pollution Analyzer — after crawl/nuclei ─────────
         # Triggered after katana (P08) or nuclei (P09) completes. Node.js apps
@@ -3877,16 +5323,11 @@ def poll_scan_work_item(item_id: int):
                         "vercel", "netlify",
                     ])
                     if _is_node_target:
-                        from app.services.js_pollution_analyzer import run_js_pollution_scan as _jsp_run
-                        _jsp_result = _jsp_run(db, job.id, target_domains=[item.target], max_domains=1)
-                        _state_jsp[_jsp_done_key] = True
-                        job.state_data = _state_jsp
-                        if _jsp_result.get("findings_created", 0) > 0:
-                            import logging as _jsplog
-                            _jsplog.getLogger(__name__).info(
-                                "js_pollution scan=%d target=%s findings=%d",
-                                job.id, item.target, _jsp_result["findings_created"],
-                            )
+                        _schedule_scan_postprocessor(
+                            job.id, item.id, "js_pollution", item.target,
+                            queue="worker.unit.exploitation",
+                            db=db,
+                        )
             except Exception as _jsp_err:
                 import logging as _jsplog2
                 _jsplog2.getLogger(__name__).debug("js_pollution_analyzer failed: %s", _jsp_err)
@@ -3899,6 +5340,20 @@ def poll_scan_work_item(item_id: int):
         # One ZAP run per target per scan (guarded by state key).
         if item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and item.target != "__batch__":
             try:
+                _schedule_scan_postprocessor(
+                    job.id, item.id, "zap", item.target,
+                    queue="worker.unit.exploitation",
+                    db=db,
+                )
+            except Exception:
+                pass
+
+        if False and item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and item.target != "__batch__":
+            _zap_lock_client = None
+            _zap_lock_acquired = False
+            _zap_lock_key = "zap_scan_global_lock"
+            _zap_lock_token = f"{job.id}:{item.id}:{item.target}"
+            try:
                 _state_zap = dict(job.state_data or {})
                 _zap_key = f"zap_done_{item.target}"
                 # Cap: ZAP is heavy (1-2 min/target) — limit to first 15 live targets.
@@ -3910,6 +5365,39 @@ def poll_scan_work_item(item_id: int):
                         is_zap_available as _zap_avail,
                     )
                     if _zap_avail():
+                        # ZAP keeps one in-memory site tree and active scanner.
+                        # Concurrent post-process hooks multiply heap/native
+                        # usage, caused repeat OOMs, and made the work queue look
+                        # locked while two poll threads waited on the service.
+                        from app.services.scan_work_queue import _redis_client as _zap_redis
+
+                        _zap_lock_client = _zap_redis()
+                        _zap_lock_acquired = bool(
+                            _zap_lock_client.set(
+                                _zap_lock_key,
+                                _zap_lock_token,
+                                nx=True,
+                                ex=2400,
+                            )
+                        )
+                        if not _zap_lock_acquired:
+                            db.add(ScanLog(
+                                scan_job_id=job.id,
+                                source="zap",
+                                level="INFO",
+                                message=(
+                                    f"zap_scan_deferred target={item.target} "
+                                    "reason=global_zap_scan_in_progress"
+                                ),
+                            ))
+                            db.commit()
+                            raise RuntimeError("global_zap_scan_in_progress")
+
+                        # Release any transaction opened by earlier
+                        # post-processors before waiting on an external scan for
+                        # several minutes. Otherwise the dispatcher blocks on
+                        # the ScanJob row and appears dead.
+                        db.commit()
                         _tgt = item.target
                         _zap_url = _tgt if str(_tgt).startswith("http") else f"https://{_tgt}"
                         # Scan AUTENTICADO: injeta credenciais do scan (auth_config)
@@ -3931,6 +5419,16 @@ def poll_scan_work_item(item_id: int):
                             k in _tl for k in ("bank", "invoice", "fatura", "pay", "auth",
                                                "sso", "login", "admin", "token", "api", "account", "conta"))
                         _zap_active_used = int(_state_zap.get("zap_active_count") or 0)
+                        _zap_mode = "active" if _hv and _zap_active_used < 8 else "baseline"
+                        import time as _zap_time
+                        _zap_started = _zap_time.monotonic()
+                        db.add(ScanLog(
+                            scan_job_id=job.id,
+                            source="zap",
+                            level="INFO",
+                            message=f"zap_scan_started target={_tgt} mode={_zap_mode}",
+                        ))
+                        db.commit()
                         if _hv and _zap_active_used < 8:
                             _zap_res = _zap_active(_zap_url, auth_headers=_zap_auth or None)
                             _state_zap["zap_active_count"] = _zap_active_used + 1
@@ -3969,7 +5467,13 @@ def poll_scan_work_item(item_id: int):
                         _zap_findings = [f for f in _zap_findings if _zap_meaningful(f)]
                         _state_zap[_zap_key] = True
                         _state_zap["zap_run_count"] = _zap_count + 1
-                        job.state_data = _state_zap
+                        _zap_patch = {
+                            _zap_key: True,
+                            "zap_run_count": _zap_count + 1,
+                        }
+                        if _hv and _zap_active_used < 8:
+                            _zap_patch["zap_active_count"] = _zap_active_used + 1
+                        job = _patch_scan_state(db, job.id, _zap_patch) or job
                         if _zap_findings:
                             from app.services.findings_extractor import persist_finding_dicts as _persist_zap
                             _zap_created = _persist_zap(
@@ -3981,9 +5485,32 @@ def poll_scan_work_item(item_id: int):
                                 "zap_baseline scan=%d target=%s alerts=%d findings_created=%d",
                                 job.id, _tgt, _zap_res.get("alert_count", 0), _zap_created,
                             )
+                        db.add(ScanLog(
+                            scan_job_id=job.id,
+                            source="zap",
+                            level="INFO",
+                            message=(
+                                f"zap_scan_finished target={_tgt} mode={_zap_mode} "
+                                f"elapsed={int(_zap_time.monotonic() - _zap_started)}s "
+                                f"alerts={len(_zap_findings)}"
+                            ),
+                        ))
+                        db.commit()
             except Exception as _zap_err:
                 import logging as _zaplog2
                 _zaplog2.getLogger(__name__).debug("zap_baseline failed: %s", _zap_err)
+            finally:
+                if _zap_lock_acquired and _zap_lock_client is not None:
+                    try:
+                        _zap_lock_client.eval(
+                            "if redis.call('get',KEYS[1]) == ARGV[1] "
+                            "then return redis.call('del',KEYS[1]) else return 0 end",
+                            1,
+                            _zap_lock_key,
+                            _zap_lock_token,
+                        )
+                    except Exception:
+                        pass
 
         # ── EXC: Attack Graph + Exploit Chain correlation — post-exploitation ────
         # Runs after P12, P13, P17 or P20 items complete (exploitation phases).
@@ -3992,6 +5519,16 @@ def poll_scan_work_item(item_id: int):
         # Also triggered on P12/P13 for early partial chain detection.
         _CHAIN_TRIGGER_PHASES = {"P10", "P12", "P13", "P17", "P20"}
         if item.status == "completed" and job and item.phase_id in _CHAIN_TRIGGER_PHASES:
+            try:
+                _schedule_scan_postprocessor(
+                    job.id, item.id, "exploit_chain", item.target,
+                    queue="worker.unit.reporting",
+                    db=db,
+                )
+            except Exception:
+                pass
+
+        if False and item.status == "completed" and job and item.phase_id in _CHAIN_TRIGGER_PHASES:
             try:
                 _state_exc = dict(job.state_data or {})
                 # Re-correlate after each P17/P20 completion (not just once)
@@ -4025,7 +5562,16 @@ def poll_scan_work_item(item_id: int):
                         _state_exc["_last_chain_phase"] = item.phase_id
                         _state_exc["exploit_chains_count"] = len(_chains) if isinstance(_chains, list) else 0
                         _state_exc["attack_graph_nodes"] = _graph.get("node_count", 0) if isinstance(_graph, dict) else 0
-                        job.state_data = _state_exc
+                        job = _patch_scan_state(
+                            db,
+                            job.id,
+                            {
+                                "exploit_chains_correlated": True,
+                                "_last_chain_phase": item.phase_id,
+                                "exploit_chains_count": _state_exc["exploit_chains_count"],
+                                "attack_graph_nodes": _state_exc["attack_graph_nodes"],
+                            },
+                        ) or job
                         import logging as _exclog
                         _exclog.getLogger(__name__).info(
                             "exploit_chain_correlation scan=%d trigger_phase=%s chains=%d graph_nodes=%d",
@@ -4151,9 +5697,7 @@ def poll_scan_work_item(item_id: int):
                     if not _st_j.get("js_done") and _st_j.get("discovered_endpoints"):
                         from app.services.js_analyzer import run_js_analysis_for_scan
                         _jr = run_js_analysis_for_scan(db, job)
-                        _st_j = dict(job.state_data or {})
-                        _st_j["js_done"] = True
-                        job.state_data = _st_j
+                        job = _patch_scan_state(db, job.id, {"js_done": True}) or job
                         if _jr.get("findings_created") or _jr.get("endpoints_reseeded"):
                             import logging as _jlog
                             _jlog.getLogger(__name__).info(
@@ -4163,26 +5707,22 @@ def poll_scan_work_item(item_id: int):
                 # ── Pentest inventory intelligence: hypotheses + coverage + safe validators ──
                 if item.phase_id in ("P03", "P08", "P09", "P10", "P12", "P13", "P16", "P17") and item.status == "completed":
                     try:
-                        from app.services.hypothesis_rules import generate_hypotheses_for_scan
-                        from app.services.pentest_coverage_service import refresh_coverage
-                        _hyp_res = generate_hypotheses_for_scan(db, job)
-                        _inv_state = dict(job.state_data or {})
-                        if not _inv_state.get("pentest_safe_validators_done") and item.phase_id in ("P09", "P10", "P12", "P13", "P17"):
-                            from app.services.pentest_validators import run_validators_for_scan
-                            _val_res = run_validators_for_scan(db, job, limit=80)
-                            _inv_state = dict(job.state_data or {})
-                            _inv_state["pentest_safe_validators_done"] = int(_val_res.get("remaining") or 0) == 0
-                            _inv_state["pentest_safe_validators_summary"] = _val_res
-                            job.state_data = _inv_state
-                        _cov_res = refresh_coverage(db, job)
-                        if (_hyp_res.get("hypotheses_created_or_seen") or 0) > 0:
-                            import logging as _invlog
-                            _invlog.getLogger(__name__).info(
-                                "pentest_inventory scan=%d hypotheses=%s coverage=%s%%",
-                                job.id, _hyp_res.get("hypotheses_created_or_seen"), _cov_res.get("coverage_percent"))
+                        # Scan-wide hypothesis generation and coverage refresh
+                        # are O(total endpoints/hypotheses), not item-local work.
+                        # Running them here made every poll take 10-100 seconds.
+                        # Coalesce result bursts into one reporting task.
+                        _schedule_pentest_inventory_refresh(
+                            job.id,
+                            mode=(
+                                "scheduled"
+                                if str(getattr(job, "mode", "") or "").lower() == "scheduled"
+                                else "unit"
+                            ),
+                            countdown=2,
+                        )
                     except Exception as _inv_err:
                         import logging as _invlog2
-                        _invlog2.getLogger(__name__).debug("pentest inventory post-processing failed: %s", _inv_err)
+                        _invlog2.getLogger(__name__).debug("pentest inventory scheduling failed: %s", _inv_err)
 
                 # ── Fase 2: Excessive Data Exposure / Mass Assignment (API) ───
                 if item.phase_id in ("P09", "P16") and item.status == "completed":
@@ -4190,9 +5730,7 @@ def poll_scan_work_item(item_id: int):
                     if not _st_a.get("api_probe_done") and _st_a.get("discovered_endpoints"):
                         from app.services.api_probe import run_api_probe_for_scan
                         _ar = run_api_probe_for_scan(db, job)
-                        _st_a = dict(job.state_data or {})
-                        _st_a["api_probe_done"] = True
-                        job.state_data = _st_a
+                        job = _patch_scan_state(db, job.id, {"api_probe_done": True}) or job
                         if _ar.get("findings_created"):
                             import logging as _alog
                             _alog.getLogger(__name__).info(
@@ -4204,9 +5742,7 @@ def poll_scan_work_item(item_id: int):
                     if not _st_bl.get("bizlogic_done") and _st_bl.get("discovered_endpoints"):
                         from app.services.business_logic_probe import run_business_logic_for_scan
                         _blr = run_business_logic_for_scan(db, job)
-                        _st_bl = dict(job.state_data or {})
-                        _st_bl["bizlogic_done"] = True
-                        job.state_data = _st_bl
+                        job = _patch_scan_state(db, job.id, {"bizlogic_done": True}) or job
                         if _blr.get("findings_created"):
                             import logging as _bllog
                             _bllog.getLogger(__name__).info(
@@ -4219,9 +5755,7 @@ def poll_scan_work_item(item_id: int):
                     if not _st_n.get("nosql_done") and (_st_n.get("discovered_endpoints")):
                         from app.services.nosql_probe import run_nosql_for_scan
                         _nr = run_nosql_for_scan(db, job)
-                        _st_n = dict(job.state_data or {})
-                        _st_n["nosql_done"] = True
-                        job.state_data = _st_n
+                        job = _patch_scan_state(db, job.id, {"nosql_done": True}) or job
                         if _nr.get("findings_created"):
                             import logging as _nlog
                             _nlog.getLogger(__name__).info(
@@ -4235,9 +5769,7 @@ def poll_scan_work_item(item_id: int):
                     if _st_b.get("auth_config") and not _st_b.get("bola_done"):
                         from app.services.bola_probe import run_bola_for_scan
                         _br = run_bola_for_scan(db, job)
-                        _st_b = dict(job.state_data or {})
-                        _st_b["bola_done"] = True
-                        job.state_data = _st_b
+                        job = _patch_scan_state(db, job.id, {"bola_done": True}) or job
                         if _br.get("findings_created"):
                             import logging as _blog
                             _blog.getLogger(__name__).info(
@@ -4253,9 +5785,7 @@ def poll_scan_work_item(item_id: int):
                         # em qualquer ambiente; classifica confirmada/hipótese/não-testada.
                         from app.services.app_pentest import run_app_pentest_for_scan
                         _aer = run_app_pentest_for_scan(db, job)
-                        _st_ae = dict(job.state_data or {})
-                        _st_ae["active_exploit_done"] = True
-                        job.state_data = _st_ae
+                        job = _patch_scan_state(db, job.id, {"active_exploit_done": True}) or job
                         if _aer.get("findings_created"):
                             import logging as _aelog
                             _aelog.getLogger(__name__).info(
@@ -4523,9 +6053,9 @@ def poll_scan_work_item(item_id: int):
             ))
         db.commit()
         if item.status == "retry":
-            dispatch_scan_work_items.delay(item.scan_job_id)
+            _schedule_scan_work_dispatch(item.scan_job_id)
         else:
-            dispatch_scan_work_items.apply_async(args=[item.scan_job_id], countdown=1)
+            _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
         return {"id": item.id, "status": item.status}
     except Exception as exc:  # noqa: BLE001
         db.rollback()
@@ -4549,7 +6079,7 @@ def poll_scan_work_item(item_id: int):
             item.updated_at = datetime.now()
             db.commit()
             if not _over_limit:
-                poll_scan_work_item.apply_async(args=[item.id], countdown=30)
+                _schedule_work_item_poll(item.id, countdown=30)
         return {"id": item_id, "status": "poll_error", "error": str(exc)}
     finally:
         db.close()

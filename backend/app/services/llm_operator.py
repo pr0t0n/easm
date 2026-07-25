@@ -115,6 +115,56 @@ Return JSON array only."""
     return prompt
 
 
+def _normalize_tech_stack(raw: Any) -> list[dict[str, Any]]:
+    """Return a prompt-safe list of technology observations.
+
+    Historical scan state stores ``tech_stack`` in more than one shape:
+    - list[dict] from newer inventory normalizers;
+    - dict buckets such as {"cms": [...], "waf": [...], "detected": [...]};
+    - occasionally plain strings from older adapters.
+
+    The prompt builder expects dictionaries.  Normalizing here keeps the LLM
+    operator from failing the whole postprocessor on mixed scan-state shapes.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        observations: list[dict[str, Any]] = []
+        for category, values in raw.items():
+            if isinstance(values, (list, tuple, set)):
+                for value in values:
+                    if isinstance(value, dict):
+                        row = dict(value)
+                        row.setdefault("category", str(category))
+                        observations.append(row)
+                    elif str(value or "").strip():
+                        observations.append({
+                            "category": str(category),
+                            "tech": str(value).strip(),
+                        })
+            elif isinstance(values, dict):
+                row = dict(values)
+                row.setdefault("category", str(category))
+                observations.append(row)
+            elif str(values or "").strip():
+                observations.append({
+                    "category": str(category),
+                    "tech": str(values).strip(),
+                })
+        return observations
+    if isinstance(raw, (list, tuple, set)):
+        observations = []
+        for value in raw:
+            if isinstance(value, dict):
+                observations.append(dict(value))
+            elif str(value or "").strip():
+                observations.append({"tech": str(value).strip()})
+        return observations
+    if str(raw or "").strip():
+        return [{"tech": str(raw).strip()}]
+    return []
+
+
 def query_llm(prompt: str, model: str | None = None) -> str:
     """Send prompt to Ollama and return raw response text."""
     ollama_url = str(getattr(settings, "ollama_base_url", "") or OLLAMA_DEFAULT_URL)
@@ -135,8 +185,9 @@ def query_llm(prompt: str, model: str | None = None) -> str:
                 "system": OPERATOR_SYSTEM_PROMPT,
                 "stream": False,
                 "options": {
-                    "temperature": 0.2,  # lower temperature = more focused/deterministic
-                    "top_p": 0.9,
+                    "temperature": 0,
+                    "top_p": 1,
+                    "seed": int(getattr(settings, "llm_deterministic_seed", 424242) or 424242),
                     "num_predict": 1024,
                 },
             },
@@ -336,7 +387,7 @@ def run_llm_operator(db, job) -> dict[str, Any]:
         for f in findings
     ]
 
-    tech_stack = list(state.get("tech_stack") or job.tech_stack or [])
+    tech_stack = _normalize_tech_stack(state.get("tech_stack") or job.tech_stack or [])
 
     # Collect completed phases
     done_phases = list({

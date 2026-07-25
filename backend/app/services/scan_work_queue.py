@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import and_, case, func, or_, text
+from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -24,6 +25,23 @@ def _redis_client():
     """Lazy Redis client. Reconecta se necessário."""
     import redis
     return redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+
+
+def clear_work_item_execute_locks(item_ids: list[int] | tuple[int, ...] | set[int]) -> int:
+    """Remove execute locks for work items that were explicitly requeued.
+
+    A worker killed by OOM cannot run the task's ``finally`` block, so its
+    Redis execute lock survives. Without clearing it, the DB lease reaper
+    requeues the item after 30 minutes only for the stale 2-hour Redis lock to
+    reject the retry. Keep cleanup coupled to the durable DB requeue paths.
+    """
+    keys = [f"work_item_execute_lock:{int(item_id)}" for item_id in item_ids]
+    if not keys:
+        return 0
+    try:
+        return int(_redis_client().delete(*keys) or 0)
+    except Exception:
+        return 0
 
 
 def kali_inflight_get(rc: str) -> int:
@@ -214,6 +232,57 @@ MODULE_TOOL_REQUIREMENTS: dict[str, set[str]] = {
     "post_exploit": {"jwt_tool"},
 }
 
+LOCAL_SOURCE_TOOLS = {"semgrep", "bandit", "retire", "trivy"}
+REPOSITORY_SOURCE_TOOLS = {
+    "gitleaks",
+    "trufflehog",
+    "trufflehog-filesystem",
+}
+
+
+def _source_input_available(tool_name: str, target: str, state: dict[str, Any]) -> bool:
+    """Return whether a SAST/secret scanner has an actual source input."""
+    tool = str(tool_name or "").strip().lower()
+    candidates = [
+        target,
+        state.get("source_path"),
+        state.get("repository_path"),
+        state.get("repository_url"),
+        state.get("repo_url"),
+        state.get("git_url"),
+    ]
+    for candidate in candidates:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        if tool in LOCAL_SOURCE_TOOLS:
+            try:
+                from app.services.semgrep_local import _local_path
+
+                if _local_path(raw) is not None:
+                    return True
+            except Exception:
+                pass
+            continue
+        if tool in REPOSITORY_SOURCE_TOOLS:
+            try:
+                from app.services.semgrep_local import _local_path
+
+                if _local_path(raw) is not None:
+                    return True
+            except Exception:
+                pass
+            lowered = raw.lower()
+            if (
+                lowered.startswith(("git@", "ssh://", "git://"))
+                or lowered.endswith(".git")
+                or "github.com/" in lowered
+                or "gitlab.com/" in lowered
+                or "bitbucket.org/" in lowered
+            ):
+                return True
+    return False
+
 
 def _tool_module_id(tool: str) -> str | None:
     name = str(tool or "").strip().lower()
@@ -341,7 +410,7 @@ HTTP_NUCLEI_TOOLS = {
     "nuclei-xss", "nuclei-sqli", "nuclei-ssrf", "nuclei-lfi",
     "nuclei-ssti", "nuclei-xxe", "nuclei-idor", "nuclei-csrf",
     "nuclei-race", "nuclei-rce", "nuclei-auth", "nuclei-deserialization",
-    "nuclei-clickjacking", "nuclei-jwt",
+    "nuclei-clickjacking", "nuclei-jwt", "nuclei-cloud",
 }
 PORT_REQUIRED_TOOLS: dict[str, set[int]] = {
     "crackmapexec": {139, 445, 389, 636, 5985, 5986},
@@ -378,6 +447,8 @@ TOOL_EVIDENCE_CONTRACTS: dict[str, list[tuple[str, ...]]] = {
     "nuclei-default-credentials": [("login_forms", "auth_endpoints", "default_credential_targets")],
     "nuclei-jwt": [("jwt_tokens", "jwt_endpoints", "auth_config")],
     "nuclei-oauth": [("oauth_endpoints", "oidc_metadata_urls", "auth_config")],
+    "jwt_tool": [("jwt_tokens", "jwt_endpoints", "auth_config")],
+    "h8mail": [("discovered_emails", "employee_emails", "breach_candidate_emails")],
     "nuclei-graphql": [("graphql_endpoints", "graphql_schema_urls")],
     "nuclei-deserialization": [("serialized_parameters", "deserialization_candidates", "java_endpoints")],
     "nuclei-crlf": [("header_reflection_candidates", "redirect_parameters", "discovered_parameterized_urls")],
@@ -444,6 +515,7 @@ PHASE_PRIORITY = {
     "P03": 25,
     "P04": 30,
     "P05": 35,
+    "P08": 40,
     "P09": 50,
     "P10": 60,
     "P11": 60,
@@ -561,6 +633,34 @@ def initial_status_for_phase(phase_id: str) -> str:
 
 def initial_last_error_for_phase(phase_id: str) -> str | None:
     return gate_reason_for_phase(phase_id) if phase_id in _BLOCKED_AT_CREATE else None
+
+
+def _qualification_satisfies_gate(state: dict[str, Any], target: str, gate_phase: str) -> bool:
+    profile = _preflight_profile_for_target(state, target)
+    if gate_phase == "P02":
+        # P02 completion means the target was actually covered by the port-scan
+        # contract. It may still have zero open ports; that is enough to allow
+        # P06/httpx to make the HTTP-live decision, but not enough for web-heavy
+        # phases.
+        return bool(profile.get("p02_complete"))
+    if gate_phase == "P06":
+        # P06 is the authoritative gate for anything that needs a web surface.
+        # A completed httpx run with no response is a terminal negative, not a
+        # qualification signal.
+        return bool(profile.get("p06_http_live"))
+    return False
+
+
+def initial_status_for_target_phase(
+    phase_id: str,
+    targets: list[str],
+    state: dict[str, Any],
+) -> str:
+    gate = PHASE_GATE.get(phase_id)
+    if gate in {"P02", "P06"} and targets:
+        if all(_qualification_satisfies_gate(state, target, gate) for target in targets):
+            return "queued"
+    return initial_status_for_phase(phase_id)
 
 
 def _skill_consultations_for_phase(
@@ -730,6 +830,25 @@ def _target_host(target: str) -> str:
         return raw.split("/")[0].split(":")[0].lower()
 
 
+def _scan_primary_hosts(state: dict[str, Any]) -> set[str]:
+    raw_values: list[str] = []
+    for key in ("target_query", "scan_target", "root_target", "current_pentest_target"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            raw_values.extend(part.strip() for part in re.split(r"[;,]", value) if part.strip())
+    for key in ("input_targets", "original_targets", "root_targets"):
+        value = state.get(key)
+        if isinstance(value, list):
+            raw_values.extend(str(part).strip() for part in value if str(part or "").strip())
+    return {_target_host(value) for value in raw_values if _target_host(value)}
+
+
+def _is_primary_scan_target(target: str, state: dict[str, Any]) -> bool:
+    target_host = _target_host(target)
+    primary_hosts = _scan_primary_hosts(state)
+    return bool(target_host and primary_hosts and target_host in primary_hosts)
+
+
 def _target_type(target: str) -> str:
     raw = str(target or "").strip()
     if raw == "__batch__":
@@ -814,6 +933,387 @@ def _preflight_profile_for_target(state: dict[str, Any], target: str) -> dict[st
         if candidate and isinstance(preflight_targets.get(candidate), dict):
             return dict(preflight_targets[candidate])
     return {}
+
+
+def _work_item_targets(item: ScanWorkItem) -> list[str]:
+    if str(item.target or "") != "__batch__":
+        return [str(item.target)]
+    metadata = dict(item.item_metadata or {})
+    return [str(value) for value in metadata.get("batch_targets") or [] if str(value)]
+
+
+def _covered_recon_targets(
+    item: ScanWorkItem,
+    targets: list[str],
+    state: dict[str, Any],
+) -> set[str]:
+    """Map the runner's materialized-input manifest back to canonical targets."""
+    if str(item.target or "") != "__batch__":
+        return set(targets)
+    result = dict(item.result or {})
+    manifest = [
+        str(value)
+        for value in (
+            result.get("batch_targets")
+            or result.get("attempted_targets")
+            or []
+        )
+        if str(value or "")
+    ]
+    if not manifest:
+        # Contract v3 fails closed.  Older in-flight scans retain their legacy
+        # behavior during a rolling deployment and can be explicitly recovered.
+        if int(state.get("qualification_contract_version") or 0) >= 3:
+            return set()
+        return set(targets)
+    manifest_hosts = {_target_host(value) for value in manifest}
+    return {
+        target
+        for target in targets
+        if _target_host(target) in manifest_hosts
+    }
+
+
+def _work_item_result_text(item: ScanWorkItem) -> str:
+    result = dict(item.result or {})
+    return str(
+        result.get("stdout")
+        or result.get("stdout_full")
+        or result.get("stdout_preview")
+        or result.get("output")
+        or ""
+    )
+
+
+def _ports_from_recon_result(
+    item: ScanWorkItem,
+    targets: list[str],
+    state: dict[str, Any] | None = None,
+) -> dict[str, list[int]]:
+    """Return per-target ports from naabu or nmap output."""
+    target_by_host = {_target_host(target): target for target in targets}
+    current_state = dict(state or {})
+    host_ip_map = dict(current_state.get("host_ip_map") or {})
+    host_ips_map = dict(current_state.get("host_ips_map") or {})
+    for target in targets:
+        host = _target_host(target)
+        values = [host_ip_map.get(target), host_ip_map.get(host)]
+        values.extend(_as_list(host_ips_map.get(target) or host_ips_map.get(host)))
+        for value in values:
+            if str(value or ""):
+                target_by_host[str(value).strip().lower()] = target
+    observed: dict[str, set[int]] = {target: set() for target in targets}
+    text_value = _work_item_result_text(item)
+    result = dict(item.result or {})
+    parsed = result.get("parsed_result")
+    if isinstance(parsed, list):
+        text_value += "\n" + "\n".join(str(value) for value in parsed)
+
+    for host, port_raw in re.findall(
+        r"(?i)(?:https?://)?([a-z0-9.-]+):(\d{1,5})(?:\b|/)",
+        text_value,
+    ):
+        target = target_by_host.get(host.rstrip(".").lower())
+        if target:
+            port = int(port_raw)
+            if 1 <= port <= 65535:
+                observed[target].add(port)
+
+    # Normal nmap output is scoped by a "scan report for" header followed by
+    # one or more "80/tcp open" rows.
+    current_target: str | None = targets[0] if len(targets) == 1 else None
+    for line in text_value.splitlines():
+        report = re.search(r"(?i)Nmap scan report for\s+([^\s(]+)", line)
+        if report:
+            current_target = target_by_host.get(_target_host(report.group(1)))
+            continue
+        match = re.match(r"\s*(\d{1,5})/(?:tcp|udp)\s+open\b", line, re.I)
+        if match and current_target:
+            observed[current_target].add(int(match.group(1)))
+    return {target: sorted(ports) for target, ports in observed.items()}
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _http_observations_from_result(item: ScanWorkItem, targets: list[str]) -> dict[str, list[dict[str, Any]]]:
+    target_by_host = {_target_host(target): target for target in targets}
+    result = dict(item.result or {})
+    candidates: list[Any] = []
+    parsed = result.get("parsed_result")
+    if isinstance(parsed, list):
+        candidates.extend(parsed)
+    candidates.extend(_work_item_result_text(item).splitlines())
+    observations: dict[str, list[dict[str, Any]]] = {target: [] for target in targets}
+    for candidate in candidates:
+        values: list[tuple[str, dict[str, Any]]] = []
+        if isinstance(candidate, dict):
+            if candidate.get("failed") is True:
+                continue
+            values.extend((str(candidate.get(key) or ""), candidate) for key in ("input", "url", "host", "final_url"))
+        else:
+            values.append((str(candidate or ""), {}))
+        for value, raw in values:
+            target = target_by_host.get(_target_host(value))
+            if not target:
+                continue
+            parsed_url = urlparse(value if "://" in value else str(raw.get("url") or ""))
+            scheme = (str(raw.get("scheme") or parsed_url.scheme or "")).lower()
+            port = _coerce_int(raw.get("port") or parsed_url.port)
+            if port is None and scheme in {"http", "https"}:
+                port = 443 if scheme == "https" else 80
+            observation = {
+                "source": "httpx",
+                "url": str(raw.get("url") or value),
+                "final_url": str(raw.get("final_url") or raw.get("location") or ""),
+                "scheme": scheme,
+                "port": port,
+                "status_code": _coerce_int(raw.get("status_code")),
+                "title": str(raw.get("title") or "")[:300],
+                "content_type": str(raw.get("content_type") or "")[:160],
+                "webserver": str(raw.get("webserver") or (raw.get("header") or {}).get("server") or "")[:160],
+                "tech": list(raw.get("tech") or [])[:50] if isinstance(raw.get("tech"), list) else [],
+                "cdn": bool(raw.get("cdn")),
+                "cdn_name": str(raw.get("cdn_name") or "")[:120],
+            }
+            if observation not in observations[target]:
+                observations[target].append(observation)
+    return observations
+
+
+def _http_live_targets_from_result(item: ScanWorkItem, targets: list[str]) -> set[str]:
+    observations = _http_observations_from_result(item, targets)
+    return {target for target, values in observations.items() if values}
+
+
+def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[str, Any]:
+    """Fold authoritative P02/P06 work-item evidence into per-target state."""
+    phase_id = str(item.phase_id or "")
+    tool = str(item.tool_name or "").lower()
+    if phase_id == "P02" and tool not in {"naabu", "nmap", "masscan"}:
+        return {}
+    if phase_id == "P06" and tool != "httpx":
+        return {}
+
+    targets = _work_item_targets(item)
+    if not targets:
+        return {}
+    state = dict(job.state_data or {})
+    covered_targets = _covered_recon_targets(item, targets, state)
+    preflight = dict(state.get("preflight") or {})
+    profiles = dict(preflight.get("targets") or {})
+    completed = str(item.status or "") in {"completed", "done"}
+    checked_at = (item.finished_at or item.updated_at or datetime.now()).isoformat()
+    result_payload = dict(item.result or {})
+    execution_profile = str(getattr(item, "profile", None) or tool)
+    execution_contract = {
+        "item_id": item.id,
+        "tool": tool,
+        "profile": execution_profile,
+        "transport": "tcp" if phase_id == "P02" else "http",
+        "coverage": (
+            "full_tcp_1_65535"
+            if "masscan" in execution_profile
+            else "top_tcp_1000"
+            if tool == "naabu"
+            else "top_tcp_200_service_detection"
+            if tool == "nmap"
+            else "http_https_default_or_explicit_origin"
+        ),
+        "runner_manifest_sha256": result_payload.get("batch_target_file_sha256"),
+        "command": str(result_payload.get("command") or "")[:1000],
+        "completed": completed,
+        "checked_at": checked_at,
+    }
+
+    if phase_id == "P02":
+        ports_by_target = _ports_from_recon_result(item, targets, state)
+        for target in targets:
+            profile = dict(profiles.get(target) or {})
+            success_tools = set(profile.get("p02_success_tools") or [])
+            terminal_tools = set(profile.get("p02_terminal_tools") or [])
+            terminal_tools.add(tool)
+            observed_ports = set(ports_by_target.get(target) or [])
+            positive_evidence = bool(observed_ports)
+            if (completed and target in covered_targets) or positive_evidence:
+                success_tools.add(tool)
+            ports = sorted(set(profile.get("open_ports") or []) | observed_ports)
+            contracts = [
+                dict(value)
+                for value in list(profile.get("p02_scan_contracts") or [])
+                if isinstance(value, dict) and value.get("item_id") != item.id
+            ]
+            contracts.append(execution_contract)
+            profile.update(
+                {
+                    "target": target,
+                    "host": _target_host(target),
+                    "open_ports": ports,
+                    "p02_success_tools": sorted(success_tools),
+                    "p02_terminal_tools": sorted(terminal_tools),
+                    "p02_complete": bool(success_tools),
+                    "p02_positive_evidence": bool(
+                        profile.get("p02_positive_evidence") or positive_evidence
+                    ),
+                    "p02_checked_at": checked_at,
+                    "p02_input_covered": target in covered_targets or positive_evidence,
+                    "p02_scan_contracts": contracts[-10:],
+                }
+            )
+            if success_tools:
+                profile["status"] = "tcp_live" if ports else "tcp_scanned_no_open_ports"
+                profile["reason"] = (
+                    f"P02 encontrou {len(ports)} porta(s) aberta(s)"
+                    if ports
+                    else "P02 executado sem porta aberta observada; aguardando P06 HTTP"
+                )
+            else:
+                profile["status"] = "p02_inconclusive"
+                profile["reason"] = "P02 sem execução conclusiva"
+            profiles[target] = profile
+    else:
+        observations_by_target = _http_observations_from_result(item, targets)
+        live_targets = {target for target, values in observations_by_target.items() if values}
+        for target in targets:
+            profile = dict(profiles.get(target) or {})
+            observations = observations_by_target.get(target) or []
+            is_live = bool(observations)
+            target_completed = (completed and target in covered_targets) or is_live
+            observed_ports = {
+                int(obs["port"])
+                for obs in observations
+                if isinstance(obs.get("port"), int) and 1 <= int(obs["port"]) <= 65535
+            }
+            ports = sorted(set(profile.get("open_ports") or []) | observed_ports)
+            contracts = [
+                dict(value)
+                for value in list(profile.get("p06_probe_contracts") or [])
+                if isinstance(value, dict) and value.get("item_id") != item.id
+            ]
+            contracts.append(execution_contract)
+            profile.update(
+                {
+                    "target": target,
+                    "host": _target_host(target),
+                    "p06_complete": target_completed,
+                    "p06_http_live": bool(target_completed and is_live),
+                    "p06_positive_evidence": is_live,
+                    "p06_checked_at": checked_at,
+                    "p06_input_covered": target in covered_targets or is_live,
+                    "p06_probe_contracts": contracts[-10:],
+                    "http_observed_ports": sorted(observed_ports),
+                    "open_ports": ports,
+                }
+            )
+            if target_completed:
+                profile["status"] = "http_live" if is_live else "no_http_response"
+                profile["reason"] = (
+                    "P06/httpx confirmou superfície HTTP"
+                    if is_live
+                    else "P06/httpx não observou resposta HTTP para este alvo"
+                )
+                profile["http"] = observations or profile.get("http") or []
+            else:
+                profile["status"] = "p06_inconclusive"
+                profile["reason"] = "P06/httpx sem execução conclusiva"
+            profiles[target] = profile
+
+    preflight.update({"enabled": True, "version": 3, "mode": "p01_dns+p02_ports+p06_http", "targets": profiles})
+    state["preflight"] = preflight
+    state["qualification_contract_version"] = max(
+        3,
+        int(state.get("qualification_contract_version") or 0),
+    )
+    job.state_data = state
+    if phase_id == "P02":
+        qualified_targets = [
+            target for target in targets
+            if bool((profiles.get(target) or {}).get("p02_complete"))
+        ]
+        positive_targets = [
+            target for target in targets
+            if bool((profiles.get(target) or {}).get("p02_positive_evidence"))
+        ]
+        observed = sum(
+            len((profiles.get(target) or {}).get("open_ports") or [])
+            for target in targets
+        )
+        state["tcp_live_targets"] = sorted({
+            *[str(t) for t in state.get("tcp_live_targets") or [] if str(t)],
+            *positive_targets,
+        })
+    else:
+        qualified_targets = [
+            target for target in targets
+            if bool((profiles.get(target) or {}).get("p06_http_live"))
+        ]
+        positive_targets = list(qualified_targets)
+        observed = len(qualified_targets)
+        state["http_live_targets"] = sorted({
+            *[str(t) for t in state.get("http_live_targets") or [] if str(t)],
+            *qualified_targets,
+        })
+        state["qualified_target_set"] = list(state["http_live_targets"])
+    job.state_data = state
+    return {
+        "phase_id": phase_id,
+        "tool": tool,
+        "item_id": item.id,
+        "item_status": item.status,
+        "targets": len(targets),
+        "covered_targets": len(covered_targets),
+        "qualified_targets": len(qualified_targets),
+        "positive_targets": len(positive_targets),
+        "observations": int(observed),
+        "batch": str(item.target or "") == "__batch__",
+        "manifest_present": bool((item.result or {}).get("batch_targets")),
+        "execution_contract": execution_contract,
+    }
+
+
+def qualified_targets_for_gate(
+    state: dict[str, Any] | None,
+    gate_phase: str,
+    targets: list[str],
+) -> list[str]:
+    """Filter a gate handoff by per-target evidence.
+
+    Contract-v2+ scans require a successful P02 scan and an actual P06/httpx
+    response before web-heavy phases are released. Missing/legacy contract
+    metadata fails closed; callers that need to recover an old scan should run
+    prepare_scan_for_requalification(), which stamps contract v3 explicitly.
+    """
+    current = dict(state or {})
+    if int(current.get("qualification_contract_version") or 0) < 2:
+        return []
+    profiles = ((current.get("preflight") or {}).get("targets") or {})
+    if gate_phase == "P02":
+        return [
+            target
+            for target in targets
+            if bool((profiles.get(target) or {}).get("p02_complete"))
+        ]
+    if gate_phase == "P06":
+        return [
+            target
+            for target in targets
+            if bool((profiles.get(target) or {}).get("p06_http_live"))
+        ]
+    if gate_phase == "P09":
+        # Gate ancestry is transitive: a P09 result cannot authorize later web
+        # exploitation for a target that P06 never confirmed as HTTP-live.
+        return [
+            target
+            for target in targets
+            if bool((profiles.get(target) or {}).get("p06_http_live"))
+        ]
+    return list(targets)
 
 
 def _target_context(state: dict[str, Any], target: str) -> dict[str, Any]:
@@ -975,8 +1475,38 @@ def validate_skill_applicability(
         decision["score"] = 0.75
         return decision
 
+    if tool_l in LOCAL_SOURCE_TOOLS | REPOSITORY_SOURCE_TOOLS:
+        if not _source_input_available(tool_l, target, state):
+            decision.update(
+                applicable=False,
+                score=0.0,
+                reason="source_code_required",
+            )
+            return decision
+
+    if tool_l == "masscan":
+        scan_level = str(state.get("scan_level") or "full").lower()
+        target_host = _target_host(target)
+        crown_hosts = {
+            _target_host(str(row.get("target") or row.get("subdomain") or ""))
+            for row in list(state.get("crown_jewels") or [])
+            if isinstance(row, dict)
+        }
+        if scan_level not in {"aggressive", "agressivo"} and target_host not in crown_hosts:
+            decision.update(
+                applicable=False,
+                score=0.0,
+                reason="full_tcp_requires_aggressive_profile_or_crown_jewel",
+            )
+            return decision
+        decision["reason"] = (
+            "full_tcp_authorized_by_aggressive_profile"
+            if scan_level in {"aggressive", "agressivo"}
+            else "full_tcp_authorized_for_crown_jewel"
+        )
+
     dead_statuses = {"invalid", "dns_dead", "dead", "unresolved", "no_tcp"}
-    if ctx["preflight_status"] in dead_statuses and phase_id not in {"P18", "P21", "P22"}:
+    if ctx["preflight_status"] in dead_statuses and phase_id not in {"P21", "P22"}:
         decision.update(
             applicable=False,
             score=0.0,
@@ -985,12 +1515,12 @@ def validate_skill_applicability(
         return decision
 
     if _requires_http_surface(phase_id, tool) and ctx["preflight_known"]:
-        if ctx["preflight_status"] == "tcp_closed" and not ctx["has_http"]:
+        if ctx["preflight_status"] in {"tcp_closed", "tcp_scanned_no_open_ports", "no_http_response"} and not ctx["has_http"]:
             decision.update(applicable=False, score=0.0, reason="no_http_surface:tcp_closed")
             return decision
 
     required_ports = PORT_REQUIRED_TOOLS.get(tool_l)
-    if required_ports and ctx["ports_known"] and ctx["open_ports"]:
+    if required_ports and ctx["ports_known"]:
         if not (set(ctx["open_ports"]) & set(required_ports)):
             decision.update(
                 applicable=False,
@@ -1030,9 +1560,9 @@ def validate_skill_applicability(
         decision["reason"] = "insufficient_context_allow_conservative"
 
     # ── Outcome-calibrated feedback ──────────────────────────────────────────
-    # Raw finding creation is deliberately not treated as a true positive.
-    # Applicability is modulated by executed reliability plus confirmed/refuted
-    # validation outcomes persisted by pentest_outcome_learning.
+    # Applicability is modulated by validation-grade signals when available
+    # and by execution-yield signals as a weaker fallback. Raw "positive"
+    # findings do not count as validated precision.
     _exec_scores = (state or {}).get("skill_execution_scores") or {}
     _hist_key = f"{skill_id}:{tool_l}"
     _hist = _exec_scores.get(_hist_key) or {}
@@ -1044,6 +1574,13 @@ def validate_skill_applicability(
         decision["score_history_adjusted"] = True
         decision["history_positive_rate"] = _hist_rate
         decision["history_runs"] = int(_hist.get("validated_observations") or 0)
+    elif _hist and int(_hist.get("utility_observations") or 0) >= 3:
+        _utility_rate = float(_hist.get("utility_rate") or 0.5)
+        _adj = round(max(0.1, float(decision["score"]) * (0.7 + 0.3 * _utility_rate)), 4)
+        decision["score"] = _adj
+        decision["score_utility_adjusted"] = True
+        decision["history_utility_rate"] = _utility_rate
+        decision["history_runs"] = int(_hist.get("utility_observations") or 0)
 
     _learned_metrics = ((state or {}).get("pentest_outcome_learning") or {}).get("metrics") or {}
     _tool_rows = [
@@ -1087,17 +1624,26 @@ def update_skill_execution_score(
 
     runs = int(cur.get("runs") or 0) + 1
     used = int(cur.get("used") or 0) + (0 if result == "skipped" else 1)
+    result = str(result or "").strip().lower()
     validated_positive = result in {"confirmed", "validated"}
     validated_negative = result in {"refuted", "false_positive"}
+    utility_positive = result in {"productive", "useful"}
+    utility_negative = result in {"unproductive", "empty", "negative"}
     positives = int(cur.get("positives") or 0) + (1 if validated_positive else 0)
 
     prev_rate = float(cur.get("positive_rate") or 0.5)
+    prev_utility_rate = float(cur.get("utility_rate") or 0.5)
     alpha = min(0.4, 2.0 / (runs + 1))
     if validated_positive or validated_negative:
         obs = 1.0 if validated_positive else 0.0
         positive_rate = round(prev_rate * (1 - alpha) + obs * alpha, 4)
     else:
         positive_rate = prev_rate
+    if utility_positive or utility_negative:
+        utility_obs = 1.0 if utility_positive else 0.0
+        utility_rate = round(prev_utility_rate * (1 - alpha) + utility_obs * alpha, 4)
+    else:
+        utility_rate = prev_utility_rate
 
     record: dict[str, Any] = {
         "skill_id": skill_id,
@@ -1106,9 +1652,11 @@ def update_skill_execution_score(
         "used": used,
         "positives": positives,
         "validated_observations": int(cur.get("validated_observations") or 0) + (1 if validated_positive or validated_negative else 0),
+        "utility_observations": int(cur.get("utility_observations") or 0) + (1 if utility_positive or utility_negative else 0),
         "raw_findings": int(cur.get("raw_findings") or 0) + max(0, int(findings_count or 0)),
         "positive_rate": positive_rate,
-        "applicability_score": round(max(0.1, positive_rate), 4),
+        "utility_rate": utility_rate,
+        "applicability_score": round(max(0.1, positive_rate if (validated_positive or validated_negative) else utility_rate), 4),
         "last_result": result,
     }
     scores[skey] = record
@@ -1273,8 +1821,21 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
     preflight = ((state.get("preflight") or {}).get("targets") or {}).get(target) or {}
     has_http = bool(preflight.get("http"))
     status = str(preflight.get("status") or "").lower()
-    if status in {"dead", "unresolved", "no_tcp"}:
-        return ["P18"]
+    if status in {"invalid", "dns_dead", "dead", "unresolved", "no_tcp"}:
+        return []
+    if status == "no_http_response":
+        # DNS/P02/P06 finished and the authoritative HTTP probe found no web
+        # response. Preserve passive credential/OSINT only for the original
+        # scan target; do not seed per-subdomain P18 or web testing without
+        # HTTP-live evidence.
+        phases = ["P18"] if _is_primary_scan_target(target, state) else []
+        # P06 is an HTTP observation, not a substitute for P02. Preserve the
+        # port qualification task when the batch scanner was partial.
+        if not preflight.get("p02_complete"):
+            phases.insert(0, "P02")
+        if not preflight.get("p06_complete"):
+            phases.insert(1 if "P02" in phases else 0, "P06")
+        return phases
     # When preflight is not yet computed (empty dict), the target came through P01
     # live-target refinement — assume HTTP is available. The "no http" branch must
     # only fire when preflight was explicitly computed and HTTP was not found.
@@ -1283,16 +1844,28 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
     # (P03 ffuf, P04 arjun, P08 katana, P09-P20 vuln) are silently skipped.
     preflight_known = bool(status)
     if preflight_known and not has_http:
-        return ["P02", "P06", "P07", "P18"]
+        phases = ["P02", "P06"]
+        if _is_primary_scan_target(target, state):
+            phases.append("P18")
+        if preflight.get("p02_complete"):
+            phases.remove("P02")
+        if preflight.get("p06_complete"):
+            phases.remove("P06")
+        return phases
     # Full web pentest phases — P08 (katana JS analysis) included alongside
     # the existing web phases so JS endpoints are always crawled.
-    return [
+    phases = [
         "P02", "P06", "P07", "P08",
         "P03", "P04", "P05", "P16",
         "P09", "P15", "P18",
         "P10", "P11", "P12", "P13",
         "P14", "P17", "P19", "P20",
     ]
+    if preflight.get("p02_complete"):
+        phases.remove("P02")
+    if preflight.get("p06_complete"):
+        phases.remove("P06")
+    return phases
 
 
 # ── T4: Batch-capable tools — run once for ALL targets instead of N serial jobs ─
@@ -1311,20 +1884,20 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
 #
 # Diagrama de dependência:
 #   P02 (port scan)       → criada como queued — ponto de partida
-#   P18 (OSINT)           → criada como queued — não depende de HTTP
-#   P03-P07, P15          → blocked; desbloqueadas quando P02 completa
-#   P08, P09, P16         → blocked; desbloqueadas quando P06 completa
+#   P18 (credencial/segredo passivo) → queued para a raiz; não depende de HTTP
+#   P06                   → blocked; desbloqueada quando P02 cobre o alvo
+#   P03-P05/P07-P09/P15/P16 → blocked; desbloqueadas quando P06 confirma HTTP
 #   P10-P14, P17, P19-P20 → blocked; desbloqueadas pós-triage de P09
 #
 PHASE_GATE: dict[str, str | None] = {
     "P02": None,   # queued imediatamente
-    "P18": None,   # queued imediatamente (OSINT independente)
-    "P03": "P02",  # crawl depende de saber que porta existe
-    "P04": "P02",
-    "P05": "P02",
+    "P18": None,   # credencial/segredo passivo; aplicabilidade filtra alvo morto
     "P06": "P02",  # fingerprint depende de port scan
-    "P07": "P02",
-    "P15": "P02",  # waybackurls/gau não precisam de HTTP mas de resolução
+    "P15": "P06",  # file/nuclei web checks require HTTP-live evidence
+    "P03": "P06",  # testes web dependem de HTTP confirmado por alvo
+    "P04": "P06",
+    "P05": "P06",
+    "P07": "P06",
     "P08": "P06",  # JS crawl depende de fingerprint HTTP
     "P09": "P06",  # nuclei depende de saber o serviço
     "P16": "P06",
@@ -1373,7 +1946,8 @@ def unblock_phase_items(
 ) -> int:
     """
     Desbloqueia items de fases que dependem de gate_phase para os targets dados.
-    Ex: gate_phase='P02' → desbloqueia P03/P04/P05/P06/P07/P15 para esses targets.
+    Ex: gate_phase='P02' → desbloqueia P06 para esses targets.
+    Ex: gate_phase='P06' → desbloqueia P03/P04/P05/P07/P08/P09/P15/P16 para targets HTTP-live.
     Retorna quantos items foram desbloqueados.
 
     `phases`: subset override of the phases that depend on gate_phase — lets a
@@ -1518,6 +2092,97 @@ def enqueue_httpx_scope_candidates(
     }
 
 
+def enqueue_p06_discovered_port_origins(
+    db: Session,
+    job: ScanJob,
+    targets: list[str],
+) -> dict[str, Any]:
+    """Probe HTTP on every P02-observed TCP port, not only implicit 80/443.
+
+    The batch host probe remains the cheap baseline.  This follow-up materializes
+    explicit origins for non-standard services so admin consoles and APIs on
+    3000/8000/8080/8443/etc. enter the same P06 qualification path.
+    """
+    profiles = dict(((job.state_data or {}).get("preflight") or {}).get("targets") or {})
+    state = dict(job.state_data or {})
+    preflight = dict(state.get("preflight") or {})
+    tls_ports = {443, 4443, 7443, 8443, 9443, 10443}
+    default_ports = {80, 443}
+    created = 0
+    existing = 0
+    origins: list[str] = []
+    now = datetime.now()
+    for target in targets:
+        host = _target_host(target)
+        if not host:
+            continue
+        profile = dict(profiles.get(target) or profiles.get(host) or {})
+        for port in _extract_ports(profile.get("open_ports")):
+            if port in default_ports:
+                continue
+            scheme = "https" if port in tls_ports else "http"
+            origin = f"{scheme}://{host}:{port}"
+            duplicate = db.query(ScanWorkItem.id).filter(
+                ScanWorkItem.scan_job_id == job.id,
+                ScanWorkItem.phase_id == "P06",
+                ScanWorkItem.tool_name == "httpx",
+                ScanWorkItem.target == origin,
+            ).first()
+            if duplicate:
+                existing += 1
+                continue
+            metadata = apply_phase_tool_metadata(
+                {
+                    "source": "p02_open_port_origin",
+                    "parent_target": target,
+                    "observed_port": port,
+                    "observed_scheme": scheme,
+                    "queue_ready_at": now.isoformat(),
+                },
+                "P06",
+                "httpx",
+                source="p02_open_port_origin",
+            )
+            db.add(ScanWorkItem(
+                scan_job_id=job.id,
+                phase_id="P06",
+                target=origin,
+                tool_name="httpx",
+                profile="httpx_probe",
+                resource_class="light",
+                priority=PHASE_PRIORITY["P06"],
+                status="queued",
+                max_attempts=2,
+                item_metadata=metadata,
+                created_at=now,
+                updated_at=now,
+            ))
+            parent_profile = dict(profile)
+            parent_profile.update({
+                "target": origin,
+                "host": host,
+                "parent_target": target,
+                "open_ports": [port],
+                "p02_complete": True,
+                "p02_input_covered": True,
+                "status": "tcp_live",
+                "reason": f"P02 observou serviço TCP em {port}; aguardando qualificação HTTP da origem",
+            })
+            profiles[origin] = parent_profile
+            origins.append(origin)
+            created += 1
+    if created:
+        preflight["targets"] = profiles
+        state["preflight"] = preflight
+        job.state_data = state
+        db.flush()
+    return {
+        "created": created,
+        "existing": existing,
+        "origins": origins[:100],
+    }
+
+
 def enqueue_scope_safe_redirect_probes(
     db: Session,
     job: ScanJob,
@@ -1588,18 +2253,87 @@ def enqueue_scope_safe_redirect_probes(
     return {"created": created, "existing": existing, "blocked": blocked, "depth_limited": 0}
 
 
+def work_queue_profile_policy(
+    state: dict[str, Any] | None,
+    *,
+    max_optional_per_phase: int | None = None,
+) -> dict[str, Any]:
+    """Resolve the phase/tool budget used by the persistent work queue."""
+    from app.services.scan_profiles import phases_for_scan_level, scan_profile
+
+    current = dict(state or {})
+    scan_level = str(current.get("scan_level") or "full")
+    profile = scan_profile(scan_level)
+    allowed = phases_for_scan_level(scan_level)
+    return {
+        "scan_level": profile.get("id"),
+        "depth": profile.get("depth"),
+        "allowed_phases": set(allowed) if allowed is not None else None,
+        "tool_depth_limit": max(1, int(profile.get("tool_depth_limit") or 1)),
+        "optional_override": (
+            max(0, int(max_optional_per_phase))
+            if max_optional_per_phase is not None
+            else None
+        ),
+    }
+
+
 def enqueue_scan_work_items(
     db: Session,
     job: ScanJob,
     targets: list[str],
     *,
     source: str = "p01",
-    max_optional_per_phase: int = 4,
+    max_optional_per_phase: int | None = None,
 ) -> dict[str, int]:
     state = dict(job.state_data or {})
     created = 0
     existing = 0
     skipped = 0
+    queue_policy = work_queue_profile_policy(
+        state,
+        max_optional_per_phase=max_optional_per_phase,
+    )
+    allowed_phases = queue_policy["allowed_phases"]
+    tool_depth_limit = int(queue_policy["tool_depth_limit"])
+    state["execution_plan_contract"] = {
+        "version": 2,
+        "scan_level": queue_policy.get("scan_level"),
+        "depth": queue_policy.get("depth"),
+        "tool_depth_limit_per_phase": tool_depth_limit,
+        "allowed_phases": sorted(allowed_phases) if allowed_phases else "P01-P22",
+        "selection_policy": "required_plus_ranked_optional_with_applicability",
+        "updated_at": datetime.now().isoformat(),
+    }
+    state["target_query"] = str(getattr(job, "target_query", "") or state.get("target_query") or "")
+    job.state_data = state
+
+    terminal_statuses = {
+        "completed",
+        "completed_with_gaps",
+        "failed",
+        "cancelled",
+        "canceled",
+        "stopped",
+    }
+    if str(job.status or "").lower() in terminal_statuses:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="ERROR",
+            message=(
+                f"work_queue_seed_rejected source={source} status={job.status} "
+                f"targets={len(targets)} reason=terminal_scan"
+            ),
+        ))
+        db.commit()
+        return {
+            "created": 0,
+            "existing": 0,
+            "skipped": len(targets),
+            "requeued": 0,
+            "rejected_terminal": 1,
+        }
 
     # ── Pass 1: collect per-(phase, tool) target sets for batch collapsing ──────
     # batch_accumulator[(phase_id, tool)] → set of targets eligible for batching
@@ -1640,13 +2374,24 @@ def enqueue_scan_work_items(
         ))
 
     for target in clean_targets:
-        for phase_id in _eligible_phases_for_target(target, state):
+        eligible_phases = _eligible_phases_for_target(target, state)
+        if allowed_phases is not None:
+            eligible_phases = [
+                phase_id for phase_id in eligible_phases
+                if phase_id in allowed_phases
+            ]
+        for phase_id in eligible_phases:
             tools = _phase_tools(phase_id)
             if not tools:
                 continue
             required = list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_tools") or [])
             optional = [tool for tool in tools if tool not in set(required)]
-            selected = list(dict.fromkeys(required + optional[:max_optional_per_phase]))
+            optional_budget = (
+                int(queue_policy["optional_override"])
+                if queue_policy["optional_override"] is not None
+                else max(0, tool_depth_limit - len(required))
+            )
+            selected = list(dict.fromkeys(required + optional[:optional_budget]))
             selected, missing_for_modules = _filter_tools_by_kali_modules(selected, module_status)
             for missing_tool in missing_for_modules:
                 module_id = _tool_module_id(missing_tool) or "unknown"
@@ -1775,7 +2520,7 @@ def enqueue_scan_work_items(
         # Batch item gets best priority of all targets in the set
         best_boost = min(_high_risk_priority_boost(t) for t in sorted_targets) if sorted_targets else 0
 
-        _batch_status = initial_status_for_phase(phase_id)
+        _batch_status = initial_status_for_target_phase(phase_id, sorted_targets, state)
         _batch_skill_ids = _skill_ids_for_phase_tool(phase_id, tool)
         _batch_consultations = [
             c
@@ -1815,7 +2560,7 @@ def enqueue_scan_work_items(
             resource_class=rc,
             priority=max(1, base_priority + best_boost),
             status=_batch_status,
-            last_error=initial_last_error_for_phase(phase_id),
+            last_error=None if _batch_status == "queued" else initial_last_error_for_phase(phase_id),
             max_attempts=2,
             item_metadata=_batch_metadata,
             created_at=datetime.now(),
@@ -1874,7 +2619,7 @@ def enqueue_scan_work_items(
         _to = _adaptive_timeout(tool, target)
         if _to is not None:
             _item_meta["timeout_override"] = _to
-        _single_status = initial_status_for_phase(phase_id)
+        _single_status = initial_status_for_target_phase(phase_id, [target], state)
         if _single_status == "queued":
             _item_meta["queue_ready_at"] = datetime.now().isoformat()
         item = ScanWorkItem(
@@ -1886,7 +2631,7 @@ def enqueue_scan_work_items(
             resource_class=rc,
             priority=max(1, base_priority + risk_boost),
             status=_single_status,
-            last_error=initial_last_error_for_phase(phase_id),
+            last_error=None if _single_status == "queued" else initial_last_error_for_phase(phase_id),
             max_attempts=2,
             item_metadata=apply_phase_tool_metadata(_item_meta, phase_id, tool, source=source),
             created_at=datetime.now(),
@@ -2137,9 +2882,25 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         except Exception:
             pass  # fail-open — reconciliation is best-effort
 
+        expired_item_ids = [
+            int(row[0])
+            for row in (
+                db.query(ScanWorkItem.id)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    # `submitted` is authoritative runner state. Its volatile
+                    # poll task is rehydrated below; expiring it from a local DB
+                    # lease can mark a still-running Kali job failed.
+                    ScanWorkItem.status.in_(["running", "dispatched"]),
+                    ScanWorkItem.lease_until.isnot(None),
+                    ScanWorkItem.lease_until <= now,
+                )
+                .all()
+            )
+        ]
         db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
-            ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+            ScanWorkItem.status.in_(["running", "dispatched"]),
             ScanWorkItem.lease_until.isnot(None),
             ScanWorkItem.lease_until <= now,
             ScanWorkItem.attempts < ScanWorkItem.max_attempts,
@@ -2154,7 +2915,7 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
         )
         db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
-            ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+            ScanWorkItem.status.in_(["running", "dispatched"]),
             ScanWorkItem.lease_until.isnot(None),
             ScanWorkItem.lease_until <= now,
             ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
@@ -2169,6 +2930,7 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             synchronize_session=False,
         )
         db.flush()
+        clear_work_item_execute_locks(expired_item_ids)
 
         # ── Zombie reaper: queued/retry items that exhausted attempts ─────────
         # CRITICAL stall fix: an item with status='queued'/'retry' but
@@ -2262,73 +3024,93 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             if room <= 0:
                 break
             to_claim = min(available, room)
-            # Wider candidate pool than `to_claim` so the per-phase fairness pass
-            # below has something to redistribute from — a strict `.limit(to_claim)`
-            # on the priority-sorted query would just hand the fairness logic the
-            # same starved slice it's meant to fix.
-            candidates = (
+            eligible_filters = (
+                ScanWorkItem.scan_job_id == scan_id,
+                ScanWorkItem.resource_class == rc,
+                ScanWorkItem.status.in_(["queued", "retry"]),
+                ScanWorkItem.attempts < ScanWorkItem.max_attempts,
+                or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
+            )
+
+            # Gates retain strict precedence because they create eligibility for
+            # the rest of the graph.
+            rows = (
                 db.query(ScanWorkItem)
-                .filter(
-                    ScanWorkItem.scan_job_id == scan_id,
-                    ScanWorkItem.resource_class == rc,
-                    ScanWorkItem.status.in_(["queued", "retry"]),
-                    ScanWorkItem.attempts < ScanWorkItem.max_attempts,
-                    or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
-                )
-                # GATE-AWARE: fases-gate (P02/P06/P09…) são reivindicadas ANTES
-                # de qualquer fase não-gate que dispute a mesma capacidade. Isso
-                # impede que uma fase-gate seja estarvada (ex.: P09=prio 50 perdia
-                # p/ P16=45 e nunca drenava → exploração bloqueada eternamente).
-                # Uma fase-gate sempre drena → seu gate abre → o pentest avança.
+                .filter(*eligible_filters, ScanWorkItem.phase_id.in_(_GATE_TARGET_PHASES))
                 .order_by(
-                    case((ScanWorkItem.phase_id.in_(_GATE_TARGET_PHASES), 0), else_=1).asc(),
                     ScanWorkItem.priority.asc(),
                     ScanWorkItem.created_at.asc(),
                     ScanWorkItem.id.asc(),
                 )
-                .limit(max(to_claim * 6, 60))
+                .limit(to_claim)
                 .with_for_update(skip_locked=True)
                 .all()
             )
-            if not candidates:
-                continue
-            # ── Per-phase fairness (root cause of scan #1's P14/P19/P20 stall) ──
-            # A strict priority sort starves any phase whose priority number is
-            # higher than another phase's, if that other phase has enough
-            # queued/retry churn (e.g. P16 continuously re-queuing timed-out
-            # paramspider/wfuzz items) to keep winning every single dispatch
-            # cycle's LIMIT — confirmed live: P14 (jwt_tool, priority 70) and
-            # P20 (gitleaks/trufflehog, priority 60/90) sat at a fixed queued
-            # count for 20+ minutes while P16 (priority 45/50) kept claiming
-            # every "light" slot every cycle. Gate phases keep unconditional
-            # priority (unbounded here, same as before); non-gate phases each
-            # get a fair share of `to_claim` per cycle instead of whichever has
-            # the lowest priority number monopolizing every slot.
-            gate_rows = [r for r in candidates if r.phase_id in _GATE_TARGET_PHASES]
-            other_rows = [r for r in candidates if r.phase_id not in _GATE_TARGET_PHASES]
-            rows = list(gate_rows[:to_claim])
             remaining_room = to_claim - len(rows)
-            if remaining_room > 0 and other_rows:
-                distinct_phases = list(dict.fromkeys(r.phase_id for r in other_rows))
-                per_phase_cap = max(1, remaining_room // len(distinct_phases))
-                per_phase_count: dict[str, int] = {}
-                fair_picks: list[ScanWorkItem] = []
-                for r in other_rows:
-                    if len(fair_picks) >= remaining_room:
+            if remaining_room > 0:
+                # Discover phases independently of the priority-limited item
+                # slice.  The old implementation fetched only the first 60
+                # rows, so a large P16 backlog could keep P08/P14/P19/P20 out of
+                # the candidate set forever.  Claim at least one row from every
+                # eligible phase before filling spare capacity by priority.
+                phase_rows = (
+                    db.query(
+                        ScanWorkItem.phase_id,
+                        func.min(ScanWorkItem.priority).label("min_priority"),
+                    )
+                    .filter(
+                        *eligible_filters,
+                        ScanWorkItem.phase_id.notin_(_GATE_TARGET_PHASES),
+                    )
+                    .group_by(ScanWorkItem.phase_id)
+                    .order_by(
+                        func.min(ScanWorkItem.priority).asc(),
+                        ScanWorkItem.phase_id.asc(),
+                    )
+                    .all()
+                )
+                phase_ids = [str(phase_id) for phase_id, _ in phase_rows]
+                per_phase_cap = max(
+                    1,
+                    remaining_room // max(1, len(phase_ids)),
+                )
+                for phase_id in phase_ids:
+                    if len(rows) >= to_claim:
                         break
-                    if per_phase_count.get(r.phase_id, 0) >= per_phase_cap:
-                        continue
-                    fair_picks.append(r)
-                    per_phase_count[r.phase_id] = per_phase_count.get(r.phase_id, 0) + 1
-                if len(fair_picks) < remaining_room:
-                    picked_ids = {r.id for r in fair_picks}
-                    for r in other_rows:
-                        if len(fair_picks) >= remaining_room:
-                            break
-                        if r.id in picked_ids:
-                            continue
-                        fair_picks.append(r)
-                rows.extend(fair_picks)
+                    phase_room = min(per_phase_cap, to_claim - len(rows))
+                    phase_picks = (
+                        db.query(ScanWorkItem)
+                        .filter(*eligible_filters, ScanWorkItem.phase_id == phase_id)
+                        .order_by(
+                            ScanWorkItem.priority.asc(),
+                            ScanWorkItem.created_at.asc(),
+                            ScanWorkItem.id.asc(),
+                        )
+                        .limit(phase_room)
+                        .with_for_update(skip_locked=True)
+                        .all()
+                    )
+                    rows.extend(phase_picks)
+
+                if len(rows) < to_claim:
+                    picked_ids = [item.id for item in rows]
+                    extras_query = db.query(ScanWorkItem).filter(
+                        *eligible_filters,
+                        ScanWorkItem.phase_id.notin_(_GATE_TARGET_PHASES),
+                    )
+                    if picked_ids:
+                        extras_query = extras_query.filter(ScanWorkItem.id.notin_(picked_ids))
+                    rows.extend(
+                        extras_query
+                        .order_by(
+                            ScanWorkItem.priority.asc(),
+                            ScanWorkItem.created_at.asc(),
+                            ScanWorkItem.id.asc(),
+                        )
+                        .limit(to_claim - len(rows))
+                        .with_for_update(skip_locked=True)
+                        .all()
+                    )
             if not rows:
                 continue
             # Reserva os slots no semáforo Redis atomicamente.
@@ -2351,11 +3133,12 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
 def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no_http") -> int:
     """
     Chamada quando httpx/naabu confirma que um target está morto (sem HTTP, sem TCP).
-    Cancela todos os work items queued/retry desse target, exceto P18 (relatório).
+    Cancela todos os work items queued/retry desse target, exceto P01 (inventário).
     Retorna quantidade de itens cancelados.
     """
-    # Fases que ainda fazem sentido para targets mortos (relatório, exposição passiva)
-    KEEP_PHASES = {"P18", "P01"}
+    # P18 é passivo para a raiz do scan, mas não deve ser preservado como
+    # bypass por subdomínio comprovadamente morto.
+    KEEP_PHASES = {"P01"}
     cancelled = (
         db.query(ScanWorkItem)
         .filter(
@@ -2364,6 +3147,7 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
             ScanWorkItem.status.in_(["queued", "retry", "blocked"]),
             ~ScanWorkItem.phase_id.in_(list(KEEP_PHASES)),
         )
+        .with_for_update(skip_locked=True)
         .all()
     )
     count = 0
@@ -2378,16 +3162,202 @@ def triage_dead_target(db: Session, scan_id: int, target: str, reason: str = "no
     return count
 
 
+def prepare_scan_for_requalification(db: Session, job: ScanJob) -> dict[str, int]:
+    """Recover a legacy scan whose global batch status opened every web gate.
+
+    Completed evidence is preserved. Only pending web work is returned to a
+    dependency-blocked state while the authoritative P02/P06 items are reset.
+    The caller must pause the scan before invoking this operation.
+    """
+    state = dict(job.state_data or {})
+    targets = [
+        str(target)
+        for target in state.get("target_set") or []
+        if str(target or "")
+    ]
+    if not targets:
+        return {"targets": 0, "blocked": 0, "p02_reset": 0, "p06_reset": 0}
+
+    now = datetime.now()
+    pending_statuses = ("queued", "retry", "dispatched", "running", "submitted")
+    web_dependency_phases = tuple(
+        phase_id
+        for phase_id, gate in PHASE_GATE.items()
+        if gate in {"P06", "P09"}
+    )
+    active_by_resource = dict(
+        db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id.in_(web_dependency_phases),
+            ScanWorkItem.status.in_(["dispatched", "running", "submitted"]),
+        )
+        .group_by(ScanWorkItem.resource_class)
+        .all()
+    )
+
+    blocked = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id.in_(web_dependency_phases),
+            ScanWorkItem.status.in_(pending_statuses),
+        )
+        .update(
+            {
+                "status": "blocked",
+                "lease_until": None,
+                "finished_at": None,
+                "last_error": "waiting_for:P06:legacy_requalification",
+                "updated_at": now,
+            },
+            synchronize_session=False,
+        )
+    )
+    p02_reset = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id == "P02",
+            ScanWorkItem.tool_name.in_(["naabu", "nmap"]),
+        )
+        .update(
+            {
+                "status": "queued",
+                "attempts": 0,
+                "lease_until": None,
+                "started_at": None,
+                "finished_at": None,
+                "last_error": None,
+                "result": {
+                    "status": "queued",
+                    "reason": "legacy_requalification_p02",
+                    "reset_at": now.isoformat(),
+                },
+                "updated_at": now,
+            },
+            synchronize_session=False,
+        )
+    )
+    p06_reset = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id == "P06",
+            ScanWorkItem.tool_name == "httpx",
+        )
+        .update(
+            {
+                "status": "blocked",
+                "attempts": 0,
+                "lease_until": None,
+                "started_at": None,
+                "finished_at": None,
+                "last_error": "waiting_for:P02:legacy_requalification",
+                "result": {
+                    "status": "blocked",
+                    "reason": "legacy_requalification_p06",
+                    "reset_at": now.isoformat(),
+                },
+                "updated_at": now,
+            },
+            synchronize_session=False,
+        )
+    )
+
+    preflight = dict(state.get("preflight") or {})
+    profiles = dict(preflight.get("targets") or {})
+    host_ip_map = dict(state.get("host_ip_map") or {})
+    for target in targets:
+        profile = dict(profiles.get(target) or {})
+        ip_value = host_ip_map.get(target)
+        profile.update(
+            {
+                "target": target,
+                "host": _target_host(target),
+                "ip": ip_value,
+                "dns_resolves": bool(ip_value),
+                "status": "dns_live" if ip_value else "dns_inconclusive",
+                "reason": (
+                    "DNS resolvido antes da requalificação"
+                    if ip_value
+                    else "DNS sem evidência conclusiva; P02 pendente"
+                ),
+            }
+        )
+        for key in (
+            "open_ports",
+            "p02_complete",
+            "p02_success_tools",
+            "p02_terminal_tools",
+            "p02_input_covered",
+            "p06_complete",
+            "p06_http_live",
+            "p06_input_covered",
+            "http",
+        ):
+            profile.pop(key, None)
+        profiles[target] = profile
+
+    preflight.update({
+        "enabled": True,
+        "version": 3,
+        "mode": "p01_dns+p02_ports+p06_http",
+        "targets": profiles,
+    })
+    recoveries = list(state.get("legacy_requalification") or [])
+    recoveries.append({
+        "at": now.isoformat(),
+        "targets": len(targets),
+        "blocked_pending_web": int(blocked),
+        "p02_reset": int(p02_reset),
+        "p06_reset": int(p06_reset),
+    })
+    state.update({
+        "preflight": preflight,
+        "qualification_contract_version": 3,
+        "work_producers_sealed": True,
+        "work_producer_stage": "legacy_requalification",
+        "legacy_requalification": recoveries[-10:],
+    })
+    job.state_data = state
+    job.mission_progress = min(99, int(job.mission_progress or 0))
+    job.current_step = "P02 · requalificação determinística dos alvos"
+
+    for resource_class, count in active_by_resource.items():
+        kali_inflight_release(str(resource_class or "light"), int(count or 0))
+
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="work-queue",
+        level="WARNING",
+        message=(
+            "legacy_scan_requalification "
+            f"targets={len(targets)} blocked={int(blocked)} "
+            f"p02_reset={int(p02_reset)} p06_reset={int(p06_reset)}"
+        ),
+    ))
+    db.flush()
+    return {
+        "targets": len(targets),
+        "blocked": int(blocked),
+        "p02_reset": int(p02_reset),
+        "p06_reset": int(p06_reset),
+    }
+
+
 def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
-    """Cancela P10/P12/P13 para targets SEM findings críticos/altos do nuclei (P09).
+    """Prioritize deep tests after P09 without treating a negative template scan as proof.
 
-    Lógica: se o nuclei não encontrou nada interessante num target, rodar wapiti/sqlmap/dalfox
-    nele é desperdício de 8–15 min/target. Mantemos apenas:
-      - Targets com achados HIGH ou CRITICAL do nuclei/P09
-      - Crown Jewels (independente de findings — merecem teste completo)
-      - Batch items (target="__batch__") — deixa o executor decidir
+    Nuclei is a useful positive signal, but it cannot rule out contextual
+    injection, stored/DOM XSS, IDOR/BOLA or business-logic flaws.  Earlier
+    versions skipped P10/P12/P13 when P09 had no medium+ finding, which turned
+    template recall into a hidden gate for unrelated testing methodologies.
 
-    Chamada após qualquer item de P09 (nuclei batch) ser concluído.
+    Applicability contracts still prevent tools such as sqlmap/dalfox from
+    running without target-specific parameters. This function now records the
+    P09 signal and priority decision only; it never skips a deep test solely
+    because P09 was negative.
     """
     from app.models.models import Finding
 
@@ -2448,10 +3418,9 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
             if t:
                 targets_with_findings.add(str(t))
 
-    # 3. Cancela itens individuais (não-batch) de P10/P12/P13 sem evidência
-    # Inclui "blocked" — items que ainda não foram desbloqueados também devem
-    # ser cancelados se o target não possui findings suficientes do nuclei (P09).
-    items_to_cancel = (
+    # 3. Review low-signal items, but preserve them. Applicability is evaluated
+    # again at dispatch against concrete endpoint/parameter evidence.
+    items_to_review = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
@@ -2467,31 +3436,28 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
     state = dict((job.state_data if job else {}) or {})
     cancelled = 0
     kept_by_evidence = 0
+    kept_by_policy = 0
     now = datetime.now()
-    for wi in items_to_cancel:
+    for wi in items_to_review:
         evidence_decision = _tool_evidence_decision(str(wi.tool_name or ""), str(wi.target or ""), state)
+        meta = dict(wi.item_metadata or {})
         if evidence_decision.get("required") and evidence_decision.get("present"):
-            meta = dict(wi.item_metadata or {})
-            meta["triage_post_p09"] = {
-                "decision": "kept_by_direct_evidence",
-                "evidence": evidence_decision,
-                "at": now.isoformat(),
-            }
-            wi.item_metadata = meta
-            wi.updated_at = now
+            decision = "kept_by_direct_evidence"
             kept_by_evidence += 1
-            continue
-        wi.status = "skipped"
-        wi.result = {
-            "skipped_reason": "triage_post_p09_no_p09_findings",
-            "targets_with_findings_count": len(targets_with_findings),
-            "triage_at": now.isoformat(),
+        else:
+            decision = "kept_for_independent_methodology"
+            kept_by_policy += 1
+        meta["triage_post_p09"] = {
+            "decision": decision,
+            "p09_positive_signal": False,
+            "evidence": evidence_decision,
+            "policy": "p09_is_priority_signal_not_negative_gate_v2",
+            "at": now.isoformat(),
         }
-        wi.last_error = "skipped:triage_post_p09_no_p09_findings"
+        wi.item_metadata = meta
         wi.updated_at = now
-        cancelled += 1
 
-    if cancelled or kept_by_evidence:
+    if items_to_review:
         db.add(ScanLog(
             scan_job_id=scan_id,
             source="work-queue",
@@ -2499,7 +3465,9 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
             message=(
                 f"triage_post_p09 scan={scan_id} "
                 f"targets_with_findings={len(targets_with_findings)} "
-                f"cancelled={cancelled} kept_by_direct_evidence={kept_by_evidence}"
+                f"cancelled=0 kept_by_direct_evidence={kept_by_evidence} "
+                f"kept_by_policy={kept_by_policy} "
+                "policy=p09_is_priority_signal_not_negative_gate_v2"
             ),
         ))
         db.commit()
@@ -2518,6 +3486,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
         "cancelled": cancelled,
         "kept": int(kept),
         "kept_by_direct_evidence": kept_by_evidence,
+        "kept_by_policy": kept_by_policy,
         "targets_with_findings": sorted(targets_with_findings),
     }
 

@@ -30,6 +30,36 @@ def _runner_url() -> str:
     return str(os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088")).rstrip("/")
 
 
+def cancel_scan_jobs_in_kali_runner(
+    scan_id: int,
+    *,
+    reason: str = "cancelled_by_scan_control",
+    timeout: int = 15,
+) -> dict[str, Any]:
+    """Cancel queued/running Kali runner jobs for a scan.
+
+    Celery revoke only stops the Python task.  Tool subprocesses launched in
+    the Kali sidecar live in a different process tree and must be cancelled
+    explicitly, otherwise stopped/deleted scans can keep generating network
+    activity and contaminate the next scan of the same target.
+    """
+    base = _runner_url()
+    try:
+        response = requests.post(
+            f"{base}/jobs/cancel",
+            params={"scan_id": int(scan_id), "reason": str(reason or "cancelled_by_scan_control")},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+        return {"ok": True, **payload}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("kali_runner scan cancel failed scan_id=%s: %s", scan_id, exc)
+        return {"ok": False, "scan_id": scan_id, "error": str(exc)}
+
+
 def kali_enabled_for_tool(tool_name: str) -> bool:
     """Back-compat helper: true only when a Kali profile exists."""
     name = str(tool_name or "").strip().lower()

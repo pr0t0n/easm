@@ -9,17 +9,17 @@ export function buildScannerAuthConfig(enabled, config = {}) {
   if (!enabled) return null;
   if (config.multiIdentity) {
     const identities = config.type === "bearer" ? [
-      { id: "user_a", role: "user", auth_type: "bearer", bearer_token: config.token },
-      { id: "user_b", role: "user", auth_type: "bearer", bearer_token: config.tokenB },
+      { id: "user_a", role: config.roleA || "user", auth_type: "bearer", bearer_token: config.token },
+      { id: "user_b", role: config.roleB || "user", auth_type: "bearer", bearer_token: config.tokenB },
     ] : config.type === "cookie" ? [
-      { id: "user_a", role: "user", auth_type: "cookie", cookies: cookieMap(config.cookie) },
-      { id: "user_b", role: "user", auth_type: "cookie", cookies: cookieMap(config.cookieB) },
+      { id: "user_a", role: config.roleA || "user", auth_type: "cookie", cookies: cookieMap(config.cookie) },
+      { id: "user_b", role: config.roleB || "user", auth_type: "cookie", cookies: cookieMap(config.cookieB) },
     ] : config.type === "basic" ? [
-      { id: "user_a", role: "user", auth_type: "basic", username: config.username, password: config.password },
-      { id: "user_b", role: "user", auth_type: "basic", username: config.usernameB, password: config.passwordB },
+      { id: "user_a", role: config.roleA || "user", auth_type: "basic", username: config.username, password: config.password },
+      { id: "user_b", role: config.roleB || "user", auth_type: "basic", username: config.usernameB, password: config.passwordB },
     ] : [
-      { id: "user_a", role: "user", auth_type: "header", headers: { [config.headerName]: config.headerValue } },
-      { id: "user_b", role: "user", auth_type: "header", headers: { [config.headerName]: config.headerValueB } },
+      { id: "user_a", role: config.roleA || "user", auth_type: "header", headers: { [config.headerName]: config.headerValue } },
+      { id: "user_b", role: config.roleB || "user", auth_type: "header", headers: { [config.headerName]: config.headerValueB } },
     ];
     const missing = identities.some((identity) => !identity.bearer_token && !identity.username && !Object.keys(identity.cookies || {}).length && !Object.values(identity.headers || {}).some(Boolean));
     return missing ? null : { type: config.type, required: true, identities };

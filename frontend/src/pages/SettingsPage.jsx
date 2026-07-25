@@ -236,13 +236,14 @@ export default function SettingsPage() {
             </span>
           )}
           <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-muted)" }}>
-            Fase P18 (OSINT)
+            Fase P18 (credenciais e segredos)
           </span>
         </div>
 
         <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 18, lineHeight: 1.5 }}>
-          Usado na fase P18 para levantamento de IPs/ASN, banners de serviços e exposições
-          passivas. Sem a key, o Shodan é ignorado e o OSINT roda sem essa fonte.
+          Usado como fonte passiva complementar na fase P18 para identificar exposições
+          externas. Sem a key, o Shodan é ignorado e a checagem de credenciais/segredos
+          roda sem essa fonte.
         </p>
 
         <form onSubmit={saveShodan}>
@@ -430,10 +431,11 @@ export default function SettingsPage() {
       {/* ── Info box: OSINT phase ────────────────────────────────────── */}
       <div style={{ ...CARD, background: "var(--surface-alt)", border: "1px solid var(--line)" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
-          Sobre o OSINT (P18)
+          Sobre credenciais e segredos (P18)
         </div>
         <p style={{ fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.6, margin: 0 }}>
-          A fase P18 roda imediatamente ao iniciar um scan (sem dependências de gate).
+          A fase P18 roda sem depender de HTTP-live para a raiz do alvo, mas não deve
+          servir como bypass para subdomínios comprovadamente mortos.
           Inclui: <strong>Shodan</strong> (com API key), <strong>theHarvester</strong>,
           <strong> gitleaks / trufflehog</strong> (busca de segredos), e
           <strong> h8mail</strong> (vazamento de credenciais).

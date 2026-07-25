@@ -173,14 +173,14 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "live URL",
     },
     "sslscan": {
-        "category": "recon", "phase": "P18",
+        "category": "recon", "phase": "P06",
         "description": "TLS certificate/protocol/cipher audit: chain, expiry, self-signed certs, TLS 1.0/1.1, SSLv2/v3, weak ciphers and server-preferred suites.",
         "when_to_use": "Every HTTPS host; cheap first-pass certificate and cipher evidence.",
         "inputs": "host:port", "outputs": "TLS certificate and cipher report",
         "prerequisites": "443/HTTPS reachable",
     },
     "testssl": {
-        "category": "recon", "phase": "P18",
+        "category": "recon", "phase": "P06",
         "description": "Comprehensive TLS/certificate auditor: protocols, ciphers, certificate trust/validity, OCSP, HSTS, compression, known TLS vulns.",
         "when_to_use": "Deeper than sslscan when compliance/PCI or strong evidence is needed.",
         "inputs": "host:port", "outputs": "TLS report with certificate/protocol/cipher findings",
@@ -368,7 +368,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "SSH service reachable",
     },
     "nmap-ssl-vuln": {
-        "category": "vuln", "phase": "P11|P18",
+        "category": "vuln", "phase": "P06|P11",
         "description": "Nmap SSL/TLS NSE vulnerability battery.",
         "when_to_use": "When HTTPS/TLS is reachable and Heartbleed/POODLE/DROWN-style checks are needed.",
         "inputs": "host", "outputs": "TLS NSE findings",

@@ -1173,6 +1173,21 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
     except Exception:
         execution_metrics = {}
 
+    try:
+        from app.services.recon_observability import build_recon_observability
+        recon_observability = build_recon_observability(db, scan)
+    except Exception as exc:
+        recon_observability = {
+            "error": str(exc)[:300],
+            "inventory": {},
+            "qualification": {},
+            "gates": [],
+            "locks": {"observable": False, "locks": []},
+            "capacity": [],
+            "events": [],
+            "comparison": {"comparable": False, "reasons": ["diagnóstico indisponível"]},
+        }
+
     return {
         # ── Scan metadata ──────────────────────────────────────────────────
         "scan_id": scan.id,
@@ -1226,6 +1241,7 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "tools_uninstalled_total": len(uninstalled_expected),
         },
         "execution_metrics": execution_metrics,
+        "recon_observability": recon_observability,
         "severity_counts": dict(severity_counts),
         # ── Capability/node coverage (legacy backward compat) ──────────────
         "completed_capabilities": completed_caps,

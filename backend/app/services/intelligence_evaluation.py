@@ -17,11 +17,13 @@ ENDPOINT_CASES = (
         "id": "object_api",
         "url": "https://fixture.invalid/api/orders/42?user_id=42",
         "tags": ["api"],
+        "auth_required": True,
         "expected": {"auth_requirement", "object_authorization", "parameter:query:user_id:idor_bola"},
     },
     {
         "id": "admin_boundary",
         "url": "https://fixture.invalid/admin/users",
+        "auth_required": True,
         "expected": {"auth_requirement"},
     },
     {
@@ -32,7 +34,7 @@ ENDPOINT_CASES = (
     {
         "id": "api_spec",
         "url": "https://fixture.invalid/openapi.json",
-        "expected": {"auth_requirement", "api_spec", "sensitive_file_analysis"},
+        "expected": {"auth_requirement_discovery", "api_spec", "sensitive_file_analysis"},
     },
     {
         "id": "static_asset",
@@ -47,7 +49,11 @@ def run_offline_intelligence_evaluation() -> dict[str, Any]:
     endpoint_predicted: set[str] = set()
     endpoint_rows = []
     for case in ENDPOINT_CASES:
-        analysis = analyze_endpoint_contract(case["url"], tags=list(case.get("tags") or []))
+        analysis = analyze_endpoint_contract(
+            case["url"],
+            tags=list(case.get("tags") or []),
+            auth_required=case.get("auth_required"),
+        )
         predicted = {test["test_class"] for test in analysis["test_matrix"] if test["test_class"] != "read_only_baseline"}
         expected = set(case["expected"])
         endpoint_expected.update(f"{case['id']}:{value}" for value in expected)

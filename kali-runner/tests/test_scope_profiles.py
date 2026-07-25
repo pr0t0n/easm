@@ -22,3 +22,62 @@ def test_runner_requires_authorized_scope() -> None:
     runner_source = (ROOT / "kali-runner" / "runner.py").read_text(encoding="utf-8")
     assert 'raise HTTPException(status_code=400, detail="authorized_scope is required")' in runner_source
     assert 'return False, "no_authorized_scope_provided"' in runner_source
+
+
+def test_runner_returns_durable_batch_input_manifest() -> None:
+    runner_source = (ROOT / "kali-runner" / "runner.py").read_text(encoding="utf-8")
+
+    assert "batch_targets: list[str]" in runner_source
+    assert "batch_target_count: int" in runner_source
+    assert "batch_target_file_sha256" in runner_source
+    assert "materialized_targets = list(dict.fromkeys(" in runner_source
+    assert "hashlib.sha256(" in runner_source
+
+
+def test_runner_can_cancel_scan_jobs_without_leaving_subprocesses_alive() -> None:
+    runner_source = (ROOT / "kali-runner" / "runner.py").read_text(encoding="utf-8")
+
+    assert '@app.post("/jobs/cancel")' in runner_source
+    assert "cancel_requested=True" in runner_source
+    assert "_job_cancel_requested(job_id)" in runner_source
+    assert "_kill_orphaned_process(pid_i, pgid_i)" in runner_source
+    assert 'status="skipped"' in runner_source
+    assert "scan_id: Optional[int] = None" in runner_source
+
+
+def test_runner_stale_job_clock_uses_utc_and_kills_process_group() -> None:
+    runner_source = (ROOT / "kali-runner" / "runner.py").read_text(encoding="utf-8")
+
+    assert "datetime.now(timezone.utc).isoformat()" in runner_source
+    assert "dt = dt.replace(tzinfo=timezone.utc)" in runner_source
+    assert "_kill_orphaned_process(pid_i, pgid_i)" in runner_source
+    assert "killed_process=" in runner_source
+    assert "items = [_mark_stale_job_if_needed(job) for job in items]" in runner_source
+    assert "hard_ceiling = timeout" in runner_source
+
+
+def test_httpx_batch_profile_uses_conservative_waf_safe_concurrency() -> None:
+    source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
+    section = source.split("httpx_probe_batch:", 1)[1].split("whatweb_fingerprint:", 1)[0]
+
+    assert '"-threads", "10"' in section
+    assert '"-rate-limit", "20"' in section
+    assert '"-retries", "2"' in section
+    assert '"-timeout", "10"' in section
+
+
+def test_naabu_batch_profile_avoids_resolver_and_nat_exhaustion() -> None:
+    source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
+    section = source.split("naabu_top1000_batch:", 1)[1].split("httpx_probe:", 1)[0]
+
+    assert '"-rate", "200"' in section
+    assert '"-c", "10"' in section
+    assert "timeout: 1200" in section
+
+
+def test_subjack_batch_profile_matches_installed_cli_contract() -> None:
+    source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
+    section = source.split("domain_takeover_batch:", 1)[1].split("nuclei_takeover:", 1)[0]
+
+    assert '"subjack", "-w", "{target_file}"' in section
+    assert '"-c"' not in section

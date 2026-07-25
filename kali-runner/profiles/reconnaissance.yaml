@@ -177,9 +177,11 @@ naabu_top1000_batch:
   category: recon
   phase: RECONNAISSANCE
   target_type: targets_file
-  description: "Batch TCP port scan top-1000 across multiple hosts in one run."
-  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "2000", "-c", "50"]
-  timeout: 600
+  description: "Conservative batch TCP scan; avoids resolver/NAT exhaustion on large WAF/CDN estates."
+  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "200", "-c", "10"]
+  # Runner silence watchdog is 50% of timeout. A 1200s budget gives a 600s
+  # no-output window, required when the final open port appears early.
+  timeout: 1200
   parser: lines
 
 nmap_service_detect:
@@ -205,7 +207,10 @@ nmap_service_detect_batch:
   cmd: ["nmap", "-sV", "--version-light", "-Pn", "--top-ports", "200", "-T4",
         "--max-retries", "1", "--max-rtt-timeout", "2s", "--host-timeout", "240s",
         "--open", "-oG", "-", "-iL", "{target_file}"]
-  timeout: 300
+  # Nmap buffers grepable output until hosts complete. The runner's silence
+  # watchdog fires at 50% of this value, so 300s killed a legitimate 56-host
+  # batch after 150s even though each host has a 240s bound.
+  timeout: 1200
   parser: raw
 
 masscan_full:
@@ -234,8 +239,10 @@ httpx_probe:
   timeout: 180
   parser: jsonl
 
-# Batch variant: probe a list of hosts/URLs in one httpx run (100 threads).
-# The canonical pipeline pattern: `subfinder | httpx -l subs.txt`.
+# Batch variant: probe a list of hosts/URLs in one httpx run. Keep this
+# deliberately conservative: on real WAF/CDN estates, 100 threads at 150 rps
+# produced a successful exit with zero observations, while the identical
+# target manifest at 10 threads/20 rps returned the expected responses.
 httpx_probe_batch:
   tool: httpx
   category: recon
@@ -245,7 +252,8 @@ httpx_probe_batch:
   cmd: ["httpx", "-l", "{target_file}", "-silent",
         "-status-code", "-title", "-tech-detect", "-location",
         "-no-color", "-json", "-include-response-header",
-        "-threads", "100", "-rate-limit", "150"]
+        "-threads", "10", "-rate-limit", "20",
+        "-retries", "2", "-timeout", "10"]
   timeout: 300
   parser: jsonl
 
@@ -434,7 +442,7 @@ domain_takeover_batch:
   phase: RECONNAISSANCE
   target_type: targets_file
   description: "Batch domain takeover check across all discovered subdomains (live + dead)."
-  cmd: ["subjack", "-w", "{target_file}", "-t", "50", "-timeout", "30", "-ssl", "-v", "-c", "/usr/share/subjack/fingerprints.json"]
+  cmd: ["subjack", "-w", "{target_file}", "-t", "50", "-timeout", "30", "-ssl", "-v"]
   timeout: 600
   parser: raw
 

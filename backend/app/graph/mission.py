@@ -820,14 +820,14 @@ _PHASE_CONTRACTS_FALLBACK: dict[str, dict[str, Any]] = {
     },
     "P18": {
         "phase_id": "P18",
-        "name": "SSL/TLS Certificate, Protocol & Cipher Audit",
-        "required_skills": ["vuln-ssl-tls"],
-        "required_tools": ["sslscan"],
-        "optional_tools": ["testssl", "nmap", "curl-headers"],
+        "name": "Credential Exposure Boundary",
+        "required_skills": ["skill.chain.exposed_git_to_credential_leak"],
+        "required_tools": ["theharvester"],
+        "optional_tools": ["gitleaks", "trufflehog", "h8mail", "bandit", "semgrep", "trivy", "nuclei-exposure", "nuclei-cloud"],
         "minimum_evidence": {
-            "type": "ssl_audit_result",
-            "description": "SSL/TLS protocol version, cipher suite, and certificate validity recorded",
-            "fields_required": ["protocol_version", "cipher_suite", "cert_valid", "source_tool"],
+            "type": "credential_exposure_result",
+            "description": "Credential, email, secret or passive exposure boundary recorded",
+            "fields_required": ["exposure_type", "location", "source_tool"],
         },
         "exit_criteria": {
             "min_required_tools_attempted": 1,
@@ -838,7 +838,7 @@ _PHASE_CONTRACTS_FALLBACK: dict[str, dict[str, Any]] = {
         "retry_policy": {
             "max_retries": 2,
             "on_failure": "try_optional_tools",
-            "skip_condition": "no_https_service",
+            "skip_condition": "no_passive_or_source_evidence",
             "skip_requires_reason": True,
         },
     },

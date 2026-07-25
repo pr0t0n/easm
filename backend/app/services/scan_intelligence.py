@@ -22,6 +22,7 @@ state OR a list of artifacts. The runner calls them at well-defined hooks.
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
 import time
@@ -62,6 +63,20 @@ def _is_ip_or_cidr(value: str) -> bool:
         ipaddress.ip_network(token, strict=False)
         return True
     except Exception:
+        return False
+
+
+def _is_public_routable_ip(value: str | None) -> bool:
+    """Return True only for addresses that belong to the external attack surface.
+
+    A public hostname may intentionally or accidentally resolve to loopback,
+    RFC1918, link-local, documentation, multicast, or another special-use
+    range. Scanning such an address from a worker measures the scanner's own
+    network instead of the authorized external target.
+    """
+    try:
+        return bool(ipaddress.ip_address(str(value or "").strip()).is_global)
+    except ValueError:
         return False
 
 
@@ -500,6 +515,7 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
     host_ip: dict[str, str] = {}
     live: list[str] = []
     dead: list[str] = []
+    non_public: list[str] = []
     root_norm = _root_scope(root)
     scoped_subdomains = [
         host
@@ -512,13 +528,41 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
         ordered,
         authorized_scope=[root_norm] if root_norm else [],
     )
+    kali_resolved = dict(kali_resolved or {})
+    root_fallback_ip = _resolve_host(root_norm) if root_norm else None
+    # If neither the Kali-side batch resolver nor the backend can resolve the
+    # root, DNS is operationally inconclusive.  Treating every discovered host
+    # as dead in that condition caused the 1-live/99-dead snapshots in scans
+    # #8/#9.  Preserve the candidates for P02/P06 qualification instead.
+    resolution_complete = bool(kali_resolved.get(root_norm) or root_fallback_ip)
+    inconclusive: list[str] = []
+    if not resolution_complete:
+        candidates = ordered[:cap] if cap is not None else ordered
+        return {
+            "live_targets": candidates,
+            "dead_targets": [],
+            "non_public_targets": [],
+            "inconclusive_targets": candidates,
+            "host_ip": {},
+            "ip_groups": {},
+            "resolution_complete": False,
+            "resolution_reason": "root_unresolved_by_kali_and_backend",
+        }
     for host in ordered:
         if cap is not None and len(live) >= cap:
             break
-        ip = kali_resolved.get(host) or _resolve_host(host)
+        ip = kali_resolved.get(host) or (root_fallback_ip if host == root_norm else _resolve_host(host))
         if ip:
-            host_ip[host] = ip
-            live.append(host)
+            explicit_local_root = host == root_norm and (
+                "." not in root_norm
+                or root_norm in {"localhost", "host.docker.internal"}
+                or (_is_ip_or_cidr(root_norm) and not _is_public_routable_ip(root_norm))
+            )
+            if _is_public_routable_ip(ip) or explicit_local_root:
+                host_ip[host] = ip
+                live.append(host)
+            else:
+                non_public.append(host)
         elif host != root_norm:  # root stays even if resolution hiccups
             dead.append(host)
         else:
@@ -529,8 +573,12 @@ def refine_target_set(root: str, subdomains: list[str], cap: int | None = None) 
     return {
         "live_targets": live,
         "dead_targets": dead,
+        "non_public_targets": non_public,
+        "inconclusive_targets": inconclusive,
         "host_ip": host_ip,
         "ip_groups": ip_groups,
+        "resolution_complete": resolution_complete,
+        "resolution_reason": "resolved",
     }
 
 
@@ -1182,10 +1230,24 @@ Apenas JSON. Sem texto adicional."""
     try:
         _model, raw = _call_learning_llm(prompt)
         if not raw:
-            return None
+            return {
+                "injected_tools": {},
+                "payloads_hint": [],
+                "reasoning": "LLM retornou vazio; sem injecao dinamica.",
+                "source_phase": phase_id,
+                "fallback": True,
+                "llm_error": "empty_response",
+            }
         parsed = _extract_json_object(raw) if hasattr(_extract_json_object, "__call__") else {}
         if not isinstance(parsed, dict):
-            return None
+            return {
+                "injected_tools": {},
+                "payloads_hint": [],
+                "reasoning": "Resposta LLM sem JSON valido; sem injecao dinamica.",
+                "source_phase": phase_id,
+                "fallback": True,
+                "llm_error": "invalid_json",
+            }
         # Sanitize
         injected = parsed.get("injected_tools") if isinstance(parsed.get("injected_tools"), dict) else {}
         payloads = parsed.get("payloads_hint") if isinstance(parsed.get("payloads_hint"), list) else []
@@ -1195,9 +1257,17 @@ Apenas JSON. Sem texto adicional."""
             "payloads_hint": [str(p) for p in payloads[:8]],
             "reasoning": reasoning,
             "source_phase": phase_id,
+            "fallback": False,
         }
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "injected_tools": {},
+            "payloads_hint": [],
+            "reasoning": "LLM indisponivel; sem injecao dinamica.",
+            "source_phase": phase_id,
+            "fallback": True,
+            "llm_error": type(exc).__name__,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1553,24 +1623,24 @@ def extract_learning_signals(state: dict[str, Any], phase_ledgers: list[dict[str
 _PHASE_DEPS: dict[str, list[str]] = {
     "P01": [],
     "P02": ["P01"],
-    "P03": ["P02"],
-    "P04": ["P03"],
-    "P05": ["P03"],
-    "P06": ["P03"],
-    "P07": ["P02"],
-    "P08": ["P05", "P06"],
-    "P09": ["P07", "P08"],
+    "P03": ["P06"],
+    "P04": ["P06"],
+    "P05": ["P06"],
+    "P06": ["P02"],
+    "P07": ["P06"],
+    "P08": ["P06"],
+    "P09": ["P06"],
     "P10": ["P09"],
-    "P11": ["P10"],
-    "P12": ["P10", "P11"],
-    "P13": ["P12"],
-    "P14": ["P12"],
-    "P15": ["P04"],
-    "P16": ["P15"],
-    "P17": ["P16"],
-    "P18": ["P06"],
-    "P19": ["P17", "P18"],
-    "P20": ["P19"],
+    "P11": ["P09"],
+    "P12": ["P09"],
+    "P13": ["P09"],
+    "P14": ["P09"],
+    "P15": ["P06"],
+    "P16": ["P06"],
+    "P17": ["P09"],
+    "P18": [],
+    "P19": ["P09"],
+    "P20": ["P09"],
     "P21": ["P20"],
     "P22": ["P21"],
 }

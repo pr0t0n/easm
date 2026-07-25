@@ -151,13 +151,15 @@ def normalize_crawler_result(
             inv.upsert_parameter(ep, name, location="body" if form["method"] != "GET" else "query", source_tool=tool_name)
             form_params += 1
 
-    # Marca coverage inicial. Testes específicos mudam esse estado depois.
+    # Discovery proves that an endpoint exists; it does not prove that any
+    # vulnerability class was tested.  Keep the initial state explicitly
+    # non-tested so coverage cannot be inflated by crawling alone.
     for ep in endpoints:
         inv.upsert_coverage(
             coverage_type="endpoint",
             target_ref=ep.normalized_url,
             test_class="discovery",
-            status="tested_no_issue",
+            status="discovered",
             endpoint_id=ep.id,
             metadata={"source_tool": tool_name},
         )
@@ -166,7 +168,7 @@ def normalize_crawler_result(
                 coverage_type="endpoint",
                 target_ref=ep.normalized_url,
                 test_class="parameter_discovery",
-                status="candidate",
+                status="planned",
                 endpoint_id=ep.id,
                 metadata={"source_tool": tool_name},
             )

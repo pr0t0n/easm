@@ -125,7 +125,7 @@ def _extract_san_domains(result: dict[str, Any]) -> list[str]:
         if domain and "." in domain:
             domains.append(domain.lower())
 
-    return list(set(domains))[:50]
+    return sorted(set(domains))[:50]
 
 
 def _get_auth_endpoints_for_scan(db: Session, scan_id: int) -> list[tuple[str, str]]:

@@ -26,6 +26,8 @@ class ScanCreate(BaseModel):
     scan_level: str = "full"
     # Target authentication for scanner (propagated to ffuf/curl/sqlmap)
     auth_config: dict[str, Any] | None = None
+    # Optional source/repository input for SAST and secret scanners.
+    source_config: dict[str, Any] | None = None
 
 
 class ScanResponse(BaseModel):

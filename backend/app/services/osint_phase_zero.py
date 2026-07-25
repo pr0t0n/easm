@@ -14,6 +14,7 @@ IMPORTANT: All calls are read-only / passive — no active probing of target sys
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -46,6 +47,17 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
+OSINT_CONNECT_TIMEOUT_SECONDS = float(os.getenv("OSINT_CONNECT_TIMEOUT_SECONDS", "3"))
+OSINT_READ_TIMEOUT_SECONDS = float(os.getenv("OSINT_READ_TIMEOUT_SECONDS", "8"))
+GITHUB_DORK_TOTAL_BUDGET_SECONDS = float(os.getenv("OSINT_GITHUB_DORK_BUDGET_SECONDS", "20"))
+GITHUB_UNAUTH_ENABLED = str(os.getenv("OSINT_GITHUB_UNAUTH_ENABLED", "false")).lower() in {"1", "true", "yes", "on"}
+
+
+def _http_timeout(read_timeout: float | None = None) -> tuple[float, float]:
+    return (
+        max(0.5, float(OSINT_CONNECT_TIMEOUT_SECONDS or 3)),
+        max(1.0, float(read_timeout or OSINT_READ_TIMEOUT_SECONDS or 8)),
+    )
 
 
 def _hibp_check_email(email: str, api_key: str) -> list[dict]:
@@ -55,7 +67,7 @@ def _hibp_check_email(email: str, api_key: str) -> list[dict]:
     url = f"{HIBP_API_BASE}/breachedaccount/{requests.utils.quote(email)}?truncateResponse=false"
     headers = {**HIBP_HEADERS, "hibp-api-key": api_key}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=_http_timeout(5))
         if resp.status_code == 404:
             return []  # no breaches
         if resp.status_code == 401:
@@ -121,20 +133,45 @@ def run_github_dork(domain: str, token: str | None = None) -> dict[str, Any]:
     Looks for leaked credentials, env files, API keys.
     Returns up to 20 results per query (GitHub API hard limit = 30).
     """
+    if not token and not GITHUB_UNAUTH_ENABLED:
+        return {
+            "skipped": "no_github_token",
+            "queries_run": 0,
+            "results_count": 0,
+            "findings": [],
+            "severity": "info",
+            "blocking": False,
+        }
+
     headers = {**GITHUB_HEADERS}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     findings: list[dict] = []
+    errors: list[str] = []
     queries_run = 0
+    deadline = time.monotonic() + max(1.0, float(GITHUB_DORK_TOTAL_BUDGET_SECONDS or 20))
 
     for query_tpl in GITHUB_DORK_QUERIES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append("budget_exhausted")
+            break
         query = query_tpl.format(domain=domain)
         params = {"q": query, "per_page": 10, "page": 1}
         try:
-            resp = requests.get(GITHUB_SEARCH_API, headers=headers, params=params, timeout=15)
+            resp = requests.get(
+                GITHUB_SEARCH_API,
+                headers=headers,
+                params=params,
+                timeout=(
+                    min(max(0.5, OSINT_CONNECT_TIMEOUT_SECONDS), max(0.5, remaining)),
+                    min(max(1.0, OSINT_READ_TIMEOUT_SECONDS), max(1.0, remaining)),
+                ),
+            )
             if resp.status_code == 403:
                 logger.debug("GitHub rate limited, stopping dorks early")
+                errors.append("rate_limited")
                 break
             if resp.status_code == 422:
                 continue  # query too complex
@@ -151,14 +188,19 @@ def run_github_dork(domain: str, token: str | None = None) -> dict[str, Any]:
                     "score": item.get("score"),
                     "sha": item.get("sha"),
                 })
-            time.sleep(1.0)  # respect GitHub rate limit (10 reqs/min unauthenticated)
+            if token and (deadline - time.monotonic()) > 1.0:
+                time.sleep(1.0)  # respect GitHub rate limit without exceeding the phase budget
         except Exception as e:
+            errors.append(str(e)[:160])
             logger.debug("GitHub dork failed for query '%s': %s", query, e)
 
     return {
         "queries_run": queries_run,
         "results_count": len(findings),
         "findings": findings,
+        "errors": errors[-5:],
+        "budget_seconds": GITHUB_DORK_TOTAL_BUDGET_SECONDS,
+        "blocking": False,
         "severity": "critical" if len(findings) > 3 else ("high" if len(findings) > 0 else "info"),
     }
 
@@ -175,7 +217,7 @@ def run_shodan_asn_sweep(domain: str, api_key: str) -> dict[str, Any]:
         # Step 1: Get IP for domain via Shodan host resolve
         resolve_resp = requests.get(
             f"https://api.shodan.io/dns/resolve?hostnames={domain}&key={api_key}",
-            timeout=15,
+            timeout=_http_timeout(8),
         )
         resolve_resp.raise_for_status()
         resolved = resolve_resp.json()
@@ -186,7 +228,7 @@ def run_shodan_asn_sweep(domain: str, api_key: str) -> dict[str, Any]:
         # Step 2: Get host info including org / ASN
         host_resp = requests.get(
             f"https://api.shodan.io/shodan/host/{ip}?key={api_key}",
-            timeout=15,
+            timeout=_http_timeout(8),
         )
         host_resp.raise_for_status()
         host_data = host_resp.json()
@@ -199,7 +241,7 @@ def run_shodan_asn_sweep(domain: str, api_key: str) -> dict[str, Any]:
         # Step 3: Search for all hosts in the same ASN
         search_resp = requests.get(
             f"https://api.shodan.io/shodan/host/search?key={api_key}&query=asn:{asn}&facets=port:10",
-            timeout=20,
+            timeout=_http_timeout(10),
         )
         search_resp.raise_for_status()
         search_data = search_resp.json()
@@ -247,6 +289,13 @@ def run_osint_phase_zero(
     from datetime import datetime
 
     logger.info("osint_phase_zero start scan=%d domain=%s", job.id, domain)
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="osint-phase-zero",
+        level="INFO",
+        message=f"osint_phase_zero_start domain={domain}",
+    ))
+    db.flush()
 
     hibp_key = str(getattr(settings, "hibp_api_key", "") or "")
     github_token = str(getattr(settings, "github_token", "") or "")
@@ -265,6 +314,18 @@ def run_osint_phase_zero(
         results["github_dork"] = run_github_dork(domain, github_token or None)
     except Exception as e:
         results["github_dork"] = {"error": str(e)}
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="osint-phase-zero",
+        level="INFO",
+        message=(
+            "osint_phase_zero_provider provider=github_dork "
+            f"status={'skipped' if results['github_dork'].get('skipped') else 'done'} "
+            f"queries={results['github_dork'].get('queries_run', 0)} "
+            f"results={results['github_dork'].get('results_count', 0)}"
+        ),
+    ))
+    db.flush()
 
     # 3. Shodan ASN sweep
     try:

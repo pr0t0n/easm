@@ -12,15 +12,15 @@ const FASES_IDS  = [
 const FASE_NOMES = {
   P01: "Enumeração de subdomínios",   P02: "Descoberta de portas/serviços",
   P03: "Descoberta de endpoints",      P04: "Descoberta de parâmetros",
-  P05: "Fingerprint de tecnologia",    P06: "Comportamento HTTP",
-  P07: "OSINT e exposição",            P08: "TLS e transporte",
-  P09: "Superfície de autenticação",   P10: "Controle de acesso",
-  P11: "Validação de entrada",         P12: "Template/Injeção",
-  P13: "Headers e roteamento",         P14: "CVEs conhecidas",
-  P15: "Paths sensíveis",              P16: "Exposição em nuvem",
-  P17: "Contratos de API",             P18: "JS e segredos client-side",
-  P19: "Tampering de métodos",         P20: "Lógica de negócio",
-  P21: "Leaks e paste intel",          P22: "Evidências e relatório",
+  P05: "Expansão de superfície",       P06: "HTTP e WAF",
+  P07: "Tecnologias",                  P08: "JavaScript e endpoints",
+  P09: "Templates de vulnerabilidade", P10: "Testes de injeção",
+  P11: "Testes SSRF",                  P12: "Testes XSS",
+  P13: "Acesso e lógica de negócio",   P14: "Limites de autenticação",
+  P15: "Arquivos e exposição web",     P16: "APIs e parâmetros",
+  P17: "Validação de exploits",        P18: "Credenciais e segredos",
+  P19: "Pós-exploração segura",        P20: "Correlação de caminhos",
+  P21: "Revisão de evidências",        P22: "Relatório da campanha",
 };
 
 const LEVEL_MAP = {
@@ -269,7 +269,9 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [accessGroupId, setAccessGroupId] = useState("");
   const [scopeAuthorizationAttested, setScopeAuthorizationAttested] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
-  const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "", multiIdentity: false, tokenB: "", cookieB: "", usernameB: "", passwordB: "", headerValueB: "" });
+  const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "", multiIdentity: false, tokenB: "", cookieB: "", usernameB: "", passwordB: "", headerValueB: "", roleA: "user", roleB: "user" });
+  const [sourceEnabled, setSourceEnabled] = useState(false);
+  const [sourceConfig, setSourceConfig] = useState({ sourcePath: "", repositoryUrl: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
   const [submitting, setSubmitting] = useState(false);
 
@@ -300,6 +302,10 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           accessGroupName: selectedGroup?.name || "",
           scopeAuthorizationAttested,
           authPayload: buildAuth(),
+          sourcePayload: sourceEnabled ? {
+            source_path: sourceConfig.sourcePath.trim(),
+            repository_url: sourceConfig.repositoryUrl.trim(),
+          } : null,
         });
       }
     } finally {
@@ -462,6 +468,33 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
               <input type="password" placeholder="password B" value={authConfig.passwordB} onChange={(e) => setAuthConfig({ ...authConfig, passwordB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
             </>}
             {authConfig.multiIdentity && authConfig.type === "header" && <input placeholder="Valor do header do usuário B" value={authConfig.headerValueB} onChange={(e) => setAuthConfig({ ...authConfig, headerValueB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", fontFamily: "var(--font-mono)" }} />}
+            {authConfig.multiIdentity && <>
+              <input placeholder="Papel do usuário A (ex.: customer)" value={authConfig.roleA} onChange={(e) => setAuthConfig({ ...authConfig, roleA: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
+              <input placeholder="Papel do usuário B (ex.: manager)" value={authConfig.roleB} onChange={(e) => setAuthConfig({ ...authConfig, roleB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
+            </>}
+          </div>
+        )}
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--ink-soft)", marginTop: 10 }}>
+          <input type="checkbox" checked={sourceEnabled} onChange={(e) => setSourceEnabled(e.target.checked)} />
+          Incluir código-fonte/repositório para SAST e secret scanning
+        </label>
+        {sourceEnabled && (
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <input
+              placeholder="Diretório local acessível pelo backend"
+              value={sourceConfig.sourcePath}
+              onChange={(e) => setSourceConfig({ ...sourceConfig, sourcePath: e.target.value })}
+              style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }}
+            />
+            <input
+              placeholder="https://github.com/organizacao/repositorio.git"
+              value={sourceConfig.repositoryUrl}
+              onChange={(e) => setSourceConfig({ ...sourceConfig, repositoryUrl: e.target.value })}
+              style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }}
+            />
+            <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: "var(--ink-muted)" }}>
+              Sem uma destas entradas, Semgrep, Bandit, Gitleaks e TruffleHog serão marcados como não aplicáveis — não como falha.
+            </div>
           </div>
         )}
         {janela === "agendar" && (
@@ -512,6 +545,7 @@ function QualityPanel({ quality }) {
   const gaps = Array.isArray(quality.gaps) ? quality.gaps : [];
   const gate = quality.quality_gate || {};
   const runtime = quality.runtime_visibility || {};
+  const external = quality.external_preconditions || {};
   const gateRuntime = runtime.quality_gate || {};
   const p21 = runtime.p21_validation || {};
   const agentRuntime = runtime.agent_runtime || {};
@@ -523,6 +557,15 @@ function QualityPanel({ quality }) {
   const mcpRecent = Array.isArray(agentRuntime.recent_mcp_contracts) ? agentRuntime.recent_mcp_contracts : [];
   const agentRecent = Array.isArray(agentRuntime.recent_agent_executions) ? agentRuntime.recent_agent_executions : [];
   const gateStatus = gate.status ? String(gate.status).replace(/_/g, " ") : "";
+  const componentDetail = (key, item) => {
+    if (key === "phase_coverage") return `${item.healthy || 0}/${item.expected || 0} fases saudáveis · ${item.weak || 0} fracas`;
+    if (key === "evidence_quality") return `${item.findings_with_evidence || 0}/${item.findings_total || 0} com evidência · ${item.verified_findings || 0} verificados`;
+    if (key === "validation_depth") return `${item.successful_validations || 0}/${item.validation_runs || 0} validações conclusivas · ${item.high_verified || 0}/${item.high_findings || 0} HIGH verificados`;
+    if (key === "test_depth") return `${item.hypotheses_resolved || 0}/${item.active_hypotheses ?? item.hypotheses ?? 0} aplicáveis · ${item.hypotheses_blocked_reachability || 0} reachability`;
+    if (key === "tool_reliability") return `${item.tools_succeeded || 0}/${item.tools_attempted || 0} execuções úteis · ${item.failed_work_items || 0} falhas`;
+    if (key === "surface_coverage") return `${item.covered_items || 0}/${item.coverage_items || 0} aplicáveis · ${item.coverage_items_inventory_only || 0} inventário · ${item.coverage_items_external_precondition || 0} pré-cond.`;
+    return "";
+  };
 
   return (
     <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "13px 14px", marginBottom: 14, background: "var(--surface)" }}>
@@ -590,6 +633,21 @@ function QualityPanel({ quality }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {(external.identity_pair_required || external.reachability_blocked_hypotheses || external.source_input_required_items || external.jwt_required_items || external.coverage_external_precondition_items) && (
+        <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "9px 10px", marginBottom: 10, background: "var(--surface-soft)" }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 7 }}>Pré-condições externas / operacionais</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, fontSize: 11.5, color: "var(--ink-muted)" }}>
+            <div>Credenciais: <strong style={{ color: external.identity_pair_required ? "var(--sev-medium-text)" : "var(--ink)" }}>{external.valid_auth_sessions || 0}/2 sessões</strong></div>
+            <div>Auth endpoints: <strong style={{ color: "var(--ink)" }}>{external.auth_required_endpoints || 0}</strong></div>
+            <div>Reachability: <strong style={{ color: "var(--ink)" }}>{external.reachability_blocked_hypotheses || 0} hipóteses</strong></div>
+            <div>Passivo sem baseline: <strong style={{ color: "var(--ink)" }}>{external.auth_unclassifiable_passive_archive_endpoints || 0}</strong></div>
+            <div>Source/repo: <strong style={{ color: "var(--ink)" }}>{external.source_input_required_items || 0} itens</strong></div>
+            <div>JWT real: <strong style={{ color: "var(--ink)" }}>{external.jwt_required_items || 0} itens</strong></div>
+            <div>Cobertura externa: <strong style={{ color: "var(--ink)" }}>{external.coverage_external_precondition_items || 0}</strong></div>
+          </div>
         </div>
       )}
 
@@ -665,6 +723,9 @@ function QualityPanel({ quality }) {
             <div style={{ height: 4, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden", marginTop: 6 }}>
               <div style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0)))}%`, height: "100%", background: Number(item.score || 0) >= 70 ? "var(--sev-low-solid)" : "var(--sev-medium-solid)" }} />
             </div>
+            <div style={{ fontSize: 10.5, color: "var(--ink-muted)", lineHeight: 1.35, marginTop: 6 }}>
+              {componentDetail(key, item)}
+            </div>
           </div>
         ))}
       </div>
@@ -709,7 +770,8 @@ function DetailPanel({ scan, logs, onClose }) {
         if (!cancelled && data?.phases) setBreakdown(data);
       } catch { /* silencioso */ }
       try {
-        const { data } = await client.get(`/api/scans/${scan.id}/quality`, { _skipToast: true });
+        const terminal = TERMINAL_STATUS.has(scan.status);
+        const { data } = await client.get(`/api/scans/${scan.id}/quality${terminal ? "?refresh=true" : ""}`, { _skipToast: true });
         if (!cancelled) setQuality(data || null);
       } catch { /* silencioso */ }
     };
@@ -1061,7 +1123,7 @@ export default function ScansPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
   const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
 
-  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload }) => {
+  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, sourcePayload }) => {
     const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
     for (const tgt of targets) {
       const payload = { target_query: tgt, scan_level: scanLevel || "full" };
@@ -1069,6 +1131,7 @@ export default function ScansPage() {
       if (accessGroupName) payload.access_group_name = accessGroupName;
       payload.scope_authorization_attested = Boolean(scopeAuthorizationAttested);
       if (authPayload)     payload.auth_config        = authPayload;
+      if (sourcePayload && (sourcePayload.source_path || sourcePayload.repository_url)) payload.source_config = sourcePayload;
       await client.post("/api/scans", payload);
     }
     showMsg("Missão lançada com sucesso!");

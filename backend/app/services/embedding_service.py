@@ -14,6 +14,9 @@ import threading
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
+EMBED_ALLOW_RUNTIME_DOWNLOAD = str(os.getenv("EMBED_ALLOW_RUNTIME_DOWNLOAD", "false")).lower() in {
+    "1", "true", "yes", "on",
+}
 
 _model = None
 _model_lock = threading.Lock()
@@ -33,6 +36,15 @@ def _get_model():
         if _load_failed:
             return None
         try:
+            # Scan completion paths must never block on external model
+            # downloads.  If embeddings were not preloaded by an explicit
+            # maintenance/backfill flow, fail closed here and let callers fall
+            # back to lexical/empty RAG results.  Set
+            # EMBED_ALLOW_RUNTIME_DOWNLOAD=true only in controlled jobs where a
+            # HuggingFace download is acceptable.
+            if not EMBED_ALLOW_RUNTIME_DOWNLOAD:
+                _load_failed = True
+                return None
             from fastembed import TextEmbedding
 
             cache_dir = os.getenv("FASTEMBED_CACHE", "/app/.fastembed_cache")

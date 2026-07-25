@@ -49,6 +49,8 @@ _KALI_RESULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0
 kali_client: httpx.AsyncClient | None = None
 kali_profiles: dict[str, dict[str, Any]] = {}
 tool_aliases: dict[str, str] = {}
+_kali_catalog_refreshed_monotonic = 0.0
+_KALI_CATALOG_MAX_AGE_SECONDS = max(5, int(os.getenv("KALI_CATALOG_MAX_AGE_SECONDS", "30")))
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +241,7 @@ def _mcp_tool_descriptor(profile_name: str, spec: dict[str, Any]) -> dict[str, A
 
 
 async def _refresh_kali_catalog() -> None:
-    global kali_profiles, tool_aliases
+    global kali_profiles, tool_aliases, _kali_catalog_refreshed_monotonic
     if kali_client is None:
         return
     try:
@@ -274,6 +276,7 @@ async def _refresh_kali_catalog() -> None:
             if _cname not in aliases and _target in profiles:
                 aliases[_cname] = _target
         tool_aliases = aliases
+        _kali_catalog_refreshed_monotonic = time.monotonic()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to load Kali profiles: %s", exc)
         kali_profiles = {}
@@ -454,7 +457,21 @@ def _candidate_profile_names(request: MCPExecutionRequest) -> list[str]:
     return cands
 
 
+async def _ensure_kali_catalog_fresh() -> None:
+    """Keep live-reloaded Kali profile metadata consistent in the MCP bridge."""
+    if (
+        not kali_profiles
+        or time.monotonic() - _kali_catalog_refreshed_monotonic
+        >= _KALI_CATALOG_MAX_AGE_SECONDS
+    ):
+        await _refresh_kali_catalog()
+
+
 async def _resolve_profile_name(request: MCPExecutionRequest) -> str | None:
+    # Kali profiles can be reloaded without restarting this service. The old
+    # cache included execution timeouts, so stale metadata silently shortened
+    # P02 jobs. Refresh on a bounded TTL before resolving every submission.
+    await _ensure_kali_catalog_fresh()
     for name in _candidate_profile_names(request):
         if name in kali_profiles:
             return name

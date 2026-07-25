@@ -36,6 +36,7 @@ from app.services.policy_service import is_target_allowed
 from app.services.strategy_runtime import evaluate_scan_authorization
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
+from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
 from app.services.risk_service import (
     build_priority_reason,
     build_rating_timeline,
@@ -198,8 +199,9 @@ def _requeue_inflight_work_items_for_pause(db: Session, scan_id: int) -> int:
         return 0
 
     try:
-        from app.services.scan_work_queue import kali_inflight_release
+        from app.services.scan_work_queue import clear_work_item_execute_locks, kali_inflight_release
     except Exception:
+        clear_work_item_execute_locks = None
         kali_inflight_release = None
 
     released_by_class: dict[str, int] = {}
@@ -219,6 +221,8 @@ def _requeue_inflight_work_items_for_pause(db: Session, scan_id: int) -> int:
                 kali_inflight_release(resource_class, count)
             except Exception:
                 continue
+    if clear_work_item_execute_locks:
+        clear_work_item_execute_locks([int(item.id) for item in items])
     return len(items)
 
 
@@ -263,7 +267,10 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
 
         # Check if all work items are in terminal states → completed, not failed
         from app.models.models import ScanWorkItem as _SWI
-        _terminal = {"completed", "done", "failed", "timeout", "skipped", "blocked"}
+        # A gate-blocked item is pending work, not terminal.  Treating it as
+        # terminal let the API reconciler independently publish "completed"
+        # while P02/P06 qualification had not opened downstream phases.
+        _terminal = {"completed", "done", "failed", "timeout", "skipped"}
         _non_terminal = (
             db.query(_SWI)
             .filter(
@@ -2483,6 +2490,7 @@ def create_scan(
     scan_level = normalize_scan_level(payload.scan_level)
     profile = scan_profile(scan_level)
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
+    source_config = payload.source_config if isinstance(payload.source_config, dict) else None
     initial_state: dict[str, Any] = {
         "llm_risk": llm_risk_state,
         "scan_level": scan_level,
@@ -2506,6 +2514,26 @@ def create_scan(
     }
     if auth_config:
         initial_state["auth_config"] = auth_config
+    if source_config:
+        source_path = str(source_config.get("source_path") or "").strip()
+        repository_url = str(source_config.get("repository_url") or "").strip()
+        if repository_url and not (
+            repository_url.startswith(("https://", "ssh://", "git://", "git@"))
+            or repository_url.endswith(".git")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="repository_url deve ser uma URL Git HTTPS/SSH valida",
+            )
+        initial_state["source_config"] = {
+            "source_path": source_path,
+            "repository_url": repository_url,
+            "provided": bool(source_path or repository_url),
+        }
+        if source_path:
+            initial_state["source_path"] = source_path
+        if repository_url:
+            initial_state["repository_url"] = repository_url
 
     job = ScanJob(
         owner_id=current_user.id,
@@ -2637,7 +2665,14 @@ def create_scan(
     )
 
 
-_TERMINAL_SCAN_STATUSES = {"completed", "failed", "stopped", "cancelled", "blocked"}
+_TERMINAL_SCAN_STATUSES = {
+    "completed",
+    "completed_with_gaps",
+    "failed",
+    "stopped",
+    "cancelled",
+    "blocked",
+}
 
 
 def _open_finding_counts_by_scan(db: Session, scan_ids: list[int]) -> dict[int, dict[str, int]]:
@@ -2943,6 +2978,8 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     if job.status in SCAN_ACTIVE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nao e permitido excluir scan em execucao")
 
+    runner_cancel = cancel_scan_jobs_in_kali_runner(scan_id, reason="scan_deleted")
+
     # Evita violacao de FK quando algum heartbeat ainda referencia este scan.
     db.query(WorkerHeartbeat).filter(WorkerHeartbeat.current_scan_id == scan_id).update(
         {
@@ -3037,7 +3074,7 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         event_type="scan.deleted",
         message=f"Scan {scan_id} excluido",
         actor_user_id=current_user.id,
-        metadata={"scan_id": scan_id},
+        metadata={"scan_id": scan_id, "kali_runner_cancel": runner_cancel},
     )
     db.commit()
     return {"ok": True}
@@ -3063,6 +3100,12 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 revoked_task_ids.append(task_id)
             except Exception:
                 continue
+
+    runner_cancel_results: list[dict[str, Any]] = []
+    for scan_id in resettable_scan_ids:
+        runner_cancel_results.append(
+            cancel_scan_jobs_in_kali_runner(scan_id, reason="reset_operational")
+        )
 
     try:
         # Limpa primeiro as referencias de workers para evitar violacao de FK em scan_jobs.
@@ -3255,6 +3298,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "preserved_queued_scan_ids": preserved_queued_scan_ids,
                 "preserved_enabled_schedules": preserved_schedules,
                 "revoked_task_ids": revoked_task_ids,
+                "kali_runner_cancel": runner_cancel_results,
                 "deleted": {
                     "scan_jobs": deleted_scan_jobs,
                     "findings": deleted_findings,
@@ -3300,6 +3344,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "enabled_schedules": preserved_schedules,
             },
             "revoked_task_ids": list(dict.fromkeys(revoked_task_ids)),
+            "kali_runner_cancel": runner_cancel_results,
         }
     except SQLAlchemyError as exc:
         db.rollback()
@@ -3316,6 +3361,7 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans em execucao/fila podem ser interrompidos")
 
     task_ids = _active_scan_task_ids(scan_id, db)
+    runner_cancel = cancel_scan_jobs_in_kali_runner(scan_id, reason="scan_stopped")
     for task_id in task_ids:
         try:
             celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
@@ -3323,6 +3369,9 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
             continue
 
     _clear_scan_worker_heartbeat(db, scan_id)
+    state = dict(job.state_data or {})
+    state["execution_epoch"] = int(state.get("execution_epoch") or 0) + 1
+    job.state_data = state
     job.status = "stopped"
     job.current_step = "Scan interrompido manualmente"
     job.next_retry_at = None
@@ -3332,7 +3381,10 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
             scan_job_id=scan_id,
             source="manager",
             level="WARNING",
-            message=f"Scan interrompido manualmente (task_ids={task_ids or ['nao_encontrada']})",
+            message=(
+                f"Scan interrompido manualmente "
+                f"(task_ids={task_ids or ['nao_encontrada']}, kali_runner_cancel={runner_cancel})"
+            ),
         )
     )
     log_audit(
@@ -3340,10 +3392,10 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         event_type="scan.stopped",
         message=f"Scan {scan_id} interrompido manualmente",
         actor_user_id=current_user.id,
-        metadata={"scan_id": scan_id, "task_ids": task_ids},
+        metadata={"scan_id": scan_id, "task_ids": task_ids, "kali_runner_cancel": runner_cancel},
     )
     db.commit()
-    return {"ok": True, "scan_id": scan_id, "revoked_task_ids": task_ids}
+    return {"ok": True, "scan_id": scan_id, "revoked_task_ids": task_ids, "kali_runner_cancel": runner_cancel}
 
 
 @router.post("/scans/{scan_id}/pause")
@@ -3358,11 +3410,13 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User =
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans em execucao/fila podem ser pausados")
 
     task_ids = _active_scan_task_ids(scan_id, db)
+    runner_cancel = cancel_scan_jobs_in_kali_runner(scan_id, reason="scan_paused")
     previous_step = str(job.current_step or "")
     requeued_items = _requeue_inflight_work_items_for_pause(db, scan_id)
     _clear_scan_worker_heartbeat(db, scan_id)
 
     state = dict(job.state_data or {})
+    state["execution_epoch"] = int(state.get("execution_epoch") or 0) + 1
     pause_control = dict(state.get("pause_control") or {})
     pause_control.update(
         {
@@ -3386,7 +3440,8 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User =
             level="WARNING",
             message=(
                 f"Scan pausado manualmente; operacao em andamento cancelada sem persistir resultado "
-                f"(task_ids={task_ids or ['nao_encontrada']}, requeued_work_items={requeued_items})"
+                f"(task_ids={task_ids or ['nao_encontrada']}, requeued_work_items={requeued_items}, "
+                f"kali_runner_cancel={runner_cancel})"
             ),
         )
     )
@@ -3395,7 +3450,12 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User =
         event_type="scan.paused",
         message=f"Scan {scan_id} pausado manualmente",
         actor_user_id=current_user.id,
-        metadata={"scan_id": scan_id, "task_ids": task_ids, "requeued_work_items": requeued_items},
+        metadata={
+            "scan_id": scan_id,
+            "task_ids": task_ids,
+            "requeued_work_items": requeued_items,
+            "kali_runner_cancel": runner_cancel,
+        },
     )
     db.commit()
 
@@ -3411,6 +3471,7 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db), current_user: User =
         "status": "paused",
         "revoked_task_ids": task_ids,
         "requeued_work_items": requeued_items,
+        "kali_runner_cancel": runner_cancel,
     }
 
 
@@ -3424,6 +3485,7 @@ def resume_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Somente scans pausados podem ser retomados")
 
     state = dict(job.state_data or {})
+    state["execution_epoch"] = int(state.get("execution_epoch") or 0) + 1
     pause_control = dict(state.get("pause_control") or {})
     resume_step = str(pause_control.get("resume_step") or job.current_step or "Retomando scan")
     pause_control["resumed_at"] = datetime.now().isoformat()
@@ -5183,7 +5245,12 @@ def scan_runtime_feed(
         phase_row["status"] = _phase_runtime_status(phase_counts, str(phase_row.get("status") or ""))
     # progresso real: terminal / (total - blocked); cap 99 enquanto rodando
     _effective = max(1, _total - _blocked)
-    if job.status in ("completed", "completed_with_gaps", "done", "finished"):
+    if (
+        job.status in ("completed", "completed_with_gaps", "done", "finished")
+        and _total > 0
+        and _terminal == _total
+        and _blocked == 0
+    ):
         _wq_progress = 100
     elif _total == 0:
         _wq_progress = int(job.mission_progress or 0)
@@ -5323,6 +5390,48 @@ def scan_quality(
 
     snapshot = dict((job.state_data or {}).get("quality_snapshot") or {})
     if snapshot and not refresh:
+        # Snapshots intentionally omit volatile runtime counters. Hydrate those
+        # counters from current rows so P21/agent/MCP/LLM never appear as zero
+        # merely because the scan is terminal.
+        try:
+            from app.models.models import EvidenceArtifact, ScanWorkItem, ValidationRun
+            from app.services.scan_quality import _runtime_visibility
+            from sqlalchemy.orm import load_only
+
+            validations = (
+                db.query(ValidationRun)
+                .options(load_only(
+                    ValidationRun.id, ValidationRun.finding_id,
+                    ValidationRun.validator_name, ValidationRun.result,
+                    ValidationRun.run_metadata, ValidationRun.attempt_artifact_id,
+                    ValidationRun.created_at,
+                ))
+                .filter(ValidationRun.scan_job_id == job.id)
+                .all()
+            )
+            artifacts = (
+                db.query(EvidenceArtifact)
+                .options(load_only(
+                    EvidenceArtifact.id, EvidenceArtifact.phase_id,
+                    EvidenceArtifact.artifact_type,
+                ))
+                .filter(EvidenceArtifact.scan_job_id == job.id)
+                .all()
+            )
+            work_items = (
+                db.query(ScanWorkItem)
+                .options(load_only(
+                    ScanWorkItem.id, ScanWorkItem.phase_id, ScanWorkItem.target,
+                    ScanWorkItem.tool_name, ScanWorkItem.status,
+                    ScanWorkItem.item_metadata, ScanWorkItem.created_at,
+                ))
+                .filter(ScanWorkItem.scan_job_id == job.id)
+                .all()
+            )
+            snapshot["runtime_visibility"] = _runtime_visibility(job, validations, artifacts, work_items)
+            snapshot["quality_gate"] = dict((job.state_data or {}).get("quality_gate") or {})
+        except Exception:
+            pass
         return snapshot
     return build_scan_quality(db, job)
 
@@ -8739,27 +8848,27 @@ def get_phase_breakdown(
     # Phase metadata (id → name) aligned with PENTEST_PHASES
     PHASE_NAMES = {
         "P01": "Subdomain Enumeration",
-        "P02": "Port Scan",
+        "P02": "Port Service Discovery",
         "P03": "Endpoint Discovery",
         "P04": "Parameter Discovery",
-        "P05": "Technology Fingerprint",
-        "P06": "HTTP Fingerprint",
-        "P07": "OSINT",
-        "P08": "JS Endpoint Analysis",
-        "P09": "Web App Scanning (nuclei)",
-        "P10": "SQL Injection",
-        "P11": "XSS / Injection",
-        "P12": "Active Exploitation",
-        "P13": "Command Injection",
+        "P05": "Surface Expansion",
+        "P06": "HTTP Fingerprinting & WAF Detection",
+        "P07": "Technology Detection",
+        "P08": "JavaScript Endpoint Analysis",
+        "P09": "Vulnerability Template Scan",
+        "P10": "Injection Testing",
+        "P11": "SSRF Testing",
+        "P12": "XSS Testing",
+        "P13": "Access Control & Business Logic",
         "P14": "Auth Boundary Testing",
-        "P15": "Historical Recon",
+        "P15": "File Handling Testing",
         "P16": "API Attack Surface",
-        "P17": "Business Logic",
-        "P18": "OSINT Extended",
-        "P19": "Supply Chain",
-        "P20": "Post-Exploitation",
-        "P21": "PoC Validation (Sandbox)",
-        "P22": "Reporting",
+        "P17": "Exploit Validation",
+        "P18": "Credential Exposure Boundary",
+        "P19": "Post Exploitation Boundary",
+        "P20": "Attack Path Correlation",
+        "P21": "Evidence Quality Review",
+        "P22": "Campaign Reporting",
     }
 
     # ── Cross-reference with phase_ledger_v2 ─────────────────────────────────

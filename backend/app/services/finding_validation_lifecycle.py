@@ -35,6 +35,51 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
         "retests_refuted": 0,
     }
     for finding in findings:
+        details = dict(finding.details or {})
+        if str(details.get("test_type") or "") == "cache_deception":
+            from app.services.cache_deception_validator import adjudicate_cache_deception
+
+            adjudication = adjudicate_cache_deception(details)
+            existing_adjudication = (
+                db.query(ValidationRun)
+                .filter(
+                    ValidationRun.scan_job_id == job.id,
+                    ValidationRun.finding_id == finding.id,
+                    ValidationRun.validator_name == "cache-deception-evidence-contract",
+                )
+                .first()
+            )
+            if existing_adjudication is None:
+                db.add(ValidationRun(
+                    scan_job_id=job.id,
+                    finding_id=finding.id,
+                    validator_name="cache-deception-evidence-contract",
+                    result=str(adjudication["result"]),
+                    reason=str(adjudication["reason"]),
+                    run_metadata=adjudication,
+                ))
+            details["cache_deception_adjudication"] = adjudication
+            finding.details = details
+            finding.verification_status = str(adjudication["result"])
+            finding.is_false_positive = adjudication["result"] == "refuted"
+            cache_target = str(finding.url or finding.domain or f"finding:{finding.id}")[:1000]
+            cache_coverage = _coverage_row(db, job, finding, cache_target)
+            cache_coverage.status = str(adjudication["result"])
+            cache_coverage.blocking_reason = None
+            cache_coverage.coverage_metadata = {
+                **dict(cache_coverage.coverage_metadata or {}),
+                "finding_id": finding.id,
+                "asset_target": cache_target,
+                "validator": "cache-deception-evidence-contract",
+                "adjudication": adjudication,
+            }
+            cache_coverage.updated_at = datetime.now()
+            db.add(cache_coverage)
+            db.add(finding)
+            if adjudication["result"] == "refuted":
+                result["retests_refuted"] += 1
+                continue
+
         decision = evaluate_finding_promotion(db, finding)
         target = str(finding.url or finding.domain or f"finding:{finding.id}")[:1000]
         coverage = _coverage_row(db, job, finding, target)
@@ -121,6 +166,7 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
         coverage.coverage_metadata = {
             **dict(coverage.coverage_metadata or {}),
             "finding_id": finding.id,
+            "asset_target": target,
             "severity": finding.severity,
             "verification_status": finding.verification_status,
             "required_artifacts": list(decision.required_artifacts),
@@ -136,23 +182,58 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
 
 
 def _coverage_row(db: Session, job: ScanJob, finding: Finding, target: str) -> CoverageItem:
+    # CoverageItem is unique by (scan, coverage_type, target_ref, test_class).
+    # A target may legitimately have several independent high-risk findings,
+    # therefore the covered object is the finding itself, not the shared asset.
+    # Using the asset as target_ref caused duplicate INSERTs in autoflush=False
+    # sessions and made the final quality gate fail after all tools had finished.
+    coverage_ref = f"finding:{finding.id}"
+    for pending in db.new:
+        if (
+            isinstance(pending, CoverageItem)
+            and pending.scan_job_id == job.id
+            and pending.coverage_type == "high_risk_finding"
+            and pending.target_ref == coverage_ref
+            and pending.test_class == "validation_retest_lifecycle"
+        ):
+            return pending
+
     row = (
         db.query(CoverageItem)
         .filter(
             CoverageItem.scan_job_id == job.id,
             CoverageItem.coverage_type == "high_risk_finding",
-            CoverageItem.target_ref == target,
+            CoverageItem.target_ref == coverage_ref,
             CoverageItem.test_class == "validation_retest_lifecycle",
         )
         .first()
     )
     if row is None:
-        row = CoverageItem(
-            scan_job_id=job.id,
+        # Compatibility with rows produced before coverage_ref became
+        # finding-scoped.
+        row = (
+            db.query(CoverageItem)
+            .filter(
+                CoverageItem.scan_job_id == job.id,
+                CoverageItem.coverage_type == "high_risk_finding",
+                CoverageItem.finding_id == finding.id,
+                CoverageItem.test_class == "validation_retest_lifecycle",
+            )
+            .first()
+        )
+    if row is None:
+        from app.services.offensive_inventory_service import OffensiveInventoryService
+
+        row = OffensiveInventoryService(db, job).upsert_coverage(
             coverage_type="high_risk_finding",
-            target_ref=target,
+            target_ref=coverage_ref,
             test_class="validation_retest_lifecycle",
             finding_id=finding.id,
             status="not_tested",
+            metadata={
+                "finding_id": int(finding.id),
+                "asset_target": target,
+                "created_by": "high_risk_lifecycle",
+            },
         )
     return row

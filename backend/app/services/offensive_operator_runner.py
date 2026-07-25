@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import threading
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -453,11 +454,38 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b")
 _URL_PARAM_RE = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_.:-]{0,79})=")
 _BARE_PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,79}$")
-_HALTED_SCAN_STATUSES = {"paused", "stopped", "completed", "failed", "cancelled", "canceled"}
+_HALTED_SCAN_STATUSES = {
+    "paused",
+    "stopped",
+    "completed",
+    "completed_with_gaps",
+    "failed",
+    "cancelled",
+    "canceled",
+}
 
 
-def _scan_halted(job: ScanJob) -> bool:
-    return str(job.status or "").lower() in _HALTED_SCAN_STATUSES
+def _scan_halt_reason(job: ScanJob, expected_execution_epoch: int | None = None) -> str | None:
+    """Fence stale threaded tasks as well as explicitly halted scans.
+
+    Celery's thread pool cannot terminate an already-running thread. A task can
+    therefore survive pause → resume, observe ``running`` again, and overwrite
+    the resumed scan with the full state snapshot it loaded before the pause.
+    ``execution_epoch`` changes at every pause/resume boundary, so an older
+    writer remains invalid even after the status returns to ``running``.
+    """
+    status = str(job.status or "").lower()
+    if status in _HALTED_SCAN_STATUSES:
+        return status
+    if expected_execution_epoch is not None:
+        current_epoch = int((job.state_data or {}).get("execution_epoch") or 0)
+        if current_epoch != int(expected_execution_epoch):
+            return "execution_epoch_changed"
+    return None
+
+
+def _scan_halted(job: ScanJob, expected_execution_epoch: int | None = None) -> bool:
+    return _scan_halt_reason(job, expected_execution_epoch) is not None
 
 
 def _clean_tool_text(value: Any) -> str:
@@ -937,9 +965,32 @@ Evidencias:
 
 JSON esperado:
 {{"execution_decision":"continue|retry|stop","injected_tools":{{}},"payloads_hint":[],"reasoning":"frase curta"}}"""
-    model, raw = _call_learning_llm(prompt)
+    try:
+        model, raw = _call_learning_llm(prompt)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "model": "unavailable",
+            "source": "ollama_runtime_reasoning",
+            "fallback": True,
+            "llm_error": type(exc).__name__,
+            "source_phase": phase_id,
+            "execution_decision": "continue",
+            "injected_tools": {},
+            "payloads_hint": [],
+            "reasoning": "LLM indisponivel; manter progressao deterministica sem injecao dinamica.",
+        }
     if not raw:
-        return None
+        return {
+            "model": model,
+            "source": "ollama_runtime_reasoning",
+            "fallback": True,
+            "llm_error": "empty_response",
+            "source_phase": phase_id,
+            "execution_decision": "continue",
+            "injected_tools": {},
+            "payloads_hint": [],
+            "reasoning": "LLM retornou vazio; manter progressao deterministica sem injecao dinamica.",
+        }
     parsed = _extract_json_object(raw)
     if not isinstance(parsed, dict) or not parsed:
         parsed = {"execution_decision": "continue", "injected_tools": {}, "payloads_hint": [], "reasoning": raw[:300]}
@@ -1552,6 +1603,265 @@ def _extract_host_from_target(target: str) -> str:
         return raw
 
 
+def _batch_stdout(result: dict[str, Any]) -> str:
+    return str(
+        result.get("stdout")
+        or result.get("stdout_preview")
+        or result.get("output")
+        or ""
+    )
+
+
+def _parse_batch_open_ports(result: dict[str, Any], targets: list[str]) -> dict[str, list[int]]:
+    """Parse host:port observations without losing the host association."""
+    target_hosts = {_extract_host_from_target(t).lower(): t for t in targets}
+    observed: dict[str, set[int]] = {t: set() for t in targets}
+    lines = _batch_stdout(result).splitlines()
+    parsed = result.get("parsed_result")
+    if isinstance(parsed, list):
+        lines.extend(str(value) for value in parsed)
+    host_port = re.compile(r"(?i)(?:https?://)?([a-z0-9.-]+):(\d{1,5})(?:\b|/)")
+    for line in lines:
+        for host, port_raw in host_port.findall(str(line)):
+            target = target_hosts.get(host.rstrip(".").lower())
+            if not target:
+                continue
+            port = int(port_raw)
+            if 1 <= port <= 65535:
+                observed[target].add(port)
+    return {target: sorted(ports) for target, ports in observed.items()}
+
+
+def _parse_batch_http_targets(result: dict[str, Any], targets: list[str]) -> set[str]:
+    observations = _parse_batch_http_observations(result, targets)
+    return {target for target, values in observations.items() if values}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _parse_batch_http_observations(result: dict[str, Any], targets: list[str]) -> dict[str, list[dict[str, Any]]]:
+    target_hosts = {_extract_host_from_target(t).lower(): t for t in targets}
+    observations: dict[str, list[dict[str, Any]]] = {target: [] for target in targets}
+    candidates: list[Any] = []
+    parsed = result.get("parsed_result")
+    if isinstance(parsed, list):
+        candidates.extend(parsed)
+    candidates.extend(_batch_stdout(result).splitlines())
+    for candidate in candidates:
+        values: list[tuple[str, dict[str, Any]]] = []
+        if isinstance(candidate, dict):
+            if candidate.get("failed") is True:
+                continue
+            values.extend((str(candidate.get(key) or ""), candidate) for key in ("input", "url", "host", "final_url"))
+        else:
+            values.append((str(candidate or ""), {}))
+        for value, raw in values:
+            host = _extract_host_from_target(value).lower()
+            target = target_hosts.get(host)
+            if not target:
+                continue
+            parsed_url = urlparse(value if "://" in value else str(raw.get("url") or ""))
+            scheme = (str(raw.get("scheme") or parsed_url.scheme or "")).lower()
+            port = _int_or_none(raw.get("port") or parsed_url.port)
+            if port is None and scheme in {"http", "https"}:
+                port = 443 if scheme == "https" else 80
+            observation = {
+                "source": "httpx_batch",
+                "url": str(raw.get("url") or value),
+                "final_url": str(raw.get("final_url") or raw.get("location") or ""),
+                "scheme": scheme,
+                "port": port,
+                "status_code": _int_or_none(raw.get("status_code")),
+                "title": str(raw.get("title") or "")[:300],
+                "content_type": str(raw.get("content_type") or "")[:160],
+                "webserver": str(raw.get("webserver") or (raw.get("header") or {}).get("server") or "")[:160],
+                "tech": list(raw.get("tech") or [])[:50] if isinstance(raw.get("tech"), list) else [],
+                "cdn": bool(raw.get("cdn")),
+                "cdn_name": str(raw.get("cdn_name") or "")[:120],
+            }
+            if observation not in observations[target]:
+                observations[target].append(observation)
+    return observations
+
+
+def _batch_covered_targets(result: dict[str, Any], targets: list[str]) -> set[str]:
+    """Return canonical targets proven present in the runner input file."""
+    manifest = [
+        str(value)
+        for value in (
+            result.get("batch_targets")
+            or result.get("attempted_targets")
+            or []
+        )
+        if str(value or "")
+    ]
+    if not manifest:
+        return set()
+    manifest_hosts = {_extract_host_from_target(value).lower() for value in manifest}
+    return {
+        target
+        for target in targets
+        if _extract_host_from_target(target).lower() in manifest_hosts
+    }
+
+
+def _record_batch_target_qualification(
+    state: dict[str, Any],
+    phase_id: str,
+    targets: list[str],
+    result: dict[str, Any],
+    ledger_status: str,
+) -> None:
+    """Persist P02/P06 evidence per target for deterministic downstream gates."""
+    if phase_id not in {"P02", "P06"}:
+        return
+    preflight = dict(state.get("preflight") or {})
+    profiles = dict(preflight.get("targets") or {})
+    host_ip = dict(state.get("host_ip_map") or {})
+    now = str(result.get("finished_at") or result.get("updated_at") or "")
+    covered_targets = _batch_covered_targets(result, targets)
+    if phase_id == "P02":
+        ports_by_target = _parse_batch_open_ports(result, targets)
+        positive_targets: list[str] = []
+        for target in targets:
+            profile = dict(profiles.get(target) or {})
+            ports = ports_by_target.get(target) or []
+            positive_evidence = bool(ports)
+            if positive_evidence:
+                positive_targets.append(target)
+            target_complete = (
+                target in covered_targets
+                and (ledger_status == "completed" or positive_evidence)
+            )
+            profile.update(
+                {
+                    "target": target,
+                    "host": _extract_host_from_target(target),
+                    "ip": host_ip.get(target) or profile.get("ip"),
+                    "dns_resolves": bool(host_ip.get(target) or profile.get("dns_resolves")),
+                    "open_ports": ports,
+                    "p02_status": ledger_status,
+                    "p02_complete": target_complete,
+                    "p02_positive_evidence": positive_evidence,
+                    "p02_checked_at": now,
+                    "p02_profile": str(result.get("profile") or "naabu_top1000_batch"),
+                    "p02_input_covered": target in covered_targets,
+                }
+            )
+            if target_complete:
+                profile["status"] = "tcp_live" if positive_evidence else "tcp_scanned_no_open_ports"
+                profile["reason"] = (
+                    f"P02 encontrou {len(ports)} porta(s) aberta(s)"
+                    if positive_evidence
+                    else "P02 concluído sem portas abertas observadas; HTTP ainda requer P06"
+                )
+            else:
+                profile["status"] = "p02_inconclusive"
+                profile["reason"] = "P02 não concluiu; não liberar testes dependentes"
+            profiles[target] = profile
+        state["tcp_live_targets"] = sorted({
+            *[str(t) for t in state.get("tcp_live_targets") or [] if str(t)],
+            *positive_targets,
+        })
+    else:
+        observations_by_target = _parse_batch_http_observations(result, targets)
+        http_live_targets = {target for target, values in observations_by_target.items() if values}
+        for target in targets:
+            profile = dict(profiles.get(target) or {})
+            observations = observations_by_target.get(target) or []
+            is_live = bool(observations)
+            target_complete = (
+                target in covered_targets
+                and (ledger_status == "completed" or is_live)
+            )
+            observed_ports = {
+                int(obs["port"])
+                for obs in observations
+                if isinstance(obs.get("port"), int) and 1 <= int(obs["port"]) <= 65535
+            }
+            profile.update(
+                {
+                    "target": target,
+                    "host": _extract_host_from_target(target),
+                    "ip": host_ip.get(target) or profile.get("ip"),
+                    "p06_status": ledger_status,
+                    "p06_complete": target_complete,
+                    "p06_http_live": is_live and target in covered_targets,
+                    "p06_positive_evidence": is_live,
+                    "p06_checked_at": now,
+                    "p06_profile": str(result.get("profile") or "httpx_probe_batch"),
+                    "p06_input_covered": target in covered_targets,
+                    "http_observed_ports": sorted(observed_ports),
+                    "open_ports": sorted(set(profile.get("open_ports") or []) | observed_ports),
+                }
+            )
+            if target_complete:
+                profile["status"] = "http_live" if is_live else "no_http_response"
+                profile["reason"] = (
+                    "P06 confirmou superfície HTTP"
+                    if is_live
+                    else "P06 concluído sem resposta HTTP para este alvo"
+                )
+                profile["http"] = observations or profile.get("http") or []
+            else:
+                profile["status"] = "p06_inconclusive"
+                profile["reason"] = "P06 não concluiu; não liberar testes web"
+            profiles[target] = profile
+        state["http_live_targets"] = sorted({
+            *[str(t) for t in state.get("http_live_targets") or [] if str(t)],
+            *[str(t) for t in http_live_targets if str(t)],
+        })
+        state["qualified_target_set"] = list(state["http_live_targets"])
+    preflight.update({"enabled": True, "version": 3, "mode": "p01_dns+p02_ports+p06_http", "targets": profiles})
+    state["preflight"] = preflight
+
+
+def _persist_batch_http_inventory(db, job: ScanJob, result: dict[str, Any], targets: list[str]) -> int:
+    """Materialize P06/httpx observations as queryable endpoints/services."""
+    observations_by_target = _parse_batch_http_observations(result, targets)
+    if not any(observations_by_target.values()):
+        return 0
+    from app.services.offensive_inventory_service import OffensiveInventoryService
+
+    inv = OffensiveInventoryService(db, job)
+    persisted = 0
+    for target, observations in observations_by_target.items():
+        for obs in observations:
+            url = str(obs.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                inv.upsert_endpoint(
+                    url,
+                    source_tool="httpx",
+                    status_code=obs.get("status_code"),
+                    content_type=str(obs.get("content_type") or ""),
+                    confidence=80,
+                    tags=["p06", "http_live", "httpx"],
+                    metadata={
+                        "target": target,
+                        "phase_id": "P06",
+                        "httpx_observation": obs,
+                    },
+                )
+                persisted += 1
+            except Exception as exc:  # noqa: BLE001
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="offensive-inventory",
+                    level="WARNING",
+                    message=f"httpx_inventory_persist_failed target={target} error={str(exc)[:300]}",
+                ))
+    return persisted
+
+
 def _dispatch_batch_phase(
     db,
     job: ScanJob,
@@ -1560,6 +1870,7 @@ def _dispatch_batch_phase(
     phase_ledgers: list[dict[str, Any]],
     completed_work: set[str],
     profile_override: str | None = None,
+    qualification_state: dict[str, Any] | None = None,
 ) -> bool:
     """Dispatch ONE batch kali job for phase_id across all targets.
 
@@ -1605,17 +1916,68 @@ def _dispatch_batch_phase(
         )
         status = result.get("status", "failed")
         ledger_status = "completed" if status in {"success", "done"} else "partial"
+        if qualification_state is not None:
+            _record_batch_target_qualification(
+                qualification_state,
+                phase_id,
+                targets,
+                result,
+                ledger_status,
+            )
+        if phase_id == "P06":
+            persisted_http = _persist_batch_http_inventory(db, job, result, targets)
+            if persisted_http:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="offensive-inventory",
+                    level="INFO",
+                    message=f"httpx_inventory_persisted endpoints={persisted_http} targets={len(targets)}",
+                ))
 
+        covered_targets = _batch_covered_targets(result, targets)
+        try:
+            from app.services.recon_observability import emit_recon_event
+
+            manifested_targets = {
+                str(value)
+                for value in (result.get("batch_targets") or [])
+                if str(value or "")
+            }
+            emit_recon_event(
+                db,
+                job.id,
+                "batch_qualification_completed",
+                level=(
+                    "INFO"
+                    if ledger_status == "completed" and len(covered_targets) == len(targets)
+                    else "WARNING"
+                ),
+                phase_id=phase_id,
+                profile=batch_profile,
+                ledger_status=ledger_status,
+                requested_targets=len(targets),
+                runner_manifest_targets=len(manifested_targets),
+                covered_targets=len(covered_targets),
+                coverage_complete=(
+                    ledger_status == "completed"
+                    and len(covered_targets) == len(targets)
+                ),
+                manifest_sha256=bool(result.get("batch_target_file_sha256")),
+            )
+        except Exception:
+            pass
         for t in targets:
-            completed_work.add(f"{phase_id}:{t}")
+            target_completed = ledger_status == "completed" and t in covered_targets
+            if target_completed:
+                completed_work.add(f"{phase_id}:{t}")
             phase_ledgers.append({
                 "phase_id": phase_id,
                 "phase_name": contract.get("name", phase_id),
                 "target": t,
-                "status": ledger_status,
+                "status": "completed" if target_completed else "partial",
                 "tools_attempted": [batch_profile],
-                "tools_success": [batch_profile] if ledger_status == "completed" else [],
-                "tools_failed": [] if ledger_status == "completed" else [batch_profile],
+                "tools_success": [batch_profile] if target_completed else [],
+                "tools_failed": [] if target_completed else [batch_profile],
                 "mcp_results": [result],
                 "batch_mode": True,
                 "batch_size": len(batch_list),
@@ -1631,8 +1993,24 @@ def _dispatch_batch_phase(
             ),
         ))
         db.commit()
-        return True
+        return ledger_status == "completed" and len(covered_targets) == len(targets)
     except Exception as exc:  # noqa: BLE001
+        try:
+            from app.services.recon_observability import emit_recon_event
+
+            emit_recon_event(
+                db,
+                job.id,
+                "batch_qualification_failed",
+                level="WARNING",
+                phase_id=phase_id,
+                profile=batch_profile,
+                requested_targets=len(targets),
+                error=str(exc)[:300],
+                action="fallback_to_sequential",
+            )
+        except Exception:
+            pass
         db.add(ScanLog(
             scan_job_id=job.id,
             source="offensive-operator",
@@ -1676,6 +2054,7 @@ def run_offensive_operator_scan(
 
     # Read EASM scan-level (asm/full) from state_data; default = full.
     initial_state = dict(job.state_data or {})
+    _execution_epoch = int(initial_state.get("execution_epoch") or 0)
     scan_level = str(initial_state.get("scan_level") or "full").lower()
     allowed_phases = phases_for_scan_level(scan_level)
     if allowed_phases is not None:
@@ -1760,6 +2139,9 @@ def run_offensive_operator_scan(
             state["offensive_operator_phase_queue_enabled"] = True
             state["offensive_operator_phase_task_budget"] = _phase_task_budget
             state["_operator_phase_queue_started"] = True
+            state["work_producers_sealed"] = False
+            state["work_producer_stage"] = "P01_discovery"
+            state["qualification_contract_version"] = 3
             state["current_pentest_phase_id"] = _next_phase
             state["current_pentest_target"] = _next_target
             job.state_data = state
@@ -1791,16 +2173,28 @@ def run_offensive_operator_scan(
         # invisible and the main task re-executes phases they already finished.
         try:
             db.refresh(job)
-            if _scan_halted(job):
+            _halt_reason = _scan_halt_reason(job, _execution_epoch)
+            if _halt_reason:
                 db.add(
                     ScanLog(
                         scan_job_id=job.id,
                         source="offensive-operator",
                         level="WARNING",
-                        message=f"pause_guard target={target} status={job.status}; saindo sem persistir nova fase",
+                        message=(
+                            f"execution_fence target={target} status={job.status} "
+                            f"reason={_halt_reason} expected_epoch={_execution_epoch} "
+                            f"current_epoch={int((job.state_data or {}).get('execution_epoch') or 0)}; "
+                            "saindo sem persistir nova fase"
+                        ),
                     )
                 )
                 db.commit()
+                if _halt_reason == "execution_epoch_changed":
+                    return {
+                        "checkpointed": True,
+                        "scan_id": job.id,
+                        "stale_execution_epoch": True,
+                    }
                 return {"ok": False, "scan_id": job.id, "halted": job.status}
             _live_state = job.state_data or {}
             for _k in (_live_state.get("completed_work") or []):
@@ -2008,19 +2402,30 @@ def run_offensive_operator_scan(
             result = runtime.run_phase(phase_id, _effective_target, scope, execution_mode, offensive_state)
             try:
                 db.refresh(job)
-                if _scan_halted(job):
+                _halt_reason = _scan_halt_reason(job, _execution_epoch)
+                if _halt_reason:
                     db.add(
                         ScanLog(
                             scan_job_id=job.id,
                             source="offensive-operator",
                             level="WARNING",
                             message=(
-                                f"pause_guard phase_id={phase_id} target={target} status={job.status}; "
+                                f"execution_fence phase_id={phase_id} target={target} status={job.status} "
+                                f"reason={_halt_reason} expected_epoch={_execution_epoch} "
+                                f"current_epoch={int((job.state_data or {}).get('execution_epoch') or 0)}; "
                                 "resultado em andamento descartado antes da persistencia"
                             ),
                         )
                     )
                     db.commit()
+                    if _halt_reason == "execution_epoch_changed":
+                        return {
+                            "checkpointed": True,
+                            "scan_id": job.id,
+                            "stale_execution_epoch": True,
+                            "phase_id": phase_id,
+                            "target": target,
+                        }
                     return {"ok": False, "scan_id": job.id, "halted": job.status, "phase_id": phase_id, "target": target}
             except Exception:
                 pass
@@ -2624,14 +3029,22 @@ def run_offensive_operator_scan(
                     if _live and _live not in all_targets:
                         all_targets.append(_live)
                 _cp_state["target_set"] = list(all_targets)
+                _cp_state["target_set_semantics"] = "dns_resolved_candidates_pending_p02_p06"
+                _cp_state["dns_resolved_targets"] = list(_refined["live_targets"])
                 _cp_state["host_ip_map"] = _refined["host_ip"]
                 _cp_state["dead_targets"] = _refined["dead_targets"]
+                _cp_state["non_public_targets"] = _refined.get("non_public_targets") or []
+                _cp_state["dns_inconclusive_targets"] = _refined.get("inconclusive_targets") or []
+                _cp_state["dns_resolution_complete"] = bool(_refined.get("resolution_complete", True))
+                _cp_state["dns_resolution_reason"] = str(_refined.get("resolution_reason") or "")
                 _cp_state["ip_groups"] = _refined["ip_groups"]
+                _cp_state["work_producer_stage"] = "P02_P06_qualification"
                 host_ip_map = _refined["host_ip"]
                 db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
-                               message=(f"target_set refined — {len(_refined['live_targets'])} live, "
+                               message=(f"target_set refined — {len(_refined['live_targets'])} dns-resolved candidate(s), "
                                         f"{len(_refined['dead_targets'])} dead, "
-                                        f"{len(_refined['ip_groups'])} unique IP(s); full P02-P22 per live target")))
+                                        f"{len(_refined.get('non_public_targets') or [])} non-public rejected, "
+                                        f"{len(_refined['ip_groups'])} unique IP(s); deep phases require P06 HTTP-live evidence")))
                 # ─ Superfície de ataque: inventaria TODOS os subdomínios vivos como
                 # assets (não só o domínio raiz). Antes, um host só virava asset se
                 # gerasse uma vuln acionável (linha ~3640), então a superfície
@@ -2701,6 +3114,7 @@ def run_offensive_operator_scan(
                             _dispatch_batch_phase(
                                 db, job, _bp_id, _batch_targets_todo,
                                 phase_ledgers, completed_work,
+                                qualification_state=_cp_state,
                             )
                     # Persist batch completions before subtasks are dispatched so
                     # each subtask reads the updated completed_work from DB and
@@ -2737,14 +3151,31 @@ def run_offensive_operator_scan(
                         _dispatched = 0
                         if settings.scan_work_queue_enabled:
                             from app.services.scan_work_queue import enqueue_scan_work_items, work_queue_counts
-                            from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
+                            from app.workers.tasks import _schedule_scan_work_dispatch as _dispatch_wq
 
                             _seed = enqueue_scan_work_items(db, job, _to_dispatch, source="p01_parallel")
                             _dispatched = int(_seed.get("created") or 0)
-                            _already_delegated.update(_to_dispatch)
+                            if not _seed.get("rejected_terminal"):
+                                _already_delegated.update(_to_dispatch)
+                                _cp_state["work_producers_sealed"] = True
+                                _cp_state["work_producer_stage"] = "sealed"
+                                _cp_state["target_inventory_generation"] = int(
+                                _cp_state.get("target_inventory_generation") or 0
+                                ) + 1
                             _cp_state["parallel_engine"] = "capacity_work_queue"
+                            _cp_state["parallel_delegated_targets"] = sorted(_already_delegated)
+                            _cp_state["parallel_pending_targets"] = []
+                            _cp_state["parallel_batch_size"] = len(_to_dispatch)
                             _cp_state["work_queue_counts"] = work_queue_counts(db, job.id)
-                            _dispatch_wq.delay(job.id)
+                            # Persist the producer checkpoint before waking the
+                            # dispatcher.  Otherwise the dispatcher can read the
+                            # previous JSONB snapshot and later overwrite the
+                            # sealed P01/P02/P06 producer state (observed on
+                            # scan #24 as stage=P01_discovery sealed=false after
+                            # P06/P07 had already completed).
+                            job.state_data = _cp_state
+                            db.commit()
+                            _dispatch_wq(job.id)
                         else:
                             from app.workers.tasks import run_scan_target_subset as _rsts
                             for _t in _to_dispatch:
@@ -3126,8 +3557,8 @@ def run_offensive_operator_scan(
                     message=f"work_queue_wait counts={_final_state_snapshot['work_queue_counts']} redispatch_in={_wait_seconds}s",
                 ))
                 db.commit()
-                from app.workers.tasks import dispatch_scan_work_items as _dispatch_wq
-                _dispatch_wq.delay(job.id)
+                from app.workers.tasks import _schedule_scan_work_dispatch as _dispatch_wq
+                _dispatch_wq(job.id)
                 queued = _enqueue_operator_continuation(
                     db,
                     job,
@@ -3325,16 +3756,28 @@ def run_offensive_operator_scan(
 
     try:
         db.refresh(job)
-        if _scan_halted(job):
+        _halt_reason = _scan_halt_reason(job, _execution_epoch)
+        if _halt_reason:
             db.add(
                 ScanLog(
                     scan_job_id=job.id,
                     source="offensive-operator",
                     level="WARNING",
-                    message=f"pause_guard finalizacao status={job.status}; relatorio/finalizacao nao persistidos",
+                    message=(
+                        f"execution_fence finalizacao status={job.status} reason={_halt_reason} "
+                        f"expected_epoch={_execution_epoch} "
+                        f"current_epoch={int((job.state_data or {}).get('execution_epoch') or 0)}; "
+                        "relatorio/finalizacao nao persistidos"
+                    ),
                 )
             )
             db.commit()
+            if _halt_reason == "execution_epoch_changed":
+                return {
+                    "checkpointed": True,
+                    "scan_id": job.id,
+                    "stale_execution_epoch": True,
+                }
             return {"ok": False, "scan_id": job.id, "halted": job.status}
     except Exception:
         pass
@@ -3446,9 +3889,9 @@ def run_offensive_operator_scan(
                        message=(f"QUALITY GATE acionado — conclusão adiada actions={_quality_gate.get('actions')}"[:2000])))
         db.commit()
         try:
-            from app.workers.tasks import dispatch_scan_work_items
+            from app.workers.tasks import _schedule_scan_work_dispatch
 
-            dispatch_scan_work_items.apply_async(args=[job.id], countdown=5)
+            _schedule_scan_work_dispatch(job.id, countdown=5)
         except Exception:
             pass
         return campaign

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.scan_profiles import phases_for_scan_level, scan_profile, normalize_scan_level
+from app.services.scan_work_queue import work_queue_profile_policy
 
 
 def test_recon_profile_limits_phase_coverage_and_depth() -> None:
@@ -29,3 +30,25 @@ def test_aggressive_profile_is_not_normalized_to_full() -> None:
     assert profile["noise_profile"] == "aggressive"
     assert profile["post_exploitation"] is True
     assert phases_for_scan_level("aggressive") is None
+
+
+def test_work_queue_uses_profile_phase_and_tool_depth_policy() -> None:
+    recon = work_queue_profile_policy({"scan_level": "asm"})
+    full = work_queue_profile_policy({"scan_level": "full"})
+    aggressive = work_queue_profile_policy({"scan_level": "aggressive"})
+
+    assert "P12" not in recon["allowed_phases"]
+    assert full["allowed_phases"] is None
+    assert recon["tool_depth_limit"] == 2
+    assert full["tool_depth_limit"] == 6
+    assert aggressive["tool_depth_limit"] == 12
+
+
+def test_explicit_optional_override_is_preserved_for_special_callers() -> None:
+    policy = work_queue_profile_policy(
+        {"scan_level": "aggressive"},
+        max_optional_per_phase=3,
+    )
+
+    assert policy["tool_depth_limit"] == 12
+    assert policy["optional_override"] == 3

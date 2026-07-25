@@ -13,6 +13,7 @@ written to /workspace/{scan_id}/{tool}/{job_id}/ for forensic auditability.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import ipaddress
 import re
@@ -25,7 +26,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
@@ -48,6 +49,16 @@ STALE_JOB_GRACE_SECONDS = int(os.getenv("KALI_STALE_JOB_GRACE_SECONDS", "30"))
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _utc_now_iso() -> str:
+    """Timezone-aware UTC timestamp.
+
+    The container runs with TZ=America/Sao_Paulo, but job timestamps represent
+    UTC. Naive ``datetime.utcnow().isoformat()`` was later parsed as local time,
+    making stale jobs look ~3h younger and preventing timeout recovery.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ── Profile loading ──────────────────────────────────────────────────────────
@@ -220,6 +231,9 @@ class JobStatus(BaseModel):
     return_code: Optional[int] = None
     error: Optional[str] = None
     workdir: Optional[str] = None
+    batch_targets: list[str] = Field(default_factory=list)
+    batch_target_count: int = 0
+    batch_target_file_sha256: Optional[str] = None
 
 
 class JobResult(JobStatus):
@@ -334,7 +348,7 @@ def _load_persisted_jobs() -> dict[str, dict[str, Any]]:
                     orphans_killed += 1
             job["status"] = "failed"
             job["error"] = job.get("error") or "runner_restarted_before_job_finished"
-            job["finished_at"] = job.get("finished_at") or datetime.utcnow().isoformat()
+            job["finished_at"] = job.get("finished_at") or _utc_now_iso()
             _persist_job_record(job)
         jobs[str(job["job_id"])] = job
     if orphans_killed:
@@ -383,7 +397,13 @@ def _parse_iso_ts(value: Any) -> float | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value)).timestamp()
+        raw = str(value).strip()
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # Backward compatibility: persisted runner records created before
+            # the timezone fix used naive UTC strings.
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except Exception:
         return None
 
@@ -414,14 +434,29 @@ def _mark_stale_job_if_needed(job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("job_id") or "")
     if not job_id:
         return job
+    pid = job.get("subprocess_pid")
+    pgid = job.get("subprocess_pgid")
+    try:
+        pid_i = int(pid) if pid else 0
+    except (TypeError, ValueError):
+        pid_i = 0
+    try:
+        pgid_i = int(pgid) if pgid else None
+    except (TypeError, ValueError):
+        pgid_i = None
+    killed = False
+    if pid_i or pgid_i:
+        killed = _kill_orphaned_process(pid_i, pgid_i)
     return _set_job_fields(
         job_id,
         status="timeout",
-        finished_at=datetime.utcnow().isoformat(),
+        finished_at=_utc_now_iso(),
         duration_seconds=round(time.time() - started_or_enqueued, 3),
-        error=f"runner watchdog marked stale {status} job after {timeout}s timeout",
+        error=f"runner watchdog marked stale {status} job after {timeout}s timeout (killed_process={killed})",
         stdout=job.get("stdout") or "",
         stderr=job.get("stderr") or "",
+        subprocess_pid=None,
+        subprocess_pgid=None,
     )
 
 
@@ -441,6 +476,24 @@ def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
     ):
         _persist_job_record(snapshot)
     return snapshot
+
+
+def _job_cancel_requested(job_id: str) -> bool:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id) or {}
+        return bool(job.get("cancel_requested"))
+
+
+def _job_cancel_reason(job_id: str) -> str:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id) or {}
+        return str(job.get("cancel_reason") or "cancelled_by_scan_control")
+
+
+def _job_is_terminal(job_id: str) -> bool:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id) or {}
+        return str(job.get("status") or "") in TERMINAL_STATES
 
 
 def _get_job_record(job_id: str) -> dict[str, Any] | None:
@@ -466,7 +519,7 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "target": req.target or (f"{len(req.targets)} targets" if req.targets else ""),
         "scan_id": req.scan_id,
         "status": "queued",
-        "enqueued_at": datetime.utcnow().isoformat(),
+        "enqueued_at": _utc_now_iso(),
         "started_at": None,
         "finished_at": None,
         "duration_seconds": None,
@@ -478,6 +531,12 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "error": None,
         "workdir": None,
         "timeout": timeout,
+        # Durable input-coverage manifest.  Empty scanner output means "no
+        # observation", not "input list unknown"; consumers need the exact
+        # materialized set to qualify every target deterministically.
+        "batch_targets": [],
+        "batch_target_count": 0,
+        "batch_target_file_sha256": None,
     }
 
 
@@ -805,9 +864,19 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
     job = _set_job_fields(
         job_id,
         status="running",
-        started_at=datetime.utcnow().isoformat(),
+        started_at=_utc_now_iso(),
         workdir=str(workdir),
     )
+    if _job_cancel_requested(job_id):
+        _set_job_fields(
+            job_id,
+            status="skipped",
+            error=_job_cancel_reason(job_id),
+            stdout="",
+            stderr="",
+            return_code=None,
+        )
+        return
     # Refresh tool_name from stored job record in case it differs from profile
     tool_name = str(job.get("tool") or tool_name)
 
@@ -874,9 +943,20 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         if req.targets:
             _set_job_fields(job_id, stage="writing_targets_file")
             batch_target_file = workdir / "targets.txt"
-            batch_target_file.write_text(
-                "\n".join(str(t).strip() for t in req.targets if str(t).strip()),
-                encoding="utf-8",
+            materialized_targets = list(dict.fromkeys(
+                str(t).strip() for t in req.targets if str(t).strip()
+            ))
+            target_file_text = "\n".join(materialized_targets)
+            if target_file_text:
+                target_file_text += "\n"
+            batch_target_file.write_text(target_file_text, encoding="utf-8")
+            _set_job_fields(
+                job_id,
+                batch_targets=materialized_targets,
+                batch_target_count=len(materialized_targets),
+                batch_target_file_sha256=hashlib.sha256(
+                    target_file_text.encode("utf-8")
+                ).hexdigest(),
             )
 
         _set_job_fields(job_id, stage="building_command")
@@ -904,8 +984,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # can kill the whole group (incl. grandchildren) on cleanup/timeout.
         stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
         # Merge per-job env vars into a copy of the process environment
-        _proc_env = dict(os.environ)
-        _proc_env.update(_job_env)
+        _proc_env = _runtime_tool_env(_job_env)
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
@@ -930,9 +1009,9 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # observed live on scan #1 for shodan-cli/curl-headers/paramspider.
         # Fix: track wall-clock time since the LAST byte of stdout/stderr
         # arrived via background reader threads. Kill early only if truly
-        # silent for `silence_limit`; a hard ceiling (multiple of the
-        # configured timeout) remains as an absolute backstop so nothing can
-        # run forever even if it dribbles out a byte occasionally.
+        # silent for `silence_limit`; the configured timeout remains the hard
+        # wall-clock budget. Profiles that legitimately need longer must set a
+        # larger timeout explicitly.
         if stdin_bytes and proc.stdin is not None:
             try:
                 proc.stdin.write(stdin_bytes)
@@ -972,11 +1051,16 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         _t_err.start()
 
         silence_limit = min(timeout, max(30, int(timeout * 0.5)))
-        hard_ceiling = timeout * 3
+        hard_ceiling = timeout
         wait_started = time.monotonic()
         kill_reason: str | None = None
+        cancelled_requested = False
         while True:
             if proc.poll() is not None:
+                break
+            if _job_cancel_requested(job_id):
+                cancelled_requested = True
+                kill_reason = _job_cancel_reason(job_id)
                 break
             now = time.monotonic()
             with _activity_lock:
@@ -1004,6 +1088,16 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             with _activity_lock:
                 partial_stdout = b"".join(_stdout_chunks).decode("utf-8", errors="replace")
                 partial_stderr = b"".join(_stderr_chunks).decode("utf-8", errors="replace")
+            if cancelled_requested:
+                _set_job_fields(
+                    job_id,
+                    status="skipped",
+                    return_code=None,
+                    error=kill_reason,
+                    stdout=partial_stdout[-500_000:] if partial_stdout else "",
+                    stderr=partial_stderr[-20_000:] if partial_stderr else "",
+                )
+                return
             raise subprocess.TimeoutExpired(
                 cmd=argv,
                 timeout=int(time.monotonic() - wait_started),
@@ -1017,6 +1111,9 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         with _activity_lock:
             raw_stdout = b"".join(_stdout_chunks)
             raw_stderr = b"".join(_stderr_chunks)
+        if _job_is_terminal(job_id):
+            return
+
         stdout = raw_stdout.decode("utf-8", errors="replace") if raw_stdout else ""
         stderr = raw_stderr.decode("utf-8", errors="replace") if raw_stderr else ""
         return_code = proc.returncode
@@ -1025,6 +1122,18 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         (workdir / "stderr.txt").write_text(stderr, encoding="utf-8", errors="replace")
         (workdir / "exit_code.txt").write_text(str(return_code), encoding="utf-8")
         (workdir / "command.txt").write_text(command, encoding="utf-8")
+
+        if _job_cancel_requested(job_id):
+            _set_job_fields(
+                job_id,
+                command=command,
+                status="skipped",
+                return_code=None,
+                stdout=stdout[-500_000:] if stdout else "",
+                stderr=stderr[-20_000:] if stderr else "",
+                error=_job_cancel_reason(job_id),
+            )
+            return
 
         parse_source = stdout
         output_file_template = profile.get("output_file")
@@ -1084,7 +1193,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # should survive a restart even if status was already written.
         _set_job_fields(
             job_id,
-            finished_at=datetime.utcnow().isoformat(),
+            finished_at=_utc_now_iso(),
             duration_seconds=round(time.perf_counter() - started, 3),
         )
 
@@ -1097,7 +1206,7 @@ def _run_job_safely(job_id: str, profile: dict[str, Any], req: JobRequest) -> No
             job_id,
             status="failed",
             error=f"uncaught runner error {type(exc).__name__}: {exc}",
-            finished_at=datetime.utcnow().isoformat(),
+            finished_at=_utc_now_iso(),
         )
 
 
@@ -1396,6 +1505,19 @@ def _module_env() -> dict[str, str]:
     return env
 
 
+def _runtime_tool_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment used by tool jobs.
+
+    Click-installed tools live in /opt/tools/bin.  Module installation already
+    exported that PATH, but tool execution used the raw container environment,
+    so a healthy module could still fail at runtime with "command not found".
+    """
+    env = _module_env()
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
 def _ensure_tools_dirs() -> None:
     for sub in ("bin", "pipx", "gems", "src", "venvs"):
         (TOOLS_PREFIX / sub).mkdir(parents=True, exist_ok=True)
@@ -1405,11 +1527,13 @@ def _module_installed(spec: dict[str, Any]) -> bool:
     provides = spec.get("provides") or []
     if not provides:
         return False
-    return all(shutil.which(str(b)) is not None for b in provides)
+    runtime_path = _module_env().get("PATH")
+    return all(shutil.which(str(b), path=runtime_path) is not None for b in provides)
 
 
 def _provides_status(spec: dict[str, Any]) -> dict[str, bool]:
-    return {str(b): shutil.which(str(b)) is not None for b in (spec.get("provides") or [])}
+    runtime_path = _module_env().get("PATH")
+    return {str(b): shutil.which(str(b), path=runtime_path) is not None for b in (spec.get("provides") or [])}
 
 
 def _persisted_state() -> dict[str, Any]:
@@ -1424,7 +1548,7 @@ def _persist_module_state(module_id: str, installed: bool) -> None:
     state = _persisted_state()
     installed_map = state.setdefault("installed", {})
     if installed:
-        installed_map[module_id] = {"at": datetime.utcnow().isoformat() + "Z"}
+        installed_map[module_id] = {"at": _utc_now_iso()}
     else:
         installed_map.pop(module_id, None)
     try:
@@ -1519,7 +1643,7 @@ def _run_module_install(module_id: str, spec: dict[str, Any]) -> None:
             run = _MODULE_RUNS.get(module_id)
             if run is not None:
                 run["status"] = "installed"
-                run["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                run["finished_at"] = _utc_now_iso()
         _append_log(module_id, "\n=== done ===")
     except Exception as exc:  # noqa: BLE001
         with _MODULES_LOCK:
@@ -1527,7 +1651,7 @@ def _run_module_install(module_id: str, spec: dict[str, Any]) -> None:
             if run is not None:
                 run["status"] = "failed"
                 run["error"] = str(exc)
-                run["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                run["finished_at"] = _utc_now_iso()
         _append_log(module_id, f"\n=== FAILED: {exc} ===")
 
 
@@ -1563,7 +1687,7 @@ def install_module(module_id: str) -> dict[str, Any]:
             "step_index": 0,
             "total_steps": len(spec.get("steps") or []),
             "current_step": None,
-            "started_at": datetime.utcnow().isoformat() + "Z",
+            "started_at": _utc_now_iso(),
             "finished_at": None,
             "error": None,
         }
@@ -1663,13 +1787,90 @@ def get_job_result(job_id: str, stdout_cap: int = 0) -> JobResult:
 
 
 @app.get("/jobs")
-def list_jobs(status: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+def list_jobs(status: Optional[str] = None, scan_id: Optional[int] = None, limit: int = 50) -> dict[str, Any]:
     with _JOBS_LOCK:
         items = list(_JOBS.values())
+    items = [_mark_stale_job_if_needed(job) for job in items]
     if status:
         items = [j for j in items if j["status"] == status]
+    if scan_id is not None:
+        items = [j for j in items if int(j.get("scan_id") or -1) == int(scan_id)]
     items.sort(key=lambda j: j.get("enqueued_at", ""), reverse=True)
     return {"count": len(items), "items": items[:limit]}
+
+
+@app.post("/jobs/cancel")
+def cancel_jobs(scan_id: Optional[int] = None, job_id: Optional[str] = None, reason: str = "cancelled_by_scan_control", limit: int = 1000) -> dict[str, Any]:
+    """Cancel queued/running jobs and kill live subprocess groups.
+
+    This is the scan-control counterpart to /jobs/purge.  Purge intentionally
+    cleans queued backlog only; stop/delete/pause need stronger semantics:
+    no Kali subprocess for a halted scan may keep running and contaminate the
+    next scan of the same target.
+    """
+    if scan_id is None and not str(job_id or "").strip():
+        raise HTTPException(status_code=400, detail="scan_id or job_id is required")
+    now = _utc_now_iso()
+    max_items = max(1, min(int(limit or 1000), 100_000))
+    cancel_reason = str(reason or "cancelled_by_scan_control")[:240]
+    with _JOBS_LOCK:
+        candidates = [
+            dict(job)
+            for job in _JOBS.values()
+            if str(job.get("status") or "") in VOLATILE_JOB_STATES
+            and (scan_id is None or int(job.get("scan_id") or -1) == int(scan_id))
+            and (not str(job_id or "").strip() or str(job.get("job_id") or "") == str(job_id).strip())
+        ][:max_items]
+
+    requested = 0
+    cancelled_futures = 0
+    killed_processes = 0
+    job_ids: list[str] = []
+    for job in candidates:
+        jid = str(job.get("job_id") or "")
+        if not jid:
+            continue
+        requested += 1
+        job_ids.append(jid)
+        _set_job_fields(jid, cancel_requested=True, cancel_reason=cancel_reason)
+        future = _FUTURES.get(jid)
+        if future is not None and future.cancel():
+            cancelled_futures += 1
+
+        pid = job.get("subprocess_pid")
+        pgid = job.get("subprocess_pgid")
+        try:
+            pid_i = int(pid) if pid else 0
+        except (TypeError, ValueError):
+            pid_i = 0
+        try:
+            pgid_i = int(pgid) if pgid else None
+        except (TypeError, ValueError):
+            pgid_i = None
+        if pid_i or pgid_i:
+            if _kill_orphaned_process(pid_i, pgid_i):
+                killed_processes += 1
+
+        current = _get_job_record(jid) or job
+        _set_job_fields(
+            jid,
+            status="skipped",
+            finished_at=now,
+            duration_seconds=current.get("duration_seconds") or 0,
+            return_code=None,
+            error=cancel_reason,
+            stdout=current.get("stdout") or "",
+            stderr=current.get("stderr") or "",
+        )
+
+    return {
+        "requested": requested,
+        "cancelled_futures": cancelled_futures,
+        "killed_processes": killed_processes,
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "job_ids": job_ids[:200],
+    }
 
 
 @app.post("/jobs/purge")
@@ -1680,7 +1881,7 @@ def purge_jobs(status: Optional[str] = "queued", scan_id: Optional[int] = None, 
     backlog cleanup after a bad fan-out.  Queued futures are cancelled when the
     executor has not started them yet.
     """
-    now = datetime.utcnow().isoformat()
+    now = _utc_now_iso()
     purged = 0
     cancelled_futures = 0
     max_items = max(1, min(int(limit or 1000), 100_000))

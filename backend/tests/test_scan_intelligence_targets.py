@@ -168,3 +168,26 @@ def test_refine_target_set_sends_root_scope_to_dnsx(monkeypatch) -> None:
 
     assert captured["authorized_scope"] == ["valid.com"]
     assert refined["live_targets"] == ["valid.com", "api.valid.com"]
+
+
+def test_refine_target_set_rejects_external_hostname_resolving_to_loopback(monkeypatch) -> None:
+    def fake_dnsx(hosts, timeout=180, authorized_scope=None):
+        return {
+            "valid.com": "1.1.1.1",
+            "api.valid.com": "1.1.1.2",
+            "localhost.valid.com": "127.0.0.1",
+        }
+
+    monkeypatch.setattr(
+        "app.services.scan_intelligence._resolve_hosts_via_kali_dnsx",
+        fake_dnsx,
+    )
+
+    refined = refine_target_set(
+        "valid.com",
+        ["api.valid.com", "localhost.valid.com"],
+    )
+
+    assert refined["live_targets"] == ["valid.com", "api.valid.com"]
+    assert refined["non_public_targets"] == ["localhost.valid.com"]
+    assert "localhost.valid.com" not in refined["host_ip"]

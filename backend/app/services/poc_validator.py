@@ -41,17 +41,16 @@ logger = logging.getLogger(__name__)
 # ── Maximum PoC validation items per scan ─────────────────────────────────────
 # Prevents creating hundreds of P21 items for noisy scans (e.g. nikto + nmap
 # generating 500 high findings). Cap ensures we validate the MOST CRITICAL findings.
-MAX_POC_VALIDATIONS_PER_SCAN = 50
+MAX_POC_VALIDATIONS_PER_SCAN = 250
 
 # ── Tools that already prove the finding — no re-validation needed ─────────────
 SELF_VALIDATING_TOOLS = {
-    # Active exploitation — output proves the condition
-    "sqlmap", "dalfox", "wapiti", "wpscan", "hydra",
-    "gitleaks", "trufflehog", "semgrep", "jwt_tool",
+    # Keep this deliberately narrow. A scanner finding is not automatically a
+    # reproduced vulnerability. These tools only skip a second PoC when their
+    # own positive output already constitutes direct validation evidence.
+    "sqlmap", "dalfox", "jwt_tool",
     # OOB callback = irrefutable proof of interaction
     "interactsh-client",
-    # Chain correlation and SAST with high confidence
-    "exploit_chain_engine", "trivy", "bandit",
     # Prototype pollution analyzer — active test
     "js_pollution_analyzer",
 }
@@ -272,6 +271,26 @@ def schedule_poc_validation(
         param = str(details.get("parameter") or details.get("param") or "").strip()
         if param:
             meta["target_parameter"] = param
+    meta["execution_target"] = val_target
+
+    # The work queue uniqueness key is phase+tool+target. Different findings can
+    # legitimately require the same validator against the same endpoint. Give
+    # each persisted item a finding-specific fragment while dispatching the
+    # original URL from metadata; HTTP fragments are never sent to the target.
+    storage_target = val_target
+    same_target_item = (
+        db.query(ScanWorkItem.id)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.phase_id == "P21",
+            ScanWorkItem.tool_name == val_tool,
+            ScanWorkItem.target == val_target,
+        )
+        .first()
+    )
+    if same_target_item and finding_id:
+        suffix = f"#easm-validation-{finding_id}"
+        storage_target = f"{val_target[: max(1, 500 - len(suffix))]}{suffix}"
 
     # ── Create the P21 validation item ───────────────────────────────────────
     try:
@@ -281,7 +300,7 @@ def schedule_poc_validation(
         val_item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id="P21",
-            target=val_target,
+            target=storage_target,
             tool_name=val_tool,
             profile=val_tool,
             resource_class=resource_class,
@@ -290,7 +309,9 @@ def schedule_poc_validation(
             # unblock report generation.
             priority=30,
             status="queued",
-            max_attempts=1,  # PoC gets one shot — fail = refuted
+            # Infrastructure/tool failure is inconclusive, never negative proof.
+            # Permit one retry before retaining the finding as candidate.
+            max_attempts=2,
             item_metadata=apply_phase_tool_metadata(meta, "P21", val_tool, source="poc_validator"),
         )
         db.add(val_item)

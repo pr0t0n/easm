@@ -109,6 +109,48 @@ def test_multiskill_phase_uses_rich_dedup_not_tool_name(multiskill_contract: str
     assert result["phase_ledger"]["skill_coverage"]["skill.two"]["status"] == "completed"
 
 
+def test_p01_reuses_equivalent_tools_across_selected_skills(monkeypatch: pytest.MonkeyPatch) -> None:
+    contracts = dict(core.PHASE_CONTRACTS)
+    contracts["P01"] = {
+        **contracts["P01"],
+        "required_skills": ["skill.one", "skill.two"],
+        "required_tools": ["subfinder"],
+        "optional_tools": [],
+    }
+    monkeypatch.setattr(core, "PHASE_CONTRACTS", contracts)
+    executions: list[dict[str, Any]] = []
+
+    def call_tool(execution: dict[str, Any]) -> dict[str, Any]:
+        executions.append(dict(execution))
+        return {
+            "status": "success",
+            "exit_code": 0,
+            "stdout": "www.example.com\napi.example.com\n",
+            "parsed_result": ["www.example.com", "api.example.com"],
+        }
+
+    runtime = core.OffensiveSkillRuntime(
+        registry=_Registry([
+            _skill("skill.one", "subfinder"),
+            _skill("skill.two", "subfinder"),
+        ]),  # type: ignore[arg-type]
+        rag=_Rag(["skill.one", "skill.two"]),  # type: ignore[arg-type]
+        executor=core.MCPToolExecutor(call_tool=call_tool, available=True),
+    )
+    scope = core.Scope(scope_id="test", allowed_domains=["example.com"], max_noise_level="high")
+
+    result = runtime.run_phase("P01", "example.com", scope, "controlled_pentest")
+
+    assert len(executions) == 1
+    assert executions[0]["tool_name"] == "subfinder"
+    assert result["phase_ledger"]["selected_skills"] == ["skill.one", "skill.two"]
+    assert result["phase_ledger"]["status"] == "completed"
+    assert len(result["mcp_results"]) == 2
+    assert result["mcp_results"][1]["deduped_from_execution_key"] == result["mcp_results"][0]["execution_key"]
+    assert result["phase_ledger"]["skill_coverage"]["skill.one"]["status"] == "completed"
+    assert result["phase_ledger"]["skill_coverage"]["skill.two"]["status"] == "completed"
+
+
 def test_evidence_uses_real_parsed_result(multiskill_contract: str) -> None:
     runtime = core.OffensiveSkillRuntime(
         registry=_Registry([_skill("skill.one")]),  # type: ignore[arg-type]

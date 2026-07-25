@@ -51,6 +51,32 @@ def test_http_tool_is_skipped_when_preflight_proves_no_http_surface() -> None:
     assert decision["reason"] == "no_http_surface:tcp_closed"
 
 
+def test_http_tool_is_skipped_after_authoritative_p06_no_response() -> None:
+    state = _state_for(
+        "dead.example.com",
+        {
+            "status": "no_http_response",
+            "open_ports": [],
+            "http": [],
+            "p02_complete": True,
+            "p06_complete": True,
+            "p06_http_live": False,
+        },
+    )
+
+    decision = validate_skill_applicability(
+        "P15",
+        "skill.chain.exposed_git_to_credential_leak",
+        "nuclei-exposure",
+        "dead.example.com",
+        state,
+        at="dispatch",
+    )
+
+    assert decision["applicable"] is False
+    assert decision["reason"] == "no_http_surface:tcp_closed"
+
+
 def test_technology_specific_tool_skips_when_known_tech_is_incompatible() -> None:
     state = _state_for(
         "https://app.example.com",
@@ -88,6 +114,93 @@ def test_port_specific_tool_skips_when_required_ports_are_known_absent() -> None
 
     assert decision["applicable"] is False
     assert decision["reason"].startswith("required_port_absent:")
+
+
+def test_source_code_tool_is_skipped_for_external_domain() -> None:
+    decision = validate_skill_applicability(
+        "P18",
+        "skill.code.sast",
+        "semgrep",
+        "app.example.com",
+        {},
+        at="dispatch",
+    )
+
+    assert decision["applicable"] is False
+    assert decision["reason"] == "source_code_required"
+
+
+def test_trivy_requires_source_or_local_path_not_remote_hostname() -> None:
+    decision = validate_skill_applicability(
+        "P18",
+        "skill.code.sast",
+        "trivy",
+        "app.example.com",
+        {},
+        at="dispatch",
+    )
+
+    assert decision["applicable"] is False
+    assert decision["reason"] == "source_code_required"
+
+
+def test_source_code_tool_accepts_existing_local_path(tmp_path) -> None:
+    decision = validate_skill_applicability(
+        "P18",
+        "skill.code.sast",
+        "bandit",
+        str(tmp_path),
+        {},
+        at="dispatch",
+    )
+
+    assert decision["applicable"] is True
+
+
+def test_repository_secret_scanner_requires_repo_reference() -> None:
+    external = validate_skill_applicability(
+        "P18",
+        "skill.code.secret_detection",
+        "trufflehog",
+        "app.example.com",
+        {},
+        at="dispatch",
+    )
+    repository = validate_skill_applicability(
+        "P18",
+        "skill.code.secret_detection",
+        "trufflehog",
+        "https://github.com/example/project.git",
+        {},
+        at="dispatch",
+    )
+
+    assert external["applicable"] is False
+    assert external["reason"] == "source_code_required"
+    assert repository["applicable"] is True
+
+
+def test_h8mail_requires_observed_email_evidence() -> None:
+    missing = validate_skill_applicability(
+        "P18",
+        "skill.chain.exposed_git_to_credential_leak",
+        "h8mail",
+        "example.com",
+        {},
+        at="dispatch",
+    )
+    present = validate_skill_applicability(
+        "P18",
+        "skill.chain.exposed_git_to_credential_leak",
+        "h8mail",
+        "example.com",
+        {"discovered_emails": ["ops@example.com"]},
+        at="dispatch",
+    )
+
+    assert missing["applicable"] is False
+    assert missing["reason"].startswith("required_evidence_absent:")
+    assert present["applicable"] is True
 
 
 def test_batch_applicability_keeps_only_targets_that_still_apply() -> None:
@@ -137,6 +250,21 @@ def test_update_skill_execution_score_accumulates() -> None:
     assert record["runs"] == 5
     assert record["positives"] == 0
     assert record["positive_rate"] < 0.4  # dropped from neutral 0.5
+
+
+def test_update_skill_execution_score_accepts_productive_unproductive_vocabulary() -> None:
+    from app.services.scan_work_queue import update_skill_execution_score
+
+    state: dict = {}
+    update_skill_execution_score(state, "skill.discovery.endpoint_discovery", "ffuf", "productive", findings_count=2)
+    record = update_skill_execution_score(state, "skill.discovery.endpoint_discovery", "ffuf", "unproductive")
+
+    assert record["validated_observations"] == 0
+    assert record["utility_observations"] == 2
+    assert record["positives"] == 0
+    assert record["raw_findings"] == 2
+    assert record["positive_rate"] == 0.5
+    assert record["utility_rate"] != 0.5
 
 
 def test_validate_skill_adjusts_score_after_history() -> None:
@@ -407,3 +535,86 @@ def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> N
     assert result["kept_by_direct_evidence"] == 1
     assert item.status == "queued"
     assert item.item_metadata["triage_post_p09"]["decision"] == "kept_by_direct_evidence"
+
+
+def test_post_p09_negative_signal_does_not_cancel_independent_methodology() -> None:
+    from app.models.models import Finding, ScanJob, ScanWorkItem
+
+    item = SimpleNamespace(
+        scan_job_id=8,
+        phase_id="P13",
+        tool_name="bl-test",
+        target="app.example.com",
+        status="blocked",
+        item_metadata={},
+        updated_at=None,
+    )
+    job = SimpleNamespace(id=8, state_data={})
+
+    class FakeQuery:
+        def __init__(self, *, first_value=None, all_value=None, scalar_value=0):
+            self._first_value = first_value
+            self._all_value = all_value or []
+            self._scalar_value = scalar_value
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return self._all_value
+
+        def first(self):
+            return self._first_value
+
+        def scalar(self):
+            return self._scalar_value
+
+    class FakeDb:
+        def query(self, model, *_args, **_kwargs):
+            if model is Finding:
+                return FakeQuery(all_value=[])
+            if model is ScanJob:
+                return FakeQuery(first_value=job)
+            if model is ScanWorkItem:
+                return FakeQuery(all_value=[item])
+            return FakeQuery(scalar_value=1)
+
+        def add(self, _obj):
+            return None
+
+        def commit(self):
+            return None
+
+    result = triage_post_p09_injection(FakeDb(), 8)  # type: ignore[arg-type]
+
+    assert result["cancelled"] == 0
+    assert result["kept_by_policy"] == 1
+    assert item.status == "blocked"
+    assert item.item_metadata["triage_post_p09"]["decision"] == "kept_for_independent_methodology"
+
+
+def test_masscan_requires_aggressive_profile_or_crown_jewel() -> None:
+    target = "api.example.com"
+    profile = {"status": "dns_live", "open_ports": []}
+
+    standard = validate_skill_applicability(
+        "P02",
+        "skill.recon.port_service_discovery",
+        "masscan",
+        target,
+        {**_state_for(target, profile), "scan_level": "full"},
+        at="enqueue",
+    )
+    aggressive = validate_skill_applicability(
+        "P02",
+        "skill.recon.port_service_discovery",
+        "masscan",
+        target,
+        {**_state_for(target, profile), "scan_level": "aggressive"},
+        at="enqueue",
+    )
+
+    assert standard["applicable"] is False
+    assert standard["reason"] == "full_tcp_requires_aggressive_profile_or_crown_jewel"
+    assert aggressive["applicable"] is True
+    assert aggressive["reason"] == "full_tcp_authorized_by_aggressive_profile"

@@ -368,57 +368,28 @@ def ensure_hypothesis_drain_work_item(
         (piece.strip() for piece in re.split(r"[,;\n]+", str(job.target_query or "")) if piece.strip()),
         str(job.target_query or "").strip(),
     )
-    # This validator is a persistent controller that processes many batches for
-    # the same target. The queue uniqueness contract does not permit one row per
-    # batch, so re-arm the existing terminal controller instead of inserting a
-    # duplicate (scan, phase, tool, target) key.
-    controller = (
+    previous_batches = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == job.id,
             ScanWorkItem.phase_id == "P21",
             ScanWorkItem.tool_name == "internal-hypothesis-validator",
-            ScanWorkItem.target == target[:500],
         )
-        .order_by(ScanWorkItem.id.desc())
-        .first()
+        .count()
     )
-    if controller:
-        metadata = dict(controller.item_metadata or {})
-        previous_status = str(controller.status or "")
-        metadata.update({
-            "source": "hypothesis_planner",
-            "engine": "internal_safe_validator",
-            "internal_hypothesis_batch": True,
-            "batch_size": max(1, min(250, int(batch_size))),
-            "queue_ready_at": now.isoformat(),
-            "planner_policy": "risk_evidence_outcome_v1",
-            "batch_iteration": int(metadata.get("batch_iteration") or 0) + 1,
-            "previous_batch_status": previous_status,
-        })
-        controller.status = "queued"
-        controller.attempts = 0
-        controller.max_attempts = 1
-        controller.lease_until = None
-        controller.started_at = None
-        controller.finished_at = None
-        controller.last_error = None
-        controller.result = {}
-        controller.item_metadata = metadata
-        controller.updated_at = now
-        db.flush()
-        return {
-            "remaining": remaining,
-            "scheduled": 1,
-            "active_work_item_id": int(controller.id),
-            "reused_controller": True,
-            "previous_status": previous_status,
-        }
+    batch_iteration = int(previous_batches or 0) + 1
+    # ScanWorkItem is unique by (scan, phase, tool, target).  A previous fix
+    # re-armed the latest terminal controller to avoid that unique key, but scan
+    # #13 showed the cost: the platform lost per-batch history and reported a
+    # completed item as if it were the active drain controller.  Each drain batch
+    # must be a new durable work item; keep the real target in metadata and make
+    # the queue target a stable logical batch key.
+    queue_target = f"{target[:420]}#hypothesis-drain:{batch_iteration}"[:500]
 
     item = ScanWorkItem(
         scan_job_id=job.id,
         phase_id="P21",
-        target=target[:500],
+        target=queue_target,
         tool_name="internal-hypothesis-validator",
         profile="internal-safe-validator",
         resource_class="light",
@@ -433,6 +404,8 @@ def ensure_hypothesis_drain_work_item(
             "batch_size": max(1, min(250, int(batch_size))),
             "queue_ready_at": now.isoformat(),
             "planner_policy": "risk_evidence_outcome_v1",
+            "batch_iteration": batch_iteration,
+            "logical_target": target[:500],
         },
         created_at=now,
         updated_at=now,

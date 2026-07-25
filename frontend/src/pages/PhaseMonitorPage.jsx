@@ -96,6 +96,204 @@ function CapabilityCard({ cap }) {
   );
 }
 
+function ReconObservabilityPanel({ value }) {
+  if (!value) return null;
+  if (value.error) {
+    return (
+      <div style={{ ...diagnosticPanel, borderLeft: "3px solid #b03333" }}>
+        <strong>Diagnóstico de execução indisponível</strong>
+        <div style={{ marginTop: 4, color: "#6b6b6b", fontSize: 12 }}>{value.error}</div>
+      </div>
+    );
+  }
+
+  const inventory = value.inventory || {};
+  const qualification = value.qualification || {};
+  const gates = Array.isArray(value.gates) ? value.gates : [];
+  const locks = value.locks?.locks || [];
+  const history = value.comparison?.history || [];
+  const events = value.events || [];
+  const categoryTone = {
+    executed: "#1f8a59",
+    platform_orchestration_failure: "#b03333",
+    tool_execution_failure: "#b03333",
+    interrupted: "#c25500",
+    incomplete_or_unverifiable: "#c25500",
+  };
+
+  return (
+    <section style={diagnosticPanel}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+        <div>
+          <div className="ds-eyebrow" style={{ color: "var(--brand-700)" }}>Diagnóstico de profundidade</div>
+          <h3 style={{ fontSize: 17, margin: "4px 0 0", color: "#1c1c1c" }}>
+            O alvo mudou ou a plataforma não executou?
+          </h3>
+        </div>
+        <span style={{ fontSize: 11, color: "#6b6b6b" }}>
+          contrato de cobertura v{value.contract_version || 0}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, marginTop: 14 }}>
+        <DiagnosticMetric label="Alvos selecionados" value={inventory.selected_targets ?? 0} />
+        <DiagnosticMetric label="Alvos descartados" value={inventory.dead_targets ?? 0} />
+        <DiagnosticMetric label="DNS inconclusivo" value={inventory.dns_inconclusive_targets ?? 0} />
+        <DiagnosticMetric
+          label="Produtores"
+          value={inventory.producers_sealed ? "selados" : (inventory.producer_stage || "em aberto")}
+          warning={!inventory.producers_sealed}
+        />
+        <DiagnosticMetric label="P02 com porta aberta" value={qualification.targets_with_open_ports ?? 0} />
+        <DiagnosticMetric label="P06 HTTP vivo" value={qualification.http_live ?? 0} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10, marginTop: 12 }}>
+        {gates.map((gate) => {
+          const abnormal = gate.normal_wait === false;
+          return (
+            <div key={gate.phase_id} style={{ border: `1px solid ${abnormal ? "#e0a4a4" : "#e5dcd5"}`, borderRadius: 8, padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <strong>{gate.phase_id} · {gate.phase_id === "P02" ? "portas" : "HTTP"}</strong>
+                <span style={{ ...chip, ...(abnormal ? chipDanger : chipSuccess), margin: 0 }}>{gate.state}</span>
+              </div>
+              <div style={{ fontSize: 12, color: "#3d3d3d", marginTop: 8, lineHeight: 1.45 }}>{gate.reason}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 10, fontSize: 11 }}>
+                <span>ativos <strong>{gate.active_items}</strong></span>
+                <span>terminais <strong>{gate.terminal_items}</strong></span>
+                <span>manifesto <strong>{gate.manifest_targets}</strong></span>
+                <span>cobertos <strong>{gate.covered_targets}</strong></span>
+                <span>qualificados <strong>{gate.qualified_targets}</strong></span>
+                <span>bloqueados <strong>{gate.downstream_blocked}</strong></span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {(locks.length > 0 || (value.capacity || []).length > 0) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 10, marginTop: 12 }}>
+          <div>
+            <div style={diagnosticSubtitle}>Locks observados agora</div>
+            {locks.map((row) => (
+              <div key={row.type} style={diagnosticRow}>
+                <span>{row.type}</span>
+                <span style={{ color: row.held ? "#c25500" : "#1f8a59" }}>
+                  {row.held ? `ocupado · TTL ${row.ttl_seconds}s` : "livre"} · {row.interpretation}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={diagnosticSubtitle}>Capacidade e espera</div>
+            {(value.capacity || []).map((row) => (
+              <div key={row.resource_class} style={diagnosticRow}>
+                <span>{row.resource_class}</span>
+                <span>
+                  global {row.global_inflight}/{row.capacity} · scan ativo {row.scan_active} · fila {row.scan_queued}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={diagnosticSubtitle}>Comparação dos scans do mesmo alvo</div>
+          <div style={{ overflowX: "auto", border: "1px solid #e5dcd5", borderRadius: 8 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, whiteSpace: "nowrap" }}>
+              <thead>
+                <tr style={{ background: "#faf8f4" }}>
+                  <th style={th}>Scan</th>
+                  <th style={th}>Diagnóstico</th>
+                  <th style={th}>Alvos</th>
+                  <th style={th}>Itens OK</th>
+                  <th style={th}>Falhas</th>
+                  <th style={th}>Bloqueados</th>
+                  <th style={th}>Ativos</th>
+                  <th style={th}>Fases</th>
+                  <th style={th}>Tools</th>
+                  <th style={th}>Skills executadas</th>
+                  <th style={th}>Findings</th>
+                  <th style={th}>Confirmadas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((row) => {
+                  const assessment = row.assessment || {};
+                  const tone = categoryTone[assessment.category] || "#6b6b6b";
+                  return (
+                    <tr key={row.scan_id} style={{ borderTop: "1px solid #efe7e0" }}>
+                      <td style={td}><strong>#{row.scan_id}</strong><div style={{ color: "#6b6b6b" }}>{row.status}</div></td>
+                      <td style={td} title={(assessment.evidence || []).join(" · ")}>
+                        <strong style={{ color: tone }}>{assessment.label || "—"}</strong>
+                        <div style={{ color: "#6b6b6b" }}>
+                          {assessment.reliable_negative ? "resultado interpretável" : "resultado não conclusivo"}
+                        </div>
+                      </td>
+                      <td style={td}>{row.targets_selected}</td>
+                      <td style={td}>{row.successful_items}</td>
+                      <td style={td}>{row.failed_items}</td>
+                      <td style={td}>{row.blocked_items}</td>
+                      <td style={td}>{row.active_items}</td>
+                      <td style={td}>{row.phases_with_success}</td>
+                      <td style={td}>{row.tools_with_success}</td>
+                      <td style={td}>{row.skills_executed}/{row.skills_attributed}</td>
+                      <td style={td}>{row.findings}</td>
+                      <td style={td}>{row.confirmed_findings}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {(value.blocked_reasons || []).length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+            Motivos dos bloqueios
+          </summary>
+          {(value.blocked_reasons || []).map((row, index) => (
+            <div key={`${row.reason}-${index}`} style={diagnosticRow}>
+              <span style={{ maxWidth: "85%", overflowWrap: "anywhere" }}>{row.reason}</span>
+              <strong>{row.count}</strong>
+            </div>
+          ))}
+        </details>
+      )}
+
+      {events.length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+            Linha do tempo de decisões ({events.length})
+          </summary>
+          {events.slice(-12).reverse().map((event, index) => (
+            <div key={`${event.created_at}-${index}`} style={diagnosticRow}>
+              <span>
+                <code style={codeStyle}>{event.event || "evento"}</code>
+                <span style={{ marginLeft: 8 }}>{event.created_at || event.at || "—"}</span>
+              </span>
+              <span style={{ color: event.level === "WARNING" ? "#b03333" : "#6b6b6b" }}>{event.level}</span>
+            </div>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+}
+
+function DiagnosticMetric({ label, value, warning = false }) {
+  return (
+    <div style={{ background: "#faf8f4", border: "1px solid #e5dcd5", borderRadius: 7, padding: "8px 10px" }}>
+      <div style={{ color: "#6b6b6b", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+      <div style={{ color: warning ? "#c25500" : "#1c1c1c", fontSize: 17, fontWeight: 700, marginTop: 3 }}>{String(value)}</div>
+    </div>
+  );
+}
+
 export default function PhaseMonitorPage() {
   const [scans, setScans] = useState([]);
   const [scanId, setScanId] = useState("");
@@ -276,6 +474,8 @@ export default function PhaseMonitorPage() {
               </div>
             );
           })()}
+
+          <ReconObservabilityPanel value={data.recon_observability} />
 
           {/* TOOL INSTALLATION REPORT */}
           {data.installation_report && (
@@ -524,6 +724,35 @@ const primaryBtn = {
   cursor: "pointer",
   fontSize: 13,
   fontWeight: 500,
+};
+
+const diagnosticPanel = {
+  background: "#ffffff",
+  border: "1px solid #e5dcd5",
+  borderLeft: "3px solid var(--brand-500)",
+  borderRadius: 10,
+  padding: "14px 16px",
+  marginBottom: 18,
+  boxShadow: "var(--shadow-card)",
+};
+
+const diagnosticSubtitle = {
+  fontSize: 11,
+  color: "#6b6b6b",
+  textTransform: "uppercase",
+  letterSpacing: "0.06em",
+  fontWeight: 600,
+  marginBottom: 5,
+};
+
+const diagnosticRow = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 12,
+  borderTop: "1px solid #efe7e0",
+  padding: "6px 2px",
+  fontSize: 11,
+  color: "#3d3d3d",
 };
 
 const sectionTitle = {

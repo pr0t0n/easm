@@ -28,10 +28,11 @@ def test_execution_metrics_use_one_work_item_denominator():
     ])
     assert metrics["source"] == "scan_work_items"
     assert metrics["total"] == 4
-    assert metrics["attempted"] == 3
+    assert metrics["attempted"] == 2
     assert metrics["succeeded"] == 1
-    assert metrics["success_pct"] == 33.3
+    assert metrics["success_pct"] == 50.0
     assert metrics["progress_pct"] == 75.0
+    assert metrics["skip_pct"] == 33.3
 
 
 def test_no_more_remediation_does_not_mean_quality_passed():

@@ -4,7 +4,8 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, load_only
 
 from app.graph.mission import PENTEST_PHASES
 from app.models.models import (
@@ -28,16 +29,30 @@ from app.models.models import (
 )
 from app.services.phase_monitor import build_phase_monitor
 from app.services.scan_execution_metrics import summarize_work_items
+from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.scan_profiles import scan_profile
 
 
 VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_positive"}
 CANDIDATE_STATUSES = {"candidate", "needs_review", "hypothesis"}
-SUCCESS_VALIDATION_RESULTS = {"confirmed", "validated", "success", "proven", "positive", "true_positive"}
+# Validation depth measures conclusive adjudication, not the number of
+# vulnerabilities found. A sound refutation is as valuable as a confirmation.
+SUCCESS_VALIDATION_RESULTS = {
+    "confirmed", "validated", "success", "proven", "positive",
+    "true_positive", "refuted", "false_positive",
+}
 TESTED_COVERAGE_STATUSES = {"tested", "covered", "validated", "completed", "done", "confirmed"}
+INVENTORY_ONLY_COVERAGE_STATUSES = {"discovered"}
+EXTERNAL_PRECONDITION_REASONS = {
+    "source_code_required",
+    "missing_observed_parameter",
+    "mutation_plan_or_fixture_missing",
+    "missing_valid_identity_pair",
+    "captured_jwt_required",
+}
 QUALITY_GATE_SCORE_THRESHOLD = 70.0
-QUALITY_GATE_MAX_ROUNDS = 2
-QUALITY_GATE_MAX_POC_PER_ROUND = 12
+QUALITY_GATE_MAX_ROUNDS = 4
+QUALITY_GATE_MAX_POC_PER_ROUND = 50
 QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
 QUALITY_GATE_MAX_FALLBACKS_PER_ROUND = 20
 
@@ -93,10 +108,13 @@ QUALITY_PHASE_FALLBACKS: dict[str, list[str]] = {
     "P09": ["nuclei", "nuclei-cves", "subjack"],
     "P11": ["nuclei", "nmap-vulscan", "nmap-http-enum"],
     "P12": ["nuclei", "nikto", "wapiti", "sqlmap", "dalfox"],
-    "P15": ["ffuf", "ffuf-files", "feroxbuster", "dirsearch", "gobuster"],
+    "P15": [
+        "nuclei-exposure", "nuclei-misconfiguration", "nuclei-file-upload",
+        "nuclei-lfi", "gau", "waybackurls", "ffuf-files",
+    ],
     "P16": ["ffuf-params", "wfuzz", "wapiti", "nuclei"],
-    "P18": ["sslscan", "testssl", "nmap-ssl-vuln"],
-    "P20": ["wpscan", "nuclei", "nikto"],
+    "P18": ["theharvester", "h8mail", "nuclei-exposure", "nuclei-cloud", "gitleaks", "trufflehog"],
+    "P20": ["nuclei", "gitleaks", "trufflehog", "nuclei-race"],
 }
 
 
@@ -138,6 +156,16 @@ def _expected_phase_ids(job: ScanJob) -> list[str]:
     if allowed:
         return [str(pid) for pid in allowed]
     return [str(p["id"]) for p in PENTEST_PHASES]
+
+
+def _quality_scored_phase_ids(job: ScanJob) -> list[str]:
+    """Return executable phases that can be measured before report generation.
+
+    P22 is the campaign report produced only after this quality gate accepts
+    completion. Scoring it here creates a circular false gap: it is necessarily
+    queued while the gate is running.
+    """
+    return [phase_id for phase_id in _expected_phase_ids(job) if phase_id != "P22"]
 
 
 def _finding_details(finding: Finding) -> dict[str, Any]:
@@ -226,32 +254,224 @@ def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str
     }, weak_rows
 
 
+def _coverage_bucket(row: CoverageItem) -> str:
+    status = str(row.status or "").strip().lower()
+    coverage_type = str(row.coverage_type or "").strip().lower()
+    test_class = str(row.test_class or "").strip().lower()
+    reason = str(row.blocking_reason or "").strip().lower()
+    if status in {"superseded", "not_applicable", "skipped"}:
+        return "excluded"
+    if coverage_type == "endpoint" and test_class == "discovery" and status in INVENTORY_ONLY_COVERAGE_STATUSES:
+        return "inventory"
+    if status == "blocked_missing_auth":
+        return "external_precondition"
+    if reason in EXTERNAL_PRECONDITION_REASONS:
+        return "external_precondition"
+    if reason.startswith("source_code_required") or reason.startswith("required_evidence_absent:"):
+        return "external_precondition"
+    return "applicable"
+
+
+def _auth_classification_bucket(endpoint: OffensiveEndpoint) -> str:
+    metadata = dict(endpoint.endpoint_metadata or {})
+    auth = dict(metadata.get("auth_classification") or {})
+    reason = str(auth.get("reason") or "").strip().lower()
+    if endpoint.auth_required is not None:
+        return "classified"
+    if reason in {"anonymous_probe_failed", "endpoint_not_reachable", "connecttimeout", "readtimeout"}:
+        return "unclassifiable_reachability"
+    anonymous = dict(auth.get("anonymous") or {})
+    if str(anonymous.get("error") or "").strip():
+        return "unclassifiable_reachability"
+    source_tool = str(getattr(endpoint, "source_tool", "") or "").strip().lower()
+    if endpoint.status_code is None and source_tool in {"waybackurls", "gau", "paramspider"}:
+        return "unclassifiable_passive_archive"
+    return "unknown"
+
+
+def _skill_runtime_attribution(job: ScanJob) -> tuple[set[str], set[str]]:
+    state = dict(job.state_data or {})
+    attributed: set[str] = set()
+    executed: set[str] = set()
+
+    def _mark_phase(phase_id: str, status: str) -> None:
+        skills = {str(s) for s in list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_skills") or []) if str(s or "")}
+        if not skills:
+            return
+        attributed.update(skills)
+        if status in {"success", "completed", "done"}:
+            executed.update(skills)
+
+    for row in list(state.get("agent_execution_runs") or []):
+        if not isinstance(row, dict):
+            continue
+        _mark_phase(str(row.get("phase_id") or ""), str(row.get("status") or "").lower())
+    for row in list(dict(state.get("agent_execution_summary") or {}).values()):
+        if not isinstance(row, dict):
+            continue
+        status = "success" if row.get("all_mandatory_executed") or int(row.get("agents_success") or 0) > 0 else "partial"
+        _mark_phase(str(row.get("phase_id") or ""), status)
+    return attributed, executed
+
+
 def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     phase_monitor = build_phase_monitor(db, job)
-    expected_phase_ids = _expected_phase_ids(job)
+    expected_phase_ids = _quality_scored_phase_ids(job)
     profile = scan_profile(_scan_level(job))
+    state = dict(job.state_data or {})
 
-    findings = db.query(Finding).filter(Finding.scan_job_id == job.id).all()
-    finding_ids = [int(f.id) for f in findings]
-    artifacts = db.query(EvidenceArtifact).filter(EvidenceArtifact.scan_job_id == job.id).all()
+    finding_rows = (
+        db.query(Finding)
+        .options(load_only(
+            Finding.id, Finding.details, Finding.severity,
+            Finding.is_false_positive, Finding.verification_status,
+        ))
+        .filter(Finding.scan_job_id == job.id)
+        .all()
+    )
+    findings = [row for row in finding_rows if not bool(row.is_false_positive)]
+    artifacts = (
+        db.query(EvidenceArtifact)
+        .options(load_only(
+            EvidenceArtifact.id, EvidenceArtifact.finding_id,
+            EvidenceArtifact.phase_id, EvidenceArtifact.artifact_type,
+        ))
+        .filter(EvidenceArtifact.scan_job_id == job.id)
+        .all()
+    )
     artifacts_by_finding: Counter[int] = Counter(
         int(a.finding_id) for a in artifacts if a.finding_id is not None
     )
-    validations = db.query(ValidationRun).filter(ValidationRun.scan_job_id == job.id).all()
-    retests = db.query(RetestRun).filter(RetestRun.scan_job_id == job.id).all()
-    coverage_items = db.query(CoverageItem).filter(CoverageItem.scan_job_id == job.id).all()
-    work_items = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == job.id).all()
-    endpoints = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == job.id).all()
+    all_validations = (
+        db.query(ValidationRun)
+        .options(load_only(
+            ValidationRun.id, ValidationRun.hypothesis_id, ValidationRun.finding_id, ValidationRun.validator_name,
+            ValidationRun.result, ValidationRun.run_metadata,
+            ValidationRun.attempt_artifact_id, ValidationRun.created_at,
+        ))
+        .filter(ValidationRun.scan_job_id == job.id)
+        .all()
+    )
+    retests = (
+        db.query(RetestRun)
+        .options(load_only(RetestRun.id, RetestRun.status))
+        .filter(RetestRun.scan_job_id == job.id)
+        .all()
+    )
+    coverage_rows = (
+        db.query(CoverageItem)
+        .options(load_only(
+            CoverageItem.id, CoverageItem.coverage_type, CoverageItem.test_class,
+            CoverageItem.status, CoverageItem.blocking_reason,
+        ))
+        .filter(CoverageItem.scan_job_id == job.id)
+        .all()
+    )
+    # Derived plans remain persisted for auditability. Once superseded or
+    # declared non-applicable they no longer belong to the active denominator.
+    coverage_buckets = Counter(_coverage_bucket(row) for row in coverage_rows)
+    coverage_items = [row for row in coverage_rows if _coverage_bucket(row) == "applicable"]
+    inventory_coverage_items = [row for row in coverage_rows if _coverage_bucket(row) == "inventory"]
+    external_coverage_items = [row for row in coverage_rows if _coverage_bucket(row) == "external_precondition"]
+    work_items = (
+        db.query(ScanWorkItem)
+        .options(load_only(
+            ScanWorkItem.id, ScanWorkItem.status, ScanWorkItem.phase_id,
+            ScanWorkItem.tool_name, ScanWorkItem.target, ScanWorkItem.resource_class,
+            ScanWorkItem.item_metadata, ScanWorkItem.created_at,
+            ScanWorkItem.updated_at, ScanWorkItem.started_at, ScanWorkItem.finished_at,
+        ))
+        .filter(ScanWorkItem.scan_job_id == job.id)
+        .all()
+    )
+    endpoints = (
+        db.query(OffensiveEndpoint)
+        .options(load_only(
+            OffensiveEndpoint.id, OffensiveEndpoint.auth_required,
+            OffensiveEndpoint.normalized_url, OffensiveEndpoint.status_code,
+            OffensiveEndpoint.content_type, OffensiveEndpoint.source_tool,
+            OffensiveEndpoint.tags,
+            OffensiveEndpoint.endpoint_metadata,
+        ))
+        .filter(OffensiveEndpoint.scan_job_id == job.id)
+        .all()
+    )
     endpoints_count = len(endpoints)
-    assets = db.query(OffensiveAsset).filter(OffensiveAsset.scan_job_id == job.id).all()
+    assets = (
+        db.query(OffensiveAsset)
+        .options(load_only(OffensiveAsset.id, OffensiveAsset.asset_type, OffensiveAsset.host))
+        .filter(OffensiveAsset.scan_job_id == job.id)
+        .all()
+    )
     offensive_assets_count = len({(str(row.asset_type or ""), str(row.host or "")) for row in assets})
     services_count = db.query(OffensiveService.id).filter(OffensiveService.scan_job_id == job.id).count()
     parameters_count = db.query(OffensiveParameter.id).filter(OffensiveParameter.scan_job_id == job.id).count()
     api_specs_count = db.query(OffensiveApiSpec.id).filter(OffensiveApiSpec.scan_job_id == job.id).count()
-    hypotheses = db.query(OffensiveHypothesis).filter(OffensiveHypothesis.scan_job_id == job.id).all()
-    identities = db.query(ScanIdentity).filter(ScanIdentity.scan_job_id == job.id).all()
-    auth_sessions = db.query(ScanAuthSession).filter(ScanAuthSession.scan_job_id == job.id).all()
-    tool_runs = db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id == job.id).all()
+    hypotheses = (
+        db.query(OffensiveHypothesis)
+        .options(load_only(
+            OffensiveHypothesis.id, OffensiveHypothesis.status,
+            OffensiveHypothesis.hypothesis_metadata,
+        ))
+        .filter(OffensiveHypothesis.scan_job_id == job.id)
+        .all()
+    )
+    superseded_hypothesis_ids = {
+        int(row.id) for row in hypotheses if str(row.status or "").lower() == "superseded"
+    }
+    validations = [
+        row for row in all_validations
+        if row.hypothesis_id is None or int(row.hypothesis_id) not in superseded_hypothesis_ids
+    ]
+    identities_count = db.query(ScanIdentity.id).filter(ScanIdentity.scan_job_id == job.id).count()
+    auth_sessions = (
+        db.query(ScanAuthSession)
+        .options(load_only(ScanAuthSession.id, ScanAuthSession.status))
+        .filter(ScanAuthSession.scan_job_id == job.id)
+        .all()
+    )
+    auth_config = dict(state.get("auth_config") or {})
+    auth_relevant_endpoints = [
+        endpoint for endpoint in endpoints if endpoint.auth_required is True
+    ]
+    auth_required = bool(
+        auth_config.get("required")
+        or auth_config.get("identities")
+        or auth_relevant_endpoints
+    )
+    valid_sessions = [s for s in auth_sessions if str(s.status or "").lower() in {"valid", "static"}]
+
+    expected_skills = {
+        str(skill_id)
+        for phase_id in expected_phase_ids
+        for skill_id in list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_skills") or [])
+        if str(skill_id or "")
+    }
+    executed_skills: set[str] = set()
+    attributed_skills: set[str] = set()
+    for work_item in work_items:
+        metadata = dict(work_item.item_metadata or {})
+        skill_ids = [str(value) for value in list(metadata.get("skill_ids") or []) if str(value or "")]
+        if metadata.get("skill_id"):
+            skill_ids.append(str(metadata["skill_id"]))
+        attributed_skills.update(skill_ids)
+        if str(work_item.status or "").lower() in {"completed", "done"}:
+            executed_skills.update(skill_ids)
+    runtime_attributed, runtime_executed = _skill_runtime_attribution(job)
+    attributed_skills.update(runtime_attributed)
+    executed_skills.update(runtime_executed)
+    if any(v.finding_id is not None for v in all_validations) or any(str(a.phase_id or "").upper() == "P21" for a in artifacts):
+        attributed_skills.add("skill.reporting.evidence_quality")
+        executed_skills.add("skill.reporting.evidence_quality")
+    externally_blocked_skills: set[str] = set()
+    if auth_required and len(valid_sessions) < 2:
+        externally_blocked_skills.add("skill.vuln.auth_bypass")
+    effective_expected_skills = expected_skills - externally_blocked_skills
+    skill_objective_ratio = _ratio(
+        len(effective_expected_skills & executed_skills),
+        len(effective_expected_skills),
+    ) if effective_expected_skills else 1.0
+    missing_skill_objectives = sorted(effective_expected_skills - executed_skills)
 
     phase_score, phase_summary, weak_phase_rows = _phase_component(phase_monitor, expected_phase_ids)
 
@@ -269,10 +489,10 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         reproduction_ratio = _ratio(len(findings_with_repro), len(findings))
         evidence_score = (evidence_ratio * 45) + (verification_ratio * 35) + (reproduction_ratio * 20)
     else:
-        evidence_ratio = 1.0 if artifacts else 0.35
-        verification_ratio = 1.0 if not high_findings else 0.0
+        evidence_ratio = 1.0 if artifacts else 0.0
+        verification_ratio = 0.0
         reproduction_ratio = 0.0
-        evidence_score = 75.0 if artifacts else 45.0
+        evidence_score = 75.0 if artifacts else 0.0
     if high_findings:
         evidence_score *= 0.75 + (0.25 * _ratio(len(high_with_evidence), len(high_findings)))
         evidence_score *= 0.75 + (0.25 * _ratio(len(high_verified), len(high_findings)))
@@ -285,20 +505,35 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     high_validation_ratio = _ratio(len(high_verified), len(high_findings)) if high_findings else 1.0
     retest_ratio = _ratio(len([r for r in retests if str(r.status or "").lower() in {"completed", "confirmed", "refuted"}]), len(retests)) if retests else 0.0
     validation_score = (validation_ratio * 45) + (high_validation_ratio * 45) + (retest_ratio * 10)
-    if not validations and findings:
-        validation_score = min(validation_score, 45.0)
+    if not validations:
+        validation_score = 0.0
 
     execution_metrics = summarize_work_items(work_items, job)
     attempted = int(execution_metrics["attempted"])
     succeeded = int(execution_metrics["succeeded"])
     failed_tools = int(execution_metrics["failed"])
     success_ratio = _ratio(succeeded, attempted) if attempted else 0.0
+    work_status_counts = Counter(str(item.status or "").lower() for item in work_items)
+    infrastructure_failure_items = int(work_status_counts.get("failed", 0) + work_status_counts.get("timeout", 0))
+    preflight_profiles = dict(((state.get("preflight") or {}).get("targets") or {}))
+    preflight_total = len(preflight_profiles)
+    p02_positive_targets = sum(1 for p in preflight_profiles.values() if isinstance(p, dict) and p.get("p02_positive_evidence"))
+    p06_positive_targets = sum(1 for p in preflight_profiles.values() if isinstance(p, dict) and p.get("p06_positive_evidence"))
+    p06_no_http_targets = sum(
+        1
+        for p in preflight_profiles.values()
+        if isinstance(p, dict)
+        and p.get("p06_complete")
+        and not p.get("p06_positive_evidence")
+    )
     missing_required = sum(
         len(row.get("required_tools_missing") or [])
         for row in (phase_monitor.get("pentest_journey") or {}).get("phases") or []
         if str(row.get("phase_id") or "") in expected_phase_ids
     )
-    tool_score = (success_ratio * 100) - min(35, missing_required * 4) - min(20, failed_tools * 0.25)
+    # Failures are already represented in success_ratio. Subtracting their
+    # absolute count again made large scans score worse merely for being large.
+    tool_score = (success_ratio * 100) - min(35, missing_required * 4)
     if attempted == 0:
         tool_score = 20.0
 
@@ -322,16 +557,37 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     tested_hypotheses = [h for h in hypotheses if str(h.status or "").lower() in tested_hypothesis_statuses]
     superseded_hypotheses = [h for h in hypotheses if str(h.status or "").lower() == "superseded"]
     blocked_hypotheses = [h for h in hypotheses if str(h.status or "").lower() in blocked_hypothesis_statuses]
+    blocked_hypothesis_reasons = Counter(
+        str((h.hypothesis_metadata or {}).get("blocked_reason") or "reason_not_recorded")
+        for h in blocked_hypotheses
+    )
+    reachability_blocked_hypotheses = [
+        h for h in blocked_hypotheses
+        if str((h.hypothesis_metadata or {}).get("blocked_reason") or "") == "endpoint_not_reachable"
+    ]
+    reachability_blocked_hypothesis_ids = {int(h.id) for h in reachability_blocked_hypotheses}
+    active_hypotheses = [
+        h for h in hypotheses
+        if str(h.status or "").lower() != "superseded" and int(h.id) not in reachability_blocked_hypothesis_ids
+    ]
+    active_blocked_hypotheses = [h for h in blocked_hypotheses if int(h.id) not in reachability_blocked_hypothesis_ids]
     resolved_hypotheses = tested_hypotheses + superseded_hypotheses
-    hypothesis_depth_points = len(tested_hypotheses) + len(superseded_hypotheses) + (len(blocked_hypotheses) * 0.25)
-    hypothesis_resolution = _ratio(hypothesis_depth_points, len(hypotheses)) if hypotheses else 1.0
-    auth_config = dict((job.state_data or {}).get("auth_config") or {})
-    auth_required = bool(auth_config.get("required") or auth_config.get("identities"))
-    valid_sessions = [s for s in auth_sessions if str(s.status or "").lower() in {"valid", "static"}]
+    hypothesis_depth_points = len(tested_hypotheses) + (len(active_blocked_hypotheses) * 0.25)
+    hypothesis_resolution = (
+        _ratio(hypothesis_depth_points, len(active_hypotheses))
+        if active_hypotheses
+        else (0.5 if endpoints_count else 0.0)
+    )
     auth_depth = min(1.0, len(valid_sessions) / 2.0) if auth_required else 1.0
-    classified_auth_endpoints = len([e for e in endpoints if e.auth_required is not None])
-    endpoint_auth_depth = _ratio(classified_auth_endpoints, endpoints_count) if endpoints_count else 1.0
-    api_depth = min(1.0, api_specs_count / 1.0) if any("api" in list(e.tags or []) for e in endpoints) else 1.0
+    auth_classification_counts = Counter(_auth_classification_bucket(e) for e in endpoints)
+    classified_auth_endpoints = int(auth_classification_counts.get("classified", 0) or 0)
+    unclassifiable_auth_endpoints = int(auth_classification_counts.get("unclassifiable_reachability", 0) or 0)
+    passive_unprobed_auth_endpoints = int(auth_classification_counts.get("unclassifiable_passive_archive", 0) or 0)
+    unknown_auth_endpoints = int(auth_classification_counts.get("unknown", 0) or 0)
+    classifiable_auth_denominator = max(0, endpoints_count - unclassifiable_auth_endpoints - passive_unprobed_auth_endpoints)
+    endpoint_auth_depth = _ratio(classified_auth_endpoints, classifiable_auth_denominator) if classifiable_auth_denominator else (1.0 if endpoints_count else 0.0)
+    has_api_surface = any("api" in [str(tag).lower() for tag in list(e.tags or [])] for e in endpoints)
+    api_depth = min(1.0, api_specs_count / 1.0) if has_api_surface else (1.0 if endpoints_count else 0.0)
     from app.services.business_logic_intelligence import build_business_logic_portfolio
 
     bl_analyses = [
@@ -348,8 +604,45 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     bl_relevant = int(business_logic.get("relevant_endpoints") or 0)
     bl_contract_ratio = _ratio(int(business_logic.get("contracted_endpoints") or 0), bl_relevant) if bl_relevant else 1.0
     bl_ready_ratio = _ratio(int(business_logic.get("ready_read_only") or 0), bl_relevant) if bl_relevant else 1.0
-    business_logic_depth = (bl_contract_ratio * 0.6) + (bl_ready_ratio * 0.4)
-    depth_score = (hypothesis_resolution * 35) + (auth_depth * 20) + (endpoint_auth_depth * 15) + (api_depth * 10) + (business_logic_depth * 20)
+    business_logic_depth = (
+        (bl_contract_ratio * 0.6) + (bl_ready_ratio * 0.4)
+        if endpoints_count
+        else 0.0
+    )
+    work_skip_reasons = Counter(
+        str(item.last_error or "")
+        for item in work_items
+        if str(item.status or "").lower() == "skipped" and str(item.last_error or "")
+    )
+    source_required_items = sum(
+        count for reason, count in work_skip_reasons.items()
+        if "source_code_required" in reason or "target_type local_path requires" in reason
+    )
+    jwt_required_items = sum(
+        count for reason, count in work_skip_reasons.items()
+        if "SCAN_JWT_TOKEN" in reason or "jwt" in reason.lower() and "required" in reason.lower()
+    )
+    external_preconditions = {
+        "identity_pair_required": bool(auth_required and len(valid_sessions) < 2),
+        "valid_auth_sessions": len(valid_sessions),
+        "auth_required_endpoints": len(auth_relevant_endpoints),
+        "source_input_required_items": source_required_items,
+        "jwt_required_items": jwt_required_items,
+        "mutation_or_observed_parameter_blockers": dict(business_logic.get("blocked") or {}),
+        "reachability_blocked_hypotheses": len(reachability_blocked_hypotheses),
+        "auth_unclassifiable_reachability_endpoints": unclassifiable_auth_endpoints,
+        "auth_unclassifiable_passive_archive_endpoints": passive_unprobed_auth_endpoints,
+        "coverage_external_precondition_items": len(external_coverage_items),
+        "externally_blocked_skills": sorted(externally_blocked_skills),
+    }
+    depth_score = (
+        (hypothesis_resolution * 25)
+        + (auth_depth * 20)
+        + (endpoint_auth_depth * 15)
+        + (api_depth * 10)
+        + (business_logic_depth * 20)
+        + (skill_objective_ratio * 10)
+    )
 
     components = {
         "phase_coverage": {
@@ -361,6 +654,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "score": round(_clamp(evidence_score), 1),
             "weight": 25,
             "findings_total": len(findings),
+            "false_positive_findings_excluded": len(finding_rows) - len(findings),
             "findings_with_evidence": len(findings_with_evidence),
             "findings_with_reproduction": len(findings_with_repro),
             "verified_findings": len(verified_findings),
@@ -371,6 +665,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "score": round(_clamp(validation_score), 1),
             "weight": 15,
             "validation_runs": len(validations),
+            "historical_validation_runs_excluded": len(all_validations) - len(validations),
             "successful_validations": len(successful_validations),
             "retests": len(retests),
             "high_findings": len(high_findings),
@@ -380,13 +675,21 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "score": round(_clamp(depth_score), 1),
             "weight": 5,
             "hypotheses": len(hypotheses),
+            "active_hypotheses": len(active_hypotheses),
             "hypotheses_resolved": len(resolved_hypotheses),
             "hypotheses_tested": len(tested_hypotheses),
             "hypotheses_superseded": len(superseded_hypotheses),
             "hypotheses_blocked": len(blocked_hypotheses),
-            "identities": len(identities),
+            "hypotheses_blocked_reachability": len(reachability_blocked_hypotheses),
+            "hypotheses_blocked_actionable": len(active_blocked_hypotheses),
+            "hypotheses_blocked_reasons": dict(sorted(blocked_hypothesis_reasons.items())),
+            "identities": identities_count,
             "valid_auth_sessions": len(valid_sessions),
             "endpoints_auth_classified": classified_auth_endpoints,
+            "endpoints_auth_classifiable": classifiable_auth_denominator,
+            "endpoints_auth_unknown": unknown_auth_endpoints,
+            "endpoints_auth_unclassifiable_reachability": unclassifiable_auth_endpoints,
+            "endpoints_auth_unclassifiable_passive_archive": passive_unprobed_auth_endpoints,
             "api_specs": api_specs_count,
             "parameters": parameters_count,
             "services": services_count,
@@ -395,6 +698,13 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "business_logic_invariants": int(business_logic.get("invariants") or 0),
             "business_logic_ready_read_only": int(business_logic.get("ready_read_only") or 0),
             "business_logic_blocked_endpoints": int(business_logic.get("blocked_endpoints") or 0),
+            "business_logic_blockers": dict(business_logic.get("blocked") or {}),
+            "skill_objectives_expected": len(expected_skills),
+            "skill_objectives_applicable": len(effective_expected_skills),
+            "skill_objectives_attributed": len(expected_skills & attributed_skills),
+            "skill_objectives_executed": len(expected_skills & executed_skills),
+            "skill_objectives_missing": missing_skill_objectives,
+            "skill_objectives_external_blocked": sorted(externally_blocked_skills),
         },
         "tool_reliability": {
             "score": round(_clamp(tool_score), 1),
@@ -402,12 +712,23 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "tools_attempted": attempted,
             "tools_succeeded": succeeded,
             "failed_work_items": failed_tools,
+            "infrastructure_failure_items": infrastructure_failure_items,
+            "work_status_counts": dict(sorted(work_status_counts.items())),
             "missing_required_tools": missing_required,
+            "preflight_targets": preflight_total,
+            "p02_positive_targets": p02_positive_targets,
+            "p06_positive_targets": p06_positive_targets,
+            "p06_no_http_targets": p06_no_http_targets,
         },
         "surface_coverage": {
             "score": round(_clamp(surface_score), 1),
             "weight": 10,
             "coverage_items": len(coverage_items),
+            "coverage_items_excluded": len(coverage_rows) - len(coverage_items),
+            "coverage_items_raw": len(coverage_rows),
+            "coverage_items_inventory_only": len(inventory_coverage_items),
+            "coverage_items_external_precondition": len(external_coverage_items),
+            "coverage_buckets": dict(sorted(coverage_buckets.items())),
             "covered_items": covered_count,
             "offensive_assets": offensive_assets_count,
             "endpoints": endpoints_count,
@@ -440,12 +761,20 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": f"{len(findings) - len(findings_with_evidence)} findings não têm artefato ou evidência estruturada.",
             "action": "Persistir request/response, comando, alvo e reprodução no EvidenceArtifact.",
         })
-    if attempted and success_ratio < 0.75:
+    if preflight_total and p06_no_http_targets == preflight_total and p06_positive_targets == 0:
         gaps.append({
             "severity": "medium",
-            "area": "tool_reliability",
-            "title": "Taxa de sucesso das ferramentas abaixo do ideal",
-            "detail": f"{succeeded}/{attempted} execuções com sucesso.",
+            "area": "surface_reachability",
+            "title": "Nenhum alvo teve superfície HTTP confirmada",
+            "detail": f"P06 concluiu sem resposta HTTP positiva para {p06_no_http_targets}/{preflight_total} alvo(s).",
+            "action": "Não promover fases web profundas; revisar conectividade, DNS, WAF/CDN e portas antes de avaliar vulnerabilidades.",
+        })
+    if attempted and success_ratio < 0.75 and infrastructure_failure_items:
+        gaps.append({
+            "severity": "medium",
+            "area": "infrastructure_reliability",
+            "title": "Falhas operacionais das ferramentas abaixo do ideal",
+            "detail": f"{succeeded}/{attempted} execuções com sucesso; {infrastructure_failure_items} item(ns) falharam ou deram timeout.",
             "action": "Revisar módulos Kali, timeouts, concorrência e dependências do runner.",
         })
     if not validations and findings:
@@ -464,29 +793,65 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": "Não há CoverageItem nem endpoints ofensivos persistidos.",
             "action": "Persistir endpoints, parâmetros e cobertura por classe de teste.",
         })
-    hypotheses_not_exercised = len(hypotheses) - len(tested_hypotheses) - len(superseded_hypotheses)
+    hypotheses_not_exercised = len(active_hypotheses) - len(tested_hypotheses)
     if hypotheses_not_exercised > 0:
+        actionable_blocked_reasons = Counter(
+            str((h.hypothesis_metadata or {}).get("blocked_reason") or "reason_not_recorded")
+            for h in active_blocked_hypotheses
+        )
+        blocked_detail = ", ".join(
+            f"{reason}={count}" for reason, count in sorted(actionable_blocked_reasons.items())
+        )
         gaps.append({
             "severity": "high" if hypothesis_resolution < 0.5 else "medium",
             "area": "test_depth",
             "title": "Hipóteses ainda não exercitadas",
-            "detail": f"{hypotheses_not_exercised} de {len(hypotheses)} hipóteses não foram exercitadas ({len(blocked_hypotheses)} bloqueadas).",
-            "action": "Executar validadores seguros em lotes e registrar bloqueios de autenticação ou ferramenta.",
+            "detail": (
+                f"{hypotheses_not_exercised} de {len(active_hypotheses)} hipóteses aplicáveis não foram exercitadas "
+                f"({len(active_blocked_hypotheses)} bloqueadas; {blocked_detail or 'sem motivo registrado'})."
+            ),
+            "action": "Corrigir a pré-condição registrada e reexecutar somente os validadores aplicáveis.",
+        })
+    if reachability_blocked_hypotheses:
+        gaps.append({
+            "severity": "medium",
+            "area": "reachability",
+            "title": "Hipóteses não testáveis por reachability",
+            "detail": f"{len(reachability_blocked_hypotheses)} hipóteses foram isoladas porque o endpoint não respondeu.",
+            "action": "Reexecutar P02/P06 nos alvos afetados ou aceitar como superfície não testável nesta janela.",
+        })
+    if missing_skill_objectives:
+        gaps.append({
+            "severity": "high" if skill_objective_ratio < 0.6 else "medium",
+            "area": "skill_coverage",
+            "title": "Objetivos de skills não exercitados",
+            "detail": (
+                f"{len(missing_skill_objectives)} de {len(expected_skills)} objetivos obrigatórios "
+                "não possuem execução concluída."
+            ),
+            "action": (
+                "Executar ao menos uma técnica aplicável com evidência para cada skill: "
+                + ", ".join(missing_skill_objectives[:8])
+            ),
         })
     if auth_required and len(valid_sessions) < 2:
         gaps.append({
             "severity": "high",
-            "area": "test_depth",
-            "title": "Matriz de autorização incompleta",
+            "area": "external_precondition",
+            "title": "Matriz de autorização aguardando credenciais",
             "detail": f"Há {len(valid_sessions)} sessão(ões) válida(s); testes horizontais exigem ao menos duas identidades.",
             "action": "Configurar identidades de papéis distintos e validar suas sessões antes das fases autenticadas.",
         })
-    if endpoints_count and endpoint_auth_depth < 0.8:
+    if classifiable_auth_denominator and endpoint_auth_depth < 0.8:
         gaps.append({
             "severity": "medium",
             "area": "test_depth",
             "title": "Requisito de autenticação não classificado",
-            "detail": f"{classified_auth_endpoints}/{endpoints_count} endpoints têm auth_required conhecido.",
+            "detail": (
+                f"{classified_auth_endpoints}/{classifiable_auth_denominator} endpoints classificáveis têm auth_required conhecido; "
+                f"{unclassifiable_auth_endpoints} ficaram sem classificação por reachability e "
+                f"{passive_unprobed_auth_endpoints} vieram de fonte passiva sem baseline ativo."
+            ),
             "action": "Executar baseline anônimo e autenticado para classificar cada endpoint.",
         })
     if bl_relevant and bl_contract_ratio < 1.0:
@@ -495,15 +860,22 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "area": "business_logic",
             "title": "Endpoints de negócio sem contrato de invariantes",
             "detail": f"{int(business_logic.get('contracted_endpoints') or 0)}/{bl_relevant} endpoints relevantes têm contrato de business logic.",
-            "action": "Reanalisar o inventário com endpoint-intelligence-v6 antes de executar testes ativos.",
+            "action": "Reanalisar o inventário com o contrato de endpoint atual antes de executar testes ativos.",
         })
     if int(business_logic.get("high_risk_endpoints") or 0) and int(business_logic.get("blocked_endpoints") or 0):
+        blocker_counts = dict(business_logic.get("blocked") or {})
+        blocker_detail = ", ".join(
+            f"{name}={count}" for name, count in sorted(blocker_counts.items()) if int(count or 0) > 0
+        )
         gaps.append({
             "severity": "high",
             "area": "business_logic",
             "title": "Invariantes de alto risco bloqueados por pré-condições",
-            "detail": f"{int(business_logic.get('blocked_endpoints') or 0)} endpoints aguardam identidade validada, parâmetro observado ou fixture reversível.",
-            "action": "Fornecer duas identidades, objeto controlado e plano de rollback; não substituir essas evidências por enumeração especulativa.",
+            "detail": (
+                f"{int(business_logic.get('blocked_endpoints') or 0)} endpoints têm pré-condições reais "
+                f"({blocker_detail or 'sem detalhamento'})."
+            ),
+            "action": "Atender apenas a pré-condição registrada para cada endpoint; não presumir credenciais ou objetos.",
         })
 
     if total_score >= 85:
@@ -532,6 +904,18 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "completion_status": "completed_with_gaps",
             "reason": "legacy_gate_did_not_enforce_numeric_threshold",
         })
+    preflight_summary = _build_preflight_summary(
+        db,
+        job,
+        external_preconditions=external_preconditions,
+        business_logic=business_logic,
+        components=components,
+    )
+    auth_precondition_summary = _build_auth_precondition_summary(
+        external_preconditions=external_preconditions,
+        components=components,
+    )
+    business_logic_precondition_summary = _build_business_logic_precondition_summary(business_logic)
 
     return {
         "scan_id": job.id,
@@ -547,17 +931,26 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "label": label,
         "quality_gate": quality_gate,
         "business_logic": business_logic,
+        "external_preconditions": external_preconditions,
+        "preflight_summary": preflight_summary,
+        "auth_precondition_summary": auth_precondition_summary,
+        "business_logic_precondition_summary": business_logic_precondition_summary,
         "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
-        "runtime_visibility": _runtime_visibility(job, validations, artifacts, work_items),
+        "runtime_visibility": _runtime_visibility(job, all_validations, artifacts, work_items),
         "execution_metrics": execution_metrics,
         "components": components,
         "summary": {
             "findings_total": len(findings),
+            "false_positive_findings_excluded": len(finding_rows) - len(findings),
             "verified_findings": len(verified_findings),
             "candidate_findings": len(candidate_findings),
             "artifacts_total": len(artifacts),
             "validation_runs": len(validations),
+            "historical_validation_runs_excluded": len(all_validations) - len(validations),
             "coverage_items": len(coverage_items),
+            "coverage_items_raw": len(coverage_rows),
+            "coverage_items_inventory_only": len(inventory_coverage_items),
+            "coverage_items_external_precondition": len(external_coverage_items),
             "tools_attempted": attempted,
             "tools_succeeded": succeeded,
             "expected_phases": len(expected_phase_ids),
@@ -575,6 +968,191 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     }
 
 
+def _phase_status_counts(db: Session, scan_id: int, phase_ids: set[str]) -> dict[str, dict[str, int]]:
+    rows = (
+        db.query(ScanWorkItem.phase_id, ScanWorkItem.status, func.count(ScanWorkItem.id))
+        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.phase_id.in_(phase_ids))
+        .group_by(ScanWorkItem.phase_id, ScanWorkItem.status)
+        .all()
+    )
+    out: dict[str, dict[str, int]] = {phase: {} for phase in phase_ids}
+    for phase_id, status, count in rows:
+        out.setdefault(str(phase_id or "unknown"), {})[str(status or "unknown")] = int(count or 0)
+    return out
+
+
+def _build_preflight_summary(
+    db: Session,
+    job: ScanJob,
+    *,
+    external_preconditions: dict[str, Any],
+    business_logic: dict[str, Any],
+    components: dict[str, Any],
+) -> dict[str, Any]:
+    state = dict(job.state_data or {})
+    profiles = dict(((state.get("preflight") or {}).get("targets") or {}))
+    profile_rows = [dict(value or {}) for value in profiles.values()]
+    phase_counts = _phase_status_counts(db, int(job.id), {"P02", "P06"})
+    recon_rows = (
+        db.query(CoverageItem.test_class, CoverageItem.status, func.count(CoverageItem.id))
+        .filter(
+            CoverageItem.scan_job_id == job.id,
+            CoverageItem.coverage_type == "recon_qualification",
+            CoverageItem.test_class.in_(["P02", "P06"]),
+        )
+        .group_by(CoverageItem.test_class, CoverageItem.status)
+        .all()
+    )
+    recon_coverage_counts: dict[str, dict[str, int]] = {"P02": {}, "P06": {}}
+    for phase_id, status, count in recon_rows:
+        recon_coverage_counts.setdefault(str(phase_id or "unknown"), {})[str(status or "unknown")] = int(count or 0)
+    p02_complete = sum(bool(row.get("p02_complete")) for row in profile_rows)
+    p06_complete = sum(bool(row.get("p06_complete")) for row in profile_rows)
+    p06_live = sum(bool(row.get("p06_http_live")) for row in profile_rows)
+    open_port_targets = sum(bool(row.get("open_ports")) for row in profile_rows)
+    dead_targets = list(state.get("dead_targets") or [])
+    dns_inconclusive = list(state.get("dns_inconclusive_targets") or [])
+    blocked_reasons = Counter(
+        str((item.item_metadata or {}).get("gate_reason") or item.last_error or "reason_not_recorded")
+        for item in db.query(ScanWorkItem)
+        .filter(ScanWorkItem.scan_job_id == job.id, ScanWorkItem.status.in_(["blocked", "skipped", "timeout", "failed"]))
+        .all()
+    )
+    return {
+        "version": "preflight-summary-v2",
+        "target": job.target_query,
+        "updated_at": datetime.now().isoformat(),
+        "producer_stage": state.get("work_producer_stage"),
+        "producers_sealed": bool(state.get("work_producers_sealed")),
+        "qualification_contract_version": int(state.get("qualification_contract_version") or 0),
+        "targets": {
+            "expanded": len(state.get("expanded_targets") or []),
+            "selected": len(state.get("target_set") or []),
+            "profiled": len(profile_rows),
+            "rejected_non_public": sum(bool(row.get("non_public_rejected")) for row in profile_rows),
+            "dead": len(dead_targets),
+            "dns_inconclusive": len(dns_inconclusive),
+            "sample_dead": dead_targets[:8],
+            "sample_dns_inconclusive": dns_inconclusive[:8],
+        },
+        "p02": {
+            "status_counts": phase_counts.get("P02") or {},
+            "coverage_counts": recon_coverage_counts.get("P02") or {},
+            "input_covered_targets": sum(bool(row.get("p02_input_covered")) for row in profile_rows),
+            "complete_targets": p02_complete,
+            "targets_with_open_ports": open_port_targets,
+            "open_ports_observed": sum(len(row.get("open_ports") or []) for row in profile_rows),
+        },
+        "p06": {
+            "status_counts": phase_counts.get("P06") or {},
+            "coverage_counts": recon_coverage_counts.get("P06") or {},
+            "input_covered_targets": sum(bool(row.get("p06_input_covered")) for row in profile_rows),
+            "complete_targets": p06_complete,
+            "http_live_targets": p06_live,
+            "no_http_response_targets": sum(bool(row.get("p06_complete")) and not bool(row.get("p06_http_live")) for row in profile_rows),
+        },
+        "quality_inputs": {
+            "external_preconditions": external_preconditions,
+            "business_logic_blockers": dict(business_logic.get("blocked") or {}),
+            "test_depth": (components.get("test_depth") or {}).get("score"),
+            "surface_coverage": (components.get("surface_coverage") or {}).get("score"),
+            "tool_reliability": (components.get("tool_reliability") or {}).get("score"),
+        },
+        "non_success_reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in blocked_reasons.most_common(12)
+        ],
+    }
+
+
+def _build_auth_precondition_summary(
+    *,
+    external_preconditions: dict[str, Any],
+    components: dict[str, Any],
+) -> dict[str, Any]:
+    depth = dict((components.get("test_depth") or {}))
+    valid_sessions = int(external_preconditions.get("valid_auth_sessions") or 0)
+    auth_required = int(external_preconditions.get("auth_required_endpoints") or 0)
+    identity_pair_required = bool(external_preconditions.get("identity_pair_required"))
+    return {
+        "version": "auth-precondition-summary-v1",
+        "blocked": identity_pair_required or bool(external_preconditions.get("jwt_required_items")),
+        "reason": (
+            "missing_valid_identity_pair"
+            if identity_pair_required
+            else "captured_jwt_required"
+            if int(external_preconditions.get("jwt_required_items") or 0) > 0
+            else ""
+        ),
+        "evidence": {
+            "valid_auth_sessions": valid_sessions,
+            "required_valid_sessions_for_horizontal_tests": 2 if identity_pair_required else 0,
+            "auth_required_endpoints": auth_required,
+            "jwt_required_work_items": int(external_preconditions.get("jwt_required_items") or 0),
+            "source_input_required_items": int(external_preconditions.get("source_input_required_items") or 0),
+            "endpoints_auth_classified": int(depth.get("endpoints_auth_classified") or 0),
+            "endpoints_auth_classifiable": int(depth.get("endpoints_auth_classifiable") or 0),
+            "endpoints_auth_unknown": int(depth.get("endpoints_auth_unknown") or 0),
+            "endpoints_auth_unclassifiable_reachability": int(depth.get("endpoints_auth_unclassifiable_reachability") or 0),
+            "endpoints_auth_unclassifiable_passive_archive": int(depth.get("endpoints_auth_unclassifiable_passive_archive") or 0),
+        },
+        "operator_message": (
+            f"{valid_sessions} sessão(ões) válida(s) encontradas; testes horizontais/IDOR/BFLA "
+            "exigem duas identidades reais e validadas."
+            if identity_pair_required
+            else "Sem bloqueio global de identidade registrado."
+        ),
+    }
+
+
+def _build_business_logic_precondition_summary(business_logic: dict[str, Any]) -> dict[str, Any]:
+    blockers = dict(business_logic.get("blocked") or {})
+    return {
+        "version": "business-logic-precondition-summary-v1",
+        "relevant_endpoints": int(business_logic.get("relevant_endpoints") or 0),
+        "contracted_endpoints": int(business_logic.get("contracted_endpoints") or 0),
+        "high_risk_endpoints": int(business_logic.get("high_risk_endpoints") or 0),
+        "ready_read_only": int(business_logic.get("ready_read_only") or 0),
+        "ready_mutation": int(business_logic.get("ready_mutation") or 0),
+        "blocked_endpoints": int(business_logic.get("blocked_endpoints") or 0),
+        "blockers": blockers,
+        "operator_message": (
+            "Execução de lógica de negócio bloqueada por pré-condições registradas: "
+            + ", ".join(f"{name}={count}" for name, count in sorted(blockers.items()))
+            if blockers
+            else "Sem bloqueio de lógica de negócio registrado."
+        ),
+        "guardrails": dict(business_logic.get("execution_guardrails") or {}),
+    }
+
+
+def _persist_quality_state(
+    db: Session,
+    job: ScanJob,
+    state: dict[str, Any],
+    quality: dict[str, Any],
+    gate_state: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = {
+        key: value for key, value in quality.items()
+        if key not in {"runtime_visibility", "phase_monitor_issues"}
+    }
+    snapshot["quality_gate"] = gate_state
+    state["quality_snapshot"] = snapshot
+    state["quality_gate"] = gate_state
+    for key in (
+        "preflight_summary",
+        "auth_precondition_summary",
+        "business_logic_precondition_summary",
+    ):
+        if key in quality:
+            state[key] = quality[key]
+    state["quality_snapshot_persisted_at"] = datetime.now().isoformat()
+    job.state_data = state
+    db.add(job)
+    return state
+
+
 def _runtime_visibility(
     job: ScanJob,
     validations: list[ValidationRun],
@@ -586,7 +1164,13 @@ def _runtime_visibility(
     p21_validations: list[dict[str, Any]] = []
     for validation in validations:
         meta = dict(validation.run_metadata or {})
-        if str(meta.get("phase_id") or "").upper() != "P21":
+        # Older validators did not persist phase_id, but a finding-scoped
+        # ValidationRun is still a P21 validation outcome. Requiring metadata
+        # made the UI report 0 while the database contained real results.
+        if (
+            str(meta.get("phase_id") or "").upper() != "P21"
+            and validation.finding_id is None
+        ):
             continue
         p21_validations.append({
             "id": validation.id,
@@ -678,6 +1262,17 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     rounds = int(gate_state.get("rounds") or 0)
 
     actions: list[dict[str, Any]] = []
+    try:
+        from app.services.recon_qualification_coverage import materialize_recon_qualification_coverage
+
+        materialize_recon_qualification_coverage(db, job)
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"qualification_coverage_materialization_failed error={exc!s}"[:2000],
+        ))
     validation_changes = _apply_promotion_gate(db, job)
     validation_changes["p21_audits_recorded"] = _record_p21_evidence_audits(db, job)
     try:
@@ -702,7 +1297,12 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     try:
         from app.services.finding_validation_lifecycle import enforce_high_risk_lifecycle
 
-        lifecycle = enforce_high_risk_lifecycle(db, job, limit=QUALITY_GATE_MAX_POC_PER_ROUND)
+        # This is an optional quality extension. Isolate its writes so a
+        # constraint/parser error can be reported as a visible quality gap
+        # without poisoning the scan's outer transaction and turning a fully
+        # drained scan into FAILED.
+        with db.begin_nested():
+            lifecycle = enforce_high_risk_lifecycle(db, job, limit=QUALITY_GATE_MAX_POC_PER_ROUND)
         validation_changes["high_risk_lifecycle"] = lifecycle
         if int(lifecycle.get("scheduled", 0) or 0) > 0:
             actions.append({"type": "schedule_p21_validation", **lifecycle})
@@ -716,10 +1316,6 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
             message=f"high_risk_lifecycle_failed error={exc!s}"[:2000],
         ))
     quality = build_scan_quality(db, job)
-    state["quality_snapshot"] = {
-        key: value for key, value in quality.items()
-        if key not in {"runtime_visibility", "phase_monitor_issues"}
-    }
     if rounds >= QUALITY_GATE_MAX_ROUNDS:
         decision = quality_gate_decision(quality, actions)
         gate_state.update({
@@ -728,10 +1324,7 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
             "last_grade": quality.get("grade"),
             "reason": "max_quality_gate_rounds_reached",
         })
-        state["quality_snapshot"]["quality_gate"] = gate_state
-        state["quality_gate"] = gate_state
-        job.state_data = state
-        db.add(job)
+        state = _persist_quality_state(db, job, state, quality, gate_state)
         return {
             **decision,
             "status": gate_state["status"],
@@ -775,10 +1368,7 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
         "actions": actions,
     })
     gate_state["history"] = history[-10:]
-    state["quality_snapshot"]["quality_gate"] = gate_state
-    state["quality_gate"] = gate_state
-    job.state_data = state
-    db.add(job)
+    state = _persist_quality_state(db, job, state, quality, gate_state)
 
     return {
         **decision,
@@ -935,30 +1525,20 @@ def _record_p21_evidence_audits(db: Session, job: ScanJob, max_rows: int = 12) -
             created_at=datetime.now(),
         )
         db.add(validation)
-        existing_cov = (
-            db.query(CoverageItem)
-            .filter(
-                CoverageItem.scan_job_id == job.id,
-                CoverageItem.coverage_type == "finding_validation",
-                CoverageItem.target_ref == target,
-                CoverageItem.test_class == "P21",
-            )
-            .first()
+        from app.services.offensive_inventory_service import OffensiveInventoryService
+
+        OffensiveInventoryService(db, job).upsert_coverage(
+            coverage_type="finding_validation",
+            target_ref=target,
+            test_class="P21",
+            status="validated",
+            finding_id=finding.id,
+            metadata={
+                "quality_gate_evidence_audit": True,
+                "artifact_id": int(audit_artifact.id),
+                "validation_run_id": int(validation.id),
+            },
         )
-        if not existing_cov:
-            db.add(CoverageItem(
-                scan_job_id=job.id,
-                coverage_type="finding_validation",
-                target_ref=target,
-                test_class="P21",
-                status="validated",
-                finding_id=finding.id,
-                coverage_metadata={
-                    "quality_gate_evidence_audit": True,
-                    "artifact_id": int(audit_artifact.id),
-                },
-                updated_at=datetime.now(),
-            ))
         recorded += 1
 
     if recorded:

@@ -100,14 +100,28 @@ def main() -> int:
                 }
                 print(json.dumps(payload, indent=2))
                 return 0
-            if "rate limit" in msg or "429" in msg:
-                if attempt >= MAX_ATTEMPTS:
-                    print(f"shodan rate limit exceeded after {attempt} attempt(s): {exc}", file=sys.stderr)
-                    return 8
-                time.sleep(3)
-                continue
-            print(f"shodan api error: {exc}", file=sys.stderr)
-            return 6
+            # shodan.client wraps the ENTIRE request call in `except Exception:
+            # raise APIError('Unable to connect to Shodan')` (confirmed by
+            # reading the installed library source) — any network-level
+            # failure (DNS, connection refused/reset, TLS, requests' own
+            # timeout, or a connection-level rate-limit rejection that never
+            # reaches a parseable HTTP response) collapses to this one generic
+            # message with the real cause discarded. Live scan #6 hit this
+            # exact message on 5/5 observed failures. A genuine HTTP 429 with
+            # a JSON error body WOULD still carry real "rate limit" text (the
+            # library only special-cases 401/403/502 explicitly, so 429 falls
+            # through to `raise APIError(data['error'])` with the real
+            # message) — so the text check below is still meaningful when we
+            # DO get one. But since we can't tell transient-connection-failure
+            # apart from rate-limit-without-a-clean-response by text alone,
+            # BOTH get the same retry-with-backoff treatment; only the exit
+            # code differs, as a best-effort hint for whoever reads last_error.
+            is_rate_limit_text = "rate limit" in msg or "429" in msg
+            if attempt >= MAX_ATTEMPTS:
+                print(f"shodan api error after {attempt} attempt(s): {exc}", file=sys.stderr)
+                return 8 if is_rate_limit_text else 6
+            time.sleep(3)
+            continue
         except Exception as exc:
             signal.alarm(0)
             print(f"shodan call failed: {exc}", file=sys.stderr)

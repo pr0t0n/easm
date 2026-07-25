@@ -37,6 +37,12 @@ _GUARD_LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
 # idempotentes). NUNCA reinicia postgres/redis (stateful), backend (é onde o
 # guardião roda) nem frontend/ollama/zap (caros ou irrelevantes ao scan).
 _AUTO_RESTART_NAMES = {"celery_beat", "mcp_server", "kali_runner"}
+_SCAN_TASK_NAMES = {
+    "run_scan_job_unit",
+    "run_scan_target_subset",
+    "execute_scan_work_item",
+    "poll_scan_work_item",
+}
 
 
 def _is_auto_restartable(short_name: str) -> bool:
@@ -102,6 +108,52 @@ def _restart_container(short_or_full: str, reason: str) -> dict:
         return {"container": short, "action": "restart_failed", "reason": reason, "error": str(exc)[:160]}
 
 
+def _worker_has_active_scan_task(short_name: str) -> bool | None:
+    """Return whether a worker currently owns scan work.
+
+    ``worker_scope`` also consumes ``scan.unit`` tasks.  Restarting it merely
+    because the watchdog heartbeat is stale can kill an in-flight scan phase
+    between "phase dispatched" and durable tool-run registration.  If Celery is
+    inspectable and the worker reports active/reserved scan work, the platform
+    guard must not restart it blindly.
+
+    ``None`` means Celery inspect itself failed/was inconclusive; callers may
+    still decide to restart when the watchdog is stale and the worker is not
+    responding.
+    """
+    short = str(short_name or "").strip()
+    if not short.startswith("worker_"):
+        return False
+    worker_group = short.removeprefix("worker_")
+    try:
+        from app.workers.celery_app import celery_app
+
+        insp = celery_app.control.inspect(timeout=1.5)
+        payloads = []
+        for fn in (insp.active, insp.reserved):
+            try:
+                data = fn() or {}
+            except Exception:
+                data = {}
+            payloads.append(data)
+        if not any(payloads):
+            return None
+        saw_worker = False
+        for data in payloads:
+            for hostname, tasks in (data or {}).items():
+                host = str(hostname or "")
+                if not (host.startswith(f"{worker_group}@") or f"_{worker_group}" in host):
+                    continue
+                saw_worker = True
+                for task in tasks or []:
+                    name = str((task or {}).get("name") or "")
+                    if name in _SCAN_TASK_NAMES or name.endswith(tuple(f".{n}" for n in _SCAN_TASK_NAMES)):
+                        return True
+        return False if saw_worker else None
+    except Exception:
+        return None
+
+
 def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False,
                            docker_view: dict | None = None) -> dict:
     """Guardião independente (roda no backend, sempre de pé).
@@ -132,8 +184,16 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
     alive = age is not None and age <= _WATCHDOG_STALE_SECONDS
     report["watchdog"] = {"heartbeat_age_seconds": age, "stale_threshold": _WATCHDOG_STALE_SECONDS, "alive": alive}
     if not alive:
-        for c in ("celery_beat", "worker_scope"):
-            report["corrections"].append(_restart_container(c, reason=f"watchdog_stale(age={age})"))
+        report["corrections"].append(_restart_container("celery_beat", reason=f"watchdog_stale(age={age})"))
+        worker_scope_busy = _worker_has_active_scan_task("worker_scope")
+        if worker_scope_busy is True:
+            report["corrections"].append({
+                "container": "worker_scope",
+                "action": "skip_active_scan_task",
+                "reason": f"watchdog_stale(age={age})",
+            })
+        else:
+            report["corrections"].append(_restart_container("worker_scope", reason=f"watchdog_stale(age={age})"))
 
     # 2. Containers stateless caídos ──────────────────────────────────────────
     view = docker_view if docker_view is not None else _docker_view()

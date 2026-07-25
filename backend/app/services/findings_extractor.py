@@ -620,10 +620,17 @@ def _extract_nuclei_findings(
 
     for row in rows:
         template_id = str(row.get("template-id") or row.get("template") or "")
-        info = dict(row.get("info") or {})
+        raw_info = row.get("info")
+        info = dict(raw_info) if isinstance(raw_info, dict) else {}
         name = str(info.get("name") or template_id)
         severity_raw = str(info.get("severity") or "info").lower()
-        tags = list(info.get("tags") or [])
+        raw_tags = info.get("tags")
+        if isinstance(raw_tags, str):
+            tags = [part.strip() for part in raw_tags.split(",") if part.strip()]
+        elif isinstance(raw_tags, (list, tuple, set)):
+            tags = [str(part) for part in raw_tags if str(part)]
+        else:
+            tags = []
         matched_at = str(row.get("matched-at") or row.get("url") or target)
         result_type = str(row.get("type") or "")
         description = str(info.get("description") or "").strip()
@@ -647,7 +654,8 @@ def _extract_nuclei_findings(
         # Example: {"info": {"classification": {"cvss-score": 9.8, "cvss-metrics": "CVSS:3.1/AV:N/..."}}}
         cvss_score: float | None = None
         try:
-            _cls = dict(info.get("classification") or {})
+            _raw_cls = info.get("classification")
+            _cls = dict(_raw_cls) if isinstance(_raw_cls, dict) else {}
             _cs_raw = (
                 _cls.get("cvss-score")
                 or _cls.get("cvss_score")
@@ -660,7 +668,18 @@ def _extract_nuclei_findings(
             pass
 
         # ── Extracted result fields (matched content, curl output, etc.) ──────
-        extracted_results = dict(row.get("extracted-results") or row.get("extracted_results") or {})
+        _raw_extracted = row.get("extracted-results")
+        if _raw_extracted is None:
+            _raw_extracted = row.get("extracted_results")
+        if isinstance(_raw_extracted, dict):
+            extracted_results: Any = dict(_raw_extracted)
+        elif isinstance(_raw_extracted, (list, tuple, set)):
+            # Nuclei's canonical JSONL schema uses a list of extracted strings.
+            extracted_results = [str(value) for value in _raw_extracted]
+        elif _raw_extracted in (None, ""):
+            extracted_results = None
+        else:
+            extracted_results = [str(_raw_extracted)]
         curl_command = str(row.get("curl-command") or row.get("curl_command") or "").strip()
 
         findings.append({
@@ -1258,7 +1277,7 @@ def _extract_subdomain_discovery_findings(
 
     if subdomains:
         findings.append({
-            "title": f"Subdomínios descobertos ({tool_name}): {len(subdomains)} host(s)",
+            "title": f"Subdomínios descobertos ({tool_name})",
             "severity": "info",
             "risk_score": 2,
             "source_worker": "recon",
@@ -1284,7 +1303,7 @@ def _extract_subdomain_discovery_findings(
     hv = [s for s in subdomains if _HV_PATTERNS.search(s)]
     if hv:
         findings.append({
-            "title": f"Subdomínios de alto valor descobertos ({tool_name}): {len(hv)} host(s)",
+            "title": f"Subdomínios de alto valor descobertos ({tool_name})",
             "severity": "medium",
             "risk_score": 5,
             "source_worker": "recon",
@@ -1312,7 +1331,7 @@ def _extract_subdomain_discovery_findings(
     nonprod = sorted({s for s in subdomains if _NONPROD_RE.search(s)})
     if nonprod:
         findings.append({
-            "title": f"Ambiente não-produtivo exposto à internet: {len(nonprod)} host(s)",
+            "title": "Ambiente não-produtivo exposto à internet",
             "severity": "medium",
             "risk_score": 6,
             "source_worker": "recon",
@@ -2318,6 +2337,21 @@ def _confidence_for(tool_col: str, v_status: str) -> int:
     return min(99, max(1, int(base * mult)))
 
 
+def _finding_dedup_title_key(title: str, details: dict[str, Any]) -> str:
+    """Stable semantic key for findings whose title includes live counts.
+
+    Counts are evidence, not identity. If they remain in the dedup key, two
+    scans of the same target can produce duplicate/unstable findings only
+    because one resolver returned one extra host or URL.
+    """
+    key = str(details.get("finding_class") or title or "").strip().lower()
+    key = re.sub(r"\b\d+\s+(?:host|hosts|host\(s\)|endpoint|endpoints|url|urls|porta|portas|ocorrência|ocorrências|encontrados?)\b", "{n}", key)
+    key = re.sub(r":\s*\d+\b", ":{n}", key)
+    key = re.sub(r"\(\s*\d+\s+[^)]*\)", "({n})", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return key[:255]
+
+
 def persist_finding_dicts(
     db: Session,
     job: Any,                      # ScanJob
@@ -2388,6 +2422,7 @@ def persist_finding_dicts(
 
         if not title or not domain_col:
             continue
+        details["dedup_title_key"] = _finding_dedup_title_key(title, details)
         outside_hosts = out_of_scope_hosts_for_finding(
             details,
             domain_col,
@@ -2504,8 +2539,24 @@ def persist_finding_dicts(
             if _hdr_dup:
                 continue
 
-        # Generic dedup: skip if (scan_job_id, title, domain, tool) already exists
+        # Generic dedup: skip if (scan_job_id, semantic-title, domain, tool)
+        # already exists. Semantic title intentionally strips live counts.
         exists = (
+            db.query(Finding)
+            .filter(
+                Finding.scan_job_id == job.id,
+                Finding.domain == domain_col,
+                Finding.tool == tool_col,
+            )
+            .limit(500)
+            .all()
+        )
+        if any(
+            _finding_dedup_title_key(str(existing.title or ""), dict(existing.details or {})) == details["dedup_title_key"]
+            for existing in exists
+        ):
+            continue
+        exact_exists = (
             db.query(Finding.id)
             .filter(
                 Finding.scan_job_id == job.id,
@@ -2515,7 +2566,7 @@ def persist_finding_dicts(
             )
             .first()
         )
-        if exists:
+        if exact_exists:
             continue
 
         try:
@@ -3174,7 +3225,6 @@ def _seed_verification_work_item(
         ScanWorkItem.phase_id == phase_id,
         ScanWorkItem.tool_name == verify_tool[:120],
         ScanWorkItem.target == target[:500],
-        ScanWorkItem.status.notin_(["completed", "done", "failed", "skipped"]),
     ).first()
     if already:
         return
@@ -3193,4 +3243,16 @@ def _seed_verification_work_item(
         created_at=__import__("datetime").datetime.now(),
         updated_at=__import__("datetime").datetime.now(),
     )
-    db.add(verify_item)
+    # The queue uniqueness contract covers every status, not only active
+    # items. A terminal validator is still evidence that this exact
+    # phase/tool/target was already scheduled. Use a savepoint as a final
+    # concurrency guard so a duplicate can never roll back the finding that
+    # requested validation.
+    try:
+        from sqlalchemy.exc import IntegrityError
+
+        with db.begin_nested():
+            db.add(verify_item)
+            db.flush()
+    except IntegrityError:
+        return
