@@ -144,6 +144,31 @@ def run_watchdog(db) -> dict:
         report["kali_functional"] = False
         report["kali_restarted"] = _restart_kali()
 
+    # ── 1b. Poller rehydration from durable DB state ─────────────────────────
+    # A submitted scan_work_item may outlive its volatile Celery poll message.
+    # Recreate stale pollers before the stale-active repair below, otherwise a
+    # terminal Kali job can be converted into retry/failed without first fetching
+    # and preserving its result/evidence.
+    try:
+        from app.workers.tasks import _rehydrate_stale_work_item_pollers
+
+        running_scan_ids = [
+            int(row[0])
+            for row in db.execute(text("SELECT id FROM scan_jobs WHERE status='running'")).fetchall()
+        ]
+        for _sid in running_scan_ids:
+            _rehydrate_stale_work_item_pollers(
+                db,
+                _sid,
+                stale_after_seconds=45,
+                limit=200,
+                source="watchdog",
+            )
+        db.commit()
+    except Exception as _rehydrate_err:
+        db.rollback()
+        logger.debug("watchdog poller_rehydration failed: %s", _rehydrate_err)
+
     # ── 2. stall de dispatch nos scans em execução ──────────────────────────
     rows = db.execute(text("""
         SELECT s.id,

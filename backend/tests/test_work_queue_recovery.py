@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 
@@ -117,6 +118,58 @@ def test_postprocessor_skipped_result_stays_skipped() -> None:
         "not_applicable",
     )
     assert tasks._postprocessor_outcome_from_result({"chains": []}) == ("completed", "")
+
+
+def test_rehydrate_stale_submitted_work_item_recreates_poller(monkeypatch) -> None:
+    from app.workers import tasks
+
+    stale_item = SimpleNamespace(
+        id=42,
+        scan_job_id=9,
+        status="submitted",
+        updated_at=datetime.now() - timedelta(minutes=10),
+        lease_until=datetime.now() - timedelta(minutes=1),
+        result={"kali_job_id": "runner-job-42", "timeout": 300},
+        attempts=1,
+        max_attempts=2,
+        last_error=None,
+        finished_at=None,
+    )
+    scheduled: list[int] = []
+    added_logs: list[object] = []
+
+    class FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [stale_item]
+
+    class FakeDB:
+        def query(self, _model):
+            return FakeQuery()
+
+        def add(self, obj):
+            added_logs.append(obj)
+
+    monkeypatch.setattr(
+        tasks,
+        "_schedule_work_item_poll",
+        lambda item_id, *, countdown: scheduled.append(item_id) or True,
+    )
+
+    result = tasks._rehydrate_stale_work_item_pollers(FakeDB(), 9, source="test")
+
+    assert result == {"scheduled": 1, "lease_extended": 1, "missing_job_id": 0}
+    assert scheduled == [42]
+    assert stale_item.lease_until > datetime.now()
+    assert added_logs
 
 
 def test_runtime_state_merge_does_not_resurrect_running_postprocessor() -> None:

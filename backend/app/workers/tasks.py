@@ -751,6 +751,77 @@ def _schedule_work_item_poll(item_id: int, *, countdown: int) -> bool:
     )
 
 
+def _rehydrate_stale_work_item_pollers(
+    db: Session,
+    scan_id: int,
+    *,
+    stale_after_seconds: int = 45,
+    limit: int = 200,
+    source: str = "dispatcher",
+) -> dict[str, int]:
+    """Recreate volatile poll Celery messages from durable submitted work items.
+
+    The Kali/MCP job id lives in scan_work_items.result.  The follow-up Celery
+    poll task is intentionally volatile; worker restarts or saturated one-thread
+    queues can lose/delay that message while the runner job keeps progressing.
+    Without this repair loop the scan can wait forever on submitted rows even
+    after the runner job has reached a terminal state.
+    """
+    from datetime import datetime, timedelta
+    from app.models.models import ScanLog, ScanWorkItem
+
+    now = datetime.now()
+    cutoff = now - timedelta(seconds=max(10, int(stale_after_seconds)))
+    scheduled = 0
+    missing_job_id = 0
+    lease_extended = 0
+    stale_items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == int(scan_id),
+            ScanWorkItem.status == "submitted",
+            ScanWorkItem.updated_at < cutoff,
+        )
+        .order_by(ScanWorkItem.updated_at.asc(), ScanWorkItem.id.asc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    for item in stale_items:
+        result_state = dict(item.result or {})
+        kali_job_id = str(result_state.get("kali_job_id") or result_state.get("dispatch_task_id") or "")
+        if not kali_job_id:
+            item.status = "retry" if int(item.attempts or 0) < int(item.max_attempts or 1) else "failed"
+            item.last_error = "missing_kali_job_id_rehydration"
+            item.lease_until = now + timedelta(seconds=120) if item.status == "retry" else None
+            item.finished_at = now if item.status == "failed" else None
+            missing_job_id += 1
+            continue
+        # Give the rehydrated poller a small grace window so the watchdog does
+        # not fail a submitted item in the same cycle before the poll can fetch
+        # the terminal runner result and persist evidence.
+        grace_until = now + timedelta(seconds=180)
+        if item.lease_until is None or item.lease_until < grace_until:
+            item.lease_until = grace_until
+            lease_extended += 1
+        if _schedule_work_item_poll(int(item.id), countdown=1):
+            scheduled += 1
+    if scheduled or missing_job_id or lease_extended:
+        db.add(ScanLog(
+            scan_job_id=int(scan_id),
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"poller_rehydration source={source} scheduled={scheduled} "
+                f"lease_extended={lease_extended} missing_job_id={missing_job_id}"
+            ),
+        ))
+    return {
+        "scheduled": scheduled,
+        "lease_extended": lease_extended,
+        "missing_job_id": missing_job_id,
+    }
+
+
 def _schedule_pentest_inventory_refresh(
     scan_id: int,
     *,
@@ -3824,30 +3895,8 @@ def dispatch_scan_work_items(
         # and before the next poll is acknowledged, the item can stay submitted
         # forever even though the dispatcher is alive. Recreate stale pollers
         # from the DB source of truth every dispatch cycle.
-        _rehydrated_polls = 0
         try:
-            _stale_poll_cutoff = datetime.now() - timedelta(seconds=45)
-            _submitted_to_poll = (
-                db.query(ScanWorkItem.id)
-                .filter(
-                    ScanWorkItem.scan_job_id == scan_id,
-                    ScanWorkItem.status == "submitted",
-                    ScanWorkItem.updated_at < _stale_poll_cutoff,
-                )
-                .order_by(ScanWorkItem.updated_at.asc(), ScanWorkItem.id.asc())
-                .limit(100)
-                .all()
-            )
-            for (_poll_item_id,) in _submitted_to_poll:
-                if _schedule_work_item_poll(int(_poll_item_id), countdown=1):
-                    _rehydrated_polls += 1
-            if _rehydrated_polls:
-                db.add(ScanLog(
-                    scan_job_id=scan_id,
-                    source="work-queue",
-                    level="INFO",
-                    message=f"poller_rehydration scheduled={_rehydrated_polls}",
-                ))
+            _rehydrate_stale_work_item_pollers(db, scan_id, source="dispatcher")
         except Exception as _poll_rehydrate_exc:
             import logging as _poll_rehydrate_log
             _poll_rehydrate_log.getLogger(__name__).debug(
