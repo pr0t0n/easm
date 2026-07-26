@@ -161,11 +161,12 @@ def _expected_phase_ids(job: ScanJob) -> list[str]:
 def _quality_scored_phase_ids(job: ScanJob) -> list[str]:
     """Return executable phases that can be measured before report generation.
 
-    P22 is the campaign report produced only after this quality gate accepts
-    completion. Scoring it here creates a circular false gap: it is necessarily
-    queued while the gate is running.
+    P21/P22 are analysis/reporting phases over evidence already collected, not
+    network-execution phases. P21 is measured by validation_depth/evidence
+    quality and P22 is produced only after this quality gate accepts completion.
+    Scoring them as phase coverage creates circular false gaps.
     """
-    return [phase_id for phase_id in _expected_phase_ids(job) if phase_id != "P22"]
+    return [phase_id for phase_id in _expected_phase_ids(job) if phase_id not in {"P21", "P22"}]
 
 
 def _finding_details(finding: Finding) -> dict[str, Any]:
@@ -221,7 +222,10 @@ def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str
         if total > 0:
             terminal_pct = float(wq.get("pct") or 0) / 100.0
             success_pct = float(wq.get("success_pct") or 0) / 100.0
-            value = (terminal_pct * 0.65) + (success_pct * 0.35)
+            if status in {"skipped", "not_applicable"} and int(wq.get("done") or 0) == 0 and int(wq.get("failed") or 0) == 0:
+                value = 1.0
+            else:
+                value = (terminal_pct * 0.65) + (success_pct * 0.35)
         else:
             value = {
                 "completed": 1.0,
@@ -235,7 +239,8 @@ def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str
                 "failed": 0.2,
                 "queued": 0.0,
                 "pending": 0.0,
-                "skipped": 0.35,
+                "skipped": 1.0,
+                "not_applicable": 1.0,
             }.get(status, 0.0)
         scored.append(value)
         if value < 0.65:
@@ -441,11 +446,24 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     )
     valid_sessions = [s for s in auth_sessions if str(s.status or "").lower() in {"valid", "static"}]
 
+    phase_rows = {
+        str(row.get("phase_id") or row.get("id") or ""): dict(row or {})
+        for row in (phase_monitor.get("pentest_journey") or {}).get("phases") or phase_monitor.get("phases") or []
+    }
+    non_applicable_phase_ids = {
+        phase_id
+        for phase_id, row in phase_rows.items()
+        if str(row.get("status") or "").lower() in {"skipped", "not_applicable"}
+        and int(dict(row.get("work_queue") or {}).get("done") or 0) == 0
+        and int(dict(row.get("work_queue") or {}).get("running") or 0) == 0
+        and int(dict(row.get("work_queue") or {}).get("queued") or 0) == 0
+        and int(dict(row.get("work_queue") or {}).get("blocked") or 0) == 0
+    }
     expected_skills = {
         str(skill_id)
         for phase_id in expected_phase_ids
         for skill_id in list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_skills") or [])
-        if str(skill_id or "")
+        if str(skill_id or "") and phase_id not in non_applicable_phase_ids
     }
     executed_skills: set[str] = set()
     attributed_skills: set[str] = set()

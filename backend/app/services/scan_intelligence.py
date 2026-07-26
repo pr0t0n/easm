@@ -149,6 +149,9 @@ def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain
     root = _root_scope(root_domain)
     if not root:
         return []
+    host_pattern = re.compile(
+        rf"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?\.)+{re.escape(root)}\.?\b"
+    )
     candidate_only_profiles = {"alterx_permutations"}
     candidate_only_tools = {"alterx"}
     found: set[str] = set()
@@ -159,11 +162,29 @@ def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain
         profile = str(mcp.get("profile") or "").strip().lower()
         if tool_name in candidate_only_tools or profile in candidate_only_profiles:
             continue
-        stdout = "\n".join(
+        output_chunks = [
             str(mcp.get(key) or "")
-            for key in ("stdout", "output", "stderr")
+            for key in (
+                "stdout",
+                "stdout_full",
+                "stdout_preview",
+                "output",
+                "stderr",
+                "stderr_full",
+                "stderr_preview",
+                # Historical MCP/Kali adapters have sometimes stored the
+                # stderr *content* in stderr_path. If this is really a path it
+                # will not match root-scoped hostnames and is harmless.
+                "stderr_path",
+            )
             if str(mcp.get(key) or "").strip()
-        )
+        ]
+        parsed = mcp.get("parsed_result")
+        if isinstance(parsed, (list, tuple, set)):
+            output_chunks.extend(str(item or "") for item in parsed if str(item or "").strip())
+        elif isinstance(parsed, dict):
+            output_chunks.append(json.dumps(parsed, ensure_ascii=False, default=str))
+        stdout = "\n".join(output_chunks)
         if not stdout:
             continue
         section: str | None = None
@@ -176,17 +197,19 @@ def extract_discovered_subdomains(mcp_results: list[dict[str, Any]], root_domain
             token = line.strip().split()[0] if line.strip() else ""
             if not token:
                 continue
-            host = _canonical_in_scope_host(token, root)
-            if not host:
-                continue
-            if section == "bruteforce":
-                if not bruteforce_poisoned:
-                    bruteforce_hits.append(host)
-                    if len(bruteforce_hits) > _DNSENUM_BRUTEFORCE_MAX_HITS:
-                        bruteforce_poisoned = True
-                        bruteforce_hits = []
-                continue
-            found.add(host)
+            candidates = [token, *host_pattern.findall(line)]
+            for candidate in candidates:
+                host = _canonical_in_scope_host(candidate, root)
+                if not host:
+                    continue
+                if section == "bruteforce":
+                    if not bruteforce_poisoned:
+                        bruteforce_hits.append(host)
+                        if len(bruteforce_hits) > _DNSENUM_BRUTEFORCE_MAX_HITS:
+                            bruteforce_poisoned = True
+                            bruteforce_hits = []
+                    continue
+                found.add(host)
         found.update(bruteforce_hits)
     return sorted(found)
 
@@ -1638,7 +1661,7 @@ _PHASE_DEPS: dict[str, list[str]] = {
     "P15": ["P06"],
     "P16": ["P06"],
     "P17": ["P09"],
-    "P18": [],
+    "P18": ["P02"],
     "P19": ["P09"],
     "P20": ["P09"],
     "P21": ["P20"],

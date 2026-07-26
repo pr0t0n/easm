@@ -23,9 +23,9 @@ _LOG_TAIL = 40
 _ERROR_RE = re.compile(r"(error|exception|traceback|killed|oom|fatal|panic|refused|cannot|failed)", re.I)
 
 # ── Self-correction (guardião) ───────────────────────────────────────────────
-# Heartbeat que o watchdog (run_watchdog, executado pelo beat→worker_scope a cada
+# Heartbeat que o watchdog (run_watchdog, executado pelo beat→worker_control a cada
 # minuto) grava a cada tick. É a prova de vida do PRÓPRIO auto-curador: se ficar
-# velho, o laço de auto-recuperação está quebrado (beat morto ou worker_scope sem
+# velho, o laço de auto-recuperação está quebrado (beat morto ou worker_control sem
 # consumir) e o backend — sempre de pé — revive a espinha do laço.
 _WATCHDOG_HEARTBEAT_KEY = "platform:watchdog_heartbeat"
 _WATCHDOG_STALE_SECONDS = int(os.getenv("WATCHDOG_STALE_SECONDS", "180"))      # 3 ticks perdidos
@@ -126,9 +126,33 @@ def _worker_has_active_scan_task(short_name: str) -> bool | None:
         return False
     worker_group = short.removeprefix("worker_")
     try:
-        from app.workers.celery_app import celery_app
+        from app.db.session import SessionLocal
+        from app.models.models import WorkerHeartbeat
 
-        insp = celery_app.control.inspect(timeout=1.5)
+        db = SessionLocal()
+        try:
+            recent_cutoff = datetime.now() - timedelta(seconds=max(_WATCHDOG_STALE_SECONDS, 300))
+            active_hb = (
+                db.query(WorkerHeartbeat.id)
+                .filter(
+                    WorkerHeartbeat.mode == worker_group,
+                    WorkerHeartbeat.current_scan_id.isnot(None),
+                    WorkerHeartbeat.status.in_(["busy", "running", "active"]),
+                    WorkerHeartbeat.last_seen_at >= recent_cutoff,
+                )
+                .order_by(WorkerHeartbeat.last_seen_at.desc())
+                .first()
+            )
+            if active_hb:
+                return True
+        finally:
+            db.close()
+    except Exception:
+        pass
+    try:
+        from app.workers.celery_app import celery
+
+        insp = celery.control.inspect(timeout=1.5)
         payloads = []
         for fn in (insp.active, insp.reserved):
             try:

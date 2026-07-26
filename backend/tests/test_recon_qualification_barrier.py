@@ -434,7 +434,7 @@ def test_known_empty_port_set_blocks_port_specific_tool() -> None:
     )
 
     assert decision["applicable"] is False
-    assert decision["reason"] == "no_http_surface:tcp_closed"
+    assert decision["reason"] == "required_port_absent:443,8443,9443,10443"
 
 
 def test_web_phases_depend_on_p06_not_only_p02() -> None:

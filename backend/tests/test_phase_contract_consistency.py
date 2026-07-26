@@ -32,7 +32,8 @@ def test_intelligence_dag_matches_execution_gates_for_core_phases() -> None:
     from app.services.scan_intelligence import _PHASE_DEPS
     from app.services.scan_work_queue import PHASE_GATE
 
-    assert _PHASE_DEPS["P18"] == []
+    assert PHASE_GATE["P18"] == "P02"
+    assert _PHASE_DEPS["P18"] == ["P02"]
     for phase_id in ("P03", "P04", "P05", "P07", "P08", "P09", "P15", "P16"):
         assert PHASE_GATE[phase_id] == "P06"
         assert _PHASE_DEPS[phase_id] == ["P06"]

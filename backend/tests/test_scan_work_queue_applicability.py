@@ -77,6 +77,30 @@ def test_http_tool_is_skipped_after_authoritative_p06_no_response() -> None:
     assert decision["reason"] == "no_http_surface:tcp_closed"
 
 
+def test_p06_http_probe_does_not_require_http_surface_before_it_classifies_surface() -> None:
+    state = _state_for(
+        "candidate.example.com",
+        {
+            "status": "tcp_scanned_no_open_ports",
+            "open_ports": [],
+            "http": [],
+            "p02_complete": True,
+            "p06_complete": False,
+        },
+    )
+
+    decision = validate_skill_applicability(
+        "P06",
+        "skill.recon.port_service_discovery",
+        "httpx",
+        "candidate.example.com",
+        state,
+        at="dispatch",
+    )
+
+    assert decision["applicable"] is True
+
+
 def test_technology_specific_tool_skips_when_known_tech_is_incompatible() -> None:
     state = _state_for(
         "https://app.example.com",

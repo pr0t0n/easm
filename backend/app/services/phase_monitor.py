@@ -164,6 +164,8 @@ def _normalized_phase_status(wq: dict[str, int], fallback: str = "") -> str:
     terminal = done + skipped + failed
     if total > 0:
         if terminal >= total:
+            if skipped >= total and done == 0 and failed == 0:
+                return "skipped"
             return "failed" if (failed + timeout) and done == 0 else "completed"
         if running > 0:
             return "executing"
@@ -171,6 +173,8 @@ def _normalized_phase_status(wq: dict[str, int], fallback: str = "") -> str:
             return "queued"
         if blocked > 0:
             return "gate_blocked"
+        if skipped > 0 and done == 0 and failed == 0:
+            return "skipped"
         if done > 0 or skipped > 0:
             return "completed"
         return "failed" if failed or timeout else "queued"
@@ -751,8 +755,11 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         _wq_terminal = _wq_done + _wq_skipped + _wq_failed
         _wq_pct = int(_wq_terminal / _wq_total * 100) if _wq_total > 0 else None
 
-        if not effective_node_visited and _wq_total == 0:
-            status_label = "queued"
+        scan_terminal = str(scan.status or "").lower() not in {"queued", "running", "retrying", "paused"}
+        if _wq_total == 0 and not ledger_entry and not normalized_ledger_status and scan_terminal:
+            status_label = "skipped"
+        elif not effective_node_visited and _wq_total == 0:
+            status_label = "skipped" if scan_terminal else "queued"
         else:
             status_label = _normalized_phase_status(_wq, normalized_ledger_status)
 

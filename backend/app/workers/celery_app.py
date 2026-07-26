@@ -8,11 +8,19 @@ from app.workers.worker_groups import (
     SCAN_SCHEDULED_QUEUE,
     SCAN_UNIT_QUEUE,
     SCAN_PARALLEL_QUEUE,
+    PLATFORM_CONTROL_QUEUE,
     all_queues,
 )
 
 # Heartbeat em leque: um agendamento por fila de worker, para que TODOS os
 # workers se registrem vivos a cada 30s (não só o que pega a fila default).
+# IMPORTANTE: essas tarefas são sinais de liveness, não trabalho durável. Se um
+# worker fica parado/reinicia, heartbeats/watchdogs antigos não podem formar um
+# backlog que depois concorre com run_scan_job_unit na mesma fila (incidente
+# scan #31: centenas de heartbeats/ticks velhos sufocaram scan.unit).
+_HEARTBEAT_EXPIRES = max(5, int(os.getenv("CELERY_HEARTBEAT_EXPIRES", "25")))
+_MINUTELY_CONTROL_EXPIRES = max(10, int(os.getenv("CELERY_MINUTELY_CONTROL_EXPIRES", "55")))
+_LONG_CONTROL_EXPIRES = max(60, int(os.getenv("CELERY_LONG_CONTROL_EXPIRES", "900")))
 try:
     _HEARTBEAT_QUEUES = sorted(set(all_queues("unit")) | {SCAN_UNIT_QUEUE, SCAN_PARALLEL_QUEUE})
 except Exception:
@@ -21,7 +29,7 @@ _HEARTBEAT_SCHEDULE = {
     f"worker-heartbeat-{_q}": {
         "task": "worker.heartbeat",
         "schedule": 30.0,
-        "options": {"queue": _q},
+        "options": {"queue": _q, "expires": _HEARTBEAT_EXPIRES},
     }
     for _q in _HEARTBEAT_QUEUES
 }
@@ -65,26 +73,26 @@ celery.conf.update(
         "scheduler-tick": {
             "task": "scheduler.tick",
             "schedule": crontab(minute="*"),
-            "options": {"queue": SCAN_SCHEDULED_QUEUE},
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _MINUTELY_CONTROL_EXPIRES},
         },
         # Watchdog: prevê/auto-recupera 'Up mas travado' (kali wedge, stall de scan).
         "watchdog-tick": {
             "task": "watchdog.tick",
             "schedule": crontab(minute="*"),
-            "options": {"queue": SCAN_SCHEDULED_QUEUE},
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _MINUTELY_CONTROL_EXPIRES},
         },
         # Ingestao semanal do aprendizado HackerOne/GitHub (antes so rodava sob demanda).
         "hackerone-learning-tick": {
             "task": "hackerone_learning.tick",
             "schedule": crontab(minute="0", hour="3", day_of_week="1"),
-            "options": {"queue": "worker.unit.reporting"},
+            "options": {"queue": "worker.unit.reporting", "expires": _LONG_CONTROL_EXPIRES},
         },
         # Mantém tool_health_snapshots fresco p/ ENFORCE_TOOL_HEALTH_PRECHECK
         # nunca operar fail-open por falta de snapshot (ver create_scan).
         "tool-health-refresh": {
             "task": "tool_health.refresh",
             "schedule": crontab(minute="*/20"),
-            "options": {"queue": SCAN_SCHEDULED_QUEUE},
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _LONG_CONTROL_EXPIRES},
         },
         **_HEARTBEAT_SCHEDULE,
     },

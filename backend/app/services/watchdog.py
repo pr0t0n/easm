@@ -229,8 +229,14 @@ def run_watchdog(db) -> dict:
     report["revived_scans"] = revived
     report["stale_repaired"] = stale_repaired
 
+    # Commit unconditionally: this closes out section 2's transaction (open
+    # since the SELECT at the top of this section) BEFORE the next sections
+    # make their own blocking network calls (celery inspect, kali HTTP,
+    # .delay()). Leaving it open across those calls is what let a single slow
+    # broker/runner response turn into a multi-hour idle-in-transaction lock
+    # on scan_jobs, freezing every write on the platform (2026-07-25 incident).
+    db.commit()
     if report["requeued"] or stale_repaired:
-        db.commit()
         try:
             from app.workers.tasks import _schedule_scan_work_dispatch
             for item in stale_repaired:
@@ -252,6 +258,11 @@ def run_watchdog(db) -> dict:
             "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
             "AND updated_at < :cutoff ORDER BY id"
         ), {"cutoff": _cutoff}).fetchall()
+        # End this read's transaction NOW, before active_scan_task_ids() (celery
+        # inspect RPC) and recover_scan_if_orphaned() (more network + DB) run —
+        # those calls have no bound tight enough to safely hold a lock open
+        # across them. See commit note in section 2 above for the incident.
+        db.commit()
         if limbo_rows:
             from app.workers.tasks import recover_scan_if_orphaned, active_scan_task_ids
             active_ids, inspect_ok = active_scan_task_ids()
@@ -264,6 +275,7 @@ def run_watchdog(db) -> dict:
                     limbo_revived.append({"scan_id": int(sid), **res})
                     logger.warning("watchdog: scan %s em LIMBO → %s", sid, res.get("action"))
     except Exception as exc:
+        db.rollback()
         logger.error("watchdog: pass de limbo falhou: %s", exc)
     report["limbo_recovered"] = limbo_revived
 
@@ -295,6 +307,9 @@ def run_watchdog(db) -> dict:
             WHERE j.status IN ('queued','running','retrying')
             """
         )).fetchall()
+        # Close this read's transaction before the loop's network calls
+        # (kali HTTP, chain-lock release, celery .delay()) — see section 2 note.
+        db.commit()
         for sid, idle_s in stuck:
             idle = int(idle_s or 0)
             if idle >= _ORPHAN_NO_PROGRESS_SECONDS:
@@ -343,6 +358,9 @@ def run_watchdog(db) -> dict:
         running_ids = [int(r[0]) for r in db.execute(text(
             "SELECT id FROM scan_jobs WHERE status='running' ORDER BY id"
         )).fetchall()]
+        # Close this read's transaction before _chain_lock_alive (Redis) and
+        # active_scan_task_ids (celery inspect) run — see section 2 note.
+        db.commit()
         no_lock = [sid for sid in running_ids if not _chain_lock_alive(sid)]
         if no_lock:
             active_ids, inspect_ok = active_scan_task_ids()

@@ -1,9 +1,12 @@
 import os
+import base64
+import gzip
 import random
 import re
 import threading
 import time
 import json
+import zlib
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -32,6 +35,7 @@ from app.workers.worker_groups import (
     SCAN_UNIT_QUEUE,
     SCAN_SCHEDULED_QUEUE,
     SCAN_PARALLEL_QUEUE,
+    PLATFORM_CONTROL_QUEUE,
     ScanMode,
     find_group_by_tool,
     get_worker_agent_profile,
@@ -1058,7 +1062,7 @@ def worker_heartbeat() -> dict[str, Any]:
 
 
 # Executado a cada minuto pelo Celery Beat (já existente)
-@celery.task(name="watchdog.tick", queue=SCAN_SCHEDULED_QUEUE)
+@celery.task(name="watchdog.tick", queue=PLATFORM_CONTROL_QUEUE)
 def watchdog_tick():
     """Watchdog: prevê/auto-recupera 'Up mas travado' (kali wedge, stall de scan)."""
     db: Session = SessionLocal()
@@ -1106,7 +1110,7 @@ def hackerone_learning_tick():
         db.close()
 
 
-@celery.task(name="tool_health.refresh", queue=SCAN_SCHEDULED_QUEUE)
+@celery.task(name="tool_health.refresh", queue=PLATFORM_CONTROL_QUEUE)
 def refresh_tool_health_snapshot():
     """Keeps tool_health_snapshots fresh so ENFORCE_TOOL_HEALTH_PRECHECK never
     fails-open due to a missing snapshot (see routes_scans.create_scan)."""
@@ -1125,7 +1129,7 @@ def refresh_tool_health_snapshot():
         db.close()
 
 
-@celery.task(name="scheduler.tick", queue=SCAN_SCHEDULED_QUEUE)
+@celery.task(name="scheduler.tick", queue=PLATFORM_CONTROL_QUEUE)
 
 def scheduler_tick():
     from zoneinfo import ZoneInfo
@@ -2532,9 +2536,67 @@ def ensure_scan_chain_running(scan_id: int, mode: str = "unit") -> dict:
                 db.close()
         except Exception:
             pass
+    if _scan_driver_pending_in_broker(scan_id, mode=mode):
+        return {"scan_id": scan_id, "enqueued": False, "reason": "driver_pending"}
     task = run_scan_job_scheduled if str(mode).lower() == "scheduled" else run_scan_job_unit
     async_result = task.delay(scan_id)
     return {"scan_id": scan_id, "enqueued": True, "task_id": getattr(async_result, "id", None)}
+
+
+def _decode_celery_message_body(message: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    """Decode a Redis broker message enough to identify scan driver args.
+
+    Celery stores queue entries as JSON envelopes with a base64 body; this app
+    also enables zlib compression.  The broker scan is best-effort and purely
+    defensive: if decoding fails, callers fail open and let the normal chain
+    lock arbitrate execution.
+    """
+    raw_body = message.get("body")
+    if not raw_body:
+        return [], {}
+    data = base64.b64decode(raw_body)
+    if (message.get("headers") or {}).get("compression"):
+        try:
+            data = zlib.decompress(data)
+        except Exception:
+            data = gzip.decompress(data)
+    payload = json.loads(data)
+    if not isinstance(payload, list):
+        return [], {}
+    args = payload[0] if payload and isinstance(payload[0], list) else []
+    kwargs = payload[1] if len(payload) > 1 and isinstance(payload[1], dict) else {}
+    return args, kwargs
+
+
+def _scan_driver_pending_in_broker(scan_id: int, mode: str = "unit") -> bool:
+    """Return True when the scan driver is already waiting in the broker queue.
+
+    ``ensure_scan_chain_running`` used to check only the live chain lock. During
+    scan #31, worker_scope was alive but backed up by old heartbeat/watchdog
+    tasks; every watchdog pass saw "no lock" and enqueued another
+    ``run_scan_job_unit(31)``. This makes the entry point idempotent across the
+    pre-start window too: lock alive OR driver pending means do not enqueue.
+    """
+    queue = SCAN_SCHEDULED_QUEUE if str(mode).lower() == "scheduled" else SCAN_UNIT_QUEUE
+    expected_task = "run_scan_job_scheduled" if str(mode).lower() == "scheduled" else "run_scan_job_unit"
+    try:
+        import redis
+
+        broker = redis.from_url(settings.celery_broker_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+        for raw in broker.lrange(queue, 0, -1):
+            try:
+                message = json.loads(raw)
+                if (message.get("headers") or {}).get("task") != expected_task:
+                    continue
+                args, kwargs = _decode_celery_message_body(message)
+                pending_scan_id = args[0] if args else kwargs.get("scan_id")
+                if int(pending_scan_id) == int(scan_id):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
 
 
 def _chain_lock_alive(scan_id: int) -> bool:

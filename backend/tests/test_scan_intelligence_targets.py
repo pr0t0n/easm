@@ -99,6 +99,30 @@ def test_extract_discovered_subdomains_ignores_candidate_only_alterx() -> None:
     ]
 
 
+def test_extract_discovered_subdomains_reads_dnsrecon_hosts_from_stderr_path_content() -> None:
+    # Regression from scan #31: the Kali/MCP adapter put dnsrecon's stderr
+    # content in stderr_path, and dnsrecon prefixes the useful host with a
+    # timestamp instead of making it the first token in the line.
+    dnsrecon_stderr = """
+    [*] std: Performing General Enumeration against: validcertificadora.com.br...
+    [*] std: 2026-07-25 23:01:08,880 - validcertificadora.com.br A 23.227.38.65
+    [*] std: 2026-07-25 23:01:13,224 - www.validcertificadora.com.br CNAME shops.myshopify.com
+    [*] std: 2026-07-25 23:01:14,109 - blog.validcertificadora.com.br CNAME aap-ipv4-blog.validcertificadora.com.br
+    [*] std: 2026-07-25 23:01:15,057 - pad.validcertificadora.com.br CNAME aap-ipv4-pad.validcertificadora.com.br
+    """
+
+    assert extract_discovered_subdomains(
+        [{"tool_name": "dnsrecon", "stderr_path": dnsrecon_stderr}],
+        "validcertificadora.com.br",
+    ) == [
+        "aap-ipv4-blog.validcertificadora.com.br",
+        "aap-ipv4-pad.validcertificadora.com.br",
+        "blog.validcertificadora.com.br",
+        "pad.validcertificadora.com.br",
+        "www.validcertificadora.com.br",
+    ]
+
+
 def test_extract_discovered_subdomains_discards_unannounced_wildcard_bruteforce_flood() -> None:
     # Reproduces the real scan #7 incident against tarcisio.blog: dnsenum's own
     # self-check ("Host's addresses" empty -> no "Wildcard detection using:"

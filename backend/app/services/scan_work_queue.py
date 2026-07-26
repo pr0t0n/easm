@@ -391,7 +391,10 @@ OOB_TOOLS = {"interactsh", "interactsh-client"}
 MANUAL_TOOLS = {"manual_review", "manual_correlation", "manual_http_probe", "report-builder", "manual_scope_review"}
 
 WEB_HEAVY_PHASES = {
-    "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10",
+    # P06 is the HTTP/surface fingerprint gate itself. It must run after P02
+    # even when HTTP is not yet known; otherwise httpx/whatweb/curl are skipped
+    # for the exact targets they are supposed to classify.
+    "P03", "P04", "P05", "P07", "P08", "P09", "P10",
     "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P19",
 }
 HTTP_SURFACE_TOOLS = {
@@ -1425,6 +1428,8 @@ def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) 
 
 
 def _requires_http_surface(phase_id: str, tool_name: str) -> bool:
+    if str(phase_id or "") == "P06":
+        return False
     tool = str(tool_name or "").strip().lower()
     return phase_id in WEB_HEAVY_PHASES or tool in HTTP_SURFACE_TOOLS or tool in HTTP_NUCLEI_TOOLS or tool.startswith("nuclei-")
 
@@ -1884,14 +1889,15 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
 #
 # Diagrama de dependência:
 #   P02 (port scan)       → criada como queued — ponto de partida
-#   P18 (credencial/segredo passivo) → queued para a raiz; não depende de HTTP
+#   P18 (credencial/segredo passivo) → blocked; desbloqueada após P02 cobrir o alvo
+#                            (não depende de HTTP, mas não compete com o gate P02)
 #   P06                   → blocked; desbloqueada quando P02 cobre o alvo
 #   P03-P05/P07-P09/P15/P16 → blocked; desbloqueadas quando P06 confirma HTTP
 #   P10-P14, P17, P19-P20 → blocked; desbloqueadas pós-triage de P09
 #
 PHASE_GATE: dict[str, str | None] = {
     "P02": None,   # queued imediatamente
-    "P18": None,   # credencial/segredo passivo; aplicabilidade filtra alvo morto
+    "P18": "P02",  # OSINT/segredo passivo; aguarda DNS/porta mínimo, não HTTP
     "P06": "P02",  # fingerprint depende de port scan
     "P15": "P06",  # file/nuclei web checks require HTTP-live evidence
     "P03": "P06",  # testes web dependem de HTTP confirmado por alvo
@@ -1924,10 +1930,10 @@ _BLOCKED_AT_CREATE: frozenset[str] = frozenset(
     ph for ph, gate in PHASE_GATE.items() if gate is not None
 )
 # Invariant: phases with gate=None must NOT be in _BLOCKED_AT_CREATE.
-# P02 and P18 start immediately — never created as 'blocked'.
+# P02 starts immediately — never created as 'blocked'.
 # Violation would cause items to stall indefinitely (no gate fires to unblock them).
 assert "P02" not in _BLOCKED_AT_CREATE, "P02 has gate=None but is in _BLOCKED_AT_CREATE"
-assert "P18" not in _BLOCKED_AT_CREATE, "P18 has gate=None but is in _BLOCKED_AT_CREATE"
+assert "P18" in _BLOCKED_AT_CREATE, "P18 must wait for P02 qualification before dispatch"
 
 # Mapa inverso: qual fase ao completar deve desbloquear quais fases?
 _GATE_UNLOCKS: dict[str, list[str]] = {}

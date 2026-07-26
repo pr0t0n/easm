@@ -60,10 +60,18 @@ def test_httpx_batch_profile_uses_conservative_waf_safe_concurrency() -> None:
     source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
     section = source.split("httpx_probe_batch:", 1)[1].split("whatweb_fingerprint:", 1)[0]
 
+    assert '"/opt/tools/bin/httpx"' in section
     assert '"-threads", "10"' in section
     assert '"-rate-limit", "20"' in section
     assert '"-retries", "2"' in section
     assert '"-timeout", "10"' in section
+
+
+def test_httpx_single_profile_uses_projectdiscovery_binary_not_python_httpx_cli() -> None:
+    source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
+    section = source.split("httpx_probe:", 1)[1].split("httpx_probe_batch:", 1)[0]
+
+    assert '"/opt/tools/bin/httpx"' in section
 
 
 def test_naabu_batch_profile_avoids_resolver_and_nat_exhaustion() -> None:

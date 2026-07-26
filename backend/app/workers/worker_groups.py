@@ -732,6 +732,10 @@ def all_queues(mode: ScanMode) -> list[str]:
 # Public queue names for scan routing
 SCAN_UNIT_QUEUE = "scan.unit"
 SCAN_SCHEDULED_QUEUE = "scan.scheduled"
+# Control-plane queue for watchdog/scheduler/tool-health. It must not share a
+# single-thread worker with long-running scan drivers; scan #31 showed that a
+# long P01 can starve watchdog.tick and make the backend guard restart workers.
+PLATFORM_CONTROL_QUEUE = "platform.control"
 # Dedicated queue for parallel per-target subtasks (run_scan_target_subset).
 # Kept separate from SCAN_UNIT_QUEUE so subtasks never starve the main scan task
 # that dispatched them.

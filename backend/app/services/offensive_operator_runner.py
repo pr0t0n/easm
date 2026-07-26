@@ -89,6 +89,54 @@ PHASE_TO_CAPABILITIES: dict[str, list[str]] = {
 }
 
 
+def _safe_db_rollback(db) -> None:
+    """Clear a poisoned/implicit SQLAlchemy transaction without masking callers.
+
+    Long offensive phases wait on Kali/network tools for minutes. If the
+    connection is invalidated while the ORM session is idle in a transaction,
+    SQLAlchemy requires an explicit rollback before any reconnect. Swallowing a
+    failed refresh without rollback poisons the session and can fail the whole
+    scan attempt even when the tool run itself completed.
+    """
+
+    try:
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _close_idle_scan_transaction(db) -> None:
+    """Ensure no ORM transaction is held while external tools run."""
+
+    try:
+        if getattr(db, "in_transaction", lambda: False)():
+            db.rollback()
+    except Exception:  # noqa: BLE001
+        _safe_db_rollback(db)
+
+
+def _refresh_scan_job_after_wait(db, job: ScanJob) -> ScanJob | None:
+    """Rollback/reload a ScanJob after a long external wait."""
+
+    try:
+        job_id = int(job.id)
+    except Exception:  # noqa: BLE001
+        return None
+    _safe_db_rollback(db)
+    try:
+        refreshed = db.get(ScanJob, job_id)
+        if refreshed is not None:
+            return refreshed
+    except Exception:  # noqa: BLE001
+        _safe_db_rollback(db)
+    try:
+        db.refresh(job)
+        return job
+    except Exception:  # noqa: BLE001
+        _safe_db_rollback(db)
+        return None
+
+
 def _scan_mode_value(scan_mode: str) -> str:
     return "scheduled" if str(scan_mode or "").strip().lower() == "scheduled" else "unit"
 
@@ -419,7 +467,7 @@ def _reachability_gate(db, job: ScanJob, target: str, completed_work: set, phase
             if _scan_halted(job):
                 return False
         except Exception:
-            pass
+            _safe_db_rollback(db)
         elapsed_total = (now_wall - float(first)) + (_t.monotonic() - started)
         if _tcp_syn_reachable(target):
             since = dict((job.state_data or {}).get("target_unreachable_since") or {})
@@ -838,7 +886,7 @@ def _record_preflight_skip(
         try:
             db.refresh(job)
         except Exception:  # noqa: BLE001
-            pass
+            _safe_db_rollback(db)
         state = dict(job.state_data or {})
         skipped_work = list(state.get("skipped_work") or [])
         skipped_work.append({"phase_id": phase_id, "target": target, "reason": reason, "tier": "tier1_preflight"})
@@ -1262,7 +1310,7 @@ def _record_lab_fast_phase(
         try:
             db.refresh(job)
         except Exception:  # noqa: BLE001
-            pass
+            _safe_db_rollback(db)
         state = dict(job.state_data or {})
         state = _ensure_runtime_visibility_contracts(state, phase_id, target, {"mcp_results": [], "skill_plan": {"selected_skills": []}})
         state = _record_agent_execution_summary(
@@ -2205,7 +2253,7 @@ def run_offensive_operator_scan(
             for _h, _ip in (_live_state.get("host_ip_map") or {}).items():
                 host_ip_map.setdefault(_h, _ip)
         except Exception:  # noqa: BLE001
-            pass
+            _safe_db_rollback(db)
         _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
         if target in _delegated_targets:
             _target_idx += 1
@@ -2399,9 +2447,10 @@ def run_offensive_operator_scan(
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             _phase_unit_start = _time.monotonic()
+            _close_idle_scan_transaction(db)
             result = runtime.run_phase(phase_id, _effective_target, scope, execution_mode, offensive_state)
+            job = _refresh_scan_job_after_wait(db, job) or job
             try:
-                db.refresh(job)
                 _halt_reason = _scan_halt_reason(job, _execution_epoch)
                 if _halt_reason:
                     db.add(
@@ -2428,7 +2477,7 @@ def run_offensive_operator_scan(
                         }
                     return {"ok": False, "scan_id": job.id, "halted": job.status, "phase_id": phase_id, "target": target}
             except Exception:
-                pass
+                _safe_db_rollback(db)
             offensive_state = result["offensive_state"]
             phase_ledger = result["phase_ledger"]
             phase_ledger["target"] = target
@@ -2878,7 +2927,9 @@ def run_offensive_operator_scan(
                     _time.sleep(30)
                     # Re-run the phase with the slow profile already in state
                     try:
+                        _close_idle_scan_transaction(db)
                         _retry_result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+                        job = _refresh_scan_job_after_wait(db, job) or job
                         _retry_ledger = _retry_result["phase_ledger"]
                         _retry_ledger["target"] = target
                         _retry_ledger["mcp_results"] = _retry_result.get("mcp_results") or []
@@ -5062,7 +5113,7 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
             try:
                 db.refresh(job)
             except Exception:  # noqa: BLE001
-                pass
+                _safe_db_rollback(db)
             cur_state = dict(job.state_data or {})
             cur_preflight = dict(cur_state.get("preflight") or {})
             cur_targets = dict(cur_preflight.get("targets") or {})
@@ -5095,7 +5146,9 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 skipped += 1
                 continue
         try:
+            _close_idle_scan_transaction(db)
             result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
+            job = _refresh_scan_job_after_wait(db, job) or job
             offensive_state = result["offensive_state"]
             ledger = result["phase_ledger"]
             ledger["target"] = target
@@ -5113,7 +5166,7 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 try:
                     db.refresh(job)
                 except Exception:  # noqa: BLE001
-                    pass
+                    _safe_db_rollback(db)
                 cur = dict(job.state_data or {})
                 cur["completed_work"] = sorted(set((cur.get("completed_work") or [])) | completed_work)
                 cur["phase_ledger_v2"] = _merge_phase_ledgers(list(cur.get("phase_ledger_v2") or []), [ledger])
