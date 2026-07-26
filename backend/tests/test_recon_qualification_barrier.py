@@ -13,23 +13,28 @@ def _item(
     targets: list[str],
     stdout: str = "",
     stdout_full: str = "",
+    last_error: str | None = None,
+    result_extra: dict | None = None,
     parsed_result=None,
     batch_targets: list[str] | None = None,
 ):
+    result = {
+        "stdout_preview": stdout,
+        "stdout_full": stdout_full,
+        "parsed_result": parsed_result,
+        "batch_targets": batch_targets or [],
+        "batch_target_count": len(batch_targets or []),
+    }
+    result.update(result_extra or {})
     return SimpleNamespace(
         id=101,
         phase_id=phase_id,
         tool_name=tool_name,
         target="__batch__" if len(targets) > 1 else targets[0],
         status=status,
+        last_error=last_error,
         item_metadata={"batch_targets": targets} if len(targets) > 1 else {},
-        result={
-            "stdout_preview": stdout,
-            "stdout_full": stdout_full,
-            "parsed_result": parsed_result,
-            "batch_targets": batch_targets or [],
-            "batch_target_count": len(batch_targets or []),
-        },
+        result=result,
         finished_at=datetime(2026, 7, 23, 12, 0, 0),
         updated_at=datetime(2026, 7, 23, 12, 0, 0),
     )
@@ -317,6 +322,61 @@ def test_p06_only_qualifies_targets_with_actual_http_response() -> None:
     assert profiles["api.valid.com"]["http"][0]["status_code"] == 200
     assert profiles["login.valid.com"]["status"] == "no_http_response"
     assert qualified_targets_for_gate(job.state_data, "P06", targets) == ["api.valid.com"]
+
+
+def test_p06_runner_timeout_is_not_reported_as_target_without_http_surface() -> None:
+    from app.services.scan_work_queue import (
+        qualified_targets_for_gate,
+        record_recon_work_item_evidence,
+        validate_skill_applicability,
+    )
+
+    targets = ["cyber.valid.com"]
+    job = SimpleNamespace(state_data={"qualification_contract_version": 3})
+    httpx_empty = _item(
+        phase_id="P06",
+        tool_name="httpx",
+        status="completed",
+        targets=targets,
+        parsed_result=[],
+        batch_targets=targets,
+    )
+    curl_timeout = _item(
+        phase_id="P06",
+        tool_name="curl-headers",
+        status="timeout",
+        targets=targets,
+        last_error="timeout after 45s",
+        result_extra={
+            "command": "curl -I http://cyber.valid.com",
+            "status": "timeout",
+            "error": "curl: (28) Connection timed out after 8000 milliseconds",
+        },
+    )
+
+    record_recon_work_item_evidence(job, httpx_empty)
+    assert job.state_data["preflight"]["targets"]["cyber.valid.com"]["status"] == "no_http_response"
+
+    record_recon_work_item_evidence(job, curl_timeout)
+
+    profile = job.state_data["preflight"]["targets"]["cyber.valid.com"]
+    assert profile["p06_complete"] is True
+    assert profile["p06_http_live"] is False
+    assert profile["status"] == "runner_connectivity_blocked"
+    assert profile["p06_runner_connectivity_failure"] is True
+    assert "curl-headers" in profile["p06_runner_failure_tools"]
+    assert qualified_targets_for_gate(job.state_data, "P06", targets) == []
+
+    decision = validate_skill_applicability(
+        "P03",
+        "skill.discovery.endpoint_discovery",
+        "ffuf",
+        "cyber.valid.com",
+        job.state_data,
+        at="dispatch",
+    )
+    assert decision["applicable"] is False
+    assert decision["reason"] == "runner_connectivity_blocked"
 
 
 def test_p09_cannot_reopen_web_work_for_target_rejected_by_p06() -> None:

@@ -1095,13 +1095,45 @@ def _http_live_targets_from_result(item: ScanWorkItem, targets: list[str]) -> se
     return {target for target, values in observations.items() if values}
 
 
+P06_CONNECTIVITY_PROBE_TOOLS = {"httpx", "curl", "curl-headers", "wafw00f", "whatweb"}
+
+
+def _p06_runner_connectivity_failure(item: ScanWorkItem) -> bool:
+    result = dict(item.result or {})
+    status = str(item.status or result.get("status") or "").strip().lower()
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            item.last_error,
+            result.get("error"),
+            result.get("stderr"),
+            result.get("stderr_full"),
+            result.get("stdout"),
+            result.get("stdout_full"),
+        )
+    ).lower()
+    if status == "timeout":
+        return True
+    failure_markers = (
+        "connecttimeout",
+        "connection timed out",
+        "connection timeout",
+        "network is unreachable",
+        "no route to host",
+        "timeout after",
+        "runner watchdog marked stale",
+        "no_output_for_",
+    )
+    return any(marker in haystack for marker in failure_markers)
+
+
 def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[str, Any]:
     """Fold authoritative P02/P06 work-item evidence into per-target state."""
     phase_id = str(item.phase_id or "")
     tool = str(item.tool_name or "").lower()
     if phase_id == "P02" and tool not in {"naabu", "nmap", "masscan"}:
         return {}
-    if phase_id == "P06" and tool != "httpx":
+    if phase_id == "P06" and tool not in P06_CONNECTIVITY_PROBE_TOOLS:
         return {}
 
     targets = _work_item_targets(item)
@@ -1183,17 +1215,26 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
     else:
         observations_by_target = _http_observations_from_result(item, targets)
         live_targets = {target for target, values in observations_by_target.items() if values}
+        runner_connectivity_failure = _p06_runner_connectivity_failure(item)
+        runner_failure_applies_to_silent_targets = runner_connectivity_failure and (len(targets) <= 1 or not live_targets)
         for target in targets:
             profile = dict(profiles.get(target) or {})
             observations = observations_by_target.get(target) or []
             is_live = bool(observations)
-            target_completed = (completed and target in covered_targets) or is_live
+            target_attempted = target in covered_targets or is_live
+            target_completed = (completed and target_attempted) or is_live or (runner_failure_applies_to_silent_targets and target_attempted)
             observed_ports = {
                 int(obs["port"])
                 for obs in observations
                 if isinstance(obs.get("port"), int) and 1 <= int(obs["port"]) <= 65535
             }
             ports = sorted(set(profile.get("open_ports") or []) | observed_ports)
+            terminal_tools = set(profile.get("p06_terminal_tools") or [])
+            if target_attempted:
+                terminal_tools.add(tool)
+            failure_tools = set(profile.get("p06_runner_failure_tools") or [])
+            if runner_failure_applies_to_silent_targets and target_attempted:
+                failure_tools.add(tool)
             contracts = [
                 dict(value)
                 for value in list(profile.get("p06_probe_contracts") or [])
@@ -1210,17 +1251,26 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
                     "p06_checked_at": checked_at,
                     "p06_input_covered": target in covered_targets or is_live,
                     "p06_probe_contracts": contracts[-10:],
+                    "p06_terminal_tools": sorted(terminal_tools),
+                    "p06_runner_connectivity_failure": bool(profile.get("p06_runner_connectivity_failure") or (runner_failure_applies_to_silent_targets and target_attempted)),
+                    "p06_runner_failure_tools": sorted(failure_tools),
                     "http_observed_ports": sorted(observed_ports),
                     "open_ports": ports,
                 }
             )
             if target_completed:
-                profile["status"] = "http_live" if is_live else "no_http_response"
-                profile["reason"] = (
-                    "P06/httpx confirmou superfície HTTP"
-                    if is_live
-                    else "P06/httpx não observou resposta HTTP para este alvo"
-                )
+                if is_live:
+                    profile["status"] = "http_live"
+                    profile["reason"] = "P06/httpx confirmou superfície HTTP"
+                elif profile.get("p06_runner_connectivity_failure"):
+                    profile["status"] = "runner_connectivity_blocked"
+                    profile["reason"] = (
+                        "P06 tentou o alvo, mas o runner/Kali não conseguiu conectar; "
+                        "não classificar como ausência de superfície do alvo"
+                    )
+                else:
+                    profile["status"] = "no_http_response"
+                    profile["reason"] = "P06/httpx não observou resposta HTTP para este alvo"
                 profile["http"] = observations or profile.get("http") or []
             else:
                 profile["status"] = "p06_inconclusive"
@@ -1520,6 +1570,9 @@ def validate_skill_applicability(
         return decision
 
     if _requires_http_surface(phase_id, tool) and ctx["preflight_known"]:
+        if ctx["preflight_status"] == "runner_connectivity_blocked" and not ctx["has_http"]:
+            decision.update(applicable=False, score=0.0, reason="runner_connectivity_blocked")
+            return decision
         if ctx["preflight_status"] in {"tcp_closed", "tcp_scanned_no_open_ports", "no_http_response"} and not ctx["has_http"]:
             decision.update(applicable=False, score=0.0, reason="no_http_surface:tcp_closed")
             return decision
@@ -1828,11 +1881,11 @@ def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]
     status = str(preflight.get("status") or "").lower()
     if status in {"invalid", "dns_dead", "dead", "unresolved", "no_tcp"}:
         return []
-    if status == "no_http_response":
+    if status in {"no_http_response", "runner_connectivity_blocked"}:
         # DNS/P02/P06 finished and the authoritative HTTP probe found no web
-        # response. Preserve passive credential/OSINT only for the original
-        # scan target; do not seed per-subdomain P18 or web testing without
-        # HTTP-live evidence.
+        # response (or the runner could not reach the target). Preserve passive
+        # credential/OSINT only for the original scan target; do not seed
+        # per-subdomain P18 or web testing without HTTP-live evidence.
         phases = ["P18"] if _is_primary_scan_target(target, state) else []
         # P06 is an HTTP observation, not a substitute for P02. Preserve the
         # port qualification task when the batch scanner was partial.

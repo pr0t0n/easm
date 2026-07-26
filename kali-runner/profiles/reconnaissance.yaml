@@ -234,7 +234,7 @@ httpx_probe:
   # scope that was authorized even when the original -u target is valid.
   # Use ProjectDiscovery httpx explicitly. /usr/bin/httpx is the Python httpx
   # CLI in this image and accepts different flags, yielding empty probes.
-  cmd: ["/opt/tools/bin/httpx", "-u", "{url}", "-silent",
+  cmd: ["python3", "/opt/runner-scripts/httpx_proxy_wrapper.py", "-u", "{url}", "-silent",
         "-status-code", "-title", "-tech-detect", "-location",
         "-no-color", "-json",
         "-threads", "15", "-rate-limit", "40"]
@@ -253,7 +253,7 @@ httpx_probe_batch:
   description: "Scope-safe batch HTTP/HTTPS prober: one run for authorized discovered hosts."
   # Use ProjectDiscovery httpx explicitly. /usr/bin/httpx is the Python httpx
   # CLI in this image and accepts different flags, yielding empty probes.
-  cmd: ["/opt/tools/bin/httpx", "-l", "{target_file}", "-silent",
+  cmd: ["python3", "/opt/runner-scripts/httpx_proxy_wrapper.py", "-l", "{target_file}", "-silent",
         "-status-code", "-title", "-tech-detect", "-location",
         "-no-color", "-json", "-include-response-header",
         "-threads", "10", "-rate-limit", "20",

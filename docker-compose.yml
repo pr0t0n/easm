@@ -135,6 +135,13 @@ services:
       SCAN_FUZZ_PARAM: "${SCAN_FUZZ_PARAM:-}"
       SCAN_FUZZ_POST_DATA: "${SCAN_FUZZ_POST_DATA:-}"
       SCAN_FUZZ_CONTENT_TYPE: "${SCAN_FUZZ_CONTENT_TYPE:-application/x-www-form-urlencoded}"
+      # Docker Desktop/VPN: direct TCP from bridge containers can be blocked
+      # while the host has normal egress. This proxy is used by HTTP-capable
+      # probes (httpx wrapper, Python requests tools such as wafw00f).
+      KALI_OUTBOUND_PROXY: "${KALI_OUTBOUND_PROXY:-http://192.168.65.7:3128}"
+      HTTP_PROXY: "${KALI_HTTP_PROXY:-${KALI_OUTBOUND_PROXY:-http://192.168.65.7:3128}}"
+      HTTPS_PROXY: "${KALI_HTTPS_PROXY:-${KALI_OUTBOUND_PROXY:-http://192.168.65.7:3128}}"
+      NO_PROXY: "${KALI_NO_PROXY:-localhost,127.0.0.1,backend,postgres,redis,kali_runner,mcp_server,browser_runner,ollama,zap,.local}"
       TZ: America/Sao_Paulo
     ports:
       - "${KALI_RUNNER_HOST_PORT:-8088}:8088"
@@ -154,7 +161,7 @@ services:
       - ./kali-runner/runner.py:/app/runner.py:ro
       # Read-only, database-free P02→P06 diagnostic. It emits JSON only to
       # stdout and keeps its complete observation state in process memory.
-      - ./kali-runner/scripts/p02_p06_observer.py:/opt/runner-scripts/p02_p06_observer.py:ro
+      - ./kali-runner/scripts:/opt/runner-scripts:ro
       # Module manifest mounted read-only so install steps can be tuned without
       # a rebuild (a container restart reloads modules.yaml).
       - ./kali-runner/modules.yaml:/app/modules.yaml:ro

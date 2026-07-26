@@ -555,6 +555,13 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if isinstance(p, dict)
         and p.get("p06_complete")
         and not p.get("p06_positive_evidence")
+        and str(p.get("status") or "") != "runner_connectivity_blocked"
+    )
+    p06_runner_connectivity_blocked_targets = sum(
+        1
+        for p in preflight_profiles.values()
+        if isinstance(p, dict)
+        and str(p.get("status") or "") == "runner_connectivity_blocked"
     )
     missing_required = sum(
         len(row.get("required_tools_missing") or [])
@@ -751,6 +758,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "p02_positive_targets": p02_positive_targets,
             "p06_positive_targets": p06_positive_targets,
             "p06_no_http_targets": p06_no_http_targets,
+            "p06_runner_connectivity_blocked_targets": p06_runner_connectivity_blocked_targets,
         },
         "surface_coverage": {
             "score": round(_clamp(surface_score), 1),
@@ -800,6 +808,18 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "title": "Nenhum alvo teve superfície HTTP confirmada",
             "detail": f"P06 concluiu sem resposta HTTP positiva para {p06_no_http_targets}/{preflight_total} alvo(s).",
             "action": "Não promover fases web profundas; revisar conectividade, DNS, WAF/CDN e portas antes de avaliar vulnerabilidades.",
+        })
+    if p06_runner_connectivity_blocked_targets:
+        gaps.append({
+            "severity": "high",
+            "area": "runner_connectivity",
+            "title": "Runner não alcançou alvo(s) que exigem validação externa",
+            "detail": (
+                f"P06 teve timeout/conectividade bloqueada a partir do runner para "
+                f"{p06_runner_connectivity_blocked_targets}/{preflight_total} alvo(s); "
+                "não interpretar como ausência de superfície do parque."
+            ),
+            "action": "Corrigir conectividade/NAT/firewall do runner ou executar probes a partir de um runner com a mesma rota do host.",
         })
     if attempted and success_ratio < 0.75 and infrastructure_failure_items:
         gaps.append({
@@ -1103,7 +1123,16 @@ def _build_preflight_summary(
             "input_covered_targets": sum(bool(row.get("p06_input_covered")) for row in profile_rows),
             "complete_targets": p06_complete,
             "http_live_targets": p06_live,
-            "no_http_response_targets": sum(bool(row.get("p06_complete")) and not bool(row.get("p06_http_live")) for row in profile_rows),
+            "no_http_response_targets": sum(
+                bool(row.get("p06_complete"))
+                and not bool(row.get("p06_http_live"))
+                and str(row.get("status") or "") != "runner_connectivity_blocked"
+                for row in profile_rows
+            ),
+            "runner_connectivity_blocked_targets": sum(
+                str(row.get("status") or "") == "runner_connectivity_blocked"
+                for row in profile_rows
+            ),
         },
         "quality_inputs": {
             "external_preconditions": external_preconditions,

@@ -87,8 +87,14 @@ def _profile_summary(state: dict[str, Any]) -> dict[str, Any]:
         "p06_input_covered": sum(bool(profile.get("p06_input_covered")) for profile in values),
         "p06_complete": sum(bool(profile.get("p06_complete")) for profile in values),
         "http_live": sum(bool(profile.get("p06_http_live")) for profile in values),
+        "runner_connectivity_blocked": sum(
+            str(profile.get("status") or "") == "runner_connectivity_blocked"
+            for profile in values
+        ),
         "no_http_response": sum(
-            bool(profile.get("p06_complete")) and not bool(profile.get("p06_http_live"))
+            bool(profile.get("p06_complete"))
+            and not bool(profile.get("p06_http_live"))
+            and str(profile.get("status") or "") != "runner_connectivity_blocked"
             for profile in values
         ),
     }

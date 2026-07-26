@@ -1685,6 +1685,35 @@ def _parse_batch_http_targets(result: dict[str, Any], targets: list[str]) -> set
     return {target for target, values in observations.items() if values}
 
 
+def _batch_runner_connectivity_failure(result: dict[str, Any], ledger_status: str) -> bool:
+    status = str(ledger_status or result.get("status") or "").strip().lower()
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            result.get("error"),
+            result.get("stderr"),
+            result.get("stderr_full"),
+            result.get("stdout"),
+            result.get("stdout_full"),
+        )
+    ).lower()
+    if status == "timeout":
+        return True
+    return any(
+        marker in haystack
+        for marker in (
+            "connecttimeout",
+            "connection timed out",
+            "connection timeout",
+            "network is unreachable",
+            "no route to host",
+            "timeout after",
+            "runner watchdog marked stale",
+            "no_output_for_",
+        )
+    )
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         if value in (None, ""):
@@ -1821,6 +1850,8 @@ def _record_batch_target_qualification(
     else:
         observations_by_target = _parse_batch_http_observations(result, targets)
         http_live_targets = {target for target, values in observations_by_target.items() if values}
+        runner_connectivity_failure = _batch_runner_connectivity_failure(result, ledger_status)
+        runner_failure_applies_to_silent_targets = runner_connectivity_failure and (len(targets) <= 1 or not http_live_targets)
         for target in targets:
             profile = dict(profiles.get(target) or {})
             observations = observations_by_target.get(target) or []
@@ -1828,7 +1859,7 @@ def _record_batch_target_qualification(
             target_complete = (
                 target in covered_targets
                 and (ledger_status == "completed" or is_live)
-            )
+            ) or (runner_failure_applies_to_silent_targets and target in covered_targets)
             observed_ports = {
                 int(obs["port"])
                 for obs in observations
@@ -1846,17 +1877,27 @@ def _record_batch_target_qualification(
                     "p06_checked_at": now,
                     "p06_profile": str(result.get("profile") or "httpx_probe_batch"),
                     "p06_input_covered": target in covered_targets,
+                    "p06_runner_connectivity_failure": bool(
+                        profile.get("p06_runner_connectivity_failure")
+                        or (runner_failure_applies_to_silent_targets and target in covered_targets)
+                    ),
                     "http_observed_ports": sorted(observed_ports),
                     "open_ports": sorted(set(profile.get("open_ports") or []) | observed_ports),
                 }
             )
             if target_complete:
-                profile["status"] = "http_live" if is_live else "no_http_response"
-                profile["reason"] = (
-                    "P06 confirmou superfície HTTP"
-                    if is_live
-                    else "P06 concluído sem resposta HTTP para este alvo"
-                )
+                if is_live:
+                    profile["status"] = "http_live"
+                    profile["reason"] = "P06 confirmou superfície HTTP"
+                elif profile.get("p06_runner_connectivity_failure"):
+                    profile["status"] = "runner_connectivity_blocked"
+                    profile["reason"] = (
+                        "P06 tentou o alvo, mas o runner/Kali não conseguiu conectar; "
+                        "não classificar como ausência de superfície do alvo"
+                    )
+                else:
+                    profile["status"] = "no_http_response"
+                    profile["reason"] = "P06 concluído sem resposta HTTP para este alvo"
                 profile["http"] = observations or profile.get("http") or []
             else:
                 profile["status"] = "p06_inconclusive"

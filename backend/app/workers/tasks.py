@@ -336,6 +336,7 @@ def _merge_runtime_scan_state(
             "tcp_scanned_no_open_ports": 20,
             "tcp_closed": 20,
             "no_http_response": 25,
+            "runner_connectivity_blocked": 27,
             "tcp_live": 30,
             "http_live": 40,
             "non_public_rejected": 50,
