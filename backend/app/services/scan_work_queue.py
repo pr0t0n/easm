@@ -89,9 +89,20 @@ def kali_inflight_release(rc: str, count: int = 1) -> None:
 from app.services.offensive_operator_core import PHASE_CONTRACTS, PHASE_TOOL_BINDINGS, ToolCatalog
 
 
+def _is_batch_target(target: str | None) -> bool:
+    return str(target or "").strip().startswith("__batch__")
+
+
+def _batch_target_key_for_source(source: str) -> str:
+    match = re.search(r"provided_target_inventory_batch_(\d+)", str(source or ""))
+    if match:
+        return f"__batch__:{int(match.group(1))}"
+    return "__batch__"
+
+
 def _scope_host_from_target(target: str) -> str:
     raw = str(target or "").strip()
-    if not raw or raw == "__batch__":
+    if not raw or _is_batch_target(raw):
         return ""
     candidate = raw if "://" in raw else f"http://{raw}"
     try:
@@ -159,7 +170,7 @@ def enforce_work_item_scope(
         return {"in_scope": True, "authorized_scope": []}
 
     now = datetime.now()
-    if str(item.target or "") == "__batch__":
+    if _is_batch_target(item.target):
         metadata = dict(item.item_metadata or {})
         batch_targets = [str(t).strip() for t in metadata.get("batch_targets") or [] if str(t or "").strip()]
         kept, skipped = filter_targets_to_authorized_scope(batch_targets, scope)
@@ -824,7 +835,7 @@ def _tool_profile(tool_name: str) -> str:
 
 def _target_host(target: str) -> str:
     raw = str(target or "").strip()
-    if not raw or raw == "__batch__":
+    if not raw or _is_batch_target(raw):
         return ""
     try:
         parsed = urlparse(raw if "://" in raw else f"https://{raw}")
@@ -854,7 +865,7 @@ def _is_primary_scan_target(target: str, state: dict[str, Any]) -> bool:
 
 def _target_type(target: str) -> str:
     raw = str(target or "").strip()
-    if raw == "__batch__":
+    if _is_batch_target(raw):
         return "batch"
     try:
         parsed = urlparse(raw if "://" in raw else f"https://{raw}")
@@ -939,7 +950,7 @@ def _preflight_profile_for_target(state: dict[str, Any], target: str) -> dict[st
 
 
 def _work_item_targets(item: ScanWorkItem) -> list[str]:
-    if str(item.target or "") != "__batch__":
+    if not _is_batch_target(item.target):
         return [str(item.target)]
     metadata = dict(item.item_metadata or {})
     return [str(value) for value in metadata.get("batch_targets") or [] if str(value)]
@@ -951,7 +962,7 @@ def _covered_recon_targets(
     state: dict[str, Any],
 ) -> set[str]:
     """Map the runner's materialized-input manifest back to canonical targets."""
-    if str(item.target or "") != "__batch__":
+    if not _is_batch_target(item.target):
         return set(targets)
     result = dict(item.result or {})
     manifest = [
@@ -1226,9 +1237,19 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
             is_live = bool(observations)
             target_attempted = target in covered_targets or is_live
             target_completed = (completed and target_attempted) or is_live or (runner_failure_applies_to_silent_targets and target_attempted)
+            previously_http_live = bool(profile.get("p06_http_live") or profile.get("p06_positive_evidence"))
+            previous_observations = [
+                dict(value)
+                for value in list(profile.get("http") or [])
+                if isinstance(value, dict)
+            ]
+            merged_observations = list(previous_observations)
+            for observation in observations:
+                if observation not in merged_observations:
+                    merged_observations.append(observation)
             observed_ports = {
                 int(obs["port"])
-                for obs in observations
+                for obs in merged_observations
                 if isinstance(obs.get("port"), int) and 1 <= int(obs["port"]) <= 65535
             }
             ports = sorted(set(profile.get("open_ports") or []) | observed_ports)
@@ -1248,9 +1269,9 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
                 {
                     "target": target,
                     "host": _target_host(target),
-                    "p06_complete": target_completed,
-                    "p06_http_live": bool(target_completed and is_live),
-                    "p06_positive_evidence": is_live,
+                    "p06_complete": bool(profile.get("p06_complete") or target_completed or previously_http_live),
+                    "p06_http_live": bool(previously_http_live or is_live),
+                    "p06_positive_evidence": bool(profile.get("p06_positive_evidence") or is_live),
                     "p06_checked_at": checked_at,
                     "p06_input_covered": target in covered_targets or is_live,
                     "p06_probe_contracts": contracts[-10:],
@@ -1261,10 +1282,10 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
                     "open_ports": ports,
                 }
             )
-            if target_completed:
-                if is_live:
+            if profile.get("p06_complete"):
+                if profile.get("p06_http_live"):
                     profile["status"] = "http_live"
-                    profile["reason"] = "P06/httpx confirmou superfície HTTP"
+                    profile["reason"] = "P06 confirmou superfície HTTP; falhas posteriores não removem evidência positiva"
                 elif profile.get("p06_runner_connectivity_failure"):
                     profile["status"] = "runner_connectivity_blocked"
                     profile["reason"] = (
@@ -1274,7 +1295,7 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
                 else:
                     profile["status"] = "no_http_response"
                     profile["reason"] = "P06/httpx não observou resposta HTTP para este alvo"
-                profile["http"] = observations or profile.get("http") or []
+                profile["http"] = merged_observations
             else:
                 profile["status"] = "p06_inconclusive"
                 profile["reason"] = "P06/httpx sem execução conclusiva"
@@ -1327,7 +1348,7 @@ def record_recon_work_item_evidence(job: ScanJob, item: ScanWorkItem) -> dict[st
         "qualified_targets": len(qualified_targets),
         "positive_targets": len(positive_targets),
         "observations": int(observed),
-        "batch": str(item.target or "") == "__batch__",
+        "batch": _is_batch_target(item.target),
         "manifest_present": bool((item.result or {}).get("batch_targets")),
         "execution_contract": execution_contract,
     }
@@ -1528,7 +1549,7 @@ def validate_skill_applicability(
         },
     }
 
-    if target == "__batch__":
+    if _is_batch_target(target):
         decision["reason"] = "batch_item_validated_per_target_at_dispatch"
         decision["score"] = 0.75
         return decision
@@ -1757,7 +1778,7 @@ def work_item_applicability_decision(
     at: str = "dispatch",
 ) -> dict[str, Any]:
     metadata = dict(item.item_metadata or {})
-    if str(item.target or "") != "__batch__":
+    if not _is_batch_target(item.target):
         return _tool_applicability_decision(
             str(item.phase_id or ""),
             str(item.tool_name or ""),
@@ -2032,7 +2053,7 @@ def unblock_phase_items(
             ScanWorkItem.status == "blocked",
             or_(
                 ScanWorkItem.target.in_(targets),
-                ScanWorkItem.target == "__batch__",
+                ScanWorkItem.target.like("__batch__%"),
             ),
         )
         .all()
@@ -2523,11 +2544,12 @@ def enqueue_scan_work_items(
         sorted_targets = sorted(tset)
 
         # Check for existing batch item
+        batch_target_key = _batch_target_key_for_source(source)
         existing_batch = db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == job.id,
             ScanWorkItem.phase_id == phase_id,
             ScanWorkItem.tool_name == tool[:120],
-            ScanWorkItem.target == "__batch__",
+            ScanWorkItem.target == batch_target_key,
         ).first()
 
         if existing_batch:
@@ -2616,7 +2638,7 @@ def enqueue_scan_work_items(
         item = ScanWorkItem(
             scan_job_id=job.id,
             phase_id=phase_id,
-            target="__batch__",
+            target=batch_target_key,
             tool_name=tool[:120],
             profile=_batch_tool_profile(tool)[:120],
             resource_class=rc,
@@ -3489,7 +3511,7 @@ def triage_post_p09_injection(db: Session, scan_id: int) -> dict[str, Any]:
             ScanWorkItem.phase_id.in_(list(_INJECTION_PHASES)),
             ScanWorkItem.tool_name.in_(list(_HIGH_COST_TOOLS)),
             ScanWorkItem.status.in_(["queued", "retry", "blocked"]),
-            ScanWorkItem.target != "__batch__",
+            ~ScanWorkItem.target.like("__batch__%"),
             ~ScanWorkItem.target.in_(list(targets_with_findings)) if targets_with_findings else text("true"),
         )
         .all()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import ipaddress
+import re
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -66,7 +67,7 @@ def is_host_in_scope(host: str, authorized_scope: list[str]) -> bool:
 def authorized_scope_from_target_query(target_query: str) -> list[str]:
     """Build the exact authorized roots from a scan target query."""
     roots: set[str] = set()
-    for piece in str(target_query or "").replace(",", "\n").splitlines():
+    for piece in re.split(r"[,;\n]+", str(target_query or "")):
         root = _normalize_scope_root(piece)
         if root:
             roots.add(root)

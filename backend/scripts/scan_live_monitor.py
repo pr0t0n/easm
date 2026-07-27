@@ -13,11 +13,12 @@ import json
 import os
 import sys
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests
 from sqlalchemy import func, text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,9 +45,9 @@ def _kali_active(scan_id: int) -> tuple[int, list[dict[str, Any]]]:
     try:
         rows: list[dict[str, Any]] = []
         for status in ("running", "queued"):
-            response = requests.get(f"{base}/jobs", params={"status": status, "limit": 1000}, timeout=8)
-            response.raise_for_status()
-            payload = response.json()
+            query = urllib.parse.urlencode({"status": status, "limit": 1000})
+            with urllib.request.urlopen(f"{base}/jobs?{query}", timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8") or "{}")
             for item in payload.get("items") or payload.get("jobs") or []:
                 if int(item.get("scan_id") or -1) == int(scan_id):
                     rows.append({

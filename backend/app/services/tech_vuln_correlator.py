@@ -815,10 +815,23 @@ def _seed_attack_profile_for_tech(
             if already:
                 continue
 
-            from app.services.scan_work_queue import apply_phase_tool_metadata
+            from app.services.scan_work_queue import (
+                apply_phase_tool_metadata,
+                initial_last_error_for_phase,
+                initial_status_for_target_phase,
+            )
 
             rc = resource_class_for_tool(tool_name)
             base_pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15, "oob": 20}.get(rc, 0)
+            job_state = {}
+            try:
+                from app.models.models import ScanJob
+
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                job_state = dict(job.state_data or {}) if job else {}
+            except Exception:
+                job_state = {}
+            initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
             item = ScanWorkItem(
                 scan_job_id=scan_id,
                 phase_id=phase_id,
@@ -827,7 +840,8 @@ def _seed_attack_profile_for_tech(
                 profile=tool_name,
                 resource_class=rc,
                 priority=max(1, base_pri + priority_boost),
-                status="queued",
+                status=initial_status,
+                last_error=None if initial_status == "queued" else initial_last_error_for_phase(phase_id),
                 max_attempts=2,
                 item_metadata=apply_phase_tool_metadata({
                     "source": "tech_attack_profile",
@@ -864,7 +878,13 @@ def _seed_targeted_nuclei(
     Returns 1 if created, 0 if already exists.
     """
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_work_queue import (
+        apply_phase_tool_metadata,
+        initial_last_error_for_phase,
+        initial_status_for_target_phase,
+        resource_class_for_tool,
+        PHASE_PRIORITY,
+    )
 
     tech_lower = product.lower()
     # Find matching nuclei tag
@@ -892,6 +912,15 @@ def _seed_targeted_nuclei(
 
     rc = resource_class_for_tool(tool_name)
     pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
+    job_state = {}
+    try:
+        from app.models.models import ScanJob
+
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        job_state = dict(job.state_data or {}) if job else {}
+    except Exception:
+        job_state = {}
+    initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
     item = ScanWorkItem(
         scan_job_id=scan_id,
         phase_id=phase_id,
@@ -900,7 +929,8 @@ def _seed_targeted_nuclei(
         profile=tool_name,
         resource_class=rc,
         priority=pri - 5,   # slightly higher priority than normal
-        status="queued",
+        status=initial_status,
+        last_error=None if initial_status == "queued" else initial_last_error_for_phase(phase_id),
         max_attempts=2,
         item_metadata=apply_phase_tool_metadata({
             "source": "tech_correlator",
@@ -992,7 +1022,13 @@ def _add_learning_work_item(
 ) -> bool:
     """Cria um ScanWorkItem learning-driven (dedup por tool+target). True se criou."""
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
+    from app.services.scan_work_queue import (
+        apply_phase_tool_metadata,
+        initial_last_error_for_phase,
+        initial_status_for_target_phase,
+        resource_class_for_tool,
+        PHASE_PRIORITY,
+    )
 
     tname = tname[:120]
     already = (
@@ -1007,11 +1043,22 @@ def _add_learning_work_item(
         return False
     rc = resource_class_for_tool(tname)
     pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 15}.get(rc, 0)
+    job_state = {}
+    try:
+        from app.models.models import ScanJob
+
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        job_state = dict(job.state_data or {}) if job else {}
+    except Exception:
+        job_state = {}
+    initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
     db.add(ScanWorkItem(
         scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
         tool_name=tname, profile=tname, resource_class=rc,
         priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)
-        status="queued", max_attempts=2,
+        status=initial_status,
+        last_error=None if initial_status == "queued" else initial_last_error_for_phase(phase_id),
+        max_attempts=2,
         item_metadata=apply_phase_tool_metadata(metadata, phase_id, tname, source=str(metadata.get("source") or "learning_work_item")),
         created_at=datetime.now(), updated_at=datetime.now(),
     ))

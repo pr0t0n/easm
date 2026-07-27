@@ -102,24 +102,50 @@ def _safe_db_rollback(db) -> None:
     try:
         db.rollback()
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            db.invalidate()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _close_idle_scan_transaction(db) -> None:
     """Ensure no ORM transaction is held while external tools run."""
 
     try:
-        if getattr(db, "in_transaction", lambda: False)():
-            db.rollback()
+        db.rollback()
     except Exception:  # noqa: BLE001
-        _safe_db_rollback(db)
+        try:
+            db.invalidate()
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def _refresh_scan_job_after_wait(db, job: ScanJob) -> ScanJob | None:
+def _release_db_session_before_external_wait(db) -> None:
+    """Release the DB connection before blocking on Kali/MCP/network tools.
+
+    SQLAlchemy starts transactions implicitly even for reads. A Celery task that
+    commits progress, then waits minutes for Kali while accidentally holding a
+    checked-out connection, will hit PostgreSQL's idle-in-transaction timeout and
+    lose the scan right when it tries to persist the result. Closing the session
+    here releases the connection; the same Session object can be reused and will
+    acquire a fresh connection on the next DB operation.
+    """
+
+    _close_idle_scan_transaction(db)
+    try:
+        db.close()
+    except Exception:  # noqa: BLE001
+        try:
+            db.invalidate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _refresh_scan_job_after_wait(db, job: ScanJob | int) -> ScanJob | None:
     """Rollback/reload a ScanJob after a long external wait."""
 
     try:
-        job_id = int(job.id)
+        job_id = int(job if isinstance(job, int) else job.id)
     except Exception:  # noqa: BLE001
         return None
     _safe_db_rollback(db)
@@ -129,12 +155,13 @@ def _refresh_scan_job_after_wait(db, job: ScanJob) -> ScanJob | None:
             return refreshed
     except Exception:  # noqa: BLE001
         _safe_db_rollback(db)
-    try:
-        db.refresh(job)
-        return job
-    except Exception:  # noqa: BLE001
-        _safe_db_rollback(db)
-        return None
+    if not isinstance(job, int):
+        try:
+            db.refresh(job)
+            return job
+        except Exception:  # noqa: BLE001
+            _safe_db_rollback(db)
+    return None
 
 
 def _scan_mode_value(scan_mode: str) -> str:
@@ -147,8 +174,26 @@ def _next_pending_phase_target(
     input_target_count: int,
     allowed_phases: set[str] | None,
     delegated_targets: set[str] | None = None,
+    skip_p01_for_input_targets: bool = False,
 ) -> tuple[str, str] | None:
     delegated_targets = delegated_targets or set()
+    if skip_p01_for_input_targets:
+        qualification_first = ["P02", "P06"]
+        phase_sequence = qualification_first + [
+            phase_id
+            for phase_id in PHASE_ORDER
+            if phase_id not in {"P01", *qualification_first}
+        ]
+        for phase_id in phase_sequence:
+            if allowed_phases is not None and phase_id not in allowed_phases:
+                continue
+            for target in all_targets:
+                if not target or target in delegated_targets:
+                    continue
+                if f"{phase_id}:{target}" not in completed_work:
+                    return phase_id, target
+        return None
+
     for target_index, target in enumerate(all_targets):
         if not target or target in delegated_targets:
             continue
@@ -157,7 +202,10 @@ def _next_pending_phase_target(
                 continue
             if phase_id == "P01" and target_index >= input_target_count:
                 continue
-            if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
+            if phase_id == "P01" and (
+                skip_p01_for_input_targets
+                or not _should_run_subdomain_enumeration(target)
+            ):
                 continue
             if f"{phase_id}:{target}" not in completed_work:
                 return phase_id, target
@@ -259,6 +307,22 @@ def _is_absolute_http_url(target: str) -> bool:
 def _should_run_subdomain_enumeration(target: str) -> bool:
     """P01 is domain enumeration. Full URLs are explicit app targets."""
     return not _is_absolute_http_url(target)
+
+
+def _is_explicit_target_inventory(state: dict[str, Any], targets: list[str]) -> bool:
+    """True when the operator supplied a concrete host inventory.
+
+    In this mode P01 must not spend minutes enumerating subdomains for every
+    already-specified host. The platform should treat the input list itself as
+    the P01 inventory evidence and start qualifying DNS/ports/HTTP in P02/P06.
+    A single bare domain remains a discovery seed and still runs P01.
+    """
+    if bool(state.get("skip_p01_subdomain_enumeration")) or bool(state.get("explicit_target_inventory")):
+        return True
+    mode = str(state.get("target_input_mode") or "").strip().lower()
+    if mode in {"explicit_target_inventory", "provided_target_inventory", "provided_targets"}:
+        return True
+    return len([target for target in targets if str(target or "").strip()]) > 1
 
 
 def _is_local_or_lab_target(target: str) -> bool:
@@ -910,6 +974,9 @@ def _record_direct_url_p01_skip(
     completed_work: set[str],
     target: str,
     all_targets: list[str],
+    *,
+    reason: str = "direct_url_target_no_subdomain_enumeration",
+    input_mode: str = "direct_url",
 ) -> None:
     _record_preflight_skip(
         db,
@@ -918,16 +985,246 @@ def _record_direct_url_p01_skip(
         completed_work,
         "P01",
         target,
-        "direct_url_target_no_subdomain_enumeration",
+        reason,
     )
     state = dict(job.state_data or {})
     modes = dict(state.get("target_input_modes") or {})
-    modes[target] = "direct_url"
+    modes[target] = input_mode
     state["target_input_modes"] = modes
-    state["direct_url_targets"] = sorted(set(list(state.get("direct_url_targets") or []) + [target]))
+    if input_mode == "direct_url":
+        state["direct_url_targets"] = sorted(set(list(state.get("direct_url_targets") or []) + [target]))
+    else:
+        state["provided_targets"] = list(dict.fromkeys(list(state.get("provided_targets") or []) + list(all_targets)))
     state["target_set"] = list(all_targets)
+    state["target_set_semantics"] = (
+        "operator_provided_targets_pending_p02_p06"
+        if input_mode != "direct_url"
+        else str(state.get("target_set_semantics") or "direct_url_targets_pending_p02_p06")
+    )
+    if input_mode != "direct_url":
+        state["explicit_target_inventory"] = True
+        state["skip_p01_subdomain_enumeration"] = True
+        state["work_producer_stage"] = "P02_P06_qualification"
+        state["work_producers_sealed"] = False
     job.state_data = state
     db.commit()
+
+
+def _first_active_work_queue_phase(db, scan_id: int) -> str:
+    """Return the earliest Pxx that still has queued/running/blocked work."""
+
+    try:
+        from app.models.models import ScanWorkItem
+
+        active_statuses = ("queued", "retry", "dispatched", "running", "submitted", "blocked")
+        # Work-queue execution is dependency/gate-major, not numeric P01→P22.
+        # The UI/current_step must expose the same frontier the dispatcher cares
+        # about, otherwise a scan with P06 still active can look like it already
+        # moved to P03 just because P03 sorts earlier in PHASE_ORDER.
+        frontier_order = ["P02", "P06", "P09"] + [
+            phase_id for phase_id in PHASE_ORDER if phase_id not in {"P02", "P06", "P09"}
+        ]
+        pending_phases = {
+            str(row[0])
+            for row in db.query(ScanWorkItem.phase_id)
+            .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
+            .distinct()
+            .all()
+            if row and row[0]
+        }
+        for phase_id in frontier_order:
+            if phase_id in pending_phases:
+                return phase_id
+    except Exception:  # noqa: BLE001
+        _safe_db_rollback(db)
+    return ""
+
+
+def _seed_explicit_inventory_work_queue(
+    db,
+    job: ScanJob,
+    scan_mode: str,
+    all_targets: list[str],
+    phase_ledgers: list[dict[str, Any]],
+    completed_work: set[str],
+    phase_task_budget: int,
+) -> dict[str, Any] | None:
+    """Hand operator-provided target inventories directly to the capacity queue.
+
+    Explicit inventories already are the target set. They must not go through the
+    legacy target-major operator loop, otherwise the first hostname can tunnel
+    into P03/P04/P05 while the rest of the list has not even reached P02.
+    """
+
+    if not all_targets or not bool(getattr(settings, "scan_work_queue_enabled", True)):
+        return None
+
+    from app.services.scan_work_queue import enqueue_scan_work_items, has_pending_work, work_queue_counts
+    from app.workers.tasks import _schedule_scan_work_dispatch as _dispatch_wq
+
+    unique_targets = list(dict.fromkeys([str(t).strip() for t in all_targets if str(t or "").strip()]))
+    total_targets = len(unique_targets)
+    if total_targets <= 0:
+        return None
+
+    state = dict(job.state_data or {})
+    batch_size = max(1, int(state.get("explicit_inventory_execution_batch_size") or settings.scan_explicit_inventory_batch_size or 10))
+    cursor = max(0, min(total_targets, int(state.get("explicit_inventory_seed_cursor") or 0)))
+    batch_index = max(0, int(state.get("explicit_inventory_batch_index") or 0))
+    counts: dict[str, int] = work_queue_counts(db, job.id)
+
+    if has_pending_work(db, job.id):
+        frontier_phase = _first_active_work_queue_phase(db, job.id) or "P02"
+        wait_seconds = max(15, int(state.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
+        state["target_set"] = unique_targets
+        state["provided_targets"] = unique_targets
+        state["explicit_inventory_total_targets"] = total_targets
+        state["explicit_inventory_seed_cursor"] = cursor
+        state["explicit_inventory_remaining_targets"] = max(0, total_targets - cursor)
+        state["work_queue_counts"] = counts
+        state["current_pentest_phase_id"] = frontier_phase
+        state["current_pentest_target"] = state.get("active_execution_batch_id") or "__batch__"
+        job.state_data = state
+        job.current_step = (
+            f"{frontier_phase} · lote {batch_index}/{max(1, ((total_targets + batch_size - 1) // batch_size))} "
+            f"em execução ({cursor}/{total_targets} alvos semeados) {dict(counts)}"
+        )
+        db.commit()
+        _dispatch_wq(job.id)
+        queued = _enqueue_operator_continuation(
+            db,
+            job,
+            scan_mode,
+            frontier_phase,
+            countdown=wait_seconds,
+            reason="provided_inventory_work_queue_wait",
+        )
+        db.commit()
+        return {
+            "checkpointed": True,
+            "parallel_engine": "capacity_work_queue",
+            "provided_targets": total_targets,
+            "seeded_targets": cursor,
+            "active_batch_index": batch_index,
+            "work_queue_counts": counts,
+            **queued,
+        }
+
+    if cursor < total_targets:
+        next_cursor = min(total_targets, cursor + batch_size)
+        batch_targets = unique_targets[cursor:next_cursor]
+        next_batch_index = batch_index + 1
+        batch_id = f"__batch__:{next_batch_index}"
+        seed = enqueue_scan_work_items(
+            db,
+            job,
+            batch_targets,
+            source=f"provided_target_inventory_batch_{next_batch_index}",
+        )
+        state = dict(job.state_data or {})
+        if seed.get("rejected_terminal"):
+            return {"ok": False, "scan_id": job.id, "rejected_terminal": True, "seed": seed}
+
+        state.update(
+            {
+                # Full inventory stays complete. Only active_execution_batch_targets
+                # is windowed to protect CPU/memory/network capacity.
+                "target_set": unique_targets,
+                "target_set_semantics": "operator_provided_targets_windowed_capacity_work_queue",
+                "provided_targets": unique_targets,
+                "explicit_target_inventory": True,
+                "skip_p01_subdomain_enumeration": True,
+                "explicit_inventory_total_targets": total_targets,
+                "explicit_inventory_execution_batch_size": batch_size,
+                "explicit_inventory_seed_cursor": next_cursor,
+                "explicit_inventory_remaining_targets": max(0, total_targets - next_cursor),
+                "explicit_inventory_batch_index": next_batch_index,
+                "explicit_inventory_batches_total": max(1, ((total_targets + batch_size - 1) // batch_size)),
+                "active_execution_batch_id": batch_id,
+                "active_execution_batch_targets": batch_targets,
+                "parallel_engine": "capacity_work_queue",
+                "parallel_delegated_targets": sorted(set(unique_targets)),
+                "parallel_pending_targets": [],
+                "parallel_batch_size": len(batch_targets),
+                "work_producers_sealed": True,
+                "work_producer_stage": "sealed",
+                "qualification_contract_version": 3,
+                "explicit_inventory_work_queue_seeded": True,
+                "_operator_phase_queue_started": True,
+                "offensive_operator_phase_queue_enabled": True,
+                "offensive_operator_phase_task_budget": phase_task_budget,
+                "completed_work": sorted(set(state.get("completed_work") or []) | completed_work),
+                "phase_ledger_v2": _merge_phase_ledgers(list(state.get("phase_ledger_v2") or []), phase_ledgers),
+                "target_inventory_generation": int(state.get("target_inventory_generation") or 0) + 1,
+            }
+        )
+        counts = work_queue_counts(db, job.id)
+        state["work_queue_counts"] = counts
+        counts = work_queue_counts(db, job.id)
+        state["work_queue_counts"] = counts
+        state["current_pentest_phase_id"] = "P02"
+        state["current_pentest_target"] = batch_id
+        job.state_data = state
+        job.current_step = (
+            f"P02 · lote {next_batch_index}/{state['explicit_inventory_batches_total']} "
+            f"inicializado ({len(batch_targets)} de {total_targets} alvos; descoberta/inventário completo preservado)"
+        )
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                "provided_target_inventory_work_queue_seed "
+                f"batch={next_batch_index}/{state['explicit_inventory_batches_total']} "
+                f"batch_id={batch_id} active_targets={len(batch_targets)} "
+                f"total_inventory_targets={total_targets} seeded_cursor={next_cursor} "
+                f"created={int(seed.get('created') or 0)} "
+                f"existing={int(seed.get('existing') or 0)} skipped={int(seed.get('skipped') or 0)} "
+                f"requeued={int(seed.get('requeued') or 0)}"
+            ),
+        ))
+        db.commit()
+
+        if has_pending_work(db, job.id):
+            frontier_phase = _first_active_work_queue_phase(db, job.id) or "P02"
+        else:
+            frontier_phase = "P02"
+        _dispatch_wq(job.id)
+        queued = _enqueue_operator_continuation(
+            db,
+            job,
+            scan_mode,
+            frontier_phase,
+            countdown=30 if has_pending_work(db, job.id) else 5,
+            reason="provided_inventory_work_queue_wait",
+        )
+        db.commit()
+        return {
+            "checkpointed": True,
+            "parallel_engine": "capacity_work_queue",
+            "provided_targets": total_targets,
+            "seeded_targets": next_cursor,
+            "active_batch_index": next_batch_index,
+            "active_batch_targets": len(batch_targets),
+            "work_queue_counts": work_queue_counts(db, job.id),
+            **queued,
+        }
+
+    state = dict(job.state_data or {})
+    state["work_queue_counts"] = counts or work_queue_counts(db, job.id)
+    state["parallel_pending_targets"] = []
+    state["work_producers_sealed"] = True
+    state["work_producer_stage"] = "sealed"
+    state["explicit_inventory_remaining_targets"] = 0
+    job.state_data = state
+    db.commit()
+    return {
+        "work_queue_done": True,
+        "parallel_engine": "capacity_work_queue",
+        "provided_targets": total_targets,
+        "seeded_targets": cursor,
+        "work_queue_counts": state["work_queue_counts"],
+    }
 
 
 def _ensure_runtime_visibility_contracts(
@@ -2149,9 +2446,21 @@ def run_offensive_operator_scan(
     _execution_epoch = int(initial_state.get("execution_epoch") or 0)
     scan_level = str(initial_state.get("scan_level") or "full").lower()
     allowed_phases = phases_for_scan_level(scan_level)
+    explicit_target_inventory = _is_explicit_target_inventory(initial_state, targets)
     if allowed_phases is not None:
         db.add(ScanLog(scan_job_id=job.id, source="offensive-operator", level="INFO",
                        message=f"scan_level={scan_level} — limiting to phases: {sorted(allowed_phases)}"))
+        db.commit()
+    if explicit_target_inventory:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                f"provided_target_inventory targets={len(targets)} — "
+                "P01 subdomain enumeration skipped; starting DNS/port/HTTP qualification"
+            ),
+        ))
         db.commit()
 
     # Set thread-local auth headers so _call_mcp_execution propagates them to kali.
@@ -2210,13 +2519,50 @@ def run_offensive_operator_scan(
     _target_idx = 0
     _phase_queue_enabled = bool(initial_state.get("offensive_operator_phase_queue_enabled", phase_queue_enabled))
     _phase_task_budget = max(1, int(initial_state.get("offensive_operator_phase_task_budget") or phase_task_budget or 1))
+    if explicit_target_inventory:
+        # Explicit target lists must advance horizontally across phases. If the
+        # capacity queue is unavailable, the phase queue fallback still executes
+        # one phase-unit per task and uses _next_pending_phase_target's
+        # phase-major ordering (P02 all targets, then P06 all targets, ...).
+        _phase_queue_enabled = True
+        _phase_task_budget = 1
     _phase_units_this_task = 0
+    _explicit_inventory_wq_done = False
 
     for _input_target in all_targets[:_input_target_count]:
-        if _input_target and not _should_run_subdomain_enumeration(_input_target):
+        if not _input_target:
+            continue
+        if explicit_target_inventory:
+            _record_direct_url_p01_skip(
+                db,
+                job,
+                phase_ledgers,
+                completed_work,
+                _input_target,
+                all_targets,
+                reason="operator_provided_target_inventory_no_subdomain_enumeration",
+                input_mode="provided_target",
+            )
+        elif not _should_run_subdomain_enumeration(_input_target):
             _record_direct_url_p01_skip(db, job, phase_ledgers, completed_work, _input_target, all_targets)
 
-    if _phase_queue_enabled and not initial_state.get("_operator_phase_queue_started"):
+    if explicit_target_inventory:
+        _inventory_wq = _seed_explicit_inventory_work_queue(
+            db,
+            job,
+            scan_mode,
+            all_targets,
+            phase_ledgers,
+            completed_work,
+            _phase_task_budget,
+        )
+        if _inventory_wq:
+            if not _inventory_wq.get("work_queue_done"):
+                return _inventory_wq
+            _explicit_inventory_wq_done = True
+            _target_idx = len(all_targets)
+
+    if _phase_queue_enabled and not _explicit_inventory_wq_done and not initial_state.get("_operator_phase_queue_started"):
         _delegated_targets = set(initial_state.get("parallel_delegated_targets") or [])
         _next_unit = _next_pending_phase_target(
             all_targets,
@@ -2224,6 +2570,7 @@ def run_offensive_operator_scan(
             _input_target_count,
             allowed_phases,
             _delegated_targets,
+            skip_p01_for_input_targets=explicit_target_inventory,
         )
         if _next_unit:
             _next_phase, _next_target = _next_unit
@@ -2232,7 +2579,7 @@ def run_offensive_operator_scan(
             state["offensive_operator_phase_task_budget"] = _phase_task_budget
             state["_operator_phase_queue_started"] = True
             state["work_producers_sealed"] = False
-            state["work_producer_stage"] = "P01_discovery"
+            state["work_producer_stage"] = "P02_P06_qualification" if explicit_target_inventory else "P01_discovery"
             state["qualification_contract_version"] = 3
             state["current_pentest_phase_id"] = _next_phase
             state["current_pentest_target"] = _next_target
@@ -2318,8 +2665,24 @@ def run_offensive_operator_scan(
             _work_key = f"{phase_id}:{target}"
             if _work_key in completed_work:
                 continue
-            if phase_id == "P01" and not _should_run_subdomain_enumeration(target):
-                _record_direct_url_p01_skip(db, job, phase_ledgers, completed_work, target, all_targets)
+            if phase_id == "P01" and (
+                explicit_target_inventory
+                or not _should_run_subdomain_enumeration(target)
+            ):
+                _record_direct_url_p01_skip(
+                    db,
+                    job,
+                    phase_ledgers,
+                    completed_work,
+                    target,
+                    all_targets,
+                    reason=(
+                        "operator_provided_target_inventory_no_subdomain_enumeration"
+                        if explicit_target_inventory
+                        else "direct_url_target_no_subdomain_enumeration"
+                    ),
+                    input_mode="provided_target" if explicit_target_inventory else "direct_url",
+                )
                 continue
             if phase_id != "P01" and _should_apply_syn_gate(target):
                 # ── Portão de alcançabilidade (SYN): only for explicit web
@@ -2491,9 +2854,10 @@ def run_offensive_operator_scan(
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             _phase_unit_start = _time.monotonic()
-            _close_idle_scan_transaction(db)
+            _job_id_for_wait = int(job.id)
+            _release_db_session_before_external_wait(db)
             result = runtime.run_phase(phase_id, _effective_target, scope, execution_mode, offensive_state)
-            job = _refresh_scan_job_after_wait(db, job) or job
+            job = _refresh_scan_job_after_wait(db, _job_id_for_wait) or job
             try:
                 _halt_reason = _scan_halt_reason(job, _execution_epoch)
                 if _halt_reason:
@@ -2971,9 +3335,10 @@ def run_offensive_operator_scan(
                     _time.sleep(30)
                     # Re-run the phase with the slow profile already in state
                     try:
-                        _close_idle_scan_transaction(db)
+                        _job_id_for_retry_wait = int(job.id)
+                        _release_db_session_before_external_wait(db)
                         _retry_result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
-                        job = _refresh_scan_job_after_wait(db, job) or job
+                        job = _refresh_scan_job_after_wait(db, _job_id_for_retry_wait) or job
                         _retry_ledger = _retry_result["phase_ledger"]
                         _retry_ledger["target"] = target
                         _retry_ledger["mcp_results"] = _retry_result.get("mcp_results") or []
@@ -3520,7 +3885,14 @@ def run_offensive_operator_scan(
                 ))
                 db.commit()
                 _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
-                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                _next_unit = _next_pending_phase_target(
+                    all_targets,
+                    completed_work,
+                    _input_target_count,
+                    allowed_phases,
+                    _delegated_targets,
+                    skip_p01_for_input_targets=explicit_target_inventory,
+                )
                 _next_phase, _next_target = _next_unit or ("P02", target)
                 _state = dict(job.state_data or {})
                 _state["current_pentest_phase_id"] = _next_phase
@@ -3541,7 +3913,14 @@ def run_offensive_operator_scan(
             _phase_units_this_task += 1
             if _phase_queue_enabled and _phase_units_this_task >= _phase_task_budget and not _hard_blocked:
                 _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
-                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                _next_unit = _next_pending_phase_target(
+                    all_targets,
+                    completed_work,
+                    _input_target_count,
+                    allowed_phases,
+                    _delegated_targets,
+                    skip_p01_for_input_targets=explicit_target_inventory,
+                )
                 if _next_unit:
                     _next_phase, _next_target = _next_unit
                     _state = dict(job.state_data or {})
@@ -3576,7 +3955,14 @@ def run_offensive_operator_scan(
                                         f"re-dispatching scan to continue")))
                 job.current_step = f"checkpoint: {len(completed_work)} concluídos — continuando"
                 _delegated_targets = set((job.state_data or {}).get("parallel_delegated_targets") or [])
-                _next_unit = _next_pending_phase_target(all_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                _next_unit = _next_pending_phase_target(
+                    all_targets,
+                    completed_work,
+                    _input_target_count,
+                    allowed_phases,
+                    _delegated_targets,
+                    skip_p01_for_input_targets=explicit_target_inventory,
+                )
                 if _next_unit:
                     queued = _enqueue_operator_continuation(
                         db,
@@ -3606,7 +3992,14 @@ def run_offensive_operator_scan(
                 _final_state_snapshot["work_queue_counts"] = work_queue_counts(db, job.id)
                 _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
                 _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
-                _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+                _next_unit = _next_pending_phase_target(
+                    _final_targets,
+                    completed_work,
+                    _input_target_count,
+                    allowed_phases,
+                    _delegated_targets,
+                    skip_p01_for_input_targets=explicit_target_inventory,
+                )
                 # `completed_work` only ever gets entries from the operator's own
                 # sequential P01 pass — the parallel work-queue engine (tasks.py)
                 # never writes to it — so it stays frozen at ~whatever it had at
@@ -3617,21 +4010,7 @@ def run_offensive_operator_scan(
                 # having moved on to P09-P20 for real). Compute the true frontier
                 # instead from live scan_work_items: the earliest PHASE_ORDER
                 # phase that still has any non-terminal item, across ALL targets.
-                _cur_phase = ""
-                try:
-                    from app.models.models import ScanWorkItem as _CP_SWI
-                    _cp_active = ("queued", "retry", "dispatched", "running", "submitted", "blocked")
-                    _cp_phases_pending = {
-                        r[0] for r in db.query(_CP_SWI.phase_id)
-                        .filter(_CP_SWI.scan_job_id == job.id, _CP_SWI.status.in_(_cp_active))
-                        .distinct().all()
-                    }
-                    for _cp_p in PHASE_ORDER:
-                        if _cp_p in _cp_phases_pending:
-                            _cur_phase = _cp_p
-                            break
-                except Exception:
-                    pass
+                _cur_phase = _first_active_work_queue_phase(db, job.id)
                 if not _cur_phase and _next_unit:
                     _cur_phase = _next_unit[0]
                 if _next_unit:
@@ -3693,7 +4072,14 @@ def run_offensive_operator_scan(
             db.commit()
             _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
             _delegated_targets = set(_final_state_snapshot.get("parallel_delegated_targets") or [])
-            _next_unit = _next_pending_phase_target(_final_targets, completed_work, _input_target_count, allowed_phases, _delegated_targets)
+            _next_unit = _next_pending_phase_target(
+                _final_targets,
+                completed_work,
+                _input_target_count,
+                allowed_phases,
+                _delegated_targets,
+                skip_p01_for_input_targets=explicit_target_inventory,
+            )
             queued = _enqueue_operator_continuation(
                 db,
                 job,
@@ -5190,9 +5576,10 @@ def _run_target_phases_subset(db, job: ScanJob, target: str) -> dict[str, Any]:
                 skipped += 1
                 continue
         try:
-            _close_idle_scan_transaction(db)
+            _job_id_for_wait = int(job.id)
+            _release_db_session_before_external_wait(db)
             result = runtime.run_phase(phase_id, target, scope, execution_mode, offensive_state)
-            job = _refresh_scan_job_after_wait(db, job) or job
+            job = _refresh_scan_job_after_wait(db, _job_id_for_wait) or job
             offensive_state = result["offensive_state"]
             ledger = result["phase_ledger"]
             ledger["target"] = target

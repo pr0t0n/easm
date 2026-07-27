@@ -48,6 +48,10 @@ TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps", "failed", "cancell
 NON_EXECUTABLE_SCAN_STATUSES = TERMINAL_SCAN_STATUSES | HALTED_SCAN_STATUSES | {"blocked"}
 
 
+def _is_work_item_batch_target(target: str | None) -> bool:
+    return str(target or "").strip().startswith("__batch__")
+
+
 def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
     status = str(scan_status or "").lower()
     error = "scan_paused" if status == "paused" else "scan_stopped"
@@ -3704,7 +3708,7 @@ def dispatch_scan_work_items(
             _gr_targets_set = {
                 str(r[0])
                 for r in db.query(_GR_SWI.target)
-                .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target != "__batch__")
+                .filter(_GR_SWI.scan_job_id == scan_id, ~_GR_SWI.target.like("__batch__%"))
                 .distinct().all()
                 if str(r[0] or "")
             }
@@ -3714,7 +3718,7 @@ def dispatch_scan_work_items(
             # after a worker restart between result persistence and gate opening.
             for (_gr_meta,) in (
                 db.query(_GR_SWI.item_metadata)
-                .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target == "__batch__")
+                .filter(_GR_SWI.scan_job_id == scan_id, _GR_SWI.target.like("__batch__%"))
                 .all()
             ):
                 for _gr_target in dict(_gr_meta or {}).get("batch_targets") or []:
@@ -4378,7 +4382,7 @@ def execute_scan_work_item(item_id: int):
             db.commit()
             return {"id": item.id, "status": "skipped", "reason": reason}
 
-        if item.target == "__batch__" and _applicability.get("batch_targets"):
+        if _is_work_item_batch_target(item.target) and _applicability.get("batch_targets"):
             _meta_for_applicability["batch_targets"] = list(_applicability.get("batch_targets") or [])
             _meta_for_applicability["batch_count"] = len(_meta_for_applicability["batch_targets"])
             _meta_for_applicability["skipped_batch_targets"] = list(_applicability.get("skipped_batch_targets") or [])
@@ -4406,7 +4410,7 @@ def execute_scan_work_item(item_id: int):
         # ── T4: Batch dispatch — one MCP call for all targets in batch item ──
         _item_meta = dict(item.item_metadata or {})
         _batch_targets: list[str] = list(_item_meta.get("batch_targets") or [])
-        _is_batch = item.target == "__batch__" and len(_batch_targets) > 1
+        _is_batch = _is_work_item_batch_target(item.target) and len(_batch_targets) > 1
         _dispatch_target = (
             _batch_targets[0]
             if _is_batch
@@ -5196,7 +5200,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 from sqlalchemy import func as _sfunc2
 
                 _imeta_gate = dict(item.item_metadata or {})
-                _is_batch_gate = item.target == "__batch__"
+                _is_batch_gate = _is_work_item_batch_target(item.target)
                 _gate_targets: list[str] = (
                     list(_imeta_gate.get("batch_targets") or []) if _is_batch_gate else [item.target]
                 )
@@ -5349,7 +5353,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 from app.services.js_endpoint_extractor import process_crawl_result as _crawl_proc
                 _crawl_meta = dict(item.item_metadata or {})
                 _crawl_base = item.target
-                if item.target == "__batch__":
+                if _is_work_item_batch_target(item.target):
                     _crawl_base = str((_crawl_meta.get("batch_targets") or [job.target_query])[0])
                 _crawl_summary = _crawl_proc(db, job.id, _crawl_base, item.tool_name, dict(item.result or {}))
                 if _crawl_summary.get("probes_seeded", 0) > 0 or _crawl_summary.get("high_value_found", 0) > 0:
@@ -5461,7 +5465,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         # After P06 (httpx/whatweb) confirms a target speaks HTTP, run ZAP baseline
         # (passive spider + alerts). Findings go through the same gated path.
         # One ZAP run per target per scan (guarded by state key).
-        if item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and item.target != "__batch__":
+        if item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and not _is_work_item_batch_target(item.target):
             try:
                 _schedule_scan_postprocessor(
                     job.id, item.id, "zap", item.target,
@@ -5471,7 +5475,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             except Exception:
                 pass
 
-        if False and item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and item.target != "__batch__":
+        if False and item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and not _is_work_item_batch_target(item.target):
             _zap_lock_client = None
             _zap_lock_acquired = False
             _zap_lock_key = "zap_scan_global_lock"
@@ -5809,7 +5813,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     from app.services.endpoint_discovery import expand_attack_surface
                     _surface_meta = dict(item.item_metadata or {})
                     _surface_base = item.target
-                    if item.target == "__batch__":
+                    if _is_work_item_batch_target(item.target):
                         _surface_base = str((_surface_meta.get("batch_targets") or [job.target_query])[0])
                     expand_attack_surface(db, job.id, _surface_base, item.tool_name, _full_result, job)
 
@@ -6117,7 +6121,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                                 _sa_case((_SWI_cov.status.in_(list(_TERM_COV)), 1), else_=0)
                             ).label("terminal"),
                         )
-                        .filter(_SWI_cov.scan_job_id == item.scan_job_id, _SWI_cov.target != "__batch__")
+                        .filter(_SWI_cov.scan_job_id == item.scan_job_id, ~_SWI_cov.target.like("__batch__%"))
                         .group_by(_SWI_cov.target)
                         .all()
                     )

@@ -71,6 +71,34 @@ def test_enforce_work_item_scope_filters_batch_targets() -> None:
     ]
 
 
+def test_enforce_work_item_scope_filters_numbered_batch_targets() -> None:
+    item = SimpleNamespace(
+        id=223,
+        scan_job_id=10,
+        target="__batch__:2",
+        tool_name="httpx",
+        status="queued",
+        lease_until=None,
+        finished_at=None,
+        updated_at=datetime.now(),
+        last_error=None,
+        result=None,
+        item_metadata={
+            "batch_targets": [
+                "https://app.valid.com/",
+                "https://external.example/login",
+            ]
+        },
+    )
+    db = SimpleNamespace(add=lambda *_args, **_kwargs: None)
+
+    decision = enforce_work_item_scope(db, item, authorized_scope=["valid.com"])  # type: ignore[arg-type]
+
+    assert decision["in_scope"] is True
+    assert item.item_metadata["batch_targets"] == ["https://app.valid.com/"]
+    assert item.item_metadata["batch_count"] == 1
+
+
 def test_enforce_work_item_scope_skips_external_single_target() -> None:
     item = SimpleNamespace(
         id=124,

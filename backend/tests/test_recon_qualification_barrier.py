@@ -224,6 +224,41 @@ def test_partial_p06_accepts_positive_http_without_treating_silence_as_negative(
     assert qualified_targets_for_gate(job.state_data, "P06", targets) == ["api.valid.com"]
 
 
+def test_p06_positive_http_evidence_is_monotonic_across_later_failures() -> None:
+    from app.services.scan_work_queue import (
+        qualified_targets_for_gate,
+        record_recon_work_item_evidence,
+    )
+
+    target = "api.valid.com"
+    job = SimpleNamespace(state_data={"qualification_contract_version": 3})
+
+    positive = _item(
+        phase_id="P06",
+        tool_name="whatweb",
+        status="completed",
+        targets=[target],
+        parsed_result=[{"input": target, "url": f"https://{target}", "status_code": 200}],
+    )
+    record_recon_work_item_evidence(job, positive)
+
+    negative = _item(
+        phase_id="P06",
+        tool_name="curl-headers",
+        status="failed",
+        targets=[target],
+        last_error="curl: (52) Empty reply from server",
+    )
+    record_recon_work_item_evidence(job, negative)
+
+    profile = job.state_data["preflight"]["targets"][target]
+    assert profile["status"] == "http_live"
+    assert profile["p06_complete"] is True
+    assert profile["p06_http_live"] is True
+    assert profile["p06_positive_evidence"] is True
+    assert qualified_targets_for_gate(job.state_data, "P06", [target]) == [target]
+
+
 def test_v3_batch_requires_runner_input_coverage_manifest() -> None:
     from app.services.scan_work_queue import (
         qualified_targets_for_gate,

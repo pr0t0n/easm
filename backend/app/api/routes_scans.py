@@ -33,7 +33,7 @@ from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanRespon
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
-from app.services.strategy_runtime import evaluate_scan_authorization
+from app.services.strategy_runtime import evaluate_scan_authorization, parse_scope_targets
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
 from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
@@ -2489,6 +2489,8 @@ def create_scan(
 
     scan_level = normalize_scan_level(payload.scan_level)
     profile = scan_profile(scan_level)
+    requested_targets = parse_scope_targets(payload.target_query)
+    explicit_target_inventory = len(requested_targets) > 1
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
     source_config = payload.source_config if isinstance(payload.source_config, dict) else None
     initial_state: dict[str, Any] = {
@@ -2497,8 +2499,13 @@ def create_scan(
         "scan_profile": profile,
         "parallelize": bool(settings.scan_parallelize_default),
         "parallel_target_batch_size": int(settings.scan_parallel_target_batch_size or 1024),
+        "explicit_inventory_execution_batch_size": int(settings.scan_explicit_inventory_batch_size or 10),
         "parallel_wait_seconds": int(settings.scan_parallel_wait_seconds or 60),
         "authorization_gate": authorization_gate,
+        "provided_targets": requested_targets,
+        "target_input_mode": "explicit_target_inventory" if explicit_target_inventory else "discovery_seed",
+        "explicit_target_inventory": explicit_target_inventory,
+        "skip_p01_subdomain_enumeration": explicit_target_inventory,
         "strategy_runtime_timeline": [
             {
                 "type": "authorization_gate",

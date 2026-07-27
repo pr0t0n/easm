@@ -75,6 +75,17 @@ function fmtDuration(s, e) {
   const m = Math.floor(sec / 60), h = Math.floor(m / 60);
   return h > 0 ? `${h}h ${String(m % 60).padStart(2,"0")}m` : `${m}m ${String(sec % 60).padStart(2,"0")}s`;
 }
+function targetTokens(value) {
+  return String(value || "")
+    .split(/[;,\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+function targetSummary(value, maxItems = 5) {
+  const tokens = targetTokens(value);
+  if (tokens.length <= maxItems) return tokens.join("; ") || "—";
+  return `${tokens.slice(0, maxItems).join("; ")}; … (+${tokens.length - maxItems})`;
+}
 function extractPhase(step) {
   if (!step) return null;
   const m = String(step).match(/P(\d+)/i);
@@ -175,7 +186,7 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
             <span className="sk-mono" style={{ fontSize: 14, fontWeight: 700 }}>#{scan.id}</span>
             <PerfilBadge perfil={perfil} />
           </div>
-          <div className="sk-mono" style={{ fontSize: 12, color: "var(--ink-soft)" }}>{scan.target_query}</div>
+          <div className="sk-mono" title={scan.target_query || ""} style={{ fontSize: 12, color: "var(--ink-soft)" }}>{targetSummary(scan.target_query)}</div>
         </div>
         <StatusDot status={scan.status} />
       </div>
@@ -847,7 +858,7 @@ function DetailPanel({ scan, logs, onClose }) {
                 <span className="sk-mono" style={{ fontSize: 15, fontWeight: 700 }}>#{scan.id}</span>
                 <StatusDot status={scan.status} />
               </div>
-              <div className="sk-mono" style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>{scan.target_query}</div>
+              <div className="sk-mono" title={scan.target_query || ""} style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>{targetSummary(scan.target_query)}</div>
             </div>
             <button onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "var(--ink-muted)", padding: "0 4px", lineHeight: 1 }}>✕</button>
           </div>
@@ -1310,7 +1321,7 @@ export default function ScansPage() {
                       <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--sev-medium-text)", background: "var(--sev-medium-bg)", border: "1px solid var(--sev-medium-border)", padding: "1px 6px", borderRadius: 99 }}>PAUSADO</span>
                     )}
                   </div>
-                  <div className="sk-mono" style={{ fontSize: 11, color: "var(--ink-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.targets_text || f.target_query}</div>
+                  <div className="sk-mono" title={f.targets_text || f.target_query || ""} style={{ fontSize: 11, color: "var(--ink-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetSummary(f.targets_text || f.target_query)}</div>
                   <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 2 }}>
                     {f.frequency}{f.run_time ? ` · ${f.run_time}` : ""}{f.day_of_week ? ` · ${f.day_of_week}` : ""}
                   </div>
@@ -1361,7 +1372,7 @@ export default function ScansPage() {
                       style={{ cursor: "pointer" }}>
                       <td className="sk-td" style={{ paddingLeft: 16 }}>
                         <span className="sk-mono" style={{ fontWeight: 700 }}>#{h.id}</span>
-                        <span className="sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)", marginLeft: 8 }}>{String(h.target_query||"").slice(0,30)}</span>
+                        <span className="sk-mono" title={h.target_query || ""} style={{ fontSize: 11, color: "var(--ink-muted)", marginLeft: 8 }}>{targetSummary(h.target_query)}</span>
                       </td>
                       <td className="sk-td"><PerfilBadge perfil={getPerfil(h)} /></td>
                       <td className="sk-td sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)" }}>{fmtDateSP(h.finished_at || h.updated_at)}</td>
@@ -1376,7 +1387,7 @@ export default function ScansPage() {
                           onClick={(e) => {
                             e.stopPropagation();
                             if (window.confirm(
-                              `Excluir a missão #${h.id} (${String(h.target_query||"").slice(0,40)})?\n\n` +
+                              `Excluir a missão #${h.id} (${targetSummary(h.target_query)})?\n\n` +
                               `Isto remove permanentemente:\n` +
                               `• o scan e seu histórico\n` +
                               `• as vulnerabilidades encontradas\n` +

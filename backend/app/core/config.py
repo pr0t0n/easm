@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     offensive_operator_phase_task_budget: int = 4
     scan_parallelize_default: bool = True
     scan_parallel_target_batch_size: int = 1024
+    scan_explicit_inventory_batch_size: int = 10
     scan_parallel_wait_seconds: int = 60
     scan_work_queue_enabled: bool = True
     scan_work_queue_dispatch_limit: int = 300

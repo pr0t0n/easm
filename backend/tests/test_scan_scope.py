@@ -1,4 +1,18 @@
-from app.services.scan_scope import is_host_in_scope
+from app.services.scan_scope import authorized_scope_from_target_query, is_host_in_scope
+
+
+def test_authorized_scope_parses_semicolon_multi_target_query() -> None:
+    scope = authorized_scope_from_target_query(
+        "www.cff.interprint.com.br;www.confea.interprint.com.br;adp.services-valid.com.br"
+    )
+
+    assert scope == [
+        "adp.services-valid.com.br",
+        "www.cff.interprint.com.br",
+        "www.confea.interprint.com.br",
+    ]
+    assert is_host_in_scope("adp.services-valid.com.br", scope) is True
+    assert is_host_in_scope("www.cff.interprint.com.br", scope) is True
 
 
 def test_exact_target_is_in_scope() -> None:

@@ -34,6 +34,19 @@ function shortLabel(value, max = 18) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function targetTokens(value) {
+  return String(value || "")
+    .split(/[;,\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function targetSummary(value, maxItems = 5) {
+  const tokens = targetTokens(value);
+  if (tokens.length <= maxItems) return tokens.join("; ") || "sem alvo";
+  return `${tokens.slice(0, maxItems).join("; ")}; … (+${tokens.length - maxItems})`;
+}
+
 function groupLayout(nodes = []) {
   const groups = { internet: [], capability: [], asset: [], data_sink: [] };
   nodes.forEach((node) => {
@@ -281,13 +294,13 @@ export default function AttackGraphPage() {
           <select value={selectedScanId} onChange={(event) => setSelectedScanId(event.target.value)}>
             {scopedScans.map((scan) => (
               <option key={scan.id} value={scan.id}>
-                #{scan.id} · {scan.target_query || "sem alvo"} · {scan.status}
+                #{scan.id} · {targetSummary(scan.target_query)} · {scan.status}
               </option>
             ))}
           </select>
         </label>
         <div className="ag-scan-meta">
-          <strong>{selectedScan?.target_query || "Nenhum scan selecionado"}</strong>
+          <strong title={selectedScan?.target_query || ""}>{selectedScan ? targetSummary(selectedScan.target_query) : "Nenhum scan selecionado"}</strong>
           <span>{selectedScan?.current_step || selectedScan?.status || "aguardando dados"}</span>
         </div>
       </div>

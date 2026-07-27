@@ -508,7 +508,15 @@ def preflight_skip_reason(phase_id: str, profile: dict[str, Any] | None) -> str 
     if phase_id == "P01" or not profile:
         return None
     status = str(profile.get("status") or "").lower()
-    # Dead hosts: skip ALL phases — no point port-scanning an unresolvable host.
+    # Dead hosts from the backend resolver are a weak Tier-1 signal, not an
+    # authoritative gate for P02. P02 is the phase responsible for network
+    # service/DNS confirmation from the Kali sidecar; skipping it here creates
+    # the exact false-negative instability seen when Docker/proxy DNS differs
+    # from the host or Kali runner.
+    if phase_id in {"P02", "P06"}:
+        return None
+    # For later phases, a still-unqualified dead/invalid target remains gated
+    # until P02/P06 produces stronger evidence.
     if status in {"invalid", "dns_dead"}:
         return profile.get("reason") or "preflight sem DNS válido"
     # tcp_closed (DNS resolves, no open web ports): skip web-heavy phases but
