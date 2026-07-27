@@ -74,6 +74,25 @@ def test_httpx_single_profile_uses_proxy_wrapper_not_python_httpx_cli() -> None:
     assert '"/opt/runner-scripts/httpx_proxy_wrapper.py"' in section
 
 
+def test_httpx_proxy_wrapper_does_not_force_unhealthy_proxy() -> None:
+    source = (ROOT / "kali-runner" / "scripts" / "httpx_proxy_wrapper.py").read_text(encoding="utf-8")
+
+    assert "proxy_unreachable" in source
+    assert "fallback=direct" in source
+    assert "socket.create_connection" in source
+    assert "_proxy_clean_env" in source
+    assert '"direct"' in source
+
+
+def test_kali_proxy_is_health_checked_for_httpx_not_global() -> None:
+    source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    kali_section = source.split("\n  kali_runner:", 1)[1].split("\n    ports:", 1)[0]
+
+    assert 'KALI_OUTBOUND_PROXY: "${KALI_OUTBOUND_PROXY:-http://192.168.65.7:3128}"' in kali_section
+    assert 'HTTP_PROXY: "${KALI_HTTP_PROXY:-}"' in kali_section
+    assert 'HTTPS_PROXY: "${KALI_HTTPS_PROXY:-}"' in kali_section
+
+
 def test_naabu_batch_profile_avoids_resolver_and_nat_exhaustion() -> None:
     source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
     section = source.split("naabu_top1000_batch:", 1)[1].split("httpx_probe:", 1)[0]
