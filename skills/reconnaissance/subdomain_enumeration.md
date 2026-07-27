@@ -14,6 +14,7 @@ noise_level: low
 requires_authorization: true
 required_tools:
 - subfinder
+- ghdb-public-indexes
 optional_tools:
 - amass
 - amass-brute
@@ -21,7 +22,6 @@ optional_tools:
 - theharvester
 - dnsx
 - assetfinder
-- ghdb-public-indexes
 - sublist3r
 - findomain
 - dnsrecon-brt
@@ -31,13 +31,14 @@ optional_tools:
 - alterx
 - nuclei-takeover
 fallback_tools:
+- ghdb-public-indexes
 - assetfinder
 evidence_required:
 - subdomain_list
 - dns_resolution_proof
 - source_tool_name
 exit_criteria:
-  minimum_tools_attempted: 1
+  minimum_tools_attempted: 2
   minimum_evidence_items: 1
   validator_required: true
 retry_policy:

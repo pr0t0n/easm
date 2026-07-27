@@ -4919,6 +4919,8 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             "stdout_parser_limit_chars": _parser_stdout_limit,
             "stdout_truncated_for_parser": len(_full_stdout) > _parser_stdout_limit,
             "parsed_result": _parsed_result,
+            "egress_context": result.get("egress_context") or {},
+            "egress_observation": result.get("egress_observation") or {},
             "batch_targets": list(result.get("batch_targets") or []),
             "batch_target_count": int(result.get("batch_target_count") or 0),
             "batch_target_file_sha256": result.get("batch_target_file_sha256"),

@@ -59,6 +59,13 @@ def test_watchdog_default_no_progress_threshold_exceeds_p01_long_job():
     assert watchdog._ORPHAN_NO_PROGRESS_SECONDS > 900
 
 
+def test_watchdog_has_idle_transaction_reaper_contract():
+    source = watchdog.__loader__.get_source(watchdog.__name__)  # type: ignore[union-attr]
+    assert "pg_terminate_backend" in source
+    assert "idle in transaction" in source
+    assert "WATCHDOG_IDLE_TX_REAPER_SECONDS" in source
+
+
 def test_no_progress_recovery_preserves_scan_with_active_celery_task():
     assert watchdog._no_progress_recovery_blocker(22, False, {22}, True) == "celery_task_active"
 

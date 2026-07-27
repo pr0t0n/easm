@@ -563,6 +563,63 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if isinstance(p, dict)
         and str(p.get("status") or "") == "runner_connectivity_blocked"
     )
+    egress_modes = Counter()
+    egress_by_phase = Counter()
+    missing_tool_binary_items = []
+    p02_p06_modes: dict[str, set[str]] = {"P02": set(), "P06": set()}
+    for item in work_items:
+        result = dict(item.result or {}) if isinstance(item.result, dict) else {}
+        observation = dict(result.get("egress_observation") or {}) if isinstance(result.get("egress_observation"), dict) else {}
+        context = dict(result.get("egress_context") or {}) if isinstance(result.get("egress_context"), dict) else {}
+        mode = str(observation.get("mode") or context.get("egress_mode_declared") or "unknown")
+        phase = str(item.phase_id or "")
+        if mode:
+            egress_modes[mode] += 1
+            if phase:
+                egress_by_phase[f"{phase}:{mode}"] += 1
+            if phase in p02_p06_modes:
+                p02_p06_modes[phase].add(mode)
+        haystack = " ".join(
+            str(value or "")
+            for value in (
+                result.get("error"),
+                result.get("stderr_preview"),
+                result.get("stderr"),
+                item.last_error,
+            )
+        ).lower()
+        if "missing_tool_binary" in haystack:
+            missing_tool_binary_items.append(item)
+    p02_modes = sorted(p02_p06_modes.get("P02") or [])
+    p06_modes = sorted(p02_p06_modes.get("P06") or [])
+    mixed_recon_egress = bool(p02_modes and p06_modes and set(p02_modes) != set(p06_modes))
+    p01_zero_output_items = []
+    p01_provider_degraded_items = []
+    for item in work_items:
+        if str(item.phase_id or "") != "P01":
+            continue
+        result = dict(item.result or {}) if isinstance(item.result, dict) else {}
+        stdout = str(result.get("stdout_full") or result.get("stdout_preview") or "")
+        parsed = result.get("parsed_result")
+        parsed_empty = parsed in (None, "", [], {})
+        if str(item.status or "").lower() in {"completed", "done"} and not stdout.strip() and parsed_empty:
+            p01_zero_output_items.append(item)
+        haystack = " ".join(
+            str(value or "")
+            for value in (
+                result.get("stderr_preview"),
+                result.get("error"),
+                item.last_error,
+            )
+        ).lower()
+        if (
+            "no api key" in haystack
+            or "no key defined" in haystack
+            or "no api key/secret" in haystack
+            or "version check failed" in haystack
+            or "expected status 200 but got 403" in haystack
+        ):
+            p01_provider_degraded_items.append(item)
     missing_required = sum(
         len(row.get("required_tools_missing") or [])
         for row in (phase_monitor.get("pentest_journey") or {}).get("phases") or []
@@ -759,6 +816,14 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "p06_positive_targets": p06_positive_targets,
             "p06_no_http_targets": p06_no_http_targets,
             "p06_runner_connectivity_blocked_targets": p06_runner_connectivity_blocked_targets,
+            "egress_modes": dict(sorted(egress_modes.items())),
+            "egress_by_phase": dict(sorted(egress_by_phase.items())),
+            "p02_egress_modes": p02_modes,
+            "p06_egress_modes": p06_modes,
+            "mixed_recon_egress": mixed_recon_egress,
+            "missing_tool_binary_items": len(missing_tool_binary_items),
+            "p01_zero_output_items": len(p01_zero_output_items),
+            "p01_provider_degraded_items": len(p01_provider_degraded_items),
         },
         "surface_coverage": {
             "score": round(_clamp(surface_score), 1),
@@ -820,6 +885,47 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
                 "não interpretar como ausência de superfície do parque."
             ),
             "action": "Corrigir conectividade/NAT/firewall do runner ou executar probes a partir de um runner com a mesma rota do host.",
+        })
+    if mixed_recon_egress:
+        gaps.append({
+            "severity": "high",
+            "area": "runner_egress_consistency",
+            "title": "P02/P06 coletaram evidência por lentes de rede diferentes",
+            "detail": f"P02 modos={p02_modes}; P06 modos={p06_modes}. Isso altera profundidade e comparação entre scans.",
+            "action": "Padronizar/registrar a rota do runner por fase e interpretar resultados TCP/HTTP com a lente declarada.",
+        })
+    if missing_tool_binary_items:
+        examples = ", ".join(
+            f"{item.phase_id}/{item.tool_name}/{item.target}" for item in missing_tool_binary_items[:5]
+        )
+        gaps.append({
+            "severity": "high",
+            "area": "runner_toolchain",
+            "title": "Ferramentas esperadas ausentes no Kali runner",
+            "detail": f"{len(missing_tool_binary_items)} item(ns) falharam por binário ausente ({examples}).",
+            "action": "Instalar/validar módulos do Kali antes do scan e bloquear FULL quando P01-P06 dependerem de ferramenta ausente.",
+        })
+    if p01_zero_output_items:
+        examples = ", ".join(
+            f"{item.tool_name}/{item.target}" for item in p01_zero_output_items[:5]
+        )
+        gaps.append({
+            "severity": "high",
+            "area": "p01_discovery_depth",
+            "title": "P01 concluiu sem produzir subdomínios",
+            "detail": f"{len(p01_zero_output_items)} execução(ões) P01 terminaram sem saída ({examples}). Isso reduz todo o scan.",
+            "action": "Exigir segunda fonte passiva/fallback e mostrar cobertura de fontes antes de aceitar superfície vazia.",
+        })
+    if p01_provider_degraded_items:
+        examples = ", ".join(
+            f"{item.tool_name}/{item.target}" for item in p01_provider_degraded_items[:5]
+        )
+        gaps.append({
+            "severity": "medium",
+            "area": "p01_provider_coverage",
+            "title": "P01 executou com fontes passivas degradadas",
+            "detail": f"{len(p01_provider_degraded_items)} execução(ões) indicaram provider/API key indisponível ({examples}).",
+            "action": "Sincronizar provider-config/API keys do runner ou depender de fontes públicas complementares como ghdb-public-indexes.",
         })
     if attempted and success_ratio < 0.75 and infrastructure_failure_items:
         gaps.append({

@@ -471,6 +471,8 @@ def normalize_kali_result(
         "stdout": result.get("stdout") or "",
         "stderr": result.get("stderr") or "",
         "parsed": result.get("parsed"),
+        "egress_context": result.get("egress_context") or {},
+        "egress_observation": result.get("egress_observation") or {},
         "source_agent_id": "kali_runner",
         "source_agent_name": "Kali Runner",
         "dispatch_task_name": f"kali:{result.get('profile')}",

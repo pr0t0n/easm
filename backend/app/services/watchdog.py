@@ -34,6 +34,37 @@ _LIMBO_SECONDS = int(os.getenv("WATCHDOG_LIMBO_SECONDS", "180"))
 # do Kali Runner. O limiar precisa ser maior que o maior job normal do P01
 # (amass_brute=900s); 720s fazia o watchdog roubar um lock ainda legítimo.
 _ORPHAN_NO_PROGRESS_SECONDS = int(os.getenv("WATCHDOG_ORPHAN_NO_PROGRESS", "1200"))  # 20min
+_IDLE_TX_REAPER_SECONDS = int(os.getenv("WATCHDOG_IDLE_TX_REAPER_SECONDS", "90"))
+
+
+def _reap_idle_transactions(db) -> list[dict]:
+    """Terminate app sessions that are idle inside a transaction too long.
+
+    This is a last-resort guardrail. The primary fix is the PostgreSQL
+    per-connection idle_in_transaction_session_timeout configured in
+    app.db.session. The watchdog reaper covers old pooled connections and gives
+    us durable telemetry when a code path violates the no-long-transaction
+    contract.
+    """
+    rows = db.execute(text("""
+        SELECT pid,
+               now() - xact_start AS age,
+               left(coalesce(query, ''), 500) AS query
+          FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND usename = current_user
+           AND pid <> pg_backend_pid()
+           AND state = 'idle in transaction'
+           AND xact_start IS NOT NULL
+           AND xact_start < now() - (:seconds || ' seconds')::interval
+         ORDER BY xact_start
+         LIMIT 25
+    """), {"seconds": int(_IDLE_TX_REAPER_SECONDS)}).fetchall()
+    killed: list[dict] = []
+    for pid, age, query in rows:
+        ok = bool(db.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": int(pid)}).scalar())
+        killed.append({"pid": int(pid), "age": str(age), "terminated": ok, "query": str(query or "")[:500]})
+    return killed
 
 
 def _kali_scan_has_active_jobs(scan_id: int) -> bool | None:
@@ -122,7 +153,8 @@ def _restart_kali() -> bool:
 def run_watchdog(db) -> dict:
     """Verifica saúde funcional + stall de scan; auto-recupera. Idempotente."""
     report = {"kali_functional": True, "kali_restarted": False,
-              "stalled_scans": [], "requeued": 0, "checked_at": datetime.now().isoformat()}
+              "stalled_scans": [], "requeued": 0, "checked_at": datetime.now().isoformat(),
+              "idle_transactions_killed": []}
 
     # Prova de vida do auto-curador: grava ANTES de qualquer trabalho, para que o
     # guardião do backend saiba que beat→worker_scope→watchdog está vivo.
@@ -131,6 +163,27 @@ def run_watchdog(db) -> dict:
         record_watchdog_heartbeat()
     except Exception:
         pass
+
+    # ── 0. DB lock guardrail: no idle transaction may survive long enough to
+    # freeze scan progress. Commit before/after so the watchdog itself does not
+    # become a lock holder.
+    try:
+        db.commit()
+        killed_idle = _reap_idle_transactions(db)
+        if killed_idle:
+            report["idle_transactions_killed"] = killed_idle
+            db.execute(text("""
+                INSERT INTO scan_logs (scan_job_id, source, level, message, created_at)
+                SELECT (SELECT id FROM scan_jobs ORDER BY id DESC LIMIT 1),
+                       'watchdog',
+                       'WARN',
+                       :message,
+                       now()
+            """), {"message": f"idle_transaction_reaper killed={killed_idle}"[:4000]})
+        db.commit()
+    except Exception as _idle_reaper_err:
+        db.rollback()
+        logger.debug("idle_transaction_reaper failed: %s", _idle_reaper_err)
 
     # ── Capacidade ADAPTATIVA (AIMD por saúde): sobe/desce o paralelismo ─────
     try:

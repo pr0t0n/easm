@@ -234,6 +234,8 @@ class JobStatus(BaseModel):
     batch_targets: list[str] = Field(default_factory=list)
     batch_target_count: int = 0
     batch_target_file_sha256: Optional[str] = None
+    egress_context: dict[str, Any] = Field(default_factory=dict)
+    egress_observation: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobResult(JobStatus):
@@ -537,6 +539,8 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "batch_targets": [],
         "batch_target_count": 0,
         "batch_target_file_sha256": None,
+        "egress_context": {},
+        "egress_observation": {},
     }
 
 
@@ -977,14 +981,50 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         _set_job_fields(job_id, stage="materializing_stdin")
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)
-        _set_job_fields(job_id, stage="executing", command=command)
+        # Merge per-job env vars into a copy of the process environment before
+        # observability/availability checks. P02/P06 quality depends on knowing
+        # whether a tool used direct container egress, a Docker proxy, or never
+        # executed because its binary was missing.
+        _proc_env = _runtime_tool_env(_job_env)
+        egress_context = _egress_context(argv, _proc_env, profile)
+        _set_job_fields(job_id, stage="executing", command=command, egress_context=egress_context)
+
+        executable = str(argv[0] or "")
+        executable_exists = (
+            bool(shutil.which(executable, path=_proc_env.get("PATH")))
+            if os.sep not in executable
+            else Path(executable).exists()
+        )
+        if not executable_exists:
+            stderr = f"missing_tool_binary executable={executable} path={_proc_env.get('PATH', '')}"
+            observation = {"mode": "not_executed", "source": "runner_preflight", "reason": "missing_tool_binary"}
+            _set_job_fields(
+                job_id,
+                status="failed",
+                command=command,
+                return_code=127,
+                stdout="",
+                stderr=stderr,
+                error=stderr,
+                egress_context=egress_context,
+                egress_observation=observation,
+            )
+            try:
+                (workdir / "stderr.txt").write_text(stderr, encoding="utf-8")
+                (workdir / "exit_code.txt").write_text("127", encoding="utf-8")
+                (workdir / "command.txt").write_text(command, encoding="utf-8")
+                (workdir / "egress_context.json").write_text(
+                    json.dumps({"context": egress_context, "observation": observation}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            return
 
         # ── Launch with Popen to capture PID for orphan-cleanup tracking ────────
         # start_new_session=True puts each tool in its own process group so we
         # can kill the whole group (incl. grandchildren) on cleanup/timeout.
         stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
-        # Merge per-job env vars into a copy of the process environment
-        _proc_env = _runtime_tool_env(_job_env)
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
@@ -1116,12 +1156,17 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
 
         stdout = raw_stdout.decode("utf-8", errors="replace") if raw_stdout else ""
         stderr = raw_stderr.decode("utf-8", errors="replace") if raw_stderr else ""
+        egress_observation = _egress_observation(stderr, egress_context)
         return_code = proc.returncode
 
         (workdir / "stdout.txt").write_text(stdout, encoding="utf-8", errors="replace")
         (workdir / "stderr.txt").write_text(stderr, encoding="utf-8", errors="replace")
         (workdir / "exit_code.txt").write_text(str(return_code), encoding="utf-8")
         (workdir / "command.txt").write_text(command, encoding="utf-8")
+        (workdir / "egress_context.json").write_text(
+            json.dumps({"context": egress_context, "observation": egress_observation}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         if _job_cancel_requested(job_id):
             _set_job_fields(
@@ -1132,6 +1177,8 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
                 stdout=stdout[-500_000:] if stdout else "",
                 stderr=stderr[-20_000:] if stderr else "",
                 error=_job_cancel_reason(job_id),
+                egress_context=egress_context,
+                egress_observation=egress_observation,
             )
             return
 
@@ -1176,6 +1223,8 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             stdout=stdout[-500_000:] if stdout else "",
             stderr=stderr[-20_000:] if stderr else "",
             parsed=parsed,
+            egress_context=egress_context,
+            egress_observation=egress_observation,
         )
     except subprocess.TimeoutExpired as exc:
         _set_job_fields(
@@ -1516,6 +1565,98 @@ def _runtime_tool_env(extra_env: dict[str, str] | None = None) -> dict[str, str]
     if extra_env:
         env.update(extra_env)
     return env
+
+
+def _safe_proxy_value(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+        if parsed.hostname and parsed.username:
+            netloc = parsed.hostname
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+    except Exception:
+        pass
+    return raw
+
+
+def _argv_proxy_value(argv: list[str]) -> str:
+    for index, token in enumerate(argv):
+        if token in {"-proxy", "--proxy"} and index + 1 < len(argv):
+            return str(argv[index + 1] or "")
+        if token.startswith("-proxy=") or token.startswith("--proxy="):
+            return token.split("=", 1)[1]
+    return ""
+
+
+def _egress_context(argv: list[str], env: dict[str, str], profile: dict[str, Any]) -> dict[str, Any]:
+    command_proxy = _argv_proxy_value(argv)
+    proxy_candidate = (
+        env.get("KALI_OUTBOUND_PROXY")
+        or env.get("HTTPS_PROXY")
+        or env.get("HTTP_PROXY")
+        or env.get("https_proxy")
+        or env.get("http_proxy")
+        or ""
+    )
+    wrapper_used = any("httpx_proxy_wrapper.py" in str(part) for part in argv)
+    direct_only = str(proxy_candidate).strip().lower() in {"0", "false", "none", "off", "direct", "disabled"}
+    return {
+        "network_namespace": "kali_runner_container",
+        "tool": str(profile.get("tool") or ""),
+        "profile": str(profile.get("source_file") or ""),
+        "wrapper": "httpx_proxy_wrapper" if wrapper_used else "",
+        "wrapper_used": wrapper_used,
+        "proxy_candidate": "" if direct_only else _safe_proxy_value(proxy_candidate),
+        "command_proxy": _safe_proxy_value(command_proxy),
+        "http_proxy_env_present": bool(str(env.get("HTTP_PROXY") or "").strip()),
+        "https_proxy_env_present": bool(str(env.get("HTTPS_PROXY") or "").strip()),
+        "kali_outbound_proxy_present": bool(str(env.get("KALI_OUTBOUND_PROXY") or "").strip()) and not direct_only,
+        "no_proxy": str(env.get("NO_PROXY") or ""),
+        "egress_mode_declared": (
+            "proxy" if command_proxy else
+            "proxy_candidate" if wrapper_used and proxy_candidate and not direct_only else
+            "direct"
+        ),
+    }
+
+
+def _egress_observation(stderr: str, context: dict[str, Any]) -> dict[str, Any]:
+    text = str(stderr or "")
+    if "httpx_proxy_wrapper proxy_enabled" in text:
+        match = re.search(r"httpx_proxy_wrapper proxy_enabled proxy=([^\\s]+)", text)
+        return {
+            "mode": "proxy",
+            "source": "httpx_proxy_wrapper",
+            "proxy": _safe_proxy_value(match.group(1) if match else context.get("proxy_candidate")),
+        }
+    if "httpx_proxy_wrapper proxy_unreachable" in text:
+        match_proxy = re.search(r"httpx_proxy_wrapper proxy_unreachable proxy=([^\\s]+)", text)
+        match_reason = re.search(r"reason=(.*?)\\s+fallback=direct", text)
+        return {
+            "mode": "fallback_direct",
+            "source": "httpx_proxy_wrapper",
+            "proxy": _safe_proxy_value(match_proxy.group(1) if match_proxy else context.get("proxy_candidate")),
+            "reason": match_reason.group(1) if match_reason else "proxy_unreachable",
+        }
+    if "httpx_proxy_wrapper proxy_response_contaminated" in text:
+        match_proxy = re.search(r"httpx_proxy_wrapper proxy_response_contaminated proxy=([^\\s]+)", text)
+        match_rows = re.search(r"blocked_rows=(\\d+)", text)
+        return {
+            "mode": "fallback_direct",
+            "source": "httpx_proxy_wrapper",
+            "proxy": _safe_proxy_value(match_proxy.group(1) if match_proxy else context.get("proxy_candidate")),
+            "reason": "proxy_response_contaminated",
+            "blocked_rows": int(match_rows.group(1)) if match_rows else None,
+        }
+    if context.get("command_proxy"):
+        return {"mode": "proxy", "source": "command_arg", "proxy": context.get("command_proxy")}
+    if context.get("wrapper_used") and context.get("proxy_candidate"):
+        return {"mode": "proxy_candidate_unobserved", "source": "httpx_proxy_wrapper"}
+    return {"mode": "direct", "source": "runner_env"}
 
 
 def _ensure_tools_dirs() -> None:
