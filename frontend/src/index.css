@@ -31,15 +31,23 @@
 }
 
 .ops-company-scope label {
-  color: var(--sidebar-muted);
+  color: var(--sidebar-muted) !important;
 }
 
-.ops-company-scope select {
+.ops-company-scope select,
+.ops-company-scope select:hover,
+.ops-company-scope select:focus {
   height: 31px;
-  border-color: var(--sidebar-border);
-  background: var(--sidebar-surface);
-  color: var(--sidebar-text);
+  border-color: var(--sidebar-border) !important;
+  background: var(--sidebar-surface) !important;
+  background-color: var(--sidebar-surface) !important;
+  color: var(--sidebar-text) !important;
   font-size: 11.5px;
+}
+
+.ops-company-scope select option {
+  background-color: var(--sidebar-surface);
+  color: var(--sidebar-text);
 }
 
 /* ============================================================
