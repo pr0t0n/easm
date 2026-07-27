@@ -636,10 +636,17 @@ def _is_recoverable_runner_infra_error(error: str | None) -> bool:
     work item still has attempts available.
     """
     detail = str(error or "").strip().lower()
-    return detail in {
+    if detail in {
         "runner_restarted_before_job_finished",
         "kali_runner_restarted_before_job_finished",
-    }
+    }:
+        return True
+    return (
+        "modulenotfounderror" in detail
+        or "importerror" in detail
+        or "no module named" in detail
+        or "pkg_resources" in detail
+    )
 
 
 def _backend_local_terminal_status(raw_status: str, exit_code: Any, error: str = "") -> str:
@@ -4353,7 +4360,8 @@ def execute_scan_work_item(item_id: int):
             now = datetime.now()
             item.status = "running"
             item.attempts = int(item.attempts or 0) + 1
-            item.started_at = item.started_at or now
+            item.started_at = now
+            item.finished_at = None
             item.lease_until = now + timedelta(seconds=1800)
             item.updated_at = now
             db.commit()
@@ -4490,7 +4498,8 @@ def execute_scan_work_item(item_id: int):
         now = datetime.now()
         item.status = "running"
         item.attempts = int(item.attempts or 0) + 1
-        item.started_at = item.started_at or now
+        item.started_at = now
+        item.finished_at = None
         item.lease_until = now + timedelta(seconds=1800)
         item.updated_at = now
         db.add(ScanLog(

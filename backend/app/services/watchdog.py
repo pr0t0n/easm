@@ -225,9 +225,10 @@ def run_watchdog(db) -> dict:
     # ── 1c. Recover infra-failed work items after a Kali runner restart ───────
     # The runner stores in-flight job state in memory. If watchdog restarts it,
     # pollers may receive a terminal-looking failure:
-    # runner_restarted_before_job_finished. That is platform infrastructure loss,
-    # not a negative tool result. Reopen it while attempts remain, otherwise the
-    # scan loses depth and the quality/skill score is polluted by a fake failure.
+    # runner_restarted_before_job_finished. Tool package/import failures are the
+    # same class of issue: platform environment loss, not a negative target/tool
+    # result. Reopen them while attempts remain, otherwise the scan loses depth
+    # and the quality/skill score is polluted by a fake failure.
     try:
         infra_rows = db.execute(text("""
             UPDATE scan_work_items w
@@ -243,9 +244,15 @@ def run_watchdog(db) -> dict:
                    )
              WHERE w.status='failed'
                AND w.attempts < w.max_attempts
-               AND w.last_error IN (
-                   'runner_restarted_before_job_finished',
-                   'kali_runner_restarted_before_job_finished'
+               AND (
+                   w.last_error IN (
+                       'runner_restarted_before_job_finished',
+                       'kali_runner_restarted_before_job_finished'
+                   )
+                   OR lower(coalesce(w.last_error, '')) LIKE '%modulenotfounderror%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%importerror%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%no module named%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%pkg_resources%'
                )
                AND EXISTS (
                    SELECT 1
@@ -258,7 +265,7 @@ def run_watchdog(db) -> dict:
         if infra_rows:
             touched_scans = sorted({int(row[0]) for row in infra_rows})
             report["requeued"] += len(infra_rows)
-            report["infra_restarted_requeued"] = len(infra_rows)
+            report["infra_failed_requeued"] = len(infra_rows)
             db.commit()
             try:
                 from app.workers.tasks import _schedule_scan_work_dispatch
@@ -275,7 +282,6 @@ def run_watchdog(db) -> dict:
                         "sid": int(_sid),
                         "message": (
                             "infra_failed_items_requeued "
-                            f"reason=runner_restarted_before_job_finished "
                             f"count={sum(1 for row in infra_rows if int(row[0]) == int(_sid))}"
                         )[:4000],
                     })
