@@ -519,6 +519,70 @@ def _step_with_phase(state: dict, message: str) -> str:
     return f"{phase} · {message}" if phase else message
 
 
+def _format_work_queue_current_step(
+    state: dict[str, Any] | None,
+    counts: dict[str, int] | None,
+    *,
+    phase_id: str | None = None,
+) -> str:
+    """Render current_step from live queue state instead of a stale snapshot."""
+    current = dict(state or {})
+    live_counts = dict(counts or {})
+    phase = str(
+        phase_id
+        or current.get("current_pentest_phase_id")
+        or ""
+    ).strip()
+    if not phase:
+        for candidate in ("P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20", "P21", "P22"):
+            if str(candidate) in str(current.get("current_step") or ""):
+                phase = candidate
+                break
+
+    total_targets = int(current.get("explicit_inventory_total_targets") or 0)
+    cursor = int(current.get("explicit_inventory_seed_cursor") or 0)
+    batch_index = int(current.get("explicit_inventory_batch_index") or 0)
+    batches_total = int(current.get("explicit_inventory_batches_total") or 0)
+    batch_size = int(current.get("explicit_inventory_execution_batch_size") or 0)
+    if total_targets and not batches_total:
+        batches_total = max(1, (total_targets + max(1, batch_size or 10) - 1) // max(1, batch_size or 10))
+    if total_targets:
+        prefix = (
+            f"lote {max(1, batch_index)}/{max(1, batches_total)} em execução "
+            f"({min(cursor, total_targets)}/{total_targets} alvos semeados)"
+        )
+    else:
+        prefix = "fila de pentest em execução"
+
+    message = f"{prefix} {live_counts}"
+    return f"{phase} · {message}" if phase else message
+
+
+def _first_active_work_queue_phase_for_scan(db: Session, scan_id: int) -> str:
+    """Return the earliest phase with executable/non-terminal work."""
+    try:
+        from app.models.models import ScanWorkItem
+        from app.services.offensive_operator_core import PHASE_ORDER
+
+        active_statuses = ("queued", "retry", "dispatched", "running", "submitted")
+        rows = (
+            db.query(ScanWorkItem.phase_id)
+            .filter(
+                ScanWorkItem.scan_job_id == int(scan_id),
+                ScanWorkItem.status.in_(active_statuses),
+            )
+            .distinct()
+            .all()
+        )
+        active = {str(row[0] or "") for row in rows if row and row[0]}
+        for phase in PHASE_ORDER:
+            if str(phase) in active:
+                return str(phase)
+    except Exception:
+        pass
+    return ""
+
+
 def _finish_work_item_for_terminal_scan(item: Any, scan_status: str | None, reason: str) -> None:
     now = datetime.now()
     item.status = "skipped"
@@ -3970,6 +4034,15 @@ def dispatch_scan_work_items(
             "counts": counts,
             "updated_at": datetime.now().isoformat(),
         }
+        _frontier_phase = _first_active_work_queue_phase_for_scan(db, scan_id)
+        if _frontier_phase:
+            state["current_pentest_phase_id"] = _frontier_phase
+        if str(job.status or "").lower() == "running":
+            job.current_step = _format_work_queue_current_step(
+                state,
+                counts,
+                phase_id=_frontier_phase or str(state.get("current_pentest_phase_id") or ""),
+            )
         state = _assign_scan_state(db, job, state)
         if _should_log_dispatch:
             db.add(ScanLog(
@@ -4809,6 +4882,26 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             result_state["poll_count"] = _polls
             item.result = result_state
             item.updated_at = _now
+            if job and str(job.status or "").lower() == "running":
+                try:
+                    _counts = work_queue_counts(db, item.scan_job_id)
+                    _state = dict(job.state_data or {})
+                    _state["work_queue_counts"] = _counts
+                    _frontier_phase = _first_active_work_queue_phase_for_scan(db, item.scan_job_id)
+                    _state["current_pentest_phase_id"] = str(
+                        _frontier_phase
+                        or item.phase_id
+                        or _state.get("current_pentest_phase_id")
+                        or ""
+                    )
+                    job.state_data = _state
+                    job.current_step = _format_work_queue_current_step(
+                        _state,
+                        _counts,
+                        phase_id=str(_frontier_phase or item.phase_id or ""),
+                    )
+                except Exception:
+                    pass
             if _polls == 1 or _polls % 4 == 0:
                 _started_at = item.started_at or _now
                 _elapsed = int((_now - _started_at).total_seconds())
@@ -6198,6 +6291,20 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # marked completed (where 100% is correct and final).
                 if job.status == "running" and abs(_pct - _current_pct) > 1:
                     job.mission_progress = _pct
+                if job.status == "running":
+                    _frontier_phase = _first_active_work_queue_phase_for_scan(db, item.scan_job_id)
+                    state["current_pentest_phase_id"] = str(
+                        _frontier_phase
+                        or item.phase_id
+                        or state.get("current_pentest_phase_id")
+                        or ""
+                    )
+                    job.current_step = _format_work_queue_current_step(
+                        state,
+                        counts,
+                        phase_id=str(_frontier_phase or item.phase_id or ""),
+                    )
+                    job.state_data = state
 
             db.add(ScanLog(
                 scan_job_id=item.scan_job_id,
