@@ -3251,9 +3251,46 @@ def _seed_verification_work_item(
         "verifies_tool": tool,
         "verification_url": finding_url or "",
     }
+    if str(target or "").startswith("__batch__"):
+        source_meta = dict(getattr(source_item, "item_metadata", None) or {})
+        batch_targets = [
+            str(value).strip()
+            for value in source_meta.get("batch_targets") or []
+            if str(value or "").strip()
+        ]
+        if batch_targets:
+            meta["batch_targets"] = batch_targets
+            meta["batch_count"] = len(batch_targets)
 
-    # Determine phase: reuse P09 (web app scanning) as default verification phase
-    phase_id = str(source_item.phase_id or "P09")
+    # Determine phase: never schedule a verifier inside liveness/recon gate
+    # phases. A finding discovered while P06/httpx is running still needs to be
+    # verified by the phase that owns the chosen tool; otherwise tools such as
+    # dalfox can be queued as P06 and pollute the HTTP-live gate ledger.
+    source_phase_id = str(source_item.phase_id or "P09")
+    phase_id = source_phase_id
+    if source_phase_id not in {
+        "P09", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20", "P21",
+    }:
+        phase_id = "P09"
+        try:
+            from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+            # Prefer phases where the verifier is a first-class required tool,
+            # then fall back to optional ownership.
+            for required_first in (True, False):
+                for candidate_phase, contract in PHASE_CONTRACTS.items():
+                    tools = (
+                        contract.get("required_tools")
+                        if required_first
+                        else contract.get("optional_tools")
+                    ) or []
+                    if verify_tool[:120] in {str(tool) for tool in tools}:
+                        phase_id = str(candidate_phase)
+                        raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            phase_id = "P09"
 
     rc = resource_class_for_tool(verify_tool)
 

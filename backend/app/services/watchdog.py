@@ -222,6 +222,72 @@ def run_watchdog(db) -> dict:
         db.rollback()
         logger.debug("watchdog poller_rehydration failed: %s", _rehydrate_err)
 
+    # ── 1c. Recover infra-failed work items after a Kali runner restart ───────
+    # The runner stores in-flight job state in memory. If watchdog restarts it,
+    # pollers may receive a terminal-looking failure:
+    # runner_restarted_before_job_finished. That is platform infrastructure loss,
+    # not a negative tool result. Reopen it while attempts remain, otherwise the
+    # scan loses depth and the quality/skill score is polluted by a fake failure.
+    try:
+        infra_rows = db.execute(text("""
+            UPDATE scan_work_items w
+               SET status='retry',
+                   lease_until=NULL,
+                   finished_at=NULL,
+                   updated_at=now(),
+                   result = jsonb_set(
+                       coalesce(w.result, '{}'::jsonb),
+                       '{status}',
+                       to_jsonb('retry'::text),
+                       true
+                   )
+             WHERE w.status='failed'
+               AND w.attempts < w.max_attempts
+               AND w.last_error IN (
+                   'runner_restarted_before_job_finished',
+                   'kali_runner_restarted_before_job_finished'
+               )
+               AND EXISTS (
+                   SELECT 1
+                     FROM scan_jobs s
+                    WHERE s.id = w.scan_job_id
+                      AND s.status='running'
+               )
+             RETURNING w.scan_job_id, w.id
+        """)).fetchall()
+        if infra_rows:
+            touched_scans = sorted({int(row[0]) for row in infra_rows})
+            report["requeued"] += len(infra_rows)
+            report["infra_restarted_requeued"] = len(infra_rows)
+            db.commit()
+            try:
+                from app.workers.tasks import _schedule_scan_work_dispatch
+                for _sid in touched_scans:
+                    _schedule_scan_work_dispatch(int(_sid))
+            except Exception as exc:
+                logger.error("watchdog: falha ao acordar dispatcher apos requeue infra: %s", exc)
+            try:
+                for _sid in touched_scans:
+                    db.execute(text("""
+                        INSERT INTO scan_logs (scan_job_id, source, level, message, created_at)
+                        VALUES (:sid, 'watchdog', 'WARN', :message, now())
+                    """), {
+                        "sid": int(_sid),
+                        "message": (
+                            "infra_failed_items_requeued "
+                            f"reason=runner_restarted_before_job_finished "
+                            f"count={sum(1 for row in infra_rows if int(row[0]) == int(_sid))}"
+                        )[:4000],
+                    })
+                db.commit()
+            except Exception:
+                db.rollback()
+        else:
+            db.commit()
+    except Exception as _infra_requeue_err:
+        db.rollback()
+        logger.debug("watchdog infra_restart_requeue failed: %s", _infra_requeue_err)
+
     # ── 2. stall de dispatch nos scans em execução ──────────────────────────
     rows = db.execute(text("""
         SELECT s.id,

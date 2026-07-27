@@ -1051,7 +1051,35 @@ def _add_learning_work_item(
         job_state = dict(job.state_data or {}) if job else {}
     except Exception:
         job_state = {}
-    initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
+    batch_targets: list[str] = []
+    if str(target or "").startswith("__batch__") and not (metadata or {}).get("batch_targets"):
+        try:
+            existing_batch_items = (
+                db.query(ScanWorkItem)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.target == target[:500],
+                )
+                .all()
+            )
+            for existing_item in existing_batch_items:
+                existing_meta = dict(existing_item.item_metadata or {})
+                batch_targets = [
+                    str(value).strip()
+                    for value in existing_meta.get("batch_targets") or []
+                    if str(value or "").strip()
+                ]
+                if batch_targets:
+                    break
+        except Exception:
+            batch_targets = []
+        if batch_targets:
+            metadata = {
+                **dict(metadata or {}),
+                "batch_targets": batch_targets,
+                "batch_count": len(batch_targets),
+            }
+    initial_status = initial_status_for_target_phase(phase_id, batch_targets or [target], job_state)
     db.add(ScanWorkItem(
         scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
         tool_name=tname, profile=tname, resource_class=rc,

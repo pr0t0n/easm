@@ -402,6 +402,19 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     for u in new_eps:
         seen.add(u)
 
+    # From here on, expansion may do slow network I/O (page fetches) and
+    # per-endpoint analysis. Release the scan_jobs FOR UPDATE lock acquired at
+    # function entry before that work. Holding it here blocked scan_logs inserts
+    # through their FK on scan_jobs, which chained into watchdog/worker locks and
+    # made healthy scans look frozen under endpoint-heavy inventories.
+    state["discovered_endpoints"] = list(seen)[:5000]
+    state["endpoint_test_targets"] = list(seen)[:10000]
+    job.state_data = state
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
     findings: list[dict] = []
     reseeded = 0
     fetched = 0
@@ -468,12 +481,19 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
 
             analysis = analyze_endpoint_contract(url)
             tools = recommended_execution_tools(analysis)
+            seeded_this_url = 0
             for tn in tools:
                 if _seed_test_item(db, scan_id, "P09", url, tn, meta):
                     reseeded += 1
                     reseeded_count += 1
+                    seeded_this_url += 1
                 if reseeded >= _MAX_PER_EVENT_RESEED:
                     break
+            if seeded_this_url:
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
         _surface_now = time.monotonic()
         if _surface_now - _surface_last_progress >= 30:

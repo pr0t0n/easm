@@ -562,6 +562,22 @@ def _terminal_result_error(result: dict[str, Any], raw_status: str, exit_code: A
     return None
 
 
+def _is_recoverable_runner_infra_error(error: str | None) -> bool:
+    """Infrastructure loss must retry; it is not a tool/skill failure.
+
+    The Kali runner keeps job state in-process. When the watchdog restarts that
+    container, in-flight jobs can surface as failed with
+    ``runner_restarted_before_job_finished``. Treating that as a terminal tool
+    failure contaminates scan quality and leaves coverage gaps even while the
+    work item still has attempts available.
+    """
+    detail = str(error or "").strip().lower()
+    return detail in {
+        "runner_restarted_before_job_finished",
+        "kali_runner_restarted_before_job_finished",
+    }
+
+
 def _backend_local_terminal_status(raw_status: str, exit_code: Any, error: str = "") -> str:
     """Map an in-process result without converting preconditions into failures."""
     normalized = str(raw_status or "").strip().lower()
@@ -3553,6 +3569,14 @@ def run_scan_postprocessor(
                     auth_headers = auth_headers_from_state(state) or {}
                 except Exception:
                     pass
+                # ZAP calls are slow network operations. Accessing job.state_data
+                # after the start commit opens a new SQLAlchemy transaction; close
+                # it before talking to ZAP so scan_jobs is not locked while the
+                # scanner runs.
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 if high_value and active_count < 8:
                     result = run_zap_active_scan(url, auth_headers=auth_headers or None)
                     patch = {"zap_active_count": active_count + 1}
@@ -4833,13 +4857,21 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 return {"id": item.id, "status": "queued", "scan_status": job.status}
         exit_code = result.get("return_code", result.get("exit_code"))
         terminal = "completed" if raw_status in {"done", "success"} and exit_code == 0 else raw_status
-        if terminal in {"failed", "timeout"} and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
+        terminal_error = _terminal_result_error(result, raw_status, exit_code)
+        if (
+            terminal in {"failed", "timeout"}
+            and item.attempts < item.max_attempts
+            and (
+                _is_recoverable_runner_infra_error(terminal_error)
+                or _work_item_tool_is_required(item)
+            )
+        ):
             terminal = "retry"
 
         item.status = terminal
         item.finished_at = datetime.now() if terminal != "retry" else None
         item.lease_until = None if terminal != "retry" else datetime.now() + timedelta(seconds=120)
-        item.last_error = _terminal_result_error(result, raw_status, exit_code)
+        item.last_error = terminal_error
 
         # Libera slot no semáforo Redis global quando tarefa termina (não é retry)
         if terminal != "retry":
