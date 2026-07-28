@@ -407,6 +407,16 @@ def run_llm_operator(db, job) -> dict[str, Any]:
     )
     targets = [str(r[0]) for r in target_rows if r[0]]
 
+    # End the read-only transaction before any slow/non-DB work below.  Leaving
+    # the SQLAlchemy session "idle in transaction" while waiting on the LLM keeps
+    # scan_jobs/scan_work_items snapshots and locks alive under load; Postgres
+    # then kills the connection via idle-in-transaction timeout and unrelated
+    # workers see lock/connection churn.
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
     if not findings_dicts and not tech_stack:
         return {"skipped": "no_context"}
 
