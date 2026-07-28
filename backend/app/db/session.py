@@ -6,7 +6,12 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from app.core.config import settings
 
 
-_IDLE_IN_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "60000"))
+# Must stay >= postgres's own `idle_in_transaction_session_timeout` (docker-compose.yml,
+# 1800000ms) — that server-level value was deliberately widened after a 5min timeout
+# killed active scan #31 mid P01 tool fan-out. This per-connection SET used to default
+# to 60000ms and silently re-tightened the server's fix on every connection, which is
+# exactly what killed scan #48's `full`-profile P01 dispatch (idle-in-tx at 60s).
+_IDLE_IN_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "1800000"))
 _LOCK_TIMEOUT_MS = int(os.getenv("DB_LOCK_TIMEOUT_MS", "30000"))
 _STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "900000"))
 
