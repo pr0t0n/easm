@@ -83,7 +83,7 @@ class Finding(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
-    title: Mapped[str] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(Text)
     severity: Mapped[str] = mapped_column(String(20), default="low")
     # Mapeamento P1-P5 do Sn1per: P1=critical, P2=high, P3=medium, P4=low, P5=info
     sn1per_priority: Mapped[str | None] = mapped_column(String(10), nullable=True)
