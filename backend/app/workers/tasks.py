@@ -3278,9 +3278,17 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
         attempt = int(getattr(task_ctx.request, "retries", 0)) + 1
         attempt = max(1, attempt)
 
+        previous_status = str(job.status or "").lower()
+        previous_step = str(job.current_step or "").strip()
         job.retry_attempt = attempt
         job.retry_max = max_attempts
-        job.current_step = f"Execucao tentativa {attempt}/{max_attempts}"
+        if (
+            previous_status not in {"running"}
+            or not previous_step
+            or previous_step.startswith("Iniciando grafo")
+            or previous_step.startswith("Execucao tentativa")
+        ):
+            job.current_step = f"Execucao tentativa {attempt}/{max_attempts}"
         db.add(
             ScanLog(
                 scan_job_id=scan_id,

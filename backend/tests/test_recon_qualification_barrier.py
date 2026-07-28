@@ -638,6 +638,16 @@ def test_phase_queue_continuations_do_not_bypass_scan_chain_lock() -> None:
     assert "None if phase_queue_task" not in source
 
 
+def test_retry_entry_does_not_overwrite_live_work_queue_current_step() -> None:
+    from app.workers import tasks
+
+    source = inspect.getsource(tasks._run_scan_with_retry_locked)
+
+    assert "previous_step = str(job.current_step or \"\").strip()" in source
+    assert "previous_status not in {\"running\"}" in source
+    assert "previous_step.startswith(\"Execucao tentativa\")" in source
+
+
 def test_force_release_chain_lock_uses_compare_delete() -> None:
     from app.workers import tasks
 
