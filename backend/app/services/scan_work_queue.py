@@ -805,8 +805,10 @@ def _append_skill_consultations_to_state(
         ))
     if not added:
         return
+    from app.services.scan_state_sanitizer import sanitize_scan_state_for_hot_update
+
     existing.extend(added)
-    state["skill_consultations"] = existing[-1000:]
+    state["skill_consultations"] = existing
     state["selected_skills"] = list(dict.fromkeys(
         list(state.get("selected_skills") or [])
         + [str(c.get("skill_id")) for c in added if c.get("skill_id") and c.get("selected")]
@@ -823,8 +825,7 @@ def _append_skill_consultations_to_state(
         }
         for c in added
     ]
-    state["skill_invocation"] = state["skill_invocation"][-1000:]
-    job.state_data = state
+    job.state_data = sanitize_scan_state_for_hot_update(state)
     db.flush()
 
 

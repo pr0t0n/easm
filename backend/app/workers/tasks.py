@@ -263,8 +263,10 @@ def _merge_runtime_scan_state(
     dispatcher update, it can erase terminal evidence and make the platform show
     stale ``running`` states.  This helper keeps runtime ledgers monotonic.
     """
-    result = dict(incoming or {})
-    current = dict(durable or {})
+    from app.services.scan_state_sanitizer import sanitize_scan_state_for_hot_update
+
+    result = sanitize_scan_state_for_hot_update(dict(incoming or {}))
+    current = sanitize_scan_state_for_hot_update(dict(durable or {}))
     result["postprocessor_ledger"] = _merge_postprocessor_ledger(
         dict(result.get("postprocessor_ledger") or {}),
         dict(current.get("postprocessor_ledger") or {}),
@@ -454,7 +456,7 @@ def _merge_runtime_scan_state(
             result[key] = max(int(result.get(key) or 0), int(current.get(key) or 0))
         elif key in current and key not in result:
             result[key] = current.get(key)
-    return result
+    return sanitize_scan_state_for_hot_update(result)
 
 
 def _assign_scan_state(db: Session, job: ScanJob, state: dict[str, Any]) -> dict[str, Any]:
