@@ -2395,6 +2395,7 @@ def persist_finding_dicts(
     default_tool: str,
     default_target: str,
     source_item: Any = None,       # ScanWorkItem | None — None for service-based findings
+    raw_stdout: str | None = None,  # real captured tool output, for grounding checks
 ) -> int:
     """Persist a list of finding dicts through the FULL quality pipeline.
 
@@ -2405,10 +2406,11 @@ def persist_finding_dicts(
     Pipeline per finding:
       1. evidence_gate.enrich_finding_with_gate → verification_status
       2. CVE + generic dedup
-      3. confidence_score from tool reliability × verification status
-      4. Finding() persisted
-      5. HIGH/CRITICAL candidate → schedule_poc_validation (P21)
-      6. MEDIUM/LOW candidate (with source_item) → T1 stage-2 verification
+      3. grounding gate: "confirmed" must cite an anchor found in raw_stdout
+      4. confidence_score from tool reliability × verification status
+      5. Finding() persisted
+      6. HIGH/CRITICAL candidate → schedule_poc_validation (P21)
+      7. MEDIUM/LOW candidate (with source_item) → T1 stage-2 verification
 
     Returns count of new findings created.
     """
@@ -2612,6 +2614,22 @@ def persist_finding_dicts(
 
         # Pull verification_status from enriched details
         v_status = str(details.get("verification_status") or "candidate")
+
+        # ── Grounding gate: "confirmed" must cite something the tool really
+        # printed. Never trust a synthesized "confirmed" over a fabricated or
+        # mis-correlated anchor — downgrade to "candidate" so it re-enters the
+        # T1 verification path instead of skipping straight into the report.
+        if v_status == "confirmed":
+            from app.services.evidence_gate import validate_finding_grounding
+            grounding = validate_finding_grounding([finding_url, cve_id], raw_stdout)
+            details["grounding"] = grounding
+            if grounding["checked"] and not grounding["grounded"]:
+                v_status = "candidate"
+                details["verification_status"] = v_status
+                details["verification_note"] = (
+                    "Downgraded from confirmed: cited URL/CVE was not found in the "
+                    "tool's captured output — requires independent reproduction."
+                )
 
         # ── Confidence score: tool reliability × verification status ──────────
         confidence_score = _confidence_for(tool_col, v_status)
@@ -3151,9 +3169,18 @@ def persist_findings_from_work_item(
             _d["learning_source"] = _prov
             _rf["details"] = _d
 
+    _raw_stdout = str(result.get("stdout_full") or result.get("stdout_preview") or "")
+    _parsed = result.get("parsed_result")
+    if _parsed:
+        try:
+            _raw_stdout = f"{_raw_stdout}\n{json.dumps(_parsed, default=str)}"
+        except (TypeError, ValueError):
+            pass
+
     created = persist_finding_dicts(
         db, job, raw_findings,
         default_tool=tool, default_target=target, source_item=item,
+        raw_stdout=_raw_stdout or None,
     )
     if meta_persisted and not created:
         db.commit()

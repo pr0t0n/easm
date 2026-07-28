@@ -290,3 +290,43 @@ def enrich_finding_with_gate(
 
     finding["details"] = details
     return finding
+
+
+# ── Grounding gate: "confirmed" must be traceable to real captured output ──────
+# Ported from an audit of PentestGPT (github.com/GreyDGL/PentestGPT), whose
+# Executor loop rejects any claimed result that isn't an exact substring of a
+# real tool receipt. Our `details["evidence"]` is a synthesized description,
+# not a verbatim quote (unlike PentestGPT's), so a literal substring match
+# would false-positive on almost every finding. Instead this checks that at
+# least one factual identity anchor of the finding (matched URL, CVE id) that
+# the extractor claims actually appears somewhere in what the tool really
+# printed — catching the case a parsing/correlation bug asserts a "confirmed"
+# hit for a URL/CVE the tool never actually touched.
+def _normalize_for_grounding(text: str) -> str:
+    return re.sub(r"\s+", " ", text.replace("\r\n", "\n")).strip().lower()
+
+
+def validate_finding_grounding(
+    anchors: list[str | None],
+    raw_output: str | None,
+) -> dict[str, Any]:
+    """Check that at least one identity anchor is present in the tool's raw output.
+
+    Returns {"checked": bool, "grounded": bool, "reason": str}. `checked=False`
+    means there wasn't enough signal to judge (no usable anchor or no raw
+    output captured) — callers must treat that as a pass, never a downgrade.
+    """
+    usable_anchors = [a for a in anchors if a and len(a) >= 4]
+    if not usable_anchors or not raw_output:
+        return {"checked": False, "grounded": True, "reason": "no_anchor_or_raw_output"}
+
+    haystack = _normalize_for_grounding(raw_output)
+    for anchor in usable_anchors:
+        if _normalize_for_grounding(anchor) in haystack:
+            return {"checked": True, "grounded": True, "reason": "anchor_matched"}
+
+    return {
+        "checked": True,
+        "grounded": False,
+        "reason": f"none_of_{len(usable_anchors)}_anchors_found_in_raw_output",
+    }
