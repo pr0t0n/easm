@@ -315,7 +315,10 @@ def _is_explicit_target_inventory(state: dict[str, Any], targets: list[str]) -> 
     In this mode P01 must not spend minutes enumerating subdomains for every
     already-specified host. The platform should treat the input list itself as
     the P01 inventory evidence and start qualifying DNS/ports/HTTP in P02/P06.
-    A single bare domain remains a discovery seed and still runs P01.
+    A single bare apex domain (e.g. valid.com) remains a discovery seed and
+    still runs P01; a single already-specific subdomain (e.g.
+    df.si.valid.com.br) also skips P01 — see `is_already_specific_subdomain`,
+    applied at scan creation in routes_scans.py.
     """
     if bool(state.get("skip_p01_subdomain_enumeration")) or bool(state.get("explicit_target_inventory")):
         return True

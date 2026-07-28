@@ -1,4 +1,8 @@
-from app.services.scan_scope import authorized_scope_from_target_query, is_host_in_scope
+from app.services.scan_scope import (
+    authorized_scope_from_target_query,
+    is_already_specific_subdomain,
+    is_host_in_scope,
+)
 
 
 def test_authorized_scope_parses_semicolon_multi_target_query() -> None:
@@ -45,3 +49,35 @@ def test_empty_scope_denies_by_default() -> None:
 
 def test_empty_host_is_not_in_scope() -> None:
     assert is_host_in_scope("", ["www.valid.com"]) is False
+
+
+def test_leaf_subdomain_under_two_label_suffix_is_already_specific() -> None:
+    assert is_already_specific_subdomain("df.si.valid.com.br") is True
+    assert is_already_specific_subdomain("si.valid.com.br") is True
+
+
+def test_apex_domain_under_two_label_suffix_is_not_already_specific() -> None:
+    assert is_already_specific_subdomain("valid.com.br") is False
+
+
+def test_leaf_subdomain_under_one_label_suffix_is_already_specific() -> None:
+    assert is_already_specific_subdomain("sub.valid.com") is True
+    assert is_already_specific_subdomain("www.valid.com") is True
+
+
+def test_apex_domain_under_one_label_suffix_is_not_already_specific() -> None:
+    assert is_already_specific_subdomain("valid.com") is False
+
+
+def test_bare_two_label_input_is_never_already_specific() -> None:
+    assert is_already_specific_subdomain("valid.com") is False
+    assert is_already_specific_subdomain("com.br") is False
+
+
+def test_ip_target_is_not_already_specific_subdomain() -> None:
+    assert is_already_specific_subdomain("192.168.1.10") is False
+
+
+def test_url_input_is_normalized_before_checking() -> None:
+    assert is_already_specific_subdomain("https://df.si.valid.com.br/path") is True
+    assert is_already_specific_subdomain("https://valid.com.br/path") is False

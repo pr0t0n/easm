@@ -2490,7 +2490,10 @@ def create_scan(
     scan_level = normalize_scan_level(payload.scan_level)
     profile = scan_profile(scan_level)
     requested_targets = parse_scope_targets(payload.target_query)
-    explicit_target_inventory = len(requested_targets) > 1
+    from app.services.scan_scope import is_already_specific_subdomain
+    explicit_target_inventory = len(requested_targets) > 1 or (
+        len(requested_targets) == 1 and is_already_specific_subdomain(requested_targets[0])
+    )
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
     source_config = payload.source_config if isinstance(payload.source_config, dict) else None
     initial_state: dict[str, Any] = {

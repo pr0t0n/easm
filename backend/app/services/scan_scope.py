@@ -37,6 +37,57 @@ def _normalize_scope_root(value: str) -> str:
         return ""
 
 
+# Common two-label public suffixes. Not a full public-suffix-list — deliberately
+# conservative: covers the ccTLDs this platform actually targets (.com.br and
+# common English-speaking ccTLDs) so P01 subdomain-enum tools (amass/subfinder,
+# designed to find children of a zone apex) aren't wastefully re-run at full
+# strength every time a target is already a specific leaf host, e.g.
+# df.si.valid.com.br. Getting this wrong only ever costs an extra P01 pass on
+# an apex domain misclassified as a subdomain — never a scope-narrowing error,
+# since the actual authorization/scope check (is_host_in_scope) is unaffected.
+_TWO_LABEL_PUBLIC_SUFFIXES = {
+    "com.br", "net.br", "org.br", "gov.br", "edu.br", "mil.br", "adv.br", "art.br",
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "sch.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au",
+    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+    "co.kr", "or.kr", "ne.kr",
+    "co.nz", "org.nz", "govt.nz",
+    "co.za", "org.za", "gov.za",
+    "co.in", "org.in", "gov.in", "net.in",
+    "com.mx", "com.ar", "com.co", "com.pe", "com.cn", "com.sg", "com.hk", "com.tw",
+}
+
+
+def is_already_specific_subdomain(target: str) -> bool:
+    """True when `target` already has more labels than its registrable/apex domain.
+
+    Used to skip P01's subdomain-enumeration fan-out when the operator already
+    supplied a specific leaf host (e.g. df.si.valid.com.br) rather than a zone
+    apex (e.g. valid.com.br) — amass/subfinder/etc. enumerate *children of a
+    zone*, and structurally cannot find anything beyond the given name when
+    it's already a leaf. See `_TWO_LABEL_PUBLIC_SUFFIXES` for the heuristic's
+    known limitation (not a full public-suffix list).
+    """
+    host = _normalize_scope_root(target)
+    if not host or _looks_like_ip(host):
+        return False
+    labels = host.split(".")
+    if len(labels) < 3:
+        return False  # can't be deeper than a 2-label apex (e.g. valid.com)
+    two_label_suffix = ".".join(labels[-2:])
+    suffix_label_count = 2 if two_label_suffix in _TWO_LABEL_PUBLIC_SUFFIXES else 1
+    apex_label_count = suffix_label_count + 1
+    return len(labels) > apex_label_count
+
+
+def _looks_like_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 def is_host_in_scope(host: str, authorized_scope: list[str]) -> bool:
     """Same policy as kali-runner's _is_target_in_scope, backend-side.
 
