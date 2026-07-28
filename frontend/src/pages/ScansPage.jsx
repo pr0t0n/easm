@@ -1113,8 +1113,13 @@ export default function ScansPage() {
   }, [loadScans, loadSchedules, loadGroups]);
 
   useEffect(() => {
-    if (!selected || scopedScans.some((scan) => Number(scan.id) === Number(selected.id))) return;
-    setSelected(null);
+    if (!selected) return;
+    const fresh = scopedScans.find((scan) => Number(scan.id) === Number(selected.id));
+    if (!fresh) { setSelected(null); return; }
+    // Keep the open drawer's scan object in sync with the 3s-polled list —
+    // otherwise it stays frozen at whatever status it had when clicked, and
+    // a scan that reaches a terminal status keeps rendering as "Rodando".
+    if (fresh !== selected) setSelected(fresh);
   }, [scopedScans, selected]);
 
   // ── WebSocket logs ────────────────────────────────────────────────────────
