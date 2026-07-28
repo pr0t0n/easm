@@ -4101,6 +4101,12 @@ def dispatch_scan_work_items(
             _pp_reconcile_log.getLogger(__name__).debug(
                 "postprocessor_ledger_reconcile failed: %s", _pp_reconcile_exc
             )
+        # Once the queue has active work again, completion is no longer waiting
+        # on a producer/postprocessor barrier.  Leaving this marker stale made
+        # the UI claim "waiting for next batch" while the next explicit
+        # inventory window was already executing.
+        state.pop("completion_waiting_for", None)
+        state.pop("completion_waiting_since", None)
         state["work_queue_counts"] = counts
         state["work_queue_last_dispatch"] = {
             "claimed": len(item_ids),
