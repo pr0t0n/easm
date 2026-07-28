@@ -6208,6 +6208,31 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                             "tool": item.tool_name,
                             "evaluated_at": datetime.now().isoformat(),
                         }
+
+                        # ── Grounding gate on promotion too: this path sets
+                        # "confirmed" directly (bypassing evidence_gate's
+                        # creation-time check), so a mis-classified PoC result
+                        # must be re-checked against what the verification
+                        # tool actually printed before it can stand.
+                        if _poc_result == "confirmed":
+                            from app.services.evidence_gate import validate_finding_grounding
+                            _verify_result = dict(item.result or {}) if isinstance(item.result, dict) else {}
+                            _verify_raw = str(_verify_result.get("stdout_full") or _verify_result.get("stdout_preview") or "")
+                            _verify_parsed = _verify_result.get("parsed_result")
+                            if _verify_parsed:
+                                try:
+                                    _verify_raw = f"{_verify_raw}\n{json.dumps(_verify_parsed, default=str)}"
+                                except (TypeError, ValueError):
+                                    pass
+                            _grounding = validate_finding_grounding([_orig.url, _orig.cve], _verify_raw)
+                            _orig_details["grounding"] = _grounding
+                            if _grounding["checked"] and not _grounding["grounded"]:
+                                _poc_result = "candidate"
+                                _orig_details["verification_note"] = (
+                                    "Downgraded from confirmed: cited URL/CVE was not found in the "
+                                    "verification tool's captured output — requires independent reproduction."
+                                )
+
                         if _poc_result == "confirmed":
                             _orig.verification_status = "confirmed"
                             _orig_details["verification_status"] = "confirmed"
