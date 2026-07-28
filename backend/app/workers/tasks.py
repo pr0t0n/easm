@@ -272,6 +272,47 @@ def _merge_runtime_scan_state(
     for key, value in current.items():
         if str(key).startswith("postprocessor_done:") and value:
             result[key] = value
+    def _explicit_inventory_counts(value: dict[str, Any] | None) -> tuple[int, int, int, int]:
+        current_value = dict(value or {})
+        total = int(current_value.get("explicit_inventory_total_targets") or 0)
+        cursor = int(current_value.get("explicit_inventory_seed_cursor") or 0)
+        batch_index = int(current_value.get("explicit_inventory_batch_index") or 0)
+        batch_size = int(current_value.get("explicit_inventory_execution_batch_size") or 0)
+        return total, cursor, batch_index, batch_size
+
+    # Explicit target inventories are a windowed producer.  The cursor is
+    # monotonic and completion must stay open until every window has been
+    # seeded.  Otherwise a stale dispatcher snapshot can either publish a false
+    # terminal scan after only the first window, or wait forever for a producer
+    # that it never re-arms.
+    result_total, result_cursor, result_batch_index, result_batch_size = _explicit_inventory_counts(result)
+    current_total, current_cursor, current_batch_index, current_batch_size = _explicit_inventory_counts(current)
+    explicit_total = max(result_total, current_total)
+    explicit_cursor = max(result_cursor, current_cursor)
+    explicit_batch_index = max(result_batch_index, current_batch_index)
+    explicit_batch_size = max(result_batch_size, current_batch_size)
+    if explicit_total:
+        explicit_cursor = min(explicit_total, explicit_cursor)
+        result["explicit_target_inventory"] = bool(
+            result.get("explicit_target_inventory")
+            or current.get("explicit_target_inventory")
+            or explicit_total
+        )
+        result["skip_p01_subdomain_enumeration"] = True
+        result["explicit_inventory_total_targets"] = explicit_total
+        result["explicit_inventory_seed_cursor"] = explicit_cursor
+        result["explicit_inventory_remaining_targets"] = max(0, explicit_total - explicit_cursor)
+        result["explicit_inventory_batch_index"] = explicit_batch_index
+        if explicit_batch_size:
+            result["explicit_inventory_execution_batch_size"] = explicit_batch_size
+            result["explicit_inventory_batches_total"] = max(
+                int(result.get("explicit_inventory_batches_total") or 0),
+                int(current.get("explicit_inventory_batches_total") or 0),
+                max(1, ((explicit_total + explicit_batch_size - 1) // explicit_batch_size)),
+            )
+
+    explicit_inventory_pending = explicit_total > 0 and explicit_cursor < explicit_total
+
     # P01/P02/P06 target production is monotonic for a scan generation: once
     # the operator has refined the target set or sealed the producer barrier, a
     # concurrent dispatcher/postprocessor snapshot must not move it backwards.
@@ -283,15 +324,23 @@ def _merge_runtime_scan_state(
         stage = str(value or "").strip()
         if stage.startswith("sealed") or stage in {"legacy_requalification"}:
             return 30
+        if stage in {"explicit_inventory_window"}:
+            return 25
         if stage in {"P02_P06_qualification"}:
             return 20
         if stage in {"P01_discovery"}:
             return 10
         return 0
 
-    if current.get("work_producers_sealed") is True and result.get("work_producers_sealed") is not True:
+    if explicit_inventory_pending:
+        result["work_producers_sealed"] = False
+        result["work_producer_stage"] = "explicit_inventory_window"
+    elif current.get("work_producers_sealed") is True and result.get("work_producers_sealed") is not True:
         result["work_producers_sealed"] = True
-    if _stage_rank(current.get("work_producer_stage")) > _stage_rank(result.get("work_producer_stage")):
+    if (
+        not explicit_inventory_pending
+        and _stage_rank(current.get("work_producer_stage")) > _stage_rank(result.get("work_producer_stage"))
+    ):
         result["work_producer_stage"] = current.get("work_producer_stage")
 
     def _ordered_union(left: Any, right: Any) -> list[Any]:
@@ -501,9 +550,20 @@ def _scan_work_producers_sealed(state: dict[str, Any] | None) -> bool:
     the legacy behavior so a deployment does not strand already-running scans.
     """
     current = dict(state or {})
+    explicit_total = int(current.get("explicit_inventory_total_targets") or 0)
+    explicit_cursor = int(current.get("explicit_inventory_seed_cursor") or 0)
+    if explicit_total > 0 and explicit_cursor < explicit_total:
+        return False
     if "work_producers_sealed" in current:
         return bool(current.get("work_producers_sealed"))
     return True
+
+
+def _explicit_inventory_producer_pending(state: dict[str, Any] | None) -> bool:
+    current = dict(state or {})
+    explicit_total = int(current.get("explicit_inventory_total_targets") or 0)
+    explicit_cursor = int(current.get("explicit_inventory_seed_cursor") or 0)
+    return explicit_total > 0 and explicit_cursor < explicit_total
 
 
 def _step_with_phase(state: dict, message: str) -> str:
@@ -4069,6 +4129,61 @@ def dispatch_scan_work_items(
                 # The current queue generation drained before P01/P02/P06 sealed
                 # target production.  Poll, but never publish a terminal scan.
                 _barrier_state = dict(job.state_data or {})
+                if _explicit_inventory_producer_pending(_barrier_state):
+                    # Explicit inventories are windowed for capacity, but the
+                    # full inventory is the producer contract.  When one window
+                    # drains, the completion barrier must drive the producer to
+                    # seed the next window; merely polling the empty work queue
+                    # strands the scan at "98%" after the first batch.
+                    _total_targets = int(_barrier_state.get("explicit_inventory_total_targets") or 0)
+                    _cursor = int(_barrier_state.get("explicit_inventory_seed_cursor") or 0)
+                    _batch_size = max(1, int(_barrier_state.get("explicit_inventory_execution_batch_size") or 10))
+                    _batches_total = int(_barrier_state.get("explicit_inventory_batches_total") or 0)
+                    if not _batches_total and _total_targets:
+                        _batches_total = max(1, ((_total_targets + _batch_size - 1) // _batch_size))
+                    _next_batch = max(1, int(_barrier_state.get("explicit_inventory_batch_index") or 0) + 1)
+                    _barrier_state["completion_waiting_for"] = "explicit_inventory_next_batch"
+                    _barrier_state["completion_waiting_since"] = datetime.now().isoformat()
+                    _barrier_state["work_producers_sealed"] = False
+                    _barrier_state["work_producer_stage"] = "explicit_inventory_window"
+                    _barrier_state["current_pentest_phase_id"] = "P02"
+                    _barrier_state = _assign_scan_state(db, job, _barrier_state)
+                    job.status = "running"
+                    job.mission_progress = min(99, int(job.mission_progress or 0))
+                    job.current_step = (
+                        f"P02 · preparando lote {_next_batch}/{max(1, _batches_total)} "
+                        f"({_cursor}/{_total_targets} alvos semeados)"
+                    )
+                    from app.services.offensive_operator_runner import _enqueue_operator_continuation
+
+                    queued = _enqueue_operator_continuation(
+                        db,
+                        job,
+                        str(job.mode or "unit"),
+                        "P02",
+                        countdown=1,
+                        reason="explicit_inventory_next_batch_after_queue_drain",
+                    )
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source="work-queue",
+                        level="INFO",
+                        message=(
+                            "explicit_inventory_next_batch_rearmed "
+                            f"cursor={_cursor}/{_total_targets} next_batch={_next_batch}/{max(1, _batches_total)} "
+                            f"task_id={queued.get('task_id')}"
+                        ),
+                    ))
+                    db.commit()
+                    _schedule_scan_work_dispatch(scan_id, limit, countdown=30)
+                    return {
+                        "claimed": len(item_ids),
+                        "counts": counts,
+                        "completion_waiting_for": "explicit_inventory_next_batch",
+                        "cursor": _cursor,
+                        "total": _total_targets,
+                        **queued,
+                    }
                 _barrier_state["completion_waiting_for"] = "work_producers"
                 _barrier_state["completion_waiting_since"] = (
                     _barrier_state.get("completion_waiting_since")

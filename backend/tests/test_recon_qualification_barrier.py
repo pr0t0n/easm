@@ -661,8 +661,58 @@ def test_completion_barrier_requires_explicit_producer_seal() -> None:
 
     assert _scan_work_producers_sealed({"work_producers_sealed": False}) is False
     assert _scan_work_producers_sealed({"work_producers_sealed": True}) is True
+    assert _scan_work_producers_sealed({
+        "work_producers_sealed": True,
+        "explicit_inventory_total_targets": 176,
+        "explicit_inventory_seed_cursor": 10,
+    }) is False
+    assert _scan_work_producers_sealed({
+        "work_producers_sealed": False,
+        "explicit_inventory_total_targets": 176,
+        "explicit_inventory_seed_cursor": 176,
+    }) is False
     # Rolling-deploy compatibility for scans created before the marker existed.
     assert _scan_work_producers_sealed({"_operator_phase_queue_started": True}) is True
+
+
+def test_runtime_state_merge_keeps_explicit_inventory_unsealed_until_all_batches_seeded() -> None:
+    from app.workers.tasks import _merge_runtime_scan_state
+
+    stale_dispatcher_snapshot = {
+        "work_producers_sealed": True,
+        "work_producer_stage": "sealed",
+        "explicit_target_inventory": True,
+        "explicit_inventory_total_targets": 176,
+        "explicit_inventory_seed_cursor": 10,
+        "explicit_inventory_batch_index": 1,
+        "explicit_inventory_execution_batch_size": 10,
+    }
+    durable_operator_checkpoint = {
+        "work_producers_sealed": True,
+        "work_producer_stage": "sealed",
+        "explicit_target_inventory": True,
+        "explicit_inventory_total_targets": 176,
+        "explicit_inventory_seed_cursor": 10,
+        "explicit_inventory_batch_index": 1,
+        "explicit_inventory_execution_batch_size": 10,
+    }
+
+    merged = _merge_runtime_scan_state(stale_dispatcher_snapshot, durable_operator_checkpoint)
+
+    assert merged["work_producers_sealed"] is False
+    assert merged["work_producer_stage"] == "explicit_inventory_window"
+    assert merged["explicit_inventory_remaining_targets"] == 166
+    assert merged["explicit_inventory_batches_total"] == 18
+
+
+def test_completion_barrier_rearms_explicit_inventory_next_batch() -> None:
+    from app.workers import tasks
+
+    source = inspect.getsource(tasks.dispatch_scan_work_items)
+
+    assert "_explicit_inventory_producer_pending(_barrier_state)" in source
+    assert "explicit_inventory_next_batch_after_queue_drain" in source
+    assert "explicit_inventory_next_batch_rearmed" in source
 
 
 def test_runtime_state_merge_preserves_sealed_producer_checkpoint() -> None:

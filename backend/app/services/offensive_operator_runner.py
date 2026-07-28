@@ -1076,11 +1076,14 @@ def _seed_explicit_inventory_work_queue(
     if has_pending_work(db, job.id):
         frontier_phase = _first_active_work_queue_phase(db, job.id) or "P02"
         wait_seconds = max(15, int(state.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
+        more_batches_pending = cursor < total_targets
         state["target_set"] = unique_targets
         state["provided_targets"] = unique_targets
         state["explicit_inventory_total_targets"] = total_targets
         state["explicit_inventory_seed_cursor"] = cursor
         state["explicit_inventory_remaining_targets"] = max(0, total_targets - cursor)
+        state["work_producers_sealed"] = not more_batches_pending
+        state["work_producer_stage"] = "explicit_inventory_window" if more_batches_pending else "sealed"
         state["work_queue_counts"] = counts
         state["current_pentest_phase_id"] = frontier_phase
         state["current_pentest_target"] = state.get("active_execution_batch_id") or "__batch__"
@@ -1146,8 +1149,8 @@ def _seed_explicit_inventory_work_queue(
                 "parallel_delegated_targets": sorted(set(unique_targets)),
                 "parallel_pending_targets": [],
                 "parallel_batch_size": len(batch_targets),
-                "work_producers_sealed": True,
-                "work_producer_stage": "sealed",
+                "work_producers_sealed": next_cursor >= total_targets,
+                "work_producer_stage": "sealed" if next_cursor >= total_targets else "explicit_inventory_window",
                 "qualification_contract_version": 3,
                 "explicit_inventory_work_queue_seeded": True,
                 "_operator_phase_queue_started": True,
