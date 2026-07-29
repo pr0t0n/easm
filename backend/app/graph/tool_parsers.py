@@ -1407,22 +1407,46 @@ def _extract_ffuf_findings(stdout: str, step_name: str, default_target: str) -> 
 
 
 def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai paths descobertos pelo gobuster dir."""
+    """Extrai paths descobertos por gobuster/dirsearch/feroxbuster.
+
+    Each content-discovery tool has its own real output shape, confirmed by
+    running each live rather than guessing:
+      - gobuster verbose:  /path (Status: 200) [Size: 1234]
+      - gobuster -q quiet: path               (Status: 200) [Size: 1234]
+        (NO leading slash in quiet mode -- the previous regex required one
+        and silently matched zero lines for every gobuster -q run.)
+      - dirsearch:         [14:35:49] 200 -  181B  - https://host/path
+        (leading timestamp -- previous regexes required the path/URL at the
+        start of the line, so dirsearch's real discoveries were always
+        discarded regardless of what it found.)
+      - feroxbuster --silent: bare "https://host/path" per line.
+    """
     findings: list[dict[str, Any]] = []
     paths: list[dict[str, str]] = []
     for raw_line in (stdout or "").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("=") or line.startswith("Gobuster"):
             continue
-        # formato: /path (Status: 200) [Size: 1234]
-        m = re.match(r"^(/\S*)\s+\(Status:\s*(\d+)\)", line)
-        if m:
-            paths.append({"path": m.group(1), "status": m.group(2)})
+        # dirsearch: [HH:MM:SS] STATUS -  SIZE  - URL
+        m_dir = re.match(r"^\[\d{2}:\d{2}:\d{2}\]\s+(\d{3})\s+-\s+\S+\s+-\s+(\S+)$", line)
+        if m_dir:
+            paths.append({"path": m_dir.group(2), "status": m_dir.group(1)})
             continue
-        # formato quiet (-q): /path
-        m2 = re.match(r"^(/[^\s]+)$", line)
-        if m2:
-            paths.append({"path": m2.group(1), "status": "200"})
+        # gobuster (verbose, leading slash, or quiet with no leading slash):
+        # <path-or-nothing> (Status: 200) [Size: 1234]
+        m_gb = re.match(r"^(\S*)\s+\(Status:\s*(\d+)\)", line)
+        if m_gb:
+            path = m_gb.group(1)
+            if path and not path.startswith(("/", "http://", "https://")):
+                path = f"/{path}"
+            if path:
+                paths.append({"path": path, "status": m_gb.group(2)})
+            continue
+        # bare path or full URL alone on the line (gobuster old quiet mode,
+        # feroxbuster --silent)
+        m_bare = re.match(r"^(/[^\s]+|https?://\S+)$", line)
+        if m_bare:
+            paths.append({"path": m_bare.group(1), "status": "200"})
     if not paths:
         return []
     sensitive_patterns = re.compile(r"(admin|backup|config|\.env|\.git|\.htaccess|wp-admin|phpmyadmin|api|debug|test|staging)", re.IGNORECASE)

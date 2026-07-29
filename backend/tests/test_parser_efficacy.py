@@ -1,9 +1,13 @@
-"""Tests for parser efficacy — dalfox and wapiti per-finding extraction."""
+"""Tests for parser efficacy — dalfox, wapiti, and content-discovery extraction."""
 from __future__ import annotations
 
 import json
 
-from app.graph.tool_parsers import _extract_dalfox_findings, _extract_wapiti_findings
+from app.graph.tool_parsers import (
+    _extract_dalfox_findings,
+    _extract_gobuster_findings,
+    _extract_wapiti_findings,
+)
 
 
 # ── Dalfox ────────────────────────────────────────────────────────────────────
@@ -113,3 +117,45 @@ def test_wapiti_text_fallback_parses_three_findings() -> None:
 def test_wapiti_json_string_input_also_works() -> None:
     findings = _extract_wapiti_findings("", "P10.wapiti", "https://target.com", parsed_json=json.dumps(WAPITI_JSON_REPORT))
     assert len(findings) == 4
+
+
+# ── Content discovery: gobuster / dirsearch / feroxbuster real output shapes ──
+# Each sample below is real captured tool output (not invented), confirmed by
+# running each tool live against a WAF-fronted target. Previously every one of
+# these formats silently produced zero findings regardless of what the tool
+# found, because the parser only matched a leading-slash gobuster-verbose line.
+
+def test_dirsearch_timestamped_line_is_parsed() -> None:
+    out = "[14:35:49] 200 -  181B  - https://api-messaging.services-valid.com.br/health"
+    findings = _extract_gobuster_findings(out, "P03.dirsearch", "api-messaging.services-valid.com.br")
+    assert findings, "dirsearch's real output format produced zero findings"
+    paths = findings[-1]["details"]["discovered_paths"]
+    assert paths == [{"path": "https://api-messaging.services-valid.com.br/health", "status": "200"}]
+
+
+def test_gobuster_quiet_mode_without_leading_slash_is_parsed() -> None:
+    out = "health               (Status: 200) [Size: 181]"
+    findings = _extract_gobuster_findings(out, "P09.gobuster", "api-messaging.services-valid.com.br")
+    assert findings, "gobuster -q's real output (no leading slash) produced zero findings"
+    paths = findings[-1]["details"]["discovered_paths"]
+    assert paths == [{"path": "/health", "status": "200"}]
+
+
+def test_gobuster_verbose_leading_slash_still_parses() -> None:
+    out = "/admin (Status: 200) [Size: 512]"
+    findings = _extract_gobuster_findings(out, "P09.gobuster", "target.com")
+    paths = findings[-1]["details"]["discovered_paths"]
+    assert paths == [{"path": "/admin", "status": "200"}]
+
+
+def test_feroxbuster_silent_bare_url_is_parsed() -> None:
+    out = "https://api-messaging.services-valid.com.br/health"
+    findings = _extract_gobuster_findings(out, "P03.feroxbuster", "api-messaging.services-valid.com.br")
+    paths = findings[-1]["details"]["discovered_paths"]
+    assert paths == [{"path": "https://api-messaging.services-valid.com.br/health", "status": "200"}]
+
+
+def test_gobuster_cli_usage_error_produces_no_findings() -> None:
+    out = "Incorrect Usage: flag provided but not defined: -wildcard"
+    findings = _extract_gobuster_findings(out, "P09.gobuster", "target.com")
+    assert findings == []

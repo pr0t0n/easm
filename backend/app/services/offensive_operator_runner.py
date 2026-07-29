@@ -675,6 +675,33 @@ def _is_real_path(line: str) -> bool:
     )
 
 
+_DIRSEARCH_LINE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s+\d{3}\s+-\s+\S+\s+-\s+(\S+)$")
+_GOBUSTER_STATUS_LINE = re.compile(r"^(\S*)\s+\(Status:\s*\d+\)")
+
+
+def _normalize_discovery_line(line: str) -> str | None:
+    """Reduce a content-discovery tool's raw output line to a bare path/URL.
+
+    gobuster/dirsearch/feroxbuster each have a distinct real shape (confirmed
+    by running each live, not guessed): dirsearch prefixes a timestamp and
+    puts the URL last; gobuster's quiet mode omits the leading slash entirely.
+    Without this, `_is_real_path`'s startswith("http"/"/") check silently
+    discards every dirsearch/gobuster-quiet discovery regardless of what the
+    tool actually found.
+    """
+    s = (line or "").strip()
+    m = _DIRSEARCH_LINE.match(s)
+    if m:
+        return m.group(1)
+    m = _GOBUSTER_STATUS_LINE.match(s)
+    if m:
+        path = m.group(1)
+        if not path:
+            return None
+        return path if path.startswith(("http://", "https://", "/")) else f"/{path}"
+    return s
+
+
 def _sanitize_evidence(ev: dict[str, Any]) -> dict[str, Any]:
     """Re-valida uma evidência ANTES do gate de persistência. Remove 'paths'
     que na verdade são saída de erro/usage do tool (envenena o sinal mesmo
@@ -4512,9 +4539,12 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
             paths = [str(p.get("url") or p.get("path") or p) if isinstance(p, dict) else str(p) for p in parsed[:100]]
             paths = [p for p in paths if _is_real_path(p)]
         else:
+            normalized = [
+                (l, _normalize_discovery_line(l)) for l in _clean_lines(stdout)
+            ]
             paths = [
-                l.strip() for l in _clean_lines(stdout)
-                if l.strip().startswith(("http://", "https://", "/"))
+                norm for l, norm in normalized
+                if norm and _is_real_path(norm)
                 and not _is_noise_line(l)
                 and not any(b in l.lower() for b in _bad_path)
             ][:100]
