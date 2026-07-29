@@ -4075,9 +4075,18 @@ def dispatch_scan_work_items(
         # If the executable queue has drained and only gate-blocked items remain,
         # those items can no longer be unblocked by a future phase completion.
         # Finalize them here so scans do not loop forever at 98-99%.
-        _orphaned_blocked = 0
-        if _scan_work_producers_sealed(job.state_data):
-            _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
+        #
+        # Deliberately NOT gated on _scan_work_producers_sealed: a blocked item's
+        # gate depends only on its OWN target's earlier-phase result, never on
+        # whether other explicit-inventory batches have been seeded yet. Gating
+        # on "sealed" deadlocked multi-batch explicit-target-inventory scans —
+        # batch 2 only seeds once has_pending_work()/​_has_active sees zero
+        # blocked items, but this finalizer (the only thing that clears them)
+        # never ran because producers weren't sealed, which itself required
+        # batch 2 to have already seeded. finalize_orphaned_blocked_work_items
+        # already no-ops safely whenever any active work remains scan-wide, so
+        # it's always safe to call here regardless of seal state.
+        _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
         if _orphaned_blocked:
             db.commit()
 
