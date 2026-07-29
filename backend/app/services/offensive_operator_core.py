@@ -194,10 +194,14 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["nmap", "shodan-cli", "masscan"]),
         ("P03", "Endpoint Discovery", "Discover routes, content and JavaScript surfaces",
          ["skill.discovery.endpoint_discovery"], ["ffuf"],
-         # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken tool in Kali).
+         # gobuster REPLACED by feroxbuster: gobuster had 0/95 completions (broken
+         # --wildcard CLI flag, fixed 2026-07-29 -- see delivery_exploitation.yaml).
          # feroxbuster is Rust-based, 10x faster, smart status filtering, automatic recursion.
          # ffuf remains as primary (most flexible); feroxbuster as fast fallback.
-         ["feroxbuster", "katana", "hakrawler", "gospider", "dirsearch",
+         # dirsearch-api: dedicated pass over a 10k curated REST/API-convention
+         # wordlist (health, webhook, callback, ...) that generic filesystem
+         # wordlists (raft-small, common.txt) don't contain at all.
+         ["feroxbuster", "katana", "hakrawler", "gospider", "dirsearch", "dirsearch-api",
           "gau", "waybackurls"]),
         ("P04", "Parameter Discovery", "Discover input points and parameters",
          ["skill.discovery.parameter_discovery"], ["arjun"],
@@ -537,6 +541,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # Content / parameter fuzzing
         entry("feroxbuster", "feroxbuster_recursive", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("dirsearch", "dirsearch_paths", ["content_discovery", "fuzzing"], "ffuf_parser"),
+        entry("dirsearch-api", "dirsearch_api_conventions", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("wfuzz", "wfuzz_param_names", ["parameter_discovery", "fuzzing"], "ffuf_parser"),
         # Vulnerability scanning
         entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=360),

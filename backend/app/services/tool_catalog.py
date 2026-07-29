@@ -293,6 +293,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL", "outputs": "found paths",
         "prerequisites": "live URL",
     },
+    "dirsearch-api": {
+        "category": "recon", "phase": "P03",
+        "description": "Web path scanner over a dedicated 10k REST/API-convention wordlist (health, webhook, callback, swagger, ...) absent from generic filesystem wordlists.",
+        "when_to_use": "Any HTTP(S) target, especially JSON/API services with little or no crawlable HTML surface.",
+        "inputs": "URL", "outputs": "found paths",
+        "prerequisites": "live URL",
+    },
 
     # ── OSINT ────────────────────────────────────────────────────────────────
     "shodan-cli": {

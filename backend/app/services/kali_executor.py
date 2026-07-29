@@ -177,6 +177,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "gobuster": "gobuster_dir",
     "feroxbuster": "feroxbuster_recursive",
     "dirsearch": "dirsearch_paths",
+    "dirsearch-api": "dirsearch_api_conventions",
     "sqlmap": "sqlmap_basic",
     "dalfox": "dalfox_xss",
     "browser-xss": "browser_xss",  # headless chromium → dispara XSS client-side (DOM)
