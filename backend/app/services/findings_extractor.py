@@ -2126,7 +2126,7 @@ def extract_findings_from_work_item(
         elif tool in ("ffuf", "ffuf-params", "ffuf-content"):
             findings = _extract_ffuf_findings(stdout, step, target)
 
-        elif tool in ("gobuster", "feroxbuster", "dirsearch", "dirsearch-api"):
+        elif tool in ("gobuster", "feroxbuster", "dirsearch", "dirsearch-api", "dirsearch-api-post"):
             findings = _extract_gobuster_findings(stdout, step, target, tool_name=tool)
 
         elif tool == "dalfox":

@@ -303,8 +303,9 @@ def classify_ssrf_candidate_fields(field_hints: list[str]) -> list[str]:
 
 def _candidate_endpoints(db, job, target: str) -> list[str]:
     """Alvos candidatos: a base do target + paths já descobertos por
-    gobuster/dirsearch/feroxbuster/ffuf nesta mesma scan (persistidos como
-    Finding — a mesma fonte que a UI usa, não um estado em memória paralelo).
+    gobuster/dirsearch/feroxbuster/ffuf/dirsearch-api(-post) nesta mesma scan
+    (persistidos como Finding — a mesma fonte que a UI usa, não um estado em
+    memória paralelo).
     """
     from app.models.models import Finding
 
@@ -315,7 +316,9 @@ def _candidate_endpoints(db, job, target: str) -> list[str]:
         .filter(
             Finding.scan_job_id == job.id,
             Finding.domain == target,
-            Finding.tool.in_(["gobuster", "dirsearch", "feroxbuster", "ffuf"]),
+            Finding.tool.in_(
+                ["gobuster", "dirsearch", "feroxbuster", "ffuf", "dirsearch-api", "dirsearch-api-post"]
+            ),
         )
         .order_by(Finding.id.desc())
         .limit(20)

@@ -115,3 +115,41 @@ def test_adaptive_probe_ssrf_finding_trusts_its_own_precomputed_status() -> None
 def test_adaptive_probe_ssrf_finding_defaults_to_candidate_without_a_precomputed_status() -> None:
     status = get_verification_status("adaptive_probe", {"details": {"vuln_family": "ssrf"}})
     assert status == "candidate"
+
+
+# ── candidate endpoint gathering: content-discovery tools feed the probe ─────
+
+def test_candidate_endpoints_reads_from_all_content_discovery_tools() -> None:
+    # Reproduced live: dirsearch-api(-post)'s discoveries never reached
+    # adaptive_error_probe because this filter's tool allowlist only listed
+    # gobuster/dirsearch/feroxbuster/ffuf -- a real endpoint found only by
+    # the dedicated REST-convention tools was invisible to the auth-bypass/
+    # SSRF probe regardless of what it discovered.
+    from unittest.mock import MagicMock
+
+    from app.services.adaptive_error_probe import _candidate_endpoints
+    from app.models.models import Finding
+
+    captured: dict[str, tuple] = {}
+
+    def fake_filter(*args, **kwargs):
+        captured["args"] = args
+        chain = MagicMock()
+        chain.order_by.return_value.limit.return_value.all.return_value = []
+        return chain
+
+    db = MagicMock()
+    db.query.return_value.filter.side_effect = fake_filter
+    job = MagicMock(id=1)
+
+    _candidate_endpoints(db, job, "api-messaging.services-valid.com.br")
+
+    rendered = []
+    for arg in captured["args"]:
+        try:
+            rendered.append(str(arg.compile(compile_kwargs={"literal_binds": True})))
+        except Exception:
+            rendered.append(str(arg))
+    blob = " ".join(rendered)
+    for tool in ("gobuster", "dirsearch", "feroxbuster", "ffuf", "dirsearch-api", "dirsearch-api-post"):
+        assert tool in blob, f"{tool} missing from _candidate_endpoints tool filter: {blob}"

@@ -300,6 +300,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL", "outputs": "found paths",
         "prerequisites": "live URL",
     },
+    "dirsearch-api-post": {
+        "category": "recon", "phase": "P03",
+        "description": "Same 10k REST/API-convention wordlist as dirsearch-api, sent via POST instead of GET. Content discovery is GET-only by default, so a REST endpoint routed to accept only POST answers 404 to GET (indistinguishable from nonexistent) while responding normally to POST on the same path.",
+        "when_to_use": "Any HTTP(S) target with a JSON/API surface — run alongside dirsearch-api, not instead of it, since GET-routed and POST-routed endpoints are disjoint sets.",
+        "inputs": "URL", "outputs": "found paths",
+        "prerequisites": "live URL",
+    },
 
     # ── OSINT ────────────────────────────────────────────────────────────────
     "shodan-cli": {

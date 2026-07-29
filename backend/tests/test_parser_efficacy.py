@@ -180,3 +180,17 @@ def test_default_tool_name_stays_gobuster_for_backward_compat() -> None:
     out = "/admin (Status: 200) [Size: 512]"
     findings = _extract_gobuster_findings(out, "P09.gobuster", "target.com")
     assert findings[-1]["details"]["tool"] == "gobuster"
+
+
+def test_dirsearch_api_post_output_is_labeled_distinctly_from_get_variant() -> None:
+    # dirsearch-api-post runs the identical wordlist as dirsearch-api but with
+    # -m POST, against a path that is invisible (404) to every GET-based tool.
+    # It must get its own tool label -- reusing "dirsearch-api" would collide
+    # with the GET pass's dedup key even when the two runs found the path
+    # under completely different HTTP methods.
+    out = "[16:37:33] 401 -  195B  - https://api-messaging.services-valid.com.br/api/v1/webhook"
+    findings = _extract_gobuster_findings(
+        out, "P03.dirsearch-api-post", "api-messaging.services-valid.com.br", tool_name="dirsearch-api-post",
+    )
+    assert findings[-1]["details"]["tool"] == "dirsearch-api-post"
+    assert "dirsearch-api-post" in findings[-1]["title"]

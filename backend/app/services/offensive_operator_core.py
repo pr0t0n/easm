@@ -201,8 +201,15 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          # dirsearch-api: dedicated pass over a 10k curated REST/API-convention
          # wordlist (health, webhook, callback, ...) that generic filesystem
          # wordlists (raft-small, common.txt) don't contain at all.
+         # dirsearch-api-post: the identical wordlist sent via POST instead of
+         # GET. Content discovery is GET-only by construction, so a REST
+         # endpoint routed to accept only POST answers 404 to every GET-based
+         # tool (indistinguishable from "doesn't exist") while responding
+         # normally to POST on the exact same path — verified live on
+         # api-messaging.services-valid.com.br's /api/v1/webhook. This is a
+         # structural blind spot of GET-only brute force, not a target quirk.
          ["feroxbuster", "katana", "hakrawler", "gospider", "dirsearch", "dirsearch-api",
-          "gau", "waybackurls"]),
+          "dirsearch-api-post", "gau", "waybackurls"]),
         ("P04", "Parameter Discovery", "Discover input points and parameters",
          ["skill.discovery.parameter_discovery"], ["arjun"],
          # ffuf: use fingerprint-first gate — P07 tech_stack selects wordlist before ffuf runs.
@@ -542,6 +549,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("feroxbuster", "feroxbuster_recursive", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("dirsearch", "dirsearch_paths", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("dirsearch-api", "dirsearch_api_conventions", ["content_discovery", "fuzzing"], "ffuf_parser"),
+        entry("dirsearch-api-post", "dirsearch_api_conventions_post", ["content_discovery", "fuzzing"], "ffuf_parser"),
         entry("wfuzz", "wfuzz_param_names", ["parameter_discovery", "fuzzing"], "ffuf_parser"),
         # Vulnerability scanning
         entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=360),

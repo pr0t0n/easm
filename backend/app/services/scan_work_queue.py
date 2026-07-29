@@ -395,6 +395,7 @@ MEDIUM_TOOLS = {
     "feroxbuster",
     "dirsearch",
     "dirsearch-api",
+    "dirsearch-api-post",
     "wfuzz",
     "dalfox",
     "subjack",
@@ -411,7 +412,7 @@ WEB_HEAVY_PHASES = {
 }
 HTTP_SURFACE_TOOLS = {
     "arjun", "paramspider", "ffuf", "ffuf-params", "ffuf-content",
-    "gobuster", "feroxbuster", "dirsearch", "dirsearch-api", "wfuzz", "katana",
+    "gobuster", "feroxbuster", "dirsearch", "dirsearch-api", "dirsearch-api-post", "wfuzz", "katana",
     "katana-js", "hakrawler", "gospider", "curl", "curl-headers",
     "httpx", "whatweb", "whatweb-basic", "nikto", "wpscan", "wapiti",
     "dalfox", "sqlmap", "zap-baseline", "zap-ajax", "zap-active",
