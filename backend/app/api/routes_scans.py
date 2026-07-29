@@ -33,7 +33,11 @@ from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanRespon
 from app.services.audit_service import log_audit
 from app.services.chroma_service import FalsePositiveVectorStore
 from app.services.policy_service import is_target_allowed
-from app.services.strategy_runtime import evaluate_scan_authorization, parse_scope_targets
+from app.services.strategy_runtime import (
+    evaluate_scan_authorization,
+    parse_scope_targets,
+    resolve_active_exploit_authorization,
+)
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
 from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
@@ -2505,6 +2509,10 @@ def create_scan(
         "explicit_inventory_execution_batch_size": int(settings.scan_explicit_inventory_batch_size or 10),
         "parallel_wait_seconds": int(settings.scan_parallel_wait_seconds or 60),
         "authorization_gate": authorization_gate,
+        # Previously an orphaned flag nothing ever set, so scan_level=aggressive's
+        # post_exploitation=true never reached the real active-exploitation code
+        # (app_pentest.py, waf_origin.py) at all. See resolve_active_exploit_authorization.
+        "active_exploit_authorized": resolve_active_exploit_authorization(profile, authorization_gate),
         "provided_targets": requested_targets,
         "target_input_mode": "explicit_target_inventory" if explicit_target_inventory else "discovery_seed",
         "explicit_target_inventory": explicit_target_inventory,

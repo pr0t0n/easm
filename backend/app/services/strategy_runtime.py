@@ -12,6 +12,23 @@ from app.models.models import ScanAuthorization, ScanAuditLog
 from app.services.scan_scope import is_host_in_scope
 
 
+def resolve_active_exploit_authorization(
+    profile: dict[str, Any] | None,
+    authorization_gate: dict[str, Any] | None,
+) -> bool:
+    """Whether real active-exploitation code (app_pentest.py, waf_origin.py) may run.
+
+    Requires BOTH an explicit choice of a scan profile that documents active
+    exploitation (`post_exploitation: true`, currently only "aggressive") AND a
+    resolved authorization approval (attestation, an existing ScanAuthorization
+    record, or a local/test target) — never on by default, never on for a
+    profile that doesn't ask for it.
+    """
+    return bool((profile or {}).get("post_exploitation")) and bool(
+        (authorization_gate or {}).get("approved")
+    )
+
+
 def normalize_target_host(value: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
