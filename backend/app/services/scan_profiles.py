@@ -1,4 +1,16 @@
-"""Scan profile policy: phase coverage plus depth/intensity knobs."""
+"""Scan profile policy: phase coverage plus depth/intensity knobs.
+
+Platform contract for the 3 user-facing depths (locked in by
+test_active_exploit_authorization.py::test_platform_profile_contract):
+  - Recon (asm):        no active exploitation, ever.
+  - Padrao (full):      no active exploitation, ever.
+  - Agressivo:           active exploitation runs once authorization is
+                         approved (see resolve_active_exploit_authorization
+                         in strategy_runtime.py).
+`post_exploitation` is the single switch this contract reads — do not add a
+second, independently-settable "active exploitation" input; changing which
+profile enables it IS the platform's intended control surface.
+"""
 from __future__ import annotations
 
 from typing import Any
