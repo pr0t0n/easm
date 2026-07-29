@@ -6192,24 +6192,45 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                             _aelog.getLogger(__name__).info(
                                 "app_pentest scan=%d resumo=%s findings=%d",
                                 job.id, _aer.get("summary"), _aer["findings_created"])
-                    # Sondagem adaptativa de erro verboso — bypass de auth via headers
-                    # hintados no próprio 401/403 do alvo + SSRF via campos hintados
-                    # num 400/422. Independente do app_pentest.py acima (flag própria),
-                    # roda uma vez por alvo que chega em qualquer uma dessas fases.
-                    _st_probe_key = f"adaptive_probe_done_{item.target}"
-                    if _st_ae.get("active_exploit_authorized") and not _st_ae.get(_st_probe_key):
+
+                # Sondagem adaptativa de erro verboso — bypass de auth via headers
+                # hintados no próprio 401/403 do alvo + SSRF via campos hintados num
+                # 400/422. Independente do app_pentest.py acima (flag própria).
+                # Inclui P03 (endpoint discovery) porque essa sondagem depende
+                # inteiramente do que o content discovery já achou -- disparar só em
+                # P09/P10/P16/P19 corria contra P03: um item de exploitation podia
+                # completar (e gravar o probe como "feito, nada achado") ANTES de
+                # dirsearch-api/dirsearch-api-post terminarem de achar o endpoint
+                # real (reproduzido ao vivo: scan onde o probe zerou porque rodou
+                # antes do dirsearch-api-post persistir /api/v1/webhook). Em vez de
+                # uma flag "feito para sempre", guarda um fingerprint dos candidatos
+                # já tentados; reroda (idempotente via dedup de finding) sempre que
+                # o content discovery encontra algo novo.
+                if item.phase_id in ("P03", "P16", "P19", "P09", "P10") and item.status == "completed":
+                    _st_ap = dict(job.state_data or {})
+                    if _st_ap.get("active_exploit_authorized"):
                         try:
-                            from app.services.adaptive_error_probe import run_adaptive_probe_for_scan
-                            _apr = run_adaptive_probe_for_scan(db, job, item.target)
-                            job = _patch_scan_state(db, job.id, {_st_probe_key: True}) or job
-                            if _apr.get("findings_created"):
-                                import logging as _aplog
-                                _aplog.getLogger(__name__).info(
-                                    "adaptive_probe scan=%d target=%s probed=%d findings=%d",
-                                    job.id, item.target, _apr.get("endpoints_probed", 0), _apr["findings_created"])
-                        except Exception as _ape:
-                            import logging as _aplog2
-                            _aplog2.getLogger(__name__).debug("adaptive_probe failed: %s", _ape)
+                            from app.services.adaptive_error_probe import (
+                                _candidate_endpoints as _ap_candidate_endpoints,
+                            )
+                            _ap_candidates = tuple(sorted(_ap_candidate_endpoints(db, job, item.target)))
+                        except Exception:
+                            _ap_candidates = ()
+                        _ap_seen_key = f"adaptive_probe_seen_{item.target}"
+                        _ap_fingerprint = "|".join(_ap_candidates)
+                        if _ap_candidates and _st_ap.get(_ap_seen_key) != _ap_fingerprint:
+                            try:
+                                from app.services.adaptive_error_probe import run_adaptive_probe_for_scan
+                                _apr = run_adaptive_probe_for_scan(db, job, item.target)
+                                job = _patch_scan_state(db, job.id, {_ap_seen_key: _ap_fingerprint}) or job
+                                if _apr.get("findings_created"):
+                                    import logging as _aplog
+                                    _aplog.getLogger(__name__).info(
+                                        "adaptive_probe scan=%d target=%s probed=%d findings=%d",
+                                        job.id, item.target, _apr.get("endpoints_probed", 0), _apr["findings_created"])
+                            except Exception as _ape:
+                                import logging as _aplog2
+                                _aplog2.getLogger(__name__).debug("adaptive_probe failed: %s", _ape)
             except Exception as _pe:
                 import logging as _plog
                 _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
