@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
 
 const statusLabel = {
@@ -419,6 +419,7 @@ export default function LearningPage() {
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [error, setError] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
+  const initialLoadStarted = useRef(false);
 
   const parsedUrlCount = useMemo(
     () => urlsText.split(/[;\s]+/).map((item) => item.trim()).filter(Boolean).length,
@@ -465,6 +466,11 @@ export default function LearningPage() {
   };
 
   useEffect(() => {
+    // React StrictMode executes mount effects twice in development. These
+    // indexes scan the learning catalog, so a duplicate request wastes memory
+    // and CPU even though the first response is still in flight.
+    if (initialLoadStarted.current) return;
+    initialLoadStarted.current = true;
     load();
   }, []);
 
