@@ -159,3 +159,24 @@ def test_gobuster_cli_usage_error_produces_no_findings() -> None:
     out = "Incorrect Usage: flag provided but not defined: -wildcard"
     findings = _extract_gobuster_findings(out, "P09.gobuster", "target.com")
     assert findings == []
+
+
+def test_tool_name_is_labeled_correctly_not_hardcoded_to_gobuster() -> None:
+    # Reproduced live: dirsearch-api's own discovery of the same path as a
+    # separate gobuster run got silently deduped away, because both findings
+    # were hardcoded to title "... (gobuster)" / details.tool="gobuster"
+    # regardless of which tool actually ran -- two genuinely distinct
+    # discoveries collided on the (scan, title, domain, tool) dedup key.
+    out = "https://api-messaging.services-valid.com.br/health"
+    findings = _extract_gobuster_findings(
+        out, "P03.dirsearch-api", "api-messaging.services-valid.com.br", tool_name="dirsearch-api",
+    )
+    assert findings[-1]["details"]["tool"] == "dirsearch-api"
+    assert "dirsearch-api" in findings[-1]["title"]
+    assert "gobuster" not in findings[-1]["title"]
+
+
+def test_default_tool_name_stays_gobuster_for_backward_compat() -> None:
+    out = "/admin (Status: 200) [Size: 512]"
+    findings = _extract_gobuster_findings(out, "P09.gobuster", "target.com")
+    assert findings[-1]["details"]["tool"] == "gobuster"

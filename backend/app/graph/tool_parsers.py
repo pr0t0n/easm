@@ -1406,8 +1406,19 @@ def _extract_ffuf_findings(stdout: str, step_name: str, default_target: str) -> 
     return findings
 
 
-def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai paths descobertos por gobuster/dirsearch/feroxbuster.
+def _extract_gobuster_findings(
+    stdout: str, step_name: str, default_target: str, tool_name: str = "gobuster",
+) -> list[dict[str, Any]]:
+    """Extrai paths descobertos por gobuster/dirsearch/dirsearch-api/feroxbuster.
+
+    `tool_name` must be the REAL source tool, not a hardcoded "gobuster" --
+    a prior version hardcoded it in the title and details.tool regardless of
+    which tool actually ran, which (a) mislabeled dirsearch/feroxbuster
+    findings as gobuster's, and (b) made two genuinely distinct discoveries
+    from different tools collide in the (scan, title, domain, tool) dedup
+    key and silently disappear as "already exists" — confirmed live: a real
+    dirsearch-api discovery vanished this way against gobuster's own finding
+    for the same path.
 
     Each content-discovery tool has its own real output shape, confirmed by
     running each live rather than guessing:
@@ -1453,7 +1464,7 @@ def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str)
     sensitive_paths = [p for p in paths if sensitive_patterns.search(p["path"])]
     if sensitive_paths:
         findings.append({
-            "title": f"Paths sensiveis expostos (gobuster): {len(sensitive_paths)} encontrados",
+            "title": f"Paths sensiveis expostos ({tool_name}): {len(sensitive_paths)} encontrados",
             "severity": "medium",
             "risk_score": 6,
             "source_worker": "recon",
@@ -1461,14 +1472,14 @@ def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str)
                 "node": "recon",
                 "step": step_name,
                 "asset": default_target,
-                "tool": "gobuster",
+                "tool": tool_name,
                 "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in sensitive_paths[:20]),
                 "sensitive_paths": sensitive_paths[:100],
                 "count": len(sensitive_paths),
             },
         })
     findings.append({
-        "title": f"Content Discovery (gobuster): {len(paths)} paths",
+        "title": f"Content Discovery ({tool_name}): {len(paths)} paths",
         "severity": "info",
         "risk_score": 2,
         "source_worker": "recon",
@@ -1476,7 +1487,7 @@ def _extract_gobuster_findings(stdout: str, step_name: str, default_target: str)
             "node": "recon",
             "step": step_name,
             "asset": default_target,
-            "tool": "gobuster",
+            "tool": tool_name,
             "evidence": "\n".join(f"{p['path']} [{p['status']}]" for p in paths[:30]),
             "discovered_paths": paths[:200],
             "count": len(paths),
