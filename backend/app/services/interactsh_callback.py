@@ -19,12 +19,18 @@ Config:
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import secrets
 import time
+import uuid
 from typing import Any
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.core.config import settings
 
@@ -43,6 +49,7 @@ _session_id: str | None = None
 _correlation_id: str | None = None
 _secret_key: str | None = None
 _server_url: str | None = None
+_rsa_private_key: rsa.RSAPrivateKey | None = None
 
 
 def _get_server() -> str:
@@ -51,18 +58,34 @@ def _get_server() -> str:
 
 
 def register_session() -> dict[str, Any]:
-    """Register a new Interactsh session. Returns {server, correlation_id, secret_key}."""
-    global _session_id, _correlation_id, _secret_key, _server_url
+    """Register a new Interactsh session. Returns {server, correlation_id, secret_key}.
+
+    The real Interactsh protocol requires "public-key" to be an actual RSA
+    public key (SubjectPublicKeyInfo, PEM, base64-encoded) — the server uses
+    it to RSA-OAEP-encrypt the AES key used for future interaction payloads.
+    The previous implementation sent a random hex token instead of a key,
+    which the server always rejected with 400 ("failed to parse PEM block
+    containing the key") — registration, and therefore every OOB
+    confirmation downstream, has never succeeded. Verified live against the
+    real oast.fun server: a proper RSA keypair registers successfully.
+    """
+    global _session_id, _correlation_id, _secret_key, _server_url, _rsa_private_key
 
     server = _get_server()
-    secret = secrets.token_hex(16)
-    correlation_id = secrets.token_hex(20)[:20]
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    public_key_b64 = base64.b64encode(public_pem).decode()
+    secret = str(uuid.uuid4())
+    correlation_id = secrets.token_hex(10)
 
     try:
         resp = requests.post(
             f"{server}/register",
             json={
-                "public-key": correlation_id,
+                "public-key": public_key_b64,
                 "secret-key": secret,
                 "correlation-id": correlation_id,
             },
@@ -73,6 +96,7 @@ def register_session() -> dict[str, Any]:
         _server_url = server
         _correlation_id = correlation_id
         _secret_key = secret
+        _rsa_private_key = private_key
         logger.info("interactsh session registered: server=%s correlation_id=%s", server, correlation_id)
         return {"server": server, "correlation_id": correlation_id, "domain": data.get("domain", f"{correlation_id}.{server.replace('https://', '')}")}
     except Exception as e:
@@ -105,6 +129,37 @@ def generate_oob_payload(
     return f"http://{slug}.{_correlation_id}.{server_host}"
 
 
+def _decrypt_event(encrypted_aes_key: str, encoded_event: str) -> dict[str, Any] | None:
+    """Decrypt one Interactsh interaction record.
+
+    Protocol (matches the real interactsh-client): the server RSA-OAEP(SHA256)
+    encrypts a per-session AES-256 key with our public key; each interaction
+    is AES-CFB encrypted with that key, IV = first 16 bytes of the ciphertext.
+    This has been verified to register and RSA-decrypt correctly against the
+    live public oast.fun server; the AES-CFB layer matches the known
+    interactsh-client source but has NOT been confirmed end-to-end against a
+    real captured interaction (the live test session never received one
+    within the polling window, plausibly public-server propagation delay) —
+    treat decrypt failures here as "unconfirmed protocol detail", not proof
+    no callback occurred.
+    """
+    if not _rsa_private_key:
+        return None
+    try:
+        aes_key_iv = _rsa_private_key.decrypt(
+            base64.b64decode(encrypted_aes_key),
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        raw = base64.b64decode(encoded_event)
+        iv, ciphertext = raw[:16], raw[16:]
+        decryptor = Cipher(algorithms.AES(aes_key_iv[:32]), modes.CFB(iv)).decryptor()
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        return json.loads(plaintext)
+    except Exception as exc:
+        logger.debug("interactsh event decrypt failed (unconfirmed protocol detail): %s", exc)
+        return None
+
+
 def poll_callbacks(timeout_seconds: int = 30) -> list[dict[str, Any]]:
     """Poll the Interactsh server for any callbacks since last poll.
 
@@ -126,8 +181,12 @@ def poll_callbacks(timeout_seconds: int = 30) -> list[dict[str, Any]]:
             return []
         resp.raise_for_status()
         data = resp.json()
-        events = data.get("data") or []
-        logger.debug("interactsh poll: %d callbacks received", len(events))
+        raw_events = data.get("data") or []
+        aes_key = data.get("aes_key")
+        if not raw_events or not aes_key:
+            return []
+        events = [e for e in (_decrypt_event(aes_key, raw) for raw in raw_events) if e]
+        logger.debug("interactsh poll: %d/%d callbacks decrypted", len(events), len(raw_events))
         return [
             {
                 "unique_id": e.get("unique-id"),

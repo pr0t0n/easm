@@ -2,6 +2,7 @@ from app.services.scan_scope import (
     authorized_scope_from_target_query,
     is_already_specific_subdomain,
     is_host_in_scope,
+    registrable_domain,
 )
 
 
@@ -81,3 +82,30 @@ def test_ip_target_is_not_already_specific_subdomain() -> None:
 def test_url_input_is_normalized_before_checking() -> None:
     assert is_already_specific_subdomain("https://df.si.valid.com.br/path") is True
     assert is_already_specific_subdomain("https://valid.com.br/path") is False
+
+
+# ── registrable_domain: shares the apex heuristic with is_already_specific_subdomain ──
+
+def test_registrable_domain_of_a_hyphenated_sibling_domain() -> None:
+    # "services-valid" is one hyphenated label, not "services" + "valid" --
+    # its direct registrable parent is genuinely services-valid.com.br, a
+    # different domain from valid.com.br. This is real DNS label math, not a
+    # value copied from any specific report.
+    assert registrable_domain("api-messaging.services-valid.com.br") == "services-valid.com.br"
+
+
+def test_registrable_domain_of_a_deep_subdomain() -> None:
+    assert registrable_domain("df.si.valid.com.br") == "valid.com.br"
+
+
+def test_registrable_domain_of_an_apex_is_itself() -> None:
+    assert registrable_domain("valid.com.br") == "valid.com.br"
+    assert registrable_domain("valid.com") == "valid.com"
+
+
+def test_registrable_domain_of_ip_returns_the_ip_unchanged() -> None:
+    assert registrable_domain("192.168.1.10") == "192.168.1.10"
+
+
+def test_registrable_domain_of_blank_input_is_empty() -> None:
+    assert registrable_domain("") == ""

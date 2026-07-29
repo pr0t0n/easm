@@ -145,6 +145,21 @@ def get_verification_status(tool_name: str, finding: dict[str, Any]) -> str:
     if step in ("tech_correlator", "cross_target_propagator"):
         return "hypothesis"
 
+    # adaptive_probe (backend/app/services/adaptive_error_probe.py) produces two
+    # very different finding types from one tool name: an auth-bypass finding
+    # always carries hard, synchronous, in-process HTTP proof (an observed
+    # status-code transition away from 401/403 using headers derived from the
+    # target's own error message) and earns "confirmed" unconditionally; an
+    # SSRF finding from the same tool is only as certain as whatever the
+    # module itself already determined (OOB callback received -> "confirmed",
+    # otherwise "candidate"). A blanket tool-level rule (CONFIRMED_TOOLS)
+    # can't express that split, so trust the per-finding value this specific
+    # tool already computed instead.
+    if tool == "adaptive_probe":
+        if str(details.get("vuln_family") or "") == "auth_bypass":
+            return "confirmed"
+        return str(details.get("verification_status") or "candidate")
+
     # nuclei com matcher específico → confirmed; nuclei genérico → candidate
     if tool.startswith("nuclei"):
         if details.get("matcher-name") or details.get("matched-at"):

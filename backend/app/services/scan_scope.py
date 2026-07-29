@@ -58,6 +58,26 @@ _TWO_LABEL_PUBLIC_SUFFIXES = {
 }
 
 
+def _apex_labels(host: str) -> list[str] | None:
+    """Return the registrable/apex domain's labels (e.g. ['valid', 'com', 'br']).
+
+    None when `host` is empty, an IP, or already too short to have an apex.
+    Shared by `is_already_specific_subdomain` and `registrable_domain` so the
+    two never drift against each other.
+    """
+    if not host or _looks_like_ip(host):
+        return None
+    labels = host.split(".")
+    if len(labels) < 2:
+        return None
+    two_label_suffix = ".".join(labels[-2:])
+    suffix_label_count = 2 if two_label_suffix in _TWO_LABEL_PUBLIC_SUFFIXES else 1
+    apex_label_count = suffix_label_count + 1
+    if len(labels) < apex_label_count:
+        return None
+    return labels[-apex_label_count:]
+
+
 def is_already_specific_subdomain(target: str) -> bool:
     """True when `target` already has more labels than its registrable/apex domain.
 
@@ -69,15 +89,23 @@ def is_already_specific_subdomain(target: str) -> bool:
     known limitation (not a full public-suffix list).
     """
     host = _normalize_scope_root(target)
-    if not host or _looks_like_ip(host):
+    apex = _apex_labels(host)
+    if apex is None:
         return False
-    labels = host.split(".")
-    if len(labels) < 3:
-        return False  # can't be deeper than a 2-label apex (e.g. valid.com)
-    two_label_suffix = ".".join(labels[-2:])
-    suffix_label_count = 2 if two_label_suffix in _TWO_LABEL_PUBLIC_SUFFIXES else 1
-    apex_label_count = suffix_label_count + 1
-    return len(labels) > apex_label_count
+    return len(host.split(".")) > len(apex)
+
+
+def registrable_domain(target: str) -> str:
+    """Return `target`'s registrable/apex domain (e.g. valid.com.br for
+    api-messaging.services-valid.com.br). Falls back to the normalized host
+    itself when no apex is derivable (IP, or already bare/too-short) —
+    never raises, never returns a value that isn't a plausible host. Shares
+    the same heuristic/limitation as `is_already_specific_subdomain` — see
+    `_TWO_LABEL_PUBLIC_SUFFIXES`.
+    """
+    host = _normalize_scope_root(target)
+    apex = _apex_labels(host)
+    return ".".join(apex) if apex else host
 
 
 def _looks_like_ip(host: str) -> bool:

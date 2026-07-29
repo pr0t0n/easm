@@ -157,6 +157,10 @@ services:
       # container restart (not a full image rebuild). Aligns with the rule:
       # never rebuild kali_runner unnecessarily — it's a stable tool repository.
       - ./kali-runner/profiles:/app/profiles:ro
+      # Small, platform-owned supplementary wordlists (e.g. common REST/API
+      # conventions absent from third-party SecLists files) referenced by
+      # profile commands. Read-only, same reload-on-restart rule as profiles.
+      - ./kali-runner/wordlists:/app/wordlists:ro
       # Runner orchestration contract (including per-batch input manifests) is
       # application code and must survive container recreation without waiting
       # for a heavyweight Kali image rebuild.
