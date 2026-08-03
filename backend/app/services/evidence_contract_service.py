@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.models import EvidenceArtifact, Finding, ScanJob
+from app.models.models import CoverageItem, EvidenceArtifact, Finding, ScanJob
 from app.services.evidence_gate import get_verification_status
 from app.services.pentest_contracts import EvidenceContract, ValidationDecision
 
@@ -198,11 +198,24 @@ def apply_finding_validation(db: Session, finding: Finding) -> ValidationDecisio
     details["validation_decision"] = decision.to_dict()
     details["proof_pack_required"] = bool(decision.required_artifacts)
     details["proof_pack_missing"] = list(decision.missing_artifacts)
+    details["verification_status"] = decision.status
     finding.verification_status = decision.status
     if decision.severity_cap:
         finding.severity = _cap_severity(str(finding.severity or "info"), decision.severity_cap)
     finding.details = details
     db.add(finding)
+    # Finding, JSON details and coverage are one validation lifecycle.
+    for coverage in (
+        db.query(CoverageItem)
+        .filter(CoverageItem.finding_id == finding.id, CoverageItem.coverage_type == "finding")
+        .all()
+    ):
+        coverage.status = decision.status
+        coverage.coverage_metadata = {
+            **dict(coverage.coverage_metadata or {}),
+            "validation_decision": decision.to_dict(),
+        }
+        db.add(coverage)
     _sync_linked_vulnerability(db, finding)
     return decision
 
@@ -306,44 +319,46 @@ def _sync_linked_vulnerability(db: Session, finding: Finding) -> None:
 
 def _best_finding_match(artifact: EvidenceArtifact, findings: list[Finding], job: ScanJob) -> Finding | None:
     artifact_tool = str(artifact.tool_name or "").strip().lower()
-    artifact_target_tokens = _target_tokens(artifact.target or "", job.target_query)
-    best: tuple[int, Finding] | None = None
+    artifact_target_tokens = _target_tokens(artifact.target or "")
+    if not artifact_tool or not artifact_target_tokens:
+        return None
+    matches: list[tuple[int, Finding]] = []
     for finding in findings:
         score = 0
         finding_tool = str(finding.tool or (finding.details or {}).get("tool") or "").strip().lower()
-        if artifact_tool and finding_tool and artifact_tool == finding_tool:
-            score += 4
-        elif artifact_tool and finding_tool and (artifact_tool in finding_tool or finding_tool in artifact_tool):
-            score += 2
+        # Cross-tool verification must carry an explicit finding_id through
+        # the validation work item; fuzzy matching cannot prove that link.
+        if artifact_tool != finding_tool:
+            continue
+        score += 4
         finding_tokens = _target_tokens(
-            " ".join(
-                str(v or "")
-                for v in [
-                    finding.domain,
-                    finding.url,
-                    (finding.details or {}).get("target"),
-                    (finding.details or {}).get("url"),
-                    (finding.details or {}).get("asset"),
-                    (finding.details or {}).get("matched-at"),
-                ]
-            ),
-            job.target_query,
+            *(str(v or "") for v in [
+                finding.domain,
+                finding.url,
+                (finding.details or {}).get("target"),
+                (finding.details or {}).get("url"),
+                (finding.details or {}).get("asset"),
+                (finding.details or {}).get("matched-at"),
+            ]),
         )
-        if artifact_target_tokens & finding_tokens:
-            score += 4
+        if not (artifact_target_tokens & finding_tokens):
+            continue
+        score += 4
         if artifact.phase_id and str((finding.details or {}).get("phase_id") or "") == artifact.phase_id:
             score += 1
-        if score >= 4 and (best is None or score > best[0]):
-            best = (score, finding)
-    return best[1] if best else None
+        matches.append((score, finding))
+    if not matches:
+        return None
+    best_score = max(score for score, _finding in matches)
+    best = [finding for score, finding in matches if score == best_score]
+    # A host-level run may emit multiple findings. An ambiguous artifact must
+    # remain unlinked instead of manufacturing a proof relationship.
+    return best[0] if len(best) == 1 else None
 
 
 def _artifact_status_for_finding(artifact: EvidenceArtifact, finding: Finding) -> str:
-    if str(artifact.validation_status or "") == "confirmed":
-        return "confirmed"
-    status = str(finding.verification_status or (finding.details or {}).get("verification_status") or "candidate")
-    if status == "confirmed":
-        return "confirmed"
+    # Evidence is established independently; a confirmed finding cannot
+    # retroactively promote a candidate artifact (circular confirmation).
     return str(artifact.validation_status or "candidate")
 
 

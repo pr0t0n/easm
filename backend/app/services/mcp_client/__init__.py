@@ -60,7 +60,8 @@ _PROFILE_TIMEOUT_HINTS: dict[str, int] = {
     # the runner profile so the backend receives the real result.
     "nuclei_cves": 900,
     "nikto_basic": 360,
-    "sqlmap_basic": 600,
+    "sqlmap_basic": 3600,
+    "sqlmap_body": 3600,
     "dalfox_xss": 600,
     "wapiti_scan": 1200,
     "wpscan_basic": 900,

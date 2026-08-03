@@ -740,3 +740,7 @@ PLATFORM_CONTROL_QUEUE = "platform.control"
 # Kept separate from SCAN_UNIT_QUEUE so subtasks never starve the main scan task
 # that dispatched them.
 SCAN_PARALLEL_QUEUE = "scan.parallel"
+# Polling has stricter latency requirements than dispatch. Keeping it on the
+# same queue as scan orchestration lets a backlog of execution tasks strand
+# already-finished Kali jobs in ``submitted`` state.
+SCAN_POLL_QUEUE = "scan.poll"

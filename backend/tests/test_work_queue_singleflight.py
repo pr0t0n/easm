@@ -67,7 +67,7 @@ def test_poll_schedule_is_unique_per_work_item(monkeypatch) -> None:
     from app.workers import tasks
 
     redis = FakeRedis()
-    task = FakeTask()
+    task = FakeRoutedTask()
     monkeypatch.setattr(scan_work_queue, "_redis_client", lambda: redis)
     monkeypatch.setattr(tasks, "poll_scan_work_item", task)
 
@@ -75,6 +75,7 @@ def test_poll_schedule_is_unique_per_work_item(monkeypatch) -> None:
     assert tasks._schedule_work_item_poll(45227, countdown=1) is False
     assert tasks._schedule_work_item_poll(45368, countdown=1) is True
     assert len(task.messages) == 2
+    assert all(message["queue"] == "scan.poll" for message in task.messages)
 
 
 def test_stale_token_cannot_claim_newer_message(monkeypatch) -> None:

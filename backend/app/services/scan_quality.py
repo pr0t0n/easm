@@ -35,6 +35,7 @@ from app.services.scan_profiles import scan_profile
 
 VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_positive"}
 CANDIDATE_STATUSES = {"candidate", "needs_review", "hypothesis"}
+P21_EVIDENCE_STATUSES = {"confirmed", "validated", "success", "proven"}
 # Validation depth measures conclusive adjudication, not the number of
 # vulnerabilities found. A sound refutation is as valuable as a confirmation.
 SUCCESS_VALIDATION_RESULTS = {
@@ -166,7 +167,48 @@ def _quality_scored_phase_ids(job: ScanJob) -> list[str]:
     quality and P22 is produced only after this quality gate accepts completion.
     Scoring them as phase coverage creates circular false gaps.
     """
-    return [phase_id for phase_id in _expected_phase_ids(job) if phase_id not in {"P21", "P22"}]
+    excluded = {"P21", "P22"}
+    state = dict(job.state_data or {})
+    # An explicit inventory is already the output P01 would produce. Penalizing
+    # the deliberately skipped enumeration phase created a false 0% gap and a
+    # fake missing-skill warning in scans #54, #66 and #67.
+    if bool(state.get("skip_p01_subdomain_enumeration")) or bool(state.get("explicit_target_inventory")):
+        excluded.add("P01")
+    return [phase_id for phase_id in _expected_phase_ids(job) if phase_id not in excluded]
+
+
+def _validation_has_independent_evidence(
+    validation: ValidationRun,
+    artifacts_by_id: dict[int, EvidenceArtifact],
+) -> bool:
+    """Reject legacy P21 audits that promoted a candidate tool run.
+
+    The row remains stored for auditability, but it cannot improve the quality
+    score unless its recorded source artifact was independently validated.
+    """
+    validator_name = str(validation.validator_name or "").strip().lower()
+    result = str(validation.result or "").strip().lower()
+    reason = str(validation.reason or "").strip().lower()
+    # Legacy read-only validations treated rate limiting as proof that a file
+    # was absent. Keep the audit row but do not reward an inconclusive 429.
+    if (
+        validator_name == "read-only-validator"
+        and result == "refuted"
+        and ("status_429" in reason or "rate_limited" in reason)
+    ):
+        return False
+    if validator_name != "quality-gate-audit":
+        return True
+    metadata = dict(validation.run_metadata or {})
+    try:
+        source_artifact_id = int(metadata.get("source_artifact_id"))
+    except (TypeError, ValueError):
+        return False
+    source = artifacts_by_id.get(source_artifact_id)
+    return bool(
+        source
+        and str(source.validation_status or "").strip().lower() in P21_EVIDENCE_STATUSES
+    )
 
 
 def _finding_details(finding: Finding) -> dict[str, Any]:
@@ -340,10 +382,12 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .options(load_only(
             EvidenceArtifact.id, EvidenceArtifact.finding_id,
             EvidenceArtifact.phase_id, EvidenceArtifact.artifact_type,
+            EvidenceArtifact.validation_status, EvidenceArtifact.artifact_metadata,
         ))
         .filter(EvidenceArtifact.scan_job_id == job.id)
         .all()
     )
+    artifacts_by_id = {int(artifact.id): artifact for artifact in artifacts}
     artifacts_by_finding: Counter[int] = Counter(
         int(a.finding_id) for a in artifacts if a.finding_id is not None
     )
@@ -351,7 +395,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         db.query(ValidationRun)
         .options(load_only(
             ValidationRun.id, ValidationRun.hypothesis_id, ValidationRun.finding_id, ValidationRun.validator_name,
-            ValidationRun.result, ValidationRun.run_metadata,
+            ValidationRun.result, ValidationRun.reason, ValidationRun.run_metadata,
             ValidationRun.attempt_artifact_id, ValidationRun.created_at,
         ))
         .filter(ValidationRun.scan_job_id == job.id)
@@ -424,10 +468,15 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     superseded_hypothesis_ids = {
         int(row.id) for row in hypotheses if str(row.status or "").lower() == "superseded"
     }
-    validations = [
+    active_validations = [
         row for row in all_validations
         if row.hypothesis_id is None or int(row.hypothesis_id) not in superseded_hypothesis_ids
     ]
+    validations = [
+        row for row in active_validations
+        if _validation_has_independent_evidence(row, artifacts_by_id)
+    ]
+    integrity_validation_runs_excluded = len(active_validations) - len(validations)
     identities_count = db.query(ScanIdentity.id).filter(ScanIdentity.scan_job_id == job.id).count()
     auth_sessions = (
         db.query(ScanAuthSession)
@@ -760,6 +809,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "weight": 15,
             "validation_runs": len(validations),
             "historical_validation_runs_excluded": len(all_validations) - len(validations),
+            "integrity_validation_runs_excluded": integrity_validation_runs_excluded,
             "successful_validations": len(successful_validations),
             "retests": len(retests),
             "high_findings": len(high_findings),
@@ -1127,6 +1177,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "artifacts_total": len(artifacts),
             "validation_runs": len(validations),
             "historical_validation_runs_excluded": len(all_validations) - len(validations),
+            "integrity_validation_runs_excluded": integrity_validation_runs_excluded,
             "coverage_items": len(coverage_items),
             "coverage_items_raw": len(coverage_rows),
             "coverage_items_inventory_only": len(inventory_coverage_items),
@@ -1632,7 +1683,9 @@ def _record_p21_evidence_audits(db: Session, job: ScanJob, max_rows: int = 12) -
         if artifact.finding_id is None:
             continue
         status = str(artifact.validation_status or "").strip().lower()
-        if status not in {"confirmed", "validated", "success", "proven", "candidate"}:
+        # A candidate artifact only proves that a tool ran. P21 must not turn
+        # it into a validated audit row without independent validation.
+        if status not in {"confirmed", "validated", "success", "proven"}:
             continue
         artifact_by_finding.setdefault(int(artifact.finding_id), artifact)
     if not artifact_by_finding:
@@ -1714,6 +1767,10 @@ def _record_p21_evidence_audits(db: Session, job: ScanJob, max_rows: int = 12) -
             created_at=datetime.now(),
         )
         db.add(validation)
+        # ValidationRun.id is database generated and is included in the
+        # coverage metadata below. Without a flush scan finalization called
+        # int(None), failed the quality gate open and left a partial P21 row.
+        db.flush()
         from app.services.offensive_inventory_service import OffensiveInventoryService
 
         OffensiveInventoryService(db, job).upsert_coverage(

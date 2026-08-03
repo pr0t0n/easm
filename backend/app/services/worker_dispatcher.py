@@ -306,6 +306,10 @@ def _persist_result_artifact(
 ) -> None:
     if not scan_id:
         return
+    status = str(result.get("status") or "").strip().lower()
+    # Blocked/skipped/error executions are telemetry, not finding evidence.
+    if status not in {"executed", "success", "completed", "done", "partial"}:
+        return
     try:
         from app.db.session import SessionLocal
         from app.services.evidence_contract_service import create_artifact_from_tool_result

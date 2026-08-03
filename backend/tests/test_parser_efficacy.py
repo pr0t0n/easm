@@ -194,3 +194,14 @@ def test_dirsearch_api_post_output_is_labeled_distinctly_from_get_variant() -> N
     )
     assert findings[-1]["details"]["tool"] == "dirsearch-api-post"
     assert "dirsearch-api-post" in findings[-1]["title"]
+
+
+def test_method_not_allowed_route_is_discovery_not_sensitive_exposure() -> None:
+    out = "[16:37:33] 405 -  195B  - https://example.test/api/admin/create"
+    findings = _extract_gobuster_findings(
+        out, "P03.dirsearch-api-post", "example.test", tool_name="dirsearch-api-post",
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "info"
+    assert findings[0]["title"].startswith("Content Discovery")

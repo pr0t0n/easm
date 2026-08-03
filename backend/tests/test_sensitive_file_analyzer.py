@@ -3,7 +3,11 @@ from types import SimpleNamespace
 from app.services.artifact_store import redact
 from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract
 from app.services.hypothesis_planner import _prefetch_read_only_observations
-from app.services.pentest_validators import _deduplicate_followup_urls, _safe_request
+from app.services.pentest_validators import (
+    _deduplicate_followup_urls,
+    _safe_request,
+    _sensitive_file_validation_decision,
+)
 from app.services.sensitive_file_analyzer import (
     ALL_SENSITIVE_EXTENSIONS,
     analyze_sensitive_file_content,
@@ -62,6 +66,21 @@ def test_sensitive_static_file_enters_endpoint_test_matrix() -> None:
     assert analysis["classification"]["sensitive_file"] is True
     assert "read_only_baseline" in tests
     assert tests["sensitive_file_analysis"]["hypothesis_type"] == "sensitive_file_exposure"
+
+
+def test_sensitive_file_rate_limit_is_inconclusive_not_refuted() -> None:
+    assert _sensitive_file_validation_decision(429, 0) == (
+        "blocked",
+        "sensitive_file_inconclusive_rate_limited_status_429",
+    )
+    assert _sensitive_file_validation_decision(404, 0) == (
+        "refuted",
+        "sensitive_file_not_found_status_404",
+    )
+    assert _sensitive_file_validation_decision(200, 2) == (
+        "candidate",
+        "sensitive_file_accessible_indicators_2",
+    )
 
 
 def test_artifact_redaction_removes_private_keys_jwts_and_cloud_keys() -> None:

@@ -56,6 +56,33 @@ def test_runner_stale_job_clock_uses_utc_and_kills_process_group() -> None:
     assert "hard_ceiling = timeout" in runner_source
 
 
+def test_runner_heartbeat_is_independent_from_tool_output() -> None:
+    runner_source = (ROOT / "kali-runner" / "runner.py").read_text(encoding="utf-8")
+
+    assert "heartbeat_at: Optional[str]" in runner_source
+    assert "output_activity_at: Optional[str]" in runner_source
+    assert "os.read(stream.fileno(), 4096)" in runner_source
+    assert 'evidence_path.open("ab", buffering=0)' in runner_source
+    assert 'profile.get("silence_timeout") or 0' in runner_source
+    assert "silence_limit > 0 and idle_for > silence_limit" in runner_source
+    assert 'stage="running_tool"' in runner_source
+
+
+def test_blind_sqli_and_quiet_fuzzers_have_explicit_timeout_contracts() -> None:
+    source = (ROOT / "kali-runner" / "profiles" / "delivery_exploitation.yaml").read_text(encoding="utf-8")
+    sqlmap_basic = source.split("sqlmap_basic:", 1)[1].split("sqlmap_body:", 1)[0]
+    sqlmap_body = source.split("sqlmap_body:", 1)[1].split("dalfox_xss:", 1)[0]
+    ffuf = source.split("ffuf_dirs:", 1)[1].split("ffuf_files:", 1)[0]
+    wfuzz = source.split("wfuzz_param_names:", 1)[1].split("gobuster_dir:", 1)[0]
+
+    assert "timeout: 3600" in sqlmap_basic
+    assert "timeout: 3600" in sqlmap_body
+    assert "heartbeat_interval: 15" in sqlmap_basic
+    assert "silence_timeout: 0" in sqlmap_basic
+    assert "silence_timeout: 0" in ffuf
+    assert "timeout: 600" in wfuzz
+
+
 def test_httpx_batch_profile_uses_conservative_waf_safe_concurrency() -> None:
     source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
     section = source.split("httpx_probe_batch:", 1)[1].split("whatweb_fingerprint:", 1)[0]

@@ -1461,7 +1461,15 @@ def _extract_gobuster_findings(
     if not paths:
         return []
     sensitive_patterns = re.compile(r"(admin|backup|config|\.env|\.git|\.htaccess|wp-admin|phpmyadmin|api|debug|test|staging)", re.IGNORECASE)
-    sensitive_paths = [p for p in paths if sensitive_patterns.search(p["path"])]
+    # 401/403/405 only establish an auth/method boundary and may be emitted by
+    # a catch-all handler. They remain discovery intelligence but must not be
+    # reported as a medium-severity exposed sensitive path.
+    sensitive_paths = [
+        p for p in paths
+        if sensitive_patterns.search(p["path"])
+        and str(p.get("status") or "").isdigit()
+        and 200 <= int(str(p["status"])) < 400
+    ]
     if sensitive_paths:
         findings.append({
             "title": f"Paths sensiveis expostos ({tool_name}): {len(sensitive_paths)} encontrados",

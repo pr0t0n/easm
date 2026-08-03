@@ -156,6 +156,9 @@ shodan_lookup:
   cmd: ["/opt/tools/pipx/venvs/shodan/bin/python", "/opt/runner-scripts/shodan_lookup.py", "{host}"]
   requires_env: ["SHODAN_API_KEY"]
   timeout: 60
+  heartbeat_interval: 10
+  # The wrapper owns its per-attempt API timeout/backoff contract.
+  silence_timeout: 0
   parser: json
 
 theharvester_passive:

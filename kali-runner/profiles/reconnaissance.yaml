@@ -412,6 +412,9 @@ curl_headers:
         "{{url}}"]
   allowed_return_codes: [0]
   timeout: 90
+  heartbeat_interval: 15
+  # curl has its own --max-time 60; do not kill it at the old 45s midpoint.
+  silence_timeout: 0
   parser: raw
 
 curl_probe:

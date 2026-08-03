@@ -42,6 +42,7 @@ JOBS_DIR = WORKSPACE / ".runner_jobs"
 PROFILES_DIR = Path(__file__).parent / "profiles"
 MAX_PARALLEL = int(os.getenv("KALI_MAX_PARALLEL", "8"))
 DEFAULT_TIMEOUT = int(os.getenv("KALI_DEFAULT_TIMEOUT", "300"))
+DEFAULT_HEARTBEAT_INTERVAL = int(os.getenv("KALI_HEARTBEAT_INTERVAL", "15"))
 WORKSPACE_TTL_HOURS = int(os.getenv("KALI_WORKSPACE_TTL_HOURS", "24"))
 VOLATILE_JOB_STATES = {"queued", "running"}
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
@@ -236,6 +237,12 @@ class JobStatus(BaseModel):
     batch_target_file_sha256: Optional[str] = None
     egress_context: dict[str, Any] = Field(default_factory=dict)
     egress_observation: dict[str, Any] = Field(default_factory=dict)
+    heartbeat_at: Optional[str] = None
+    heartbeat_sequence: int = 0
+    output_activity_at: Optional[str] = None
+    output_bytes: int = 0
+    elapsed_seconds: Optional[float] = None
+    timeout_policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobResult(JobStatus):
@@ -467,14 +474,15 @@ def _set_job_fields(job_id: str, **fields: Any) -> dict[str, Any]:
         job = _JOBS[job_id]
         job.update(fields)
         snapshot = dict(job)
-    # Write to disk for terminal state, stdout arrival, finished_at,
-    # or when subprocess_pid changes (critical for orphan-cleanup on restart).
-    # All other intermediate updates stay in-memory.
+    # Heartbeats are deliberately durable. A long blind/time-based probe may
+    # produce no stdout for minutes; after a control-plane restart operators
+    # must still be able to distinguish "process was alive" from "job hung".
     if (
         fields.get("status") in TERMINAL_STATES
         or "stdout" in fields
         or "finished_at" in fields
         or "subprocess_pid" in fields
+        or "heartbeat_at" in fields
     ):
         _persist_job_record(snapshot)
     return snapshot
@@ -514,6 +522,8 @@ def _get_job_record(job_id: str) -> dict[str, Any] | None:
 
 def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
     timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
+    heartbeat_interval = max(1, int(profile.get("heartbeat_interval") or DEFAULT_HEARTBEAT_INTERVAL))
+    silence_timeout = max(0, int(profile.get("silence_timeout") or 0))
     return {
         "job_id": str(uuid.uuid4()),
         "profile": req.profile,
@@ -533,6 +543,17 @@ def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
         "error": None,
         "workdir": None,
         "timeout": timeout,
+        "heartbeat_at": None,
+        "heartbeat_sequence": 0,
+        "output_activity_at": None,
+        "output_bytes": 0,
+        "elapsed_seconds": None,
+        "timeout_policy": {
+            "hard_timeout_seconds": timeout,
+            "silence_timeout_seconds": silence_timeout,
+            "heartbeat_interval_seconds": heartbeat_interval,
+            "silence_timeout_enabled": silence_timeout > 0,
+        },
         # Durable input-coverage manifest.  Empty scanner output means "no
         # observation", not "input list unknown"; consumers need the exact
         # materialized set to qualify every target deterministically.
@@ -1041,17 +1062,12 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             pgid = proc.pid
         _set_job_fields(job_id, subprocess_pid=proc.pid, subprocess_pgid=pgid)
 
-        # ── Heartbeat-aware wait ─────────────────────────────────────────────
-        # proc.communicate(timeout=N) is a blind, fixed-deadline kill: it can't
-        # tell "genuinely hung" from "slow but still producing output" (a rate-
-        # limited API doing backoff, a crawler on a large site). That
-        # indistinguishability was flagging real, working calls as timeouts —
-        # observed live on scan #1 for shodan-cli/curl-headers/paramspider.
-        # Fix: track wall-clock time since the LAST byte of stdout/stderr
-        # arrived via background reader threads. Kill early only if truly
-        # silent for `silence_limit`; the configured timeout remains the hard
-        # wall-clock budget. Profiles that legitimately need longer must set a
-        # larger timeout explicitly.
+        # ── Process heartbeat + independent output activity ─────────────────
+        # A live process is not the same thing as a chatty process. Blind SQLi,
+        # OOB checks and scanners in quiet mode can legitimately emit nothing
+        # for minutes. Persist a process heartbeat on a fixed cadence and treat
+        # stdout/stderr activity as a separate signal. Silence termination is
+        # opt-in per profile; the hard timeout is always profile-specific.
         if stdin_bytes and proc.stdin is not None:
             try:
                 proc.stdin.write(stdin_bytes)
@@ -1067,16 +1083,28 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         _activity_lock = threading.Lock()
         _stdout_chunks: list[bytes] = []
         _stderr_chunks: list[bytes] = []
+        _output_bytes = [0]
+        _output_activity_at = [None]
 
-        def _pump(stream, sink: list[bytes]) -> None:
+        def _pump(stream, sink: list[bytes], evidence_path: Path) -> None:
             try:
-                while True:
-                    chunk = stream.read(4096)
-                    if not chunk:
-                        break
-                    with _activity_lock:
-                        sink.append(chunk)
-                        _activity[0] = time.monotonic()
+                # Unbuffered append makes partial evidence durable while the
+                # process is running. A hard timeout or runner restart must not
+                # erase the useful prefix of a long blind/time-based analysis.
+                with evidence_path.open("ab", buffering=0) as evidence_stream:
+                    while True:
+                        # BufferedReader.read(4096) can wait for the whole
+                        # buffer, hiding small progress messages. os.read
+                        # returns as soon as any bytes are available.
+                        chunk = os.read(stream.fileno(), 4096)
+                        if not chunk:
+                            break
+                        evidence_stream.write(chunk)
+                        with _activity_lock:
+                            sink.append(chunk)
+                            _activity[0] = time.monotonic()
+                            _output_bytes[0] += len(chunk)
+                            _output_activity_at[0] = _utc_now_iso()
             except Exception:
                 pass
             finally:
@@ -1085,14 +1113,34 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
                 except Exception:
                     pass
 
-        _t_out = threading.Thread(target=_pump, args=(proc.stdout, _stdout_chunks), daemon=True)
-        _t_err = threading.Thread(target=_pump, args=(proc.stderr, _stderr_chunks), daemon=True)
+        stdout_evidence_path = workdir / "stdout.txt"
+        stderr_evidence_path = workdir / "stderr.txt"
+        _t_out = threading.Thread(
+            target=_pump,
+            args=(proc.stdout, _stdout_chunks, stdout_evidence_path),
+            daemon=True,
+        )
+        _t_err = threading.Thread(
+            target=_pump,
+            args=(proc.stderr, _stderr_chunks, stderr_evidence_path),
+            daemon=True,
+        )
         _t_out.start()
         _t_err.start()
 
-        silence_limit = min(timeout, max(30, int(timeout * 0.5)))
+        heartbeat_interval = max(1, int(profile.get("heartbeat_interval") or DEFAULT_HEARTBEAT_INTERVAL))
+        silence_limit = max(0, int(profile.get("silence_timeout") or 0))
         hard_ceiling = timeout
         wait_started = time.monotonic()
+        next_heartbeat = wait_started
+        heartbeat_sequence = 0
+        timeout_policy = {
+            "hard_timeout_seconds": hard_ceiling,
+            "silence_timeout_seconds": silence_limit,
+            "heartbeat_interval_seconds": heartbeat_interval,
+            "silence_timeout_enabled": silence_limit > 0,
+        }
+        _set_job_fields(job_id, timeout_policy=timeout_policy)
         kill_reason: str | None = None
         cancelled_requested = False
         while True:
@@ -1105,7 +1153,22 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             now = time.monotonic()
             with _activity_lock:
                 idle_for = now - _activity[0]
-            if idle_for > silence_limit:
+                output_bytes = _output_bytes[0]
+                output_activity_at = _output_activity_at[0]
+            if now >= next_heartbeat:
+                heartbeat_sequence += 1
+                _set_job_fields(
+                    job_id,
+                    stage="running_tool",
+                    heartbeat_at=_utc_now_iso(),
+                    heartbeat_sequence=heartbeat_sequence,
+                    output_activity_at=output_activity_at,
+                    output_bytes=output_bytes,
+                    elapsed_seconds=round(now - wait_started, 3),
+                    timeout_policy=timeout_policy,
+                )
+                next_heartbeat = now + heartbeat_interval
+            if silence_limit > 0 and idle_for > silence_limit:
                 kill_reason = f"no_output_for_{int(idle_for)}s_silence_limit_{silence_limit}s"
                 break
             if now - wait_started > hard_ceiling:
@@ -1151,6 +1214,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         with _activity_lock:
             raw_stdout = b"".join(_stdout_chunks)
             raw_stderr = b"".join(_stderr_chunks)
+            final_output_activity_at = _output_activity_at[0]
         if _job_is_terminal(job_id):
             return
 
@@ -1213,8 +1277,8 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         # like nikto/nuclei can emit >150K of useful output where the
         # critical `+` finding lines are at the *start*, not the end.
         # Truncating the head silently dropped 12+ findings/scan. The
-        # parsers read all lines and only retain matches, so larger
-        # buffers are safe; stderr stays at 20K (mostly progress/errors).
+        # parsers read all lines and only retain matches, so larger buffers
+        # are safe; stderr stays at 20K (mostly progress/errors).
         _set_job_fields(
             job_id,
             command=command,
@@ -1225,15 +1289,33 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
             parsed=parsed,
             egress_context=egress_context,
             egress_observation=egress_observation,
+            output_activity_at=final_output_activity_at,
+            output_bytes=len(raw_stdout) + len(raw_stderr),
+            elapsed_seconds=round(time.monotonic() - wait_started, 3),
         )
     except subprocess.TimeoutExpired as exc:
+        timeout_stdout = str(exc.stdout or "")
+        timeout_stderr = str(exc.stderr or "")
+        try:
+            (workdir / "stdout.txt").write_text(timeout_stdout, encoding="utf-8", errors="replace")
+            (workdir / "stderr.txt").write_text(timeout_stderr, encoding="utf-8", errors="replace")
+            (workdir / "command.txt").write_text(command, encoding="utf-8")
+            (workdir / "timeout.txt").write_text(
+                f"timeout after {exc.timeout}s\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
         _set_job_fields(
             job_id,
             command=command,
             status="timeout",
             error=f"timeout after {exc.timeout}s",
-            stdout=str(exc.stdout or ""),
-            stderr=str(exc.stderr or ""),
+            stdout=timeout_stdout,
+            stderr=timeout_stderr,
+            output_activity_at=_utc_now_iso() if timeout_stdout or timeout_stderr else None,
+            output_bytes=len(timeout_stdout.encode("utf-8")) + len(timeout_stderr.encode("utf-8")),
+            elapsed_seconds=float(exc.timeout),
         )
     except Exception as exc:  # noqa: BLE001
         _set_job_fields(job_id, status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -1374,6 +1456,8 @@ def list_profiles() -> dict[str, Any]:
             "phase": spec.get("phase"),
             "description": spec.get("description"),
             "timeout": spec.get("timeout", DEFAULT_TIMEOUT),
+            "heartbeat_interval": spec.get("heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL),
+            "silence_timeout": spec.get("silence_timeout", 0),
             "source": spec.get("source_file"),
             "command": command,
             "command_executable": executable,
@@ -1442,6 +1526,8 @@ def list_typed_profiles() -> dict[str, Any]:
             "description": spec.get("description"),
             "parameters": _profile_parameters(command),
             "timeout_seconds": spec.get("timeout", DEFAULT_TIMEOUT),
+            "heartbeat_interval_seconds": spec.get("heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL),
+            "silence_timeout_seconds": spec.get("silence_timeout", 0),
             "result_schema": {
                 "status": "queued | running | done | failed | timeout | skipped",
                 "exit_code": "int",

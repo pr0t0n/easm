@@ -35,6 +35,7 @@ from app.workers.worker_groups import (
     SCAN_UNIT_QUEUE,
     SCAN_SCHEDULED_QUEUE,
     SCAN_PARALLEL_QUEUE,
+    SCAN_POLL_QUEUE,
     PLATFORM_CONTROL_QUEUE,
     ScanMode,
     find_group_by_tool,
@@ -900,6 +901,7 @@ def _schedule_work_item_poll(item_id: int, *, countdown: int) -> bool:
             args=[int(item_id)],
             kwargs={"_poll_token": token},
             countdown=countdown,
+            queue=SCAN_POLL_QUEUE,
         ),
     )
 
@@ -4953,7 +4955,7 @@ def execute_scan_work_item(item_id: int):
         db.close()
 
 
-@celery.task(name="poll_scan_work_item", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+@celery.task(name="poll_scan_work_item", queue=SCAN_POLL_QUEUE, ignore_result=True)
 def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
     """Poll an async MCP/Kali job and persist the terminal result."""
     from datetime import datetime, timedelta
@@ -5022,6 +5024,16 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             item.lease_until = _now + timedelta(seconds=max(600, _runner_timeout + 300))
             result_state["last_poll"] = _now.isoformat()
             result_state["kali_status"] = raw_status or "running"
+            # Preserve the runner's independent process heartbeat. Output may
+            # remain silent during blind/time-based validation, so last_poll is
+            # only transport health; runner_heartbeat_at proves the subprocess
+            # itself was alive at the reported instant.
+            result_state["runner_heartbeat_at"] = status_payload.get("heartbeat_at")
+            result_state["runner_heartbeat_sequence"] = int(status_payload.get("heartbeat_sequence") or 0)
+            result_state["runner_output_activity_at"] = status_payload.get("output_activity_at")
+            result_state["runner_output_bytes"] = int(status_payload.get("output_bytes") or 0)
+            result_state["runner_elapsed_seconds"] = status_payload.get("elapsed_seconds")
+            result_state["runner_timeout_policy"] = dict(status_payload.get("timeout_policy") or {})
             # P1 — heartbeat de progresso VISÍVEL. O updated_at já era tocado a
             # cada poll (sinal mudo p/ o watchdog), mas o branch "ainda rodando"
             # não emitia log nenhum — então no log/UI o job parecia morto. Conta
@@ -5031,26 +5043,10 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             result_state["poll_count"] = _polls
             item.result = result_state
             item.updated_at = _now
-            if job and str(job.status or "").lower() == "running":
-                try:
-                    _counts = work_queue_counts(db, item.scan_job_id)
-                    _state = dict(job.state_data or {})
-                    _state["work_queue_counts"] = _counts
-                    _frontier_phase = _first_active_work_queue_phase_for_scan(db, item.scan_job_id)
-                    _state["current_pentest_phase_id"] = str(
-                        _frontier_phase
-                        or item.phase_id
-                        or _state.get("current_pentest_phase_id")
-                        or ""
-                    )
-                    job.state_data = _state
-                    job.current_step = _format_work_queue_current_step(
-                        _state,
-                        _counts,
-                        phase_id=str(_frontier_phase or item.phase_id or ""),
-                    )
-                except Exception:
-                    pass
+            # The durable item heartbeat and ScanLog below are sufficient while
+            # the runner is active. Updating ScanJob.state_data on every poll
+            # rewrote a 500+ KiB JSON document and caused row-lock contention
+            # between concurrent pollers during scan #67.
             if _polls == 1 or _polls % 4 == 0:
                 _started_at = item.started_at or _now
                 _elapsed = int((_now - _started_at).total_seconds())
@@ -5061,7 +5057,10 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     message=(
                         f"work_item_progress id={item.id} phase={item.phase_id} "
                         f"target={item.target} tool={item.tool_name} "
-                        f"kali_status={raw_status or 'running'} elapsed={_elapsed}s poll={_polls}"
+                        f"kali_status={raw_status or 'running'} elapsed={_elapsed}s poll={_polls} "
+                        f"runner_heartbeat={result_state.get('runner_heartbeat_at') or 'pending'} "
+                        f"heartbeat_seq={result_state.get('runner_heartbeat_sequence') or 0} "
+                        f"output_bytes={result_state.get('runner_output_bytes') or 0}"
                     ),
                 ))
             db.commit()
@@ -6430,6 +6429,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             counts = work_queue_counts(db, item.scan_job_id)
             state = dict(job.state_data or {})
             state["work_queue_counts"] = counts
+            _persist_progress_state = False
 
             # ── subdomain_coverage: atualiza a cada 10 items terminados ──────────
             # Para scans work_queue, state_data.subdomain_coverage não é populado
@@ -6476,10 +6476,9 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                         "total_work_targets": _n_total_wq,
                     }
                     state["_cov_last_total"] = _cov_current
+                    _persist_progress_state = True
                 except Exception:
                     pass
-
-            job.state_data = state
 
             # ── mission_progress: baseado em work items reais, não phase_ledger ──
             # Terminal = completed | done | failed | timeout | skipped
@@ -6506,18 +6505,22 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     job.mission_progress = _pct
                 if job.status == "running":
                     _frontier_phase = _first_active_work_queue_phase_for_scan(db, item.scan_job_id)
-                    state["current_pentest_phase_id"] = str(
+                    _next_phase_id = str(
                         _frontier_phase
                         or item.phase_id
                         or state.get("current_pentest_phase_id")
                         or ""
                     )
+                    if _next_phase_id != str(state.get("current_pentest_phase_id") or ""):
+                        _persist_progress_state = True
+                    state["current_pentest_phase_id"] = _next_phase_id
                     job.current_step = _format_work_queue_current_step(
                         state,
                         counts,
                         phase_id=str(_frontier_phase or item.phase_id or ""),
                     )
-                    job.state_data = state
+                    if _persist_progress_state:
+                        job.state_data = state
 
             db.add(ScanLog(
                 scan_job_id=item.scan_job_id,
@@ -6540,6 +6543,17 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         db.rollback()
         item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
         if item:
+            # The runner result is committed before optional parsers, feedback,
+            # gates and progress bookkeeping. A post-processing failure must
+            # not overwrite the authoritative terminal result or manufacture a
+            # retry/failed state (observed under ScanJob row contention in #67).
+            if str(item.status or "").lower() in {"completed", "done", "failed", "timeout", "skipped"}:
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
+                return {
+                    "id": item.id,
+                    "status": item.status,
+                    "postprocess_error": str(exc)[:2000],
+                }
             item.last_error = str(exc)[:2000]
             # If max attempts exceeded, mark failed and release semaphore
             _over_limit = int(item.attempts or 0) >= int(item.max_attempts or 2)

@@ -8,6 +8,7 @@ from app.workers.worker_groups import (
     SCAN_SCHEDULED_QUEUE,
     SCAN_UNIT_QUEUE,
     SCAN_PARALLEL_QUEUE,
+    SCAN_POLL_QUEUE,
     PLATFORM_CONTROL_QUEUE,
     all_queues,
 )
@@ -22,7 +23,9 @@ _HEARTBEAT_EXPIRES = max(5, int(os.getenv("CELERY_HEARTBEAT_EXPIRES", "25")))
 _MINUTELY_CONTROL_EXPIRES = max(10, int(os.getenv("CELERY_MINUTELY_CONTROL_EXPIRES", "55")))
 _LONG_CONTROL_EXPIRES = max(60, int(os.getenv("CELERY_LONG_CONTROL_EXPIRES", "900")))
 try:
-    _HEARTBEAT_QUEUES = sorted(set(all_queues("unit")) | {SCAN_UNIT_QUEUE, SCAN_PARALLEL_QUEUE})
+    _HEARTBEAT_QUEUES = sorted(
+        set(all_queues("unit")) | {SCAN_UNIT_QUEUE, SCAN_PARALLEL_QUEUE, SCAN_POLL_QUEUE}
+    )
 except Exception:
     _HEARTBEAT_QUEUES = [SCAN_UNIT_QUEUE]
 _HEARTBEAT_SCHEDULE = {

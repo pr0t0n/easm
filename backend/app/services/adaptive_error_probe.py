@@ -37,6 +37,7 @@ import json
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -190,6 +191,9 @@ def probe_auth_bypass(
             "bypass_detected": False,
             "headers_used": None,
             "new_status": None,
+            "negative_control_status": None,
+            "confirmation_status": None,
+            "stable_transition": False,
             "evidence_excerpt": None,
         }
         if baseline.status_code not in _AUTH_STATUS:
@@ -198,6 +202,21 @@ def probe_auth_bypass(
         body = baseline.text or ""
         result["hints"] = _header_hints_from_body(body)
         if not result["hints"]:
+            return result
+
+        # A random, unrelated header is the negative control for an unstable
+        # auth boundary or a backend that changes status for every request.
+        try:
+            control = client.request(
+                method,
+                url,
+                json=baseline_json if baseline_json is not None else {},
+                headers={"X-EASM-Negative-Control": "1"},
+            )
+        except Exception:
+            return result
+        result["negative_control_status"] = control.status_code
+        if control.status_code not in _AUTH_STATUS:
             return result
 
         target_host = httpx.URL(url).host or ""
@@ -212,7 +231,20 @@ def probe_auth_bypass(
             except Exception:
                 continue
             if retry.status_code not in _AUTH_STATUS and retry.status_code != baseline.status_code:
+                try:
+                    confirmation = client.request(
+                        method,
+                        url,
+                        json=baseline_json if baseline_json is not None else {},
+                        headers=candidate_headers,
+                    )
+                except Exception:
+                    continue
+                result["confirmation_status"] = confirmation.status_code
+                if confirmation.status_code != retry.status_code:
+                    continue
                 result["bypass_detected"] = True
+                result["stable_transition"] = True
                 result["headers_used"] = candidate_headers
                 result["new_status"] = retry.status_code
                 result["evidence_excerpt"] = (retry.text or "")[:1000]
@@ -301,6 +333,17 @@ def classify_ssrf_candidate_fields(field_hints: list[str]) -> list[str]:
     return candidates
 
 
+def _matching_oob_callbacks(collector_url: str, callbacks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return only callbacks correlated to this exact unique collector slug."""
+    collector_token = (urlparse(str(collector_url or "")).hostname or "").split(".", 1)[0]
+    if not collector_token:
+        return []
+    return [
+        callback for callback in callbacks
+        if collector_token in str(callback.get("unique_id") or "")
+    ]
+
+
 def _candidate_endpoints(db, job, target: str) -> list[str]:
     """Alvos candidatos: a base do target + paths já descobertos por
     gobuster/dirsearch/feroxbuster/ffuf/dirsearch-api(-post) nesta mesma scan
@@ -308,8 +351,21 @@ def _candidate_endpoints(db, job, target: str) -> list[str]:
     memória paralelo).
     """
     from app.models.models import Finding
+    from app.services.scan_scope import (
+        authorized_scope_from_target_query,
+        host_from_scope_reference,
+        is_host_in_scope,
+    )
 
-    base = target if target.startswith(("http://", "https://")) else f"https://{target}"
+    raw_target = str(target or "").strip()
+    if not raw_target or raw_target.startswith("__batch__"):
+        return []
+
+    base = raw_target if raw_target.startswith(("http://", "https://")) else f"https://{raw_target}"
+    base_host = host_from_scope_reference(base)
+    authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
+    if not base_host or not authorized_scope or not is_host_in_scope(base_host, authorized_scope):
+        return []
     candidates = [base]
     rows = (
         db.query(Finding)
@@ -327,8 +383,17 @@ def _candidate_endpoints(db, job, target: str) -> list[str]:
     seen = {base}
     for row in rows:
         for p in (dict(row.details or {}).get("discovered_paths") or [])[:20]:
+            status = str(p.get("status") or "") if isinstance(p, dict) else ""
+            # 404/405, throttling and server errors are not sufficient route
+            # evidence. In particular, a global 405 handler generated dozens
+            # of invented REST endpoints in scan #66.
+            if status.isdigit() and not (200 <= int(status) <= 403):
+                continue
             path = str(p.get("path") if isinstance(p, dict) else p)
             url = path if path.startswith(("http://", "https://")) else f"{base.rstrip('/')}/{path.lstrip('/')}"
+            candidate_host = host_from_scope_reference(url)
+            if not candidate_host or not is_host_in_scope(candidate_host, authorized_scope):
+                continue
             if url not in seen:
                 seen.add(url)
                 candidates.append(url)
@@ -345,6 +410,7 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
     endpoints = _candidate_endpoints(db, job, target)
     raw_findings: list[dict[str, Any]] = []
     probed = 0
+    inventory_updates = 0
 
     for url in endpoints:
         bypass = probe_auth_bypass(url)
@@ -356,14 +422,14 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
 
         raw_findings.append({
             "title": f"Authentication bypass via non-standard header scheme: {url}",
-            "severity": "critical",
-            "risk_score": 9,
+            "severity": "high",
+            "risk_score": 7,
             "details": {
                 "tool": "adaptive_probe",
                 "asset": target,
                 "matched_at": url,
                 "url": url,
-                "verification_status": "confirmed",
+                "verification_status": "candidate",
                 "evidence": (
                     f"Baseline {bypass['baseline_status']} -> {bypass['new_status']} "
                     f"with headers {bypass['headers_used']}. Response: {bypass['evidence_excerpt']}"
@@ -372,6 +438,9 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
                     "headers_used": bypass["headers_used"],
                     "baseline_status": bypass["baseline_status"],
                     "new_status": bypass["new_status"],
+                    "negative_control_status": bypass.get("negative_control_status"),
+                    "confirmation_status": bypass.get("confirmation_status"),
+                    "stable_transition": bypass.get("stable_transition"),
                     "hints_read_from_error_body": bypass["hints"],
                 },
                 "discovery_method": (
@@ -386,7 +455,21 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
         field_hints = probe_json_field_hints(url, headers=bypass["headers_used"])
         if not field_hints.get("checked"):
             continue
-        ssrf_fields = classify_ssrf_candidate_fields(field_hints.get("field_hints") or [])
+        observed_fields = [str(name) for name in field_hints.get("field_hints") or [] if str(name)]
+        if observed_fields:
+            try:
+                inventory_updates += _persist_adaptive_inventory(
+                    db,
+                    job,
+                    url=url,
+                    bypass=bypass,
+                    field_names=observed_fields,
+                )
+            except Exception:
+                # Finding persistence remains useful, but the quality gate will
+                # expose an inventory gap rather than inventing parameters.
+                pass
+        ssrf_fields = classify_ssrf_candidate_fields(observed_fields)
         if not ssrf_fields:
             continue
 
@@ -406,7 +489,8 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
         except Exception:
             confirm, callbacks, collector = {"sent": False}, [], ""
 
-        confirmed_via_oob = bool(callbacks)
+        matching_callbacks = _matching_oob_callbacks(collector, callbacks)
+        confirmed_via_oob = bool(matching_callbacks)
         raw_findings.append({
             "title": f"Server-Side Request Forgery via '{ssrf_fields[0]}' field: {url}",
             "severity": "critical",
@@ -420,7 +504,7 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
                 "evidence": (
                     f"POST {ssrf_fields[0]}=<oob-collector> -> {confirm.get('status')} "
                     f"{confirm.get('response_excerpt')}"
-                    + (f" | OOB callback received: {callbacks[0]}" if confirmed_via_oob else "")
+                    + (f" | OOB callback received: {matching_callbacks[0]}" if confirmed_via_oob else "")
                 ),
                 "reproduction": {
                     "field": ssrf_fields[0],
@@ -444,7 +528,68 @@ def run_adaptive_probe_for_scan(db, job, target: str) -> dict:
             db, job, raw_findings,
             default_tool="adaptive_probe", default_target=target, source_item=None,
         )
-    return {"endpoints_probed": probed, "findings_created": created}
+    if inventory_updates:
+        try:
+            from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
+
+            analyze_endpoints_for_scan(db, job)
+        except Exception:
+            pass
+    return {
+        "endpoints_probed": probed,
+        "findings_created": created,
+        "inventory_updates": inventory_updates,
+    }
+
+
+def _persist_adaptive_inventory(
+    db,
+    job,
+    *,
+    url: str,
+    bypass: dict[str, Any],
+    field_names: list[str],
+) -> int:
+    """Materialize target-observed API structure for downstream BL planning."""
+    from app.services.offensive_inventory_service import OffensiveInventoryService
+
+    inv = OffensiveInventoryService(db, job)
+    endpoint = inv.upsert_endpoint(
+        url,
+        method="POST",
+        source_tool="adaptive_probe",
+        status_code=int(bypass.get("new_status") or 0) or None,
+        auth_required=True,
+        discovered_from="target_validation_error",
+        confidence=85,
+        tags=["api", "authentication", "structured-input"],
+        metadata={
+            "adaptive_probe": {
+                "baseline_status": bypass.get("baseline_status"),
+                "negative_control_status": bypass.get("negative_control_status"),
+                "transition_status": bypass.get("new_status"),
+                "confirmation_status": bypass.get("confirmation_status"),
+                "stable_transition": bool(bypass.get("stable_transition")),
+                "header_names": sorted(dict(bypass.get("headers_used") or {}).keys()),
+            }
+        },
+    )
+    for name in dict.fromkeys(field_names):
+        inv.upsert_parameter(
+            endpoint,
+            name,
+            location="body",
+            type_hint="string",
+            source_tool="adaptive_probe",
+            metadata={"observed_from": "target_validation_error", "method": "POST"},
+        )
+    # New parameters invalidate the previous endpoint analysis contract.
+    metadata = dict(endpoint.endpoint_metadata or {})
+    metadata.pop("analysis", None)
+    endpoint.endpoint_metadata = metadata
+    db.add(endpoint)
+    db.flush()
+    return 1
 
 
 def confirm_ssrf_via_oob(
