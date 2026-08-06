@@ -126,6 +126,44 @@ class AuthSessionManager:
             )
         return None
 
+    def upsert_captured_material(
+        self, identity_key: str, role: str, username_ref: str, material: AuthMaterial
+    ) -> tuple[ScanIdentity, ScanAuthSession]:
+        """Persist a session captured interactively (credential_capture_service),
+        the same way ensure_sessions() persists a static/form_login one — but
+        without going through self.contract, since a captured session has no
+        auth_config entry at all (it bypasses the static/form_login paths
+        entirely)."""
+        identity = (
+            self.db.query(ScanIdentity)
+            .filter(
+                ScanIdentity.scan_job_id == self.scan.id,
+                ScanIdentity.identity_key == identity_key,
+            )
+            .first()
+        )
+        if identity is None:
+            identity = ScanIdentity(scan_job_id=self.scan.id, identity_key=identity_key)
+        identity.role = role
+        identity.username_ref = username_ref or None
+        identity.auth_type = material.auth_type
+        identity.status = material.status
+        identity.session_valid = material.valid
+        identity.last_error = material.error or None
+        identity.session_metadata = {
+            "role": role,
+            "auth_type": material.auth_type,
+            "validated_at": datetime.now().isoformat(),
+        }
+        identity.updated_at = datetime.now()
+        self.db.add(identity)
+        self.db.flush()
+
+        session = self._upsert_session(identity, material)
+        self.db.add(session)
+        self.db.flush()
+        return identity, session
+
     def _upsert_identity(self, identity_contract) -> ScanIdentity:
         identity = (
             self.db.query(ScanIdentity)

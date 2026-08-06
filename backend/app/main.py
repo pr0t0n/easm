@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.api.routes_auth import router as auth_router
+from app.api.routes_identities import router as identities_router
 from app.api.routes_management import router as management_router
 from app.api.routes_scans import router as scans_router
 from app.api.routes_ws import router as ws_router
@@ -178,3 +179,4 @@ app.include_router(management_router)
 app.include_router(ws_router)
 app.include_router(agent_flow_router)
 app.include_router(pentest_router)
+app.include_router(identities_router)

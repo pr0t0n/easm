@@ -183,6 +183,13 @@ def _load_skill_file(path: Path) -> dict[str, Any] | None:
         "exit_criteria": exit_criteria,
         "retry_policy": retry_policy,
         "attack_chain_opportunities": attack_chain_opportunities,
+        # `safety_rules:` is a nested YAML mapping in every skill's
+        # frontmatter, but this parser is flat (see _parse_yaml_frontmatter) —
+        # its sub-keys land on `meta` at the top level, not nested under
+        # "safety_rules" (which stays an empty list). Surface the one flag
+        # consumers actually gate mutating actions on directly, rather than
+        # silently dropping it like the rest of `safety_rules` today.
+        "destructive_payloads_allowed": bool(meta.get("destructive_payloads_allowed", False)),
         "source_file": str(path),
         # Legacy compat fields
         "id": skill_id,

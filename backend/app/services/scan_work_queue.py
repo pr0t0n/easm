@@ -1902,6 +1902,68 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
     return requeued
 
 
+# Crawler/spider AND content-discovery tools whose kali-runner profiles inject
+# auth headers (see kali-runner/runner.py:_inject_auth_headers H_SYNTAX /
+# HAKRAWLER_SYNTAX) — the tools where re-running with a newly captured
+# identity can surface endpoints/content that were unreachable pre-auth.
+# Deliberately excludes gau/waybackurls: those query external archives
+# (web.archive.org, CommonCrawl), not the live target, so a captured session
+# has nothing to add for them.
+_AUTHENTICATED_CRAWL_TOOLS = {
+    "katana", "gospider", "hakrawler",
+    "dirsearch", "dirsearch-api", "dirsearch-api-post", "ffuf", "feroxbuster",
+}
+
+
+def requeue_authenticated_crawl_items(db: Session, job: ScanJob, identity_key: str) -> int:
+    """Re-run crawler/spider work items with a newly confirmed auth session.
+
+    These tools already completed once, unauthenticated, before any identity
+    existed for this scan — unlike requeue_evidence_ready_work_items, which
+    only picks up items skipped for missing evidence. The prior unauthenticated
+    result is archived in item_metadata rather than discarded, so both passes
+    stay comparable.
+    """
+    now = datetime.now()
+    candidates = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.tool_name.in_(_AUTHENTICATED_CRAWL_TOOLS),
+            ScanWorkItem.status.in_(["completed", "failed"]),
+        )
+        .all()
+    )
+    requeued = 0
+    for item in candidates:
+        meta = dict(item.item_metadata or {})
+        meta["previous_unauthenticated_result"] = item.result
+        meta["requeued_for_auth_session"] = identity_key
+        meta["requeued_for_auth_session_at"] = now.isoformat()
+        item.status = "queued"
+        item.lease_until = None
+        item.finished_at = None
+        item.last_error = None
+        item.attempts = 0
+        item.result = {
+            "status": "requeued",
+            "reason": "authenticated_session_captured",
+            "identity_key": identity_key,
+            "requeued_at": now.isoformat(),
+        }
+        item.item_metadata = meta
+        item.updated_at = now
+        requeued += 1
+    if requeued:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="INFO",
+            message=f"authenticated_crawl_requeue scan={job.id} identity={identity_key} requeued={requeued}",
+        ))
+    return requeued
+
+
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
     preflight = ((state.get("preflight") or {}).get("targets") or {}).get(target) or {}
     has_http = bool(preflight.get("http"))

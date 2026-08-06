@@ -1008,33 +1008,6 @@ def _schedule_pentest_inventory_refresh(
     )
 
 
-def _schedule_business_logic_analysis(
-    scan_id: int,
-    item_id: int,
-    target: str,
-    *,
-    mode: str = "unit",
-    countdown: int = 1,
-) -> bool:
-    import hashlib
-    from app.workers.worker_groups import phase_queue
-
-    target_key = hashlib.sha256(str(target).encode()).hexdigest()[:20]
-    key = f"business_logic_pending:{int(scan_id)}:{target_key}"
-    queue = phase_queue("P13", mode="scheduled" if mode == "scheduled" else "unit")
-    return _singleflight_publish(
-        key,
-        countdown=countdown,
-        ttl_seconds=3600,
-        publish=lambda token: run_business_logic_analysis_postprocess.apply_async(
-            args=[int(scan_id), int(item_id), str(target)],
-            kwargs={"_postprocess_token": token},
-            countdown=countdown,
-            queue=queue,
-        ),
-    )
-
-
 # ── FAIR pillar mapping (duplicated from risk_service to avoid circular import) ───
 _TOOL_FAIR_PILLAR: dict[str, str] = {
     "naabu": "perimeter_resilience", "nmap": "perimeter_resilience",
@@ -3707,9 +3680,9 @@ def run_scan_postprocessor(
                 active_count = int(state.get("zap_active_count") or 0)
                 auth_headers: dict[str, str] = {}
                 try:
-                    from app.services.scan_intelligence import auth_headers_from_state
+                    from app.services.zap_scanner import resolve_zap_auth_headers
 
-                    auth_headers = auth_headers_from_state(state) or {}
+                    auth_headers = resolve_zap_auth_headers(db, job, state) or {}
                 except Exception:
                     pass
                 # ZAP calls are slow network operations. Accessing job.state_data
@@ -4689,6 +4662,21 @@ def execute_scan_work_item(item_id: int):
         except Exception:
             _authorized_scope = []
 
+        # Resolve a captured auth session for this scan (if any) so tools that
+        # go through the generic MCP path — katana/gospider/hakrawler and any
+        # other kali-runner profile, not just the {bl-test, code-analyzer,
+        # semgrep} carve-out below — also crawl authenticated once an operator
+        # has captured a valid session. mcp_server.py already forwards
+        # arguments.auth_headers to the kali runner (see _submit_kali_profile);
+        # this was the only missing link for these tools.
+        try:
+            from app.services.worker_dispatcher import _resolve_auth_context
+            from app.services.kali_executor import _auth_headers_from_skill_context
+            _auth_context = _resolve_auth_context(item.scan_job_id, {"identity_key": _item_meta.get("identity_key")})
+            _auth_headers = _auth_headers_from_skill_context({"auth_context": _auth_context}) if _auth_context else {}
+        except Exception:
+            _auth_headers = {}
+
         execution = {
             "mcp_request_id": f"wi-{item.id}",
             "phase_id": item.phase_id,
@@ -4704,13 +4692,15 @@ def execute_scan_work_item(item_id: int):
                 "authorized_scope": _authorized_scope,
                 **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
                 **({k: v for k, v in _job_env.items()} if _job_env else {}),
+                **({"auth_headers": _auth_headers} if _auth_headers else {}),
             },
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }
         if _is_batch:
             execution["targets"] = _batch_targets
 
-        if str(item.tool_name or "").strip().lower() in {"bl-test", "code-analyzer", "semgrep"}:
+        _norm_item_tool = str(item.tool_name or "").strip().lower()
+        if _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"} or _norm_item_tool.startswith("skill-probe"):
             from app.services.worker_dispatcher import execute_tool_with_workers
 
             result = execute_tool_with_workers(
@@ -5682,28 +5672,16 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 import logging as _llmlog2
                 _llmlog2.getLogger(__name__).debug("llm_operator failed: %s", _llme)
 
-        # ── BLA: Business Logic Analyzer — per-target after active phases ────────
-        # Runs after P12/P13 (active injection) OR after P09 (nuclei) when
-        # no injection tools are queued. Avoids redundant runs via state_data flag.
-        if item.status == "completed" and job and item.phase_id in ("P10", "P12", "P13"):
-            try:
-                _state_bla = dict(job.state_data or {})
-                _bla_done_key = f"bla_done_{item.target}"
-                if not _state_bla.get(_bla_done_key):
-                    _schedule_business_logic_analysis(
-                        job.id,
-                        item.id,
-                        item.target,
-                        mode=(
-                            "scheduled"
-                            if str(getattr(job, "mode", "") or "").lower() == "scheduled"
-                            else "unit"
-                        ),
-                        countdown=1,
-                    )
-            except Exception as _bla_err:
-                import logging as _blalog2
-                _blalog2.getLogger(__name__).debug("business_logic_analyzer scheduling failed: %s", _bla_err)
+        # BLA (business_logic_analyzer.py) is no longer scheduled here as a
+        # second, parallel automatic trigger — it ran unauthenticated (its
+        # tests never received a captured session's headers/cookies) and
+        # wrote Finding rows directly, bypassing the evidence/scope-guard
+        # gate. Its test battery now runs INSIDE bl-test's run_as_tool
+        # (business_logic_test.py), which already gets real auth_headers via
+        # worker_dispatcher._resolve_auth_context and persists through the
+        # gated pipeline — bl-test's own P16/P19 dispatch is the single
+        # automatic trigger now. run_business_logic_analysis_postprocess and
+        # POST /scans/{id}/business-logic remain available for on-demand use.
 
         # ── JSP: JS Prototype Pollution Analyzer — after crawl/nuclei ─────────
         # Triggered after katana (P08) or nuclei (P09) completes. Node.js apps
@@ -5732,19 +5710,37 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 import logging as _jsplog2
                 _jsplog2.getLogger(__name__).debug("js_pollution_analyzer failed: %s", _jsp_err)
 
-        # ── ZAP: OWASP ZAP baseline scan — after HTTP fingerprint confirms target ──
+        # ── ZAP: OWASP ZAP baseline scan — after endpoint discovery populates
+        # OffensiveEndpoint ──
         # ZAP runs as a separate container (zap:8090), not via Kali CLI, so it's
         # triggered as a post-processing hook (like js_pollution/multi_identity).
-        # After P06 (httpx/whatweb) confirms a target speaks HTTP, run ZAP baseline
-        # (passive spider + alerts). Findings go through the same gated path.
+        # Previously gated on P06/P07 (HTTP fingerprint/WAF detection) completing
+        # — but P06/P07 are gate SIBLINGS of P03 in PHASE_GATE (both unblock the
+        # instant P02 finishes), and the dispatcher drains gate phases (P02/P06/P09)
+        # ahead of P03, so ZAP structurally fired before any crawler had populated
+        # OffensiveEndpoint — its spider ran blind, endpoint-discovery-wise, on
+        # every scan regardless of auth. Gated on P03/P08 (the real endpoint-
+        # discovery phases: katana/gospider/hakrawler/feroxbuster/dirsearch, and JS
+        # endpoint analysis) instead, so ZAP's own spider has real endpoint context
+        # by the time it runs. Findings go through the same gated path.
         # One ZAP run per target per scan (guarded by state key).
-        if item.status == "completed" and job and item.phase_id in ("P06", "P07") and item.target and not _is_work_item_batch_target(item.target):
+        if item.status == "completed" and job and item.phase_id in ("P03", "P08") and item.target and not _is_work_item_batch_target(item.target):
             try:
                 _schedule_scan_postprocessor(
                     job.id, item.id, "zap", item.target,
                     queue="worker.unit.exploitation",
                     db=db,
                 )
+            except Exception:
+                pass
+            # Same trigger point (endpoints now exist) seeds skill-probe items
+            # for the markdown-only skills — see skill_execution_engine.py.
+            # No-ops (returns 0) without a valid captured session.
+            try:
+                from app.services.skill_execution_engine import seed_skill_probe_items
+
+                for _sp_phase in ("P13", "P16", "P19"):
+                    seed_skill_probe_items(db, job, _sp_phase, item.target)
             except Exception:
                 pass
 

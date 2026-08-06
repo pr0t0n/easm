@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
+from app.models.encrypted_json import EncryptedJSON
 
 
 user_access_groups = Table(
@@ -151,8 +152,10 @@ class ScanAuthSession(Base):
     session_key: Mapped[str] = mapped_column(String(120), default="default", index=True)
     auth_type: Mapped[str] = mapped_column(String(60), default="none", index=True)
     status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
-    headers: Mapped[dict] = mapped_column(JSONB, default=dict)
-    cookies: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Encrypted at rest (Fernet) — these carry real Authorization headers and
+    # session cookies once credential capture writes to them.
+    headers: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
+    cookies: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
     validation_result: Mapped[dict] = mapped_column(JSONB, default=dict)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

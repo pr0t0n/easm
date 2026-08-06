@@ -7,6 +7,7 @@ from app.api.deps import apply_company_scope
 from app.core.security import decode_access_token
 from app.db.session import SessionLocal
 from app.models.models import AgentTraceEvent, ScanJob, ScanLog, SkillScore, User
+from app.services import credential_capture_service
 
 
 router = APIRouter(tags=["ws"])
@@ -77,6 +78,78 @@ def _auth_scan(db: Session, scan_id: int, token: str):
     q = db.query(ScanJob).filter(ScanJob.id == scan_id)
     q = apply_company_scope(q, user, ScanJob)
     return user, q.first()
+
+
+@router.websocket("/ws/scans/{scan_id}/identities/capture/{capture_session_id}")
+async def ws_credential_capture(websocket: WebSocket, scan_id: int, capture_session_id: str):
+    """Bidirectional: streams CDP screencast frames of a live, operator-driven
+    Playwright session (started via the REST /identities/capture/start route)
+    to the client, and forwards the client's mouse/keyboard events back into
+    that session via CDP. See credential_capture_service.py for the capture
+    lifecycle and the in-scope-only header/cookie filtering."""
+    token = websocket.query_params.get("token", "")
+    db: Session = SessionLocal()
+    try:
+        user, job = _auth_scan(db, scan_id, token)
+        if not user or not job:
+            await websocket.close(code=4401)
+            return
+
+        capture = credential_capture_service.get_capture(capture_session_id, scan_id)
+        if capture is None:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+        send_lock = asyncio.Lock()
+
+        async def _on_frame(params: dict) -> None:
+            try:
+                async with send_lock:
+                    await websocket.send_json(
+                        {"type": "frame", "data": params.get("data"), "sessionId": params.get("sessionId")}
+                    )
+                await capture.cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")})
+            except Exception:
+                pass  # a dropped/failed frame shouldn't kill the CDP session
+
+        capture.cdp.on("Page.screencastFrame", _on_frame)
+        # Started here, not in start_capture — CDP sends an immediate frame of
+        # the CURRENT page state the moment startScreencast is called, which is
+        # exactly what an operator connecting to an already-loaded, already-
+        # settled page needs. Starting it earlier (before any listener exists)
+        # means that immediate frame — and any repaint before this connects —
+        # fires into nothing, and a static page never repaints again on its
+        # own, leaving the canvas black with no frame ever arriving.
+        try:
+            await capture.cdp.send(
+                "Page.startScreencast",
+                {"format": "jpeg", "quality": 70, "maxWidth": 1280, "maxHeight": 800, "everyNthFrame": 1},
+            )
+        except Exception:
+            pass
+
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                await credential_capture_service.apply_input_event(capture, msg)
+        except WebSocketDisconnect:
+            # Operator may reconnect mid-flow (e.g. flaky wifi during MFA) —
+            # the capture (browser/context) stays alive; only this socket's
+            # frame listener needs to go, or screencastFrame keeps firing into
+            # a dead callback on every reconnect.
+            pass
+        finally:
+            try:
+                await capture.cdp.send("Page.stopScreencast")
+            except Exception:
+                pass
+            try:
+                capture.cdp.remove_listener("Page.screencastFrame", _on_frame)
+            except Exception:
+                pass
+    finally:
+        db.close()
 
 
 @router.websocket("/ws/scans/{scan_id}/trace")

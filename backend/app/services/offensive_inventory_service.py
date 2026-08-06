@@ -349,7 +349,6 @@ class OffensiveInventoryService:
         endpoint_count: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> OffensiveApiSpec:
-        target_ref = str(target_ref or "")[:1000]
         row = (
             self.db.query(OffensiveApiSpec)
             .filter(OffensiveApiSpec.scan_job_id == self.scan.id, OffensiveApiSpec.url == url, OffensiveApiSpec.spec_type == spec_type)

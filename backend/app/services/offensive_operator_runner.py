@@ -3265,8 +3265,12 @@ def run_offensive_operator_scan(
             # and its active scan fuzzes POST/JSON bodies via the proxy, which
             # sqlmap/dalfox never do here. Runs once per target, capped so it can't
             # blow up scan time on many-host targets.
+            # Gated on P03/P08 (real endpoint-discovery phases), not P06/P07 — those
+            # are gate SIBLINGS of P03 in PHASE_GATE, and the dispatcher drains gate
+            # phases (P02/P06/P09) ahead of P03, so ZAP previously ran with
+            # OffensiveEndpoint still empty regardless of auth.
             _zap_done_targets = list(state.get("_zap_done_targets") or [])
-            if phase_id in {"P06", "P07"} and _effective_target not in _zap_done_targets:
+            if phase_id in {"P03", "P08"} and _effective_target not in _zap_done_targets:
                 _zap_done_targets.append(_effective_target)
                 state["_zap_done_targets"] = _zap_done_targets
                 job.state_data = state
@@ -3277,17 +3281,23 @@ def run_offensive_operator_scan(
                             run_zap_ajax_spider as _zap_ajax,
                             run_zap_baseline as _zap_baseline,
                             run_zap_active_scan as _zap_active,
+                            resolve_zap_auth_headers as _resolve_zap_auth,
                         )
+                        from app.services.offensive_inventory_service import OffensiveInventoryService
                         if _zap_avail():
                             _zap_url = (
                                 _effective_target if str(_effective_target).startswith("http")
                                 else f"https://{_effective_target}"
                             )
-                            _zap_auth = auth_headers_from_state(state)
+                            # Prefer a real captured session over the legacy static
+                            # auth_config — falls back to auth_headers_from_state
+                            # internally when no ScanAuthSession exists.
+                            _zap_auth = _resolve_zap_auth(db, job, state)
                             _zap_raw: list[dict[str, Any]] = []
 
-                            _ajax_result = _zap_ajax(_zap_url)
-                            _new_urls = [u for u in (_ajax_result.get("discovered_urls") or []) if "?" in u]
+                            _ajax_result = _zap_ajax(_zap_url, auth_headers=_zap_auth)
+                            _all_discovered = list(_ajax_result.get("discovered_urls") or [])
+                            _new_urls = [u for u in _all_discovered if "?" in u]
                             if _new_urls:
                                 _existing_urls = list(state.get("discovered_parameterized_urls") or [])
                                 _merged = list(dict.fromkeys(_existing_urls + _new_urls))
@@ -3295,6 +3305,23 @@ def run_offensive_operator_scan(
                                 job.state_data = state
                                 db.add(ScanLog(scan_job_id=job.id, source="zap", level="INFO",
                                                message=f"zap_ajax_spider target={_zap_url} new_parameterized_urls={len(_new_urls)}"))
+                            # Feed ALL discovered URLs (not just parameterized ones)
+                            # into the structured endpoint inventory — the AJAX
+                            # spider renders the SPA for real and often finds routes
+                            # katana/gospider miss entirely; previously this was
+                            # thrown away after the parameterized-only filter above.
+                            if _all_discovered:
+                                _zap_inv = OffensiveInventoryService(db, job)
+                                for _zurl in _all_discovered:
+                                    try:
+                                        _zap_inv.upsert_endpoint(
+                                            _zurl, source_tool="zap-ajax-spider",
+                                            discovered_from=_zap_url,
+                                            auth_context="authenticated" if _zap_auth else "anonymous",
+                                            confidence=75, tags=["zap", "ajax_spider"],
+                                        )
+                                    except Exception:
+                                        pass
                             _zap_raw.extend(_ajax_result.get("findings") or [])
                             db.commit()  # surface AJAX-discovered URLs to P10/P12 immediately, don't wait on active scan
 
@@ -3315,6 +3342,23 @@ def run_offensive_operator_scan(
                         db.add(ScanLog(scan_job_id=job.id, source="zap", level="WARNING",
                                        message=f"zap_integration_failed target={_effective_target} error={_zap_exc}"))
                     db.commit()
+                    # Same trigger point (endpoints now exist) seeds skill-probe
+                    # items for the markdown-only skills — see
+                    # skill_execution_engine.py. No-ops without a captured
+                    # session. Rebuilds the URL independently of _zap_url
+                    # (defined only inside `if _zap_avail():` above) so this
+                    # still runs even if ZAP itself is unavailable/failed.
+                    try:
+                        from app.services.skill_execution_engine import seed_skill_probe_items
+
+                        _sp_url = (
+                            _effective_target if str(_effective_target).startswith("http")
+                            else f"https://{_effective_target}"
+                        )
+                        for _sp_phase in ("P13", "P16", "P19"):
+                            seed_skill_probe_items(db, job, _sp_phase, _sp_url)
+                    except Exception:
+                        pass
             # 2c. browser-xss — REVERTED (2026-07-09). exploit_browser_xss.py hardcodes
             # one specific app's known walkthrough (route "/#/search?q=" + the exact
             # two payloads from the OWASP Juice Shop DOM XSS/Bonus Payload challenges).

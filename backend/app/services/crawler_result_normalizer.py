@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlparse
@@ -16,14 +17,103 @@ from app.services.scan_scope import (
     is_host_in_scope,
 )
 
+logger = logging.getLogger(__name__)
+
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+")
 _PATH_RE = re.compile(r"(?m)^\s*(/[^\s\"']{1,240})(?:\s|$)")
 _JS_RE = re.compile(r"\.(?:js|mjs|cjs)(?:\?|$)", re.I)
 _API_RE = re.compile(r"(?i)(/api/[^\"'\s<>)]{0,180}|/rest/[^\"'\s<>)]{0,180}|/graphql\b|/swagger(?:-ui)?/?|/openapi\.json|/api-docs)")
+# Narrower than _API_RE: only the paths that are themselves a machine-readable
+# spec document (not just "an API-shaped URL") — these are worth structurally
+# parsing via api_spec_ingestion_service, not merely recording as an endpoint.
+_SPEC_URL_RE = re.compile(r"(?i)(/swagger(?:-ui)?/?(?:\.json)?$|/openapi\.json$|/api-docs/?$|/v\d+/api-docs$)")
 _FORM_RE = re.compile(r"(?is)<form\b[^>]*?(?:action=[\"']([^\"']+)[\"'])?[^>]*>(.*?)</form>")
 _INPUT_RE = re.compile(r"(?is)<(?:input|textarea|select)\b[^>]*?name=[\"']([^\"']+)[\"']")
 _METHOD_RE = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|OPTIONS)\b")
+
+
+def _try_ingest_exposed_spec(db: Session, scan: ScanJob, spec_url: str) -> None:
+    """Auto-parse a discovered OpenAPI/Swagger spec into the offensive endpoint
+    inventory. This is the shared path for ZAP, browser capture, endpoint_discovery
+    and the offensive operator runner — unlike the katana/gospider/hakrawler-only
+    hook in js_endpoint_extractor.py, this one covers whichever tool actually
+    surfaces the spec URL first."""
+    try:
+        from app.services.api_spec_ingestion_service import ingest_api_spec
+
+        result = ingest_api_spec(db, scan, spec_url=spec_url, spec_type="openapi")
+        if result.get("ok"):
+            logger.info(
+                "crawler_result_normalizer: auto-ingested exposed spec %s (%d endpoints)",
+                spec_url, result.get("endpoints") or 0,
+            )
+        else:
+            logger.debug(
+                "crawler_result_normalizer: exposed spec %s did not parse as OpenAPI: %s",
+                spec_url, result.get("error"),
+            )
+    except Exception:
+        logger.debug("crawler_result_normalizer: failed to auto-ingest exposed spec %s", spec_url, exc_info=True)
+
+
+def _flag_related_out_of_scope_hosts(
+    db: Session,
+    scan: ScanJob,
+    in_scope_target: str,
+    blocked_hosts: list[str],
+    blocked_urls: list[str],
+) -> None:
+    """Surface hosts referenced by the target but outside its authorized scope
+    as a visible, persisted signal — today this only ever produced a ScanLog
+    WARNING line, invisible unless an operator had the live log drawer open at
+    the right moment. Never auto-expands scope; only flags it for the operator
+    to decide. Deduplicated per scan via state_data so the same host doesn't
+    re-fire a finding on every crawl result."""
+    state = dict(scan.state_data or {})
+    already_flagged = set(state.get("related_hosts_flagged") or [])
+    new_hosts = [h for h in blocked_hosts if h and h not in already_flagged]
+    if not new_hosts:
+        return
+
+    raw_findings = []
+    for host in new_hosts:
+        example_urls = [u for u in blocked_urls if host_from_scope_reference(u) == host][:5]
+        raw_findings.append({
+            "title": f"Host relacionado fora do escopo detectado: {host}",
+            "severity": "info",
+            "risk_score": 1,
+            "details": {
+                # Deliberately NOT one of asset/domain/host/hostname/target/url/
+                # matched_at/final_url/network.* — those are exactly the keys
+                # scan_scope.out_of_scope_hosts_for_finding scans, which would
+                # reject this very finding for referencing an out-of-scope host.
+                "related_host_out_of_scope": host,
+                "example_references": example_urls,
+                "discovery_note": (
+                    f"Referenciado a partir de {in_scope_target}, mas '{host}' nao esta "
+                    "no escopo autorizado deste scan. Nenhum teste ativo foi executado "
+                    "contra este host. Adicione-o ao escopo explicitamente se ele deve "
+                    "ser testado."
+                ),
+            },
+        })
+
+    try:
+        from app.services.findings_extractor import persist_finding_dicts
+
+        persist_finding_dicts(
+            db, scan, raw_findings,
+            default_tool="scope-guard",
+            default_target=in_scope_target,
+            source_item=None,
+        )
+    except Exception:
+        logger.debug("crawler_result_normalizer: failed to persist related-host-out-of-scope finding", exc_info=True)
+        return
+
+    state["related_hosts_flagged"] = sorted(already_flagged | set(new_hosts))[:200]
+    scan.state_data = state
 
 
 def normalize_crawler_result(
@@ -64,17 +154,22 @@ def normalize_crawler_result(
     forms = [form for form in forms if _allowed(str(form.get("action") or ""))]
     browser_urls = {req["url"] for req in browser_requests}
     scripts = [u for u in urls if _JS_RE.search(u)]
+
+    spec_urls = [u for u in (urls + api_candidates) if _SPEC_URL_RE.search(u)]
+    if spec_urls:
+        _try_ingest_exposed_spec(db, scan, spec_urls[0])
     if blocked_urls:
+        blocked_hosts = sorted({host_from_scope_reference(url) for url in blocked_urls if host_from_scope_reference(url)})
         db.add(ScanLog(
             scan_job_id=scan.id,
             source="scope-guard",
             level="WARNING",
             message=(
                 f"crawler_inventory_scope_blocked tool={tool_name} "
-                f"count={len(blocked_urls)} hosts="
-                f"{sorted({host_from_scope_reference(url) for url in blocked_urls if host_from_scope_reference(url)})}"
+                f"count={len(blocked_urls)} hosts={blocked_hosts}"
             )[:4000],
         ))
+        _flag_related_out_of_scope_hosts(db, scan, target, blocked_hosts, blocked_urls)
 
     endpoints = []
     for url in sorted(set(urls + api_candidates)):

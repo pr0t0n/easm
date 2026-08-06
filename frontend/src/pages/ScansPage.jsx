@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import client, { getWsBaseUrl } from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
+import CredentialCaptureModal from "../components/CredentialCaptureModal";
 import LogTerminal from "../components/LogTerminal";
 import { buildScannerAuthConfig } from "../lib/scannerAuth";
 
@@ -450,6 +451,11 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           <input type="checkbox" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
           Autenticação no scanner
         </label>
+        <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 4 }}>
+          Alvo com MFA/SSO (ex.: login com Microsoft)? Não dá pra preencher token/cookie aqui antes de existir a sessão —
+          deixe em branco, crie o scan, e use <strong>"Capturar sessão"</strong> no painel de detalhe dele (transmite o
+          login ao vivo dentro da própria plataforma, sem programa externo).
+        </div>
         {authEnabled && (
           <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "160px 1fr 1fr", gap: 10, alignItems: "end" }}>
             <select value={authConfig.type} onChange={(e) => setAuthConfig({ ...authConfig, type: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }}>
@@ -769,6 +775,18 @@ function DetailPanel({ scan, logs, onClose }) {
   const [breakdown, setBreakdown] = useState(null);
   const [quality, setQuality] = useState(null);
   const [progress, setProgress] = useState(scan?.mission_progress ?? 0);
+  const [identities, setIdentities] = useState([]);
+  const [showCapture, setShowCapture] = useState(false);
+
+  const loadIdentities = async () => {
+    if (!scan?.id) return;
+    try {
+      const { data } = await client.get(`/api/scans/${scan.id}/identities`, { _skipToast: true });
+      setIdentities(data?.items || []);
+    } catch { /* silencioso */ }
+  };
+
+  useEffect(() => { loadIdentities(); }, [scan?.id]);
 
   useEffect(() => {
     if (!scan?.id) return;
@@ -903,6 +921,32 @@ function DetailPanel({ scan, logs, onClose }) {
             </div>
           )}
 
+          {/* identidades autenticadas */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div className="sk-eyebrow">Identidades autenticadas</div>
+              <button className="btn-secondary" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => setShowCapture(true)}>
+                Capturar sessão
+              </button>
+            </div>
+            {identities.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: "var(--ink-muted)" }}>
+                Nenhuma identidade capturada — testes que exigem sessão (IDOR, BFLA, auth bypass) ficam bloqueados até isso existir.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {identities.map((id) => (
+                  <div key={id.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, padding: "6px 8px", border: "1px solid var(--line-soft)", borderRadius: 6 }}>
+                    <span className="sk-mono">{id.identity_key}{id.role ? ` · ${id.role}` : ""}</span>
+                    <span style={{ color: id.session_valid ? "var(--sev-low-solid)" : "var(--sev-critical-solid)", fontWeight: 700 }}>
+                      {id.session_valid ? "válida" : id.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* logs */}
           {logs.length > 0 && (
             <div style={{ marginTop: 16 }}>
@@ -914,6 +958,13 @@ function DetailPanel({ scan, logs, onClose }) {
           )}
         </div>
       </div>
+      {showCapture && (
+        <CredentialCaptureModal
+          scanId={scan.id}
+          onClose={() => setShowCapture(false)}
+          onCaptured={() => loadIdentities()}
+        />
+      )}
     </div>
   );
 }

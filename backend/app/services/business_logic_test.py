@@ -9,11 +9,14 @@ all legacy speculative network probes are hard-disabled.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import json
 import time
 import httpx
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=6.0, read=15.0, write=8.0, pool=6.0)
 # Kept only for backwards-compatible pure helpers and historical tests. Active
@@ -640,6 +643,7 @@ def run_as_tool(
     execution_plan: dict | None = None,
     auth_headers: dict | None = None,
     auth_cookies: dict | None = None,
+    run_business_logic_battery: bool = True,
 ) -> dict:
     """Execute only read-only baselines from an observed-endpoint contract.
 
@@ -668,6 +672,41 @@ def run_as_tool(
             "try_sqli_auth": False,
         },
     }
+    headers = {str(key): str(value) for key, value in dict(auth_headers or {}).items() if value}
+    cookies = {str(key): str(value) for key, value in dict(auth_cookies or {}).items() if value}
+    # Named-technique battery (CORS, rate-limit, mass-assignment, etc.) —
+    # separate from the observed-evidence-only baseline replay above, and run
+    # regardless of whether that replay had any actions. This is the single
+    # canonical business-logic path now: business_logic_analyzer.py used to
+    # also be triggered on its own as a Celery postprocess and wrote Finding
+    # rows directly, bypassing the evidence/scope-guard gate this tool's
+    # result goes through — that second trigger has been removed.
+    def _business_logic_findings() -> list[dict]:
+        if not run_business_logic_battery:
+            # skill-probe reuses this executor for its own LLM-planned
+            # actions only — running the generic CORS/rate-limit/etc battery
+            # here too would duplicate bl-test's own, unrelated invocation.
+            return []
+        try:
+            from app.services.business_logic_analyzer import analyze_business_logic
+
+            post_paths = [
+                str(row.get("endpoint") or "")
+                for row in actions
+                if str(row.get("method") or "").upper() in ("POST", "PUT")
+            ]
+            return analyze_business_logic(
+                domain=urlparse(base).hostname or base,
+                base_url=base,
+                existing_findings=[],
+                discovered_auth_paths=post_paths or None,
+                auth_headers=headers or None,
+                auth_cookies=cookies or None,
+            )
+        except Exception:
+            logger.debug("business_logic_test: analyze_business_logic battery failed", exc_info=True)
+            return []
+
     if not actions:
         return {
             **common,
@@ -676,14 +715,13 @@ def run_as_tool(
             "stdout": "business_logic: 0 ações; pré-condições/contratos pendentes",
             "stderr": "",
             "parsed": {"summary": {"observed": 0, "failed": 0, "blocked": len(blocked)}, "observations": [], "blocked": blocked},
+            "business_logic_findings": _business_logic_findings(),
         }
 
     base_parsed = urlparse(base)
     deadline = time.monotonic() + max(1, min(120, int(max_seconds or 0)))
     observations: list[dict] = []
     failures = 0
-    headers = {str(key): str(value) for key, value in dict(auth_headers or {}).items() if value}
-    cookies = {str(key): str(value) for key, value in dict(auth_cookies or {}).items() if value}
     try:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False, headers=headers, cookies=cookies) as client:
             for action in actions[:50]:
@@ -732,4 +770,5 @@ def run_as_tool(
             "mutation_authorized": bool(plan.get("mutation_authorized")),
             "mutation_executed": False,
         },
+        "business_logic_findings": _business_logic_findings(),
     }

@@ -119,6 +119,38 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
+    if norm_tool.startswith("skill-probe"):
+        # Bridges a hand-authored skill's markdown prose to bounded, LLM-planned
+        # HTTP execution for skills with no dedicated Python test function —
+        # see skill_execution_engine.py for the fail-closed planning/validation
+        # gate. This is a separate tool from "bl-test" on purpose: bl-test's
+        # execution plan is 100% deterministic/inventory-derived (no LLM in
+        # the loop); mixing an LLM-proposed plan into it would blur that trust
+        # boundary and its audit trail.
+        from app.services.skill_execution_engine import run_skill_probe
+        request_headers = dict(auth_context.get("headers") or {}) if isinstance(auth_context, dict) else {}
+        request_cookies = dict(auth_context.get("cookies") or {}) if isinstance(auth_context, dict) else {}
+        result = run_skill_probe(
+            scan_id=scan_id,
+            skill_id=skill_id or "",
+            target=target,
+            auth_headers=request_headers,
+            auth_cookies=request_cookies,
+        )
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("evidence_required", evidence_required or [])
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend Skill Probe (LLM-planned)")
+        result.setdefault("worker_group", "risk_assessment")
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
+        return result
+
     if norm_tool not in TOOL_TO_PROFILE:
         return {
             "tool": tool_name,

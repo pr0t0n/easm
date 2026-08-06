@@ -2086,6 +2086,26 @@ def extract_findings_from_work_item(
 
     findings: list[dict[str, Any]] = []
 
+    # business_logic_test.py::run_as_tool (tool "bl-test") attaches a separate
+    # named-technique battery (CORS, rate-limit, mass-assignment, etc. — see
+    # business_logic_analyzer.py::analyze_business_logic) under this key,
+    # independent of whichever branch below handles the tool's primary
+    # baseline-observation output.
+    bl_findings = result.get("business_logic_findings")
+    if isinstance(bl_findings, list):
+        for bf in bl_findings:
+            if not isinstance(bf, dict) or not bf.get("title"):
+                continue
+            details_payload = dict(bf.get("details") or {})
+            details_payload.setdefault("evidence", str(bf.get("evidence") or "")[:2000])
+            details_payload.setdefault("description", str(bf.get("description") or "")[:2000])
+            findings.append({
+                "title": str(bf["title"])[:500],
+                "severity": str(bf.get("severity") or "info"),
+                "risk_score": int(details_payload.get("cvss_estimate") or 5),
+                "details": details_payload,
+            })
+
     try:
         # ── Structured-output tools (prefer parsed_result) ──────────────────
         if tool == "httpx":
@@ -3117,6 +3137,47 @@ def _bridge_finding_to_vulnerability(
     db.add(vuln)
 
 
+_SPEC_FINDING_URL_RE = re.compile(
+    r"(?i)(/swagger(?:-ui)?/?(?:\.json)?$|/openapi\.json$|/api-docs/?$|/v\d+/api-docs$)"
+)
+
+
+def _try_ingest_spec_from_findings(db: Session, job: Any, raw_findings: list[dict[str, Any]]) -> None:
+    """When any tool's findings (nuclei-exposure, nuclei-misconfiguration, etc.)
+    reveal an exposed OpenAPI/Swagger spec, parse it into the structured
+    offensive endpoint inventory instead of only recording "spec exposed" as a
+    generic finding. This is the third and most general hook for this — the
+    other two (katana/gospider/hakrawler in js_endpoint_extractor.py, and
+    ZAP/browser-capture/endpoint_discovery/offensive_operator in
+    crawler_result_normalizer.py) don't cover nuclei's own exposure templates,
+    which is how a real scan actually surfaced the spec in practice."""
+    for finding in raw_findings:
+        details = finding.get("details") or {}
+        candidate = str(details.get("matched_at") or details.get("matched-at") or details.get("asset") or "")
+        if not candidate or not _SPEC_FINDING_URL_RE.search(candidate):
+            continue
+        if not candidate.startswith("http"):
+            continue
+        try:
+            from app.services.api_spec_ingestion_service import ingest_api_spec
+
+            result = ingest_api_spec(db, job, spec_url=candidate, spec_type="openapi")
+            if result.get("ok"):
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "findings_extractor: auto-ingested exposed spec %s (%d endpoints)",
+                    candidate, result.get("endpoints") or 0,
+                )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "findings_extractor: failed to auto-ingest exposed spec %s", candidate, exc_info=True
+            )
+        return
+
+
 def persist_findings_from_work_item(
     db: Session,
     item: Any,  # ScanWorkItem
@@ -3134,6 +3195,7 @@ def persist_findings_from_work_item(
     phase_id = str(item.phase_id or "")
 
     raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
+    _try_ingest_spec_from_findings(db, job, raw_findings)
     meta_persisted = _persist_extractor_meta(db, item, result)
     if not raw_findings:
         if meta_persisted:

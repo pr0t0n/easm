@@ -576,8 +576,10 @@ def _inject_auth_headers(argv: list[str], auth_headers: dict[str, str], tool: st
     """Inject authentication headers into supported tool commands.
 
     Different tools use different flags for headers:
-      ffuf, gobuster, nuclei, httpx, feroxbuster, wfuzz, dirsearch: -H "Key: Value"
-      curl: -H "Key: Value"
+      ffuf, gobuster, nuclei, httpx, feroxbuster, wfuzz, dirsearch, curl,
+      katana, gospider: -H "Key: Value" (repeatable)
+      hakrawler: single -h flag, pairs joined by ";;" (verified against the
+      installed binary's own -h usage text, not "-H" nor repeatable)
       sqlmap: --header="Key: Value"  OR  --cookie="..." for cookies
       dalfox: --header "Key: Value"
       wpscan: --headers "Key: Value"
@@ -592,13 +594,20 @@ def _inject_auth_headers(argv: list[str], auth_headers: dict[str, str], tool: st
     new_argv = list(argv)
 
     # Tools that use -H "Key: Value" syntax
-    H_SYNTAX = {"ffuf", "gobuster", "nuclei", "httpx", "feroxbuster", "wfuzz", "dirsearch", "curl"}
+    H_SYNTAX = {
+        "ffuf", "gobuster", "nuclei", "httpx", "feroxbuster", "wfuzz", "dirsearch", "curl",
+        "katana", "gospider",
+    }
     # Tools that use --header
     LONG_HEADER_SYNTAX = {"sqlmap", "dalfox"}
     # Tools that use --headers (plural, with all in one)
     HEADERS_SYNTAX = {"wpscan"}
+    # hakrawler: single "-h" flag, all pairs joined by ";;"
+    HAKRAWLER_SYNTAX = {"hakrawler"}
 
-    if tool_lower in H_SYNTAX or any(tool_lower.startswith(t) for t in H_SYNTAX):
+    if tool_lower in HAKRAWLER_SYNTAX:
+        new_argv.extend(["-h", ";;".join(headers_pairs)])
+    elif tool_lower in H_SYNTAX or any(tool_lower.startswith(t) for t in H_SYNTAX):
         for pair in headers_pairs:
             new_argv.extend(["-H", pair])
     elif tool_lower in LONG_HEADER_SYNTAX:

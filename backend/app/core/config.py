@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     celery_broker_url: str
     celery_result_backend: str
     langgraph_checkpointer_dsn: str | None = None
+    # Fernet key protecting captured session material (ScanAuthSession.headers/
+    # .cookies) at rest — no default on purpose, this must be explicitly
+    # configured. Generate with: python -c "from cryptography.fernet import
+    # Fernet; print(Fernet.generate_key().decode())"
+    credential_encryption_key: str
 
     ollama_base_url: str = "http://ollama:11434"
     llm_primary_provider: str = "ollama"

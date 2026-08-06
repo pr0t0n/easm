@@ -58,6 +58,11 @@ requests==2.32.3
 urllib3==2.2.3
 python-dotenv==1.0.0
 
+# Browser automation — remote client only (connects to the browser_runner
+# container's `playwright run-server`). PyPI has no 1.54.1 build (only the npm
+# package does) — 1.54.0 is protocol-compatible within the same minor version.
+playwright==1.54.0
+
 # Testing (optional)
 pytest==8.3.5
 pytest-asyncio==0.23.3

@@ -59,12 +59,28 @@ def _fetch_json(url: str) -> dict[str, Any] | None:
 
 
 def _base_url(spec: dict[str, Any], source_url: str) -> str:
+    """Real-world OpenAPI specs commonly declare `servers[0].url` with
+    unresolved template variables for multi-environment deploys (e.g.
+    "https://{env}-platform.example.com"), and the variable's declared
+    `default` frequently points at a different environment than the one we
+    actually fetched the spec from (confirmed live: a spec fetched from a
+    "hml-api-*" host had servers[0].url templated with `default: "dev-api"`).
+    Trusting servers[0] literally, or resolving it to its declared default,
+    both produce a host that is out of scope for the scan that found this
+    spec. The one thing we know for certain is in-scope is source_url itself
+    (the scan already fetched it successfully) — prefer deriving the base
+    from that whenever the declared server URL still has an unresolved
+    `{...}` placeholder.
+    """
     servers = spec.get("servers") or []
+    server_url = ""
     if servers and isinstance(servers[0], dict) and servers[0].get("url"):
-        return str(servers[0]["url"])
+        server_url = str(servers[0]["url"])
+    if server_url and "{" not in server_url:
+        return server_url
     if source_url.startswith("http"):
         return source_url.rsplit("/", 1)[0] + "/"
-    return ""
+    return server_url
 
 
 def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source_url: str) -> int:

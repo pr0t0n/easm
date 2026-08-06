@@ -17,6 +17,7 @@ e gera testes/findings específicos ao tipo de negócio:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -32,6 +33,15 @@ _HEADERS = {
     "User-Agent": "Mozilla/5.0 (EASM-SecurityScanner/2.0; +https://scriptkidd.o)",
     "Accept": "application/json, text/html, */*",
 }
+
+# Set once per analyze_business_logic() call (see its `finally` reset) so every
+# test_* function's _safe_get/_safe_post automatically carries the real
+# captured session — previously every test in this module only ever made
+# anonymous requests, which silently defeated auth-gated checks (rate limit,
+# IDOR, mass assignment) even when a valid session existed for the scan.
+_auth_context: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "_business_logic_auth_context", default={}
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Service type classification
@@ -74,7 +84,7 @@ SERVICE_PROFILES: dict[str, dict] = {
         "risk": "high",
         "tests": ["idor_sequential", "http_method_abuse", "mass_assignment",
                   "verbose_errors", "rate_limit_absent", "bola_check",
-                  "graphql_exposure", "cache_deception"],
+                  "graphql_exposure", "cache_deception", "open_cors"],
     },
     "node_js_app": {
         "keywords": ["node", "nodejs", "express", "nestjs", "next", "nuxt",
@@ -135,20 +145,38 @@ class BusinessLogicFinding:
         self.cvss_estimate = cvss_estimate
 
 
-def _safe_get(url: str, **kwargs) -> requests.Response | None:
+def _merged_request_kwargs(explicit_headers: dict[str, str] | None, explicit_cookies: Any) -> tuple[dict, Any]:
+    auth = _auth_context.get()
+    merged_headers = {**_HEADERS, **(auth.get("headers") or {}), **(explicit_headers or {})}
+    cookies = explicit_cookies if explicit_cookies is not None else (auth.get("cookies") or None)
+    return merged_headers, cookies
+
+
+def _safe_get(url: str, *, headers: dict[str, str] | None = None, cookies: Any = None, **kwargs) -> requests.Response | None:
+    # `headers`/`cookies` are named explicitly (not left in **kwargs) so callers
+    # can override/extend without colliding with the headers=_HEADERS this
+    # function used to hardcode — passing headers={...} used to raise
+    # "got multiple values for keyword argument 'headers'", silently swallowed
+    # by the except below, which meant every test_open_cors call with a custom
+    # Origin header always failed and returned None.
+    merged_headers, merged_cookies = _merged_request_kwargs(headers, cookies)
     try:
-        r = requests.get(url, timeout=_DEFAULT_TIMEOUT, headers=_HEADERS,
-                         verify=False, allow_redirects=True, **kwargs)
+        r = requests.get(url, timeout=_DEFAULT_TIMEOUT, headers=merged_headers,
+                         cookies=merged_cookies, verify=False, allow_redirects=True, **kwargs)
         return r
     except Exception as e:
         logger.debug("GET %s failed: %s", url, e)
         return None
 
 
-def _safe_post(url: str, data: Any = None, json_data: Any = None, **kwargs) -> requests.Response | None:
+def _safe_post(
+    url: str, data: Any = None, json_data: Any = None, *,
+    headers: dict[str, str] | None = None, cookies: Any = None, **kwargs,
+) -> requests.Response | None:
+    merged_headers, merged_cookies = _merged_request_kwargs(headers, cookies)
     try:
-        r = requests.post(url, timeout=_DEFAULT_TIMEOUT, headers=_HEADERS,
-                          verify=False, allow_redirects=False,
+        r = requests.post(url, timeout=_DEFAULT_TIMEOUT, headers=merged_headers,
+                          cookies=merged_cookies, verify=False, allow_redirects=False,
                           data=data, json=json_data, **kwargs)
         return r
     except Exception as e:
@@ -356,7 +384,7 @@ def test_open_cors(base_url: str, domain: str) -> list[BusinessLogicFinding]:
     findings = []
     r = _safe_get(
         base_url,
-        headers={**_HEADERS, "Origin": "https://evil-attacker.com"},
+        headers={"Origin": "https://evil-attacker.com"},
     )
     if not r:
         return findings
@@ -404,14 +432,63 @@ def test_open_cors(base_url: str, domain: str) -> list[BusinessLogicFinding]:
             business_impact="Exfiltração de dados de qualquer usuário autenticado via site malicioso.",
             cvss_estimate=9.1,
         ))
+
+    # A completely different (and common) bug class from the two checks above:
+    # an allowlist regex without ^...$ anchors matches on substring, so an
+    # origin that merely CONTAINS the real domain as a prefix — with an
+    # attacker-controlled suffix — passes validation even though neither a
+    # wildcard nor an exact reflection of a throwaway origin would reveal it.
+    # Confirmed live against a real target during this session: nuclei's
+    # generic cors-misconfig template caught something here but only at
+    # "info" severity with no reflected-origin proof — this test constructs
+    # the actual bypass and checks whether IT specifically gets reflected.
+    suffix_origin = f"https://{domain}.attacker.com"
+    r_suffix = _safe_get(base_url, headers={"Origin": suffix_origin})
+    if r_suffix:
+        acao_suffix = r_suffix.headers.get("Access-Control-Allow-Origin", "")
+        acac_suffix = r_suffix.headers.get("Access-Control-Allow-Credentials", "")
+        if acao_suffix == suffix_origin:
+            findings.append(BusinessLogicFinding(
+                title="CORS Crítico: Regex de Origem Sem Âncora (Domain-Suffix Bypass)",
+                severity="high" if acac_suffix.lower() == "true" else "medium",
+                test_type="open_cors",
+                domain=domain,
+                evidence=(
+                    f"Origin '{suffix_origin}' (domínio real + sufixo controlado pelo atacante) "
+                    f"foi refletida no ACAO header: {acao_suffix} | ACAC: {acac_suffix}"
+                ),
+                description=(
+                    "A política de CORS valida a origem por substring/prefixo (regex sem "
+                    f"âncoras ^...$) em vez de allowlist exata — um domínio atacante que apenas "
+                    f"começa com '{domain}' (ex.: {domain}.attacker.com) passa na validação."
+                ),
+                reproduction_steps=[
+                    f"curl -sk -I '{base_url}' -H 'Origin: {suffix_origin}'",
+                    "# Se Access-Control-Allow-Origin refletir esse Origin: bypass confirmado",
+                ],
+                business_impact=(
+                    "Qualquer domínio registrável pelo atacante com esse prefixo realiza requests "
+                    "cross-origin autenticadas caso Allow-Credentials também seja true."
+                ),
+                cvss_estimate=8.1 if acac_suffix.lower() == "true" else 6.5,
+            ))
     return findings
 
 
-def test_rate_limit_absent(base_url: str, domain: str) -> list[BusinessLogicFinding]:
-    """Verifica ausência de rate limiting em endpoints de auth."""
+def test_rate_limit_absent(base_url: str, domain: str, extra_paths: list[str] | None = None) -> list[BusinessLogicFinding]:
+    """Verifica ausência de rate limiting em endpoints de auth.
+
+    Real auth paths are rarely one of a handful of common guesses (e.g. the
+    Valid Platform ID API uses /api/clients/auth/authorize-user) — testing
+    only hardcoded common paths gets 404s and silently finds nothing on any
+    target that doesn't happen to use one of them. `extra_paths` lets the
+    caller pass paths the recon phase actually discovered for this scan
+    (auth-like URLs from the offensive endpoint inventory), tried first.
+    """
     findings = []
-    auth_paths = ["/api/auth/login", "/api/login", "/login", "/api/v1/auth",
-                  "/api/users/login", "/auth/token"]
+    default_paths = ["/api/auth/login", "/api/login", "/login", "/api/v1/auth",
+                      "/api/users/login", "/auth/token"]
+    auth_paths = list(dict.fromkeys((extra_paths or []) + default_paths))
 
     for path in auth_paths:
         url = base_url.rstrip("/") + path
@@ -834,10 +911,18 @@ def analyze_business_logic(
     domain: str,
     base_url: str | None = None,
     existing_findings: list[Any] | None = None,
+    discovered_auth_paths: list[str] | None = None,
+    auth_headers: dict[str, str] | None = None,
+    auth_cookies: dict[str, str] | None = None,
 ) -> list[dict]:
     """
     Executa testes de business logic para um domínio.
     Retorna lista de findings no formato plataforma.
+
+    auth_headers/auth_cookies (from a captured ScanAuthSession, if any) are
+    installed into `_auth_context` for the duration of this call so every
+    test_* function's _safe_get/_safe_post carries the real session —
+    previously every test here only ever made anonymous requests.
     """
     if not base_url:
         base_url = f"https://{domain}" if not domain.startswith("http") else domain
@@ -851,30 +936,34 @@ def analyze_business_logic(
 
     tests_to_run = profile.get("tests", [])
 
-    # Run applicable tests
-    if "docker_api_unauth" in tests_to_run:
-        raw_findings.extend(test_docker_api_unauth(base_url, domain))
-    if "env_vars_leak" in tests_to_run:
-        raw_findings.extend(test_env_vars_leak(base_url, domain))
-    if "idor_accounts" in tests_to_run or "bola_check" in tests_to_run:
-        raw_findings.extend(test_idor_accounts(base_url, domain))
-    if "verbose_errors" in tests_to_run:
-        raw_findings.extend(test_verbose_errors(base_url, domain))
-    if "open_cors" in tests_to_run:
-        raw_findings.extend(test_open_cors(base_url, domain))
-    if "rate_limit_absent" in tests_to_run:
-        raw_findings.extend(test_rate_limit_absent(base_url, domain))
-    if "debug_mode" in tests_to_run:
-        raw_findings.extend(test_debug_mode(base_url, domain))
-    # New real-world attack tests
-    if "graphql_exposure" in tests_to_run:
-        raw_findings.extend(test_graphql_exposure(base_url, domain))
-    if "mass_assignment" in tests_to_run:
-        raw_findings.extend(test_mass_assignment(base_url, domain))
-    if "race_condition_financial" in tests_to_run:
-        raw_findings.extend(test_race_condition_financial(base_url, domain))
-    if "cache_deception" in tests_to_run:
-        raw_findings.extend(test_cache_deception(base_url, domain))
+    _token = _auth_context.set({"headers": auth_headers or {}, "cookies": auth_cookies or {}})
+    try:
+        # Run applicable tests
+        if "docker_api_unauth" in tests_to_run:
+            raw_findings.extend(test_docker_api_unauth(base_url, domain))
+        if "env_vars_leak" in tests_to_run:
+            raw_findings.extend(test_env_vars_leak(base_url, domain))
+        if "idor_accounts" in tests_to_run or "bola_check" in tests_to_run:
+            raw_findings.extend(test_idor_accounts(base_url, domain))
+        if "verbose_errors" in tests_to_run:
+            raw_findings.extend(test_verbose_errors(base_url, domain))
+        if "open_cors" in tests_to_run:
+            raw_findings.extend(test_open_cors(base_url, domain))
+        if "rate_limit_absent" in tests_to_run:
+            raw_findings.extend(test_rate_limit_absent(base_url, domain, extra_paths=discovered_auth_paths))
+        if "debug_mode" in tests_to_run:
+            raw_findings.extend(test_debug_mode(base_url, domain))
+        # New real-world attack tests
+        if "graphql_exposure" in tests_to_run:
+            raw_findings.extend(test_graphql_exposure(base_url, domain))
+        if "mass_assignment" in tests_to_run:
+            raw_findings.extend(test_mass_assignment(base_url, domain))
+        if "race_condition_financial" in tests_to_run:
+            raw_findings.extend(test_race_condition_financial(base_url, domain))
+        if "cache_deception" in tests_to_run:
+            raw_findings.extend(test_cache_deception(base_url, domain))
+    finally:
+        _auth_context.reset(_token)
 
     # Convert to platform format
     return [
@@ -900,17 +989,65 @@ def analyze_business_logic(
     ]
 
 
+_AUTH_PATH_KEYWORDS = ("login", "auth", "token", "signin", "sign-in", "session", "authorize", "sso")
+
+
+def _discovered_auth_paths(db: Any, scan_id: int, domain: str) -> list[str]:
+    """Pull auth-like paths the recon phase actually found for this scan's
+    domain, so test_rate_limit_absent (and future tests) try real endpoints
+    instead of only a handful of hardcoded common guesses."""
+    from urllib.parse import urlparse
+
+    from app.models.models import OffensiveEndpoint
+
+    try:
+        rows = (
+            db.query(OffensiveEndpoint.url, OffensiveEndpoint.method)
+            .filter(
+                OffensiveEndpoint.scan_job_id == scan_id,
+                OffensiveEndpoint.method.in_(["POST", "PUT"]),
+            )
+            .limit(500)
+            .all()
+        )
+    except Exception:
+        return []
+
+    paths: list[str] = []
+    for url, _method in rows:
+        try:
+            parsed = urlparse(str(url or ""))
+        except Exception:
+            continue
+        if domain not in (parsed.hostname or ""):
+            continue
+        path = parsed.path or ""
+        if path and any(kw in path.lower() for kw in _AUTH_PATH_KEYWORDS):
+            paths.append(path)
+    return list(dict.fromkeys(paths))[:15]
+
+
 def run_business_logic_scan(
     db: Any,
     scan_id: int,
     target_domains: list[str] | None = None,
     max_domains: int = 20,
+    auth_headers: dict[str, str] | None = None,
+    auth_cookies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Executa análise de business logic para todos os domínios de um scan
     (ou lista específica) e persiste os findings.
+
+    Persistence goes through findings_extractor.persist_finding_dicts — the
+    single gated path (evidence grounding, scope-guard, dedup, confidence
+    scoring) — instead of writing Finding rows directly. Previously this
+    function bypassed that pipeline entirely, which also meant a discovered
+    out-of-scope host referenced in a finding's details could slip through
+    unchecked.
     """
     from app.models.models import Finding, ScanJob
+    from app.services.findings_extractor import persist_finding_dicts
 
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not job:
@@ -941,56 +1078,35 @@ def run_business_logic_scan(
             .filter(Finding.scan_job_id == scan_id, Finding.domain == domain)
             .all()
         )
+        discovered_auth_paths = _discovered_auth_paths(db, scan_id, domain)
 
-        biz_findings = analyze_business_logic(domain, base_url, existing_findings)
+        biz_findings = analyze_business_logic(
+            domain, base_url, existing_findings, discovered_auth_paths,
+            auth_headers=auth_headers, auth_cookies=auth_cookies,
+        )
 
+        raw_findings = []
         for bf in biz_findings:
-            # Check for duplicates
-            exists = (
-                db.query(Finding.id)
-                .filter(
-                    Finding.scan_job_id == scan_id,
-                    Finding.domain == domain,
-                    Finding.title == bf["title"],
-                )
-                .first()
-            )
-            if exists:
-                continue
-
-            details_payload = bf.get("details", {}) or {}
+            details_payload = dict(bf.get("details") or {})
             details_payload["evidence"] = bf.get("evidence", "")[:2000]
             details_payload["validation_status"] = bf.get("validation_status", "hypothesis")
-            # Enrich for report engine: ensure target + description are accessible
-            if not details_payload.get("target"):
-                details_payload["target"] = domain
-            if not details_payload.get("url"):
-                details_payload["url"] = f"https://{domain}" if not domain.startswith("http") else domain
             if bf.get("description") and not details_payload.get("description"):
                 details_payload["description"] = bf.get("description", "")[:2000]
+            raw_findings.append({
+                "title": bf["title"][:500],
+                "severity": bf["severity"],
+                "risk_score": int(details_payload.get("cvss_estimate") or 5),
+                "details": details_payload,
+            })
 
-            f = Finding(
-                scan_job_id=scan_id,
-                domain=domain,
-                title=bf["title"][:500],
-                severity=bf["severity"],
-                tool=bf.get("source_tool", "business_logic_analyzer"),
-                recommendation=bf.get("evidence", "")[:2000],
-                details=details_payload,
-                retest_status=bf.get("validation_status", "hypothesis"),
-                risk_score=int(bf.get("details", {}).get("cvss_estimate", 5.0)),
-                created_at=datetime.now(),
-            )
-            db.add(f)
-            total_findings += 1
-
-        results_by_domain[domain] = len(biz_findings)
-
-    if total_findings:
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
+        created = persist_finding_dicts(
+            db, job, raw_findings,
+            default_tool="business_logic_analyzer",
+            default_target=domain,
+            source_item=None,
+        )
+        total_findings += created
+        results_by_domain[domain] = created
 
     return {
         "domains_analyzed": len(target_domains),

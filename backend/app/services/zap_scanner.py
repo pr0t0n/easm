@@ -266,6 +266,38 @@ def _alerts_to_findings(alerts: list[dict], target: str) -> list[dict]:
     return findings
 
 
+def resolve_zap_auth_headers(db: Any, job: Any, state: dict[str, Any] | None = None) -> dict[str, str]:
+    """Prefer a real captured session (AuthSessionManager/ScanAuthSession) over
+    the legacy static auth_config mechanism.
+
+    auth_headers_from_state(state) only ever reads state["auth_config"] — a
+    single, static identity supplied at scan-creation time. It's still a
+    legitimate fallback for scans that never had a live credential capture,
+    so it's not removed — but a real captured session (from the CDP capture
+    flow, confirm_identity_capture) should always take priority when one
+    exists, since it's an actual live session rather than a static config.
+    """
+    try:
+        from app.services.auth_session_manager import AuthSessionManager
+
+        material = AuthSessionManager(db, job).get_material()
+        if material and material.valid:
+            headers = dict(material.headers or {})
+            if material.cookies and "Cookie" not in headers and "cookie" not in headers:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in material.cookies.items())
+            if headers:
+                return headers
+    except Exception:
+        logger.debug("resolve_zap_auth_headers: AuthSessionManager lookup failed", exc_info=True)
+
+    try:
+        from app.services.scan_intelligence import auth_headers_from_state
+
+        return auth_headers_from_state(state or dict(getattr(job, "state_data", None) or {})) or {}
+    except Exception:
+        return {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scan entry points
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,15 +355,22 @@ def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None) ->
     }
 
 
-def run_zap_ajax_spider(target: str, max_duration_mins: int = 3) -> dict[str, Any]:
+def run_zap_ajax_spider(
+    target: str, max_duration_mins: int = 3, auth_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """
     ZAP AJAX Spider: usa headless browser para navegar SPAs.
     Descobre rotas dinâmicas que katana/gospider não encontram.
     Ideal para: targets com React/Vue/Angular confirmado.
+
+    auth_headers: se fornecido, o headless browser navega autenticado — sem
+    isso, uma SPA atrás de login nunca sai da tela de login e o spider não
+    descobre nada além dela.
     """
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
+    _auth_rules = _apply_auth_headers(auth_headers)
     try:
         _zap_post("/JSON/ajaxSpider/action/scan/", {
             "url": target,
@@ -342,6 +381,8 @@ def run_zap_ajax_spider(target: str, max_duration_mins: int = 3) -> dict[str, An
         _wait_for_ajax_spider(max_wait=max_duration_mins * 60)
     except Exception as exc:
         logger.warning("ZAP AJAX spider error: %s", exc)
+    finally:
+        _clear_auth_headers(_auth_rules)
 
     # Get discovered URLs
     try:
@@ -357,6 +398,8 @@ def run_zap_ajax_spider(target: str, max_duration_mins: int = 3) -> dict[str, An
     findings = _alerts_to_findings(alerts, target)
     for f in findings:
         f["details"]["zap_scan_type"] = "ajax_spider"
+        if auth_headers:
+            f["details"]["authenticated_scan"] = True
 
     return {
         "scan_type": "zap-ajax",
@@ -364,6 +407,7 @@ def run_zap_ajax_spider(target: str, max_duration_mins: int = 3) -> dict[str, An
         "discovered_urls": discovered_urls[:100],
         "discovered_url_count": len(discovered_urls),
         "alert_count": len(alerts),
+        "authenticated": bool(auth_headers),
         "findings": findings,
     }
 
@@ -433,11 +477,15 @@ def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None)
     }
 
 
-def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, Any]:
+def run_zap_api_scan(
+    target: str, openapi_url: str | None = None, auth_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """
     ZAP API Scan: scan orientado a OpenAPI/Swagger.
     Testa automaticamente todos os endpoints do schema.
     openapi_url: URL do swagger.json/openapi.json. Se None, tenta /swagger.json e /openapi.json.
+    auth_headers: scan autenticado — também usado na descoberta do spec, caso o
+    próprio arquivo openapi.json exija sessão.
     """
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
@@ -448,7 +496,7 @@ def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, A
         for path in ("/swagger.json", "/openapi.json", "/api-docs", "/api/swagger.json", "/v2/api-docs"):
             candidate = urljoin(target, path)
             try:
-                r = requests.get(candidate, timeout=10, verify=False, allow_redirects=True)
+                r = requests.get(candidate, timeout=10, verify=False, allow_redirects=True, headers=auth_headers or None)
                 if r.status_code == 200 and ("swagger" in r.text.lower() or "openapi" in r.text.lower()):
                     openapi_url = candidate
                     logger.info("ZAP API scan: discovered OpenAPI at %s", openapi_url)
@@ -467,6 +515,7 @@ def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, A
             logger.warning("ZAP OpenAPI import error: %s", exc)
 
     # Active scan against discovered endpoints
+    _auth_rules = _apply_auth_headers(auth_headers)
     try:
         ascan_data = _zap_post("/JSON/ascan/action/scan/", {
             "url": target, "recurse": "true",
@@ -475,6 +524,8 @@ def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, A
         _wait_for_active_scan(ascan_id, max_wait=_API_SCAN_MAX_WAIT)
     except Exception as exc:
         logger.warning("ZAP API active scan error: %s", exc)
+    finally:
+        _clear_auth_headers(_auth_rules)
 
     alerts = _get_alerts(target)
     findings = _alerts_to_findings(alerts, target)
@@ -482,6 +533,8 @@ def run_zap_api_scan(target: str, openapi_url: str | None = None) -> dict[str, A
         f["details"]["zap_scan_type"] = "api_scan"
         if openapi_url:
             f["details"]["openapi_url"] = openapi_url
+        if auth_headers:
+            f["details"]["authenticated_scan"] = True
 
     return {
         "scan_type": "zap-api",
@@ -507,11 +560,11 @@ def run_zap_scan(tool_name: str, target: str, item_metadata: dict | None = None,
     if tool == "zap-baseline":
         return run_zap_baseline(target, auth_headers=auth)
     elif tool == "zap-ajax":
-        return run_zap_ajax_spider(target)
+        return run_zap_ajax_spider(target, auth_headers=auth)
     elif tool == "zap-active":
         return run_zap_active_scan(target, auth_headers=auth)
     elif tool == "zap-api":
         openapi_url = meta.get("openapi_url") or meta.get("swagger_url")
-        return run_zap_api_scan(target, openapi_url=openapi_url)
+        return run_zap_api_scan(target, openapi_url=openapi_url, auth_headers=auth)
     else:
         return {"error": f"Unknown ZAP tool: {tool_name}", "findings": []}

@@ -172,6 +172,29 @@ def _extract_js_endpoints(js_content: str) -> list[str]:
     return sorted(endpoints)
 
 
+def _try_ingest_exposed_spec(db: Session, scan_id: int, spec_url: str) -> None:
+    """Auto-parse a discovered OpenAPI/Swagger spec into the offensive endpoint
+    inventory so downstream authz/BOLA hypotheses see the real routes+params,
+    instead of the exposure only being flagged as a generic nuclei finding."""
+    try:
+        from app.models.models import ScanJob
+        from app.services.api_spec_ingestion_service import ingest_api_spec
+
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not scan:
+            return
+        result = ingest_api_spec(db, scan, spec_url=spec_url, spec_type="openapi")
+        if result.get("ok"):
+            logger.info(
+                "js_endpoint_extractor: auto-ingested exposed spec %s (%d endpoints)",
+                spec_url, result.get("endpoints") or 0,
+            )
+        else:
+            logger.debug("js_endpoint_extractor: exposed spec %s did not parse as OpenAPI: %s", spec_url, result.get("error"))
+    except Exception:
+        logger.debug("js_endpoint_extractor: failed to auto-ingest exposed spec %s", spec_url, exc_info=True)
+
+
 def seed_high_value_probes(
     db: Session,
     scan_id: int,
@@ -206,8 +229,13 @@ def seed_high_value_probes(
     if any("graphql" in u.lower() or "/gql" in u.lower() for u in all_discovered):
         tools_to_seed.append(("nuclei-graphql", "graphql endpoint discovered"))
 
-    if any(x in combined_text for x in ("/swagger", "/openapi", "/api-docs", "/api/docs")):
+    swagger_urls = [
+        u for u in all_discovered
+        if any(x in u.lower() for x in ("/swagger", "/openapi", "/api-docs", "/api/docs"))
+    ]
+    if swagger_urls:
         tools_to_seed.append(("nuclei-exposure", "swagger/openapi endpoint discovered"))
+        _try_ingest_exposed_spec(db, scan_id, swagger_urls[0])
 
     if any(x in combined_text for x in ("/admin", "/administrator", "/wp-admin", "/console")):
         tools_to_seed.append(("nuclei-exposure", "admin path discovered"))
