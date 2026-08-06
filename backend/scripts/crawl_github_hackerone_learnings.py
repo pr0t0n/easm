@@ -367,7 +367,7 @@ def _counts(db) -> tuple[dict[str, int], dict[str, int]]:
     # crawled rows alone can no longer fill until an admin accepts them.
     phase_counts: dict[str, int] = defaultdict(int)
     skill_counts: dict[str, int] = defaultdict(int)
-    rows = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.status.in_(("accepted", "pending"))).all()
+    rows = db.query(VulnerabilityLearning).filter(VulnerabilityLearning.status.in_(("accepted", "pending_review"))).all()
     for row in rows:
         for phase in list(row.affected_phases or []):
             phase_counts[str(phase)] += 1
@@ -437,14 +437,15 @@ def _build_learning(
     return VulnerabilityLearning(
         owner_id=owner_id,
         # Crawled from a public index, not authored/reviewed by us — stays
-        # "pending" until an admin reviews it via PUT .../accept, same gate
-        # the manually-submitted learning path already goes through. Only
+        # "pending_review" (the same value every other ingestion path uses)
+        # until an admin reviews it via PUT .../accept, same gate the
+        # manually-submitted learning path already goes through. Only
         # "accepted" rows feed live skill selection (build_runtime_learning_
         # playbook) and semantic RAG seeding (tech_vuln_correlator) — this
         # crawler is scheduled to run unattended weekly now, so content an
         # attacker could seed into a public GitHub/HackerOne index must not
         # auto-promote into something that steers live scans.
-        status="pending",
+        status="pending_review",
         source_kind=SOURCE_KIND,
         source_urls=[url for url in [source_url, report_url] if url],
         url_count=len([url for url in [source_url, report_url] if url]),

@@ -381,6 +381,71 @@ def document_count(*, db: Session | None = None) -> int:
             db.close()
 
 
+def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
+    """Diagnostic check for the RAG knowledge layer.
+
+    Catches the two failure modes that let this silently rot before:
+    1. rag_knowledge_store never indexed (index_skills_to_knowledge_store
+       exists but nothing calls it automatically).
+    2. VulnerabilityLearning rows marked status='accepted' — which the
+       supervisor treats as human-reviewed, ready-to-use knowledge — but with
+       no real LLM synthesis behind them (raw_llm_response empty), e.g. a bulk
+       crawler seed that predates the accepted-status fix.
+    """
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
+        store_total = int(db.execute(text("SELECT COUNT(*) FROM rag_knowledge_store")).scalar() or 0)
+        store_by_source = {
+            str(row[0]): int(row[1])
+            for row in db.execute(
+                text("SELECT source_kind, COUNT(*) FROM rag_knowledge_store GROUP BY source_kind")
+            ).fetchall()
+        }
+        unsynthesized_accepted = int(
+            db.execute(
+                text(
+                    "SELECT COUNT(*) FROM vulnerability_learnings "
+                    "WHERE status = 'accepted' "
+                    "AND (raw_llm_response IS NULL OR trim(raw_llm_response) = '')"
+                )
+            ).scalar()
+            or 0
+        )
+        accepted_total = int(
+            db.execute(text("SELECT COUNT(*) FROM vulnerability_learnings WHERE status = 'accepted'")).scalar() or 0
+        )
+
+        issues: list[str] = []
+        if store_total == 0:
+            issues.append(
+                "rag_knowledge_store esta vazio — nenhuma skill ou aprendizado alimenta as decisoes do "
+                "supervisor via RAG. Rode index_skills_to_knowledge_store()."
+            )
+        if unsynthesized_accepted:
+            issues.append(
+                f"{unsynthesized_accepted} registro(s) 'accepted' em vulnerability_learnings sem "
+                "raw_llm_response — marcados como revisados/confiaveis mas sem sintese real. Reverter "
+                "para pending ou re-processar antes de deixarem influenciar agentes."
+            )
+
+        return {
+            "ok": not issues,
+            "issues": issues,
+            "rag_knowledge_store": {"total": store_total, "by_source_kind": store_by_source},
+            "vulnerability_learnings": {
+                "accepted_total": accepted_total,
+                "accepted_without_synthesis": unsynthesized_accepted,
+            },
+        }
+    except Exception as exc:
+        return {"ok": False, "issues": [f"health check failed: {exc}"]}
+    finally:
+        if own_session:
+            db.close()
+
+
 def rebuild_embedding_index(*, db: Session | None = None) -> None:
     """Recria o IVFFlat com lists = max(1, sqrt(N)).
 

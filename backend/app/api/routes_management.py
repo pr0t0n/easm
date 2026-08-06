@@ -2337,6 +2337,21 @@ def kali_runner_health(current_user: User = Depends(get_current_user)):
     }
 
 
+@router.get("/knowledge/health")
+def knowledge_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Surfaces whether the RAG knowledge layer (skills + accepted HackerOne
+    learnings) is actually populated and trustworthy, not just whether the
+    ingestion/indexing code exists. Catches: rag_knowledge_store never indexed,
+    and VulnerabilityLearning rows marked accepted without real LLM synthesis.
+    """
+    from app.services.rag_repository import knowledge_health as _knowledge_health
+
+    return _knowledge_health(db=db)
+
+
 @router.get("/kali-runner/catalog")
 def kali_runner_catalog(
     include_unprofiled: bool = Query(False),
@@ -2756,14 +2771,38 @@ def bulk_review_vulnerability_learnings(
     current_user: User = Depends(require_admin),
 ):
     from app.services.vulnerability_learning_service import (
+        bulk_review_all_pending,
         serialize_vulnerability_learning,
         update_learning_review,
         vulnerability_learning_summary,
     )
 
+    action = str(payload.get("action") or "accepted").strip().lower()
+    status_value = "accepted" if action in {"accept", "accepted"} else "rejected" if action in {"reject", "rejected"} else ""
+    if not status_value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action deve ser accept ou reject.")
+
     raw_ids = payload.get("ids") or payload.get("learning_ids") or []
+    notes = str(payload.get("review_notes") or "").strip() or None
+
+    # "select all" in the UI only ever loads a page of the list (default 50,
+    # capped at 200) — sending back that page's ids as "all" would silently
+    # skip everything else in the backlog. The client signals a true
+    # apply-to-everything action with the literal sentinel "all" instead of
+    # an id list, and we go straight to the DB for every pending_review row.
+    if raw_ids == "all" or payload.get("scope") == "all_pending":
+        result = bulk_review_all_pending(db, current_user, status_value, notes=notes)
+        return {
+            "ok": True,
+            "status": status_value,
+            "reviewed_count": result["reviewed_count"],
+            "missing_ids": [],
+            "items": [],
+            "summary": vulnerability_learning_summary(db),
+        }
+
     if not isinstance(raw_ids, list):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ids deve ser uma lista.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ids deve ser uma lista ou \"all\".")
     # Accept both numeric IDs and catalog-<key> IDs (materialized on first use)
     learning_ids: list[str | int] = [
         int(item) if str(item).strip().isdigit() else str(item).strip()
@@ -2772,11 +2811,6 @@ def bulk_review_vulnerability_learnings(
     ]
     if not learning_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selecione pelo menos um aprendizado.")
-
-    action = str(payload.get("action") or "accepted").strip().lower()
-    status_value = "accepted" if action in {"accept", "accepted"} else "rejected" if action in {"reject", "rejected"} else ""
-    if not status_value:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action deve ser accept ou reject.")
 
     rows: list[VulnerabilityLearning] = []
     missing_ids: list[str | int] = []
@@ -2788,7 +2822,6 @@ def bulk_review_vulnerability_learnings(
             missing_ids.append(raw)
 
     reviewed = []
-    notes = str(payload.get("review_notes") or "").strip() or None
     for row in rows:
         reviewed.append(update_learning_review(db, row, current_user, status_value, notes=notes))
 

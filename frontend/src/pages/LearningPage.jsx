@@ -409,6 +409,7 @@ export default function LearningPage() {
   const [manualInstruction, setManualInstruction] = useState("");
   const [manualUrlsText, setManualUrlsText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
+  const [selectAllMode, setSelectAllMode] = useState(false);
   const [crawlerLimit, setCrawlerLimit] = useState(10000);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -632,6 +633,7 @@ export default function LearningPage() {
   };
 
   const toggleSelected = (id) => {
+    setSelectAllMode(false);
     setSelectedIds((current) => (
       current.includes(id)
         ? current.filter((item) => item !== id)
@@ -640,7 +642,9 @@ export default function LearningPage() {
   };
 
   const toggleAllPending = () => {
-    setSelectedIds(allPendingSelected ? [] : pendingItemIds);
+    const turningOn = !allPendingSelected;
+    setSelectAllMode(turningOn);
+    setSelectedIds(turningOn ? pendingItemIds : []);
   };
 
   const review = async (action) => {
@@ -678,18 +682,19 @@ export default function LearningPage() {
   };
 
   const bulkReview = async (action) => {
-    if (!selectedIds.length) return;
+    if (!selectAllMode && !selectedIds.length) return;
     setReviewing(true);
     setError("");
     setTaskStatus("");
     try {
       const { data } = await client.post("/api/learning/vulnerabilities/bulk-review", {
-        ids: selectedIds,
+        ids: selectAllMode ? "all" : selectedIds,
         action,
         review_notes: notes,
       });
       setSummary(data.summary || {});
       setSelectedIds([]);
+      setSelectAllMode(false);
       setNotes("");
       if ((data.items || []).length) {
         setReviewItem(data.items[0]);
@@ -857,16 +862,18 @@ export default function LearningPage() {
           <div>
             <h2 className="text-lg font-semibold" style={{ color: "var(--ink)" }}>Histórico</h2>
             <p className="mt-1 text-xs" style={{ color: "var(--ink-muted)" }}>
-              {selectedIds.length} selecionados para revisão em lote
+              {selectAllMode
+                ? `Todos os ${summary.pending_review ?? pendingItemIds.length} pendentes selecionados`
+                : `${selectedIds.length} selecionados para revisão em lote`}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             {loading && <span className="self-center text-xs" style={{ color: "var(--ink-muted)" }}>Carregando...</span>}
-            <button type="button" className="btn-secondary" onClick={() => bulkReview("reject")} disabled={reviewing || selectedIds.length === 0}>
-              Rejeitar selecionados
+            <button type="button" className="btn-secondary" onClick={() => bulkReview("reject")} disabled={reviewing || (!selectAllMode && selectedIds.length === 0)}>
+              {selectAllMode ? "Rejeitar TODOS os pendentes" : "Rejeitar selecionados"}
             </button>
-            <button type="button" className="btn-primary" onClick={() => bulkReview("accept")} disabled={reviewing || selectedIds.length === 0}>
-              Aceitar selecionados
+            <button type="button" className="btn-primary" onClick={() => bulkReview("accept")} disabled={reviewing || (!selectAllMode && selectedIds.length === 0)}>
+              {selectAllMode ? "Aceitar TODOS os pendentes" : "Aceitar selecionados"}
             </button>
           </div>
         </div>
