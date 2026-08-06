@@ -9,7 +9,7 @@ O ciclo operacional e baseado em um loop explícito **Supervisor → Agente → 
 | Item | Detalhe |
 | --- | --- |
 | Arquitetura | Kali-only para tools - backend/worker tool-free - LangGraph para fluxo - RAG em pgvector (backend) - MCP como ponte de execucao Kali-only |
-| Containers | 19 servicos (1 Kali - 1 backend - 1 MCP - 10 workers - 1 ZAP - 5 infra/UI: postgres/redis/ollama/celery_beat/frontend) |
+| Containers | 20 servicos (1 Kali - 1 backend - 1 MCP - 10 workers - 1 ZAP - 1 browser_runner (captura de sessao autenticada) - 5 infra/UI: postgres/redis/ollama/celery_beat/frontend) |
 | Imagem backend | 4.06 GB lean (era 21.3 GB com tools embarcadas) |
 | Imagem Kali | ~55 GB (kali-linux-everything + ProjectDiscovery + jwt_tool/paramspider) |
 | Tool count | 4 077 binarios no Kali, 48 profiles YAML, 22 fases tecnicas |
@@ -103,6 +103,7 @@ O `docker-compose.yml` usa profiles `dev` e `prod`. No profile `dev`, os servico
 | `worker_reporting` | compose service `worker_reporting` | Narrativa e consolidacao |
 | `celery_beat` | compose service `celery_beat` | Agendamentos + watchdog de recuperacao de scan |
 | `zap` | compose service `zap` | OWASP ZAP (scans ativos/baseline via profiles zap-*) |
+| `browser_runner` | compose service `browser_runner` | Playwright `run-server` remoto — browser real usado pela captura de sessão autenticada (CDP), nao usado para crawling |
 | `frontend` | compose service `frontend` | Interface web |
 
 Portas sao configuraveis por `.env`. Defaults do compose:
@@ -555,6 +556,97 @@ Quando um agente identifica uma possível vulnerabilidade, os aprendizados aceit
 
 Esse enriquecimento é usado em `risk_assessment` e `evidence_adjudication`. Se um achado crítico/alto não tiver prova suficiente, ele entra em `validation_backlog` com o playbook aprendido para que o próximo ciclo priorize as ferramentas e passos corretos. O relatório preserva esses campos em `Finding.details`, permitindo mostrar não só o achado, mas também como ele foi reproduzido ou o que faltou para comprovação.
 
+## Captura de Sessão Autenticada (CDP)
+
+Muitos achados críticos (escalação de privilégio, BOLA/BFLA cross-tenant, autorização quebrada)
+só são testáveis com uma sessão autenticada real — e alvos com SSO/MFA (Keycloak, Microsoft,
+Google) não podem ser automatizados com usuário/senha estático. A plataforma resolve isso com um
+browser real, do lado do servidor, cuja tela é transmitida ao vivo para dentro da própria página
+do ScriptKidd.o via CDP (Chrome DevTools Protocol) — o operador nunca sai da aba do produto, não
+instala nada, não confia em nenhum certificado de proxy.
+
+### Como funciona
+
+1. No painel de detalhe de um scan, o operador clica em **"Capturar sessão autenticada"** e
+   informa um identificador (`identity_key`, ex.: `org_admin`) e opcionalmente um papel (`role`).
+2. O backend conecta em `ws://browser_runner:9222/playwright` (Playwright remoto), abre um
+   contexto/página nova e uma sessão CDP (`context.new_cdp_session`).
+3. O frontend abre um WebSocket (`/ws/scans/{id}/identities/capture/{capture_session_id}`) que
+   recebe frames JPEG (`Page.screencastFrame`) e os desenha num `<canvas>`; cliques/teclas do
+   operador são reenviados pelo mesmo socket como `Input.dispatchMouseEvent`/`dispatchKeyEvent`.
+4. O operador completa o login — incluindo qualquer redirecionamento de MFA/SSO para um IdP de
+   terceiros — normalmente, como se estivesse na tela real.
+5. A cada request/response observada, o backend testa o host contra o escopo autorizado do scan
+   (`is_host_in_scope`). Tráfego de um IdP de terceiros (`login.microsoftonline.com`,
+   `accounts.google.com` etc.) é descartado no ato — nunca é armazenado nem logado.
+6. Ao clicar em **"Confirmar e salvar sessão"**, o backend lê os cookies do contexto, filtra pelo
+   mesmo critério de escopo, monta o material de autenticação (`AuthMaterial`) e grava em
+   `ScanIdentity`/`ScanAuthSession` — **headers e cookies são criptografados em repouso** (Fernet,
+   `EncryptedJSON`, chave em `CREDENTIAL_ENCRYPTION_KEY`).
+7. O browser/contexto real é encerrado (`cancel` também encerra, sem gravar nada no banco).
+
+### Reintegração automática no scan
+
+Confirmar uma captura (`POST .../confirm`) dispara, no mesmo request:
+
+- `generate_hypotheses_for_scan`: reprocessa o inventário de endpoints já catalogado com o novo
+  fato "existe identidade autenticada válida".
+- `requeue_evidence_ready_work_items`: reabre itens de lógica de negócio que ficaram bloqueados
+  por falta de parâmetro/evidência observável.
+- `requeue_authenticated_crawl_items`: reenfileira as ferramentas de crawling e descoberta de
+  conteúdo que suportam header de autenticação (`katana`, `gospider`, `hakrawler`, `ffuf`,
+  `feroxbuster`, `dirsearch`, `dirsearch-api`, `dirsearch-api-post`) para rodar de novo **com a
+  sessão real** — o resultado anterior, sem autenticação, fica preservado em
+  `item_metadata.previous_unauthenticated_result` em vez de ser descartado. `gau`/`waybackurls`
+  ficam de fora de propósito: consultam arquivo público (web.archive.org), não o alvo ao vivo.
+- Se o scan já estava em status terminal (`completed`/`completed_with_gaps`), o status volta para
+  `running` só quando há de fato algo reenfileirado, e `dispatch_scan_work_items` é disparado —
+  sem isso, os itens reenfileirados ficariam presos em `queued` para sempre, porque o dispatcher
+  ignora scans terminais.
+
+Na prática, isso significa que a fase P03 (Web Crawling & JS Extraction) e a descoberta de
+conteúdo em P15 rodam uma segunda vez, agora autenticadas, assim que uma sessão é confirmada — sem
+qualquer intervenção manual.
+
+### Como os headers chegam na ferramenta
+
+O header/cookie de autenticação percorre: `AuthSessionManager` → `worker_dispatcher.
+_resolve_auth_context` (ou o caminho genérico de `execute_scan_work_item` no MCP, que resolve o
+mesmo jeito para qualquer ferramenta) → `kali_executor._auth_headers_from_skill_context` →
+payload `auth_headers` do job → `kali-runner/runner.py:_inject_auth_headers`, que injeta na
+sintaxe correta de cada ferramenta (`-H "Key: Value"` para a maioria; `katana`/`gospider` incluídos
+no mesmo grupo; `hakrawler` usa um único `-h` com pares unidos por `;;`, sintaxe própria dele).
+
+### Segurança
+
+- Zero proxy MITM neste caminho: o Playwright *é* o navegador, não observa de fora — não há
+  certificado para o operador confiar.
+- Filtragem por escopo acontece em tempo real, request a request, antes de qualquer coisa ser
+  guardada — não é uma limpeza posterior.
+- `headers`/`cookies` de `ScanAuthSession` são criptografados em repouso (`EncryptedJSON`); dados
+  legados em texto puro continuam sendo lidos sem quebrar (compatibilidade), mas nada novo é
+  gravado sem criptografia.
+- Contextos de captura vivem em memória do processo backend (`_ACTIVE_CAPTURES`) — não há
+  replicação entre múltiplos workers do backend nesta versão.
+- **Gap conhecido**: `IDLE_TIMEOUT_SECONDS` (15 min) está declarado no código mas ainda não é
+  aplicado por nenhum reaper — capturas abandonadas (sem confirm/cancel explícito) não são
+  encerradas automaticamente hoje, o que pode acumular contextos de browser órfãos no
+  `browser_runner`.
+
+### Arquivos relevantes
+
+```text
+backend/app/services/credential_capture_service.py  # ciclo de vida da captura (start/confirm/cancel)
+backend/app/api/routes_ws.py                        # WS bidirecional de screencast + input
+backend/app/api/routes_identities.py                # REST: start/status/confirm/cancel/list
+backend/app/models/encrypted_json.py                # TypeDecorator Fernet para headers/cookies
+backend/app/services/auth_session_manager.py        # leitura/escrita de ScanIdentity/ScanAuthSession
+backend/app/services/scan_work_queue.py             # requeue_authenticated_crawl_items
+backend/app/workers/tasks.py                         # resolucao generica de auth_headers no dispatch MCP
+kali-runner/runner.py                                # _inject_auth_headers (sintaxe por ferramenta)
+frontend/src/components/CredentialCaptureModal.jsx   # canvas + WS, UI do operador
+```
+
 ## Base de Conhecimento de Bug Bounty
 
 Alem do aprendizado manual e por URL, a plataforma inclui uma base pre-carregada de 32 tecnicas extraidas de dois repositorios publicos de bug bounty:
@@ -861,6 +953,12 @@ docker compose --profile dev logs --tail 200 worker_recon worker_exploitation
 | `GET /api/scans/{id}/report` | relatorio tecnico/executivo |
 | `WS /ws/scans/{id}/trace` | stream em tempo real de eventos de trace do agente (poll 0.5s) |
 | `GET /api/scans/{id}/trace` | historico completo de eventos de trace e skill scores |
+| `POST /api/scans/{id}/identities/capture/start` | inicia captura de sessao autenticada (abre browser real no `browser_runner`) |
+| `WS /ws/scans/{id}/identities/capture/{capture_session_id}` | stream bidirecional CDP: frames de tela para o operador, mouse/teclado de volta |
+| `GET /api/scans/{id}/identities/capture/{capture_session_id}/status` | status da captura em andamento (headers capturados, url atual) |
+| `POST /api/scans/{id}/identities/capture/{capture_session_id}/confirm` | persiste a sessao (criptografada) e reintegra no scan |
+| `POST /api/scans/{id}/identities/capture/{capture_session_id}/cancel` | cancela a captura sem gravar nada |
+| `GET /api/scans/{id}/identities` | lista identidades autenticadas ja capturadas para o scan |
 
 ## Operacao Local
 
