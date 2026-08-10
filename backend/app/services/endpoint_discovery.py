@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 

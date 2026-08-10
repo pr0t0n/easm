@@ -143,6 +143,18 @@ async def confirm_identity_capture(
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sessao de captura nao encontrada")
 
+    if str(result.get("status") or "") not in {"valid", "static"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "sessao capturada, mas o login ainda nao foi comprovado; navegue para uma area autenticada e confirme novamente",
+                "capture_session_id": capture_session_id,
+                "validation": result.get("validation") or {},
+                "headers_captured": result.get("headers_captured", 0),
+                "cookies_captured": result.get("cookies_captured", 0),
+            },
+        )
+
     from app.services.hypothesis_rules import generate_hypotheses_for_scan
     from app.services.execution_context_service import activate_internal_context, reopen_auth_blocked_hypotheses
     from app.services.scan_work_queue import (
@@ -153,8 +165,8 @@ async def confirm_identity_capture(
     try:
         identity = db.query(ScanIdentity).filter(ScanIdentity.id == int(result["scan_identity_id"])).first()
         auth_session = db.query(ScanAuthSession).filter(ScanAuthSession.id == int(result["scan_auth_session_id"])).first()
-        if auth_session is None or str(auth_session.status or "") not in {"valid", "static"}:
-            raise RuntimeError("captured_session_failed_validation")
+        if auth_session is None:
+            raise RuntimeError("captured_session_not_found")
         internal_context = activate_internal_context(db, scan, auth_session, identity)
         generate_hypotheses_for_scan(db, scan)
         hypotheses_reopened = reopen_auth_blocked_hypotheses(db, scan)
@@ -172,10 +184,11 @@ async def confirm_identity_capture(
         except Exception:
             pass
         # dispatch_scan_work_items no-ops for a terminal scan (TERMINAL_SCAN_STATUSES
-        # includes completed_with_gaps) — requeued items would sit in "queued"
-        # forever without this. Only flip it back when there is requeued work,
-        # so a capture against an otherwise-idle scan doesn't reopen it for nothing.
-        if (evidence_requeued or crawl_requeued or skill_probes_seeded) and str(scan.status or "").lower() in {"completed", "completed_with_gaps"}:
+        # includes completed_with_gaps and failed) — requeued G1 items would sit
+        # in "queued" forever without this. Only flip it back when there is
+        # requeued work, so a capture against an otherwise-idle scan doesn't
+        # reopen it for nothing. Do not revive cancelled scans implicitly.
+        if (evidence_requeued or crawl_requeued or skill_probes_seeded) and str(scan.status or "").lower() in {"completed", "completed_with_gaps", "failed"}:
             scan.status = "running"
         db.commit()
         from app.workers.tasks import dispatch_scan_work_items

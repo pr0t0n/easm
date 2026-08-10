@@ -313,7 +313,17 @@ async def confirm_capture(db: Session, scan: ScanJob, capture_session_id: str) -
     db.add(session)
     db.commit()
 
-    await _teardown(capture)
+    if validation.get("valid"):
+        capture.status = "confirmed"
+        await _teardown(capture)
+    else:
+        # Keep the live browser open on validation failure. SPAs often render the
+        # same app shell for anonymous/authenticated GET /, while the useful
+        # proof only appears after the operator navigates to an authenticated
+        # area (profile/account/dashboard). Closing here turned a recoverable
+        # false-negative into a 404 on the next confirm attempt.
+        capture.status = "validation_failed"
+        capture.last_activity_at = time.monotonic()
 
     return {
         "scan_identity_id": identity.id,
@@ -387,11 +397,16 @@ async def _validate_captured_login(
     # Authorization header itself is strong material; liveness still must pass.
     if has_authorization and not auth_denied and not current_login_page:
         valid = True
+    browser_state = await _browser_authenticated_state(capture)
+    if not valid and not auth_denied and not current_login_page and browser_state.get("observed"):
+        valid = True
     reason = "authenticated_behavior_observed" if valid else (
         "authenticated_probe_denied" if auth_denied else
         "capture_still_on_login_page" if current_login_page else
         "no_authenticated_behavior_observed"
     )
+    if valid and not materially_different and not has_authorization and browser_state.get("observed"):
+        reason = "browser_authenticated_state_observed"
     return {
         "valid": valid,
         "reason": reason,
@@ -399,4 +414,51 @@ async def _validate_captured_login(
         "anonymous": anon_fp,
         "authenticated": auth_fp,
         "materially_different": materially_different,
+        "browser_state": browser_state,
     }
+
+
+async def _browser_authenticated_state(capture: CaptureSession) -> dict[str, Any]:
+    """Look for login-state evidence in the live browser without storing DOM.
+
+    This is intentionally conservative. It exists for SPA/app-shell targets
+    where the HTTP probe sees identical HTML for anonymous and authenticated
+    users, but the operator-driven browser visibly shows an authenticated
+    session after login.
+    """
+    try:
+        body_text = await capture.page.locator("body").inner_text(timeout=3_000)
+    except Exception:
+        return {"observed": False, "markers": []}
+
+    text = " ".join(str(body_text or "").lower().split())
+    if not text:
+        return {"observed": False, "markers": []}
+
+    marker_candidates: list[tuple[str, str]] = []
+    for label, value in (
+        ("identity_key", capture.identity_key),
+        ("username_ref", capture.username_ref),
+    ):
+        normalized = str(value or "").strip().lower()
+        if len(normalized) >= 3:
+            marker_candidates.append((label, normalized))
+
+    marker_candidates.extend(
+        [
+            ("logout", "logout"),
+            ("sign_out", "sign out"),
+            ("sair", "sair"),
+            ("desconectar", "desconectar"),
+            ("profile", "profile"),
+            ("perfil", "perfil"),
+            ("my_account", "my account"),
+            ("minha_conta", "minha conta"),
+            ("account_menu", "account"),
+            ("user_menu", "usuário"),
+            ("user_menu_ascii", "usuario"),
+        ]
+    )
+
+    observed = sorted({label for label, marker in marker_candidates if marker and marker in text})
+    return {"observed": bool(observed), "markers": observed[:10]}
