@@ -73,6 +73,43 @@ def test_each_required_phase_has_approved_skill_for_controlled_pentest():
     assert missing == []
 
 
+def test_mission_phase_contracts_are_aligned_with_operational_core():
+    from app.graph import mission
+    from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+    assert set(mission.PHASE_CONTRACTS) == set(PHASE_CONTRACTS)
+    for phase_id, contract in PHASE_CONTRACTS.items():
+        mission_contract = mission.PHASE_CONTRACTS[phase_id]
+        assert mission_contract["name"] == contract["name"]
+        assert mission_contract["required_tools"] == contract["required_tools"]
+        assert mission_contract["optional_tools"] == contract["optional_tools"]
+
+    assert mission.PHASE_CONTRACTS["P11"]["name"] == "SSRF Testing"
+    assert mission.PHASE_CONTRACTS["P13"]["name"] == "Access Control & Business Logic"
+    assert mission.PHASE_CONTRACTS["P13"]["required_tools"] == ["bl-test"]
+
+
+def test_agent_registry_uses_current_phase_taxonomy():
+    from app.agents.agent_registry import AGENT_REGISTRY
+
+    agents = {agent.agent_id: agent for agent in AGENT_REGISTRY}
+    assert agents["agent-vuln-ssrf"].phase_ids == ["P11"]
+    assert agents["agent-vuln-business-logic"].phase_ids == ["P13"]
+    assert "bl-test" in agents["agent-vuln-business-logic"].tools
+    assert "P13" in agents["agent-vuln-idor"].phase_ids
+    assert "P13" not in agents["agent-vuln-ssrf"].phase_ids
+
+
+def test_scan_api_phase_names_come_from_operational_contracts():
+    from app.api.routes_scans import _canonical_phase_names
+
+    names = _canonical_phase_names()
+    assert names["P11"] == "SSRF Testing"
+    assert names["P13"] == "Access Control & Business Logic"
+    assert names["P16"] == "API Input Surface Review"
+    assert "API Attack Surface" not in set(names.values())
+
+
 def test_campaign_report_is_built_from_phase_ledger_not_only_findings():
     source = _source("app/services/offensive_operator_core.py")
     report_builder = source[source.index("class ReportBuilder") : source.index("class OffensiveSkillRuntime")]

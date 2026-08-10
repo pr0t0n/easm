@@ -146,7 +146,7 @@ AGENT_OSINT_CLOUD = AgentManifest(
     tools=["nuclei", "shodan-cli", "trufflehog"],
     required_skills=["cloud_storage_enum", "cloud_misconfiguration"],
     when_to_activate="Hunt misconfigured cloud storage and public buckets.",
-    phase_ids=["P10"],
+    phase_ids=["P18"],
     priority=7,
     timeout_seconds=400,
 )
@@ -162,8 +162,8 @@ AGENT_VULN_CVE = AgentManifest(
     description="Known vulnerability scanning via Nuclei, version-based matching.",
     tools=["nuclei", "nmap-vulscan"],
     required_skills=["cve_matching", "nuclei_template_selection"],
-    when_to_activate="Run after fingerprinting to catch known issues quickly.",
-    phase_ids=["P11"],
+    when_to_activate="Run vulnerability templates after fingerprinting, then validate credible exploit paths.",
+    phase_ids=["P09", "P17"],
     priority=9,
     timeout_seconds=900,
 )
@@ -176,7 +176,7 @@ AGENT_VULN_INJECTION = AgentManifest(
     tools=["sqlmap", "dalfox", "wapiti", "nikto"],
     required_skills=["injection_testing", "payload_crafting", "result_validation"],
     when_to_activate="Test discovered parameters for injection flaws.",
-    phase_ids=["P12"],
+    phase_ids=["P10", "P12"],
     priority=9,
     timeout_seconds=1200,
 )
@@ -189,9 +189,22 @@ AGENT_VULN_SSRF = AgentManifest(
     tools=["nuclei", "interactsh-client"],
     required_skills=["ssrf_detection", "oob_callback", "redirect_validation"],
     when_to_activate="Test URL-based parameters for SSRF/redirect flaws.",
-    phase_ids=["P13"],
+    phase_ids=["P11"],
     priority=8,
     timeout_seconds=600,
+)
+
+AGENT_VULN_BUSINESS_LOGIC = AgentManifest(
+    agent_id="agent-vuln-business-logic",
+    name="Access Control & Business Logic Agent",
+    category="vulnerability",
+    description="Business-logic, BOLA/BFLA, mass-assignment, CSRF and object authorization checks using observed authenticated endpoints.",
+    tools=["bl-test", "chromium-capture", "arjun", "nuclei-idor", "nuclei-redirect", "curl"],
+    required_skills=["business_logic_testing", "authorization_testing", "bola_bfla", "mass_assignment", "csrf_validation"],
+    when_to_activate="Validate authenticated object boundaries and business flows discovered during crawl/API analysis.",
+    phase_ids=["P13"],
+    priority=9,
+    timeout_seconds=900,
 )
 
 AGENT_VULN_AUTH = AgentManifest(
@@ -267,7 +280,7 @@ AGENT_VULN_IDOR = AgentManifest(
     tools=["katana", "arjun", "nuclei", "curl-headers"],
     required_skills=["idor_detection", "two_account_validation", "authorization_testing", "role_tenant_diffing", "object_id_mutation"],
     when_to_activate="Test ID/resource access controls after endpoint discovery and authentication context collection.",
-    phase_ids=["P19"],
+    phase_ids=["P13", "P19"],
     priority=8,
     timeout_seconds=600,
 )
@@ -333,6 +346,7 @@ AGENT_REGISTRY: list[AgentManifest] = [
     AGENT_VULN_CVE,
     AGENT_VULN_INJECTION,
     AGENT_VULN_SSRF,
+    AGENT_VULN_BUSINESS_LOGIC,
     AGENT_VULN_AUTH,
     AGENT_VULN_DIRECTORY,
     AGENT_VULN_API,

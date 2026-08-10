@@ -409,7 +409,7 @@ def _build_mission_phase_contracts() -> "dict[str, dict[str, Any]]":
     return result
 
 
-_PHASE_CONTRACTS_FALLBACK: dict[str, dict[str, Any]] = {
+_LEGACY_PHASE_CONTRACTS_UNUSED: dict[str, dict[str, Any]] = {
     "P01": {
         "phase_id": "P01",
         "name": "Subdomain Enumeration",
@@ -940,13 +940,27 @@ _PHASE_CONTRACTS_FALLBACK: dict[str, dict[str, Any]] = {
     },
 }
 
-# PHASE_CONTRACTS: use offensive_operator_core as source of truth so that the
-# phase walker (PENTEST_PHASES) and the workflow validator (validate_phase_exit_criteria)
-# always operate on the same required_tools list. Falls back to the legacy dict above
-# only when offensive_operator_core fails to import (e.g. missing optional dep).
-PHASE_CONTRACTS: dict[str, dict[str, Any]] = (
-    _build_mission_phase_contracts() or _PHASE_CONTRACTS_FALLBACK
-)
+# PHASE_CONTRACTS: offensive_operator_core is the only active source of truth.
+# Do not fall back to the historical dict above: it uses an obsolete taxonomy
+# (for example P13=SSRF, P21=Secret Exposure) and caused UI/validator/runner
+# misunderstandings.  If the core contracts fail to import, expose the same
+# minimal P01 fallback used by PENTEST_PHASES instead of reintroducing stale
+# semantics.
+PHASE_CONTRACTS: dict[str, dict[str, Any]] = _build_mission_phase_contracts() or {
+    "P01": {
+        "phase_id": "P01",
+        "name": "Subdomain Enumeration",
+        "required_skills": ["skill.recon.subdomain_enumeration"],
+        "required_tools": ["subfinder"],
+        "optional_tools": [],
+        "exit_criteria": {
+            "min_required_tools_attempted": 1,
+            "min_required_tools_succeeded": 1,
+            "evidence_persisted": True,
+            "parser_result_registered": False,
+        },
+    }
+}
 
 
 def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:

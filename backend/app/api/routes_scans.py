@@ -67,6 +67,42 @@ router = APIRouter(prefix="/api", tags=["scans"])
 vector_store = FalsePositiveVectorStore()
 
 
+def _canonical_phase_names() -> dict[str, str]:
+    """Return P01-P22 labels from the operational phase contracts."""
+    try:
+        from app.services.offensive_operator_core import PHASE_CONTRACTS
+
+        return {
+            str(phase_id): str(contract.get("name") or phase_id)
+            for phase_id, contract in PHASE_CONTRACTS.items()
+        }
+    except Exception:
+        return {
+            "P01": "Subdomain Enumeration",
+            "P02": "Port Service Discovery",
+            "P03": "Endpoint Discovery",
+            "P04": "Parameter Discovery",
+            "P05": "Surface Expansion",
+            "P06": "HTTP Fingerprinting & WAF Detection",
+            "P07": "Technology Detection",
+            "P08": "JavaScript Endpoint Analysis",
+            "P09": "Vulnerability Template Scan",
+            "P10": "Injection Testing",
+            "P11": "SSRF Testing",
+            "P12": "XSS Testing",
+            "P13": "Access Control & Business Logic",
+            "P14": "Auth Boundary Testing",
+            "P15": "File Handling Testing",
+            "P16": "API Input Surface Review",
+            "P17": "Exploit Validation",
+            "P18": "Credential Exposure Boundary",
+            "P19": "Post Exploitation Boundary",
+            "P20": "Attack Path Correlation",
+            "P21": "Evidence Quality Review",
+            "P22": "Campaign Reporting",
+        }
+
+
 def _effective_mission_progress(job: ScanJob) -> int:
     progress = int(job.mission_progress or 0)
     state = dict(job.state_data or {})
@@ -5193,30 +5229,7 @@ def scan_runtime_feed(
         .group_by(_SWI_rt.phase_id, _SWI_rt.tool_name, _SWI_rt.profile, _SWI_rt.status)
         .all()
     )
-    _phase_names = {
-        "P01": "Subdomain Enumeration",
-        "P02": "Port Service Discovery",
-        "P03": "Endpoint Discovery",
-        "P04": "Parameter Discovery",
-        "P05": "Surface Expansion",
-        "P06": "HTTP Fingerprinting & WAF Detection",
-        "P07": "Technology Detection",
-        "P08": "JavaScript Endpoint Analysis",
-        "P09": "Vulnerability Template Scan",
-        "P10": "Injection Testing",
-        "P11": "SSRF Testing",
-        "P12": "XSS Testing",
-        "P13": "Access Control & Business Logic",
-        "P14": "Auth Boundary Testing",
-        "P15": "File Handling Testing",
-        "P16": "API Input Surface Review",
-        "P17": "Exploit Validation",
-        "P18": "Credential Exposure Boundary",
-        "P19": "Post Exploitation Boundary",
-        "P20": "Attack Path Correlation",
-        "P21": "Evidence Quality Review",
-        "P22": "Campaign Reporting",
-    }
+    _phase_names = _canonical_phase_names()
     for phase_id, tool_name, profile, status_value, count, last_error, started_at, finished_at in _wq_tool_rows:
         phase_id = str(phase_id or "")
         target = "all-targets"
@@ -8878,31 +8891,8 @@ def get_phase_breakdown(
         elif status == "skipped":
             p["skipped"] += cnt
 
-    # Phase metadata (id → name) aligned with PENTEST_PHASES
-    PHASE_NAMES = {
-        "P01": "Subdomain Enumeration",
-        "P02": "Port Service Discovery",
-        "P03": "Endpoint Discovery",
-        "P04": "Parameter Discovery",
-        "P05": "Surface Expansion",
-        "P06": "HTTP Fingerprinting & WAF Detection",
-        "P07": "Technology Detection",
-        "P08": "JavaScript Endpoint Analysis",
-        "P09": "Vulnerability Template Scan",
-        "P10": "Injection Testing",
-        "P11": "SSRF Testing",
-        "P12": "XSS Testing",
-        "P13": "Access Control & Business Logic",
-        "P14": "Auth Boundary Testing",
-        "P15": "File Handling Testing",
-        "P16": "API Attack Surface",
-        "P17": "Exploit Validation",
-        "P18": "Credential Exposure Boundary",
-        "P19": "Post Exploitation Boundary",
-        "P20": "Attack Path Correlation",
-        "P21": "Evidence Quality Review",
-        "P22": "Campaign Reporting",
-    }
+    # Phase metadata (id → name) aligned with the operational contracts.
+    PHASE_NAMES = _canonical_phase_names()
 
     # ── Cross-reference with phase_ledger_v2 ─────────────────────────────────
     # Phases executed via the LangGraph engine have no scan_work_items rows.

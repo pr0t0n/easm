@@ -340,7 +340,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 
     # ── VULNERABILITY ASSESSMENT ────────────────────────────────────────────
     "nuclei": {
-        "category": "vuln", "phase": "P11|P13|P14|P16|P17|P19|P20",
+        "category": "vuln", "phase": "P09|P10|P11|P14|P15|P16|P17|P18|P19|P20",
         "description": "Template-driven scanner — 8000+ checks for CVEs, misconfigs, exposures.",
         "when_to_use": "Primary vuln scanner — run on every live URL after recon.",
         "inputs": "URL list, template tags", "outputs": "findings JSON",
@@ -389,14 +389,14 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "TLS service reachable",
     },
     "nikto": {
-        "category": "vuln", "phase": "P12",
+        "category": "vuln", "phase": "P09|P10|P12|P17|P20",
         "description": "Legacy web server scanner (6700+ tests for misconfigs, default files).",
         "when_to_use": "Quick coverage of common web server flaws; complements nuclei.",
         "inputs": "URL", "outputs": "vulnerability list",
         "prerequisites": "live URL",
     },
     "wapiti": {
-        "category": "vuln", "phase": "P12|P16",
+        "category": "vuln", "phase": "P10|P11|P16|P17",
         "description": "Black-box web scanner — SQLi, XSS, file disclosure, SSRF, XXE.",
         "when_to_use": "Active injection scanning when crawler has built URL map.",
         "inputs": "URL", "outputs": "findings",
@@ -410,14 +410,14 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "wfuzz binary and Seclists in kali_runner",
     },
     "sqlmap": {
-        "category": "vuln", "phase": "P12",
+        "category": "vuln", "phase": "P10|P17",
         "description": "Automatic SQL injection + DB takeover (extracts schema, dumps tables).",
         "when_to_use": "When recon flags suspect parameters or arjun finds reflective inputs.",
         "inputs": "URL with params", "outputs": "injection points + DB extracts",
         "prerequisites": "URL with parameter",
     },
     "dalfox": {
-        "category": "vuln", "phase": "P12",
+        "category": "vuln", "phase": "P10|P12",
         "description": "Modern XSS scanner (DOM, reflected, stored) with payload mutation.",
         "when_to_use": "After parameter discovery (arjun) on dynamic endpoints.",
         "inputs": "URL", "outputs": "XSS findings + PoC",
@@ -431,7 +431,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "prerequisites": "WP-DETECTED, WPSCAN_API_TOKEN (for CVE intel)",
     },
     "interactsh-client": {
-        "category": "vuln", "phase": "P13",
+        "category": "vuln", "phase": "P11",
         "description": "OOB interaction server — proves blind SSRF/RCE/XSS via DNS callbacks.",
         "when_to_use": "Validate blind vulnerabilities found by nuclei or active web scanners.",
         "inputs": "registered hostname", "outputs": "callback log",
