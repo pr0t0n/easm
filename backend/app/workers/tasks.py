@@ -4118,6 +4118,7 @@ def dispatch_scan_work_items(
                 _GATE_UNLOCKS as _gr_unlocks,
                 triage_post_p09_injection as _gr_triage,
                 qualified_targets_for_gate as _gr_qualified,
+                repair_authenticated_deep_test_work_items as _gr_repair_g1_deep,
             )
             from app.models.models import ScanWorkItem as _GR_SWI
             from sqlalchemy import func as _gr_func
@@ -4187,6 +4188,10 @@ def dispatch_scan_work_items(
                 if _gate_pid == "P09":
                     try:
                         _gr_triage(db, scan_id)
+                    except Exception:
+                        pass
+                    try:
+                        _gr_repair_g1_deep(db, job)
                     except Exception:
                         pass
                     _unb_targets = _p09_gate_release_targets(_unb_targets)
@@ -5881,6 +5886,13 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                             # gate for unrelated methodologies.
                             from app.services.scan_work_queue import triage_post_p09_injection as _triage_p09
                             _triage_result = _triage_p09(db, job.id)
+                            try:
+                                from app.services.scan_work_queue import (
+                                    repair_authenticated_deep_test_work_items as _repair_g1_deep,
+                                )
+                                _repair_g1_deep(db, job)
+                            except Exception:
+                                pass
                             if _triage_result.get("cancelled", 0) > 0:
                                 import logging as _trilog
                                 _trilog.getLogger(__name__).info(

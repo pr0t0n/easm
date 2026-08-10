@@ -64,6 +64,29 @@ def test_internal_endpoint_matrix_includes_code_parameter_api_and_business_analy
     assert ("P13", "bl-test") in matrix
 
 
+def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() -> None:
+    state = {
+        "discovered_endpoints": ["https://example.test/support/manage"],
+        "discovered_parameterized_urls": ["https://example.test/search?q=invoice"],
+    }
+
+    assert "wapiti" in scan_work_queue._authenticated_tools_for_phase(
+        "P10", "https://example.test/support/manage", state
+    )
+    assert "sqlmap" in scan_work_queue._authenticated_tools_for_phase(
+        "P10", "https://example.test/search?q=invoice", state
+    )
+    assert "nuclei" in scan_work_queue._authenticated_tools_for_phase(
+        "P11", "https://example.test/support/manage", state
+    )
+    assert "dalfox" in scan_work_queue._authenticated_tools_for_phase(
+        "P12", "https://example.test/search?q=invoice", state
+    )
+    assert "bl-test" in scan_work_queue._authenticated_tools_for_phase(
+        "P13", "https://example.test/support/manage", state
+    )
+
+
 def test_g1_clones_crawler_spider_and_fuzzing_without_mutating_g0(monkeypatch) -> None:
     tools = [
         ("P03", "katana"), ("P03", "hakrawler"), ("P03", "gospider"),
@@ -130,6 +153,65 @@ def test_g1_clones_crawler_spider_and_fuzzing_without_mutating_g0(monkeypatch) -
     assert all(row.execution_context == "internal" for row in g1_items)
     assert all(row.auth_session_revision == 1 for row in g1_items)
     assert all(source.execution_context == "external" and source.result == {"g0": True} for source in sources)
+
+
+def test_skill_probe_seed_uses_internal_session_context(monkeypatch) -> None:
+    from app.services import skill_execution_engine
+
+    monkeypatch.setattr(
+        "app.services.auth_session_manager.has_any_valid_session",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.execution_context_service.get_context",
+        lambda *args, **kwargs: SimpleNamespace(
+            status="running",
+            session_revision=7,
+            identity_key="vidal",
+        ),
+    )
+    monkeypatch.setattr(
+        skill_execution_engine,
+        "get_skill_by_id",
+        lambda skill_id: {"phase_ids": ["P13"]} if skill_id == "skill.idor_object_authorization" else None,
+    )
+
+    class Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *_args, **_kwargs):
+            return Query()
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+    db = DB()
+    created = skill_execution_engine.seed_skill_probe_items(
+        db,
+        SimpleNamespace(id=81),
+        "P13",
+        "https://example.test/support/manage",
+    )
+    items = [row for row in db.added if isinstance(row, ScanWorkItem)]
+
+    assert created == 1
+    assert items[0].execution_context == "internal"
+    assert items[0].auth_session_revision == 7
+    assert items[0].item_metadata["identity_key"] == "vidal"
 
 
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:

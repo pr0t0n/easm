@@ -70,9 +70,9 @@ def test_prompt_tool_catalog_does_not_assign_tls_tools_to_p18() -> None:
 
 
 def test_mission_fallback_does_not_reintroduce_p18_tls_contract() -> None:
-    from app.graph.mission import _PHASE_CONTRACTS_FALLBACK
+    from app.graph.mission import _LEGACY_PHASE_CONTRACTS_UNUSED
 
-    p18 = _PHASE_CONTRACTS_FALLBACK["P18"]
+    p18 = _LEGACY_PHASE_CONTRACTS_UNUSED["P18"]
     assert p18["name"] == "Credential Exposure Boundary"
     assert p18["required_tools"] == ["theharvester"]
     assert "sslscan" not in p18["optional_tools"]

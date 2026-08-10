@@ -115,6 +115,7 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
     """
     from app.models.models import ScanWorkItem
     from app.services.auth_session_manager import has_any_valid_session
+    from app.services.execution_context_service import get_context
     from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
     from datetime import datetime
 
@@ -127,6 +128,20 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
     target = str(target or "")[:500]
     if not target:
         return 0
+
+    execution_context = "external"
+    auth_session_revision = 0
+    identity_key = ""
+    try:
+        internal = get_context(db, job.id, "internal")
+        if internal is not None and str(internal.status or "") in {"running", "pending"}:
+            execution_context = "internal"
+            auth_session_revision = int(getattr(internal, "session_revision", 0) or 1)
+            identity_key = str(getattr(internal, "identity_key", "") or "")
+    except Exception:
+        execution_context = "external"
+        auth_session_revision = 0
+        identity_key = ""
 
     created = 0
     for skill_id in _SKILL_PROBE_CANDIDATES:
@@ -151,6 +166,7 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
 
         existing = db.query(ScanWorkItem.id).filter(
             ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == execution_context,
             ScanWorkItem.phase_id == phase_id,
             ScanWorkItem.tool_name == tool_name,
             ScanWorkItem.target == target,
@@ -161,6 +177,8 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
 
         item = ScanWorkItem(
             scan_job_id=job.id,
+            execution_context=execution_context,
+            auth_session_revision=auth_session_revision,
             phase_id=phase_id,
             target=target,
             tool_name=tool_name,
@@ -171,6 +189,9 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
             max_attempts=1,
             item_metadata=apply_phase_tool_metadata({
                 "source": "skill_execution_engine",
+                "execution_context": execution_context,
+                "auth_session_revision": auth_session_revision,
+                "identity_key": identity_key,
                 "skill_id": skill_id,
                 "skill_ids": [skill_id],
             }, phase_id, tool_name, source="skill_execution_engine"),
@@ -191,7 +212,11 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
             scan_job_id=job.id,
             source="skill-execution-engine",
             level="INFO",
-            message=f"skill_probe_seeded scan={job.id} phase={phase_id} target={target} items_created={created}",
+            message=(
+                f"skill_probe_seeded scan={job.id} phase={phase_id} target={target} "
+                f"context={execution_context} session_revision={auth_session_revision} "
+                f"items_created={created}"
+            ),
         ))
         db.commit()
 

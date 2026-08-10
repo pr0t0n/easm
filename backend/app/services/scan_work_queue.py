@@ -1922,6 +1922,38 @@ _AUTHENTICATED_DISCOVERY_TOOLS = {
     "linkfinder", "nuclei-js-secrets", "nuclei-js-analysis",
 }
 
+_AUTHENTICATED_DEEP_TEST_TOOLS = {
+    # Broad authenticated dynamic analysis.  These do not require a prior
+    # positive Nuclei signal; dispatch-time evidence/applicability still decides
+    # whether each target is safe and useful.
+    "wapiti", "nikto", "nuclei", "bl-test",
+    # Evidence-gated active checks.  They are selected only when crawler/spider
+    # state has already produced concrete parameters/endpoints for the target.
+    "sqlmap", "dalfox", "nuclei-sqli", "nuclei-xss", "nuclei-ssrf",
+    "nuclei-idor", "nuclei-redirect",
+    # Parameter/fuzzer tools that are also useful after authentication.
+    "arjun", "ffuf", "ffuf-params", "wfuzz",
+}
+
+
+def _authenticated_tools_for_phase(phase_id: str, target: str, state: dict[str, Any]) -> list[str]:
+    tools = [
+        tool
+        for tool in _phase_tools(phase_id)
+        if tool in _AUTHENTICATED_DISCOVERY_TOOLS or tool in _AUTHENTICATED_DEEP_TEST_TOOLS
+    ]
+    if phase_id == "P08":
+        tools = list(dict.fromkeys(tools + ["linkfinder", "nuclei-js-analysis", "nuclei-js-secrets"]))
+    if phase_id == "P13":
+        tools = list(dict.fromkeys(["bl-test"] + tools))
+
+    selected: list[str] = []
+    for tool in tools:
+        decision = _tool_applicability_decision(phase_id, tool, target, state, at="enqueue")
+        if decision.get("applicable"):
+            selected.append(tool)
+    return list(dict.fromkeys(selected))
+
 
 def requeue_authenticated_crawl_items(db: Session, job: ScanJob, identity_key: str) -> int:
     """Create independent G1 crawler/spider/fuzzing items.
@@ -2054,18 +2086,10 @@ def seed_internal_first_work_items(db: Session, job: ScanJob, identity_key: str)
     clean_targets, skipped_targets = filter_targets_to_authorized_scope(targets, authorized_scope_for_scan(db, job.id))
     now = datetime.now()
     created = 0
-    phases = ["P03", "P04", "P05", "P08", "P09", "P13", "P16"]
+    phases = ["P03", "P04", "P05", "P08", "P09", "P10", "P11", "P12", "P13", "P16"]
     for target in clean_targets:
         for phase_id in phases:
-            tools = [
-                tool
-                for tool in _phase_tools(phase_id)
-                if tool in _AUTHENTICATED_DISCOVERY_TOOLS or tool in {"nuclei", "bl-test"}
-            ]
-            if phase_id == "P08":
-                tools = list(dict.fromkeys(tools + ["linkfinder", "nuclei-js-analysis", "nuclei-js-secrets"]))
-            if phase_id == "P13":
-                tools = [tool for tool in tools if tool == "bl-test"] or ["bl-test"]
+            tools = _authenticated_tools_for_phase(phase_id, target, state)
             for tool in tools:
                 exists = db.query(ScanWorkItem.id).filter(
                     ScanWorkItem.scan_job_id == job.id,
@@ -2125,6 +2149,164 @@ def seed_internal_first_work_items(db: Session, job: ScanJob, identity_key: str)
             ),
         ))
     return created
+
+
+def _candidate_internal_deep_targets(db: Session, job: ScanJob, *, limit: int = 40) -> list[str]:
+    state = dict(job.state_data or {})
+    raw: list[str] = []
+
+    def _add(value: Any) -> None:
+        if value in (None, "", [], {}, ()):
+            return
+        if isinstance(value, dict):
+            for key in ("url", "endpoint", "target", "base_url", "page", "action"):
+                if value.get(key):
+                    _add(value.get(key))
+                    return
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _add(item)
+            return
+        text_value = str(value).strip()
+        if text_value:
+            raw.append(text_value)
+
+    for key in (
+        "endpoint_test_targets",
+        "internal_discovered_endpoints",
+        "discovered_endpoints",
+        "crawled_endpoints",
+        "discovered_parameterized_urls",
+    ):
+        _add(state.get(key))
+    _add(state.get("provided_targets"))
+    _add(getattr(job, "target_query", "") or state.get("target_query"))
+
+    try:
+        from app.models.models import OffensiveEndpoint
+
+        rows = (
+            db.query(OffensiveEndpoint)
+            .filter(OffensiveEndpoint.scan_job_id == job.id)
+            .order_by(OffensiveEndpoint.last_seen.desc().nullslast())
+            .limit(500)
+            .all()
+        )
+        for row in rows:
+            _add(getattr(row, "normalized_url", None) or getattr(row, "url", None))
+    except Exception:
+        pass
+
+    clean, _ = filter_targets_to_authorized_scope(raw, authorized_scope_for_scan(db, job.id))
+    seen: set[str] = set()
+    out: list[str] = []
+    for target in clean:
+        normalized = str(target or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        parsed_type = _target_type(normalized)
+        if parsed_type not in {"url", "api_endpoint", "parameterized_endpoint", "domain", "subdomain"}:
+            continue
+        try:
+            parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
+            path = parsed.path or ""
+            segments = [seg for seg in path.split("/") if seg]
+            if len(normalized) > 320:
+                continue
+            if path.count(".js/") > 0 or path.count("config.js/") > 0:
+                continue
+            if any(segments.count(seg) > 3 for seg in set(segments)):
+                continue
+        except Exception:
+            pass
+        seen.add(normalized)
+        out.append(normalized)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def repair_authenticated_deep_test_work_items(db: Session, job: ScanJob, identity_key: str | None = None) -> dict[str, int]:
+    """Idempotently seed missing G1 deep-test rows after authenticated discovery.
+
+    This is the safety net for scans already past P08/P09: crawlers may have
+    discovered internal endpoints after the original internal-first seed, so
+    P10/P11/P12/P13 must be materialized from the observed G1 surface, not only
+    from the initial root target.
+    """
+    from app.services.execution_context_service import get_context
+
+    internal = get_context(db, job.id, "internal")
+    if internal is None or str(internal.status or "") not in {"running", "pending"}:
+        return {"created": 0, "targets": 0, "phases": 0}
+
+    state = dict(job.state_data or {})
+    now = datetime.now()
+    revision = int(getattr(internal, "session_revision", 0) or 1)
+    identity = str(identity_key or getattr(internal, "identity_key", "") or "")
+    targets = _candidate_internal_deep_targets(db, job)
+    phases = ["P10", "P11", "P12", "P13"]
+    created = 0
+    for target in targets:
+        for phase_id in phases:
+            for tool in _authenticated_tools_for_phase(phase_id, target, state):
+                exists = db.query(ScanWorkItem.id).filter(
+                    ScanWorkItem.scan_job_id == job.id,
+                    ScanWorkItem.execution_context == "internal",
+                    ScanWorkItem.phase_id == phase_id,
+                    ScanWorkItem.tool_name == tool[:120],
+                    ScanWorkItem.target == target[:500],
+                ).first()
+                if exists:
+                    continue
+                rc = resource_class_for_tool(tool)
+                metadata = apply_phase_tool_metadata({
+                    "source": "authenticated_deep_repair",
+                    "execution_context": "internal",
+                    "identity_key": identity,
+                    "session_revision": revision,
+                    "queue_ready_at": now.isoformat(),
+                    "repair_reason": "p09_completed_with_authenticated_surface",
+                    "applicability": _tool_applicability_decision(phase_id, tool, target, state, at="enqueue"),
+                }, phase_id, tool, source="authenticated_deep_repair")
+                db.add(ScanWorkItem(
+                    scan_job_id=job.id,
+                    execution_context="internal",
+                    auth_session_revision=revision,
+                    phase_id=phase_id,
+                    target=target[:500],
+                    tool_name=tool[:120],
+                    profile=_tool_profile(tool)[:120],
+                    resource_class=rc,
+                    priority=max(1, PHASE_PRIORITY.get(phase_id, 100) - 6),
+                    status="queued",
+                    max_attempts=2,
+                    item_metadata=metadata,
+                    created_at=now,
+                    updated_at=now,
+                ))
+                db.flush()
+                created += 1
+    if created:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"authenticated_deep_repair scan={job.id} identity={identity} "
+                f"session_revision={revision} targets={len(targets)} created={created}"
+            ),
+        ))
+        state["authenticated_deep_repair"] = {
+            "identity_key": identity,
+            "session_revision": revision,
+            "targets": targets[:50],
+            "created": created,
+            "at": now.isoformat(),
+        }
+        job.state_data = state
+    return {"created": created, "targets": len(targets), "phases": len(phases)}
 
 
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
