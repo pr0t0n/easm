@@ -87,6 +87,17 @@ def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() 
     )
 
 
+def test_authenticated_deep_target_filter_rejects_static_and_mime_artifacts() -> None:
+    assert scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/api/users")
+    assert scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/support/manage")
+    assert not scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/assets/app.js")
+    assert not scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/multipart/form-data")
+    assert not scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/image/png")
+    assert not scan_work_queue._looks_like_actionable_deep_endpoint(
+        "https://example.test/FQAABDgAAAAeT1MvMlYNYwkAAAEgAAAAYGNtYXABDQLUAAACNAAAAUJoZWFk"
+    )
+
+
 def test_g1_clones_crawler_spider_and_fuzzing_without_mutating_g0(monkeypatch) -> None:
     tools = [
         ("P03", "katana"), ("P03", "hakrawler"), ("P03", "gospider"),
