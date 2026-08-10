@@ -88,6 +88,8 @@ def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() 
 
 
 def test_authenticated_deep_target_filter_rejects_static_and_mime_artifacts() -> None:
+    from app.services.offensive_inventory_service import is_actionable_endpoint_url
+
     assert scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/api/users")
     assert scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/support/manage")
     assert not scan_work_queue._looks_like_actionable_deep_endpoint("https://example.test/assets/app.js")
@@ -96,6 +98,9 @@ def test_authenticated_deep_target_filter_rejects_static_and_mime_artifacts() ->
     assert not scan_work_queue._looks_like_actionable_deep_endpoint(
         "https://example.test/FQAABDgAAAAeT1MvMlYNYwkAAAEgAAAAYGNtYXABDQLUAAACNAAAAUJoZWFk"
     )
+    assert is_actionable_endpoint_url("https://example.test/api/users")
+    assert not is_actionable_endpoint_url("https://example.test/assets/app.js")
+    assert not is_actionable_endpoint_url("https://example.test/text/plain")
 
 
 def test_g1_clones_crawler_spider_and_fuzzing_without_mutating_g0(monkeypatch) -> None:

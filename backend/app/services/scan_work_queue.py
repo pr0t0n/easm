@@ -2219,71 +2219,12 @@ def _candidate_internal_deep_targets(db: Session, job: ScanJob, *, limit: int = 
 
 def _looks_like_actionable_deep_endpoint(target: str) -> bool:
     """Reject JS/CSS/MIME/font artifacts before seeding active deep tests."""
-    normalized = str(target or "").strip()
-    if not normalized:
-        return False
     try:
-        parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
-        path = parsed.path or "/"
-        lower_path = path.lower()
-        segments = [seg for seg in path.split("/") if seg]
-        lower_segments = [seg.lower() for seg in segments]
-        static_suffixes = (
-            ".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif",
-            ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".map", ".ts",
-            ".html", ".json",
-        )
-        mime_fragments = (
-            "multipart/form-data", "application/", "image/", "text/css",
-            "text/javascript", "text/plain", "font/", "pdf.worker", "dd/mm/yyyy",
-            "mm/dd/yyyy", "mmmm/yyyy",
-        )
-        library_fragments = (
-            "date-fns", "use-sync-external-store", "zustand", "reactgridlayout",
-            "draggable", "calculateutils", "responsiveutils", "utils/types",
-            "/utils", "/types", "/constants", "example/url", "path/file",
-        )
-        if len(normalized) > 320:
-            return False
-        if lower_path.startswith("/assets/"):
-            return False
-        if any(fragment in lower_path for fragment in mime_fragments):
-            return False
-        if any(fragment in lower_path for fragment in library_fragments):
-            return False
-        if re.fullmatch(r"/(?:america|europe|asia|africa|pacific|atlantic)/[a-z_/-]+/?", lower_path):
-            return False
-        if re.fullmatch(r"/(?:\d{1,4}|mm|dd|yyyy)[a-z0-9_/-]*(?:/\d{1,4})?/?", lower_path):
-            return False
-        if lower_path.count(".js/") > 0 or lower_path.count("config.js/") > 0:
-            return False
-        if any(seg.endswith(static_suffixes) for seg in lower_segments):
-            return False
-        if any(len(seg) > 80 for seg in segments):
-            return False
-        if any(segments.count(seg) > 3 for seg in set(segments)):
-            return False
-        if re.fullmatch(r"/(?:40[134]|50[0234])/?", lower_path):
-            return False
-        # Base64/font table fragments leaked from bundled assets are usually
-        # long, high-entropy path segments without API/action words.
-        action_words = {
-            "api", "user", "users", "support", "manage", "permission", "permissions",
-            "organization", "settings", "domains", "protocol", "openid-connect",
-            "userinfo", "registration", "registrations", "impersonate", "product",
-            "products", "pricing", "terms", "terms-acceptance", "terms-conditions",
-            "dashboard", "dashboards", "billing", "projects", "organizations",
-            "members", "tickets", "help-center", "profile", "auth", "login",
-        }
-        has_action_word = any(seg.lower() in action_words for seg in segments)
-        if segments and parsed.query == "" and not has_action_word:
-            return False
-        if segments and not has_action_word:
-            if any(len(seg) >= 32 and re.fullmatch(r"[A-Za-z0-9_+/=-]+", seg) for seg in segments):
-                return False
+        from app.services.offensive_inventory_service import is_actionable_endpoint_url
+
+        return is_actionable_endpoint_url(target)
     except Exception:
-        return True
-    return True
+        return bool(str(target or "").strip())
 
 
 def repair_authenticated_deep_test_work_items(db: Session, job: ScanJob, identity_key: str | None = None) -> dict[str, int]:

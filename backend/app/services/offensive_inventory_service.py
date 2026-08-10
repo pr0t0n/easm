@@ -87,6 +87,82 @@ def normalize_url(url: str, base: str | None = None) -> str:
     return urlunparse((scheme, netloc, path, "", query, ""))
 
 
+def is_actionable_endpoint_url(url: str) -> bool:
+    """True when a discovered URL is a route/API/form worth active testing.
+
+    Crawler and JS extractors often surface asset names, MIME strings,
+    timezone/date-format constants and high-entropy font/bundle fragments as
+    path-like strings. Those remain useful raw evidence, but they are not
+    application endpoints and must not be promoted into active P10-P13 tests.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        path = parsed.path or "/"
+        lower_path = path.lower()
+        segments = [seg for seg in path.split("/") if seg]
+        lower_segments = [seg.lower() for seg in segments]
+    except Exception:
+        return True
+
+    static_suffixes = (
+        ".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif",
+        ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".map", ".ts",
+        ".html",
+    )
+    mime_fragments = (
+        "multipart/form-data", "application/", "image/", "text/css",
+        "text/javascript", "text/plain", "font/", "pdf.worker", "dd/mm/yyyy",
+        "mm/dd/yyyy", "mmmm/yyyy",
+    )
+    library_fragments = (
+        "date-fns", "use-sync-external-store", "zustand", "reactgridlayout",
+        "draggable", "calculateutils", "responsiveutils", "utils/types",
+        "/utils", "/types", "/constants", "example/url", "path/file",
+    )
+    if len(raw) > 320:
+        return False
+    if lower_path.startswith("/assets/"):
+        return False
+    if any(fragment in lower_path for fragment in mime_fragments):
+        return False
+    if any(fragment in lower_path for fragment in library_fragments):
+        return False
+    if lower_path.count(".js/") > 0 or lower_path.count("config.js/") > 0:
+        return False
+    if any(seg.endswith(static_suffixes) for seg in lower_segments):
+        return False
+    if any(len(seg) > 80 for seg in segments):
+        return False
+    if any(segments.count(seg) > 3 for seg in set(segments)):
+        return False
+    if re.fullmatch(r"/(?:40[134]|50[0234])/?", lower_path):
+        return False
+    if re.fullmatch(r"/(?:america|europe|asia|africa|pacific|atlantic)/[a-z_/-]+/?", lower_path):
+        return False
+    if re.fullmatch(r"/(?:\d{1,4}|mm|dd|yyyy)[a-z0-9_/-]*(?:/\d{1,4})?/?", lower_path):
+        return False
+
+    action_words = {
+        "api", "user", "users", "support", "manage", "permission", "permissions",
+        "organization", "settings", "domains", "protocol", "openid-connect",
+        "userinfo", "registration", "registrations", "impersonate", "product",
+        "products", "pricing", "terms", "terms-acceptance", "terms-conditions",
+        "dashboard", "dashboards", "billing", "projects", "organizations",
+        "members", "tickets", "help-center", "profile", "auth", "login",
+        "graphql", "swagger", "openapi", "upload", "admin",
+    }
+    has_action_word = any(seg.lower() in action_words for seg in segments)
+    if segments and parsed.query == "" and not has_action_word:
+        return False
+    if segments and not has_action_word:
+        if any(len(seg) >= 32 and re.fullmatch(r"[A-Za-z0-9_+/=-]+", seg) for seg in segments):
+            return False
+    return True
+
+
 def parameter_risk_hint(name: str, url: str = "") -> str:
     n = str(name or "").lower()
     if n in {"id", "user_id", "userid", "account", "account_id", "basket", "basketid", "order", "order_id", "invoice", "tenant", "tenant_id"}:
@@ -634,6 +710,8 @@ class OffensiveInventoryService:
         return ep
 
     def _sync_state_endpoint(self, url: str) -> None:
+        if not is_actionable_endpoint_url(url):
+            return
         state = dict(self.scan.state_data or {})
         seen = list(state.get("discovered_endpoints") or [])
         if url not in seen:

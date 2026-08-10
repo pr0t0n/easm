@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urljoin, urlparse
 from sqlalchemy.orm import Session
 
 from app.models.models import ScanJob, ScanLog
-from app.services.offensive_inventory_service import OffensiveInventoryService
+from app.services.offensive_inventory_service import OffensiveInventoryService, is_actionable_endpoint_url
 from app.services.scan_scope import (
     authorized_scope_from_target_query,
     host_from_scope_reference,
@@ -183,9 +183,16 @@ def normalize_crawler_result(
         + [str(form.get("action") or "") for form in forms]
     )
     blocked_urls = sorted({value for value in raw_candidates if value and not _allowed(value)})
-    urls = [value for value in urls if _allowed(value)]
-    api_candidates = [value for value in api_candidates if _allowed(value)]
-    browser_requests = [req for req in browser_requests if _allowed(str(req.get("url") or ""))]
+    urls = [value for value in urls if _allowed(value) and is_actionable_endpoint_url(value)]
+    api_candidates = [value for value in api_candidates if _allowed(value) and is_actionable_endpoint_url(value)]
+    browser_requests = [
+        req for req in browser_requests
+        if _allowed(str(req.get("url") or ""))
+        and (
+            is_actionable_endpoint_url(str(req.get("url") or ""))
+            or str(req.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+        )
+    ]
     forms = [form for form in forms if _allowed(str(form.get("action") or ""))]
     browser_urls = {req["url"] for req in browser_requests}
     scripts = [u for u in urls if _JS_RE.search(u)]
