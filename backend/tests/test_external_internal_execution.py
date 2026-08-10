@@ -19,6 +19,7 @@ from app.services.execution_context_service import (
     inventory_auth_context,
     normalize_execution_context,
 )
+from app.workers import tasks
 
 
 def test_execution_context_is_limited_to_g0_and_g1() -> None:
@@ -30,6 +31,22 @@ def test_execution_context_is_limited_to_g0_and_g1() -> None:
         normalize_execution_context("G2")
     assert inventory_auth_context("external") == "anonymous"
     assert inventory_auth_context("internal") == "authenticated"
+
+
+def test_inventory_fingerprint_handles_missing_status_codes() -> None:
+    import app.services.execution_context_service as contexts
+
+    first = contexts._fingerprint([
+        ("https://example.test/a", "GET", None, None),
+        ("https://example.test/b", "GET", 200, "abc"),
+    ])
+    second = contexts._fingerprint([
+        ("https://example.test/b", "GET", 200, "abc"),
+        ("https://example.test/a", "GET", None, None),
+    ])
+
+    assert first == second
+    assert len(first) == 64
 
 
 def test_internal_endpoint_matrix_includes_code_parameter_api_and_business_analysis() -> None:
@@ -113,6 +130,151 @@ def test_g1_clones_crawler_spider_and_fuzzing_without_mutating_g0(monkeypatch) -
     assert all(row.execution_context == "internal" for row in g1_items)
     assert all(row.auth_session_revision == 1 for row in g1_items)
     assert all(source.execution_context == "external" and source.result == {"g0": True} for source in sources)
+
+
+def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:
+    item = SimpleNamespace(
+        id=123,
+        scan_job_id=81,
+        status="submitted",
+        result={"kali_job_id": "job-123", "timeout": 300},
+        resource_class="light",
+        phase_id="P08",
+        target="https://example.test/app.js",
+        tool_name="linkfinder",
+        started_at=None,
+        lease_until=None,
+        updated_at=None,
+        item_metadata={},
+    )
+    job = SimpleNamespace(id=81, status="running")
+    sessions = []
+
+    class Query:
+        def __init__(self, model):
+            self.model = model
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            if self.model is ScanWorkItem:
+                return item
+            return job
+
+    class FakeSession:
+        def __init__(self):
+            self.in_transaction = False
+            self.closed = False
+            self.added = []
+            sessions.append(self)
+
+        def query(self, model):
+            self.in_transaction = True
+            return Query(model)
+
+        def add(self, row):
+            self.in_transaction = True
+            self.added.append(row)
+
+        def commit(self):
+            self.in_transaction = False
+
+        def rollback(self):
+            self.in_transaction = False
+
+        def close(self):
+            self.closed = True
+            self.in_transaction = False
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status": "running",
+                "heartbeat_at": "2026-08-10T14:00:00",
+                "heartbeat_sequence": 7,
+                "output_bytes": 10,
+            }
+
+    def fake_get(*args, **kwargs):
+        assert sessions, "poller should read DB before polling runner"
+        assert all(not session.in_transaction for session in sessions)
+        return Response()
+
+    import app.db.session as db_session
+    import requests
+
+    monkeypatch.setattr(db_session, "SessionLocal", FakeSession)
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(tasks, "_legacy_delivery_allowed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(tasks, "_schedule_work_item_poll", lambda *args, **kwargs: True)
+    monkeypatch.setattr(tasks, "_scan_is_terminal", lambda status: False)
+
+    result = tasks.poll_scan_work_item(123)
+
+    assert result["status"] == "submitted"
+    assert item.result["kali_status"] == "running"
+    assert item.result["poll_count"] == 1
+
+
+def test_surface_expansion_postprocessor_preserves_internal_context_and_session(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_expand_attack_surface(db, scan_id, source_target, tool_name, result, job, *, execution_context="external"):
+        calls["scan_id"] = scan_id
+        calls["source_target"] = source_target
+        calls["tool_name"] = tool_name
+        calls["result"] = result
+        calls["execution_context"] = execution_context
+        calls["auth_session_id"] = getattr(item, "auth_session_id", None)
+        return {"new_endpoints": 2, "reseeded": 1}
+
+    class DB:
+        def __init__(self):
+            self.commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            raise AssertionError("surface expansion should not rollback")
+
+        def refresh(self, obj):
+            calls["refreshed_job"] = obj.id
+
+    import app.services.endpoint_discovery as endpoint_discovery
+    import app.services.execution_context_service as contexts
+
+    monkeypatch.setattr(endpoint_discovery, "expand_attack_surface", fake_expand_attack_surface)
+    monkeypatch.setattr(contexts, "processor_should_run", lambda *args, **kwargs: (False, None, {}))
+    monkeypatch.setattr(contexts, "complete_processor_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks, "_schedule_pentest_inventory_refresh", lambda *args, **kwargs: calls.setdefault("inventory", True))
+
+    job = SimpleNamespace(id=81, target_query="https://example.test", state_data={}, mode="unit")
+    item = SimpleNamespace(
+        id=55,
+        scan_job_id=81,
+        status="completed",
+        phase_id="P03",
+        target="https://example.test/dashboard",
+        tool_name="katana",
+        item_metadata={},
+        result={"stdout": "https://example.test/api/private"},
+        execution_context="internal",
+        auth_session_id=10,
+    )
+
+    summary = tasks._run_surface_expansion_postprocessor(DB(), job, item)
+
+    assert summary["execution_context"] == "internal"
+    assert calls["execution_context"] == "internal"
+    assert calls["auth_session_id"] == 10
+    assert calls["source_target"] == "https://example.test/dashboard"
+    assert summary["surface_expansion"] == {"new_endpoints": 2, "reseeded": 1}
+    assert calls["inventory"] is True
 
 
 def test_crawler_normalizer_preserves_internal_context(monkeypatch) -> None:

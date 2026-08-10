@@ -200,11 +200,22 @@ def run_js_analysis_for_scan(db, job, *, execution_context: str = "external") ->
             source_tool="js_analyzer", metadata={"source": "js_candidate"},
         )
         js_asset = inv.upsert_js_asset(ju, endpoint=js_endpoint, download_status="pending", analysis_status="running", source_tool="js_analyzer")
+        # Persist the lightweight "running" marker before the network download.
+        # Holding this transaction open while httpx waits on the target leaves
+        # offensive_js_assets/scan_jobs locks behind and can stall the whole scan.
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         a = analyze_js(ju, scope_root=root, headers=request_headers, cookies=request_cookies)
         if not a.get("ok"):
             js_asset.analysis_status = "failed"
             js_asset.js_metadata = {**dict(js_asset.js_metadata or {}), "error": a.get("error")}
             db.add(js_asset)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
             continue
         analyzed += 1
         js_asset.analysis_status = "parsed"
@@ -235,6 +246,10 @@ def run_js_analysis_for_scan(db, job, *, execution_context: str = "external") ->
             )
             for p in a.get("params") or []:
                 inv.upsert_parameter(ep, p, location="json", source_tool="js_analyzer", source_js_asset_id=js_asset.id)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         for sec in a["secrets"]:
             findings.append({
                 "title": f"Segredo hardcoded em JS ({sec['type']}): {ju.split('/')[-1][:60]}",

@@ -193,7 +193,15 @@ def upsert_endpoint_observation(
 
 
 def _fingerprint(rows: list[tuple[str, str, int | None, str | None]]) -> str:
-    payload = json.dumps(sorted(rows), ensure_ascii=True, separators=(",", ":"))
+    # Python cannot sort tuples that contain mixed ``None`` and ``int`` values
+    # in the same position. Endpoint observations commonly have status_code=None
+    # for static/crawler-only discoveries, so normalize every sortable component
+    # before generating the deterministic inventory fingerprint.
+    normalized = [
+        tuple("" if value is None else str(value) for value in row)
+        for row in rows
+    ]
+    payload = json.dumps(sorted(normalized), ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

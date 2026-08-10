@@ -840,6 +840,222 @@ def _schedule_scan_postprocessor(
         raise
 
 
+def _run_surface_expansion_postprocessor(db: Session, job: ScanJob, item: Any) -> dict[str, Any]:
+    """Process crawler/fuzzer discoveries outside the poll critical path.
+
+    The work-item poller must release the runner result quickly.  Surface
+    expansion can normalize hundreds of URLs, enqueue fresh work and run
+    scan-wide probes; keeping that inline held DB transactions open while other
+    workers tried to advance the same scan.
+    """
+    from app.services.cross_target_propagator import (
+        propagate_credential_findings,
+        propagate_certificate_sans,
+    )
+
+    full_result = dict(item.result or {})
+    tool_lower = str(item.tool_name or "").lower()
+    execution_context = str(getattr(item, "execution_context", "external") or "external")
+    summary: dict[str, Any] = {
+        "tool": item.tool_name,
+        "phase_id": item.phase_id,
+        "execution_context": execution_context,
+    }
+
+    def _release_processor_transaction(checkpoint: Any) -> Any:
+        checkpoint_id = getattr(checkpoint, "id", None)
+        try:
+            db.commit()
+            db.refresh(job)
+        except Exception:
+            db.rollback()
+            raise
+        if checkpoint_id is None:
+            return checkpoint
+        try:
+            from app.models.models import ProcessorCheckpoint
+
+            return db.query(ProcessorCheckpoint).filter(ProcessorCheckpoint.id == checkpoint_id).first() or checkpoint
+        except Exception:
+            return checkpoint
+
+    # Credenciais: gitleaks/trufflehog → credential stuffing em outros targets.
+    if tool_lower in {"gitleaks", "trufflehog", "git-dumper", "h8mail"}:
+        propagate_credential_findings(db, job.id, item.target, item.tool_name, full_result)
+        summary["credentials_propagated"] = True
+
+    # Certificado: extrai SANs → novos subdomínios in-scope.
+    if tool_lower in {"sslscan", "testssl"}:
+        propagate_certificate_sans(db, job.id, item.target, item.tool_name, full_result, job)
+        summary["certificate_sans_propagated"] = True
+
+    # Frente E: crawl/fuzz → inventário → reinjeção de novos endpoints in-scope.
+    if tool_lower in {
+        "ffuf", "ffuf-content", "ffuf-params", "ffuf-values", "ffuf-post",
+        "feroxbuster", "gobuster", "dirsearch", "katana", "gospider",
+        "hakrawler", "gau", "waybackurls", "linkfinder", "paramspider",
+    } and item.target:
+        from app.services.endpoint_discovery import expand_attack_surface
+
+        surface_meta = dict(item.item_metadata or {})
+        surface_base = item.target
+        if _is_work_item_batch_target(item.target):
+            surface_base = str((surface_meta.get("batch_targets") or [job.target_query])[0])
+        summary["surface_expansion"] = expand_attack_surface(
+            db,
+            job.id,
+            surface_base,
+            item.tool_name,
+            full_result,
+            job,
+            execution_context=execution_context,
+        )
+        # Make any state_data endpoint updates visible to downstream processors.
+        try:
+            db.commit()
+            db.refresh(job)
+        except Exception:
+            db.rollback()
+            raise
+
+    # Análise estática de JS (endpoints/params/sinks/segredos).
+    if item.phase_id in ("P03", "P08", "P09") and item.status == "completed":
+        state_j = dict(job.state_data or {})
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_j, checkpoint_j, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="js-analysis", processor_version="v2-auth-context",
+        )
+        if run_j and (state_j.get("discovered_endpoints") or state_j.get("internal_discovered_endpoints")):
+            from app.services.js_analyzer import run_js_analysis_for_scan
+
+            checkpoint_j = _release_processor_transaction(checkpoint_j)
+            js_result = run_js_analysis_for_scan(db, job, execution_context=execution_context)
+            complete_processor_checkpoint(db, checkpoint_j, js_result)
+            summary["js_analysis"] = js_result
+
+    # Scan-wide hypothesis generation and coverage refresh are coalesced.
+    if item.phase_id in ("P03", "P08", "P09", "P10", "P12", "P13", "P16", "P17") and item.status == "completed":
+        _schedule_pentest_inventory_refresh(
+            job.id,
+            mode=("scheduled" if str(getattr(job, "mode", "") or "").lower() == "scheduled" else "unit"),
+            countdown=2,
+        )
+        summary["inventory_refresh_scheduled"] = True
+
+    # Excessive Data Exposure / Mass Assignment (API).
+    if item.phase_id in ("P09", "P16") and item.status == "completed":
+        state_a = dict(job.state_data or {})
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_a, checkpoint_a, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="api-probe", processor_version="v2-auth-context",
+        )
+        if run_a and (state_a.get("discovered_endpoints") or state_a.get("internal_discovered_endpoints")):
+            from app.services.api_probe import run_api_probe_for_scan
+
+            checkpoint_a = _release_processor_transaction(checkpoint_a)
+            api_result = run_api_probe_for_scan(db, job, execution_context=execution_context)
+            complete_processor_checkpoint(db, checkpoint_a, api_result)
+            summary["api_probe"] = api_result
+
+    # Lógica de negócio.
+    if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
+        state_bl = dict(job.state_data or {})
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_bl, checkpoint_bl, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="business-logic", processor_version="v2-auth-context",
+        )
+        if run_bl and (state_bl.get("discovered_endpoints") or state_bl.get("internal_discovered_endpoints")):
+            from app.services.business_logic_probe import run_business_logic_for_scan
+
+            checkpoint_bl = _release_processor_transaction(checkpoint_bl)
+            bl_result = run_business_logic_for_scan(db, job, execution_context=execution_context)
+            complete_processor_checkpoint(db, checkpoint_bl, bl_result)
+            summary["business_logic_probe"] = bl_result
+
+    # NoSQL injection.
+    if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
+        state_n = dict(job.state_data or {})
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_n, checkpoint_n, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="nosql-probe", processor_version="v2-context-auth",
+        )
+        has_nosql_surface = bool(state_n.get("discovered_endpoints") or (
+            execution_context == "internal" and state_n.get("internal_discovered_endpoints")
+        ))
+        if run_n and has_nosql_surface:
+            from app.services.nosql_probe import run_nosql_for_scan
+
+            checkpoint_n = _release_processor_transaction(checkpoint_n)
+            nosql_result = run_nosql_for_scan(db, job, execution_context=execution_context)
+            complete_processor_checkpoint(db, checkpoint_n, nosql_result)
+            summary["nosql_probe"] = nosql_result
+
+    # BOLA/BFLA autenticado: somente G1/internal.
+    if item.phase_id in ("P16", "P19", "P09") and item.status == "completed":
+        state_b = dict(job.state_data or {})
+        from app.services.auth_session_manager import has_any_valid_session
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_b, checkpoint_b, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="bola-bfla", processor_version="v2-context-controls",
+        )
+        if execution_context == "internal" and run_b and (has_any_valid_session(db, job) or state_b.get("auth_config")):
+            from app.services.bola_probe import run_bola_for_scan
+
+            checkpoint_b = _release_processor_transaction(checkpoint_b)
+            bola_result = run_bola_for_scan(db, job)
+            complete_processor_checkpoint(db, checkpoint_b, bola_result)
+            summary["bola_probe"] = bola_result
+
+    # Exploração ativa genérica, se autorizada.
+    if item.phase_id in ("P16", "P19", "P09", "P10") and item.status == "completed":
+        state_ae = dict(job.state_data or {})
+        from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+
+        run_ae, checkpoint_ae, _ = processor_should_run(
+            db, job, execution_context=execution_context,
+            processor_name="active-app-pentest", processor_version="v2-context-auth",
+        )
+        if state_ae.get("active_exploit_authorized") and run_ae:
+            from app.services.app_pentest import run_app_pentest_for_scan
+
+            checkpoint_ae = _release_processor_transaction(checkpoint_ae)
+            app_result = run_app_pentest_for_scan(db, job, execution_context=execution_context)
+            complete_processor_checkpoint(db, checkpoint_ae, app_result)
+            summary["app_pentest"] = app_result
+
+    # Sondagem adaptativa de erro verboso.
+    if item.phase_id in ("P03", "P16", "P19", "P09", "P10") and item.status == "completed":
+        state_ap = dict(job.state_data or {})
+        if state_ap.get("active_exploit_authorized"):
+            try:
+                from app.services.adaptive_error_probe import _candidate_endpoints as _ap_candidate_endpoints
+
+                ap_candidates = tuple(sorted(_ap_candidate_endpoints(db, job, item.target)))
+            except Exception:
+                ap_candidates = ()
+            ap_seen_key = f"adaptive_probe_seen_{item.target}"
+            ap_fingerprint = "|".join(ap_candidates)
+            if ap_candidates and state_ap.get(ap_seen_key) != ap_fingerprint:
+                from app.services.adaptive_error_probe import run_adaptive_probe_for_scan
+
+                adaptive_result = run_adaptive_probe_for_scan(db, job, item.target)
+                _patch_scan_state(db, job.id, {ap_seen_key: ap_fingerprint})
+                summary["adaptive_error_probe"] = adaptive_result
+
+    db.commit()
+    return summary
+
+
 def _scan_postprocessors_pending(scan_id: int, state: dict[str, Any] | None = None) -> bool:
     ledger = dict((state or {}).get("postprocessor_ledger") or {})
     now = datetime.now()
@@ -3678,6 +3894,8 @@ def run_scan_postprocessor(
 
             chains = correlate_chains(db, job.id)
             result = {"graph": graph, "chains": chains}
+        elif kind == "surface_expansion":
+            result = _run_surface_expansion_postprocessor(db, job, item)
         elif kind == "zap":
             from app.services.zap_scanner import (
                 is_zap_available,
@@ -5125,6 +5343,14 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             db.commit()
             return {"id": item.id, "status": item.status}
 
+        # Important: do not keep a SQLAlchemy transaction open while polling the
+        # external runner. A SELECT above starts a transaction; if we then wait
+        # on MCP/Kali with the Session alive, Postgres sees an
+        # "idle in transaction" backend that can block scan_jobs/scan_logs and
+        # cascade into lock timeouts. Commit/close the read snapshot, perform
+        # network I/O, then open a fresh short-lived transaction to persist.
+        db.commit()
+        db.close()
         status_response = requests.get(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/jobs/{kali_job_id}",
             timeout=10,
@@ -5132,6 +5358,14 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         status_response.raise_for_status()
         status_payload = dict(status_response.json())
         raw_status = str(status_payload.get("status") or "").lower()
+        db = SessionLocal()
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if not item:
+            return {"error": f"work item {item_id} not found"}
+        job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if item.status != "submitted":
+            return {"id": item.id, "status": item.status}
+        result_state = dict(item.result or result_state)
         if raw_status not in {"done", "failed", "timeout", "skipped"}:
             _now = datetime.now()
             _runner_timeout = max(60, int(result_state.get("timeout") or 300))
@@ -5181,12 +5415,22 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             _schedule_work_item_poll(item.id, countdown=15)
             return {"id": item.id, "status": "submitted", "kali_status": raw_status}
 
+        db.commit()
+        db.close()
         result_response = requests.get(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/jobs/{kali_job_id}/result",
             timeout=75,
         )
         result_response.raise_for_status()
         result = dict(result_response.json())
+        db = SessionLocal()
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if not item:
+            return {"error": f"work item {item_id} not found"}
+        job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if item.status != "submitted":
+            return {"id": item.id, "status": item.status}
+        result_state = dict(item.result or result_state)
         if job:
             db.refresh(job)
             if _scan_is_terminal(job.status):
@@ -6176,237 +6420,24 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 import logging as _cjlog2
                 _cjlog2.getLogger(__name__).debug("crown_jewel_analysis failed: %s", _cje)
 
-        # ── Shared surface memory: propaga credenciais / versões / SANs ────────
-        # Ponto #3: descobertas se propagam entre targets do mesmo scan.
+        # ── Shared surface memory / probes ─────────────────────────────────────
+        # Crawler/spider/fuzzing and scan-wide probes are intentionally scheduled
+        # outside the poll critical path.  They may normalize many endpoints and
+        # enqueue follow-up work; doing that inline was holding DB transactions
+        # while other workers needed to update the same scan.
         if item.status == "completed" and job:
             try:
-                from app.services.cross_target_propagator import (
-                    propagate_credential_findings,
-                    propagate_certificate_sans,
+                _schedule_scan_postprocessor(
+                    job.id,
+                    item.id,
+                    "surface_expansion",
+                    f"{item.id}:{item.target}",
+                    queue="worker.unit.reporting",
+                    db=db,
                 )
-                _full_result = dict(item.result or {})
-                _tool_lower = str(item.tool_name or "").lower()
-
-                # Credenciais: gitleaks/trufflehog → credential stuffing em outros targets
-                if _tool_lower in {"gitleaks", "trufflehog", "git-dumper", "h8mail"}:
-                    propagate_credential_findings(db, job.id, item.target, item.tool_name, _full_result)
-
-                # Certificado: extrai SANs → novos subdomínios in-scope
-                if _tool_lower in {"sslscan", "testssl"}:
-                    propagate_certificate_sans(db, job.id, item.target, item.tool_name, _full_result, job)
-
-                # ── Frente E: expansão de superfície (crawl/fuzz → loop) ───────
-                # Crawler/spider/fuzzing descobriu páginas → abre, extrai segredos
-                # e endpoints, e REINJETA os in-scope como novos alvos de teste.
-                if _tool_lower in {
-                    "ffuf", "ffuf-content", "ffuf-params", "ffuf-values", "ffuf-post",
-                    "feroxbuster", "gobuster", "dirsearch", "katana", "gospider",
-                    "hakrawler", "gau", "waybackurls", "linkfinder", "paramspider",
-                } and item.target:
-                    from app.services.endpoint_discovery import expand_attack_surface
-                    _surface_meta = dict(item.item_metadata or {})
-                    _surface_base = item.target
-                    if _is_work_item_batch_target(item.target):
-                        _surface_base = str((_surface_meta.get("batch_targets") or [job.target_query])[0])
-                    expand_attack_surface(
-                        db,
-                        job.id,
-                        _surface_base,
-                        item.tool_name,
-                        _full_result,
-                        job,
-                        execution_context=str(getattr(item, "execution_context", "external") or "external"),
-                    )
-
-                # ── Análise estática de JS (endpoints/params/sinks/segredos) ──
-                # Após crawl/JS phases. Uma vez por scan. Realimenta endpoints.
-                if item.phase_id in ("P03", "P08", "P09") and item.status == "completed":
-                    _st_j = dict(job.state_data or {})
-                    _ctx_j = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_j, _cp_j, _ = processor_should_run(
-                        db, job, execution_context=_ctx_j,
-                        processor_name="js-analysis", processor_version="v2-auth-context",
-                    )
-                    if _run_j and (_st_j.get("discovered_endpoints") or _st_j.get("internal_discovered_endpoints")):
-                        from app.services.js_analyzer import run_js_analysis_for_scan
-                        _jr = run_js_analysis_for_scan(db, job, execution_context=_ctx_j)
-                        complete_processor_checkpoint(db, _cp_j, _jr)
-                        if _jr.get("findings_created") or _jr.get("endpoints_reseeded"):
-                            import logging as _jlog
-                            _jlog.getLogger(__name__).info(
-                                "js_analyzer scan=%d findings=%s endpoints_reseeded=%s",
-                                job.id, _jr.get("findings_created"), _jr.get("endpoints_reseeded"))
-
-                # ── Pentest inventory intelligence: hypotheses + coverage + safe validators ──
-                if item.phase_id in ("P03", "P08", "P09", "P10", "P12", "P13", "P16", "P17") and item.status == "completed":
-                    try:
-                        # Scan-wide hypothesis generation and coverage refresh
-                        # are O(total endpoints/hypotheses), not item-local work.
-                        # Running them here made every poll take 10-100 seconds.
-                        # Coalesce result bursts into one reporting task.
-                        _schedule_pentest_inventory_refresh(
-                            job.id,
-                            mode=(
-                                "scheduled"
-                                if str(getattr(job, "mode", "") or "").lower() == "scheduled"
-                                else "unit"
-                            ),
-                            countdown=2,
-                        )
-                    except Exception as _inv_err:
-                        import logging as _invlog2
-                        _invlog2.getLogger(__name__).debug("pentest inventory scheduling failed: %s", _inv_err)
-
-                # ── Fase 2: Excessive Data Exposure / Mass Assignment (API) ───
-                if item.phase_id in ("P09", "P16") and item.status == "completed":
-                    _st_a = dict(job.state_data or {})
-                    _ctx_a = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_a, _cp_a, _ = processor_should_run(
-                        db, job, execution_context=_ctx_a,
-                        processor_name="api-probe", processor_version="v2-auth-context",
-                    )
-                    if _run_a and (_st_a.get("discovered_endpoints") or _st_a.get("internal_discovered_endpoints")):
-                        from app.services.api_probe import run_api_probe_for_scan
-                        _ar = run_api_probe_for_scan(db, job, execution_context=_ctx_a)
-                        complete_processor_checkpoint(db, _cp_a, _ar)
-                        if _ar.get("findings_created"):
-                            import logging as _alog
-                            _alog.getLogger(__name__).info(
-                                "api_probe scan=%d findings=%d", job.id, _ar["findings_created"])
-
-                # ── Lógica de Negócio (tampering/fluxo/cupom) — read-only ─────
-                if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
-                    _st_bl = dict(job.state_data or {})
-                    _ctx_bl = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_bl, _cp_bl, _ = processor_should_run(
-                        db, job, execution_context=_ctx_bl,
-                        processor_name="business-logic", processor_version="v2-auth-context",
-                    )
-                    if _run_bl and (_st_bl.get("discovered_endpoints") or _st_bl.get("internal_discovered_endpoints")):
-                        from app.services.business_logic_probe import run_business_logic_for_scan
-                        _blr = run_business_logic_for_scan(db, job, execution_context=_ctx_bl)
-                        complete_processor_checkpoint(db, _cp_bl, _blr)
-                        if _blr.get("findings_created"):
-                            import logging as _bllog
-                            _bllog.getLogger(__name__).info(
-                                "business_logic_probe scan=%d findings=%d", job.id, _blr["findings_created"])
-
-                # ── Fase 2: NoSQL injection (testável sem auth) ───────────────
-                # Após descoberta de endpoints com parâmetro. Uma vez por scan.
-                if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
-                    _st_n = dict(job.state_data or {})
-                    _ctx_n = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_n, _cp_n, _ = processor_should_run(
-                        db, job, execution_context=_ctx_n,
-                        processor_name="nosql-probe", processor_version="v2-context-auth",
-                    )
-                    _has_nosql_surface = bool(_st_n.get("discovered_endpoints") or (
-                        _ctx_n == "internal" and _st_n.get("internal_discovered_endpoints")
-                    ))
-                    if _run_n and _has_nosql_surface:
-                        from app.services.nosql_probe import run_nosql_for_scan
-                        _nr = run_nosql_for_scan(db, job, execution_context=_ctx_n)
-                        complete_processor_checkpoint(db, _cp_n, _nr)
-                        if _nr.get("findings_created"):
-                            import logging as _nlog
-                            _nlog.getLogger(__name__).info(
-                                "nosql_probe scan=%d confirmados=%d", job.id, _nr["findings_created"])
-
-                # ── Fase 2: BOLA/BFLA autenticado (API #1/#5) ─────────────────
-                # Só roda se o scan é AUTENTICADO (auth_config) e após a API/IDOR
-                # ter sido mapeada. Uma vez por scan (flag no state).
-                if item.phase_id in ("P16", "P19", "P09") and item.status == "completed":
-                    _st_b = dict(job.state_data or {})
-                    from app.services.auth_session_manager import has_any_valid_session
-                    # has_any_valid_session is the single source of truth for
-                    # "this scan has a confirmed authenticated session" — it
-                    # also covers a session captured interactively via the CDP
-                    # flow, which the raw auth_config-truthy check below never
-                    # saw. Kept as an OR fallback for scans whose
-                    # ensure_sessions() hasn't run yet at this point.
-                    _ctx_b = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_b, _cp_b, _ = processor_should_run(
-                        db, job, execution_context=_ctx_b,
-                        processor_name="bola-bfla", processor_version="v2-context-controls",
-                    )
-                    if _ctx_b == "internal" and _run_b and (has_any_valid_session(db, job) or _st_b.get("auth_config")):
-                        from app.services.bola_probe import run_bola_for_scan
-                        _br = run_bola_for_scan(db, job)
-                        complete_processor_checkpoint(db, _cp_b, _br)
-                        if _br.get("findings_created"):
-                            import logging as _blog
-                            _blog.getLogger(__name__).info(
-                                "bola_probe scan=%d confirmados=%d", job.id, _br["findings_created"])
-
-                # ── EXPLORAÇÃO ATIVA (8 skills genéricas, guardrail-aware) ────
-                # Só em alvo AUTORIZADO (state.active_exploit_authorized=True).
-                # Uma vez por scan, após superfície/endpoints descobertos.
-                if item.phase_id in ("P16", "P19", "P09", "P10") and item.status == "completed":
-                    _st_ae = dict(job.state_data or {})
-                    _ctx_ae = str(getattr(item, "execution_context", "external") or "external")
-                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
-                    _run_ae, _cp_ae, _ = processor_should_run(
-                        db, job, execution_context=_ctx_ae,
-                        processor_name="active-app-pentest", processor_version="v2-context-auth",
-                    )
-                    if _st_ae.get("active_exploit_authorized") and _run_ae:
-                        # Application Pentest GENÉRICO (dirigido por descoberta) — funciona
-                        # em qualquer ambiente; classifica confirmada/hipótese/não-testada.
-                        from app.services.app_pentest import run_app_pentest_for_scan
-                        _aer = run_app_pentest_for_scan(db, job, execution_context=_ctx_ae)
-                        complete_processor_checkpoint(db, _cp_ae, _aer)
-                        if _aer.get("findings_created"):
-                            import logging as _aelog
-                            _aelog.getLogger(__name__).info(
-                                "app_pentest scan=%d resumo=%s findings=%d",
-                                job.id, _aer.get("summary"), _aer["findings_created"])
-
-                # Sondagem adaptativa de erro verboso — bypass de auth via headers
-                # hintados no próprio 401/403 do alvo + SSRF via campos hintados num
-                # 400/422. Independente do app_pentest.py acima (flag própria).
-                # Inclui P03 (endpoint discovery) porque essa sondagem depende
-                # inteiramente do que o content discovery já achou -- disparar só em
-                # P09/P10/P16/P19 corria contra P03: um item de exploitation podia
-                # completar (e gravar o probe como "feito, nada achado") ANTES de
-                # dirsearch-api/dirsearch-api-post terminarem de achar o endpoint
-                # real (reproduzido ao vivo: scan onde o probe zerou porque rodou
-                # antes do dirsearch-api-post persistir /api/v1/webhook). Em vez de
-                # uma flag "feito para sempre", guarda um fingerprint dos candidatos
-                # já tentados; reroda (idempotente via dedup de finding) sempre que
-                # o content discovery encontra algo novo.
-                if item.phase_id in ("P03", "P16", "P19", "P09", "P10") and item.status == "completed":
-                    _st_ap = dict(job.state_data or {})
-                    if _st_ap.get("active_exploit_authorized"):
-                        try:
-                            from app.services.adaptive_error_probe import (
-                                _candidate_endpoints as _ap_candidate_endpoints,
-                            )
-                            _ap_candidates = tuple(sorted(_ap_candidate_endpoints(db, job, item.target)))
-                        except Exception:
-                            _ap_candidates = ()
-                        _ap_seen_key = f"adaptive_probe_seen_{item.target}"
-                        _ap_fingerprint = "|".join(_ap_candidates)
-                        if _ap_candidates and _st_ap.get(_ap_seen_key) != _ap_fingerprint:
-                            try:
-                                from app.services.adaptive_error_probe import run_adaptive_probe_for_scan
-                                _apr = run_adaptive_probe_for_scan(db, job, item.target)
-                                job = _patch_scan_state(db, job.id, {_ap_seen_key: _ap_fingerprint}) or job
-                                if _apr.get("findings_created"):
-                                    import logging as _aplog
-                                    _aplog.getLogger(__name__).info(
-                                        "adaptive_probe scan=%d target=%s probed=%d findings=%d",
-                                        job.id, item.target, _apr.get("endpoints_probed", 0), _apr["findings_created"])
-                            except Exception as _ape:
-                                import logging as _aplog2
-                                _aplog2.getLogger(__name__).debug("adaptive_probe failed: %s", _ape)
             except Exception as _pe:
                 import logging as _plog
-                _plog.getLogger(__name__).debug("propagator failed: %s", _pe)
+                _plog.getLogger(__name__).debug("surface expansion scheduling failed: %s", _pe)
 
         # ── T1: Evidence gate stage 2 — promote candidate finding to confirmed ──
         # When a verification work item completes, update the original finding.
