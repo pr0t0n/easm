@@ -2492,6 +2492,11 @@ def create_scan(
     }
 
     scan_level = normalize_scan_level(payload.scan_level)
+    execution_plan = str(getattr(payload, "execution_plan", "external_only") or "external_only").strip().lower()
+    if execution_plan in {"internal_external", "internal-first", "internal_first", "g1_then_g0"}:
+        execution_plan = "internal_then_external"
+    if execution_plan not in {"external_only", "internal_then_external"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="execution_plan invalido")
     profile = scan_profile(scan_level)
     requested_targets = parse_scope_targets(payload.target_query)
     from app.services.scan_scope import is_already_specific_subdomain
@@ -2504,6 +2509,8 @@ def create_scan(
         "llm_risk": llm_risk_state,
         "scan_level": scan_level,
         "scan_profile": profile,
+        "execution_plan": execution_plan,
+        "execution_plan_stage": "waiting_for_auth" if execution_plan == "internal_then_external" else "external_running",
         "parallelize": bool(settings.scan_parallelize_default),
         "parallel_target_batch_size": int(settings.scan_parallel_target_batch_size or 1024),
         "explicit_inventory_execution_batch_size": int(settings.scan_explicit_inventory_batch_size or 10),
@@ -2559,10 +2566,18 @@ def create_scan(
         target_query=payload.target_query,
         authorization_code=authorization_gate.get("authorization_code"),
         mode=payload.mode,
-        status="queued" if compliance_status == "approved" else "blocked",
+        status=(
+            "waiting_for_auth"
+            if compliance_status == "approved" and execution_plan == "internal_then_external"
+            else ("queued" if compliance_status == "approved" else "blocked")
+        ),
         compliance_status=compliance_status,
         authorization_id=authorization_gate.get("authorization_id"),
-        current_step="1. Amass Subdomain Recon",
+        current_step=(
+            "Aguardando captura de credencial para iniciar G1 interno"
+            if compliance_status == "approved" and execution_plan == "internal_then_external"
+            else "1. Amass Subdomain Recon"
+        ),
         state_data=initial_state,
     )
     db.add(job)
@@ -2620,7 +2635,7 @@ def create_scan(
         message=f"Scan criado para alvo {payload.target_query}",
         actor_user_id=current_user.id,
         scan_job_id=job.id,
-        metadata={"target": payload.target_query, "mode": payload.mode},
+        metadata={"target": payload.target_query, "mode": payload.mode, "execution_plan": execution_plan},
     )
 
     if compliance_status == "approved":
@@ -2630,7 +2645,7 @@ def create_scan(
             message="Gate de compliance aprovado para execucao",
             actor_user_id=current_user.id,
             scan_job_id=job.id,
-            metadata={"target": payload.target_query, "mode": payload.mode},
+            metadata={"target": payload.target_query, "mode": payload.mode, "execution_plan": execution_plan},
         )
     else:
         log_audit(
@@ -2646,7 +2661,7 @@ def create_scan(
     db.commit()
     db.refresh(job)
 
-    if compliance_status == "approved":
+    if compliance_status == "approved" and execution_plan != "internal_then_external":
         try:
             # A1 — respeita o limite de scans concorrentes: dispara se houver vaga,
             # senão deixa o scan aguardando (o promotor do watchdog o sobe depois).

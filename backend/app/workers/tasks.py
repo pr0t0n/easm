@@ -3877,6 +3877,7 @@ def dispatch_scan_work_items(
         pass  # Redis unavailable — proceed without the lock (fail-open)
 
     db = SessionLocal()
+    _release_external_after_commit = False
     try:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
         if not job:
@@ -4126,6 +4127,53 @@ def dispatch_scan_work_items(
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
         try:
+            if (
+                str(state.get("execution_plan") or "") == "internal_then_external"
+                and not bool(state.get("external_released_after_internal"))
+                and bool(state.get("external_release_pending"))
+            ):
+                _internal_counts = dict(
+                    db.query(ScanWorkItem.status, func.count(ScanWorkItem.id))
+                    .filter(
+                        ScanWorkItem.scan_job_id == scan_id,
+                        ScanWorkItem.execution_context == "internal",
+                    )
+                    .group_by(ScanWorkItem.status)
+                    .all()
+                )
+                _internal_active_statuses = {"queued", "retry", "dispatched", "running", "submitted", "blocked"}
+                _internal_total = sum(int(v or 0) for v in _internal_counts.values())
+                _internal_active = sum(
+                    int(v or 0)
+                    for status_key, v in _internal_counts.items()
+                    if str(status_key or "") in _internal_active_statuses
+                )
+                if _internal_total > 0 and _internal_active == 0:
+                    try:
+                        from app.services.execution_context_service import get_context as _get_execution_context
+                        _external_context = _get_execution_context(db, scan_id, "external")
+                        if _external_context is not None:
+                            _external_context.status = "running"
+                            db.add(_external_context)
+                    except Exception:
+                        pass
+                    state["execution_plan_stage"] = "external_releasing"
+                    state["external_released_after_internal"] = True
+                    state["external_released_after_internal_at"] = datetime.now().isoformat()
+                    state["internal_then_external_internal_counts"] = _internal_counts
+                    job.status = "queued"
+                    job.current_step = "G1 interno concluído; liberando G0 externo"
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source="execution-plan",
+                        level="INFO",
+                        message=f"internal_then_external_release scan={scan_id} internal_counts={_internal_counts}",
+                    ))
+                    _release_external_after_commit = True
+        except Exception as _release_err:
+            import logging as _release_log
+            _release_log.getLogger(__name__).debug("internal_then_external release check failed: %s", _release_err)
+        try:
             from app.services.scan_work_queue import enrich_phase_ledgers_from_work_items
             enrich_phase_ledgers_from_work_items(db, job)
             state = dict(job.state_data or {})
@@ -4177,6 +4225,17 @@ def dispatch_scan_work_items(
                 message=f"work_queue_dispatch claimed={len(item_ids)} counts={counts}",
             ))
         db.commit()
+        if _release_external_after_commit:
+            try:
+                admit_or_defer_scan(scan_id, mode="unit")
+            except Exception as _release_exc:
+                import logging as _release_log2
+                _release_log2.getLogger(__name__).warning(
+                    "internal_then_external external release failed scan=%s: %s",
+                    scan_id,
+                    _release_exc,
+                )
+            return {"claimed": len(item_ids), "counts": counts, "external_released": True}
         _active_statuses = ("queued", "retry", "dispatched", "running", "submitted")
         # "blocked" items are pending (waiting for their gate to open) — keep polling
         _has_active = item_ids or any(counts.get(st, 0) for st in _active_statuses) or counts.get("blocked", 0) > 0

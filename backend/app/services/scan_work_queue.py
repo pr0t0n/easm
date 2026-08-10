@@ -2027,6 +2027,106 @@ def requeue_authenticated_crawl_items(db: Session, job: ScanJob, identity_key: s
     return created
 
 
+def seed_internal_first_work_items(db: Session, job: ScanJob, identity_key: str) -> int:
+    """Seed the first G1 wave without requiring pre-existing G0 rows.
+
+    The normal authenticated path clones planned G0 crawler/fuzzer items.  In
+    the "internal_then_external" execution plan G0 is deliberately held until
+    G1 drains, so there are no external rows to clone yet.  This function seeds
+    a conservative authenticated discovery/analysis matrix directly from the
+    scan's initial target set.
+    """
+    from app.services.execution_context_service import get_context
+
+    internal = get_context(db, job.id, "internal")
+    if internal is None or str(internal.status or "") not in {"running", "pending"}:
+        return 0
+
+    state = dict(job.state_data or {})
+    targets = [
+        str(t).strip()
+        for t in (state.get("provided_targets") or [])
+        if str(t or "").strip()
+    ]
+    if not targets:
+        raw = str(job.target_query or "").replace(",", ";").replace("\n", ";")
+        targets = [t.strip() for t in raw.split(";") if t.strip()]
+    clean_targets, skipped_targets = filter_targets_to_authorized_scope(targets, authorized_scope_for_scan(db, job.id))
+    now = datetime.now()
+    created = 0
+    phases = ["P03", "P04", "P05", "P08", "P09", "P13", "P16"]
+    for target in clean_targets:
+        for phase_id in phases:
+            tools = [
+                tool
+                for tool in _phase_tools(phase_id)
+                if tool in _AUTHENTICATED_DISCOVERY_TOOLS or tool in {"nuclei", "bl-test"}
+            ]
+            if phase_id == "P08":
+                tools = list(dict.fromkeys(tools + ["linkfinder", "nuclei-js-analysis", "nuclei-js-secrets"]))
+            if phase_id == "P13":
+                tools = [tool for tool in tools if tool == "bl-test"] or ["bl-test"]
+            for tool in tools:
+                exists = db.query(ScanWorkItem.id).filter(
+                    ScanWorkItem.scan_job_id == job.id,
+                    ScanWorkItem.execution_context == "internal",
+                    ScanWorkItem.phase_id == phase_id,
+                    ScanWorkItem.tool_name == tool[:120],
+                    ScanWorkItem.target == target[:500],
+                ).first()
+                if exists:
+                    continue
+                rc = resource_class_for_tool(tool)
+                metadata = apply_phase_tool_metadata({
+                    "source": "internal_first_plan",
+                    "execution_context": "internal",
+                    "identity_key": identity_key,
+                    "session_revision": int(internal.session_revision or 1),
+                    "queue_ready_at": now.isoformat(),
+                    "internal_first": True,
+                }, phase_id, tool, source="internal_first_plan")
+                db.add(ScanWorkItem(
+                    scan_job_id=job.id,
+                    execution_context="internal",
+                    auth_session_revision=int(internal.session_revision or 1),
+                    phase_id=phase_id,
+                    target=target[:500],
+                    tool_name=tool[:120],
+                    profile=_tool_profile(tool)[:120],
+                    resource_class=rc,
+                    priority=max(1, PHASE_PRIORITY.get(phase_id, 100) - 8),
+                    status="queued",
+                    max_attempts=2,
+                    item_metadata=metadata,
+                    created_at=now,
+                    updated_at=now,
+                ))
+                db.flush()
+                created += 1
+    if created or skipped_targets:
+        event = {
+            "identity_key": identity_key,
+            "session_revision": int(internal.session_revision or 1),
+            "targets": clean_targets[:50],
+            "skipped_targets": skipped_targets[:50],
+            "created": created,
+            "at": now.isoformat(),
+        }
+        state["internal_first_seed"] = event
+        state["execution_plan_stage"] = "internal_running" if created else "internal_seed_empty"
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"internal_first_seed scan={job.id} identity={identity_key} "
+                f"session_revision={internal.session_revision} created={created} skipped={len(skipped_targets)}"
+            ),
+        ))
+    return created
+
+
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
     preflight = ((state.get("preflight") or {}).get("targets") or {}).get(target) or {}
     has_http = bool(preflight.get("http"))

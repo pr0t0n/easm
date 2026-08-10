@@ -156,10 +156,11 @@ async def confirm_identity_capture(
         )
 
     from app.services.hypothesis_rules import generate_hypotheses_for_scan
-    from app.services.execution_context_service import activate_internal_context, reopen_auth_blocked_hypotheses
+    from app.services.execution_context_service import activate_internal_context, get_context, reopen_auth_blocked_hypotheses
     from app.services.scan_work_queue import (
         requeue_authenticated_crawl_items,
         requeue_evidence_ready_work_items,
+        seed_internal_first_work_items,
     )
 
     try:
@@ -171,7 +172,22 @@ async def confirm_identity_capture(
         generate_hypotheses_for_scan(db, scan)
         hypotheses_reopened = reopen_auth_blocked_hypotheses(db, scan)
         evidence_requeued = requeue_evidence_ready_work_items(db, scan)
-        crawl_requeued = requeue_authenticated_crawl_items(db, scan, result.get("identity_key") or "")
+        state = dict(scan.state_data or {})
+        execution_plan = str(state.get("execution_plan") or "external_only")
+        if execution_plan == "internal_then_external":
+            external_context = get_context(db, scan.id, "external")
+            if external_context is not None:
+                external_context.status = "waiting_for_internal"
+                db.add(external_context)
+            crawl_requeued = seed_internal_first_work_items(db, scan, result.get("identity_key") or "")
+            state = dict(scan.state_data or {})
+            state["execution_plan_stage"] = "internal_running"
+            state["external_release_pending"] = True
+            scan.state_data = state
+            scan.status = "running"
+            scan.current_step = "G1 interno em execução; G0 externo aguardando conclusão do interno"
+        else:
+            crawl_requeued = requeue_authenticated_crawl_items(db, scan, result.get("identity_key") or "")
         zap_rescheduled = _retrigger_authenticated_zap(db, scan)
         skill_probes_seeded = 0
         try:

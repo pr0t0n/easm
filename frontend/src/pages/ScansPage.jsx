@@ -31,7 +31,7 @@ const LEVEL_MAP = {
   Recon: "Recon", Standard: "Padrão", Aggressive: "Agressivo",
 };
 
-const ACTIVE_STATUS    = ["queued", "running", "retrying"];
+const ACTIVE_STATUS    = ["queued", "running", "retrying", "waiting_for_auth"];
 const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
 const TERMINAL_STATUS  = new Set(["completed", "completed_with_gaps", "failed", "cancelled", "stopped"]);
 
@@ -60,6 +60,7 @@ const STATUS_CSS = {
   retrying:{ c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Retentando" },
   paused:  { c: "var(--sev-medium-text)",   dot: "var(--sev-medium-solid)",   t: "Pausado" },
   blocked: { c: "var(--sev-critical-text)", dot: "var(--sev-critical-solid)", t: "Bloqueado" },
+  waiting_for_auth: { c: "var(--sev-medium-text)", dot: "var(--sev-medium-solid)", t: "Aguardando credencial" },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -103,6 +104,11 @@ function blockedReasonLabel(scan) {
 }
 function getPerfil(scan) {
   return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Padrão";
+}
+function executionPlanLabel(scan) {
+  const plan = scan?.state_data?.execution_plan || scan?.execution_plan || "external_only";
+  if (plan === "internal_then_external") return "G1 interno → G0 externo";
+  return "G0 externo";
 }
 function getFaseStates(scan) {
   const cur = extractPhase(scan.current_step);
@@ -183,10 +189,13 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
       {/* cabeçalho */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-            <span className="sk-mono" style={{ fontSize: 14, fontWeight: 700 }}>#{scan.id}</span>
-            <PerfilBadge perfil={perfil} />
-          </div>
+	          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+	            <span className="sk-mono" style={{ fontSize: 14, fontWeight: 700 }}>#{scan.id}</span>
+	            <PerfilBadge perfil={perfil} />
+	            <span style={{ fontSize: 10, fontWeight: 800, color: "var(--brand-700)", background: "var(--brand-50)", border: "1px solid var(--brand-200)", padding: "2px 7px", borderRadius: 999 }}>
+	              {executionPlanLabel(scan)}
+	            </span>
+	          </div>
           <div className="sk-mono" title={scan.target_query || ""} style={{ fontSize: 12, color: "var(--ink-soft)" }}>{targetSummary(scan.target_query)}</div>
         </div>
         <StatusDot status={scan.status} />
@@ -280,6 +289,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [target,   setTarget]   = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
   const [scopeAuthorizationAttested, setScopeAuthorizationAttested] = useState(false);
+  const [executionPlan, setExecutionPlan] = useState("external_only");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "", multiIdentity: false, tokenB: "", cookieB: "", usernameB: "", passwordB: "", headerValueB: "", roleA: "user", roleB: "user" });
   const [sourceEnabled, setSourceEnabled] = useState(false);
@@ -310,6 +320,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         await onCreate({
           target,
           scanLevel: LEVEL_REVERSE[perfil] || "full",
+          executionPlan,
           accessGroupId,
           accessGroupName: selectedGroup?.name || "",
           scopeAuthorizationAttested,
@@ -425,6 +436,34 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
 
       {/* Autenticação (expansível) */}
       <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line-soft)" }}>
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-soft)", display: "block", marginBottom: 7 }}>Plano de execução</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {[
+              ["external_only", "G0 Externo", "Executa teste externo/anônimo imediatamente."],
+              ["internal_then_external", "G1 Interno → G0 Externo", "Solicita credencial primeiro, roda interno autenticado e depois externo."],
+            ].map(([value, title, desc]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setExecutionPlan(value)}
+                style={{
+                  textAlign: "left",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: `1px solid ${executionPlan === value ? "var(--brand-500)" : "var(--line)"}`,
+                  background: executionPlan === value ? "var(--brand-50)" : "#fff",
+                  color: executionPlan === value ? "var(--brand-700)" : "var(--ink-soft)",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-body)",
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 800, color: executionPlan === value ? "var(--brand-700)" : "var(--ink)" }}>{title}</div>
+                <div style={{ fontSize: 10.5, marginTop: 3, lineHeight: 1.35 }}>{desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
         <label style={{
           marginBottom: 12,
           display: "grid",
@@ -770,13 +809,19 @@ function QualityPanel({ quality }) {
 }
 
 // ─── Painel de detalhe lateral ────────────────────────────────────────────────
-function DetailPanel({ scan, logs, onClose }) {
+function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenCaptureConsumed }) {
   const [phases, setPhases] = useState([]);
   const [breakdown, setBreakdown] = useState(null);
   const [quality, setQuality] = useState(null);
   const [progress, setProgress] = useState(scan?.mission_progress ?? 0);
   const [identities, setIdentities] = useState([]);
   const [showCapture, setShowCapture] = useState(false);
+
+  useEffect(() => {
+    if (!autoOpenCapture) return;
+    setShowCapture(true);
+    onAutoOpenCaptureConsumed?.();
+  }, [autoOpenCapture, onAutoOpenCaptureConsumed, scan?.id]);
 
   const loadIdentities = async () => {
     if (!scan?.id) return;
@@ -810,7 +855,7 @@ function DetailPanel({ scan, logs, onClose }) {
       } catch { /* silencioso */ }
     };
     load();
-    const isLive = ["queued","running","retrying"].includes(scan.status);
+    const isLive = ["queued","running","retrying","waiting_for_auth"].includes(scan.status);
     const t = isLive ? setInterval(load, 5000) : null;
     return () => { cancelled = true; if (t) clearInterval(t); };
   }, [scan?.id, scan?.status]);
@@ -818,7 +863,7 @@ function DetailPanel({ scan, logs, onClose }) {
   if (!scan) return null;
 
   const pct = Math.max(0, Math.min(100, Number(progress || 0)));
-  const isLive = ["queued","running","retrying"].includes(scan.status);
+  const isLive = ["queued","running","retrying","waiting_for_auth"].includes(scan.status);
 
   const STATUS_BAR = {
     executed:                     "var(--sev-low-solid)",
@@ -1112,6 +1157,7 @@ export default function ScansPage() {
   const [composer,  setComposer]  = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
   const [selected,  setSelected]  = useState(null);
+  const [autoCaptureScanId, setAutoCaptureScanId] = useState(null);
   const [logs,      setLogs]      = useState([]);
   const [scanStatus, setScanStatus] = useState({});
   const [filaOrder,    setFilaOrder]    = useState([]);
@@ -1195,19 +1241,26 @@ export default function ScansPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
   const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
 
-  const createScan = async ({ target, scanLevel, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, sourcePayload }) => {
+  const createScan = async ({ target, scanLevel, executionPlan, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, sourcePayload }) => {
     const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
+    let firstInternalScan = null;
     for (const tgt of targets) {
-      const payload = { target_query: tgt, scan_level: scanLevel || "full" };
+      const payload = { target_query: tgt, scan_level: scanLevel || "full", execution_plan: executionPlan || "external_only" };
       if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
       if (accessGroupName) payload.access_group_name = accessGroupName;
       payload.scope_authorization_attested = Boolean(scopeAuthorizationAttested);
       if (authPayload)     payload.auth_config        = authPayload;
       if (sourcePayload && (sourcePayload.source_path || sourcePayload.repository_url)) payload.source_config = sourcePayload;
-      await client.post("/api/scans", payload);
+      const { data } = await client.post("/api/scans", payload);
+      if (!firstInternalScan && payload.execution_plan === "internal_then_external") firstInternalScan = data;
     }
-    showMsg("Missão lançada com sucesso!");
+    showMsg(firstInternalScan ? "Missão criada. Capture a credencial para iniciar o G1 interno." : "Missão lançada com sucesso!");
     setComposer(false);
+    if (firstInternalScan) {
+      setScans((prev) => [firstInternalScan, ...prev.filter((scan) => Number(scan.id) !== Number(firstInternalScan.id))]);
+      setSelected(firstInternalScan);
+      setAutoCaptureScanId(firstInternalScan.id);
+    }
     loadScans();
   };
 
@@ -1322,7 +1375,13 @@ export default function ScansPage() {
             ))}
           </div>
           {selected && !TERMINAL_STATUS.has(selected.status) && (
-            <DetailPanel scan={selected} logs={logs} onClose={() => setSelected(null)} />
+	            <DetailPanel
+	              scan={selected}
+	              logs={logs}
+	              autoOpenCapture={Number(autoCaptureScanId) === Number(selected.id)}
+	              onAutoOpenCaptureConsumed={() => setAutoCaptureScanId(null)}
+	              onClose={() => setSelected(null)}
+	            />
           )}
         </div>
       )}
@@ -1472,7 +1531,13 @@ export default function ScansPage() {
             C = Crítico · A = Alto · M = Médio · B = Baixo · clique numa linha para ver detalhes
           </div>
           {selected && TERMINAL_STATUS.has(selected.status) && (
-            <DetailPanel scan={selected} logs={logs} onClose={() => setSelected(null)} />
+	            <DetailPanel
+	              scan={selected}
+	              logs={logs}
+	              autoOpenCapture={Number(autoCaptureScanId) === Number(selected.id)}
+	              onAutoOpenCaptureConsumed={() => setAutoCaptureScanId(null)}
+	              onClose={() => setSelected(null)}
+	            />
           )}
         </div>
       </div>

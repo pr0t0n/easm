@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class ScanCreate(BaseModel):
     target_query: str
     mode: str = "single"
+    execution_plan: str = "external_only"
     access_group_id: int | None = None
     access_group_name: str | None = None
     authorization_code: str | None = None
