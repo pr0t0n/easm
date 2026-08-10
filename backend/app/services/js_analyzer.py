@@ -52,13 +52,20 @@ _PARAM_RE = re.compile(r"""['"]([a-zA-Z_][\w\-]{1,40})['"]\s*:""")  # chaves de 
 _FUNC_RE = re.compile(r"\bfunction\s+([a-zA-Z_]\w{2,40})\s*\(|\b([a-zA-Z_]\w{2,40})\s*[:=]\s*(?:async\s*)?\(")
 
 
-def analyze_js(js_url: str, scope_root: str | None = None) -> dict:
+def analyze_js(
+    js_url: str,
+    scope_root: str | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+) -> dict:
     """Baixa e analisa um arquivo JS. Read-only."""
     out = {"url": js_url, "ok": False, "endpoints": [], "params": [], "functions": [],
            "eval_sinks": [], "proto_sinks": [], "secrets": []}
     try:
+        request_headers = {"User-Agent": "Mozilla/5.0 (easm-js-analyzer)", **dict(headers or {})}
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
-                          headers={"User-Agent": "Mozilla/5.0 (easm-js-analyzer)"}) as c:
+                          headers=request_headers, cookies=dict(cookies or {})) as c:
             r = c.get(js_url)
             body = (r.text or "")[:_MAX_BYTES]
     except Exception as exc:
@@ -121,17 +128,36 @@ def _candidate_js(urls: list[str]) -> list[str]:
     return out
 
 
-def run_js_analysis_for_scan(db, job) -> dict:
+def run_js_analysis_for_scan(db, job, *, execution_context: str = "external") -> dict:
     from app.models.models import Finding
     from app.services.hypothesis_rules import generate_hypotheses_for_scan
     from app.services.offensive_inventory_service import OffensiveInventoryService, sha256_text
 
+    from app.services.execution_context_service import inventory_auth_context, normalize_execution_context
+
+    execution_context = normalize_execution_context(execution_context)
+    auth_context = inventory_auth_context(execution_context)
     state = dict(getattr(job, "state_data", None) or {})
     target_raw = str(getattr(job, "target_query", "") or "").split(",")[0].strip()
     target_url = target_raw if target_raw.startswith(("http://", "https://")) else f"https://{target_raw}"
     allowed_host = (urlparse(target_url).hostname or "").lower()
     root = _root_domain(allowed_host or target_raw)
-    urls = list(state.get("discovered_endpoints") or [])
+    urls = list(
+        state.get("internal_discovered_endpoints") or []
+        if execution_context == "internal"
+        else state.get("discovered_endpoints") or []
+    )
+    try:
+        from app.models.models import OffensiveEndpoint
+
+        urls.extend(
+            str(row[0]) for row in db.query(OffensiveEndpoint.url).filter(
+                OffensiveEndpoint.scan_job_id == job.id,
+                OffensiveEndpoint.auth_context == auth_context,
+            ).all()
+        )
+    except Exception:
+        pass
     try:
         for (det,) in db.query(Finding.details).filter(Finding.scan_job_id == job.id).limit(800).all():
             if isinstance(det, dict):
@@ -154,10 +180,27 @@ def run_js_analysis_for_scan(db, job) -> dict:
     new_endpoints: set[str] = set()
     analyzed = 0
     inv = OffensiveInventoryService(db, job)
+    request_headers: dict[str, str] = {}
+    request_cookies: dict[str, str] = {}
+    if execution_context == "internal":
+        try:
+            from app.services.auth_session_manager import AuthSessionManager
+
+            material = AuthSessionManager(db, job).get_material()
+            if material and material.valid:
+                request_headers = dict(material.headers or {})
+                request_cookies = dict(material.cookies or {})
+        except Exception:
+            pass
     for ju in js_files:
-        js_endpoint = inv.upsert_endpoint(ju, source_tool="js_analyzer", tags=["js"], metadata={"source": "discovered_js_candidate"})
+        js_endpoint = inv.upsert_endpoint(ju, source_tool="js_analyzer", auth_context=auth_context, tags=["js"], metadata={"source": "discovered_js_candidate", "execution_context": execution_context})
+        from app.services.execution_context_service import upsert_endpoint_observation
+        upsert_endpoint_observation(
+            db, job, js_endpoint, execution_context=execution_context,
+            source_tool="js_analyzer", metadata={"source": "js_candidate"},
+        )
         js_asset = inv.upsert_js_asset(ju, endpoint=js_endpoint, download_status="pending", analysis_status="running", source_tool="js_analyzer")
-        a = analyze_js(ju, scope_root=root)
+        a = analyze_js(ju, scope_root=root, headers=request_headers, cookies=request_cookies)
         if not a.get("ok"):
             js_asset.analysis_status = "failed"
             js_asset.js_metadata = {**dict(js_asset.js_metadata or {}), "error": a.get("error")}
@@ -182,8 +225,13 @@ def run_js_analysis_for_scan(db, job) -> dict:
                 e,
                 source_tool="js_analyzer",
                 discovered_from=ju,
+                auth_context=auth_context,
                 tags=["api"] if "/api" in e.lower() or "/rest" in e.lower() else [],
-                metadata={"source_js_asset_id": js_asset.id, "source_js_url": ju},
+                metadata={"source_js_asset_id": js_asset.id, "source_js_url": ju, "execution_context": execution_context},
+            )
+            upsert_endpoint_observation(
+                db, job, ep, execution_context=execution_context,
+                source_tool="js_analyzer", metadata={"source_js_url": ju},
             )
             for p in a.get("params") or []:
                 inv.upsert_parameter(ep, p, location="json", source_tool="js_analyzer", source_js_asset_id=js_asset.id)
@@ -228,6 +276,10 @@ def run_js_analysis_for_scan(db, job) -> dict:
         for e in fresh:
             seen.add(e)
         st["discovered_endpoints"] = list(seen)[:5000]
+        if execution_context == "internal":
+            st["internal_discovered_endpoints"] = sorted(
+                set(st.get("internal_discovered_endpoints") or []) | set(new_endpoints)
+            )[:5000]
         job.state_data = st
         reseeded = len(fresh)
     try:
@@ -249,4 +301,5 @@ def run_js_analysis_for_scan(db, job) -> dict:
     except Exception:
         db.rollback()
     return {"analyzed": analyzed, "js_files": len(js_files), "endpoints_found": len(new_endpoints),
-            "endpoints_reseeded": reseeded, "findings_created": created}
+            "endpoints_reseeded": reseeded, "findings_created": created,
+            "execution_context": execution_context}

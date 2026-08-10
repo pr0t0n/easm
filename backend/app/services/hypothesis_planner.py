@@ -21,6 +21,7 @@ TERMINAL_STATUSES = {
     "blocked_precondition", "blocked_missing_auth", "blocked_missing_validator",
     "blocked_missing_authorization",
     "blocked_historical_not_reexecuted",
+    "blocked_missing_second_identity",
 }
 VALIDATOR_TYPES = {
     "idor_bola", "object_reference", "bfla_authz", "business_logic_mass_assignment",
@@ -336,12 +337,18 @@ def ensure_hypothesis_drain_work_item(
 ) -> dict[str, Any]:
     """Ensure that the persistent queue owns the remaining validation drain."""
     plan = plan_hypotheses(db, job)
-    remaining = len(list(plan.get("rows") or []))
+    planned_rows = list(plan.get("rows") or [])
+    remaining = len(planned_rows)
+    execution_context = "internal" if any(
+        str(getattr(row, "execution_context", "external") or "external") == "internal"
+        for row in planned_rows
+    ) else "external"
     active_statuses = ["blocked", "queued", "retry", "dispatched", "running", "submitted"]
     existing = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == execution_context,
             ScanWorkItem.tool_name == "internal-hypothesis-validator",
             ScanWorkItem.status.in_(active_statuses),
         )
@@ -372,6 +379,7 @@ def ensure_hypothesis_drain_work_item(
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == execution_context,
             ScanWorkItem.phase_id == "P21",
             ScanWorkItem.tool_name == "internal-hypothesis-validator",
         )
@@ -388,6 +396,7 @@ def ensure_hypothesis_drain_work_item(
 
     item = ScanWorkItem(
         scan_job_id=job.id,
+        execution_context=execution_context,
         phase_id="P21",
         target=queue_target,
         tool_name="internal-hypothesis-validator",
@@ -401,6 +410,7 @@ def ensure_hypothesis_drain_work_item(
             "source": "hypothesis_planner",
             "engine": "internal_safe_validator",
             "internal_hypothesis_batch": True,
+            "execution_context": execution_context,
             "batch_size": max(1, min(250, int(batch_size))),
             "queue_ready_at": now.isoformat(),
             "planner_policy": "risk_evidence_outcome_v1",

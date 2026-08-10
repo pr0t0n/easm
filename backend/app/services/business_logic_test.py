@@ -635,6 +635,18 @@ def _collections_from_swagger(c: httpx.Client, base: str) -> list[str]:
     return cols
 
 
+def _cross_identity_signature(observation: dict) -> tuple:
+    """Coarse response fingerprint used only to flag whether two identities
+    got a meaningfully different response to the same request — not a
+    security verdict by itself, just evidence for whatever consumes
+    cross_identity_delta downstream."""
+    return (
+        observation.get("status_code"),
+        str(observation.get("content_type") or "")[:40],
+        int(observation.get("content_length") or 0) // 256,
+    )
+
+
 def run_as_tool(
     target: str,
     extra_urls: list[str] | None = None,
@@ -643,6 +655,7 @@ def run_as_tool(
     execution_plan: dict | None = None,
     auth_headers: dict | None = None,
     auth_cookies: dict | None = None,
+    identity_sessions: dict[str, dict] | None = None,
     run_business_logic_battery: bool = True,
 ) -> dict:
     """Execute only read-only baselines from an observed-endpoint contract.
@@ -674,6 +687,21 @@ def run_as_tool(
     }
     headers = {str(key): str(value) for key, value in dict(auth_headers or {}).items() if value}
     cookies = {str(key): str(value) for key, value in dict(auth_cookies or {}).items() if value}
+    # Real per-identity material (e.g. {"user_a": {...}, "user_b": {...}})
+    # for actions whose required_identities names more than one identity.
+    # Previously this executor only ever accepted ONE auth_headers/auth_cookies
+    # pair, so an action contract requiring ["user_a","user_b"] (a real
+    # object-ownership/money-movement invariant) was marked "ready" upstream
+    # but silently only ever executed as a single identity — the second
+    # identity's request never actually happened.
+    identity_material: dict[str, dict[str, dict[str, str]]] = {
+        str(key): {
+            "headers": {str(k): str(v) for k, v in dict((value or {}).get("headers") or {}).items() if v},
+            "cookies": {str(k): str(v) for k, v in dict((value or {}).get("cookies") or {}).items() if v},
+        }
+        for key, value in dict(identity_sessions or {}).items()
+        if isinstance(value, dict)
+    }
     # Named-technique battery (CORS, rate-limit, mass-assignment, etc.) —
     # separate from the observed-evidence-only baseline replay above, and run
     # regardless of whether that replay had any actions. This is the single
@@ -722,8 +750,37 @@ def run_as_tool(
     deadline = time.monotonic() + max(1, min(120, int(max_seconds or 0)))
     observations: list[dict] = []
     failures = 0
+    clients: dict[str, httpx.Client] = {}
+
+    def _client_for(identity_key: str) -> httpx.Client:
+        if identity_key not in clients:
+            material = identity_material.get(identity_key) or {"headers": headers, "cookies": cookies}
+            clients[identity_key] = httpx.Client(
+                timeout=_TIMEOUT, follow_redirects=False, verify=False,
+                headers=material["headers"], cookies=material["cookies"],
+            )
+        return clients[identity_key]
+
+    def _observe(response: httpx.Response, *, endpoint: str, method: str, action: dict, identity_key: str | None) -> dict:
+        body = response.content or b""
+        observation = {
+            "endpoint": endpoint,
+            "method": method,
+            "status_code": response.status_code,
+            "content_type": str(response.headers.get("content-type") or "")[:160],
+            "content_length": len(body),
+            "body_fingerprint": __import__("hashlib").sha256(body).hexdigest()[:16],
+            "redirect_location": str(response.headers.get("location") or "")[:500],
+            "flows": action.get("flows") or [],
+            "invariants": action.get("invariants") or [],
+            "evidence_status": "baseline_observed",
+        }
+        if identity_key:
+            observation["identity_key"] = identity_key
+        return observation
+
     try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False, headers=headers, cookies=cookies) as client:
+        try:
             for action in actions[:50]:
                 if time.monotonic() > deadline:
                     blocked.append({"endpoint": action.get("endpoint"), "reasons": ["execution_budget_exhausted"]})
@@ -733,27 +790,32 @@ def run_as_tool(
                 if not endpoint or parsed.scheme not in {"http", "https"} or parsed.hostname != base_parsed.hostname:
                     blocked.append({"endpoint": endpoint, "reasons": ["outside_target_scope"]})
                     continue
-                if str(action.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}:
+                method = str(action.get("method") or "GET").upper()
+                if method not in {"GET", "HEAD", "OPTIONS"}:
                     blocked.append({"endpoint": endpoint, "reasons": ["state_change_not_allowed_in_baseline_executor"]})
                     continue
+                required = [str(item) for item in dict.fromkeys(action.get("required_identities") or [])]
+                cross_identity_keys = [key for key in required if key in identity_material]
                 try:
-                    response = client.request(str(action.get("method") or "GET").upper(), endpoint)
-                    body = response.content or b""
-                    observations.append({
-                        "endpoint": endpoint,
-                        "method": str(action.get("method") or "GET").upper(),
-                        "status_code": response.status_code,
-                        "content_type": str(response.headers.get("content-type") or "")[:160],
-                        "content_length": len(body),
-                        "body_fingerprint": __import__("hashlib").sha256(body).hexdigest()[:16],
-                        "redirect_location": str(response.headers.get("location") or "")[:500],
-                        "flows": action.get("flows") or [],
-                        "invariants": action.get("invariants") or [],
-                        "evidence_status": "baseline_observed",
-                    })
+                    if len(cross_identity_keys) >= 2:
+                        key_a, key_b = cross_identity_keys[0], cross_identity_keys[1]
+                        obs_a = _observe(_client_for(key_a).request(method, endpoint), endpoint=endpoint, method=method, action=action, identity_key=key_a)
+                        obs_b = _observe(_client_for(key_b).request(method, endpoint), endpoint=endpoint, method=method, action=action, identity_key=key_b)
+                        delta = _cross_identity_signature(obs_a) != _cross_identity_signature(obs_b)
+                        obs_a["cross_identity_delta"] = delta
+                        obs_b["cross_identity_delta"] = delta
+                        observations.append(obs_a)
+                        observations.append(obs_b)
+                    else:
+                        identity_key = cross_identity_keys[0] if cross_identity_keys else None
+                        response = _client_for(identity_key or "__default__").request(method, endpoint)
+                        observations.append(_observe(response, endpoint=endpoint, method=method, action=action, identity_key=identity_key))
                 except Exception as exc:  # noqa: BLE001
                     failures += 1
-                    observations.append({"endpoint": endpoint, "method": action.get("method"), "evidence_status": "request_failed", "error": type(exc).__name__})
+                    observations.append({"endpoint": endpoint, "method": method, "evidence_status": "request_failed", "error": type(exc).__name__})
+        finally:
+            for client in clients.values():
+                client.close()
     except Exception as exc:  # noqa: BLE001
         return {**common, "status": "failed", "stdout": "", "stderr": f"{type(exc).__name__}: {exc}", "dispatch_error": type(exc).__name__}
 

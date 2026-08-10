@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import requests
@@ -16,6 +16,141 @@ from sqlalchemy.orm import Session
 
 from app.models.models import ScanAuthSession, ScanIdentity, ScanJob
 from app.services.pentest_contracts import AuthContract, normalize_auth_config
+
+# Soft TTL applied to every persisted ScanAuthSession. Nothing previously set
+# ScanAuthSession.expires_at at all, so a captured/static session was treated
+# as good for the entire scan lifetime with no re-check. auth-session-revalidate
+# (celery beat, see tasks.py) re-probes any row past this and flips it to
+# "expired" if the target now looks logged-out.
+SESSION_REVALIDATION_INTERVAL_SECONDS = 30 * 60
+
+_HIGH_PRIVILEGE_ROLE_MARKERS = (
+    "admin", "administrator", "superadmin", "super_admin", "owner",
+    "root", "manager", "staff", "moderator", "superuser",
+)
+_LOW_PRIVILEGE_ROLE_MARKERS = (
+    "guest", "viewer", "anonymous", "anon", "free", "basic",
+    "low", "readonly", "read_only", "member",
+)
+
+
+def privilege_rank(role: str) -> int:
+    """Classify a free-text identity role into a coarse privilege rank
+    (0=low, 1=peer/unknown, 2=high) so cross-identity validators (IDOR/BFLA,
+    business-logic 2-identity execution) know which captured identity should
+    play which side of a test, instead of assuming capture order reflects
+    privilege order — an operator who captures "admin" before "low_priv_user"
+    previously got tests run in the wrong direction with no correction."""
+    text = str(role or "").strip().lower()
+    if not text:
+        return 1
+    if any(marker in text for marker in _HIGH_PRIVILEGE_ROLE_MARKERS):
+        return 2
+    if any(marker in text for marker in _LOW_PRIVILEGE_ROLE_MARKERS):
+        return 0
+    return 1
+
+
+def has_any_valid_session(db: Session, scan: ScanJob) -> bool:
+    """Single source of truth for "does this scan have at least one confirmed
+    authenticated session". Replaces the ad hoc auth_config-truthy checks that
+    used to be scattered across BOLA gating / skill-probe seeding, each of
+    which could silently disagree about what counts as "authenticated"."""
+    return (
+        db.query(ScanAuthSession.id)
+        .filter(ScanAuthSession.scan_job_id == scan.id, ScanAuthSession.status.in_(["valid", "static"]))
+        .first()
+        is not None
+    )
+
+
+def revalidate_expiring_sessions(db: Session) -> dict[str, int]:
+    """Celery-beat entry point (task auth-session-revalidate): find
+    ScanAuthSession rows past their soft expiry for scans still running, and
+    probe whether the underlying session is still authenticated.
+
+    Nothing previously re-checked a captured/static session's liveness after
+    initial validation — a session that died mid-scan (logout, idle timeout,
+    revoked token) kept being handed to every downstream tool with no signal
+    that results from that point on were effectively unauthenticated.
+    """
+    from app.models.models import ScanLog
+
+    now = datetime.now()
+    stale = (
+        db.query(ScanAuthSession, ScanIdentity, ScanJob)
+        .join(ScanJob, ScanAuthSession.scan_job_id == ScanJob.id)
+        .outerjoin(ScanIdentity, ScanAuthSession.scan_identity_id == ScanIdentity.id)
+        .filter(
+            ScanAuthSession.status.in_(["valid", "static"]),
+            ScanAuthSession.expires_at.isnot(None),
+            ScanAuthSession.expires_at <= now,
+            ScanJob.status.in_(["queued", "running", "retrying", "paused"]),
+        )
+        .all()
+    )
+    checked = 0
+    expired = 0
+    for session, identity, scan in stale:
+        checked += 1
+        target = str(scan.target_query or "").split(",")[0].strip()
+        if not target:
+            session.expires_at = now + timedelta(seconds=SESSION_REVALIDATION_INTERVAL_SECONDS)
+            db.add(session)
+            continue
+        base = target if target.startswith("http") else f"http://{target}"
+        looks_dead = False
+        try:
+            response = requests.get(
+                base,
+                headers=dict(session.headers or {}),
+                cookies=dict(session.cookies or {}),
+                timeout=15,
+                allow_redirects=False,
+                verify=False,
+            )
+            if response.status_code in (401, 403):
+                looks_dead = True
+            location = str(response.headers.get("location") or "").lower()
+            if response.status_code in (301, 302, 303, 307, 308) and any(
+                marker in location for marker in ("login", "signin", "sign-in", "auth")
+            ):
+                looks_dead = True
+        except Exception:  # noqa: BLE001
+            # A transport failure isn't proof the session died — don't flip
+            # status on a flaky network blip, just push the next check out.
+            session.expires_at = now + timedelta(seconds=SESSION_REVALIDATION_INTERVAL_SECONDS)
+            db.add(session)
+            continue
+        if looks_dead:
+            expired += 1
+            session.status = "expired"
+            session.last_error = "session_expired_detected_by_revalidation"
+            session.updated_at = now
+            db.add(session)
+            if identity is not None:
+                identity.status = "expired"
+                identity.session_valid = False
+                identity.last_error = "session_expired_detected_by_revalidation"
+                identity.updated_at = now
+                db.add(identity)
+            db.add(
+                ScanLog(
+                    scan_job_id=scan.id,
+                    source="auth-session-manager",
+                    level="WARNING",
+                    message=(
+                        f"authenticated_session_expired scan={scan.id} "
+                        f"identity={identity.identity_key if identity else session.session_key} "
+                        "downstream tools will run unauthenticated until a new session is captured"
+                    ),
+                )
+            )
+        else:
+            session.expires_at = now + timedelta(seconds=SESSION_REVALIDATION_INTERVAL_SECONDS)
+            db.add(session)
+    db.commit()
+    return {"checked": checked, "expired": expired}
 
 
 @dataclass(slots=True)
@@ -92,6 +227,8 @@ class AuthSessionManager:
             self.db.add(session)
 
         self._persist_scan_auth_summary(sessions)
+        if self.contract.auth_type == "login_flow":
+            self._seed_session_fixation_hypothesis()
         self.db.flush()
         return {
             "required": self.contract.required,
@@ -125,6 +262,44 @@ class AuthSessionManager:
                 status=status,
             )
         return None
+
+    def list_material(self, limit: int = 4) -> list[AuthMaterial]:
+        """Return up to `limit` distinct valid identities' auth material,
+        ordered from lowest to highest privilege rank. get_material() only
+        ever returns a single identity, which is why cross-identity checks
+        (IDOR/BFLA, business-logic actions with required_identities=[user_a,
+        user_b]) could never actually run two identities against the same
+        request — callers that need more than one identity's material should
+        use this instead."""
+        query = (
+            self.db.query(ScanAuthSession, ScanIdentity)
+            .outerjoin(ScanIdentity, ScanAuthSession.scan_identity_id == ScanIdentity.id)
+            .filter(ScanAuthSession.scan_job_id == self.scan.id)
+            .order_by(ScanAuthSession.id.asc())
+        )
+        materials: list[AuthMaterial] = []
+        seen_identity_keys: set[str] = set()
+        for session, identity in query.all():
+            status = str(session.status or "")
+            if status not in {"valid", "static"}:
+                continue
+            identity_key = str(identity.identity_key if identity else f"session-{session.id}")
+            if identity_key in seen_identity_keys:
+                continue
+            seen_identity_keys.add(identity_key)
+            materials.append(
+                AuthMaterial(
+                    identity_key=identity_key,
+                    role=str(identity.role if identity else ""),
+                    auth_type=str(session.auth_type or "none"),
+                    headers={str(k): str(v) for k, v in dict(session.headers or {}).items()},
+                    cookies={str(k): str(v) for k, v in dict(session.cookies or {}).items()},
+                    valid=True,
+                    status=status,
+                )
+            )
+        materials.sort(key=lambda item: privilege_rank(item.role))
+        return materials[:limit]
 
     def upsert_captured_material(
         self, identity_key: str, role: str, username_ref: str, material: AuthMaterial
@@ -214,6 +389,7 @@ class AuthSessionManager:
         session.last_validated_at = datetime.now()
         session.last_error = material.error or None
         session.updated_at = datetime.now()
+        session.expires_at = datetime.now() + timedelta(seconds=SESSION_REVALIDATION_INTERVAL_SECONDS)
         return session
 
     def _build_material(self, identity_key: str, role: str, contract: AuthContract) -> AuthMaterial:
@@ -370,6 +546,29 @@ class AuthSessionManager:
             if str(item.get("id") or item.get("identity_key") or "") == identity_key:
                 return dict(item)
         return dict(auth_config)
+
+    def _seed_session_fixation_hypothesis(self) -> None:
+        """One session_fixation hypothesis per scan (not per endpoint) when a
+        real login flow with credentials is configured — fixation can only be
+        tested by performing the login itself, which a CDP-captured-only
+        session never has credentials for. See validate_session_fixation."""
+        try:
+            from app.services.offensive_inventory_service import OffensiveInventoryService
+
+            login_url = str(self.contract.login_url or "")
+            OffensiveInventoryService(self.db, self.scan).upsert_hypothesis(
+                hypothesis_type="session_fixation",
+                title=f"Session Fixation: {login_url or self.scan.target_query}"[:255],
+                target_ref=login_url or str(self.scan.target_query or ""),
+                source_signal="auth_config:login_flow",
+                confidence=55,
+                recommended_tools=["session-fixation-validator"],
+                required_identities=[],
+                evidence_requirements=["pre_login_session_identifier", "post_login_session_identifier"],
+                replace_contract=True,
+            )
+        except Exception:
+            pass
 
     def _persist_scan_auth_summary(self, sessions: list[AuthMaterial]) -> None:
         state = dict(self.scan.state_data or {})

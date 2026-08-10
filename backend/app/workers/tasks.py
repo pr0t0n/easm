@@ -1277,6 +1277,24 @@ def watchdog_tick():
         db.close()
 
 
+# Executado a cada 10 minutos pelo Celery Beat (ver celery_app.py beat_schedule)
+@celery.task(name="auth_session.revalidate", queue=PLATFORM_CONTROL_QUEUE)
+def auth_session_revalidate_tick():
+    """Re-probes authenticated sessions past their soft TTL for scans still
+    running, flipping status to 'expired' when the target now looks
+    logged-out — see auth_session_manager.revalidate_expiring_sessions."""
+    db: Session = SessionLocal()
+    try:
+        from app.services.auth_session_manager import revalidate_expiring_sessions
+        return revalidate_expiring_sessions(db)
+    except Exception as exc:
+        import logging as _alog
+        _alog.getLogger(__name__).error("auth_session_revalidate_tick failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery.task(name="hackerone_learning.tick", queue="worker.unit.reporting")
 def hackerone_learning_tick():
     """Dispara semanalmente o crawler de aprendizado HackerOne/GitHub.
@@ -3661,7 +3679,12 @@ def run_scan_postprocessor(
             chains = correlate_chains(db, job.id)
             result = {"graph": graph, "chains": chains}
         elif kind == "zap":
-            from app.services.zap_scanner import is_zap_available, run_zap_active_scan, run_zap_baseline
+            from app.services.zap_scanner import (
+                is_zap_available,
+                run_zap_active_scan,
+                run_zap_ajax_spider,
+                run_zap_baseline,
+            )
 
             if not is_zap_available():
                 result = {"status": "skipped", "reason": "zap_unavailable"}
@@ -3678,13 +3701,15 @@ def run_scan_postprocessor(
                     for token in ("bank", "invoice", "pay", "auth", "sso", "login", "admin", "token", "api", "account")
                 )
                 active_count = int(state.get("zap_active_count") or 0)
+                execution_context = str(getattr(item, "execution_context", "external") or "external").lower()
                 auth_headers: dict[str, str] = {}
-                try:
-                    from app.services.zap_scanner import resolve_zap_auth_headers
+                if execution_context == "internal":
+                    try:
+                        from app.services.zap_scanner import resolve_zap_auth_headers
 
-                    auth_headers = resolve_zap_auth_headers(db, job, state) or {}
-                except Exception:
-                    pass
+                        auth_headers = resolve_zap_auth_headers(db, job, state) or {}
+                    except Exception:
+                        pass
                 # ZAP calls are slow network operations. Accessing job.state_data
                 # after the start commit opens a new SQLAlchemy transaction; close
                 # it before talking to ZAP so scan_jobs is not locked while the
@@ -3699,6 +3724,39 @@ def run_scan_postprocessor(
                 else:
                     result = run_zap_baseline(url, auth_headers=auth_headers or None)
                     patch = {}
+                # G1 always receives a browser-backed spider so authenticated
+                # SPA routes are not limited to links visible in static HTML.
+                tech_text = " ".join(str(value) for value in list(job.tech_stack or [])).lower()
+                if execution_context == "internal" or any(token in tech_text for token in ("react", "vue", "angular", "next", "nuxt")):
+                    ajax_result = run_zap_ajax_spider(url, auth_headers=auth_headers or None)
+                    result["ajax_spider"] = ajax_result
+                    result["discovered_urls"] = sorted(set(
+                        list(result.get("discovered_urls") or [])
+                        + list(ajax_result.get("discovered_urls") or [])
+                    ))[:1000]
+                    result["findings"] = list(result.get("findings") or []) + list(ajax_result.get("findings") or [])
+                try:
+                    from app.services.crawler_result_normalizer import normalize_crawler_result
+
+                    normalize_crawler_result(
+                        db,
+                        job,
+                        target=url,
+                        tool_name="zap-ajax" if result.get("ajax_spider") else str(result.get("scan_type") or "zap-baseline"),
+                        result={
+                            "parsed_result": {"urls": list(result.get("discovered_urls") or [])},
+                            "stdout": "\n".join(str(value) for value in list(result.get("discovered_urls") or [])),
+                        },
+                        auth_context="authenticated" if execution_context == "internal" else "anonymous",
+                        execution_context=execution_context,
+                    )
+                except Exception as exc:
+                    db.add(ScanLog(
+                        scan_job_id=job.id,
+                        source="zap",
+                        level="WARNING",
+                        message=f"zap_inventory_normalization_failed context={execution_context} error={exc!s}"[:2000],
+                    ))
                 findings = [
                     finding for finding in list(result.get("findings") or [])
                     if str(finding.get("title") or "").strip().lower() not in {"", "zap finding", "[zap]", "zap"}
@@ -4655,6 +4713,9 @@ def execute_scan_work_item(item_id: int):
                 _job_env["SHODAN_API_KEY"] = _shodan_key
         except Exception:
             pass
+        for _env_name, _env_value in dict(_item_meta.get("env") or {}).items():
+            if str(_env_name) in {"SCAN_FUZZ_PARAM", "SCAN_FUZZ_POST_DATA", "SCAN_FUZZ_CONTENT_TYPE"}:
+                _job_env[str(_env_name)] = str(_env_value)
 
         try:
             from app.services.scan_scope import authorized_scope_for_scan
@@ -4669,13 +4730,15 @@ def execute_scan_work_item(item_id: int):
         # has captured a valid session. mcp_server.py already forwards
         # arguments.auth_headers to the kali runner (see _submit_kali_profile);
         # this was the only missing link for these tools.
-        try:
-            from app.services.worker_dispatcher import _resolve_auth_context
-            from app.services.kali_executor import _auth_headers_from_skill_context
-            _auth_context = _resolve_auth_context(item.scan_job_id, {"identity_key": _item_meta.get("identity_key")})
-            _auth_headers = _auth_headers_from_skill_context({"auth_context": _auth_context}) if _auth_context else {}
-        except Exception:
-            _auth_headers = {}
+        _auth_headers = {}
+        if str(getattr(item, "execution_context", "external") or "external").lower() == "internal":
+            try:
+                from app.services.worker_dispatcher import _resolve_auth_context
+                from app.services.kali_executor import _auth_headers_from_skill_context
+                _auth_context = _resolve_auth_context(item.scan_job_id, {"identity_key": _item_meta.get("identity_key")})
+                _auth_headers = _auth_headers_from_skill_context({"auth_context": _auth_context}) if _auth_context else {}
+            except Exception:
+                _auth_headers = {}
 
         execution = {
             "mcp_request_id": f"wi-{item.id}",
@@ -4880,6 +4943,7 @@ def execute_scan_work_item(item_id: int):
             if not run:
                 run = ExecutedToolRun(
                     scan_job_id=item.scan_job_id,
+                    execution_context=str(getattr(item, "execution_context", "external") or "external"),
                     phase_id=str(item.phase_id or "")[:10] or None,
                     skill_id=str(_primary_skill_id or "")[:120] or None,
                     tool_name=str(item.tool_name or "")[:100],
@@ -4892,6 +4956,7 @@ def execute_scan_work_item(item_id: int):
                 )
                 db.add(run)
             run.phase_id = str(item.phase_id or "")[:10] or None
+            run.execution_context = str(getattr(item, "execution_context", "external") or "external")
             run.skill_id = str(_primary_skill_id or "")[:120] or None
             run.profile = str(item.profile or item.tool_name or "")[:120] or None
             run.target = str(_dispatch_target or item.target or "")[:500]
@@ -6084,16 +6149,30 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     _surface_base = item.target
                     if _is_work_item_batch_target(item.target):
                         _surface_base = str((_surface_meta.get("batch_targets") or [job.target_query])[0])
-                    expand_attack_surface(db, job.id, _surface_base, item.tool_name, _full_result, job)
+                    expand_attack_surface(
+                        db,
+                        job.id,
+                        _surface_base,
+                        item.tool_name,
+                        _full_result,
+                        job,
+                        execution_context=str(getattr(item, "execution_context", "external") or "external"),
+                    )
 
                 # ── Análise estática de JS (endpoints/params/sinks/segredos) ──
                 # Após crawl/JS phases. Uma vez por scan. Realimenta endpoints.
                 if item.phase_id in ("P03", "P08", "P09") and item.status == "completed":
                     _st_j = dict(job.state_data or {})
-                    if not _st_j.get("js_done") and _st_j.get("discovered_endpoints"):
+                    _ctx_j = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_j, _cp_j, _ = processor_should_run(
+                        db, job, execution_context=_ctx_j,
+                        processor_name="js-analysis", processor_version="v2-auth-context",
+                    )
+                    if _run_j and (_st_j.get("discovered_endpoints") or _st_j.get("internal_discovered_endpoints")):
                         from app.services.js_analyzer import run_js_analysis_for_scan
-                        _jr = run_js_analysis_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"js_done": True}) or job
+                        _jr = run_js_analysis_for_scan(db, job, execution_context=_ctx_j)
+                        complete_processor_checkpoint(db, _cp_j, _jr)
                         if _jr.get("findings_created") or _jr.get("endpoints_reseeded"):
                             import logging as _jlog
                             _jlog.getLogger(__name__).info(
@@ -6123,10 +6202,16 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # ── Fase 2: Excessive Data Exposure / Mass Assignment (API) ───
                 if item.phase_id in ("P09", "P16") and item.status == "completed":
                     _st_a = dict(job.state_data or {})
-                    if not _st_a.get("api_probe_done") and _st_a.get("discovered_endpoints"):
+                    _ctx_a = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_a, _cp_a, _ = processor_should_run(
+                        db, job, execution_context=_ctx_a,
+                        processor_name="api-probe", processor_version="v2-auth-context",
+                    )
+                    if _run_a and (_st_a.get("discovered_endpoints") or _st_a.get("internal_discovered_endpoints")):
                         from app.services.api_probe import run_api_probe_for_scan
-                        _ar = run_api_probe_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"api_probe_done": True}) or job
+                        _ar = run_api_probe_for_scan(db, job, execution_context=_ctx_a)
+                        complete_processor_checkpoint(db, _cp_a, _ar)
                         if _ar.get("findings_created"):
                             import logging as _alog
                             _alog.getLogger(__name__).info(
@@ -6135,10 +6220,16 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # ── Lógica de Negócio (tampering/fluxo/cupom) — read-only ─────
                 if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
                     _st_bl = dict(job.state_data or {})
-                    if not _st_bl.get("bizlogic_done") and _st_bl.get("discovered_endpoints"):
+                    _ctx_bl = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_bl, _cp_bl, _ = processor_should_run(
+                        db, job, execution_context=_ctx_bl,
+                        processor_name="business-logic", processor_version="v2-auth-context",
+                    )
+                    if _run_bl and (_st_bl.get("discovered_endpoints") or _st_bl.get("internal_discovered_endpoints")):
                         from app.services.business_logic_probe import run_business_logic_for_scan
-                        _blr = run_business_logic_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"bizlogic_done": True}) or job
+                        _blr = run_business_logic_for_scan(db, job, execution_context=_ctx_bl)
+                        complete_processor_checkpoint(db, _cp_bl, _blr)
                         if _blr.get("findings_created"):
                             import logging as _bllog
                             _bllog.getLogger(__name__).info(
@@ -6148,10 +6239,19 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # Após descoberta de endpoints com parâmetro. Uma vez por scan.
                 if item.phase_id in ("P09", "P16", "P10") and item.status == "completed":
                     _st_n = dict(job.state_data or {})
-                    if not _st_n.get("nosql_done") and (_st_n.get("discovered_endpoints")):
+                    _ctx_n = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_n, _cp_n, _ = processor_should_run(
+                        db, job, execution_context=_ctx_n,
+                        processor_name="nosql-probe", processor_version="v2-context-auth",
+                    )
+                    _has_nosql_surface = bool(_st_n.get("discovered_endpoints") or (
+                        _ctx_n == "internal" and _st_n.get("internal_discovered_endpoints")
+                    ))
+                    if _run_n and _has_nosql_surface:
                         from app.services.nosql_probe import run_nosql_for_scan
-                        _nr = run_nosql_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"nosql_done": True}) or job
+                        _nr = run_nosql_for_scan(db, job, execution_context=_ctx_n)
+                        complete_processor_checkpoint(db, _cp_n, _nr)
                         if _nr.get("findings_created"):
                             import logging as _nlog
                             _nlog.getLogger(__name__).info(
@@ -6162,10 +6262,23 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # ter sido mapeada. Uma vez por scan (flag no state).
                 if item.phase_id in ("P16", "P19", "P09") and item.status == "completed":
                     _st_b = dict(job.state_data or {})
-                    if _st_b.get("auth_config") and not _st_b.get("bola_done"):
+                    from app.services.auth_session_manager import has_any_valid_session
+                    # has_any_valid_session is the single source of truth for
+                    # "this scan has a confirmed authenticated session" — it
+                    # also covers a session captured interactively via the CDP
+                    # flow, which the raw auth_config-truthy check below never
+                    # saw. Kept as an OR fallback for scans whose
+                    # ensure_sessions() hasn't run yet at this point.
+                    _ctx_b = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_b, _cp_b, _ = processor_should_run(
+                        db, job, execution_context=_ctx_b,
+                        processor_name="bola-bfla", processor_version="v2-context-controls",
+                    )
+                    if _ctx_b == "internal" and _run_b and (has_any_valid_session(db, job) or _st_b.get("auth_config")):
                         from app.services.bola_probe import run_bola_for_scan
                         _br = run_bola_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"bola_done": True}) or job
+                        complete_processor_checkpoint(db, _cp_b, _br)
                         if _br.get("findings_created"):
                             import logging as _blog
                             _blog.getLogger(__name__).info(
@@ -6176,12 +6289,18 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 # Uma vez por scan, após superfície/endpoints descobertos.
                 if item.phase_id in ("P16", "P19", "P09", "P10") and item.status == "completed":
                     _st_ae = dict(job.state_data or {})
-                    if _st_ae.get("active_exploit_authorized") and not _st_ae.get("active_exploit_done"):
+                    _ctx_ae = str(getattr(item, "execution_context", "external") or "external")
+                    from app.services.execution_context_service import processor_should_run, complete_processor_checkpoint
+                    _run_ae, _cp_ae, _ = processor_should_run(
+                        db, job, execution_context=_ctx_ae,
+                        processor_name="active-app-pentest", processor_version="v2-context-auth",
+                    )
+                    if _st_ae.get("active_exploit_authorized") and _run_ae:
                         # Application Pentest GENÉRICO (dirigido por descoberta) — funciona
                         # em qualquer ambiente; classifica confirmada/hipótese/não-testada.
                         from app.services.app_pentest import run_app_pentest_for_scan
-                        _aer = run_app_pentest_for_scan(db, job)
-                        job = _patch_scan_state(db, job.id, {"active_exploit_done": True}) or job
+                        _aer = run_app_pentest_for_scan(db, job, execution_context=_ctx_ae)
+                        complete_processor_checkpoint(db, _cp_ae, _aer)
                         if _aer.get("findings_created"):
                             import logging as _aelog
                             _aelog.getLogger(__name__).info(

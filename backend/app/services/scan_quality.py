@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, load_only
 from app.graph.mission import PENTEST_PHASES
 from app.models.models import (
     CoverageItem,
+    EndpointObservation,
     EvidenceArtifact,
     ExecutedToolRun,
     Finding,
@@ -21,6 +22,7 @@ from app.models.models import (
     OffensiveService,
     RetestRun,
     ScanAuthSession,
+    ScanExecutionContext,
     ScanIdentity,
     ScanJob,
     ScanLog,
@@ -427,6 +429,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .options(load_only(
             ScanWorkItem.id, ScanWorkItem.status, ScanWorkItem.phase_id,
             ScanWorkItem.tool_name, ScanWorkItem.target, ScanWorkItem.resource_class,
+            ScanWorkItem.execution_context,
             ScanWorkItem.item_metadata, ScanWorkItem.result, ScanWorkItem.created_at,
             ScanWorkItem.updated_at, ScanWorkItem.started_at, ScanWorkItem.finished_at,
         ))
@@ -439,6 +442,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             OffensiveEndpoint.id, OffensiveEndpoint.auth_required,
             OffensiveEndpoint.normalized_url, OffensiveEndpoint.status_code,
             OffensiveEndpoint.content_type, OffensiveEndpoint.source_tool,
+            OffensiveEndpoint.auth_context,
             OffensiveEndpoint.tags,
             OffensiveEndpoint.endpoint_metadata,
         ))
@@ -446,6 +450,25 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .all()
     )
     endpoints_count = len(endpoints)
+    execution_contexts = (
+        db.query(ScanExecutionContext)
+        .filter(ScanExecutionContext.scan_job_id == job.id)
+        .all()
+    )
+    internal_context = next(
+        (row for row in execution_contexts if str(row.context_type or "") == "internal"),
+        None,
+    )
+    observation_counts = Counter(
+        str(row[0] or "external")
+        for row in db.query(EndpointObservation.execution_context).filter(
+            EndpointObservation.scan_job_id == job.id
+        ).all()
+    )
+    internal_work_items = [
+        row for row in work_items
+        if str(getattr(row, "execution_context", "external") or "external") == "internal"
+    ]
     assets = (
         db.query(OffensiveAsset)
         .options(load_only(OffensiveAsset.id, OffensiveAsset.asset_type, OffensiveAsset.host))
@@ -696,6 +719,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     blocked_hypothesis_statuses = {
         "blocked_precondition", "blocked_missing_auth", "blocked_missing_validator",
         "blocked_missing_authorization", "blocked_historical_not_reexecuted",
+        "blocked_missing_second_identity",
     }
     tested_hypotheses = [h for h in hypotheses if str(h.status or "").lower() in tested_hypothesis_statuses]
     superseded_hypotheses = [h for h in hypotheses if str(h.status or "").lower() == "superseded"]
@@ -709,11 +733,21 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if str((h.hypothesis_metadata or {}).get("blocked_reason") or "") == "endpoint_not_reachable"
     ]
     reachability_blocked_hypothesis_ids = {int(h.id) for h in reachability_blocked_hypotheses}
+    product_boundary_hypothesis_ids = {
+        int(h.id) for h in blocked_hypotheses
+        if str(h.status or "").lower() == "blocked_missing_second_identity"
+    }
     active_hypotheses = [
         h for h in hypotheses
-        if str(h.status or "").lower() != "superseded" and int(h.id) not in reachability_blocked_hypothesis_ids
+        if str(h.status or "").lower() != "superseded"
+        and int(h.id) not in reachability_blocked_hypothesis_ids
+        and int(h.id) not in product_boundary_hypothesis_ids
     ]
-    active_blocked_hypotheses = [h for h in blocked_hypotheses if int(h.id) not in reachability_blocked_hypothesis_ids]
+    active_blocked_hypotheses = [
+        h for h in blocked_hypotheses
+        if int(h.id) not in reachability_blocked_hypothesis_ids
+        and int(h.id) not in product_boundary_hypothesis_ids
+    ]
     resolved_hypotheses = tested_hypotheses + superseded_hypotheses
     hypothesis_depth_points = len(tested_hypotheses) + (len(active_blocked_hypotheses) * 0.25)
     hypothesis_resolution = (
@@ -721,7 +755,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if active_hypotheses
         else (0.5 if endpoints_count else 0.0)
     )
-    auth_depth = min(1.0, len(valid_sessions) / 2.0) if auth_required else 1.0
+    auth_depth = min(1.0, len(valid_sessions) / 1.0) if auth_required else 1.0
     auth_classification_counts = Counter(_auth_classification_bucket(e) for e in endpoints)
     classified_auth_endpoints = int(auth_classification_counts.get("classified", 0) or 0)
     unclassifiable_auth_endpoints = int(auth_classification_counts.get("unclassifiable_reachability", 0) or 0)
@@ -738,7 +772,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         for endpoint in endpoints
         if (dict(endpoint.endpoint_metadata or {}).get("analysis") or {}).get("business_logic")
     ]
-    bl_identities = ["user_a", "user_b"] if len(valid_sessions) >= 2 else (["user_a"] if valid_sessions else [])
+    bl_identities = ["user_a"] if valid_sessions else []
     business_logic = build_business_logic_portfolio(
         bl_analyses,
         available_identities=bl_identities,
@@ -766,7 +800,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if "SCAN_JWT_TOKEN" in reason or "jwt" in reason.lower() and "required" in reason.lower()
     )
     external_preconditions = {
-        "identity_pair_required": bool(auth_required and len(valid_sessions) < 2),
+        "identity_pair_required": False,
         "valid_auth_sessions": len(valid_sessions),
         "auth_required_endpoints": len(auth_relevant_endpoints),
         "source_input_required_items": source_required_items,
@@ -1064,14 +1098,6 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
                 + ", ".join(missing_skill_objectives[:8])
             ),
         })
-    if auth_required and len(valid_sessions) < 2:
-        gaps.append({
-            "severity": "high",
-            "area": "external_precondition",
-            "title": "Matriz de autorização aguardando credenciais",
-            "detail": f"Há {len(valid_sessions)} sessão(ões) válida(s); testes horizontais exigem ao menos duas identidades.",
-            "action": "Configurar identidades de papéis distintos e validar suas sessões antes das fases autenticadas.",
-        })
     if classifiable_auth_denominator and endpoint_auth_depth < 0.8:
         gaps.append({
             "severity": "medium",
@@ -1107,6 +1133,80 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             ),
             "action": "Atender apenas a pré-condição registrada para cada endpoint; não presumir credenciais ou objetos.",
         })
+
+    context_quality = {
+        "g0": {
+            "status": next((str(row.status or "") for row in execution_contexts if str(row.context_type or "") == "external"), "legacy"),
+            "observations": int(observation_counts.get("external", 0)),
+        },
+        "g1": {
+            "status": str(internal_context.status or "") if internal_context else "not_started",
+            "session_revision": int(internal_context.session_revision or 0) if internal_context else 0,
+            "observations": int(observation_counts.get("internal", 0)),
+            "work_items": len(internal_work_items),
+        },
+    }
+    if internal_context is not None:
+        completed_internal_tools = {
+            str(row.tool_name or "").lower()
+            for row in internal_work_items
+            if str(row.status or "").lower() in {"completed", "done"}
+        }
+        pending_internal = [
+            row for row in internal_work_items
+            if str(row.status or "").lower() in {"queued", "retry", "blocked", "dispatched", "running", "submitted"}
+        ]
+        crawler_tools = {"katana", "katana-js", "hakrawler", "gospider", "chromium-capture"}
+        content_fuzzers = {"ffuf", "ffuf-content", "ffuf-files", "feroxbuster", "dirsearch", "dirsearch-api", "dirsearch-api-post"}
+        parameter_fuzzers = {"arjun", "ffuf-params", "wfuzz"}
+        internal_endpoints = [
+            row for row in endpoints
+            if str(row.auth_context or "").lower() in {"authenticated", "internal", "g1"}
+        ]
+        context_quality["g1"].update({
+            "completed_tools": sorted(completed_internal_tools),
+            "crawler_complete": bool(completed_internal_tools & crawler_tools),
+            "content_fuzzing_complete": bool(completed_internal_tools & content_fuzzers),
+            "parameter_fuzzing_complete": bool(completed_internal_tools & parameter_fuzzers),
+            "pending_items": len(pending_internal),
+            "internal_endpoints": len(internal_endpoints),
+            "diff_computed": bool(state.get("execution_context_diff")),
+        })
+        if not internal_work_items:
+            gaps.append({
+                "severity": "high", "area": "internal_execution",
+                "title": "G1 sem matriz de execução interna",
+                "detail": "A sessão foi ativada, mas nenhum crawler, spider ou fuzzer interno foi criado.",
+                "action": "Semear novamente a matriz autenticada de descoberta e análise.",
+            })
+        if pending_internal:
+            gaps.append({
+                "severity": "high", "area": "internal_execution",
+                "title": "G1 ainda possui trabalho pendente",
+                "detail": f"{len(pending_internal)} itens autenticados ainda não atingiram estado terminal.",
+                "action": "Drenar a fila G1 antes de concluir o relatório.",
+            })
+        if not completed_internal_tools & crawler_tools:
+            gaps.append({
+                "severity": "high", "area": "internal_discovery",
+                "title": "Crawler/spider autenticado sem cobertura",
+                "detail": "Nenhum crawler primário ou fallback concluiu no G1.",
+                "action": "Executar Katana e ao menos um fallback entre Hakrawler, GoSpider ou Chromium capture.",
+            })
+        if not completed_internal_tools & content_fuzzers:
+            gaps.append({
+                "severity": "high", "area": "internal_discovery",
+                "title": "Fuzzing autenticado sem cobertura",
+                "detail": "Nenhum fuzzer de conteúdo, arquivo ou rota de API concluiu no G1.",
+                "action": "Executar ffuf e um fallback entre Feroxbuster/Dirsearch no contexto interno.",
+            })
+        if internal_endpoints and not state.get("execution_context_diff"):
+            gaps.append({
+                "severity": "high", "area": "internal_analysis",
+                "title": "Endpoints internos sem comparação G0 × G1",
+                "detail": f"{len(internal_endpoints)} endpoints internos existem, mas o diff de contexto não foi materializado.",
+                "action": "Calcular o diff e reprocessar endpoints internal_only/shared_changed.",
+            })
 
     if total_score >= 85:
         grade = "A"
@@ -1161,6 +1261,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "label": label,
         "quality_gate": quality_gate,
         "business_logic": business_logic,
+        "execution_contexts": context_quality,
         "external_preconditions": external_preconditions,
         "preflight_summary": preflight_summary,
         "auth_precondition_summary": auth_precondition_summary,
@@ -1555,6 +1656,38 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
             level="WARNING",
             message=f"high_risk_lifecycle_failed error={exc!s}"[:2000],
         ))
+    try:
+        from app.services.execution_context_service import compute_external_internal_diff, get_context
+
+        external_context = get_context(db, job.id, "external")
+        if external_context is not None:
+            pending_external = db.query(ScanWorkItem.id).filter(
+                ScanWorkItem.scan_job_id == job.id,
+                ScanWorkItem.execution_context == "external",
+                ScanWorkItem.status.in_(["queued", "retry", "blocked", "dispatched", "running", "submitted"]),
+            ).count()
+            if pending_external == 0:
+                external_context.status = "completed"
+                external_context.finished_at = external_context.finished_at or datetime.now()
+                external_context.updated_at = datetime.now()
+                db.add(external_context)
+            validation_changes["external_context_pending_items"] = pending_external
+        internal_context = get_context(db, job.id, "internal")
+        if internal_context is not None:
+            validation_changes["execution_context_diff"] = compute_external_internal_diff(db, job)
+            pending_internal = db.query(ScanWorkItem.id).filter(
+                ScanWorkItem.scan_job_id == job.id,
+                ScanWorkItem.execution_context == "internal",
+                ScanWorkItem.status.in_(["queued", "retry", "blocked", "dispatched", "running", "submitted"]),
+            ).count()
+            if pending_internal == 0:
+                internal_context.status = "completed"
+                internal_context.finished_at = internal_context.finished_at or datetime.now()
+                internal_context.updated_at = datetime.now()
+                db.add(internal_context)
+            validation_changes["internal_context_pending_items"] = pending_internal
+    except Exception as exc:  # noqa: BLE001
+        validation_changes["execution_context_diff"] = {"error": str(exc)[:500]}
     quality = build_scan_quality(db, job)
     if rounds >= QUALITY_GATE_MAX_ROUNDS:
         decision = quality_gate_decision(quality, actions)

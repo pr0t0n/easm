@@ -89,6 +89,12 @@ def execute_login_flow(login_flow: dict[str, Any], user_agent: str | None = None
     except Exception as exc:  # noqa: BLE001
         diag["pre_get_error"] = str(exc)
 
+    # Snapshot the cookie jar as it stands right before credentials are
+    # submitted — the only way to test session fixation (does the
+    # pre-authentication session identifier survive login unchanged?) is to
+    # compare this against the post-login cookies below.
+    diag["pre_login_cookies"] = {c.name: c.value for c in session.cookies}
+
     # Step 2 — submit credentials
     try:
         if method == "GET":

@@ -115,17 +115,34 @@ def verify_nosql(endpoints: list[str], auth_headers: dict | None = None) -> dict
     return result
 
 
-def run_nosql_for_scan(db, job) -> dict:
+def run_nosql_for_scan(db, job, *, execution_context: str = "external") -> dict:
     """Coleta endpoints com parâmetro descobertos + roda o probe + persiste."""
     from app.models.models import Finding
 
     state = dict(getattr(job, "state_data", None) or {})
-    try:
-        from app.services.scan_intelligence import auth_headers_from_state
-        auth = auth_headers_from_state(state) or {}
-    except Exception:
-        auth = {}
+    execution_context = str(execution_context or "external").lower()
+    if execution_context not in {"external", "internal"}:
+        execution_context = "external"
+    auth = {}
+    if execution_context == "internal":
+        try:
+            from app.services.auth_session_manager import AuthSessionManager
+
+            material = AuthSessionManager(db, job).get_material()
+            if material and material.valid:
+                auth = dict(material.headers or {})
+                cookies = dict(material.cookies or {})
+                if cookies and not any(str(k).lower() == "cookie" for k in auth):
+                    auth["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        except Exception:
+            try:
+                from app.services.scan_intelligence import auth_headers_from_state
+                auth = auth_headers_from_state(state) or {}
+            except Exception:
+                auth = {}
     urls = list(state.get("discovered_endpoints") or [])
+    if execution_context == "internal":
+        urls.extend(list(state.get("internal_discovered_endpoints") or []))
     try:
         for (det,) in db.query(Finding.details).filter(Finding.scan_job_id == job.id).limit(800).all():
             if isinstance(det, dict):
@@ -146,6 +163,7 @@ def run_nosql_for_scan(db, job) -> dict:
                 "payload": f.get("payload"), "evidence": f.get("evidence"),
                 "owasp_category": "A03:2021 Injection", "verification_status": "confirmed",
                 "vuln_family": "nosql_injection",
+                "execution_context": execution_context,
                 "discovery_method": "injeção de operador NoSQL ([$ne]/[$gt]/[$regex]) read-only",
             },
         } for f in res["findings"]]

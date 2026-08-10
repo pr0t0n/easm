@@ -167,6 +167,38 @@ class ScanAuthSession(Base):
     identity = relationship("ScanIdentity")
 
 
+class ScanExecutionContext(Base):
+    """One of the two fixed execution contexts of a web pentest.
+
+    ``external`` is the anonymous G0 pass. ``internal`` is the authenticated
+    G1 pass.  Session refreshes increment ``session_revision``; they never
+    create a third execution generation.
+    """
+    __tablename__ = "scan_execution_contexts"
+    __table_args__ = (
+        sa.UniqueConstraint("scan_job_id", "context_type", name="uq_scan_execution_contexts_scan_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    context_type: Mapped[str] = mapped_column(String(20), default="external", index=True)
+    auth_session_id: Mapped[int | None] = mapped_column(ForeignKey("scan_auth_sessions.id"), nullable=True, index=True)
+    identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    role: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    session_revision: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    inventory_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    scan_job = relationship("ScanJob")
+    auth_session = relationship("ScanAuthSession")
+
+
 class EvidenceArtifact(Base):
     """Proof-pack persistente usado pelo evidence gate e relatório de pentest."""
     __tablename__ = "evidence_artifacts"
@@ -179,6 +211,7 @@ class EvidenceArtifact(Base):
     tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     target: Mapped[str | None] = mapped_column(Text, nullable=True)
     identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
     artifact_type: Mapped[str] = mapped_column(String(80), default="tool_output", index=True)
     validation_status: Mapped[str] = mapped_column(String(40), default="candidate", index=True)
     confidence_score: Mapped[int] = mapped_column(Integer, default=50)
@@ -277,6 +310,39 @@ class OffensiveEndpoint(Base):
     source_artifact = relationship("EvidenceArtifact")
 
 
+class EndpointObservation(Base):
+    """A context-specific observation of a canonical offensive endpoint."""
+    __tablename__ = "endpoint_observations"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "endpoint_id", "execution_context", "method", "source_tool",
+            name="uq_endpoint_observations_endpoint_context_method_tool",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    endpoint_id: Mapped[int] = mapped_column(ForeignKey("offensive_endpoints.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
+    auth_session_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    role_observed: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    method: Mapped[str] = mapped_column(String(12), default="GET", index=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    content_type: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    redirect_location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_tool: Mapped[str] = mapped_column(String(120), default="", index=True)
+    source_artifact_id: Mapped[int | None] = mapped_column(ForeignKey("evidence_artifacts.id"), nullable=True, index=True)
+    observation_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+
+    scan_job = relationship("ScanJob")
+    endpoint = relationship("OffensiveEndpoint")
+    source_artifact = relationship("EvidenceArtifact")
+
+
 class OffensiveParameter(Base):
     __tablename__ = "offensive_parameters"
     __table_args__ = (
@@ -349,11 +415,12 @@ class OffensiveApiSpec(Base):
 class OffensiveHypothesis(Base):
     __tablename__ = "offensive_hypotheses"
     __table_args__ = (
-        sa.UniqueConstraint("scan_job_id", "hypothesis_type", "target_ref", "source_signal", name="uq_offensive_hypotheses_signal"),
+        sa.UniqueConstraint("scan_job_id", "execution_context", "hypothesis_type", "target_ref", "source_signal", name="uq_offensive_hypotheses_signal"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
     hypothesis_type: Mapped[str] = mapped_column(String(120), index=True)
     title: Mapped[str] = mapped_column(String(255))
     target_ref: Mapped[str] = mapped_column(String(1000), default="", index=True)
@@ -375,6 +442,7 @@ class ValidationRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
     hypothesis_id: Mapped[int | None] = mapped_column(ForeignKey("offensive_hypotheses.id"), nullable=True, index=True)
     finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
     validator_name: Mapped[str] = mapped_column(String(120), index=True)
@@ -395,11 +463,12 @@ class ValidationRun(Base):
 class CoverageItem(Base):
     __tablename__ = "coverage_items"
     __table_args__ = (
-        sa.UniqueConstraint("scan_job_id", "coverage_type", "target_ref", "test_class", name="uq_coverage_items_scan_target_test"),
+        sa.UniqueConstraint("scan_job_id", "execution_context", "coverage_type", "target_ref", "test_class", name="uq_coverage_items_scan_target_test"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
     coverage_type: Mapped[str] = mapped_column(String(80), index=True)
     target_ref: Mapped[str] = mapped_column(String(1000), default="", index=True)
     test_class: Mapped[str] = mapped_column(String(120), default="", index=True)
@@ -415,6 +484,31 @@ class CoverageItem(Base):
     endpoint = relationship("OffensiveEndpoint")
     hypothesis = relationship("OffensiveHypothesis")
     finding = relationship("Finding")
+
+
+class ProcessorCheckpoint(Base):
+    """Idempotency checkpoint keyed by context and inventory input hash."""
+    __tablename__ = "processor_checkpoints"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "scan_job_id", "execution_context", "processor_name", "processor_version", "input_fingerprint",
+            name="uq_processor_checkpoints_context_input",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
+    processor_name: Mapped[str] = mapped_column(String(120), index=True)
+    processor_version: Mapped[str] = mapped_column(String(80), default="v1", index=True)
+    input_fingerprint: Mapped[str] = mapped_column(String(80), default="", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    checkpoint_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    scan_job = relationship("ScanJob")
 
 
 class RetestRun(Base):
@@ -448,6 +542,7 @@ class ExecutedToolRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
     phase_id: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     skill_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     tool_name: Mapped[str] = mapped_column(String(100), index=True)
@@ -469,6 +564,7 @@ class ScanWorkItem(Base):
     __table_args__ = (
         sa.UniqueConstraint(
             "scan_job_id",
+            "execution_context",
             "phase_id",
             "tool_name",
             "target",
@@ -478,6 +574,8 @@ class ScanWorkItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    execution_context: Mapped[str] = mapped_column(String(20), default="external", index=True)
+    auth_session_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
     phase_id: Mapped[str] = mapped_column(String(10), index=True)
     target: Mapped[str] = mapped_column(String(500), index=True)
     tool_name: Mapped[str] = mapped_column(String(120), index=True)

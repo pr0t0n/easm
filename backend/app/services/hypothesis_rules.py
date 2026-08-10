@@ -13,7 +13,7 @@ def generate_hypotheses_for_scan(db: Session, scan: ScanJob) -> dict[str, int]:
     endpoint_summary = analyze_endpoints_for_scan(db, scan)
     inv = OffensiveInventoryService(db, scan)
     created_or_seen = 0
-    active_keys: set[tuple[str, str, str]] = set()
+    active_keys: set[tuple[str, str, str, str]] = set()
     endpoints = (
         db.query(OffensiveEndpoint)
         .filter(OffensiveEndpoint.scan_job_id == scan.id)
@@ -23,6 +23,7 @@ def generate_hypotheses_for_scan(db: Session, scan: ScanJob) -> dict[str, int]:
     )
     for endpoint in endpoints:
         analysis = dict((endpoint.endpoint_metadata or {}).get("analysis") or {})
+        execution_context = str(analysis.get("execution_context") or ("internal" if str(endpoint.auth_context or "").lower() in {"authenticated", "internal", "g1"} else "external"))
         for test in list(analysis.get("test_matrix") or []):
             h_type = str(test.get("hypothesis_type") or "")
             if not h_type:
@@ -40,10 +41,11 @@ def generate_hypotheses_for_scan(db: Session, scan: ScanJob) -> dict[str, int]:
                 evidence_requirements=list(test.get("evidence_requirements") or []),
                 metadata={"endpoint_id": endpoint.id, "url": endpoint.url, "test_class": test.get("test_class"), "analysis_version": analysis.get("version")},
                 replace_contract=True,
+                execution_context=execution_context,
             )
-            if hypothesis.status == "superseded":
+            if hypothesis.status in {"superseded", "blocked_missing_auth"} and execution_context == "internal":
                 hypothesis.status = "open"
-            active_keys.add((h_type, target_ref, source_signal))
+            active_keys.add((execution_context, h_type, target_ref, source_signal))
             created_or_seen += 1
 
     superseded = 0
@@ -59,6 +61,7 @@ def generate_hypotheses_for_scan(db: Session, scan: ScanJob) -> dict[str, int]:
         if not version.startswith("endpoint-intelligence-v"):
             continue
         key = (
+            str(hypothesis.execution_context or "external"),
             str(hypothesis.hypothesis_type or ""),
             str(hypothesis.target_ref or ""),
             str(hypothesis.source_signal or ""),

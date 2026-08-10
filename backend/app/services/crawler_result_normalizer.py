@@ -33,7 +33,13 @@ _INPUT_RE = re.compile(r"(?is)<(?:input|textarea|select)\b[^>]*?name=[\"']([^\"'
 _METHOD_RE = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|OPTIONS)\b")
 
 
-def _try_ingest_exposed_spec(db: Session, scan: ScanJob, spec_url: str) -> None:
+def _try_ingest_exposed_spec(
+    db: Session,
+    scan: ScanJob,
+    spec_url: str,
+    *,
+    execution_context: str = "external",
+) -> None:
     """Auto-parse a discovered OpenAPI/Swagger spec into the offensive endpoint
     inventory. This is the shared path for ZAP, browser capture, endpoint_discovery
     and the offensive operator runner — unlike the katana/gospider/hakrawler-only
@@ -42,7 +48,24 @@ def _try_ingest_exposed_spec(db: Session, scan: ScanJob, spec_url: str) -> None:
     try:
         from app.services.api_spec_ingestion_service import ingest_api_spec
 
-        result = ingest_api_spec(db, scan, spec_url=spec_url, spec_type="openapi")
+        auth_headers: dict[str, str] = {}
+        auth_cookies: dict[str, str] = {}
+        if execution_context == "internal":
+            from app.services.auth_session_manager import AuthSessionManager
+
+            material = AuthSessionManager(db, scan).get_material()
+            if material and material.valid:
+                auth_headers = dict(material.headers or {})
+                auth_cookies = dict(material.cookies or {})
+        result = ingest_api_spec(
+            db,
+            scan,
+            spec_url=spec_url,
+            spec_type="openapi",
+            execution_context=execution_context,
+            auth_headers=auth_headers,
+            auth_cookies=auth_cookies,
+        )
         if result.get("ok"):
             logger.info(
                 "crawler_result_normalizer: auto-ingested exposed spec %s (%d endpoints)",
@@ -125,7 +148,19 @@ def normalize_crawler_result(
     result: dict[str, Any] | None,
     source_artifact_id: int | None = None,
     auth_context: str = "anonymous",
+    execution_context: str | None = None,
 ) -> dict[str, Any]:
+    from app.services.execution_context_service import (
+        ensure_external_context,
+        inventory_auth_context,
+        normalize_execution_context,
+        upsert_endpoint_observation,
+    )
+
+    context_type = normalize_execution_context(execution_context or auth_context)
+    if context_type == "external" and hasattr(db, "query"):
+        ensure_external_context(db, scan)
+    auth_context = inventory_auth_context(context_type)
     inv = OffensiveInventoryService(db, scan)
     payload = result if isinstance(result, dict) else {}
     raw = _raw_text(payload)
@@ -157,7 +192,7 @@ def normalize_crawler_result(
 
     spec_urls = [u for u in (urls + api_candidates) if _SPEC_URL_RE.search(u)]
     if spec_urls:
-        _try_ingest_exposed_spec(db, scan, spec_urls[0])
+        _try_ingest_exposed_spec(db, scan, spec_urls[0], execution_context=context_type)
     if blocked_urls:
         blocked_hosts = sorted({host_from_scope_reference(url) for url in blocked_urls if host_from_scope_reference(url)})
         db.add(ScanLog(
@@ -172,6 +207,7 @@ def normalize_crawler_result(
         _flag_related_out_of_scope_hosts(db, scan, target, blocked_hosts, blocked_urls)
 
     endpoints = []
+    contextual_fuzzing: list[tuple[str, str, dict[str, Any]]] = []
     for url in sorted(set(urls + api_candidates)):
         if url in browser_urls:
             continue
@@ -188,6 +224,16 @@ def normalize_crawler_result(
         if source_artifact_id:
             ep.source_artifact_id = source_artifact_id
         endpoints.append(ep)
+        if hasattr(db, "query"):
+            upsert_endpoint_observation(
+                db,
+                scan,
+                ep,
+                execution_context=context_type,
+                source_tool=tool_name,
+                source_artifact_id=source_artifact_id,
+                metadata={"discovered_from": target, "source": "crawler_result_normalizer"},
+            )
 
     captured_params = 0
     for req in browser_requests:
@@ -210,6 +256,17 @@ def normalize_crawler_result(
             },
         )
         endpoints.append(ep)
+        if hasattr(db, "query"):
+            upsert_endpoint_observation(
+                db,
+                scan,
+                ep,
+                execution_context=context_type,
+                source_tool=tool_name,
+                source_artifact_id=source_artifact_id,
+                status_code=req.get("status") if isinstance(req.get("status"), int) else None,
+                metadata={"discovered_from": target, "source": "browser_capture"},
+            )
         for name in req.get("query_parameters") or []:
             inv.upsert_parameter(
                 ep,
@@ -219,6 +276,11 @@ def normalize_crawler_result(
                 metadata={"source": "browser_capture_query"},
             )
             captured_params += 1
+            contextual_fuzzing.append(("ffuf-values", url.split("?", 1)[0], {
+                "known_parameters": [name],
+                "env": {"SCAN_FUZZ_PARAM": name},
+                "reason": "observed_query_parameter",
+            }))
         body_location = "json" if _looks_json(str(req.get("postData") or "")) else "body"
         for name in req.get("body_parameters") or []:
             inv.upsert_parameter(
@@ -242,9 +304,35 @@ def normalize_crawler_result(
             tags=["form"],
             metadata={"source": "crawler_form", "raw_fields": form["fields"][:50]},
         )
+        endpoints.append(ep)
+        if hasattr(db, "query"):
+            upsert_endpoint_observation(
+                db,
+                scan,
+                ep,
+                execution_context=context_type,
+                source_tool=tool_name,
+                source_artifact_id=source_artifact_id,
+                metadata={"discovered_from": target, "source": "crawler_form"},
+            )
         for name in form["fields"]:
             inv.upsert_parameter(ep, name, location="body" if form["method"] != "GET" else "query", source_tool=tool_name)
             form_params += 1
+        safe_form = form["method"] == "GET" or re.search(
+            r"(?i)/(?:search|login|signin|auth|query|filter|lookup)(?:/|$)",
+            str(form["action"]),
+        )
+        if form["fields"] and safe_form:
+            field = str(form["fields"][0])
+            contextual_fuzzing.append(("ffuf-post", str(form["action"]), {
+                "discovered_forms": [str(form["action"])],
+                "post_endpoints": [str(form["action"])],
+                "env": {
+                    "SCAN_FUZZ_POST_DATA": f"{field}=FUZZ",
+                    "SCAN_FUZZ_CONTENT_TYPE": "application/x-www-form-urlencoded",
+                },
+                "reason": "observed_safe_form_contract",
+            }))
 
     # Discovery proves that an endpoint exists; it does not prove that any
     # vulnerability class was tested.  Keep the initial state explicitly
@@ -256,7 +344,8 @@ def normalize_crawler_result(
             test_class="discovery",
             status="discovered",
             endpoint_id=ep.id,
-            metadata={"source_tool": tool_name},
+            metadata={"source_tool": tool_name, "execution_context": context_type},
+            execution_context=context_type,
         )
         if "?" in ep.url:
             inv.upsert_coverage(
@@ -265,8 +354,32 @@ def normalize_crawler_result(
                 test_class="parameter_discovery",
                 status="planned",
                 endpoint_id=ep.id,
-                metadata={"source_tool": tool_name},
+                metadata={"source_tool": tool_name, "execution_context": context_type},
+                execution_context=context_type,
             )
+
+    fuzz_items_seeded = 0
+    if contextual_fuzzing and hasattr(db, "query"):
+        try:
+            from app.services.endpoint_discovery import _seed_test_item
+
+            for tool_name_seed, fuzz_target, fuzz_metadata in contextual_fuzzing[:20]:
+                if _seed_test_item(
+                    db,
+                    scan.id,
+                    "P04",
+                    fuzz_target,
+                    tool_name_seed,
+                    {
+                        "source": "crawler_observed_fuzz_contract",
+                        "execution_context": context_type,
+                        **fuzz_metadata,
+                    },
+                    execution_context=context_type,
+                ):
+                    fuzz_items_seeded += 1
+        except Exception:
+            logger.debug("crawler_result_normalizer: contextual fuzzing seed failed", exc_info=True)
 
     db.flush()
     return {
@@ -279,6 +392,8 @@ def normalize_crawler_result(
         "captured_params": captured_params,
         "endpoints_upserted": len(endpoints),
         "out_of_scope_urls_blocked": len(blocked_urls),
+        "execution_context": context_type,
+        "contextual_fuzzing_items_seeded": fuzz_items_seeded,
     }
 
 

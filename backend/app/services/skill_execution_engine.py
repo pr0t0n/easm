@@ -114,13 +114,12 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
     so seeding would just create dead work.
     """
     from app.models.models import ScanWorkItem
-    from app.services.auth_session_manager import AuthSessionManager
+    from app.services.auth_session_manager import has_any_valid_session
     from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
     from datetime import datetime
 
     try:
-        material = AuthSessionManager(db, job).get_material()
-        if not material or not material.valid:
+        if not has_any_valid_session(db, job):
             return 0
     except Exception:
         return 0

@@ -1,6 +1,8 @@
 """Canonical endpoint intelligence between discovery and test execution."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any
@@ -158,6 +160,12 @@ def analyze_endpoint_contract(
         tests.append(_test("upload_contract_discovery", "", 55, ["chromium-capture"], [], ["accepted_methods", "accepted_content_types"], "path:upload_surface"))
     if method_state_changing and auth_observed and not is_static:
         tests.append(_test("state_change_authorization", "business_logic_mass_assignment", 75, ["mass-assignment-validator", "auth-matrix"], ["user_a", "user_b"], ["baseline", "read_back", "negative_control"], f"method:{str(method).upper()}"))
+        # CSRF only matters for cookie-based session auth (a cross-origin page
+        # can't attach a custom Authorization header) — validate_csrf() makes
+        # that call for real using the scan's actual session material; this
+        # hypothesis is deliberately broad (any auth-observed state change)
+        # since we don't know cookie-vs-header at analysis time.
+        tests.append(_test("csrf_state_change", "csrf_state_change", 68, ["csrf-validator"], ["user_a"], ["baseline_request", "cross_origin_request", "state_verification"], f"method:{str(method).upper()}:csrf"))
     elif method_state_changing and not is_static:
         tests.append(_test(
             "state_change_contract_discovery",
@@ -169,7 +177,12 @@ def analyze_endpoint_contract(
             f"method:{str(method).upper()}:auth_unknown",
         ))
     if is_session_termination:
-        tests.append(_test("session_termination_boundary", "", 70, ["session-invalidation-validator"], ["user_a"], ["session_before", "logout_request", "session_after"], "path:session_termination"))
+        # BUG FIX: this test's hypothesis_type used to be "" (empty string),
+        # which hypothesis_rules.generate_hypotheses_for_scan silently drops
+        # (`if not h_type: continue`) — so this test class never became a
+        # persisted OffensiveHypothesis and validate_session_termination()
+        # never ran, despite being fully wired everywhere else.
+        tests.append(_test("session_termination_boundary", "session_termination_boundary", 70, ["session-invalidation-validator"], ["user_a"], ["session_before", "logout_request", "session_after"], "path:session_termination"))
     if (is_redirect_surface or is_server_fetch_surface or is_input_surface) and not parameter_rows:
         surface = "server_fetch" if is_server_fetch_surface else ("redirect" if is_redirect_surface else "input")
         validators = ["arjun", "chromium-capture"] if is_input_surface else ["arjun"]
@@ -244,26 +257,49 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
     tests_planned = 0
     tests_current = 0
     skipped_current = 0
-    active_plan_keys: set[tuple[str, str]] = set()
+    active_plan_keys: set[tuple[str, str, str]] = set()
     for endpoint in endpoints:
         metadata = dict(endpoint.endpoint_metadata or {})
         previous_analysis_tags = set(_analysis_tags(dict(metadata.get("analysis") or {})))
-        if not force and (metadata.get("analysis") or {}).get("version") == ANALYSIS_VERSION:
-            skipped_current += 1
-            current_matrix = list((metadata.get("analysis") or {}).get("test_matrix") or [])
-            tests_current += len(current_matrix)
-            active_plan_keys.update(
-                (endpoint.normalized_url, str(test.get("test_class") or ""))
-                for test in current_matrix
-                if str(test.get("test_class") or "")
-            )
-            continue
         parameters = (
             db.query(OffensiveParameter)
             .filter(OffensiveParameter.endpoint_id == endpoint.id)
             .order_by(OffensiveParameter.id.asc())
             .all()
         )
+        execution_context = "internal" if str(endpoint.auth_context or "").lower() in {"authenticated", "internal", "g1"} else "external"
+        analysis_input = {
+            "version": ANALYSIS_VERSION,
+            "url": endpoint.normalized_url,
+            "method": str(endpoint.method or "GET").upper(),
+            "content_type": str(endpoint.content_type or ""),
+            "auth_required": endpoint.auth_required,
+            "auth_context": str(endpoint.auth_context or "anonymous"),
+            "role_observed": str(endpoint.role_observed or ""),
+            "tags": sorted(str(tag) for tag in list(endpoint.tags or []) if tag not in previous_analysis_tags),
+            "parameters": sorted(
+                (str(parameter.name), str(parameter.location), str(parameter.type_hint or ""), str(parameter.risk_hint or ""))
+                for parameter in parameters
+            ),
+        }
+        analysis_input_hash = hashlib.sha256(
+            json.dumps(analysis_input, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        previous_analysis = dict(metadata.get("analysis") or {})
+        if (
+            not force
+            and previous_analysis.get("version") == ANALYSIS_VERSION
+            and previous_analysis.get("input_hash") == analysis_input_hash
+        ):
+            skipped_current += 1
+            current_matrix = list(previous_analysis.get("test_matrix") or [])
+            tests_current += len(current_matrix)
+            active_plan_keys.update(
+                (execution_context, endpoint.normalized_url, str(test.get("test_class") or ""))
+                for test in current_matrix
+                if str(test.get("test_class") or "")
+            )
+            continue
         analysis = analyze_endpoint_contract(
             endpoint.url,
             method=endpoint.method,
@@ -281,6 +317,8 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
             content_type=str(endpoint.content_type or ""),
             auth_required=endpoint.auth_required,
         )
+        analysis["input_hash"] = analysis_input_hash
+        analysis["execution_context"] = execution_context
         metadata["analysis"] = analysis
         endpoint.endpoint_metadata = metadata
         endpoint.tags = sorted(
@@ -301,14 +339,15 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
                 metadata={"analysis_version": ANALYSIS_VERSION},
             )
         for test in analysis["test_matrix"]:
-            active_plan_keys.add((endpoint.normalized_url, str(test["test_class"])))
+            active_plan_keys.add((execution_context, endpoint.normalized_url, str(test["test_class"])))
             inv.upsert_coverage(
                 coverage_type="endpoint_test_plan",
                 target_ref=endpoint.normalized_url,
                 test_class=test["test_class"],
                 status="planned",
                 endpoint_id=endpoint.id,
-                metadata={"analysis_version": ANALYSIS_VERSION, "hypothesis_type": test["hypothesis_type"], "validators": test["validators"], "preconditions": test["preconditions"]},
+                metadata={"analysis_version": ANALYSIS_VERSION, "analysis_input_hash": analysis_input_hash, "hypothesis_type": test["hypothesis_type"], "validators": test["validators"], "preconditions": test["preconditions"], "execution_context": execution_context},
+                execution_context=execution_context,
             )
             tests_planned += 1
             tests_current += 1
@@ -327,7 +366,7 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
     )
     superseded_plans = 0
     for row in stale_plans:
-        row_key = (str(row.target_ref or ""), str(row.test_class or ""))
+        row_key = (str(row.execution_context or "external"), str(row.target_ref or ""), str(row.test_class or ""))
         version = str((row.coverage_metadata or {}).get("analysis_version") or "")
         if row_key in active_plan_keys and version == ANALYSIS_VERSION:
             continue

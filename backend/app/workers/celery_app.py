@@ -97,6 +97,16 @@ celery.conf.update(
             "schedule": crontab(minute="*/20"),
             "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _LONG_CONTROL_EXPIRES},
         },
+        # Re-probes authenticated sessions past their soft TTL (expires_at)
+        # for scans still running — nothing previously re-checked whether a
+        # captured/static session had died mid-scan (logout, idle timeout,
+        # revoked token), so tools kept running "authenticated" long after
+        # the session was gone.
+        "auth-session-revalidate": {
+            "task": "auth_session.revalidate",
+            "schedule": crontab(minute="*/10"),
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _LONG_CONTROL_EXPIRES},
+        },
         **_HEARTBEAT_SCHEDULE,
     },
     timezone="America/Sao_Paulo",

@@ -220,7 +220,7 @@ def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: st
     return {u for u in urls if u.startswith("http")}
 
 
-def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
+def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata, *, execution_context: str = "external") -> bool:
     from app.models.models import ScanWorkItem
     from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
     from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
@@ -231,6 +231,7 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
 
     already = db.query(ScanWorkItem.id).filter(
         ScanWorkItem.scan_job_id == scan_id,
+        ScanWorkItem.execution_context == execution_context,
         ScanWorkItem.phase_id == phase_id,
         ScanWorkItem.tool_name == tool_name,
         ScanWorkItem.target == target[:500],
@@ -240,9 +241,23 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
     rc = resource_class_for_tool(tool_name)
     pri = PHASE_PRIORITY.get(phase_id, 100) + {"light": 0, "medium": 5, "heavy": 12}.get(rc, 0)
     item_metadata = apply_phase_tool_metadata(metadata, phase_id, tool_name, source=str((metadata or {}).get("source") or "endpoint_discovery"))
+    item_metadata["execution_context"] = execution_context
+    auth_session_revision = 0
+    if execution_context == "internal":
+        try:
+            from app.services.execution_context_service import get_context
+
+            internal = get_context(db, scan_id, "internal")
+            auth_session_revision = int(internal.session_revision or 0) if internal else 0
+            if internal and internal.identity_key:
+                item_metadata["identity_key"] = internal.identity_key
+        except Exception:
+            pass
     item_metadata["queue_ready_at"] = datetime.now().isoformat()
     db.add(ScanWorkItem(
-        scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
+        scan_job_id=scan_id, execution_context=execution_context,
+        auth_session_revision=auth_session_revision,
+        phase_id=phase_id, target=target[:500],
         tool_name=tool_name, profile=tool_name, resource_class=rc,
         priority=pri - 10, status="queued", max_attempts=2,
         item_metadata=item_metadata,
@@ -256,9 +271,44 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata) -> bool:
         return False
 
 
+def _internal_endpoint_analysis_matrix(url: str, analysis: dict) -> list[tuple[str, str]]:
+    """Context-safe fan-out for an endpoint discovered only after login."""
+    lower = str(url or "").lower()
+    classifications = dict(analysis.get("classification") or {})
+    matrix: list[tuple[str, str]] = []
+    is_js = re.search(r"\.(?:js|mjs|cjs)(?:\?|$)", lower) is not None
+    is_api = bool(classifications.get("api") or any(token in lower for token in ("/api/", "/rest/", "/graphql")))
+    is_input = bool("?" in url or classifications.get("input_surface") or is_api)
+    parsed = urlparse(url)
+    leaf = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    directory_like = parsed.path.endswith("/") or "." not in leaf
+    if directory_like:
+        matrix.extend([("P03", "katana"), ("P03", "ffuf"), ("P03", "feroxbuster")])
+    if is_api:
+        matrix.extend([("P03", "dirsearch-api"), ("P03", "dirsearch-api-post")])
+    if is_js:
+        matrix.extend([
+            ("P08", "linkfinder"),
+            ("P08", "nuclei-js-analysis"),
+            ("P08", "nuclei-js-secrets"),
+        ])
+    if is_input:
+        matrix.extend([("P04", "arjun"), ("P04", "ffuf-params")])
+    if is_api:
+        matrix.extend([("P16", "nuclei"), ("P16", "wapiti")])
+    if classifications.get("sensitive_function") or is_api:
+        matrix.append(("P13", "bl-test"))
+    matrix.append(("P09", "nuclei"))
+    return list(dict.fromkeys(matrix))
+
+
 def expand_attack_surface(db: Session, scan_id: int, source_target: str,
-                          tool_name: str, result: dict, job) -> dict:
+                          tool_name: str, result: dict, job,
+                          *, execution_context: str = "external") -> dict:
     """Ponto de entrada — chamado quando um tool de discovery completa."""
+    from app.services.execution_context_service import normalize_execution_context
+
+    execution_context = normalize_execution_context(execution_context)
     if str(tool_name or "").lower() not in _DISCOVERY_TOOLS:
         return {"skipped": "not_discovery_tool"}
 
@@ -273,6 +323,23 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
 
     state = dict(job.state_data or {})
     seen: set[str] = set(state.get("discovered_endpoints") or [])
+    try:
+        from app.models.models import EndpointObservation, OffensiveEndpoint
+
+        context_seen = {
+            str(row[0])
+            for row in (
+                db.query(OffensiveEndpoint.url)
+                .join(EndpointObservation, EndpointObservation.endpoint_id == OffensiveEndpoint.id)
+                .filter(
+                    OffensiveEndpoint.scan_job_id == scan_id,
+                    EndpointObservation.execution_context == execution_context,
+                )
+                .all()
+            )
+        }
+    except Exception:
+        context_seen = set(seen) if execution_context == "external" else set()
     fetched_count = int(state.get("se_fetched_count") or 0)
     reseeded_count = int(state.get("se_reseeded_count") or 0)
 
@@ -291,7 +358,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     out_of_scope: list[str] = []
     new_eps = []
     for u in found:
-        if u in seen:
+        if u in context_seen:
             continue
         host = _host_of(u)
         if authorized_scope and not is_host_in_scope(host, authorized_scope):
@@ -325,13 +392,16 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         from app.services.hypothesis_rules import generate_hypotheses_for_scan
         from app.models.models import OffensiveEndpoint
 
+        from app.services.execution_context_service import inventory_auth_context
+
         normalize_crawler_result(
             db,
             job,
             target=source_target,
             tool_name=tool_name,
             result=result,
-            auth_context="anonymous",
+            auth_context=inventory_auth_context(execution_context),
+            execution_context=execution_context,
         )
         generate_hypotheses_for_scan(db, job)
         # The normalizer understands additional tool-specific formats. Merge
@@ -408,6 +478,10 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     # through their FK on scan_jobs, which chained into watchdog/worker locks and
     # made healthy scans look frozen under endpoint-heavy inventories.
     state["discovered_endpoints"] = list(seen)[:5000]
+    if execution_context == "internal":
+        state["internal_discovered_endpoints"] = sorted(
+            set(state.get("internal_discovered_endpoints") or []) | set(new_eps)
+        )[:5000]
     state["endpoint_test_targets"] = list(seen)[:10000]
     job.state_data = state
     try:
@@ -418,6 +492,18 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     findings: list[dict] = []
     reseeded = 0
     fetched = 0
+    request_headers: dict[str, str] = {}
+    request_cookies: dict[str, str] = {}
+    if execution_context == "internal":
+        try:
+            from app.services.auth_session_manager import AuthSessionManager
+
+            material = AuthSessionManager(db, job).get_material()
+            if material and material.valid:
+                request_headers = dict(material.headers or {})
+                request_cookies = dict(material.cookies or {})
+        except Exception:
+            logger.warning("internal page analysis has no valid auth material scan=%d", scan_id)
 
     for url_index, url in enumerate(new_eps, start=1):
         hv = bool(_HIGH_VALUE.search(url))
@@ -427,7 +513,11 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         if hv and fetched < _MAX_PER_EVENT_FETCH and fetched_count < _MAX_FETCH_PER_SCAN:
             try:
                 from app.services.page_analyzer import fetch_and_extract
-                info = fetch_and_extract(url)
+                info = fetch_and_extract(
+                    url,
+                    headers=request_headers,
+                    cookies=request_cookies,
+                )
                 fetched += 1
                 fetched_count += 1
                 if info.get("ok"):
@@ -469,7 +559,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                 logger.debug("page fetch falhou %s: %s", url, exc)
 
         # (b) Reinjetar como ALVO DE TESTE (fecha o loop)
-        if (hv or has_param) and reseeded < _MAX_PER_EVENT_RESEED and reseeded_count < _MAX_RESEED_PER_SCAN:
+        if (execution_context == "internal" or hv or has_param) and reseeded < _MAX_PER_EVENT_RESEED and reseeded_count < _MAX_RESEED_PER_SCAN:
             meta = {
                 "source": "surface_expansion", "engine": "endpoint_discovery",
                 "discovered_by": tool_name, "discovered_from": source_target,
@@ -479,11 +569,17 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
             # test matrix. Discovery only seeds context-safe broad probes.
             from app.services.endpoint_analysis_pipeline import analyze_endpoint_contract, recommended_execution_tools
 
-            analysis = analyze_endpoint_contract(url)
+            analysis = analyze_endpoint_contract(
+                url,
+                auth_required=True if execution_context == "internal" else None,
+            )
             tools = recommended_execution_tools(analysis)
+            phase_tools = [("P09", tool) for tool in tools]
+            if execution_context == "internal":
+                phase_tools.extend(_internal_endpoint_analysis_matrix(url, analysis))
             seeded_this_url = 0
-            for tn in tools:
-                if _seed_test_item(db, scan_id, "P09", url, tn, meta):
+            for phase_id, tn in list(dict.fromkeys(phase_tools)):
+                if _seed_test_item(db, scan_id, phase_id, url, tn, meta, execution_context=execution_context):
                     reseeded += 1
                     reseeded_count += 1
                     seeded_this_url += 1
@@ -509,6 +605,10 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
 
     # Persistir contadores e conjunto (cap p/ não inchar state)
     state["discovered_endpoints"] = list(seen)[:5000]
+    if execution_context == "internal":
+        state["internal_discovered_endpoints"] = sorted(
+            set(state.get("internal_discovered_endpoints") or []) | set(new_eps)
+        )[:5000]
     state["endpoint_test_targets"] = list(seen)[:10000]
     state["se_fetched_count"] = fetched_count
     state["se_reseeded_count"] = reseeded_count
@@ -522,6 +622,22 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                                   source_item=None)
         except Exception as exc:
             logger.debug("persist surface findings falhou: %s", exc)
+
+    if execution_context == "internal":
+        try:
+            from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
+            from app.services.hypothesis_rules import generate_hypotheses_for_scan
+            from app.services.execution_context_service import (
+                compute_external_internal_diff,
+                reopen_auth_blocked_hypotheses,
+            )
+
+            analyze_endpoints_for_scan(db, job)
+            generate_hypotheses_for_scan(db, job)
+            reopen_auth_blocked_hypotheses(db, job)
+            compute_external_internal_diff(db, job)
+        except Exception as exc:
+            logger.warning("internal endpoint analysis fan-out failed scan=%d: %s", scan_id, exc)
 
     try:
         db.commit()

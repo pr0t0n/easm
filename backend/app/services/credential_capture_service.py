@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import time
 import uuid
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 from playwright.async_api import Browser, BrowserContext, CDPSession, Page, Playwright, async_playwright
 from sqlalchemy.orm import Session
 
@@ -229,6 +231,45 @@ async def _teardown(capture: CaptureSession) -> None:
     _ACTIVE_CAPTURES.pop(capture.capture_session_id, None)
 
 
+async def reap_idle_captures() -> int:
+    """Close any capture whose browser session has been idle (no operator
+    input, no new in-scope header observed) for longer than
+    IDLE_TIMEOUT_SECONDS. That constant was declared but never enforced
+    anywhere before this — an abandoned capture (operator closed the tab or
+    walked away mid-login) kept its Playwright browser/context alive in the
+    browser_runner container indefinitely."""
+    now = time.monotonic()
+    stale = [
+        capture
+        for capture in list(_ACTIVE_CAPTURES.values())
+        if now - capture.last_activity_at > IDLE_TIMEOUT_SECONDS
+    ]
+    for capture in stale:
+        capture.status = "idle_timeout"
+        await _teardown(capture)
+    return len(stale)
+
+
+async def run_idle_capture_reaper_loop(interval_seconds: int = 60) -> None:
+    """Background loop started once at FastAPI startup (see main.py). Must
+    run in-process with start_capture()'s Playwright objects, since
+    _ACTIVE_CAPTURES is a plain in-process dict with no cross-process
+    visibility — a Celery beat task running in a separate worker process
+    cannot see or reap entries in it."""
+    import asyncio
+    import logging
+
+    logger = logging.getLogger(__name__)
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            reaped = await reap_idle_captures()
+            if reaped:
+                logger.info("credential_capture_service: reaped %d idle capture(s)", reaped)
+        except Exception:
+            logger.exception("credential_capture_service: idle capture reaper tick failed")
+
+
 async def cancel_capture(capture_session_id: str, scan_id: int) -> bool:
     capture = get_capture(capture_session_id, scan_id)
     if capture is None:
@@ -246,6 +287,7 @@ async def confirm_capture(db: Session, scan: ScanJob, capture_session_id: str) -
     in_scope_cookies = _filter_cookies_to_scope(raw_cookies, capture.authorized_scope)
     cookies = {str(c["name"]): str(c["value"]) for c in in_scope_cookies}
     headers = dict(capture.captured_headers)
+    validation = await _validate_captured_login(capture, headers, cookies)
 
     material = AuthMaterial(
         identity_key=capture.identity_key,
@@ -253,15 +295,22 @@ async def confirm_capture(db: Session, scan: ScanJob, capture_session_id: str) -
         auth_type="session_capture",
         headers=headers,
         cookies=cookies,
-        valid=bool(headers or cookies),
-        status="valid" if (headers or cookies) else "failed",
-        error="" if (headers or cookies) else "no_in_scope_session_material_captured",
+        valid=bool(validation.get("valid")),
+        status="valid" if validation.get("valid") else "failed",
+        error="" if validation.get("valid") else str(validation.get("reason") or "captured_login_not_validated"),
     )
 
     manager = AuthSessionManager(db, scan)
     identity, session = manager.upsert_captured_material(
         capture.identity_key, capture.role, capture.username_ref, material
     )
+    session.validation_result = {
+        **dict(session.validation_result or {}),
+        **validation,
+        "identity_key": capture.identity_key,
+        "role": capture.role,
+    }
+    db.add(session)
     db.commit()
 
     await _teardown(capture)
@@ -273,4 +322,81 @@ async def confirm_capture(db: Session, scan: ScanJob, capture_session_id: str) -
         "status": session.status,
         "headers_captured": len(headers),
         "cookies_captured": len(cookies),
+        "validation": validation,
+    }
+
+
+async def _validate_captured_login(
+    capture: CaptureSession,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+) -> dict[str, Any]:
+    """Prove that captured material changes access relative to anonymous G0.
+
+    A cookie's mere existence is not authentication: consent, CSRF and load
+    balancer cookies are common before login.  The current in-scope page is
+    requested both anonymously and with captured material and the differential
+    is persisted as the admission evidence for G1.
+    """
+    probe_url = str(capture.page.url or "")
+    host = urlparse(probe_url).hostname or ""
+    if not probe_url.startswith(("http://", "https://")) or not is_host_in_scope(host, capture.authorized_scope):
+        return {"valid": False, "reason": "capture_not_on_in_scope_page", "probe_url": probe_url}
+    if not headers and not cookies:
+        return {"valid": False, "reason": "no_in_scope_session_material_captured", "probe_url": probe_url}
+
+    def fingerprint(response: httpx.Response) -> dict[str, Any]:
+        body = bytes(response.content or b"")[:100_000]
+        return {
+            "status_code": response.status_code,
+            "location": str(response.headers.get("location") or "")[:500],
+            "content_type": str(response.headers.get("content-type") or "")[:160],
+            "body_length": len(response.content or b""),
+            "body_sha256": hashlib.sha256(body).hexdigest(),
+        }
+
+    try:
+        timeout = httpx.Timeout(15.0, connect=8.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
+            authenticated = await client.get(probe_url, headers=headers, cookies=cookies)
+            anonymous = await client.get(probe_url)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "reason": f"session_validation_transport_error:{type(exc).__name__}",
+            "probe_url": probe_url,
+        }
+
+    auth_fp = fingerprint(authenticated)
+    anon_fp = fingerprint(anonymous)
+    login_markers = ("/login", "/signin", "/sign-in", "/auth")
+    auth_location = str(auth_fp["location"]).lower()
+    auth_denied = authenticated.status_code in {401, 403} or (
+        authenticated.status_code in {301, 302, 303, 307, 308}
+        and any(marker in auth_location for marker in login_markers)
+    )
+    current_login_page = any(marker in urlparse(probe_url).path.lower() for marker in login_markers)
+    materially_different = (
+        auth_fp["status_code"] != anon_fp["status_code"]
+        or auth_fp["location"] != anon_fp["location"]
+        or auth_fp["body_sha256"] != anon_fp["body_sha256"]
+    )
+    has_authorization = any(str(name).lower() == "authorization" and str(value) for name, value in headers.items())
+    valid = bool(not auth_denied and not current_login_page and materially_different)
+    # Token-based APIs can return identical public landing pages while the
+    # Authorization header itself is strong material; liveness still must pass.
+    if has_authorization and not auth_denied and not current_login_page:
+        valid = True
+    reason = "authenticated_behavior_observed" if valid else (
+        "authenticated_probe_denied" if auth_denied else
+        "capture_still_on_login_page" if current_login_page else
+        "no_authenticated_behavior_observed"
+    )
+    return {
+        "valid": valid,
+        "reason": reason,
+        "probe_url": probe_url,
+        "anonymous": anon_fp,
+        "authenticated": auth_fp,
+        "materially_different": materially_different,
     }

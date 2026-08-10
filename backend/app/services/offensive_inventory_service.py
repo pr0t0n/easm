@@ -378,12 +378,17 @@ class OffensiveInventoryService:
         evidence_requirements: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         replace_contract: bool = False,
+        execution_context: str = "external",
     ) -> OffensiveHypothesis:
+        from app.services.execution_context_service import normalize_execution_context
+
+        execution_context = normalize_execution_context(execution_context)
         target_ref = str(target_ref or "")[:1000]
         row = (
             self.db.query(OffensiveHypothesis)
             .filter(
                 OffensiveHypothesis.scan_job_id == self.scan.id,
+                OffensiveHypothesis.execution_context == execution_context,
                 OffensiveHypothesis.hypothesis_type == hypothesis_type,
                 OffensiveHypothesis.target_ref == target_ref,
                 OffensiveHypothesis.source_signal == source_signal,
@@ -393,12 +398,14 @@ class OffensiveInventoryService:
         if row is None:
             row = OffensiveHypothesis(
                 scan_job_id=self.scan.id,
+                execution_context=execution_context,
                 hypothesis_type=hypothesis_type,
                 target_ref=target_ref,
                 source_signal=source_signal,
                 title=title[:255],
             )
         row.title = title[:255]
+        row.execution_context = execution_context
         row.confidence = max(int(row.confidence or 0), int(confidence or 0))
         if replace_contract:
             row.recommended_tools = list(dict.fromkeys(recommended_tools or []))
@@ -430,6 +437,7 @@ class OffensiveInventoryService:
     ) -> ValidationRun:
         row = ValidationRun(
             scan_job_id=self.scan.id,
+            execution_context=str(getattr(hypothesis, "execution_context", None) or (metadata or {}).get("execution_context") or "external"),
             hypothesis_id=hypothesis.id if hypothesis else None,
             finding_id=finding_id,
             validator_name=validator_name,
@@ -466,7 +474,22 @@ class OffensiveInventoryService:
         finding_id: int | None = None,
         blocking_reason: str = "",
         metadata: dict[str, Any] | None = None,
+        execution_context: str = "external",
     ) -> CoverageItem:
+        from app.services.execution_context_service import normalize_execution_context
+
+        if execution_context == "external" and hypothesis_id:
+            hypothesis_context = self.db.query(OffensiveHypothesis.execution_context).filter(
+                OffensiveHypothesis.id == hypothesis_id
+            ).scalar()
+            execution_context = str(hypothesis_context or execution_context)
+        if execution_context == "external" and endpoint_id:
+            endpoint_auth_context = self.db.query(OffensiveEndpoint.auth_context).filter(
+                OffensiveEndpoint.id == endpoint_id
+            ).scalar()
+            if str(endpoint_auth_context or "").lower() in {"authenticated", "internal", "g1"}:
+                execution_context = "internal"
+        execution_context = normalize_execution_context(execution_context)
         if _is_postgresql_session(self.db):
             return self._upsert_coverage_postgres(
                 coverage_type=coverage_type,
@@ -478,11 +501,13 @@ class OffensiveInventoryService:
                 finding_id=finding_id,
                 blocking_reason=blocking_reason,
                 metadata=metadata,
+                execution_context=execution_context,
             )
         row = (
             self.db.query(CoverageItem)
             .filter(
                 CoverageItem.scan_job_id == self.scan.id,
+                CoverageItem.execution_context == execution_context,
                 CoverageItem.coverage_type == coverage_type,
                 CoverageItem.target_ref == target_ref,
                 CoverageItem.test_class == test_class,
@@ -495,6 +520,7 @@ class OffensiveInventoryService:
                     candidate for candidate in getattr(self.db, "new", [])
                     if isinstance(candidate, CoverageItem)
                     and candidate.scan_job_id == self.scan.id
+                    and candidate.execution_context == execution_context
                     and candidate.coverage_type == coverage_type
                     and candidate.target_ref == target_ref
                     and candidate.test_class == test_class
@@ -502,7 +528,8 @@ class OffensiveInventoryService:
                 None,
             )
         if row is None:
-            row = CoverageItem(scan_job_id=self.scan.id, coverage_type=coverage_type, target_ref=target_ref, test_class=test_class)
+            row = CoverageItem(scan_job_id=self.scan.id, execution_context=execution_context, coverage_type=coverage_type, target_ref=target_ref, test_class=test_class)
+        row.execution_context = execution_context
         current_status = str(row.status or "unknown")
         incoming_status = str(status or "unknown")
         if (
@@ -535,6 +562,7 @@ class OffensiveInventoryService:
         finding_id: int | None = None,
         blocking_reason: str = "",
         metadata: dict[str, Any] | None = None,
+        execution_context: str = "external",
     ) -> CoverageItem:
         """Atomic CoverageItem upsert.
 
@@ -553,6 +581,7 @@ class OffensiveInventoryService:
         current_rank = sa.case(_COVERAGE_STATUS_RANK, value=table.c.status, else_=0)
         stmt = pg_insert(table).values(
             scan_job_id=self.scan.id,
+            execution_context=execution_context,
             coverage_type=coverage_type,
             target_ref=target_ref,
             test_class=test_class,

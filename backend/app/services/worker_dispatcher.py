@@ -99,11 +99,13 @@ def execute_tool_with_workers(
         execution_plan = _business_logic_execution_plan(scan_id)
         request_headers = dict(auth_context.get("headers") or {}) if isinstance(auth_context, dict) else {}
         request_cookies = dict(auth_context.get("cookies") or {}) if isinstance(auth_context, dict) else {}
+        identity_sessions = _resolve_auth_identities(scan_id)
         result = _bl_run(
             target,
             execution_plan=execution_plan,
             auth_headers=request_headers,
             auth_cookies=request_cookies,
+            identity_sessions=identity_sessions or None,
         )
         if skill_id:
             result.setdefault("skill_id", skill_id)
@@ -286,6 +288,35 @@ def _resolve_auth_context(scan_id: int | None, skill_contract: dict[str, Any] | 
                 return {}
             material = AuthSessionManager(db, scan).get_material(identity_key or None)
             return material.to_dict() if material else {}
+        finally:
+            db.close()
+    except Exception:
+        return {}
+
+
+def _resolve_auth_identities(scan_id: int | None) -> dict[str, dict[str, Any]]:
+    """Return up to 2 identities' auth material keyed by logical role
+    ("user_a" = lowest privilege rank, "user_b" = next). Business-logic
+    actions that declare required_identities=["user_a","user_b"] need both
+    sides' real headers/cookies to actually execute a cross-identity
+    comparison — _resolve_auth_context() above only ever resolves a single
+    identity, which is why a plan could be marked "ready" for 2 identities
+    while the executor still only ever ran as one."""
+    if not scan_id:
+        return {}
+    try:
+        from app.db.session import SessionLocal
+        from app.models.models import ScanJob
+        from app.services.auth_session_manager import AuthSessionManager
+
+        db = SessionLocal()
+        try:
+            scan = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+            if not scan:
+                return {}
+            materials = AuthSessionManager(db, scan).list_material(limit=2)
+            keys = ["user_a", "user_b"]
+            return {keys[i]: materials[i].to_dict() for i in range(min(len(materials), len(keys)))}
         finally:
             db.close()
     except Exception:

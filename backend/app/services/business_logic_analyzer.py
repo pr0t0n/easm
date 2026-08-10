@@ -76,7 +76,7 @@ SERVICE_PROFILES: dict[str, dict] = {
                      "wp-admin", "cpanel", "plesk"],
         "risk": "high",
         "tests": ["default_creds", "unauthenticated_access", "info_disclosure_admin",
-                  "cache_deception"],
+                  "cache_deception", "file_upload"],
     },
     "api_gateway": {
         "keywords": ["api", "gateway", "graphql", "rest", "v1", "v2", "v3",
@@ -84,7 +84,7 @@ SERVICE_PROFILES: dict[str, dict] = {
         "risk": "high",
         "tests": ["idor_sequential", "http_method_abuse", "mass_assignment",
                   "verbose_errors", "rate_limit_absent", "bola_check",
-                  "graphql_exposure", "cache_deception", "open_cors"],
+                  "graphql_exposure", "cache_deception", "open_cors", "file_upload"],
     },
     "node_js_app": {
         "keywords": ["node", "nodejs", "express", "nestjs", "next", "nuxt",
@@ -98,7 +98,7 @@ SERVICE_PROFILES: dict[str, dict] = {
                      "media", "assets", "cdn"],
         "risk": "high",
         "tests": ["bucket_listing", "unauthenticated_download", "path_traversal_upload",
-                  "cache_deception"],
+                  "cache_deception", "file_upload"],
     },
     "monitoring": {
         "keywords": ["grafana", "kibana", "prometheus", "zabbix", "nagios",
@@ -888,6 +888,171 @@ def test_debug_mode(base_url: str, domain: str) -> list[BusinessLogicFinding]:
     return findings
 
 
+# ── File Upload / Admin Functionality Tests ──────────────────────────────────
+
+_UPLOAD_PATHS = ["/upload", "/api/upload", "/api/files/upload", "/admin/upload", "/file/upload", "/api/v1/upload"]
+_DANGEROUS_UPLOAD_PAYLOADS = [
+    ("shell.php.jpg", b"<?php echo 'rce_poc'; ?>", "image/jpeg"),
+    ("shell.phtml", b"<?php echo 'rce_poc'; ?>", "image/jpeg"),
+    ("poc.svg", b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>", "image/svg+xml"),
+]
+_UPLOAD_REJECTION_MARKERS = ("invalid file", "not allowed", "rejected", "unsupported", "extensão não permitida", "tipo de arquivo")
+
+
+def test_file_upload(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Tenta upload de payloads de extensão dupla/polyglot em paths comuns e
+    verifica se o servidor ACEITA (2xx) sem rejeitar por extensão/magic-bytes/
+    content-type. Não tenta executar o arquivo enviado — isso seria uma
+    exploração ativa de RCE, fora do escopo desta detecção (heurística, como
+    test_debug_mode)."""
+    findings = []
+    for path in _UPLOAD_PATHS:
+        url = base_url.rstrip("/") + path
+        for filename, content, content_type in _DANGEROUS_UPLOAD_PAYLOADS:
+            r = _safe_post(url, files={"file": (filename, content, content_type)})
+            if r is None or r.status_code not in (200, 201):
+                continue
+            body_lower = (r.text or "")[:2000].lower()
+            if any(marker in body_lower for marker in _UPLOAD_REJECTION_MARKERS):
+                continue
+            findings.append(BusinessLogicFinding(
+                title=f"Upload de arquivo com extensão perigosa aceito: {path}",
+                severity="high",
+                test_type="file_upload",
+                domain=domain,
+                evidence=(
+                    f"POST {url} com arquivo '{filename}' ({content_type}) → HTTP {r.status_code}, "
+                    "sem rejeição por extensão/tipo/magic-bytes."
+                ),
+                description=(
+                    f"O endpoint de upload {path} aceitou um arquivo com extensão de execução "
+                    f"disfarçada ('{filename}') sem validar a extensão real, magic bytes ou content-type."
+                ),
+                reproduction_steps=[f"curl -s -X POST '{url}' -F 'file=@{filename};type={content_type}'"],
+                business_impact=(
+                    "Upload irrestrito de arquivos pode permitir execução remota de código ou XSS "
+                    "armazenado, dependendo de como o arquivo é servido posteriormente."
+                ),
+                cvss_estimate=8.0,
+            ))
+            break  # 1 prova por path basta
+    return findings
+
+
+_ADMIN_LOGIN_PATHS = ["/admin/login", "/admin", "/wp-login.php", "/administrator", "/manage/login", "/cpanel", "/login"]
+_ADMIN_LOGIN_FAILURE_MARKERS = ("invalid", "incorrect", "failed", "denied", "unauthorized", "wrong password", "senha")
+
+
+def test_admin_default_creds(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Tenta credenciais padrão/fracas comuns nos paths de login administrativo
+    mais comuns. Reaproveita a mesma lista de credenciais fracas já usada por
+    generic_auth.py em vez de duplicar uma nova."""
+    from app.services.generic_auth import COMMON_CREDS
+
+    findings = []
+    for path in _ADMIN_LOGIN_PATHS:
+        url = base_url.rstrip("/") + path
+        baseline = _safe_post(url, data={"username": "zzqq_nouser_4471", "password": "zzqq_nopass_9913"})
+        if baseline is None:
+            continue
+        baseline_marker = any(m in (baseline.text or "").lower() for m in _ADMIN_LOGIN_FAILURE_MARKERS)
+        for user, pw in COMMON_CREDS[:6]:
+            r = _safe_post(url, data={"username": user, "password": pw})
+            if r is None:
+                continue
+            has_marker = any(m in (r.text or "").lower() for m in _ADMIN_LOGIN_FAILURE_MARKERS)
+            new_cookie = bool(set(r.cookies.keys()) - set(baseline.cookies.keys()))
+            success = (
+                (baseline_marker and not has_marker and r.status_code in (200, 302))
+                or (r.status_code == 302 and baseline.status_code != 302)
+                or new_cookie
+            )
+            if success:
+                findings.append(BusinessLogicFinding(
+                    title=f"Credenciais padrão aceitas no login administrativo: {path}",
+                    severity="critical",
+                    test_type="admin_default_creds",
+                    domain=domain,
+                    evidence=(
+                        f"POST {url} com '{user}:{pw}' → HTTP {r.status_code}, sem marcador de falha "
+                        "(o baseline com credencial inválida teve marcador de falha)."
+                    ),
+                    description=f"O painel administrativo em {path} aceitou uma credencial padrão/fraca comum ('{user}:{pw}').",
+                    reproduction_steps=[f"curl -s -X POST '{url}' -d 'username={user}&password={pw}'"],
+                    business_impact="Acesso administrativo completo obtido via credencial padrão — comprometimento total do painel.",
+                    cvss_estimate=9.0,
+                ))
+                break  # 1 prova por path basta
+    return findings
+
+
+_ADMIN_SURFACE_PATHS = ["/admin", "/admin/dashboard", "/administrator", "/wp-admin/", "/manage", "/console", "/cpanel"]
+_ADMIN_CONTENT_INDICATORS = ("dashboard", "admin panel", "painel administrativo", "user management", "site administration", "logout")
+
+
+def test_admin_unauthenticated_access(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Acessa paths administrativos comuns SEM nenhuma credencial/sessão
+    (deliberadamente ignora _auth_context/_safe_get aqui) e verifica se o
+    conteúdo retornado já parece um painel administrativo real."""
+    findings = []
+    for path in _ADMIN_SURFACE_PATHS:
+        url = base_url.rstrip("/") + path
+        try:
+            r = requests.get(url, timeout=_DEFAULT_TIMEOUT, headers=_HEADERS, verify=False, allow_redirects=False)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        text_lower = (r.text or "")[:4000].lower()
+        matched = [marker for marker in _ADMIN_CONTENT_INDICATORS if marker in text_lower]
+        if matched:
+            findings.append(BusinessLogicFinding(
+                title=f"Painel administrativo acessível sem autenticação: {path}",
+                severity="critical",
+                test_type="admin_unauthenticated_access",
+                domain=domain,
+                evidence=f"GET {url} sem sessão → HTTP 200 com indicadores de painel admin: {', '.join(matched[:3])}.",
+                description=f"O path administrativo {path} respondeu 200 com conteúdo de painel administrativo sem exigir autenticação.",
+                reproduction_steps=[f"curl -s '{url}' | head -100"],
+                business_impact="Painel administrativo completo exposto a qualquer visitante não autenticado.",
+                cvss_estimate=8.5,
+            ))
+    return findings
+
+
+_ADMIN_INFO_PATHS = ["/admin/info", "/admin/status", "/admin/version", "/admin/phpinfo.php", "/manage/status", "/admin/debug"]
+_ADMIN_INFO_INDICATORS = ("version", "build", "commit", "stack", "traceback", "database", "secret", "password", "config")
+
+
+def test_admin_info_disclosure(base_url: str, domain: str) -> list[BusinessLogicFinding]:
+    """Mesmo padrão de test_debug_mode, restrito a paths de info/status/debug
+    tipicamente expostos por consoles administrativos."""
+    findings = []
+    for path in _ADMIN_INFO_PATHS:
+        url = base_url.rstrip("/") + path
+        r = _safe_get(url)
+        if not r or r.status_code not in (200, 206):
+            continue
+        text_lower = (r.text or "").lower()
+        found = [marker for marker in _ADMIN_INFO_INDICATORS if marker in text_lower]
+        if found:
+            findings.append(BusinessLogicFinding(
+                title=f"Divulgação de informação em console administrativo: {path}",
+                severity="medium",
+                test_type="admin_info_disclosure",
+                domain=domain,
+                evidence=f"HTTP 200 em {url}. Indicadores encontrados: {', '.join(found[:3])}.",
+                description=f"O endpoint administrativo {path} expôs informações internas ({', '.join(found)}).",
+                reproduction_steps=[f"curl -s '{url}' | head -100"],
+                business_impact=(
+                    "Exposição de versão, configuração ou detalhes internos que facilitam "
+                    "reconhecimento e exploração direcionada."
+                ),
+                cvss_estimate=5.5,
+            ))
+    return findings
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main analyzer
 # ─────────────────────────────────────────────────────────────────────────────
@@ -962,6 +1127,14 @@ def analyze_business_logic(
             raw_findings.extend(test_race_condition_financial(base_url, domain))
         if "cache_deception" in tests_to_run:
             raw_findings.extend(test_cache_deception(base_url, domain))
+        if "file_upload" in tests_to_run:
+            raw_findings.extend(test_file_upload(base_url, domain))
+        if "default_creds" in tests_to_run:
+            raw_findings.extend(test_admin_default_creds(base_url, domain))
+        if "unauthenticated_access" in tests_to_run:
+            raw_findings.extend(test_admin_unauthenticated_access(base_url, domain))
+        if "info_disclosure_admin" in tests_to_run:
+            raw_findings.extend(test_admin_info_disclosure(base_url, domain))
     finally:
         _auth_context.reset(_token)
 

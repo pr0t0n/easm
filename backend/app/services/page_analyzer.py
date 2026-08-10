@@ -53,7 +53,13 @@ def _root_domain(host: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
-def fetch_and_extract(url: str, scope_root: str | None = None) -> dict:
+def fetch_and_extract(
+    url: str,
+    scope_root: str | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+) -> dict:
     """Abre a página (GET) e extrai endpoints, segredos e scripts externos.
 
     scope_root: domínio registrável do alvo (p/ separar mesmo-domínio de
@@ -65,8 +71,9 @@ def fetch_and_extract(url: str, scope_root: str | None = None) -> dict:
         "secrets": [], "external_scripts": [],
     }
     try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False) as c:
-            r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (pentest-discovery)"})
+        request_headers = {"User-Agent": "Mozilla/5.0 (pentest-discovery)", **dict(headers or {})}
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False, cookies=dict(cookies or {})) as c:
+            r = c.get(url, headers=request_headers)
             out["status"] = r.status_code
             body = r.text[: _MAX_BYTES] if r.text else ""
     except Exception as exc:

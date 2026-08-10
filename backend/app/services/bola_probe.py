@@ -128,12 +128,49 @@ def run_bola_for_scan(db, job) -> dict:
     from app.models.models import Finding
 
     state = dict(getattr(job, "state_data", None) or {})
-    # sessão do scan
+    # G1 intentionally represents the single authenticated internal context.
+    # Object-ownership BOLA needs a second independent identity as a control;
+    # swapping a numeric ID with one session is only a hypothesis, never proof.
     try:
-        from app.services.scan_intelligence import auth_headers_from_state
-        auth = auth_headers_from_state(state) or {}
+        from app.services.auth_session_manager import AuthSessionManager
+
+        if len(AuthSessionManager(db, job).list_material(limit=2)) < 2:
+            return {
+                "status": "blocked_missing_second_identity",
+                "confirmed": False,
+                "findings": [],
+                "findings_created": 0,
+                "note": "BOLA entre proprietarios requer segunda identidade independente.",
+            }
+    except Exception:
+        return {
+            "status": "blocked_missing_second_identity",
+            "confirmed": False,
+            "findings": [],
+            "findings_created": 0,
+        }
+    # Sessão do scan. AuthSessionManager é o superset (static/bearer/cookie/
+    # basic/header/login_flow E sessão CDP capturada) — antes esta função só
+    # enxergava auth_headers_from_state, que nunca soube nada sobre uma
+    # sessão capturada via credential_capture_service, então BOLA/BFLA rodava
+    # sem sessão real em qualquer scan cuja auth veio da captura CDP.
+    auth: dict[str, str] = {}
+    try:
+        from app.services.auth_session_manager import AuthSessionManager
+
+        material = AuthSessionManager(db, job).get_material()
+        if material and material.valid:
+            auth = dict(material.headers)
+            if material.cookies and "Cookie" not in auth:
+                auth["Cookie"] = "; ".join(f"{k}={v}" for k, v in material.cookies.items())
     except Exception:
         auth = {}
+    if not auth:
+        try:
+            from app.services.scan_intelligence import auth_headers_from_state
+            auth = auth_headers_from_state(state) or {}
+        except Exception:
+            auth = {}
     if not auth:
         return {"skipped": "no_auth"}
 

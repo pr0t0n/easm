@@ -1909,59 +1909,122 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
 # Deliberately excludes gau/waybackurls: those query external archives
 # (web.archive.org, CommonCrawl), not the live target, so a captured session
 # has nothing to add for them.
-_AUTHENTICATED_CRAWL_TOOLS = {
-    "katana", "gospider", "hakrawler",
-    "dirsearch", "dirsearch-api", "dirsearch-api-post", "ffuf", "feroxbuster",
+_AUTHENTICATED_DISCOVERY_TOOLS = {
+    # Live crawlers / spiders.
+    "katana", "katana-js", "gospider", "hakrawler", "chromium-capture",
+    # Content, file and API-route fuzzing.
+    "dirsearch", "dirsearch-api", "dirsearch-api-post",
+    "ffuf", "ffuf-content", "ffuf-files", "feroxbuster",
+    # Parameter / value / observed-form fuzzing. Applicability is still checked
+    # by the dispatcher, so ffuf-values/ffuf-post only run with real evidence.
+    "arjun", "ffuf-params", "ffuf-values", "ffuf-post", "wfuzz",
+    # Protected bundle analysis is part of internal endpoint discovery.
+    "linkfinder", "nuclei-js-secrets", "nuclei-js-analysis",
 }
 
 
 def requeue_authenticated_crawl_items(db: Session, job: ScanJob, identity_key: str) -> int:
-    """Re-run crawler/spider work items with a newly confirmed auth session.
+    """Create independent G1 crawler/spider/fuzzing items.
 
-    These tools already completed once, unauthenticated, before any identity
-    existed for this scan — unlike requeue_evidence_ready_work_items, which
-    only picks up items skipped for missing evidence. The prior unauthenticated
-    result is archived in item_metadata rather than discarded, so both passes
-    stay comparable.
+    Despite the legacy function name, G0 rows are never requeued or overwritten.
+    G1 is seeded from every planned G0 discovery item regardless of its current
+    status, removing the capture-time race between queued/running/completed rows.
     """
+    from app.services.execution_context_service import get_context
+
     now = datetime.now()
+    internal = get_context(db, job.id, "internal")
+    if internal is None or str(internal.status or "") not in {"running", "pending"}:
+        return 0
     candidates = (
         db.query(ScanWorkItem)
         .filter(
             ScanWorkItem.scan_job_id == job.id,
-            ScanWorkItem.tool_name.in_(_AUTHENTICATED_CRAWL_TOOLS),
-            ScanWorkItem.status.in_(["completed", "failed"]),
+            ScanWorkItem.execution_context == "external",
+            ScanWorkItem.tool_name.in_(_AUTHENTICATED_DISCOVERY_TOOLS),
         )
+        .order_by(ScanWorkItem.id.asc())
         .all()
     )
-    requeued = 0
-    for item in candidates:
-        meta = dict(item.item_metadata or {})
-        meta["previous_unauthenticated_result"] = item.result
-        meta["requeued_for_auth_session"] = identity_key
-        meta["requeued_for_auth_session_at"] = now.isoformat()
-        item.status = "queued"
-        item.lease_until = None
-        item.finished_at = None
-        item.last_error = None
-        item.attempts = 0
-        item.result = {
-            "status": "requeued",
-            "reason": "authenticated_session_captured",
+    created = 0
+    for source_item in candidates:
+        existing = (
+            db.query(ScanWorkItem)
+            .filter(
+                ScanWorkItem.scan_job_id == job.id,
+                ScanWorkItem.execution_context == "internal",
+                ScanWorkItem.phase_id == source_item.phase_id,
+                ScanWorkItem.tool_name == source_item.tool_name,
+                ScanWorkItem.target == source_item.target,
+            )
+            .first()
+        )
+        if existing:
+            # A recaptured G1 session re-runs the discovery matrix under the new
+            # session revision while retaining the previous result in metadata.
+            if int(existing.auth_session_revision or 0) < int(internal.session_revision or 0):
+                meta = dict(existing.item_metadata or {})
+                history = list(meta.get("session_revision_results") or [])
+                if existing.result:
+                    history.append({
+                        "session_revision": int(existing.auth_session_revision or 0),
+                        "result": existing.result,
+                        "finished_at": existing.finished_at.isoformat() if existing.finished_at else None,
+                    })
+                meta["session_revision_results"] = history[-5:]
+                meta["identity_key"] = identity_key
+                meta["execution_context"] = "internal"
+                existing.item_metadata = meta
+                existing.auth_session_revision = int(internal.session_revision or 1)
+                existing.status = "queued"
+                existing.attempts = 0
+                existing.lease_until = None
+                existing.started_at = None
+                existing.finished_at = None
+                existing.last_error = None
+                existing.result = {}
+                existing.updated_at = now
+                created += 1
+            continue
+        meta = dict(source_item.item_metadata or {})
+        meta.update({
+            "source": "authenticated_internal_context",
+            "execution_context": "internal",
             "identity_key": identity_key,
-            "requeued_at": now.isoformat(),
-        }
-        item.item_metadata = meta
-        item.updated_at = now
-        requeued += 1
-    if requeued:
+            "g0_source_item_id": source_item.id,
+            "session_revision": int(internal.session_revision or 1),
+            "queue_ready_at": now.isoformat(),
+        })
+        db.add(ScanWorkItem(
+            scan_job_id=job.id,
+            execution_context="internal",
+            auth_session_revision=int(internal.session_revision or 1),
+            phase_id=source_item.phase_id,
+            target=source_item.target,
+            tool_name=source_item.tool_name,
+            profile=source_item.profile,
+            resource_class=source_item.resource_class,
+            priority=max(1, int(source_item.priority or 100) - 5),
+            status="queued",
+            attempts=0,
+            max_attempts=source_item.max_attempts,
+            item_metadata=meta,
+            created_at=now,
+            updated_at=now,
+        ))
+        db.flush()
+        created += 1
+    if created:
         db.add(ScanLog(
             scan_job_id=job.id,
             source="work-queue",
             level="INFO",
-            message=f"authenticated_crawl_requeue scan={job.id} identity={identity_key} requeued={requeued}",
+            message=(
+                f"internal_discovery_seed scan={job.id} identity={identity_key} "
+                f"session_revision={internal.session_revision} created_or_requeued={created}"
+            ),
         ))
-    return requeued
+    return created
 
 
 def _eligible_phases_for_target(target: str, state: dict[str, Any]) -> list[str]:
@@ -2435,6 +2498,12 @@ def enqueue_scan_work_items(
     max_optional_per_phase: int | None = None,
 ) -> dict[str, int]:
     state = dict(job.state_data or {})
+    try:
+        from app.services.execution_context_service import ensure_external_context
+
+        ensure_external_context(db, job)
+    except Exception:
+        pass
     created = 0
     existing = 0
     skipped = 0
@@ -2612,6 +2681,7 @@ def enqueue_scan_work_items(
         batch_target_key = _batch_target_key_for_source(source)
         existing_batch = db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == "external",
             ScanWorkItem.phase_id == phase_id,
             ScanWorkItem.tool_name == tool[:120],
             ScanWorkItem.target == batch_target_key,
@@ -2702,6 +2772,7 @@ def enqueue_scan_work_items(
             _batch_metadata["queue_ready_at"] = datetime.now().isoformat()
         item = ScanWorkItem(
             scan_job_id=job.id,
+            execution_context="external",
             phase_id=phase_id,
             target=batch_target_key,
             tool_name=tool[:120],
@@ -2734,6 +2805,7 @@ def enqueue_scan_work_items(
     for (phase_id, tool, target) in single_items:
         already = db.query(ScanWorkItem.id).filter(
             ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == "external",
             ScanWorkItem.phase_id == phase_id,
             ScanWorkItem.tool_name == tool[:120],
             ScanWorkItem.target == target[:500],
@@ -2773,6 +2845,7 @@ def enqueue_scan_work_items(
             _item_meta["queue_ready_at"] = datetime.now().isoformat()
         item = ScanWorkItem(
             scan_job_id=job.id,
+            execution_context="external",
             phase_id=phase_id,
             target=target[:500],
             tool_name=tool[:120],

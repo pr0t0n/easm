@@ -97,6 +97,22 @@ def on_startup():
     seed_admin_user()
     seed_skill_library_data()
     start_platform_guard()
+    start_credential_capture_reaper()
+
+
+def start_credential_capture_reaper():
+    """Idle-timeout enforcement for interactive CDP session capture.
+
+    Must run in-process with start_capture()'s Playwright objects —
+    credential_capture_service._ACTIVE_CAPTURES is a plain in-process dict
+    with no cross-process visibility, so a Celery-beat task (a separate
+    worker process) could never see or reap entries in it. IDLE_TIMEOUT_SECONDS
+    was declared but unenforced before this.
+    """
+    import asyncio
+    from app.services.credential_capture_service import run_idle_capture_reaper_loop
+
+    asyncio.ensure_future(run_idle_capture_reaper_loop())
 
 
 def start_platform_guard():

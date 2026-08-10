@@ -274,14 +274,20 @@ def _mutation_negative_value(client: httpx.Client, base: str, ua: dict, plan: di
     return out
 
 
-def run_business_logic_for_scan(db, job) -> dict:
+def run_business_logic_for_scan(db, job, *, execution_context: str = "external") -> dict:
     state = dict(getattr(job, "state_data", None) or {})
     base = str(getattr(job, "target_query", "") or "").split(",")[0].strip()
     from app.models.models import OffensiveEndpoint, ScanAuthSession
     from app.services.business_logic_intelligence import build_business_logic_execution_plan
     from app.services.business_logic_test import run_as_tool
 
-    endpoints = db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == job.id).all()
+    from app.services.execution_context_service import inventory_auth_context, normalize_execution_context
+
+    execution_context = normalize_execution_context(execution_context)
+    endpoints = db.query(OffensiveEndpoint).filter(
+        OffensiveEndpoint.scan_job_id == job.id,
+        OffensiveEndpoint.auth_context == inventory_auth_context(execution_context),
+    ).all()
     analyses = [
         dict((dict(row.endpoint_metadata or {}).get("analysis") or {}))
         for row in endpoints
@@ -290,8 +296,8 @@ def run_business_logic_for_scan(db, job) -> dict:
     valid_sessions = db.query(ScanAuthSession).filter(
         ScanAuthSession.scan_job_id == job.id,
         ScanAuthSession.status.in_(["valid", "static"]),
-    ).limit(2).all()
-    identities = ["user_a", "user_b"] if len(valid_sessions) >= 2 else (["user_a"] if valid_sessions else [])
+    ).limit(1).all()
+    identities = ["user_a"] if valid_sessions and execution_context == "internal" else []
     plan = build_business_logic_execution_plan(
         analyses,
         available_identities=identities,
@@ -305,4 +311,5 @@ def run_business_logic_for_scan(db, job) -> dict:
         auth_cookies=dict(primary_session.cookies or {}) if primary_session else {},
     )
     res["findings_created"] = 0
+    res["execution_context"] = execution_context
     return res

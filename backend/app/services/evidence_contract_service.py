@@ -36,6 +36,7 @@ def create_evidence_artifact(db: Session, contract: EvidenceContract) -> Evidenc
         tool_name=contract.tool_name or None,
         target=contract.target or None,
         identity_key=contract.identity_key or None,
+        execution_context=str((contract.metadata or {}).get("execution_context") or "external"),
         artifact_type=contract.artifact_type,
         validation_status=contract.validation_status,
         confidence_score=contract.confidence_score,

@@ -47,7 +47,10 @@ def _retrigger_authenticated_zap(db: Session, scan: ScanJob) -> int:
         # _schedule_scan_postprocessor requires an existing ScanWorkItem row
         # (only used for its id — the "zap" branch uses the target string
         # passed explicitly, not item.target) — any row for this scan works.
-        anchor_item = db.query(ScanWorkItem.id).filter(ScanWorkItem.scan_job_id == scan.id).first()
+        anchor_item = db.query(ScanWorkItem.id).filter(
+            ScanWorkItem.scan_job_id == scan.id,
+            ScanWorkItem.execution_context == "internal",
+        ).first()
         if not anchor_item:
             return 0
         anchor_item_id = anchor_item[0]
@@ -141,16 +144,23 @@ async def confirm_identity_capture(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sessao de captura nao encontrada")
 
     from app.services.hypothesis_rules import generate_hypotheses_for_scan
+    from app.services.execution_context_service import activate_internal_context, reopen_auth_blocked_hypotheses
     from app.services.scan_work_queue import (
         requeue_authenticated_crawl_items,
         requeue_evidence_ready_work_items,
     )
 
     try:
+        identity = db.query(ScanIdentity).filter(ScanIdentity.id == int(result["scan_identity_id"])).first()
+        auth_session = db.query(ScanAuthSession).filter(ScanAuthSession.id == int(result["scan_auth_session_id"])).first()
+        if auth_session is None or str(auth_session.status or "") not in {"valid", "static"}:
+            raise RuntimeError("captured_session_failed_validation")
+        internal_context = activate_internal_context(db, scan, auth_session, identity)
         generate_hypotheses_for_scan(db, scan)
+        hypotheses_reopened = reopen_auth_blocked_hypotheses(db, scan)
         evidence_requeued = requeue_evidence_ready_work_items(db, scan)
         crawl_requeued = requeue_authenticated_crawl_items(db, scan, result.get("identity_key") or "")
-        _retrigger_authenticated_zap(db, scan)
+        zap_rescheduled = _retrigger_authenticated_zap(db, scan)
         skill_probes_seeded = 0
         try:
             from app.services.scan_scope import authorized_scope_for_scan
@@ -171,8 +181,22 @@ async def confirm_identity_capture(
         from app.workers.tasks import dispatch_scan_work_items
 
         dispatch_scan_work_items.delay(scan.id)
-    except Exception:
-        pass  # re-integration is best-effort — the capture itself already succeeded and committed
+        result["internal_context"] = {
+            "generation": "G1",
+            "status": internal_context.status,
+            "session_revision": internal_context.session_revision,
+            "discovery_items_created": crawl_requeued,
+            "evidence_items_requeued": evidence_requeued,
+            "hypotheses_reopened": hypotheses_reopened,
+            "zap_rescheduled": zap_rescheduled,
+            "skill_probes_seeded": skill_probes_seeded,
+        }
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"sessao capturada, mas a execucao interna G1 nao foi iniciada: {exc}",
+        ) from exc
 
     return result
 

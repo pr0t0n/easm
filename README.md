@@ -628,10 +628,14 @@ no mesmo grupo; `hakrawler` usa um único `-h` com pares unidos por `;;`, sintax
   gravado sem criptografia.
 - Contextos de captura vivem em memória do processo backend (`_ACTIVE_CAPTURES`) — não há
   replicação entre múltiplos workers do backend nesta versão.
-- **Gap conhecido**: `IDLE_TIMEOUT_SECONDS` (15 min) está declarado no código mas ainda não é
-  aplicado por nenhum reaper — capturas abandonadas (sem confirm/cancel explícito) não são
-  encerradas automaticamente hoje, o que pode acumular contextos de browser órfãos no
-  `browser_runner`.
+- `IDLE_TIMEOUT_SECONDS` (15 min) é aplicado por um reaper assíncrono (`run_idle_capture_reaper_loop`,
+  iniciado no startup do backend) que roda em-processo — capturas abandonadas (sem confirm/cancel
+  explícito) são encerradas automaticamente, liberando o contexto de browser no `browser_runner`.
+  Corrigido 2026-08-07 (antes disso o timeout estava só declarado, sem enforcement).
+- Sessões confirmadas também têm um TTL "soft" (`ScanAuthSession.expires_at`, 30 min) revalidado
+  periodicamente por uma task Celery-beat (`auth_session.revalidate`) — uma sessão que caiu no meio
+  do scan (logout, expiração no servidor, token revogado) é detectada e marcada `expired`, em vez de
+  continuar sendo usada silenciosamente por ferramentas downstream.
 
 ### Arquivos relevantes
 
