@@ -88,6 +88,62 @@ def test_execution_plan_reconciler_derives_g1_running_g0_waiting() -> None:
     assert external_context.status == "waiting_for_internal"
 
 
+def test_execution_plan_reconciler_promotes_g0_when_external_work_is_active() -> None:
+    job = SimpleNamespace(
+        id=82,
+        state_data={
+            "execution_plan": "internal_then_external",
+            "external_release_pending": True,
+            "g1_status": "running",
+            "g0_status": "waiting_for_internal",
+        },
+    )
+    internal_context = SimpleNamespace(status="running", finished_at=None)
+    external_context = SimpleNamespace(status="waiting_for_internal", finished_at=None)
+
+    class Query:
+        def __init__(self, db, models):
+            self.db = db
+            self.models = models
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def group_by(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            self.db.work_count_queries += 1
+            if self.db.work_count_queries == 1:
+                return [("completed", 142), ("skipped", 16)]
+            return [("completed", 70), ("queued", 30), ("submitted", 8)]
+
+        def first(self):
+            self.db.context_queries += 1
+            return internal_context if self.db.context_queries == 1 else external_context
+
+    class DB:
+        def __init__(self):
+            self.work_count_queries = 0
+            self.context_queries = 0
+            self.added = []
+
+        def query(self, *models):
+            return Query(self, models)
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    state = reconcile_execution_plan_state(DB(), job)  # type: ignore[arg-type]
+
+    assert state["current_surface"] == "G0"
+    assert state["g1_status"] == "completed"
+    assert state["g0_status"] == "running"
+    assert state["execution_tracks"]["G0"]["active"] == 38
+    assert internal_context.status == "completed"
+    assert external_context.status == "running"
+
+
 def test_inventory_fingerprint_handles_missing_status_codes() -> None:
     import app.services.execution_context_service as contexts
 

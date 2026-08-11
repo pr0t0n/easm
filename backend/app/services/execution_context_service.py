@@ -99,12 +99,20 @@ def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
     if internal["total"] > 0:
         internal_status = "running" if internal["active"] > 0 else "completed"
 
-    external_waiting = bool(state.get("external_release_pending")) and not bool(
-        state.get("external_released_after_internal")
+    # ``external_release_pending`` is a request/plan flag; it can remain true on
+    # older scans even after external rows were materialized.  Runtime truth is
+    # the durable queue: if G0 has active work, G0 is running.
+    external_has_active_work = external["active"] > 0
+    external_has_any_work = external["total"] > 0
+    external_waiting = (
+        bool(state.get("external_release_pending"))
+        and not bool(state.get("external_released_after_internal"))
+        and internal_status != "completed"
+        and not external_has_active_work
     )
     external_status = "waiting_for_internal" if external_waiting else "not_started"
     if not external_waiting:
-        if external["total"] > 0:
+        if external_has_any_work:
             external_status = "running" if external["active"] > 0 else "completed"
         elif bool(state.get("external_released_after_internal")):
             external_status = "running"

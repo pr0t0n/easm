@@ -106,8 +106,24 @@ function getPerfil(scan) {
   return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Padrão";
 }
 function executionPlanLabel(scan) {
-  const plan = scan?.state_data?.execution_plan || scan?.execution_plan || "external_only";
-  if (plan === "internal_then_external") return "G1 interno → G0 externo";
+  const state = scan?.state_data || {};
+  const plan = state.execution_plan || scan?.execution_plan || "external_only";
+  const current = String(state.current_surface || "").toUpperCase();
+  const g1 = state.g1_status || state.internal_execution_status;
+  const g0 = state.g0_status || state.external_execution_status;
+  if (plan === "internal_then_external") {
+    if (current === "G1") {
+      return g0 === "waiting_for_internal"
+        ? "Agora: G1 interno · G0 aguardando"
+        : "Agora: G1 interno";
+    }
+    if (current === "G0") {
+      return g1 === "completed"
+        ? "G1 concluído · Agora: G0 externo"
+        : "Agora: G0 externo";
+    }
+    return "G1 interno → G0 externo";
+  }
   return "G0 externo";
 }
 function getFaseStates(scan) {
