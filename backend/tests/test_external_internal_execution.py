@@ -242,6 +242,7 @@ def test_skill_probe_seed_uses_internal_session_context(monkeypatch) -> None:
     assert created == 1
     assert items[0].execution_context == "internal"
     assert items[0].auth_session_revision == 7
+    assert items[0].max_attempts == 2
     assert items[0].item_metadata["identity_key"] == "vidal"
 
 
@@ -487,6 +488,14 @@ def test_dispatcher_rehydrates_orphaned_dispatched_work_items(monkeypatch) -> No
     assert result["scheduled"] == 1
     assert published == [{"args": [70001], "queue": "queue.P13.unit"}]
     assert item.lease_until is not None
+
+
+def test_worker_transient_error_classifier_covers_db_disconnects() -> None:
+    assert tasks._is_transient_worker_error(
+        "psycopg2.OperationalError: server closed the connection unexpectedly"
+    )
+    assert tasks._is_transient_worker_error("PendingRollbackError: transaction has been rolled back")
+    assert not tasks._is_transient_worker_error("source_code_required")
 
 
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:

@@ -49,6 +49,24 @@ TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps", "failed", "cancell
 NON_EXECUTABLE_SCAN_STATUSES = TERMINAL_SCAN_STATUSES | HALTED_SCAN_STATUSES | {"blocked"}
 
 
+def _is_transient_worker_error(exc: BaseException | str) -> bool:
+    text = str(exc)
+    return any(
+        token in text
+        for token in (
+            "DeadlockDetected",
+            "deadlock detected",
+            "OperationalError",
+            "server closed the connection unexpectedly",
+            "connection already closed",
+            "terminating connection",
+            "transaction has been rolled back",
+            "PendingRollbackError",
+            "SSL SYSCALL error",
+        )
+    )
+
+
 def _is_work_item_batch_target(target: str | None) -> bool:
     return str(target or "").strip().startswith("__batch__")
 
@@ -4965,17 +4983,7 @@ def execute_scan_work_item(item_id: int):
                 if not item or not job:
                     return {"id": item_id, "status": "failed", "error": str(exc)[:500]}
                 finished_at = datetime.now()
-                transient_error = any(
-                    token in str(exc)
-                    for token in (
-                        "DeadlockDetected",
-                        "deadlock detected",
-                        "OperationalError",
-                        "server closed the connection unexpectedly",
-                        "transaction has been rolled back",
-                        "PendingRollbackError",
-                    )
-                )
+                transient_error = _is_transient_worker_error(exc)
                 can_retry = transient_error and int(item.attempts or 0) < int(item.max_attempts or 1)
                 item.status = "retry" if can_retry else "failed"
                 item.lease_until = (
@@ -5392,8 +5400,18 @@ def execute_scan_work_item(item_id: int):
         db.rollback()
         item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
         if item:
-            item.status = "retry" if int(item.attempts or 0) < int(item.max_attempts or 1) else "failed"
-            item.last_error = str(exc)[:2000]
+            transient_error = _is_transient_worker_error(exc)
+            attempts = int(item.attempts or 0)
+            max_attempts = int(item.max_attempts or 1)
+            if transient_error and attempts >= max_attempts and max_attempts < 3:
+                item.max_attempts = attempts + 1
+                max_attempts = int(item.max_attempts or max_attempts)
+            item.status = "retry" if attempts < max_attempts else "failed"
+            item.last_error = (
+                f"transient_worker_error_retry:{exc!s}"[:2000]
+                if transient_error and item.status == "retry"
+                else str(exc)[:2000]
+            )
             item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
             item.finished_at = datetime.now() if item.status == "failed" else None
             # ── Camada 0: semaphore leak fix — release slot on exception ──────

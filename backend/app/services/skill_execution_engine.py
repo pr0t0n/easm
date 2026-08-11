@@ -182,7 +182,11 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
             resource_class=resource_class_for_tool("skill-probe"),
             priority=60,
             status="queued",
-            max_attempts=1,
+            # Skill probes run inside the backend and persist trace/evidence.
+            # A transient DB reconnect during that persistence is not a
+            # negative security result, so give them the same retry budget as
+            # other required work-queue items.
+            max_attempts=2,
             item_metadata=apply_phase_tool_metadata({
                 "source": "skill_execution_engine",
                 "execution_context": execution_context,
