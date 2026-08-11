@@ -85,6 +85,21 @@ def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() 
     assert "bl-test" in scan_work_queue._authenticated_tools_for_phase(
         "P13", "https://example.test/support/manage", state
     )
+    assert "nuclei-auth-bypass" in scan_work_queue._authenticated_tools_for_phase(
+        "P14", "https://example.test/api/auth/login", {**state, "login_forms": ["https://example.test/api/auth/login"]}
+    )
+    assert "nuclei-exposure" in scan_work_queue._authenticated_tools_for_phase(
+        "P15", "https://example.test/support/manage", state
+    )
+    assert "nuclei" in scan_work_queue._authenticated_tools_for_phase(
+        "P17", "https://example.test/support/manage", state
+    )
+    assert "nuclei" in scan_work_queue._authenticated_tools_for_phase(
+        "P19", "https://example.test/support/manage", state
+    )
+    assert "nuclei" in scan_work_queue._authenticated_tools_for_phase(
+        "P20", "https://example.test/support/manage", state
+    )
 
 
 def test_authenticated_deep_target_filter_rejects_static_and_mime_artifacts() -> None:
@@ -228,6 +243,40 @@ def test_skill_probe_seed_uses_internal_session_context(monkeypatch) -> None:
     assert items[0].execution_context == "internal"
     assert items[0].auth_session_revision == 7
     assert items[0].item_metadata["identity_key"] == "vidal"
+
+
+def test_skill_probe_seed_does_not_fallback_to_external_without_g1_context(monkeypatch) -> None:
+    from app.services import skill_execution_engine
+
+    monkeypatch.setattr(
+        "app.services.auth_session_manager.has_any_valid_session",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.execution_context_service.get_context",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        skill_execution_engine,
+        "get_skill_by_id",
+        lambda skill_id: {"phase_ids": ["P13"]},
+    )
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    created = skill_execution_engine.seed_skill_probe_items(
+        DB(),
+        SimpleNamespace(id=81),
+        "P13",
+        "https://example.test/support/manage",
+    )
+
+    assert created == 0
 
 
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:

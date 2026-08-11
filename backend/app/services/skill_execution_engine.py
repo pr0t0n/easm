@@ -129,19 +129,15 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
     if not target:
         return 0
 
-    execution_context = "external"
-    auth_session_revision = 0
-    identity_key = ""
     try:
         internal = get_context(db, job.id, "internal")
-        if internal is not None and str(internal.status or "") in {"running", "pending"}:
-            execution_context = "internal"
-            auth_session_revision = int(getattr(internal, "session_revision", 0) or 1)
-            identity_key = str(getattr(internal, "identity_key", "") or "")
+        if internal is None or str(internal.status or "") not in {"running", "pending"}:
+            return 0
+        execution_context = "internal"
+        auth_session_revision = int(getattr(internal, "session_revision", 0) or 1)
+        identity_key = str(getattr(internal, "identity_key", "") or "")
     except Exception:
-        execution_context = "external"
-        auth_session_revision = 0
-        identity_key = ""
+        return 0
 
     created = 0
     for skill_id in _SKILL_PROBE_CANDIDATES:

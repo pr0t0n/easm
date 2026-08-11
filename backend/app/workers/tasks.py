@@ -4864,23 +4864,48 @@ def execute_scan_work_item(item_id: int):
                 if not item or not job:
                     return {"id": item_id, "status": "failed", "error": str(exc)[:500]}
                 finished_at = datetime.now()
-                item.status = "failed"
-                item.lease_until = None
-                item.finished_at = finished_at
+                transient_error = any(
+                    token in str(exc)
+                    for token in (
+                        "DeadlockDetected",
+                        "deadlock detected",
+                        "OperationalError",
+                        "server closed the connection unexpectedly",
+                        "transaction has been rolled back",
+                        "PendingRollbackError",
+                    )
+                )
+                can_retry = transient_error and int(item.attempts or 0) < int(item.max_attempts or 1)
+                item.status = "retry" if can_retry else "failed"
+                item.lease_until = (
+                    finished_at + timedelta(seconds=min(300, 30 * max(1, int(item.attempts or 1))))
+                    if can_retry else None
+                )
+                item.finished_at = None if can_retry else finished_at
                 item.updated_at = finished_at
-                item.last_error = f"internal_hypothesis_validator_failed:{exc!s}"[:2000]
-                item.result = {"status": "failed", "error": str(exc)[:1000], "finished_at": finished_at.isoformat()}
+                item.last_error = (
+                    f"internal_hypothesis_validator_transient_retry:{exc!s}"[:2000]
+                    if can_retry else f"internal_hypothesis_validator_failed:{exc!s}"[:2000]
+                )
+                item.result = {
+                    "status": item.status,
+                    "transient": bool(can_retry),
+                    "error": str(exc)[:1000],
+                    "finished_at": finished_at.isoformat(),
+                }
                 failure_state = dict(job.state_data or {})
-                failure_state["hypothesis_drain_failures"] = int(failure_state.get("hypothesis_drain_failures") or 0) + 1
+                if not can_retry:
+                    failure_state["hypothesis_drain_failures"] = int(failure_state.get("hypothesis_drain_failures") or 0) + 1
                 failure_state["hypothesis_drain_last_error"] = str(exc)[:500]
                 failure_state["hypothesis_drain_last_failed_at"] = finished_at.isoformat()
+                failure_state["hypothesis_drain_last_transient"] = bool(can_retry)
                 job.state_data = failure_state
                 try:
                     kali_inflight_release(str(item.resource_class or "light"), 1)
                 except Exception:
                     pass
                 db.commit()
-                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=30 if can_retry else 1)
                 return {"id": item.id, "status": item.status, "error": str(exc)[:500]}
 
         _state_for_applicability = dict(job.state_data or {})

@@ -1926,11 +1926,14 @@ _AUTHENTICATED_DEEP_TEST_TOOLS = {
     # Broad authenticated dynamic analysis.  These do not require a prior
     # positive Nuclei signal; dispatch-time evidence/applicability still decides
     # whether each target is safe and useful.
-    "wapiti", "nikto", "nuclei", "bl-test",
+    "wapiti", "nikto", "nuclei", "bl-test", "curl",
     # Evidence-gated active checks.  They are selected only when crawler/spider
     # state has already produced concrete parameters/endpoints for the target.
     "sqlmap", "dalfox", "nuclei-sqli", "nuclei-xss", "nuclei-ssrf",
-    "nuclei-idor", "nuclei-redirect",
+    "nuclei-idor", "nuclei-redirect", "nuclei-auth-bypass", "nuclei-jwt",
+    "nuclei-csrf", "nuclei-cors", "nuclei-race", "nuclei-lfi",
+    "nuclei-ssti", "nuclei-rce", "nuclei-exposure", "nuclei-file-upload",
+    "nuclei-swagger", "nuclei-graphql", "jwt_tool",
     # Parameter/fuzzer tools that are also useful after authentication.
     "arjun", "ffuf", "ffuf-params", "wfuzz",
 }
@@ -1946,6 +1949,8 @@ def _authenticated_tools_for_phase(phase_id: str, target: str, state: dict[str, 
         tools = list(dict.fromkeys(tools + ["linkfinder", "nuclei-js-analysis", "nuclei-js-secrets"]))
     if phase_id == "P13":
         tools = list(dict.fromkeys(["bl-test"] + tools))
+    if phase_id in {"P17", "P19", "P20"}:
+        tools = list(dict.fromkeys(["nuclei"] + tools))
 
     selected: list[str] = []
     for tool in tools:
@@ -2086,7 +2091,10 @@ def seed_internal_first_work_items(db: Session, job: ScanJob, identity_key: str)
     clean_targets, skipped_targets = filter_targets_to_authorized_scope(targets, authorized_scope_for_scan(db, job.id))
     now = datetime.now()
     created = 0
-    phases = ["P03", "P04", "P05", "P08", "P09", "P10", "P11", "P12", "P13", "P16"]
+    phases = [
+        "P03", "P04", "P05", "P08", "P09",
+        "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P19", "P20",
+    ]
     for target in clean_targets:
         for phase_id in phases:
             tools = _authenticated_tools_for_phase(phase_id, target, state)
@@ -2246,7 +2254,7 @@ def repair_authenticated_deep_test_work_items(db: Session, job: ScanJob, identit
     revision = int(getattr(internal, "session_revision", 0) or 1)
     identity = str(identity_key or getattr(internal, "identity_key", "") or "")
     targets = _candidate_internal_deep_targets(db, job)
-    phases = ["P10", "P11", "P12", "P13"]
+    phases = ["P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P19", "P20"]
     created = 0
     for target in targets:
         for phase_id in phases:

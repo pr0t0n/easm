@@ -405,7 +405,7 @@ def ensure_hypothesis_drain_work_item(
         priority=3,
         status="queued",
         attempts=0,
-        max_attempts=1,
+        max_attempts=3,
         item_metadata={
             "source": "hypothesis_planner",
             "engine": "internal_safe_validator",
