@@ -4399,39 +4399,54 @@ def dispatch_scan_work_items(
                 "dispatched_rehydration failed: %s", _dispatch_rehydrate_exc
             )
 
-        # ── Auto-retry timed-out items that haven't exceeded max_attempts ────────
-        # Items with status='timeout' are NOT automatically retried — they stay
-        # terminal and block their downstream gate phases indefinitely.
-        # Here we re-queue them (resetting lease) if attempts < max_attempts so
-        # the dispatch loop picks them up on the next cycle.
+        # ── Auto-retry recoverable terminal items ───────────────────────────────
+        # Runner timeouts, DB disconnects while persisting backend-local evidence
+        # and stale-runner watchdog kills are infrastructure/transport failures,
+        # not negative pentest evidence.  Leaving them terminal strands G1 before
+        # the G0 handoff and makes the UI look "running" forever.
         try:
             from app.models.models import ScanWorkItem as _SWI_retry
             from datetime import datetime as _dt_retry
 
             _retried = 0
-            _timeout_items = (
+            _terminal_items = (
                 db.query(_SWI_retry)
                 .filter(
                     _SWI_retry.scan_job_id == scan_id,
-                    _SWI_retry.status == "timeout",
-                    _SWI_retry.attempts < _SWI_retry.max_attempts,
+                    _SWI_retry.status.in_(["timeout", "failed"]),
                 )
                 .order_by(_SWI_retry.priority.asc(), _SWI_retry.updated_at.asc(), _SWI_retry.id.asc())
                 .limit(200)
                 .all()
             )
-            for _ti in _timeout_items:
-                if not _work_item_tool_is_required(_ti):
+            for _ti in _terminal_items:
+                _err = str(_ti.last_error or "")
+                _recoverable = (
+                    str(_ti.status or "") == "timeout"
+                    or _is_recoverable_runner_infra_error(_err)
+                    or _is_transient_worker_error(_err)
+                    or "watchdog marked stale running job" in _err
+                    or "lease_expired_max_attempts" in _err and str(_ti.tool_name or "").startswith("skill-probe")
+                )
+                if not _recoverable:
+                    continue
+                _attempts = int(_ti.attempts or 0)
+                _max_attempts = int(_ti.max_attempts or 1)
+                if _attempts >= _max_attempts and _max_attempts < 3:
+                    _ti.max_attempts = _attempts + 1
+                    _max_attempts = int(_ti.max_attempts or _max_attempts)
+                if _attempts >= _max_attempts:
                     continue
                 _ti.status = "queued"
                 _ti.lease_until = None
-                _ti.last_error = f"[auto-retry after timeout attempt {_ti.attempts}]"
+                _ti.finished_at = None
+                _ti.last_error = f"[auto-retry recoverable terminal attempt {_ti.attempts}: {_err[:180]}]"
                 _ti.updated_at = _dt_retry.utcnow()
                 _retried += 1
             if _retried:
                 import logging as _retry_log
                 _retry_log.getLogger(__name__).info(
-                    "auto_retry_timeouts: scan=%d requeued=%d items", scan_id, _retried
+                    "auto_retry_recoverable_terminals: scan=%d requeued=%d items", scan_id, _retried
                 )
         except Exception as _retry_exc:
             import logging as _retry_log2
@@ -4841,7 +4856,13 @@ def dispatch_scan_work_items(
             pass
 
 
-@celery.task(name="execute_scan_work_item", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+@celery.task(
+    name="execute_scan_work_item",
+    queue=SCAN_PARALLEL_QUEUE,
+    ignore_result=True,
+    soft_time_limit=max(300, int(os.getenv("WORK_ITEM_SOFT_TIME_LIMIT", "900"))),
+    time_limit=max(360, int(os.getenv("WORK_ITEM_TIME_LIMIT", "960"))),
+)
 def execute_scan_work_item(item_id: int):
     """Submit one tool/profile/target work item through MCP -> Kali and release the worker."""
     from datetime import datetime, timedelta
