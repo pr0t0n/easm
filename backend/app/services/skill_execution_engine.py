@@ -119,6 +119,39 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
     from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
     from datetime import datetime
 
+    scan_status = str(getattr(job, "status", "") or "").lower()
+    terminal_or_halted = {
+        "completed",
+        "completed_with_gaps",
+        "failed",
+        "cancelled",
+        "canceled",
+        "stopped",
+        "paused",
+        "blocked",
+    }
+    if scan_status in terminal_or_halted:
+        try:
+            from app.models.models import ScanLog
+
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="skill-execution-engine",
+                level="ERROR",
+                message=(
+                    f"skill_probe_seed_rejected scan={job.id} phase={phase_id} "
+                    f"target={str(target or '')[:500]} status={scan_status} "
+                    "reason=scan_not_running"
+                )[:2000],
+            ))
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return 0
+
     try:
         if not has_any_valid_session(db, job):
             return 0

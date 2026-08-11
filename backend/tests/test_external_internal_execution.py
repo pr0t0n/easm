@@ -357,6 +357,53 @@ def test_skill_probe_seed_uses_internal_session_context(monkeypatch) -> None:
     assert items[0].item_metadata["identity_key"] == "vidal"
 
 
+def test_skill_probe_seed_rejects_terminal_scan(monkeypatch) -> None:
+    from app.services import skill_execution_engine
+
+    monkeypatch.setattr(
+        "app.services.auth_session_manager.has_any_valid_session",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.execution_context_service.get_context",
+        lambda *args, **kwargs: SimpleNamespace(
+            status="running",
+            session_revision=7,
+            identity_key="vidal",
+        ),
+    )
+    monkeypatch.setattr(
+        skill_execution_engine,
+        "get_skill_by_id",
+        lambda skill_id: {"phase_ids": ["P13"]},
+    )
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    db = DB()
+    created = skill_execution_engine.seed_skill_probe_items(
+        db,
+        SimpleNamespace(id=78, status="completed_with_gaps"),
+        "P13",
+        "https://example.test/support/manage",
+    )
+
+    assert created == 0
+    assert not [row for row in db.added if isinstance(row, ScanWorkItem)]
+    assert any("skill_probe_seed_rejected" in getattr(row, "message", "") for row in db.added)
+
+
 def test_skill_probe_seed_does_not_fallback_to_external_without_g1_context(monkeypatch) -> None:
     from app.services import skill_execution_engine
 
