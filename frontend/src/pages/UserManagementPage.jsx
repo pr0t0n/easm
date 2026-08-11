@@ -21,14 +21,27 @@ export default function UserManagementPage() {
   const [passwordForm, setPasswordForm] = useState({ userId: "", newPassword: "" });
   const [groupForm, setGroupForm] = useState({ name: "", description: "" });
   const [drafts, setDrafts] = useState({});
+  const [groupDrafts, setGroupDrafts] = useState({});
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [busyUserId, setBusyUserId] = useState(null);
+  const [busyGroupId, setBusyGroupId] = useState(null);
 
   const loadData = async () => {
     const [usersRes, groupsRes] = await Promise.all([client.get("/api/users"), client.get("/api/access-groups")]);
     setUsers(usersRes.data);
     setGroups(groupsRes.data);
+    setGroupDrafts(
+      Object.fromEntries(
+        (groupsRes.data || []).map((group) => [
+          group.id,
+          {
+            name: group.name || "",
+            description: group.description || "",
+          },
+        ]),
+      ),
+    );
     setDrafts(
       Object.fromEntries(
         (usersRes.data || []).map((user) => [
@@ -79,6 +92,48 @@ export default function UserManagementPage() {
       await loadData();
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao criar grupo.");
+    }
+  };
+
+  const updateGroupDraft = (groupId, field, value) => {
+    setGroupDrafts((prev) => ({ ...prev, [groupId]: { ...prev[groupId], [field]: value } }));
+  };
+
+  const saveGroup = async (groupId) => {
+    const draft = groupDrafts[groupId];
+    if (!draft) return;
+    setBusyGroupId(groupId);
+    setError("");
+    setFeedback("");
+    try {
+      await client.put(`/api/access-groups/${groupId}`, draft);
+      setFeedback("Grupo atualizado com sucesso.");
+      await loadData();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao atualizar grupo.");
+    } finally {
+      setBusyGroupId(null);
+    }
+  };
+
+  const deleteGroup = async (groupId) => {
+    const group = groups.find((g) => Number(g.id) === Number(groupId));
+    const name = group?.name || `#${groupId}`;
+    if (!window.confirm(`Deseja realmente excluir o grupo "${name}"? Usuários, scans e agendamentos serão desvinculados desta empresa.`)) return;
+    setBusyGroupId(groupId);
+    setError("");
+    setFeedback("");
+    try {
+      const res = await client.delete(`/api/access-groups/${groupId}`);
+      const detached = res.data?.detached || {};
+      setFeedback(
+        `Grupo excluído. Desvinculado de ${detached.users || 0} usuário(s), ${detached.scans || 0} scan(s) e ${detached.schedules || 0} agendamento(s).`,
+      );
+      await loadData();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Falha ao excluir grupo.");
+    } finally {
+      setBusyGroupId(null);
     }
   };
 
@@ -183,12 +238,33 @@ export default function UserManagementPage() {
             <button className="btn btn-primary" onClick={createGroup}>Criar grupo</button>
           </div>
           <div className="divider-h" />
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {groups.map((g) => (
-              <div key={g.id} className="mono-sm" style={{ color: "var(--ink-soft)" }}>
-                #{g.id} · <b style={{ color: "var(--ink)" }}>{g.name}</b> — {g.description || "sem descrição"}
+              <div key={g.id} className="card-soft" style={{ display: "grid", gap: 8 }}>
+                <div className="mono-sm muted">#{g.id}</div>
+                <input
+                  style={inputStyle}
+                  placeholder="Nome do grupo"
+                  value={groupDrafts[g.id]?.name || ""}
+                  onChange={(e) => updateGroupDraft(g.id, "name", e.target.value)}
+                />
+                <input
+                  style={inputStyle}
+                  placeholder="Descrição"
+                  value={groupDrafts[g.id]?.description || ""}
+                  onChange={(e) => updateGroupDraft(g.id, "description", e.target.value)}
+                />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => saveGroup(g.id)} disabled={busyGroupId === g.id}>
+                    {busyGroupId === g.id ? "Salvando…" : "Salvar grupo"}
+                  </button>
+                  <button className="btn btn-danger" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => deleteGroup(g.id)} disabled={busyGroupId === g.id}>
+                    Excluir grupo
+                  </button>
+                </div>
               </div>
             ))}
+            {groups.length === 0 && <div className="mono-sm muted">Nenhum grupo cadastrado.</div>}
           </div>
         </section>
       </div>

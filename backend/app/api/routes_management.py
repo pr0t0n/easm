@@ -16,7 +16,7 @@ from app.api.deps import apply_company_scope, get_current_user, require_admin, r
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScanWorkItem, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat
+from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScanWorkItem, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat, user_access_groups
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -2138,7 +2138,13 @@ def update_access_group(group_id: int, payload: dict, db: Session = Depends(get_
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grupo nao encontrado")
     if "name" in payload:
-        row.name = (payload.get("name") or row.name).strip()
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nome do grupo obrigatorio")
+        exists = db.query(AccessGroup).filter(AccessGroup.name == name, AccessGroup.id != group_id).first()
+        if exists:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Grupo ja existe")
+        row.name = name
     if "description" in payload:
         row.description = (payload.get("description") or "").strip()
     db.commit()
@@ -2150,9 +2156,29 @@ def delete_access_group(group_id: int, db: Session = Depends(get_db), current_us
     row = db.query(AccessGroup).filter(AccessGroup.id == group_id).first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grupo nao encontrado")
+    user_links = db.execute(
+        user_access_groups.delete().where(user_access_groups.c.group_id == group_id)
+    ).rowcount or 0
+    scan_links = (
+        db.query(ScanJob)
+        .filter(ScanJob.access_group_id == group_id)
+        .update({ScanJob.access_group_id: None}, synchronize_session=False)
+    )
+    schedule_links = (
+        db.query(ScheduledScan)
+        .filter(ScheduledScan.access_group_id == group_id)
+        .update({ScheduledScan.access_group_id: None}, synchronize_session=False)
+    )
     db.delete(row)
     db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "detached": {
+            "users": int(user_links),
+            "scans": int(scan_links or 0),
+            "schedules": int(schedule_links or 0),
+        },
+    }
 
 
 def _load_user_groups(db: Session, group_ids: list[int] | None, *, required: bool) -> list[AccessGroup]:
