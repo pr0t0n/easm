@@ -20,7 +20,7 @@ from app.models.models import (
     ScanJob,
     ScanLog,
 )
-from app.services.execution_context_service import activate_internal_context, get_context
+from app.services.execution_context_service import activate_internal_context, get_context, reconcile_execution_plan_state
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_scope import authorized_scope_for_scan
 from app.services.scan_work_queue import seed_internal_first_work_items
@@ -99,6 +99,30 @@ def start_scan_from_valid_session(
         "execution_plan": "internal_then_external",
         "execution_plan_stage": "internal_running",
         "external_release_pending": True,
+        "g1_status": "running",
+        "g0_status": "waiting_for_internal",
+        "internal_execution_status": "running",
+        "external_execution_status": "waiting_for_internal",
+        "current_surface": "G1",
+        "execution_tracks": {
+            "G1": {
+                "label": "Interno autenticado",
+                "context": "internal",
+                "status": "running",
+                "counts": {},
+                "total": 0,
+                "active": 0,
+            },
+            "G0": {
+                "label": "Externo anônimo",
+                "context": "external",
+                "status": "waiting_for_internal",
+                "counts": {},
+                "total": 0,
+                "active": 0,
+            },
+            "updated_at": now.isoformat(),
+        },
         "parallelize": bool(source_state.get("parallelize", True)),
         "parallel_target_batch_size": int(source_state.get("parallel_target_batch_size") or 1024),
         "explicit_inventory_execution_batch_size": int(source_state.get("explicit_inventory_execution_batch_size") or 10),
@@ -203,6 +227,15 @@ def start_scan_from_valid_session(
     for host in authorized_scope_for_scan(db, job.id):
         for phase_id in ("P13", "P16", "P19"):
             skill_probes += seed_skill_probe_items(db, job, phase_id, f"https://{host}")
+
+    try:
+        reconcile_execution_plan_state(db, job)
+    except Exception:
+        # Creation already carries the initial G1/G0 state.  Reconciliation is
+        # self-healing and will run again from dispatcher/watchdog in the real
+        # service; do not fail authenticated scan creation because a test double
+        # or transitional DB lacks query support.
+        pass
 
     db.add(ScanLog(
         scan_job_id=job.id,

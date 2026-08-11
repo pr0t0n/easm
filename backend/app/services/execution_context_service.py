@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.models import (
@@ -23,6 +24,7 @@ from app.models.models import (
     ScanIdentity,
     ScanJob,
     ScanLog,
+    ScanWorkItem,
 )
 
 
@@ -42,6 +44,128 @@ def normalize_execution_context(value: str | None) -> str:
 
 def inventory_auth_context(execution_context: str) -> str:
     return "authenticated" if normalize_execution_context(execution_context) == INTERNAL else "anonymous"
+
+
+_ACTIVE_ITEM_STATUSES = {"queued", "retry", "dispatched", "running", "submitted", "blocked"}
+_TERMINAL_ITEM_STATUSES = {"completed", "done", "failed", "timeout", "skipped"}
+
+
+def _summarize_context_work_items(db: Session, scan_id: int, context_type: str) -> dict[str, Any]:
+    context_type = normalize_execution_context(context_type)
+    rows = (
+        db.query(ScanWorkItem.status, func.count(ScanWorkItem.id))
+        .filter(
+            ScanWorkItem.scan_job_id == int(scan_id),
+            ScanWorkItem.execution_context == context_type,
+        )
+        .group_by(ScanWorkItem.status)
+        .all()
+    )
+    counts = {str(status or "unknown"): int(count or 0) for status, count in rows}
+    total = sum(counts.values())
+    active = sum(count for status, count in counts.items() if status in _ACTIVE_ITEM_STATUSES)
+    terminal = sum(count for status, count in counts.items() if status in _TERMINAL_ITEM_STATUSES)
+    return {
+        "context": context_type,
+        "counts": counts,
+        "total": total,
+        "active": active,
+        "terminal": terminal,
+    }
+
+
+def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
+    """Keep the user-visible G0/G1 execution state derived from durable rows.
+
+    Celery/Redis are transport; ``scan_work_items`` and
+    ``scan_execution_contexts`` are the source of truth.  This reconciler makes
+    the internal/external split observable even after worker restarts, lost
+    broker messages or authenticated reruns that were created before the UI
+    state fields existed.
+    """
+    state = dict(job.state_data or {})
+    if (
+        str(state.get("execution_plan") or "") != "internal_then_external"
+        and not state.get("internal_first_seed")
+        and not state.get("external_release_pending")
+    ):
+        return state
+
+    now = datetime.now()
+    internal = _summarize_context_work_items(db, int(job.id), INTERNAL)
+    external = _summarize_context_work_items(db, int(job.id), EXTERNAL)
+
+    internal_status = "not_started"
+    if internal["total"] > 0:
+        internal_status = "running" if internal["active"] > 0 else "completed"
+
+    external_waiting = bool(state.get("external_release_pending")) and not bool(
+        state.get("external_released_after_internal")
+    )
+    external_status = "waiting_for_internal" if external_waiting else "not_started"
+    if not external_waiting:
+        if external["total"] > 0:
+            external_status = "running" if external["active"] > 0 else "completed"
+        elif bool(state.get("external_released_after_internal")):
+            external_status = "running"
+
+    current_surface = None
+    if internal_status == "running":
+        current_surface = "G1"
+    elif external_status == "waiting_for_internal":
+        current_surface = "G1"
+    elif external_status == "running":
+        current_surface = "G0"
+    elif internal_status == "completed" and external_status in {"not_started", "waiting_for_internal"}:
+        current_surface = "G1"
+    elif external_status == "completed":
+        current_surface = "G0"
+
+    state.update(
+        {
+            "execution_plan": state.get("execution_plan") or "internal_then_external",
+            "g1_status": internal_status,
+            "g0_status": external_status,
+            "internal_execution_status": internal_status,
+            "external_execution_status": external_status,
+            "current_surface": current_surface,
+            "execution_tracks": {
+                "G1": {
+                    "label": "Interno autenticado",
+                    "context": INTERNAL,
+                    "status": internal_status,
+                    "counts": internal["counts"],
+                    "total": internal["total"],
+                    "active": internal["active"],
+                },
+                "G0": {
+                    "label": "Externo anônimo",
+                    "context": EXTERNAL,
+                    "status": external_status,
+                    "counts": external["counts"],
+                    "total": external["total"],
+                    "active": external["active"],
+                },
+                "updated_at": now.isoformat(),
+            },
+        }
+    )
+
+    for context_type, status in ((INTERNAL, internal_status), (EXTERNAL, external_status)):
+        row = get_context(db, int(job.id), context_type)
+        if row is None:
+            continue
+        if str(row.status or "") != status:
+            row.status = status
+            row.updated_at = now
+            if status == "completed" and row.finished_at is None:
+                row.finished_at = now
+            if status in {"running", "waiting_for_internal"}:
+                row.finished_at = None
+            db.add(row)
+
+    job.state_data = state
+    return state
 
 
 def ensure_external_context(db: Session, scan: ScanJob) -> ScanExecutionContext:

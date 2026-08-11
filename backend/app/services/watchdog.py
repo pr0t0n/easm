@@ -213,6 +213,7 @@ def run_watchdog(db) -> dict:
             for row in db.execute(text("SELECT id FROM scan_jobs WHERE status='running'")).fetchall()
         ]
         dispatched_rehydrated = 0
+        execution_tracks_reconciled = 0
         for _sid in running_scan_ids:
             _rehydrate_stale_work_item_pollers(
                 db,
@@ -229,8 +230,26 @@ def run_watchdog(db) -> dict:
                 source="watchdog",
             )
             dispatched_rehydrated += int(_dispatch_rehydration.get("scheduled") or 0)
+            try:
+                from app.models.models import ScanJob
+                from app.services.execution_context_service import reconcile_execution_plan_state
+
+                _job = db.query(ScanJob).filter(ScanJob.id == int(_sid)).first()
+                if _job is not None:
+                    _before = dict(_job.state_data or {})
+                    _after = reconcile_execution_plan_state(db, _job)
+                    if (
+                        _before.get("g0_status") != _after.get("g0_status")
+                        or _before.get("g1_status") != _after.get("g1_status")
+                        or _before.get("current_surface") != _after.get("current_surface")
+                    ):
+                        execution_tracks_reconciled += 1
+            except Exception as _exec_track_err:
+                logger.debug("watchdog execution_track_reconcile failed: %s", _exec_track_err)
         if dispatched_rehydrated:
             report["dispatched_rehydrated"] = dispatched_rehydrated
+        if execution_tracks_reconciled:
+            report["execution_tracks_reconciled"] = execution_tracks_reconciled
         db.commit()
     except Exception as _rehydrate_err:
         db.rollback()

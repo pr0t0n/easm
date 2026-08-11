@@ -635,7 +635,22 @@ def _format_work_queue_current_step(
     else:
         prefix = "fila de pentest em execução"
 
+    surface = str(current.get("current_surface") or "").strip().upper()
+    g1_status = str(current.get("g1_status") or current.get("internal_execution_status") or "").strip()
+    g0_status = str(current.get("g0_status") or current.get("external_execution_status") or "").strip()
+    if surface == "G1":
+        track = "G1 interno"
+        if g0_status == "waiting_for_internal":
+            track += " · G0 externo aguardando"
+    elif surface == "G0":
+        track = "G0 externo"
+        if g1_status == "completed":
+            track = "G1 interno concluído · G0 externo"
+    else:
+        track = ""
     message = f"{prefix} {live_counts}"
+    if track:
+        message = f"{track} · {message}"
     return f"{phase} · {message}" if phase else message
 
 
@@ -4539,6 +4554,15 @@ def dispatch_scan_work_items(
             state = dict(job.state_data or {})
         except Exception:
             pass
+        try:
+            from app.services.execution_context_service import reconcile_execution_plan_state
+            state = reconcile_execution_plan_state(db, job)
+            db.flush()
+        except Exception as _exec_plan_reconcile_exc:
+            import logging as _exec_plan_reconcile_log
+            _exec_plan_reconcile_log.getLogger(__name__).debug(
+                "execution_plan_reconcile failed: %s", _exec_plan_reconcile_exc
+            )
         _prev_dispatch = dict(state.get("work_queue_last_dispatch") or {})
         _prev_counts = dict(_prev_dispatch.get("counts") or {})
         _should_log_dispatch = bool(item_ids) or counts != _prev_counts or int(_prev_dispatch.get("claimed") or 0) != len(item_ids)

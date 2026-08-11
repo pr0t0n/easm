@@ -18,6 +18,7 @@ from app.services.endpoint_discovery import _internal_endpoint_analysis_matrix
 from app.services.execution_context_service import (
     inventory_auth_context,
     normalize_execution_context,
+    reconcile_execution_plan_state,
 )
 from app.workers import tasks
 
@@ -31,6 +32,60 @@ def test_execution_context_is_limited_to_g0_and_g1() -> None:
         normalize_execution_context("G2")
     assert inventory_auth_context("external") == "anonymous"
     assert inventory_auth_context("internal") == "authenticated"
+
+
+def test_execution_plan_reconciler_derives_g1_running_g0_waiting() -> None:
+    job = SimpleNamespace(
+        id=82,
+        state_data={
+            "execution_plan": "internal_then_external",
+            "external_release_pending": True,
+        },
+    )
+    internal_context = SimpleNamespace(status="pending", finished_at=None)
+    external_context = SimpleNamespace(status="running", finished_at=None)
+
+    class Query:
+        def __init__(self, db, models):
+            self.db = db
+            self.models = models
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def group_by(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            self.db.work_count_queries += 1
+            if self.db.work_count_queries == 1:
+                return [("completed", 3), ("queued", 2), ("submitted", 1)]
+            return []
+
+        def first(self):
+            self.db.context_queries += 1
+            return internal_context if self.db.context_queries == 1 else external_context
+
+    class DB:
+        def __init__(self):
+            self.work_count_queries = 0
+            self.context_queries = 0
+            self.added = []
+
+        def query(self, *models):
+            return Query(self, models)
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    state = reconcile_execution_plan_state(DB(), job)  # type: ignore[arg-type]
+
+    assert state["current_surface"] == "G1"
+    assert state["g1_status"] == "running"
+    assert state["g0_status"] == "waiting_for_internal"
+    assert state["execution_tracks"]["G1"]["active"] == 3
+    assert internal_context.status == "running"
+    assert external_context.status == "waiting_for_internal"
 
 
 def test_inventory_fingerprint_handles_missing_status_codes() -> None:
@@ -408,6 +463,9 @@ def test_authenticated_rerun_service_creates_g1_first_scan_from_valid_session(mo
     assert new_job.state_data["execution_plan"] == "internal_then_external"
     assert new_job.state_data["execution_plan_stage"] == "internal_running"
     assert new_job.state_data["external_release_pending"] is True
+    assert new_job.state_data["g1_status"] == "running"
+    assert new_job.state_data["g0_status"] == "waiting_for_internal"
+    assert new_job.state_data["current_surface"] == "G1"
     assert new_job.state_data["authenticated_scan_source_id"] == 81
     assert new_job.state_data["authenticated_scan_source_auth_session_id"] == 12
     assert new_job.state_data["authenticated_scan_identity_key"] == "vidal"
