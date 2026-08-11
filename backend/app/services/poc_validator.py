@@ -197,6 +197,37 @@ def schedule_poc_validation(
     from app.services.scan_work_queue import apply_phase_tool_metadata
 
     # ── Guards ────────────────────────────────────────────────────────────────
+    scan_status = str(getattr(job, "status", "") or "").lower()
+    if scan_status in {
+        "completed",
+        "completed_with_gaps",
+        "failed",
+        "cancelled",
+        "canceled",
+        "stopped",
+        "paused",
+        "blocked",
+    }:
+        try:
+            from app.models.models import ScanLog
+
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="poc-validator",
+                level="ERROR",
+                message=(
+                    f"poc_validation_seed_rejected scan={job.id} "
+                    f"finding={getattr(finding, 'id', None)} status={scan_status} "
+                    "reason=scan_not_running"
+                )[:2000],
+            ))
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return False
 
     # Only HIGH and CRITICAL severity warrant PoC validation cost
     severity = str(getattr(finding, "severity", "") or "").lower()

@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 
-from app.models.models import CoverageItem, EvidenceArtifact, ValidationRun
+from app.models.models import CoverageItem, EvidenceArtifact, ScanWorkItem, ValidationRun
 from app.services.exploitation_evidence import persist_p21_validation_record
+from app.services.poc_validator import schedule_poc_validation
 
 
 class _Query:
@@ -119,3 +120,38 @@ def test_p21_refutation_is_recorded_as_refuted():
     assert db.rows[EvidenceArtifact][0].validation_status == "refuted"
     assert db.rows[ValidationRun][0].result == "refuted"
     assert db.rows[CoverageItem][0].status == "refuted"
+
+
+def test_poc_validation_rejects_terminal_scan_without_creating_work_item():
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    db = DB()
+    ok = schedule_poc_validation(
+        db,
+        SimpleNamespace(
+            id=17794,
+            title="Authentication bypass candidate",
+            severity="high",
+            verification_status="candidate",
+            tool="adaptive_probe",
+            url="https://app.example.test/api/v1/webhook",
+            domain="app.example.test",
+            details={},
+        ),
+        SimpleNamespace(id=58, status="completed_with_gaps"),
+    )
+
+    assert ok is False
+    assert not [row for row in db.added if isinstance(row, ScanWorkItem)]
+    assert any("poc_validation_seed_rejected" in getattr(row, "message", "") for row in db.added)
