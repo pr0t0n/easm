@@ -28,6 +28,7 @@ from app.models.models import (
     ScanWorkItem, SkillLibrary, ScanIdentity, ScanAuthSession, EvidenceArtifact, OffensiveAsset,
     OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
     OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun, PentestOutcomeMetric,
+    EndpointObservation, ProcessorCheckpoint, ScanExecutionContext,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.audit_service import log_audit
@@ -3194,7 +3195,7 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
     active_scan_ids = [row.id for row in scan_rows if row.status in SCAN_ACTIVE_STATUSES]
     # Regra operacional: preservar scans que ainda NAO aconteceram (fila).
     # Limpa apenas execucoes historicas e em andamento.
-    resettable_statuses = {"running", "retrying", "paused", "completed", "failed", "stopped", "blocked"}
+    resettable_statuses = {"running", "retrying", "paused", "completed", "completed_with_gaps", "failed", "stopped", "blocked"}
     resettable_scan_ids = [row.id for row in scan_rows if row.status in resettable_statuses]
     preserved_queued_scan_ids = [row.id for row in scan_rows if row.status == "queued"]
 
@@ -3237,6 +3238,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_validation_runs = 0
         deleted_retest_runs = 0
         deleted_coverage_items = 0
+        deleted_endpoint_observations = 0
+        deleted_processor_checkpoints = 0
+        deleted_execution_contexts = 0
         deleted_offensive_assets = 0
         deleted_offensive_inventory = 0
         deleted_scan_embeddings = 0
@@ -3273,6 +3277,18 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             deleted_validation_runs = (
                 db.query(ValidationRun)
                 .filter(ValidationRun.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            # EndpointObservation references both offensive_endpoints and
+            # evidence_artifacts. It must be removed before either side.
+            deleted_endpoint_observations = (
+                db.query(EndpointObservation)
+                .filter(EndpointObservation.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_processor_checkpoints = (
+                db.query(ProcessorCheckpoint)
+                .filter(ProcessorCheckpoint.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
             deleted_offensive_inventory += (
@@ -3315,6 +3331,11 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 .filter(EvidenceArtifact.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
+            deleted_execution_contexts = (
+                db.query(ScanExecutionContext)
+                .filter(ScanExecutionContext.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
             db.query(ScanAuthSession).filter(ScanAuthSession.scan_job_id.in_(resettable_scan_ids)).delete(
                 synchronize_session=False,
             )
@@ -3351,6 +3372,10 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
             db.query(AgentActivityLog).filter(AgentActivityLog.scan_job_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
             db.query(SkillScore).filter(SkillScore.scan_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
+            db.query(PentestOutcomeMetric).filter(PentestOutcomeMetric.last_scan_job_id.in_(resettable_scan_ids)).update(
+                {PentestOutcomeMetric.last_scan_job_id: None},
+                synchronize_session=False,
+            )
             db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id.in_(resettable_scan_ids)).delete(synchronize_session=False)
             deleted_scan_logs = (
                 db.query(ScanLog)
@@ -3415,6 +3440,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                     "validation_runs": deleted_validation_runs,
                     "retest_runs": deleted_retest_runs,
                     "coverage_items": deleted_coverage_items,
+                    "endpoint_observations": deleted_endpoint_observations,
+                    "processor_checkpoints": deleted_processor_checkpoints,
+                    "execution_contexts": deleted_execution_contexts,
                     "offensive_assets": deleted_offensive_assets,
                     "offensive_inventory": deleted_offensive_inventory,
                     "scan_embeddings": deleted_scan_embeddings,
@@ -3438,6 +3466,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "validation_runs": deleted_validation_runs,
                 "retest_runs": deleted_retest_runs,
                 "coverage_items": deleted_coverage_items,
+                "endpoint_observations": deleted_endpoint_observations,
+                "processor_checkpoints": deleted_processor_checkpoints,
+                "execution_contexts": deleted_execution_contexts,
                 "offensive_assets": deleted_offensive_assets,
                 "offensive_inventory": deleted_offensive_inventory,
                 "scan_embeddings": deleted_scan_embeddings,
@@ -3455,6 +3486,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         }
     except SQLAlchemyError as exc:
         db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("reset_operational_failed")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Falha ao executar reset operacional: {exc.__class__.__name__}") from exc
 
 
