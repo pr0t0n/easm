@@ -241,10 +241,14 @@ export default function OperationsCenterPage() {
     }));
   const heatMax = Math.max(...heat.flatMap(r => sevCols.map(s => r[s])), 1);
   // Frameworks: cobertura/técnicas são capacidade da plataforma (estática); o
-  // RISCO se molda à severidade do escopo selecionado (intensidade 0..1).
+  // RISCO deve refletir exposição validada no escopo atual. Depois de um reset
+  // operacional, scans/findings podem estar zerados — nesse caso risco precisa
+  // ser 0, não o protótipo estático de TV wall.
+  const scopedExposureCount = effCrit + effAlto + effMed + effBaix;
   const frameworksView = FRAMEWORKS.map((fw) => ({
     ...fw,
-    risco: selScan ? Math.round(fw.risco * sevIntensity) : fw.risco,
+    risco: scopedExposureCount > 0 ? Math.round(fw.risco * sevIntensity) : 0,
+    gaps: scopedExposureCount > 0 ? fw.gaps : ["sem exposição validada"],
   }));
 
   const stTone = { ocioso: TV.muted, executando: "#7fe0b0", degradado: "#ff8a8a" };
