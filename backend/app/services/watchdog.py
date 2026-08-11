@@ -203,12 +203,16 @@ def run_watchdog(db) -> dict:
     # terminal Kali job can be converted into retry/failed without first fetching
     # and preserving its result/evidence.
     try:
-        from app.workers.tasks import _rehydrate_stale_work_item_pollers
+        from app.workers.tasks import (
+            _rehydrate_orphaned_dispatched_work_items,
+            _rehydrate_stale_work_item_pollers,
+        )
 
         running_scan_ids = [
             int(row[0])
             for row in db.execute(text("SELECT id FROM scan_jobs WHERE status='running'")).fetchall()
         ]
+        dispatched_rehydrated = 0
         for _sid in running_scan_ids:
             _rehydrate_stale_work_item_pollers(
                 db,
@@ -217,10 +221,20 @@ def run_watchdog(db) -> dict:
                 limit=200,
                 source="watchdog",
             )
+            _dispatch_rehydration = _rehydrate_orphaned_dispatched_work_items(
+                db,
+                _sid,
+                stale_after_seconds=90,
+                limit=100,
+                source="watchdog",
+            )
+            dispatched_rehydrated += int(_dispatch_rehydration.get("scheduled") or 0)
+        if dispatched_rehydrated:
+            report["dispatched_rehydrated"] = dispatched_rehydrated
         db.commit()
     except Exception as _rehydrate_err:
         db.rollback()
-        logger.debug("watchdog poller_rehydration failed: %s", _rehydrate_err)
+        logger.debug("watchdog work_item_rehydration failed: %s", _rehydrate_err)
 
     # ── 1c. Recover infra-failed work items after a Kali runner restart ───────
     # The runner stores in-flight job state in memory. If watchdog restarts it,
@@ -233,18 +247,25 @@ def run_watchdog(db) -> dict:
         infra_rows = db.execute(text("""
             UPDATE scan_work_items w
                SET status='retry',
+                   max_attempts = CASE
+                       WHEN w.attempts >= w.max_attempts AND w.max_attempts < 4
+                       THEN w.attempts + 1
+                       ELSE w.max_attempts
+                   END,
                    lease_until=NULL,
                    finished_at=NULL,
                    updated_at=now(),
+                   last_error='watchdog_recoverable_terminal_requeued:' || left(coalesce(w.last_error, ''), 350),
                    result = jsonb_set(
                        coalesce(w.result, '{}'::jsonb),
                        '{status}',
                        to_jsonb('retry'::text),
                        true
                    )
-             WHERE w.status='failed'
-               AND w.attempts < w.max_attempts
+             WHERE w.status IN ('failed', 'timeout')
                AND (
+                   w.status='timeout'
+                   OR
                    w.last_error IN (
                        'runner_restarted_before_job_finished',
                        'kali_runner_restarted_before_job_finished'
@@ -253,6 +274,22 @@ def run_watchdog(db) -> dict:
                    OR lower(coalesce(w.last_error, '')) LIKE '%importerror%'
                    OR lower(coalesce(w.last_error, '')) LIKE '%no module named%'
                    OR lower(coalesce(w.last_error, '')) LIKE '%pkg_resources%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%operationalerror%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%server closed the connection%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%pendingrollbackerror%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%transaction has been rolled back%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%exit_code=28%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%operation timed out%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%connection timed out%'
+                   OR lower(coalesce(w.last_error, '')) LIKE '%watchdog marked stale running job%'
+                   OR (
+                       lower(coalesce(w.last_error, '')) LIKE '%lease_expired_max_attempts%'
+                       AND w.tool_name LIKE 'skill-probe:%'
+                   )
+               )
+               AND (
+                   w.attempts < w.max_attempts
+                   OR (w.attempts >= w.max_attempts AND w.max_attempts < 4)
                )
                AND EXISTS (
                    SELECT 1

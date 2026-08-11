@@ -90,3 +90,22 @@ def test_deadchain_recovery_consults_kali_runner_before_redrive():
     assert '"blocker": "kali_runner_active"' in deadchain_section
     assert '"blocker": "kali_runner_unknown"' in deadchain_section
     assert "truly_orphan.append(sid)" in deadchain_section
+
+
+def test_watchdog_rehydrates_orphaned_dispatched_items():
+    source = watchdog.__loader__.get_source(watchdog.__name__)  # type: ignore[union-attr]
+
+    assert "_rehydrate_orphaned_dispatched_work_items" in source
+    assert "dispatched_rehydrated" in source
+    assert "source=\"watchdog\"" in source
+
+
+def test_watchdog_recovers_transient_terminal_items():
+    source = watchdog.__loader__.get_source(watchdog.__name__)  # type: ignore[union-attr]
+
+    assert "watchdog_recoverable_terminal_requeued" in source
+    assert "w.status IN ('failed', 'timeout')" in source
+    assert "%server closed the connection%" in source
+    assert "%exit_code=28%" in source
+    assert "%watchdog marked stale running job%" in source
+    assert "w.max_attempts < 4" in source
