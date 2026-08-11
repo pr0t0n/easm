@@ -498,6 +498,12 @@ def test_worker_transient_error_classifier_covers_db_disconnects() -> None:
     assert not tasks._is_transient_worker_error("source_code_required")
 
 
+def test_runner_timeout_without_detail_is_recoverable() -> None:
+    assert tasks._is_recoverable_runner_infra_error("runner_failed_without_detail exit_code=28")
+    assert tasks._is_recoverable_runner_infra_error("operation timed out")
+    assert not tasks._is_recoverable_runner_infra_error("application returned 403")
+
+
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:
     item = SimpleNamespace(
         id=123,

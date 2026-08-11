@@ -727,6 +727,9 @@ def _is_recoverable_runner_infra_error(error: str | None) -> bool:
         or "importerror" in detail
         or "no module named" in detail
         or "pkg_resources" in detail
+        or "exit_code=28" in detail
+        or "operation timed out" in detail
+        or "connection timed out" in detail
     )
 
 
