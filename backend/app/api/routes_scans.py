@@ -2734,6 +2734,44 @@ def create_scan(
     )
 
 
+@router.post("/scans/{source_scan_id}/rerun-authenticated")
+def rerun_scan_with_valid_session(
+    source_scan_id: int,
+    target_scan_id: int | None = Query(None),
+    identity_key: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    source = _authorized_scan_query(db, current_user).filter(ScanJob.id == source_scan_id).first()
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan de origem nao encontrado")
+    try:
+        from app.services.authenticated_scan_starter import start_scan_from_valid_session
+
+        result = start_scan_from_valid_session(
+            db,
+            source_scan_id=source_scan_id,
+            target_scan_id=target_scan_id,
+            identity_key=identity_key,
+        )
+        log_audit(
+            db,
+            event_type="scan.rerun_authenticated",
+            message=f"Scan {result['scan_id']} iniciado reutilizando sessao valida do scan {source_scan_id}",
+            actor_user_id=current_user.id,
+            scan_job_id=int(result["scan_id"]),
+            metadata=result,
+        )
+        db.commit()
+        from app.workers.tasks import dispatch_scan_work_items
+
+        dispatch_scan_work_items.delay(int(result["scan_id"]))
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
 _TERMINAL_SCAN_STATUSES = {
     "completed",
     "completed_with_gaps",
