@@ -111,6 +111,10 @@ def start_scan_from_valid_session(
         "explicit_target_inventory": True,
         "skip_p01_subdomain_enumeration": True,
         "reused_auth_from_scan_id": int(source.id),
+        "authenticated_scan_source_id": int(source.id),
+        "authenticated_scan_source_auth_session_id": int(source_session.id),
+        "authenticated_scan_source_identity_id": int(source_identity.id),
+        "authenticated_scan_identity_key": source_identity.identity_key,
         "reused_auth_session_source_id": int(source_session.id),
         "strategy_runtime_timeline": [
             {

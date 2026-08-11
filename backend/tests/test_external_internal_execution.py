@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models.models import ScanWorkItem
+from app.models.models import ScanAuthSession, ScanIdentity, ScanJob, ScanWorkItem
 from app.services import (
     app_pentest,
     credential_capture_service,
@@ -277,6 +277,139 @@ def test_skill_probe_seed_does_not_fallback_to_external_without_g1_context(monke
     )
 
     assert created == 0
+
+
+def test_authenticated_rerun_service_creates_g1_first_scan_from_valid_session(monkeypatch) -> None:
+    from app.services.authenticated_scan_starter import start_scan_from_valid_session
+
+    now_source = SimpleNamespace()
+    source = ScanJob(
+        id=81,
+        owner_id=7,
+        access_group_id=3,
+        target_query="https://example.test",
+        authorization_code="AUTH-1",
+        authorization_id=11,
+        mode="unit",
+        state_data={
+            "scan_level": "full",
+            "parallelize": True,
+            "authorization_gate": {
+                "approved": True,
+                "authorized_scope": ["example.test"],
+                "public_targets": ["example.test"],
+            },
+        },
+    )
+    identity = ScanIdentity(
+        id=10,
+        scan_job_id=81,
+        identity_key="vidal",
+        role="admin",
+        username_ref="vidal@example.test",
+        auth_type="browser",
+        status="valid",
+        session_valid=True,
+        session_metadata={"validated": True},
+    )
+    session = ScanAuthSession(
+        id=12,
+        scan_job_id=81,
+        scan_identity_id=10,
+        session_key="sess-12",
+        auth_type="browser",
+        status="valid",
+        headers={"Authorization": "Bearer captured"},
+        cookies={"sid": "abc"},
+        validation_result={"valid": True},
+    )
+
+    class Query:
+        def __init__(self, db, models):
+            self.db = db
+            self.models = models
+
+        def join(self, *args, **kwargs):
+            return self
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            if self.models and self.models[0] is ScanJob:
+                return source
+            if self.models and self.models[0] is ScanAuthSession:
+                return (session, identity)
+            return None
+
+    class DB:
+        def __init__(self):
+            self.added = []
+            self.next_ids = {ScanJob: 82, ScanIdentity: 20, ScanAuthSession: 21}
+
+        def query(self, *models):
+            return Query(self, models)
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        def flush(self):
+            for obj in self.added:
+                for cls, next_id in list(self.next_ids.items()):
+                    if isinstance(obj, cls) and getattr(obj, "id", None) is None:
+                        obj.id = next_id
+                        self.next_ids[cls] = next_id + 1
+
+        def execute(self, *args, **kwargs):
+            return now_source
+
+    monkeypatch.setattr(
+        "app.services.authenticated_scan_starter.activate_internal_context",
+        lambda db, job, auth_session, scan_identity: SimpleNamespace(
+            status="running",
+            session_revision=1,
+            identity_key=scan_identity.identity_key,
+            auth_session_id=auth_session.id,
+        ),
+    )
+    external_context = SimpleNamespace(status="running")
+    monkeypatch.setattr(
+        "app.services.authenticated_scan_starter.get_context",
+        lambda db, scan_id, context_type: external_context if context_type == "external" else None,
+    )
+    monkeypatch.setattr(
+        "app.services.authenticated_scan_starter.authorized_scope_for_scan",
+        lambda db, scan_id: ["example.test"],
+    )
+    monkeypatch.setattr(
+        "app.services.authenticated_scan_starter.seed_internal_first_work_items",
+        lambda db, job, identity_key: 44,
+    )
+    monkeypatch.setattr(
+        "app.services.authenticated_scan_starter.seed_skill_probe_items",
+        lambda db, job, phase_id, target: 1,
+    )
+
+    db = DB()
+    result = start_scan_from_valid_session(db, source_scan_id=81, identity_key="vidal")
+    new_job = next(obj for obj in db.added if isinstance(obj, ScanJob) and obj.id == 82)
+    copied_session = next(obj for obj in db.added if isinstance(obj, ScanAuthSession) and obj.id == 21)
+
+    assert result["scan_id"] == 82
+    assert result["internal_items"] == 44
+    assert result["skill_probes"] == 3
+    assert external_context.status == "waiting_for_internal"
+    assert copied_session.headers == {"Authorization": "Bearer captured"}
+    assert copied_session.cookies == {"sid": "abc"}
+    assert new_job.state_data["execution_plan"] == "internal_then_external"
+    assert new_job.state_data["execution_plan_stage"] == "internal_running"
+    assert new_job.state_data["external_release_pending"] is True
+    assert new_job.state_data["authenticated_scan_source_id"] == 81
+    assert new_job.state_data["authenticated_scan_source_auth_session_id"] == 12
+    assert new_job.state_data["authenticated_scan_identity_key"] == "vidal"
 
 
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:
