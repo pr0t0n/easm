@@ -1193,6 +1193,93 @@ def _rehydrate_stale_work_item_pollers(
     }
 
 
+def _rehydrate_orphaned_dispatched_work_items(
+    db: Session,
+    scan_id: int,
+    *,
+    stale_after_seconds: int = 90,
+    limit: int = 50,
+    source: str = "dispatcher",
+) -> dict[str, int]:
+    """Re-publish dispatched rows whose volatile Celery message disappeared.
+
+    ``dispatched`` is durable DB state created before the Celery message reaches
+    a worker.  A restart in that tiny window leaves no active/reserved task and
+    no ``work_item_execute_lock`` because ``execute_scan_work_item`` never ran.
+    Waiting for the long DB lease makes G1/G0 handoff look stalled.  Re-publish
+    stale dispatched rows; the Redis execution lock in ``execute_scan_work_item``
+    remains the single-flight guard if a delayed duplicate eventually appears.
+    """
+    from datetime import datetime, timedelta
+    from app.models.models import ScanLog, ScanWorkItem
+    from app.services.scan_work_queue import _redis_client
+    from app.workers.worker_groups import phase_queue
+
+    now = datetime.now()
+    cutoff = now - timedelta(seconds=max(30, int(stale_after_seconds)))
+    redis_client = None
+    try:
+        redis_client = _redis_client()
+    except Exception:
+        redis_client = None
+
+    candidates = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == int(scan_id),
+            ScanWorkItem.status == "dispatched",
+            ScanWorkItem.updated_at < cutoff,
+        )
+        .order_by(ScanWorkItem.updated_at.asc(), ScanWorkItem.id.asc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    scheduled = 0
+    lock_held = 0
+    lease_extended = 0
+    mode = "scheduled"
+    try:
+        from app.models.models import ScanJob
+
+        job_mode = (
+            db.query(ScanJob.mode)
+            .filter(ScanJob.id == int(scan_id))
+            .scalar()
+        )
+        mode = "scheduled" if str(job_mode or "").lower() == "scheduled" else "unit"
+    except Exception:
+        mode = "unit"
+
+    for item in candidates:
+        if redis_client is not None:
+            try:
+                if redis_client.get(f"work_item_execute_lock:{int(item.id)}"):
+                    lock_held += 1
+                    continue
+            except Exception:
+                pass
+        queue = phase_queue(str(item.phase_id or ""), mode=mode)
+        execute_scan_work_item.apply_async(args=[int(item.id)], queue=queue)
+        scheduled += 1
+        grace_until = now + timedelta(seconds=max(300, int(stale_after_seconds) * 2))
+        if item.lease_until is None or item.lease_until < grace_until:
+            item.lease_until = grace_until
+            lease_extended += 1
+        item.updated_at = now
+
+    if scheduled or lock_held or lease_extended:
+        db.add(ScanLog(
+            scan_job_id=int(scan_id),
+            source="work-queue",
+            level="INFO",
+            message=(
+                f"dispatched_rehydration source={source} scheduled={scheduled} "
+                f"lease_extended={lease_extended} lock_held={lock_held}"
+            ),
+        ))
+    return {"scheduled": scheduled, "lease_extended": lease_extended, "lock_held": lock_held}
+
+
 def _schedule_pentest_inventory_refresh(
     scan_id: int,
     *,
@@ -4276,6 +4363,20 @@ def dispatch_scan_work_items(
                 message=f"work_item_dispatch_queues {dict(sorted(_dispatch_queues.items()))}",
             ))
             db.commit()
+
+        # ``dispatched`` rows depend on a volatile Celery message that is
+        # published immediately after the durable DB claim.  If workers restart
+        # in that gap, the row keeps a long lease but no task exists to execute
+        # it.  Re-publish stale dispatched rows instead of waiting for lease
+        # expiry; execute_scan_work_item's Redis lock prevents duplicate work.
+        try:
+            _rehydrate_orphaned_dispatched_work_items(db, scan_id, source="dispatcher")
+            db.commit()
+        except Exception as _dispatch_rehydrate_exc:
+            import logging as _dispatch_rehydrate_log
+            _dispatch_rehydrate_log.getLogger(__name__).debug(
+                "dispatched_rehydration failed: %s", _dispatch_rehydrate_exc
+            )
 
         # ── Auto-retry timed-out items that haven't exceeded max_attempts ────────
         # Items with status='timeout' are NOT automatically retried — they stay

@@ -412,6 +412,83 @@ def test_authenticated_rerun_service_creates_g1_first_scan_from_valid_session(mo
     assert new_job.state_data["authenticated_scan_identity_key"] == "vidal"
 
 
+def test_dispatcher_rehydrates_orphaned_dispatched_work_items(monkeypatch) -> None:
+    from datetime import datetime, timedelta
+
+    item = SimpleNamespace(
+        id=70001,
+        scan_job_id=82,
+        phase_id="P13",
+        status="dispatched",
+        updated_at=datetime.now() - timedelta(minutes=5),
+        lease_until=None,
+    )
+    published: list[dict[str, object]] = []
+
+    class Query:
+        def __init__(self, rows=None, scalar_value=None):
+            self.rows = rows or []
+            self.scalar_value = scalar_value
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def scalar(self):
+            return self.scalar_value
+
+    class DB:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *models):
+            if models and models[0] is ScanWorkItem:
+                return Query([item])
+            return Query(scalar_value="unit")
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    monkeypatch.setattr(
+        "app.workers.tasks._redis_client",
+        lambda: SimpleNamespace(get=lambda key: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.scan_work_queue._redis_client",
+        lambda: SimpleNamespace(get=lambda key: None),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "phase_queue",
+        lambda phase_id, mode="unit": f"queue.{phase_id}.{mode}",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.workers.worker_groups.phase_queue",
+        lambda phase_id, mode="unit": f"queue.{phase_id}.{mode}",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "execute_scan_work_item",
+        SimpleNamespace(apply_async=lambda args, queue: published.append({"args": args, "queue": queue})),
+    )
+
+    result = tasks._rehydrate_orphaned_dispatched_work_items(DB(), 82, stale_after_seconds=90)
+
+    assert result["scheduled"] == 1
+    assert published == [{"args": [70001], "queue": "queue.P13.unit"}]
+    assert item.lease_until is not None
+
+
 def test_poll_work_item_closes_db_transaction_before_runner_poll(monkeypatch) -> None:
     item = SimpleNamespace(
         id=123,
