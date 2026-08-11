@@ -54,6 +54,7 @@ EXTERNAL_PRECONDITION_REASONS = {
     "captured_jwt_required",
 }
 QUALITY_GATE_SCORE_THRESHOLD = 70.0
+QUALITY_GATE_REQUIRE_ZERO_GAPS = True
 QUALITY_GATE_MAX_ROUNDS = 4
 QUALITY_GATE_MAX_POC_PER_ROUND = 50
 QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
@@ -126,17 +127,26 @@ def quality_gate_decision(
 ) -> dict[str, Any]:
     actions = list(remediation_actions or [])
     score = float(quality.get("score") or 0.0)
+    gaps = list(quality.get("gaps") or [])
     hard_gaps = [
-        gap for gap in list(quality.get("gaps") or [])
+        gap for gap in gaps
         if str(gap.get("severity") or "").lower() == "high"
     ]
-    quality_passed = score >= QUALITY_GATE_SCORE_THRESHOLD and not hard_gaps
+    quality_passed = (
+        score >= QUALITY_GATE_SCORE_THRESHOLD
+        and not hard_gaps
+        and (not QUALITY_GATE_REQUIRE_ZERO_GAPS or not gaps)
+    )
+    quality_blocked = not quality_passed and not actions
     return {
         "passed": quality_passed,
-        "completion_allowed": not actions,
+        "completion_allowed": quality_passed,
         "requires_remediation": bool(actions),
-        "completion_status": "completed" if quality_passed else "completed_with_gaps",
+        "requires_operator_action": quality_blocked,
+        "completion_status": "completed" if quality_passed else "blocked",
         "blockers": hard_gaps,
+        "gap_count": len(gaps),
+        "strict_zero_gaps": QUALITY_GATE_REQUIRE_ZERO_GAPS,
     }
 
 

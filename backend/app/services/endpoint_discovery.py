@@ -218,11 +218,11 @@ def _extract_endpoints_from_result(tool_name: str, result: dict, base_target: st
         for m in re.finditer(r"^\s*(/[^\s\"']{1,200})\s", stdout, re.M):
             urls.add(f"https://{base_host}{m.group(1).split('#')[0]}")
 
-    try:
-        from app.services.offensive_inventory_service import is_actionable_endpoint_url
-        return {u for u in urls if u.startswith("http") and is_actionable_endpoint_url(u)}
-    except Exception:
-        return {u for u in urls if u.startswith("http")}
+    # This extractor feeds discovery/surface expansion.  Do not apply the
+    # active-test endpoint filter here: short semantic routes such as /aa or
+    # /bb are still valid discovered surface, and the later work-item
+    # applicability layer decides whether they deserve active testing.
+    return {u for u in urls if u.startswith("http")}
 
 
 def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata, *, execution_context: str = "external") -> bool:

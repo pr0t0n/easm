@@ -3951,6 +3951,36 @@ def run_business_logic_analysis_postprocess(
         db.close()
 
 
+def _schedule_business_logic_analysis(
+    scan_id: int,
+    item_id: int,
+    target: str,
+    *,
+    countdown: int = 3,
+    queue: str = "worker.unit.reporting",
+) -> bool:
+    """Schedule one on-demand business-logic analysis per scan/target.
+
+    This remains available for explicit/manual workflows, but it is not used as
+    an automatic duplicate trigger from the poll path.
+    """
+    import hashlib
+
+    target_key = hashlib.sha256(str(target).encode()).hexdigest()[:20]
+    key = f"business_logic_pending:{int(scan_id)}:{target_key}"
+    return _singleflight_publish(
+        key,
+        countdown=countdown,
+        ttl_seconds=3600,
+        publish=lambda token: run_business_logic_analysis_postprocess.apply_async(
+            args=[int(scan_id), int(item_id), str(target)],
+            kwargs={"_postprocess_token": token},
+            queue=queue,
+            countdown=countdown,
+        ),
+    )
+
+
 @celery.task(name="run_scan_postprocessor", queue="worker.unit.reporting", ignore_result=True)
 def run_scan_postprocessor(
     scan_id: int,
@@ -4772,9 +4802,10 @@ def dispatch_scan_work_items(
                 except Exception as exc:  # noqa: BLE001
                     _quality_gate = {
                         "passed": False,
-                        "completion_allowed": True,
+                        "completion_allowed": False,
                         "requires_remediation": False,
-                        "completion_status": "completed_with_gaps",
+                        "requires_operator_action": True,
+                        "completion_status": "blocked",
                         "status": "error",
                         "actions": [],
                         "error": str(exc)[:500],
@@ -4806,6 +4837,30 @@ def dispatch_scan_work_items(
                     ))
                     db.commit()
                     _schedule_scan_work_dispatch(scan_id, limit, countdown=5)
+                    return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
+
+                if not _quality_gate.get("completion_allowed"):
+                    _final_state = dict(job.state_data or {})
+                    _final_state["completion_source"] = "quality_gate"
+                    _final_state["quality_gate_active"] = False
+                    _final_state["quality_gate_blocked"] = True
+                    _final_state["current_pentest_phase_id"] = "P21"
+                    _final_state = _assign_scan_state(db, job, _final_state)
+                    job.status = "blocked"
+                    job.mission_progress = 99
+                    job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade"
+                    db.add(ScanLog(
+                        scan_job_id=scan_id,
+                        source="quality-gate",
+                        level="ERROR",
+                        message=(
+                            "QUALITY GATE bloqueou conclusão — sem 100% de cobertura/evidência/validação "
+                            f"score={_quality_gate.get('quality', {}).get('score')} "
+                            f"gap_count={_quality_gate.get('gap_count')} "
+                            f"blockers={_quality_gate.get('blockers')}"
+                        )[:2000],
+                    ))
+                    db.commit()
                     return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
 
                 _final_state = dict(job.state_data or {})

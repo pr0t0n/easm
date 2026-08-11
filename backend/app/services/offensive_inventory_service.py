@@ -149,7 +149,7 @@ def is_actionable_endpoint_url(url: str) -> bool:
         "api", "user", "users", "support", "manage", "permission", "permissions",
         "organization", "settings", "domains", "protocol", "openid-connect",
         "userinfo", "registration", "registrations", "impersonate", "product",
-        "products", "pricing", "terms", "terms-acceptance", "terms-conditions",
+        "products", "order", "orders", "invoice", "invoices", "pricing", "terms", "terms-acceptance", "terms-conditions",
         "dashboard", "dashboards", "billing", "projects", "organizations",
         "members", "tickets", "help-center", "profile", "auth", "login",
         "graphql", "swagger", "openapi", "upload", "admin",

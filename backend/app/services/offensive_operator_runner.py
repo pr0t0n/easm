@@ -4425,9 +4425,10 @@ def run_offensive_operator_scan(
     except Exception as exc:  # noqa: BLE001
         _quality_gate = {
             "passed": False,
-            "completion_allowed": True,
+            "completion_allowed": False,
             "requires_remediation": False,
-            "completion_status": "completed_with_gaps",
+            "requires_operator_action": True,
+            "completion_status": "blocked",
             "status": "error",
             "actions": [],
             "error": str(exc)[:500],
@@ -4452,6 +4453,30 @@ def run_offensive_operator_scan(
             _schedule_scan_work_dispatch(job.id, countdown=5)
         except Exception:
             pass
+        return campaign
+
+    if not _quality_gate.get("completion_allowed"):
+        state = dict(job.state_data or {})
+        state["quality_gate_active"] = False
+        state["quality_gate_blocked"] = True
+        state["completion_source"] = "quality_gate"
+        state["current_pentest_phase_id"] = "P21"
+        job.state_data = state
+        job.status = "blocked"
+        job.mission_progress = 99
+        job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade"
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="ERROR",
+            message=(
+                "QUALITY GATE bloqueou conclusão — sem 100% de cobertura/evidência/validação "
+                f"score={_quality_gate.get('quality', {}).get('score')} "
+                f"gap_count={_quality_gate.get('gap_count')} "
+                f"blockers={_quality_gate.get('blockers')}"
+            )[:2000],
+        ))
+        db.commit()
         return campaign
 
     job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")

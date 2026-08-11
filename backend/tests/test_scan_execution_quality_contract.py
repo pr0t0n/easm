@@ -37,9 +37,10 @@ def test_execution_metrics_use_one_work_item_denominator():
 
 def test_no_more_remediation_does_not_mean_quality_passed():
     decision = quality_gate_decision({"score": 48, "gaps": []}, [])
-    assert decision["completion_allowed"] is True
+    assert decision["completion_allowed"] is False
+    assert decision["requires_operator_action"] is True
     assert decision["passed"] is False
-    assert decision["completion_status"] == "completed_with_gaps"
+    assert decision["completion_status"] == "blocked"
 
 
 def test_high_gap_blocks_even_when_numeric_score_is_high():
@@ -48,4 +49,17 @@ def test_high_gap_blocks_even_when_numeric_score_is_high():
         "gaps": [{"severity": "high", "title": "high finding without proof"}],
     })
     assert decision["passed"] is False
+    assert decision["completion_allowed"] is False
+    assert decision["completion_status"] == "blocked"
     assert len(decision["blockers"]) == 1
+
+
+def test_medium_gap_also_blocks_strict_zero_gap_completion():
+    decision = quality_gate_decision({
+        "score": 95,
+        "gaps": [{"severity": "medium", "title": "surface evidence incomplete"}],
+    }, [])
+    assert decision["passed"] is False
+    assert decision["completion_allowed"] is False
+    assert decision["completion_status"] == "blocked"
+    assert decision["strict_zero_gaps"] is True

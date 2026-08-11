@@ -1180,6 +1180,7 @@ def _discovered_auth_paths(db: Any, scan_id: int, domain: str) -> list[str]:
                 OffensiveEndpoint.scan_job_id == scan_id,
                 OffensiveEndpoint.method.in_(["POST", "PUT"]),
             )
+            .order_by(OffensiveEndpoint.url.asc(), OffensiveEndpoint.id.asc())
             .limit(500)
             .all()
         )

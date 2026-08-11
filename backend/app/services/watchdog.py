@@ -645,7 +645,7 @@ def run_watchdog(db) -> dict:
             WHERE status IN ('queued','blocked','submitted','retry')
               AND scan_job_id IN (
                   SELECT id FROM scan_jobs
-                  WHERE lower(status) IN ('completed','failed','stopped','cancelled')
+                  WHERE lower(status) IN ('completed','completed_with_gaps','failed','stopped','cancelled','canceled')
               )
         """))
         db.commit()

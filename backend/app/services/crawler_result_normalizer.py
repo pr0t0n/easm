@@ -93,7 +93,7 @@ def _flag_related_out_of_scope_hosts(
     the right moment. Never auto-expands scope; only flags it for the operator
     to decide. Deduplicated per scan via state_data so the same host doesn't
     re-fire a finding on every crawl result."""
-    state = dict(scan.state_data or {})
+    state = dict(getattr(scan, "state_data", None) or {})
     already_flagged = set(state.get("related_hosts_flagged") or [])
     new_hosts = [h for h in blocked_hosts if h and h not in already_flagged]
     if not new_hosts:
@@ -136,7 +136,10 @@ def _flag_related_out_of_scope_hosts(
         return
 
     state["related_hosts_flagged"] = sorted(already_flagged | set(new_hosts))[:200]
-    scan.state_data = state
+    try:
+        scan.state_data = state
+    except Exception:
+        pass
 
 
 def normalize_crawler_result(
