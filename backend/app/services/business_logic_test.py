@@ -743,7 +743,11 @@ def run_as_tool(
             "stdout": "business_logic: 0 ações; pré-condições/contratos pendentes",
             "stderr": "",
             "parsed": {"summary": {"observed": 0, "failed": 0, "blocked": len(blocked)}, "observations": [], "blocked": blocked},
-            "business_logic_findings": _business_logic_findings(),
+            # No observed actions means the contract preconditions are not met.
+            # Do not run the generic battery here: it can open clients / perform
+            # target analysis and would violate the fail-closed "no plan, no
+            # request" contract this branch exists to enforce.
+            "business_logic_findings": [],
         }
 
     base_parsed = urlparse(base)

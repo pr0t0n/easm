@@ -597,6 +597,57 @@ class ScanWorkItem(Base):
     scan_job = relationship("ScanJob")
 
 
+NON_TERMINAL_SCAN_WORK_ITEM_STATUSES = {
+    "queued",
+    "retry",
+    "blocked",
+    "dispatched",
+    "running",
+    "submitted",
+}
+
+HALTED_OR_TERMINAL_SCAN_STATUSES_FOR_WORK_ITEMS = {
+    "completed",
+    "completed_with_gaps",
+    "failed",
+    "cancelled",
+    "canceled",
+    "stopped",
+    "paused",
+    "blocked",
+}
+
+
+def _guard_scan_work_item_insert(mapper, connection, target: ScanWorkItem) -> None:
+    """Fail closed when a producer tries to add executable work to a closed scan.
+
+    Most work is created through scan_work_queue, but a few evidence/skill
+    producers historically inserted ScanWorkItem rows directly.  This model
+    guard is the final backstop: terminal or halted scans must never receive
+    new queued/running work that the dispatcher will ignore and the UI can
+    accidentally hide.
+    """
+    item_status = str(getattr(target, "status", "") or "queued").lower()
+    if item_status not in NON_TERMINAL_SCAN_WORK_ITEM_STATUSES:
+        return
+    scan_id = getattr(target, "scan_job_id", None)
+    if scan_id is None:
+        return
+    scan_status = connection.execute(
+        sa.text("SELECT lower(status) FROM scan_jobs WHERE id = :scan_id"),
+        {"scan_id": int(scan_id)},
+    ).scalar_one_or_none()
+    if str(scan_status or "") in HALTED_OR_TERMINAL_SCAN_STATUSES_FOR_WORK_ITEMS:
+        raise ValueError(
+            "scan_work_item_rejected_for_terminal_scan:"
+            f" scan_id={scan_id} scan_status={scan_status} "
+            f"phase={getattr(target, 'phase_id', '')} tool={getattr(target, 'tool_name', '')}"
+        )
+
+
+sa.event.listen(ScanWorkItem, "before_insert", _guard_scan_work_item_insert)
+
+
 class ScanAuditLog(Base):
     """Auditoria de memória operacional: notas, ações e observações do agente autônomo."""
     __tablename__ = "scan_audit_logs"

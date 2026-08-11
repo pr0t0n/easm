@@ -636,6 +636,41 @@ def run_watchdog(db) -> dict:
         logger.error("watchdog: promotor de admissão (A1) falhou: %s", exc)
         report["scans_promoted"] = []
 
+    # ── 3e. Guardrail de consistência: scan terminal/haltado com trabalho vivo ─
+    # This should be impossible for new writes because ScanWorkItem has a model
+    # guard, but historical rows and future direct-SQL mistakes must be visible.
+    try:
+        inconsistent_rows = db.execute(text("""
+            SELECT s.id,
+                   lower(s.status) AS scan_status,
+                   w.status AS item_status,
+                   count(*) AS cnt
+              FROM scan_jobs s
+              JOIN scan_work_items w ON w.scan_job_id = s.id
+             WHERE lower(s.status) IN (
+                   'completed','completed_with_gaps','failed','stopped',
+                   'cancelled','canceled','blocked','paused'
+             )
+               AND w.status IN ('queued','blocked','submitted','retry','dispatched','running')
+             GROUP BY s.id, lower(s.status), w.status
+             ORDER BY s.id, w.status
+        """)).fetchall()
+        inconsistencies = [
+            {
+                "scan_id": int(row[0]),
+                "scan_status": str(row[1] or ""),
+                "item_status": str(row[2] or ""),
+                "count": int(row[3] or 0),
+            }
+            for row in inconsistent_rows
+        ]
+        report["terminal_work_inconsistencies"] = inconsistencies
+        if inconsistencies:
+            logger.error("watchdog: terminal/halted scans with live work items: %s", inconsistencies)
+    except Exception as exc:
+        logger.error("watchdog: consistencia terminal/work-items falhou: %s", exc)
+        report["terminal_work_inconsistencies"] = []
+
     # Item 20 — limpeza segura da fila: itens pendentes (queued/blocked/
     # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela
     # (scan #12 chegou a 6072 blocked). Remover é seguro — o scan acabou.

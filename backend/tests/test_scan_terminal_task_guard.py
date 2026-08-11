@@ -1,5 +1,7 @@
 import inspect
 
+import pytest
+
 
 def test_run_scan_preflight_happens_before_chain_lock() -> None:
     from app.workers import tasks
@@ -24,3 +26,44 @@ def test_terminal_preflight_source_contract() -> None:
     assert "TERMINAL_SCAN_STATUSES" in source
     assert "scan_not_found" in source
     assert "scan_{status}" in source
+
+
+def test_scan_work_item_insert_guard_rejects_terminal_scan() -> None:
+    from app.models.models import ScanWorkItem, _guard_scan_work_item_insert
+
+    class Result:
+        def scalar_one_or_none(self):
+            return "completed_with_gaps"
+
+    class Connection:
+        def execute(self, *_args, **_kwargs):
+            return Result()
+
+    item = ScanWorkItem(
+        scan_job_id=58,
+        phase_id="P21",
+        target="https://example.test/api/v1/webhook",
+        tool_name="nuclei-ssrf",
+        status="queued",
+    )
+
+    with pytest.raises(ValueError, match="scan_work_item_rejected_for_terminal_scan"):
+        _guard_scan_work_item_insert(None, Connection(), item)
+
+
+def test_scan_work_item_insert_guard_allows_terminal_item_status() -> None:
+    from app.models.models import ScanWorkItem, _guard_scan_work_item_insert
+
+    class Connection:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("terminal item statuses should not query scan state")
+
+    item = ScanWorkItem(
+        scan_job_id=58,
+        phase_id="P21",
+        target="https://example.test/api/v1/webhook",
+        tool_name="nuclei-ssrf",
+        status="skipped",
+    )
+
+    _guard_scan_work_item_insert(None, Connection(), item)
