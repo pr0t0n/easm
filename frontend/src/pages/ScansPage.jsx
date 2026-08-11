@@ -109,15 +109,17 @@ function executionPlanLabel(scan) {
   const state = scan?.state_data || {};
   const plan = state.execution_plan || scan?.execution_plan || "external_only";
   const current = String(state.current_surface || "").toUpperCase();
-  const g1 = state.g1_status || state.internal_execution_status;
-  const g0 = state.g0_status || state.external_execution_status;
+  const g1 = String(state.g1_status || state.internal_execution_status || "").toLowerCase();
+  const g0 = String(state.g0_status || state.external_execution_status || "").toLowerCase();
+  const internalActive = ["running", "queued", "dispatching", "active"].includes(g1);
+  const externalActive = ["running", "queued", "dispatching", "active"].includes(g0);
   if (plan === "internal_then_external") {
-    if (current === "G1") {
+    if (current === "G1" || internalActive) {
       return g0 === "waiting_for_internal"
         ? "Agora: G1 interno · G0 aguardando"
         : "Agora: G1 interno";
     }
-    if (current === "G0") {
+    if (current === "G0" || externalActive) {
       return g1 === "completed"
         ? "G1 concluído · Agora: G0 externo"
         : "Agora: G0 externo";

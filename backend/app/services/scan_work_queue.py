@@ -3469,10 +3469,48 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
             db.flush()
 
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        hold_external_for_internal = False
         if job:
             _evidence_requeued = requeue_evidence_ready_work_items(db, job)
             if _evidence_requeued:
                 db.flush()
+            _state = dict(job.state_data or {})
+            if (
+                str(_state.get("execution_plan") or "") == "internal_then_external"
+                and not bool(_state.get("external_released_after_internal"))
+            ):
+                _internal_active = (
+                    db.query(func.count(ScanWorkItem.id))
+                    .filter(
+                        ScanWorkItem.scan_job_id == scan_id,
+                        ScanWorkItem.execution_context == "internal",
+                        ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted", "blocked"]),
+                    )
+                    .scalar() or 0
+                )
+                hold_external_for_internal = int(_internal_active or 0) > 0
+                if hold_external_for_internal:
+                    _held_external = db.query(ScanWorkItem).filter(
+                        ScanWorkItem.scan_job_id == scan_id,
+                        ScanWorkItem.execution_context == "external",
+                        ScanWorkItem.status.in_(["dispatched", "running"]),
+                    ).update(
+                        {
+                            "status": "queued",
+                            "lease_until": None,
+                            "updated_at": now,
+                            "last_error": "waiting_for_internal_g1_completion",
+                        },
+                        synchronize_session=False,
+                    )
+                    if _held_external:
+                        db.add(ScanLog(
+                            scan_job_id=scan_id,
+                            source="execution-plan",
+                            level="INFO",
+                            message=f"external_work_held_until_internal_complete requeued={int(_held_external)}",
+                        ))
+                        db.flush()
 
         _scope_skipped = skip_out_of_scope_queued_work_items(db, scan_id)
         if _scope_skipped:
@@ -3543,6 +3581,14 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                 ScanWorkItem.attempts < ScanWorkItem.max_attempts,
                 or_(ScanWorkItem.lease_until.is_(None), ScanWorkItem.lease_until <= now),
             )
+            if hold_external_for_internal:
+                eligible_filters = (
+                    *eligible_filters,
+                    or_(
+                        ScanWorkItem.execution_context.is_(None),
+                        ScanWorkItem.execution_context != "external",
+                    ),
+                )
 
             # Gates retain strict precedence because they create eligibility for
             # the rest of the graph.

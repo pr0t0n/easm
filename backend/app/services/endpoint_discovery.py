@@ -46,6 +46,39 @@ _HIGH_VALUE = re.compile(
     r"account|user|profile|dashboard|console|manage|setting|secret|key)"
 )
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+")
+_EXECUTION_STATE_KEYS = {
+    "execution_plan",
+    "execution_plan_stage",
+    "current_surface",
+    "g0_status",
+    "g1_status",
+    "internal_execution_status",
+    "external_execution_status",
+    "external_release_pending",
+    "external_released_after_internal",
+    "execution_tracks",
+}
+
+
+def _preserve_runtime_execution_state(db: Session, job: ScanJob, state: dict) -> dict:
+    """Merge endpoint-discovery state without resurrecting stale G0/G1 fields.
+
+    Surface expansion may run for minutes from a state_data snapshot captured at
+    task start. During that window the execution-context reconciler can move a
+    scan from waiting_for_auth to G1 running. Writing the old JSON wholesale at
+    the end makes the UI/backend jump backwards. Preserve the fresh runtime
+    execution keys and let this service patch only discovery/inventory fields.
+    """
+    merged = dict(state or {})
+    try:
+        db.refresh(job)
+        fresh = dict(job.state_data or {})
+        for key in _EXECUTION_STATE_KEYS:
+            if key in fresh:
+                merged[key] = fresh.get(key)
+    except Exception:
+        pass
+    return merged
 
 
 def _emit_surface_progress(scan_id: int, message: str) -> None:
@@ -174,7 +207,7 @@ def promote_httpx_results_to_test_queue(
             "created_at": datetime.now().isoformat(),
         })
         state["httpx_endpoint_promotions"] = promotions[-100:]
-        job.state_data = state
+        job.state_data = _preserve_runtime_execution_state(db, job, state)
         db.flush()
     if urls:
         generate_hypotheses_for_scan(db, job)
@@ -374,7 +407,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         state["out_of_scope_endpoints_skipped"] = sorted(
             set(state.get("out_of_scope_endpoints_skipped") or []) | set(out_of_scope)
         )[:200]
-        job.state_data = state
+        job.state_data = _preserve_runtime_execution_state(db, job, state)
         logger.info(
             "surface_expansion scan=%d fora_do_escopo=%d exemplos=%s",
             scan_id, len(out_of_scope), out_of_scope[:5],
@@ -460,7 +493,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
             "created_at": datetime.now().isoformat(),
         })
         state["discovered_host_test_queue"] = host_events[-100:]
-        job.state_data = state
+        job.state_data = _preserve_runtime_execution_state(db, job, state)
         db.flush()
         try:
             from app.services.scan_work_queue import enqueue_httpx_scope_candidates
@@ -488,7 +521,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
             set(state.get("internal_discovered_endpoints") or []) | set(new_eps)
         )[:5000]
     state["endpoint_test_targets"] = list(seen)[:10000]
-    job.state_data = state
+    job.state_data = _preserve_runtime_execution_state(db, job, state)
     try:
         db.commit()
     except Exception:
@@ -509,6 +542,15 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                 request_cookies = dict(material.cookies or {})
         except Exception:
             logger.warning("internal page analysis has no valid auth material scan=%d", scan_id)
+        finally:
+            # Auth material is a short DB read. Do not keep the implicit
+            # SQLAlchemy transaction open while the page analyzer performs
+            # network fetches; that exact pattern left workers idle-in-tx and
+            # blocked scan_jobs/scan_logs during authenticated G1 expansion.
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
 
     for url_index, url in enumerate(new_eps, start=1):
         hv = bool(_HIGH_VALUE.search(url))
@@ -617,7 +659,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     state["endpoint_test_targets"] = list(seen)[:10000]
     state["se_fetched_count"] = fetched_count
     state["se_reseeded_count"] = reseeded_count
-    job.state_data = state
+    job.state_data = _preserve_runtime_execution_state(db, job, state)
 
     if findings:
         try:

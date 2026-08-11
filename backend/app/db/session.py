@@ -6,12 +6,12 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from app.core.config import settings
 
 
-# Must stay >= postgres's own `idle_in_transaction_session_timeout` (docker-compose.yml,
-# 1800000ms) — that server-level value was deliberately widened after a 5min timeout
-# killed active scan #31 mid P01 tool fan-out. This per-connection SET used to default
-# to 60000ms and silently re-tightened the server's fix on every connection, which is
-# exactly what killed scan #48's `full`-profile P01 dispatch (idle-in-tx at 60s).
-_IDLE_IN_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "1800000"))
+# Idle transactions are never a valid way to wait for Kali/ZAP/LLM/browser I/O.
+# Long-running tools must release/close the SQLAlchemy transaction before the
+# external wait and reopen a fresh session to persist results. Keep this guard
+# short enough that a missed code path cannot freeze scan_jobs/scan_logs for
+# minutes or hours, while still leaving room for ordinary DB-only fan-out.
+_IDLE_IN_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "120000"))
 _LOCK_TIMEOUT_MS = int(os.getenv("DB_LOCK_TIMEOUT_MS", "30000"))
 _STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "900000"))
 
@@ -54,7 +54,15 @@ def enforce_connection_timeouts(db) -> None:
     db.execute(text(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}"))
 
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    # Prevent innocent attribute reads after commit from opening a fresh
+    # implicit transaction while a worker is about to wait on external I/O.
+    # Workers still refresh/re-query explicitly where fresh state is required.
+    expire_on_commit=False,
+)
 
 
 class Base(DeclarativeBase):

@@ -11,4 +11,4 @@ def test_db_connections_enforce_transaction_timeouts() -> None:
     assert "lock_timeout" in source
     assert "statement_timeout" in source
     assert "DB_IDLE_IN_TX_TIMEOUT_MS" in source
-
+    assert "expire_on_commit=False" in source

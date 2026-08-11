@@ -104,11 +104,15 @@ def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
     # the durable queue: if G0 has active work, G0 is running.
     external_has_active_work = external["active"] > 0
     external_has_any_work = external["total"] > 0
+    internal_then_external = str(state.get("execution_plan") or "") == "internal_then_external"
+    external_released = bool(state.get("external_released_after_internal"))
+    external_pending = bool(state.get("external_release_pending")) or (
+        internal_then_external and not external_released and internal_status != "completed"
+    )
     external_waiting = (
-        bool(state.get("external_release_pending"))
-        and not bool(state.get("external_released_after_internal"))
+        external_pending
+        and not external_released
         and internal_status != "completed"
-        and not external_has_active_work
     )
     external_status = "waiting_for_internal" if external_waiting else "not_started"
     if not external_waiting:
@@ -132,6 +136,7 @@ def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
     state.update(
         {
             "execution_plan": state.get("execution_plan") or "internal_then_external",
+            "external_release_pending": bool(external_waiting or state.get("external_release_pending")),
             "g1_status": internal_status,
             "g0_status": external_status,
             "internal_execution_status": internal_status,
@@ -171,6 +176,25 @@ def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
             if status in {"running", "waiting_for_internal"}:
                 row.finished_at = None
             db.add(row)
+
+    job_status = str(job.status or "").lower()
+    if job_status not in {"completed", "completed_with_gaps", "failed", "blocked", "cancelled", "canceled"}:
+        if current_surface == "G1" and internal_status == "running":
+            job.status = "running"
+            job.current_step = "G1 interno em execução; G0 externo aguardando conclusão do interno"
+            if not int(job.mission_progress or 0):
+                job.mission_progress = 1
+            state["execution_plan_stage"] = "internal_running"
+        elif current_surface == "G0" and external_status == "running":
+            job.status = "running"
+            job.current_step = "G0 externo em execução após conclusão do G1 interno"
+            if not int(job.mission_progress or 0):
+                job.mission_progress = 1
+            state["execution_plan_stage"] = "external_running"
+        elif internal_status == "completed" and external_status == "waiting_for_internal":
+            job.status = "running"
+            job.current_step = "G1 interno concluído; aguardando liberação do G0 externo"
+            state["execution_plan_stage"] = "waiting_external_release"
 
     job.state_data = state
     return state

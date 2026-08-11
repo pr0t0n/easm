@@ -20,12 +20,12 @@ services:
     # (e.g. a with_for_update() lock) and then dies/hangs without commit or
     # rollback used to hold that lock forever — one such zombie blocked every
     # scan_jobs/worker_heartbeats write platform-wide for 5+ hours (2026-07-25).
-    # Postgres still kills abandoned sessions, but the window must be longer
-    # than legitimate Kali-backed P01/P02/P06 waits. Short values (5min) killed
-    # active scan #31 after a long P01 tool fan-out and poisoned SQLAlchemy.
+    # Postgres still kills abandoned sessions. Legitimate Kali/ZAP/browser waits
+    # must not happen inside a DB transaction; if one slips through, kill it
+    # quickly enough that scan_jobs/scan_logs do not freeze platform-wide.
     command: >
       postgres
-      -c idle_in_transaction_session_timeout=1800000
+      -c idle_in_transaction_session_timeout=120000
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-scriptkiddo}"
       POSTGRES_USER: "${POSTGRES_USER:-scriptkiddo}"

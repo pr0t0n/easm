@@ -2812,6 +2812,21 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
     for s in rows:
         sev = fc.get(s.id, {})
         terminal = str(s.status or "").lower() in _TERMINAL_SCAN_STATUSES
+        state = dict(s.state_data or {})
+        card_state = {
+            "subdomain_coverage": state.get("subdomain_coverage") or {},
+        }
+        for key in (
+            "execution_plan",
+            "execution_plan_stage",
+            "current_surface",
+            "g0_status",
+            "g1_status",
+            "internal_execution_status",
+            "external_execution_status",
+        ):
+            if key in state:
+                card_state[key] = state.get(key)
         out.append(ScanResponse(
             id=s.id,
             target_query=s.target_query,
@@ -2834,7 +2849,7 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             open_medium=int(sev.get("medium", 0)),
             open_low=int(sev.get("low", 0)),
             open_info=int(sev.get("info", 0)),
-            state_data={"subdomain_coverage": (s.state_data or {}).get("subdomain_coverage") or {}},
+            state_data=card_state,
         ))
     return out
 

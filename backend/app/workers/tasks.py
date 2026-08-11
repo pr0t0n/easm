@@ -903,6 +903,7 @@ def _run_surface_expansion_postprocessor(db: Session, job: ScanJob, item: Any) -
         try:
             db.commit()
             db.refresh(job)
+            db.commit()
         except Exception:
             db.rollback()
             raise
@@ -5280,6 +5281,17 @@ def execute_scan_work_item(item_id: int):
         }
         if _is_batch:
             execution["targets"] = _batch_targets
+
+        # Everything needed to call local/MCP executors has been snapshotted
+        # above. Release the implicit transaction opened by scope/auth/settings
+        # reads before any external or long-running executor call. Otherwise a
+        # worker can sit idle-in-transaction while Kali/ZAP/LLM/browser work is
+        # happening and block scan_jobs/scan_logs through FK/row locks.
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         _norm_item_tool = str(item.tool_name or "").strip().lower()
         if _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"} or _norm_item_tool.startswith("skill-probe"):
