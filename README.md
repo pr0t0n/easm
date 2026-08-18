@@ -304,9 +304,9 @@ Por baixo, existem 22 fases tecnicas (`P01` a `P22`) em `backend/app/graph/missi
 | `P17` | `risk_assessment` | `worker_exploitation` | Upload & WebShell Bypass | `nuclei` |
 | `P18` | `risk_assessment` | `worker_recon` / `worker_c2` | SSL/TLS Certificate, Protocol & Cipher Audit | `sslscan`, `testssl`, `nmap`, `curl-headers` |
 | `P19` | `risk_assessment` | `worker_exploitation` / `worker_installation` | IDOR & Access Control Flaws | `nuclei`, `katana`, `arjun`, `curl-headers` |
-| `P20` | `risk_assessment` | `worker_exploitation` | CMS-Specific Scan | `wpscan`, `nuclei`, `nikto` |
-| `P21` | `threat_intel` | `worker_actions` / `worker_weaponization` | Secret & Credential Exposure | `trufflehog`, `gitleaks`, `semgrep`, `bandit` |
-| `P22` | `risk_assessment` | `worker_actions` | Dependency & Supply Chain Risk | `retire`, `trivy`, `semgrep`, `bandit`, `gitleaks` |
+| `P20` | `evidence_adjudication` | `worker_evidence` | Attack Path Correlation | correlação de findings, hipóteses, evidências e crown jewels |
+| `P21` | `evidence_adjudication` | `worker_evidence` | Evidence Quality Review & Revalidation Wires | `manual_review` + validators específicos materializados por wire |
+| `P22` | `executive_analyst` | `worker_reporting` | Campaign Reporting | `report-builder`, `manual_review` |
 
 Este catálogo é intencionalmente o contrato operacional: se uma ferramenta aparece aqui, ela deve existir como profile no `kali_runner`, ser executada dentro do container Kali e aparecer no `Phase Monitor` como `executed`, `skipped` com motivo, ou `attempted_failed` com erro rastreável.
 

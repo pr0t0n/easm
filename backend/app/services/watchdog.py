@@ -652,6 +652,7 @@ def run_watchdog(db) -> dict:
                    'cancelled','canceled','blocked','paused'
              )
                AND w.status IN ('queued','blocked','submitted','retry','dispatched','running')
+               AND COALESCE(w.metadata->>'post_scan_revalidation', 'false') <> 'true'
              GROUP BY s.id, lower(s.status), w.status
              ORDER BY s.id, w.status
         """)).fetchall()
@@ -675,9 +676,30 @@ def run_watchdog(db) -> dict:
     # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela
     # (scan #12 chegou a 6072 blocked). Remover é seguro — o scan acabou.
     try:
+        # Keep the reasoning edge even when its dead transport row is purged.
+        # ValidationWire.work_item_id is nullable specifically so terminal
+        # queue cleanup can detach it and record why the planned return test
+        # never executed instead of violating the FK or erasing the dossier.
+        db.execute(text("""
+            UPDATE validation_wires vw
+               SET work_item_id = NULL,
+                   status = CASE WHEN vw.status IN ('queued','running') THEN 'blocked' ELSE vw.status END,
+                   result_summary = COALESCE(vw.result_summary, '{}'::jsonb)
+                       || '{"reason":"terminal_scan_work_item_purged"}'::jsonb,
+                   updated_at = now()
+              FROM scan_work_items swi
+             WHERE vw.work_item_id = swi.id
+               AND swi.status IN ('queued','blocked','submitted','retry')
+               AND COALESCE(swi.metadata->>'post_scan_revalidation', 'false') <> 'true'
+               AND swi.scan_job_id IN (
+                   SELECT id FROM scan_jobs
+                   WHERE lower(status) IN ('completed','completed_with_gaps','failed','stopped','cancelled','canceled')
+               )
+        """))
         purged = db.execute(text("""
             DELETE FROM scan_work_items
             WHERE status IN ('queued','blocked','submitted','retry')
+              AND COALESCE(metadata->>'post_scan_revalidation', 'false') <> 'true'
               AND scan_job_id IN (
                   SELECT id FROM scan_jobs
                   WHERE lower(status) IN ('completed','completed_with_gaps','failed','stopped','cancelled','canceled')

@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
-from app.models.encrypted_json import EncryptedJSON
+from app.models.encrypted_json import EncryptedJSON, StateDataJSON
 
 
 user_access_groups = Table(
@@ -57,7 +57,7 @@ class ScanJob(Base):
     retry_max: Mapped[int] = mapped_column(Integer, default=0)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    state_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    state_data: Mapped[dict] = mapped_column(StateDataJSON, default=dict)
     tech_stack: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -460,6 +460,119 @@ class ValidationRun(Base):
     finding = relationship("Finding")
 
 
+class FindingAdjudication(Base):
+    """One immutable-ish evidence review cycle for a finding.
+
+    The LLM proposal and the deterministic final decision deliberately live in
+    separate columns.  This prevents a model response from silently becoming
+    ground truth while preserving enough provenance to calibrate it later.
+    """
+
+    __tablename__ = "finding_adjudications"
+    __table_args__ = (
+        sa.UniqueConstraint("finding_id", "cycle", name="uq_finding_adjudications_finding_cycle"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id"), index=True)
+    cycle: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(40), default="reviewing", index=True)
+    dossier_hash: Mapped[str] = mapped_column(String(80), default="", index=True)
+    dossier: Mapped[dict] = mapped_column(JSONB, default=dict)
+    proposed_verdict: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    final_verdict: Mapped[str] = mapped_column(String(40), default="inconclusive", index=True)
+    reason_code: Mapped[str] = mapped_column(String(120), default="insufficient_evidence", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    missing_evidence: Mapped[list] = mapped_column(JSONB, default=list)
+    contradictions: Mapped[list] = mapped_column(JSONB, default=list)
+    supporting_evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    model_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(80), default="finding-adjudication-v1")
+    prompt_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    model_response: Mapped[dict] = mapped_column(JSONB, default=dict)
+    decision_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    scan_job = relationship("ScanJob")
+    finding = relationship("Finding")
+
+
+class ValidationWire(Base):
+    """Persistent return path from an evidence gap to one specific re-test.
+
+    A wire binds the finding and originating evidence to an already-known
+    target, parameter, identity context and closed action recipe.  Work items
+    are execution attempts; the wire is the durable reasoning edge that can
+    survive retries and trigger a fresh adjudication when the attempt ends.
+    """
+
+    __tablename__ = "validation_wires"
+    __table_args__ = (
+        sa.UniqueConstraint("idempotency_key", name="uq_validation_wires_idempotency_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id"), index=True)
+    adjudication_id: Mapped[int | None] = mapped_column(ForeignKey("finding_adjudications.id"), nullable=True, index=True)
+    parent_wire_id: Mapped[int | None] = mapped_column(ForeignKey("validation_wires.id"), nullable=True, index=True)
+    work_item_id: Mapped[int | None] = mapped_column(ForeignKey("scan_work_items.id"), nullable=True, index=True)
+    source_artifact_id: Mapped[int | None] = mapped_column(ForeignKey("evidence_artifacts.id"), nullable=True, index=True)
+    endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("offensive_endpoints.id"), nullable=True, index=True)
+    phase_id: Mapped[str] = mapped_column(String(10), default="P21", index=True)
+    action_id: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="planned", index=True)
+    reason_code: Mapped[str] = mapped_column(String(120), default="missing_evidence", index=True)
+    target_ref: Mapped[str] = mapped_column(Text, default="")
+    parameter_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    secondary_identity_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    profile: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    input_bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    expected_signals: Mapped[dict] = mapped_column(JSONB, default=dict)
+    policy_decision: Mapped[dict] = mapped_column(JSONB, default=dict)
+    result_summary: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    idempotency_key: Mapped[str] = mapped_column(String(160), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    scan_job = relationship("ScanJob")
+    finding = relationship("Finding")
+    adjudication = relationship("FindingAdjudication")
+
+
+class FindingIntelligenceSnapshot(Base):
+    """Source-attributed vulnerability intelligence captured for one finding."""
+
+    __tablename__ = "finding_intelligence_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id"), index=True)
+    cve_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    applicability: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    cvss_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cvss_vector: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cvss_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cvss_source: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    epss_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    epss_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kev: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    public_exploit_status: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    references: Mapped[list] = mapped_column(JSONB, default=list)
+    source_payload: Mapped[dict] = mapped_column("payload", JSONB, default=dict)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+    scan_job = relationship("ScanJob")
+    finding = relationship("Finding")
+
+
 class CoverageItem(Base):
     __tablename__ = "coverage_items"
     __table_args__ = (
@@ -617,15 +730,59 @@ HALTED_OR_TERMINAL_SCAN_STATUSES_FOR_WORK_ITEMS = {
     "blocked",
 }
 
+POST_SCAN_REVALIDATION_SCAN_STATUSES = {
+    "completed",
+    "completed_with_gaps",
+    "failed",
+    "cancelled",
+    "canceled",
+}
+
+
+def is_post_scan_revalidation_item(target: ScanWorkItem, scan_status: str | None = None) -> bool:
+    """Recognise the narrow, internally-created P21 return path.
+
+    A completed/cancelled scan remains immutable, but an administrator may ask
+    P21 to re-evaluate one existing finding.  That bounded action is represented
+    by a wire with both the finding and adjudication bound in metadata; it is
+    not permission to resume the original scan or enqueue arbitrary work.
+    """
+    metadata = dict(getattr(target, "item_metadata", None) or {})
+    valid_binding = bool(
+        metadata.get("post_scan_revalidation") is True
+        and metadata.get("validation_wire_id")
+        and metadata.get("verifies_finding_id")
+        and metadata.get("adjudication_id")
+        and str(getattr(target, "phase_id", "") or "").upper() == "P21"
+    )
+    if not valid_binding:
+        return False
+    if scan_status is None:
+        return True
+    return str(scan_status or "").lower() in POST_SCAN_REVALIDATION_SCAN_STATUSES
+
 
 def _guard_scan_work_item_insert(mapper, connection, target: ScanWorkItem) -> None:
-    """Fail closed when a producer tries to add executable work to a closed scan.
+    """Silently no-op work inserted against a closed scan instead of raising.
 
     Most work is created through scan_work_queue, but a few evidence/skill
     producers historically inserted ScanWorkItem rows directly.  This model
     guard is the final backstop: terminal or halted scans must never receive
     new queued/running work that the dispatcher will ignore and the UI can
     accidentally hide.
+
+    This used to raise ValueError here — but before_insert fires mid-flush,
+    so the exception poisoned the caller's SQLAlchemy session ("This
+    Session's transaction has been rolled back..."), and callers that did
+    not immediately db.rollback() left every later operation in the same
+    transaction broken. Confirmed live: a stray P21 hypothesis-drain item
+    raised this exactly as the scan finished, which cascaded into 3 failed
+    retries of an unfixable condition (the scan was correctly already
+    `completed`, so every retry hit the identical rejection) and clobbered
+    the scan's status to `failed` despite the run having genuinely
+    succeeded. Converting the item to a terminal, harmless "skipped" row on
+    insert gives the same "a closed scan never receives new active work"
+    guarantee without ever raising mid-flush.
     """
     item_status = str(getattr(target, "status", "") or "queued").lower()
     if item_status not in NON_TERMINAL_SCAN_WORK_ITEM_STATUSES:
@@ -637,12 +794,17 @@ def _guard_scan_work_item_insert(mapper, connection, target: ScanWorkItem) -> No
         sa.text("SELECT lower(status) FROM scan_jobs WHERE id = :scan_id"),
         {"scan_id": int(scan_id)},
     ).scalar_one_or_none()
-    if str(scan_status or "") in HALTED_OR_TERMINAL_SCAN_STATUSES_FOR_WORK_ITEMS:
-        raise ValueError(
-            "scan_work_item_rejected_for_terminal_scan:"
-            f" scan_id={scan_id} scan_status={scan_status} "
-            f"phase={getattr(target, 'phase_id', '')} tool={getattr(target, 'tool_name', '')}"
-        )
+    if (
+        str(scan_status or "") in HALTED_OR_TERMINAL_SCAN_STATUSES_FOR_WORK_ITEMS
+        and not is_post_scan_revalidation_item(target, str(scan_status or ""))
+    ):
+        target.status = "skipped"
+        metadata = dict(getattr(target, "item_metadata", None) or {})
+        metadata["rejected_for_terminal_scan"] = {
+            "scan_status": scan_status,
+            "reason": "scan_already_closed_when_item_was_created",
+        }
+        target.item_metadata = metadata
 
 
 sa.event.listen(ScanWorkItem, "before_insert", _guard_scan_work_item_insert)

@@ -725,11 +725,24 @@ def skill_planner_node(state: AgentState) -> AgentState:
             from app.agents.supervisor_runtime import BlockedDecision, decide_next_technique
             from app.services.tool_catalog import tool_summary_for_agent
 
+            # SEC-005: this was hardcoded True, so the system prompt's own
+            # "if no authorized scope -> block execution" rule was
+            # structurally unreachable regardless of the real scope contract
+            # (see routes_scans.py's authorization_gate, the actual source of
+            # truth). Derive it for real instead.
+            from app.services.scan_scope import host_from_scope_reference, is_host_in_scope
+
+            _authorized_scope_roots = list((state.get("authorization_gate") or {}).get("authorized_scope") or [])
+            _target_host_for_scope = host_from_scope_reference(str(state.get("target") or ""))
+            _authorized_scope_ok = bool(_target_host_for_scope) and is_host_in_scope(
+                _target_host_for_scope, _authorized_scope_roots
+            )
+
             execution_context = {
                 "target": str(state.get("target") or ""),
                 "phase": str(plan.get("phase") or ""),
                 "skill": str(plan.get("skill_id") or ""),
-                "authorized_scope": True,
+                "authorized_scope": _authorized_scope_ok,
                 "auth_available": bool((state.get("auth_summary") or {}).get("ready")),
                 "max_risk_allowed": str((state.get("scan_profile") or {}).get("max_risk_allowed") or "medium"),
                 "capability": capability,

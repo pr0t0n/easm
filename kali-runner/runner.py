@@ -148,7 +148,7 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
     host = host.split("/")[0].split(":")[0]
     if PRIVATE_NET_RE.match(host):
         return True, f"loopback/link-local blocked: {host}"
-    if any(ch in t for ch in [";", "&&", "||", "`", "$(", "\n", "\r"]):
+    if any(ch in t for ch in [";", "&&", "||", "`", "$(", "\n", "\r", "|", ">", "<", "'"]):
         return True, f"shell metacharacter in target: {t!r}"
     return False, ""
 
@@ -191,6 +191,74 @@ def _is_target_in_scope(target: str, authorized_scope: list[str] | None) -> tupl
         elif host == root or host.endswith(f".{root}"):
             return True, ""
     return False, f"target {host!r} outside authorized scope {scope}"
+
+
+def _resolve_all_host_ips(host: str) -> list[str]:
+    """All resolved IPs for `host` (A + AAAA) — used by the DNS-rebinding
+    re-check (SEC-004). Unlike _resolve_host_ip (which returns only the
+    first address, for template materialization), this must see every
+    record to catch a rebinding attempt where only some of a host's
+    addresses point at a private/loopback range."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    ips: list[str] = []
+    socket.setdefaulttimeout(5)
+    try:
+        infos = socket.getaddrinfo(host, None)
+        for info in infos:
+            candidate = str(info[4][0])
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if candidate not in ips:
+                ips.append(candidate)
+    except OSError:
+        pass
+    return ips
+
+
+def _disallowed_dns_rebind(host: str, authorized_scope: list[str] | None) -> tuple[bool, str]:
+    """SEC-004: a hostname's own literal string can pass _is_target_in_scope
+    while its DNS record resolves to a private/loopback/link-local address —
+    classic DNS rebinding. Reject unless that specific resolved address is
+    itself an explicit, authorized IP/CIDR scope entry (preserves the
+    existing, intentional RFC1918 trust for targets the operator explicitly
+    scoped by IP/CIDR — see PRIVATE_NET_RE's docstring — while catching a
+    public-looking domain silently resolving somewhere never authorized).
+    A no-op for literal IP targets; those are covered by the scope check
+    itself, not DNS.
+    """
+    try:
+        ipaddress.ip_address(host)
+        return False, ""
+    except ValueError:
+        pass
+
+    scope = [str(s).strip().lower() for s in (authorized_scope or []) if str(s).strip()]
+    cidr_roots = [root for root in scope if _is_ip_or_cidr(root)]
+
+    for ip in _resolve_all_host_ips(host):
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast):
+            continue
+        explicitly_authorized = False
+        for root in cidr_roots:
+            try:
+                if addr in ipaddress.ip_network(root, strict=False):
+                    explicitly_authorized = True
+                    break
+            except ValueError:
+                continue
+        if not explicitly_authorized:
+            return True, f"host {host!r} resolves to private/loopback address {ip} not explicitly authorized (possible DNS rebinding)"
+    return False, ""
 
 
 def _is_ip_or_cidr(value: str) -> bool:
@@ -838,6 +906,20 @@ def _target_validation_error(profile: dict[str, Any], target: str) -> str:
         return f"target_type local_path requires an existing directory: {candidate}"
     if not candidate.is_dir():
         return f"target_type local_path requires a directory, got file: {candidate}"
+    # KALI-003: without this, an operator-supplied source_path pointing
+    # anywhere on the container filesystem (/etc, /app, /opt/tools, ...) gets
+    # fed straight into gitleaks/trufflehog/semgrep/bandit/trivy, which then
+    # exfiltrate whatever they find there into Finding/Evidence rows. The
+    # container has no bind mount for external source code other than
+    # WORKSPACE (see docker-compose.yml's kali_runner volumes), so any real
+    # "mounted source or extracted repository artifact" (per these profiles'
+    # own descriptions) already lives under WORKSPACE — confining to it
+    # formalizes what should already be true rather than restricting a real
+    # use case.
+    resolved = candidate.resolve()
+    workspace_resolved = WORKSPACE.resolve()
+    if resolved != workspace_resolved and not resolved.is_relative_to(workspace_resolved):
+        return f"target_type local_path must be confined under {workspace_resolved}: got {resolved}"
     return ""
 
 
@@ -1974,6 +2056,10 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         in_scope, scope_reason = _is_target_in_scope(candidate, req.authorized_scope)
         if not in_scope:
             raise HTTPException(status_code=400, detail=f"target out of authorized scope: {scope_reason}")
+        candidate_host = _target_host(candidate)
+        rebind_unsafe, rebind_reason = _disallowed_dns_rebind(candidate_host, req.authorized_scope)
+        if rebind_unsafe:
+            raise HTTPException(status_code=400, detail=f"unsafe target: {rebind_reason}")
 
     job = _new_job_record(req, profile)
     job_id = job["job_id"]

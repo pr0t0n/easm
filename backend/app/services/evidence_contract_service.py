@@ -66,6 +66,17 @@ def create_artifact_from_tool_result(
     identity_key: str = "",
 ) -> EvidenceArtifact:
     details = dict(result.get("parsed") or {})
+    wire = dict(result.get("validation_wire") or {})
+    bindings = dict(result.get("input_bindings") or wire.get("input_bindings") or {})
+    observations = [
+        dict(row) for row in list(details.get("observations") or [])
+        if isinstance(row, dict)
+    ]
+    baseline_observation = observations[0] if observations else {}
+    attempted_observation = observations[1] if len(observations) > 1 else {}
+    positive = details.get("vulnerable") is True or details.get("confirmed") is True
+    explicit_negative = details.get("negative_control_passed") is True
+    validation_status = "confirmed" if positive else "refuted" if explicit_negative else "candidate"
     contract = EvidenceContract(
         scan_job_id=scan_job_id,
         finding_id=finding_id,
@@ -78,8 +89,29 @@ def create_artifact_from_tool_result(
         # A tool exiting successfully proves the command ran, not that it proved a
         # vulnerability — promotion to "confirmed" is decided by evaluate_finding_promotion
         # based on baseline/exploit reproduction, never by execution status alone.
-        validation_status="candidate",
-        confidence_score=80 if str(result.get("status") or "") == "executed" else 40,
+        validation_status=validation_status,
+        confidence_score=95 if positive or explicit_negative else 80 if str(result.get("status") or "") in {"executed", "done", "completed"} else 40,
+        baseline_request={
+            "target": wire.get("target_ref") or result.get("target"),
+            "method": bindings.get("method") or "GET",
+            "parameter": wire.get("parameter_ref") or bindings.get("parameter_ref"),
+            "identity_key": wire.get("identity_key"),
+        } if wire else {},
+        baseline_response_ref=(
+            f"validation-wire:{wire.get('id')}:primary:{baseline_observation.get('body_fingerprint', '')}"
+            if wire and baseline_observation else ""
+        ),
+        exploit_request={
+            "target": wire.get("target_ref") or result.get("target"),
+            "method": bindings.get("method") or "GET",
+            "parameter": wire.get("parameter_ref") or bindings.get("parameter_ref"),
+            "identity_key": wire.get("secondary_identity_key"),
+            "object_id": bindings.get("object_id"),
+        } if wire and (wire.get("secondary_identity_key") or bindings.get("object_id")) else {},
+        exploit_response_ref=(
+            f"validation-wire:{wire.get('id')}:attempt:{attempted_observation.get('body_fingerprint', '')}"
+            if wire and attempted_observation else ""
+        ),
         payload=str(details.get("payload") or ""),
         diff_summary=str(details.get("diff") or result.get("stderr") or "")[:4000],
         reproduction_steps=_steps_from_result(result),
@@ -90,6 +122,9 @@ def create_artifact_from_tool_result(
             "stdout_ref": result.get("evidence_path") or "",
             "status": result.get("status"),
             "dispatch_task_id": result.get("dispatch_task_id"),
+            "validation_wire_id": wire.get("id"),
+            "negative_control": explicit_negative,
+            "expected_signals": dict(result.get("expected_signals") or {}),
         },
     )
     return create_evidence_artifact(db, contract)

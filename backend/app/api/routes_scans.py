@@ -29,6 +29,7 @@ from app.models.models import (
     OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
     OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun, PentestOutcomeMetric,
     EndpointObservation, ProcessorCheckpoint, ScanExecutionContext,
+    FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.audit_service import log_audit
@@ -3154,6 +3155,18 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     db.query(SkillScore).filter(SkillScore.scan_id == scan_id).delete(
         synchronize_session=False,
     )
+    # ValidationWire points at ScanWorkItem, EvidenceArtifact and
+    # OffensiveEndpoint, so the durable return edges must be removed before
+    # any of those execution/evidence parents.
+    db.query(ValidationWire).filter(ValidationWire.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(FindingIntelligenceSnapshot).filter(FindingIntelligenceSnapshot.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
+    db.query(FindingAdjudication).filter(FindingAdjudication.scan_job_id == scan_id).delete(
+        synchronize_session=False,
+    )
     db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == scan_id).delete(
         synchronize_session=False,
     )
@@ -3170,6 +3183,19 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     db.query(CoverageItem).filter(CoverageItem.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(ValidationRun).filter(ValidationRun.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveParameter).filter(OffensiveParameter.scan_job_id == scan_id).delete(synchronize_session=False)
+    # These three tables (execution-context tracking, G0/G1 endpoint
+    # observations, quality-gate processor checkpoints) were added after this
+    # endpoint was written and never got added here -- all three have a plain
+    # NO ACTION delete rule at the DB level (confirmed: only scan_embeddings
+    # has ON DELETE CASCADE), so any scan that reached G0/G1 tracking, endpoint
+    # observation or a processor checkpoint 500s on delete with a
+    # ForeignKeyViolation. reset_operational_scans already cleans these three
+    # for its own reset flow; delete_scan never got the same treatment.
+    # endpoint_observations also FKs to offensive_endpoints/evidence_artifacts,
+    # so it must be deleted before those two.
+    db.query(EndpointObservation).filter(EndpointObservation.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ScanExecutionContext).filter(ScanExecutionContext.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ProcessorCheckpoint).filter(ProcessorCheckpoint.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveJsAsset).filter(OffensiveJsAsset.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveService).filter(OffensiveService.scan_job_id == scan_id).delete(synchronize_session=False)
@@ -3256,6 +3282,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_endpoint_observations = 0
         deleted_processor_checkpoints = 0
         deleted_execution_contexts = 0
+        deleted_finding_adjudications = 0
+        deleted_validation_wires = 0
+        deleted_intelligence_snapshots = 0
         deleted_offensive_assets = 0
         deleted_offensive_inventory = 0
         deleted_scan_embeddings = 0
@@ -3292,6 +3321,24 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             deleted_validation_runs = (
                 db.query(ValidationRun)
                 .filter(ValidationRun.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            # Wires reference work items, evidence and endpoints.  Intelligence
+            # and adjudications reference findings.  Remove all three before
+            # any of those parents in an operational reset.
+            deleted_validation_wires = (
+                db.query(ValidationWire)
+                .filter(ValidationWire.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_intelligence_snapshots = (
+                db.query(FindingIntelligenceSnapshot)
+                .filter(FindingIntelligenceSnapshot.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_finding_adjudications = (
+                db.query(FindingAdjudication)
+                .filter(FindingAdjudication.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
             # EndpointObservation references both offensive_endpoints and
@@ -3458,6 +3505,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                     "endpoint_observations": deleted_endpoint_observations,
                     "processor_checkpoints": deleted_processor_checkpoints,
                     "execution_contexts": deleted_execution_contexts,
+                    "finding_adjudications": deleted_finding_adjudications,
+                    "validation_wires": deleted_validation_wires,
+                    "intelligence_snapshots": deleted_intelligence_snapshots,
                     "offensive_assets": deleted_offensive_assets,
                     "offensive_inventory": deleted_offensive_inventory,
                     "scan_embeddings": deleted_scan_embeddings,
@@ -3484,6 +3534,9 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "endpoint_observations": deleted_endpoint_observations,
                 "processor_checkpoints": deleted_processor_checkpoints,
                 "execution_contexts": deleted_execution_contexts,
+                "finding_adjudications": deleted_finding_adjudications,
+                "validation_wires": deleted_validation_wires,
+                "intelligence_snapshots": deleted_intelligence_snapshots,
                 "offensive_assets": deleted_offensive_assets,
                 "offensive_inventory": deleted_offensive_inventory,
                 "scan_embeddings": deleted_scan_embeddings,
@@ -4912,6 +4965,114 @@ def get_finding_intelligence(
     if not finding:
         raise HTTPException(status_code=404, detail="Finding não encontrado")
     return build_finding_intelligence(db, finding)
+
+
+@router.get("/findings/{finding_id}/adjudication")
+def get_finding_adjudication(
+    finding_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the latest dossier/decision and every wire for this finding."""
+    from app.services.finding_adjudication import build_finding_assessment, adjudication_to_dict, wire_to_dict
+
+    finding = _authorized_finding_query(db, current_user).filter(Finding.id == finding_id).first()
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding não encontrado")
+    adjudications = (
+        db.query(FindingAdjudication)
+        .filter(FindingAdjudication.finding_id == finding.id)
+        .order_by(FindingAdjudication.cycle.desc())
+        .all()
+    )
+    wires = (
+        db.query(ValidationWire)
+        .filter(ValidationWire.finding_id == finding.id)
+        .order_by(ValidationWire.id.asc())
+        .all()
+    )
+    by_adjudication: dict[int, list[dict[str, Any]]] = {}
+    for wire in wires:
+        if wire.adjudication_id is not None:
+            by_adjudication.setdefault(int(wire.adjudication_id), []).append(wire_to_dict(wire))
+    return {
+        "finding_id": finding.id,
+        "assessment": build_finding_assessment(
+            db,
+            db.query(ScanJob).filter(ScanJob.id == finding.scan_job_id).first(),
+            finding,
+        ),
+        "current": adjudication_to_dict(
+            adjudications[0], wires=by_adjudication.get(int(adjudications[0].id), [])
+        ) if adjudications else None,
+        "history": [
+            adjudication_to_dict(row, wires=by_adjudication.get(int(row.id), []))
+            for row in adjudications
+        ],
+        "orphan_or_legacy_wires": [
+            wire_to_dict(wire) for wire in wires if wire.adjudication_id is None
+        ],
+    }
+
+
+@router.post("/findings/{finding_id}/adjudicate")
+def re_adjudicate_finding(
+    finding_id: int,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Re-evaluate a finding and materialize its next bounded P21 wire."""
+    from app.services.finding_adjudication import (
+        adjudicate_finding,
+        refresh_finding_intelligence,
+        retry_blocked_post_scan_wire,
+    )
+
+    finding = _authorized_finding_query(db, current_user).filter(Finding.id == finding_id).first()
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding não encontrado")
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == finding.scan_job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    body = dict(payload or {})
+    intelligence = None
+    if bool(body.get("refresh_intelligence")):
+        intelligence = refresh_finding_intelligence(db, job, finding)
+    result = retry_blocked_post_scan_wire(db, job, finding)
+    recovered_wire = result is not None
+    if result is None:
+        result = adjudicate_finding(db, job, finding, force=bool(body.get("force", True)))
+    log_audit(
+        db,
+        event_type="finding.adjudicated",
+        message=f"Finding #{finding.id} re-adjudicado por {current_user.email}",
+        actor_user_id=current_user.id,
+        metadata={"finding_id": finding.id, "adjudication_id": result.get("id"), "wire_ids": [w.get("id") for w in result.get("wires", [])]},
+    )
+    db.commit()
+    scheduled: list[dict[str, Any]] = []
+    if str(job.status or "").lower() in {"completed", "completed_with_gaps", "failed", "cancelled", "canceled"}:
+        from app.workers.tasks import schedule_post_scan_validation_wire
+
+        for wire in list(result.get("wires") or []):
+            if str(wire.get("status") or "") != "queued" or not wire.get("work_item_id"):
+                continue
+            try:
+                task_id = schedule_post_scan_validation_wire(int(wire["work_item_id"]))
+                scheduled.append({"work_item_id": int(wire["work_item_id"]), "task_id": task_id})
+            except Exception as exc:  # noqa: BLE001
+                scheduled.append({
+                    "work_item_id": int(wire["work_item_id"]),
+                    "error": str(exc)[:500],
+                })
+    return {
+        "ok": True,
+        "intelligence": intelligence,
+        "adjudication": result,
+        "recovered_blocked_wire": recovered_wire,
+        "post_scan_scheduled": scheduled,
+    }
 
 
 @router.get("/findings/export.csv")

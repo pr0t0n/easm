@@ -36,7 +36,8 @@ def classify_poc_work_item(item: Any) -> dict[str, Any]:
     if status not in {"completed", "done"}:
         return {"result": "candidate", "reason": "validator_not_terminal", "positive_signal": False, "negative_signal": False}
 
-    negative = next((pattern for pattern in NEGATIVE_PATTERNS if pattern in blob), "")
+    structured_negative = _structured_negative(parsed)
+    negative = structured_negative or next((pattern for pattern in NEGATIVE_PATTERNS if pattern in blob), "")
     positive = _structured_positive(parsed) or next(
         (pattern for prefix, patterns in POSITIVE_PATTERNS.items() if tool.startswith(prefix) for pattern in patterns if pattern in blob),
         "",
@@ -59,6 +60,17 @@ def _structured_positive(parsed: Any) -> str:
         return "structured_actionable_result" if actionable else ""
     if isinstance(parsed, dict) and _dict_positive(parsed):
         return "structured_actionable_result"
+    return ""
+
+
+def _structured_negative(parsed: Any) -> str:
+    if isinstance(parsed, dict) and parsed.get("negative_control_passed") is True:
+        return "structured_negative_control_passed"
+    if isinstance(parsed, list) and parsed and all(
+        isinstance(item, dict) and item.get("negative_control_passed") is True
+        for item in parsed
+    ):
+        return "structured_negative_control_passed"
     return ""
 
 

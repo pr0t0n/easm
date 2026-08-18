@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from app.models.models import CoverageItem, EvidenceArtifact, ScanWorkItem, ValidationRun
-from app.services.exploitation_evidence import persist_p21_validation_record
+from app.services.exploitation_evidence import build_poc_artifact, persist_p21_validation_record
 from app.services.poc_validator import schedule_poc_validation
 
 
@@ -120,6 +120,15 @@ def test_p21_refutation_is_recorded_as_refuted():
     assert db.rows[EvidenceArtifact][0].validation_status == "refuted"
     assert db.rows[ValidationRun][0].result == "refuted"
     assert db.rows[CoverageItem][0].status == "refuted"
+
+
+def test_poc_artifact_accepts_empty_payload_list():
+    item = _item()
+
+    artifact = build_poc_artifact({"reproduction": {"payloads": []}}, item)
+
+    assert artifact["payload"] is None
+    assert artifact["validated_by_item_id"] == item.id
 
 
 def test_poc_validation_rejects_terminal_scan_without_creating_work_item():

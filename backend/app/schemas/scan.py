@@ -1,7 +1,42 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+# SEC-003: state_data is echoed back to API callers (ScanResponse/ReportResponse),
+# but it can carry raw credential material under these keys (auth_config's
+# username/password/bearer_token/cookies/headers, llm_risk's password/auth_value)
+# — see ScanJob.state_data's encryption-at-rest in StateDataJSON, which protects
+# the DB column but not a decrypted-in-Python value handed back over HTTP.
+_STATE_DATA_SENSITIVE_SUBTREES = ("auth_config", "llm_risk")
+_STATE_DATA_SENSITIVE_LEAVES = {
+    "password", "passwd", "bearer_token", "token", "cookie", "cookies",
+    "headers", "header_value", "auth_value",
+}
+
+
+def _redact_sensitive_leaves(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted = {}
+        for key, sub in value.items():
+            if key in _STATE_DATA_SENSITIVE_LEAVES and sub:
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_sensitive_leaves(sub)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_leaves(item) for item in value]
+    return value
+
+
+def _redact_state_data(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    out = dict(state)
+    for key in _STATE_DATA_SENSITIVE_SUBTREES:
+        if key in out and isinstance(out[key], (dict, list)):
+            out[key] = _redact_sensitive_leaves(out[key])
+    return out
 
 
 class ScanCreate(BaseModel):
@@ -59,6 +94,11 @@ class ScanResponse(BaseModel):
     open_info: int = 0
     state_data: dict[str, Any] = {}
 
+    @field_validator("state_data")
+    @classmethod
+    def _redact_credentials(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _redact_state_data(value)
+
 
 class LogResponse(BaseModel):
     id: int
@@ -95,6 +135,11 @@ class ReportResponse(BaseModel):
     status: str
     findings: list[dict[str, Any]]
     state_data: dict[str, Any]
+
+    @field_validator("state_data")
+    @classmethod
+    def _redact_credentials(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _redact_state_data(value)
 
 
 class ScanStatusResponse(BaseModel):

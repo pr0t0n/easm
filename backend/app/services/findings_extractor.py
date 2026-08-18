@@ -683,6 +683,47 @@ def _extract_nuclei_findings(
             extracted_results = [str(_raw_extracted)]
         curl_command = str(row.get("curl-command") or row.get("curl_command") or "").strip()
 
+        # A bare "template X matched at Y" evidence string discards the ONE
+        # field nuclei's `extracted-results` capture exists for: the specific
+        # resource name (bucket, tenant id, subdomain, etc) the template
+        # pulled out of the response. For a template like aws-bucket-takeover,
+        # `matched_at` is where the REQUEST was sent (the domain/CDN whose
+        # origin is misconfigured) -- it is NOT the vulnerable resource
+        # itself, which is the extracted bucket name. Without surfacing that
+        # distinction explicitly, the finding reads as "the domain is
+        # takeover-able" (wrong and confusing for a takeover-tagged finding,
+        # where readers reasonably expect a claimable subdomain/resource
+        # name, not the apex host) when what's actually true is "this
+        # domain's CDN origin points at a bucket that no longer exists."
+        _extracted_str = (
+            ", ".join(str(v) for v in extracted_results) if isinstance(extracted_results, list)
+            else str(extracted_results) if extracted_results else ""
+        )
+        _evidence_bits = [f"Nuclei template {template_id} matched at {matched_at}"]
+        if _extracted_str:
+            _evidence_bits.append(f"recurso extraído: {_extracted_str}")
+        reproduction_extra: list[str] = []
+        if "takeover" in tags:
+            if _extracted_str:
+                _evidence_bits.append(
+                    f"'{matched_at}' é o host onde a requisição foi feita (a origem/CDN "
+                    f"cujo apontamento está órfão) — o recurso reivindicável é "
+                    f"'{_extracted_str}', não o host em si."
+                )
+                reproduction_extra.append(
+                    f"Verificar se o recurso '{_extracted_str}' está disponível para "
+                    "registro por qualquer conta (ex.: head-bucket/HEAD request direto "
+                    "ao provedor de nuvem, sem depender do domínio alvo) antes de "
+                    "considerar a reivindicação confirmada — a resposta de erro "
+                    "'não existe' isolada não prova disponibilidade global."
+                )
+            else:
+                _evidence_bits.append(
+                    "Template de takeover casou sem um recurso extraído explícito — "
+                    "confirmar manualmente qual serviço/CNAME está órfão antes de reportar."
+                )
+        evidence_text = " · ".join(_evidence_bits)
+
         findings.append({
             "title": name or template_id,
             "severity": severity,
@@ -693,7 +734,7 @@ def _extract_nuclei_findings(
                 "step": tool_name,
                 "asset": matched_at,
                 "tool": tool_name,
-                "evidence": f"Nuclei template {template_id} matched at {matched_at}",
+                "evidence": evidence_text,
                 "template_id": template_id,
                 "nuclei_tags": tags,
                 "result_type": result_type,
@@ -705,6 +746,7 @@ def _extract_nuclei_findings(
                 "cvss": cvss_score,
                 "curl_command": curl_command or None,
                 "extracted_results": extracted_results or None,
+                "reproduction_notes": reproduction_extra or None,
             },
         })
 

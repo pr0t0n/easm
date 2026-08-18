@@ -84,7 +84,8 @@ SERVICE_PROFILES: dict[str, dict] = {
         "risk": "high",
         "tests": ["idor_sequential", "http_method_abuse", "mass_assignment",
                   "verbose_errors", "rate_limit_absent", "bola_check",
-                  "graphql_exposure", "cache_deception", "open_cors", "file_upload"],
+                  "graphql_exposure", "cache_deception", "open_cors", "file_upload",
+                  "stored_content_injection_oob"],
     },
     "node_js_app": {
         "keywords": ["node", "nodejs", "express", "nestjs", "next", "nuxt",
@@ -133,6 +134,7 @@ class BusinessLogicFinding:
         reproduction_steps: list[str],
         business_impact: str,
         cvss_estimate: float = 0.0,
+        extra_details: dict[str, Any] | None = None,
     ):
         self.title = title
         self.severity = severity
@@ -143,6 +145,12 @@ class BusinessLogicFinding:
         self.reproduction_steps = reproduction_steps
         self.business_impact = business_impact
         self.cvss_estimate = cvss_estimate
+        # Structured data a specific test needs to survive into
+        # Finding.details for later async reconciliation -- e.g.
+        # test_stored_html_injection_oob's oob_probe_slug, which
+        # check_and_confirm_oob_findings matches an inbound interactsh
+        # callback against. Most tests leave this empty.
+        self.extra_details = dict(extra_details or {})
 
 
 def _merged_request_kwargs(explicit_headers: dict[str, str] | None, explicit_cookies: Any) -> tuple[dict, Any]:
@@ -688,6 +696,79 @@ def test_mass_assignment(base_url: str, domain: str) -> list[BusinessLogicFindin
     return findings
 
 
+_STORED_INJECTION_FIELD_NAMES = ("content", "message", "comment", "description", "body", "text", "reason", "resource")
+
+
+def test_stored_html_injection_oob(
+    base_url: str, domain: str, input_paths: list[str] | None = None,
+) -> list[BusinessLogicFinding]:
+    """Stored HTML/script injection whose render sink is out-of-band (an
+    internal email/notification template, not the app's own web UI) is
+    invisible to a re-fetch-and-check tester: the app never reflects it back
+    over HTTP. skills/vulnerability_testing/stored_xss_testing.md's
+    "Extension: HTML Injection Rendered in an Email Client" prescribes the
+    correct black-box method -- an OOB beacon, confirmed later by an
+    inbound callback, not a retrieval request -- but until now nothing in
+    this codebase actually generated or tracked one. This wires the
+    interactsh client that already exists (interactsh_callback.py, already
+    polled periodically by tasks.py) into a stored-content write path.
+
+    Only ever creates a "candidate" finding here: confirmation happens
+    asynchronously when/if check_and_confirm_oob_findings sees the callback,
+    keyed on the oob_probe_slug stored in this finding's own details.
+    """
+    from app.services.interactsh_callback import generate_oob_payload
+
+    findings: list[BusinessLogicFinding] = []
+    for path in (input_paths or [])[:5]:
+        url = base_url.rstrip("/") + path
+        oob_url = generate_oob_payload(finding_id=None, test_type="stored")
+        if ".invalid" in oob_url:
+            # register_session() failed (no network path to a public/
+            # configured interactsh server) -- nothing to correlate later,
+            # so don't create a finding that can never be confirmed.
+            continue
+        probe_slug = oob_url.split("://", 1)[-1].split(".", 1)[0]
+        payload_html = f'<img src="{oob_url}">'
+        body = {name: payload_html for name in _STORED_INJECTION_FIELD_NAMES}
+        r = _safe_post(url, json_data=body)
+        if r is None or r.status_code not in (200, 201, 202):
+            continue
+        findings.append(BusinessLogicFinding(
+            title=f"Possível injeção de HTML armazenada (sink fora de banda): {path}",
+            severity="medium",
+            test_type="stored_html_injection_oob",
+            domain=domain,
+            evidence=(
+                f"POST {url} aceitou payload HTML ({payload_html}) em campos de texto livre "
+                f"(status={r.status_code}). Sonda OOB registrada: {oob_url}. Confirmação depende "
+                "de callback recebido pelo interactsh (verificação assíncrona, não desta request)."
+            ),
+            description=(
+                "O endpoint aceita HTML sem sanitização em campo de texto livre. Se o valor for "
+                "renderizado sem escape em um sink fora da aplicação web (ex.: cliente de e-mail "
+                "de suporte), isso não aparece em nenhuma resposta HTTP re-consultável -- só uma "
+                "sonda fora de banda confirma o disparo."
+            ),
+            reproduction_steps=[
+                f"curl -s -X POST '{url}' -H 'Content-Type: application/json' -d '{{\"content\":\"{payload_html}\"}}'",
+                f"# Aguardar callback do interactsh para o slug '{probe_slug}' antes de tratar como confirmado.",
+            ],
+            business_impact=(
+                "Phishing/tracking via cliente de e-mail interno se o sink for um template de "
+                "notificação; a app store como não sanitizada."
+            ),
+            cvss_estimate=5.4,
+            extra_details={
+                "oob_probe_slug": probe_slug,
+                "oob_probe_url": oob_url,
+                "verification_status": "candidate",
+                "needs_verification": True,
+            },
+        ))
+    return findings
+
+
 def test_race_condition_financial(base_url: str, domain: str) -> list[BusinessLogicFinding]:
     """
     Detecta race conditions em operações financeiras/de limite.
@@ -1079,6 +1160,7 @@ def analyze_business_logic(
     discovered_auth_paths: list[str] | None = None,
     auth_headers: dict[str, str] | None = None,
     auth_cookies: dict[str, str] | None = None,
+    discovered_input_paths: list[str] | None = None,
 ) -> list[dict]:
     """
     Executa testes de business logic para um domínio.
@@ -1123,6 +1205,8 @@ def analyze_business_logic(
             raw_findings.extend(test_graphql_exposure(base_url, domain))
         if "mass_assignment" in tests_to_run:
             raw_findings.extend(test_mass_assignment(base_url, domain))
+        if "stored_content_injection_oob" in tests_to_run and discovered_input_paths:
+            raw_findings.extend(test_stored_html_injection_oob(base_url, domain, discovered_input_paths))
         if "race_condition_financial" in tests_to_run:
             raw_findings.extend(test_race_condition_financial(base_url, domain))
         if "cache_deception" in tests_to_run:
@@ -1138,7 +1222,10 @@ def analyze_business_logic(
     finally:
         _auth_context.reset(_token)
 
-    # Convert to platform format
+    return _to_platform_findings(raw_findings, service_type)
+
+
+def _to_platform_findings(raw_findings: list[BusinessLogicFinding], service_type: str) -> list[dict]:
     return [
         {
             "title": f.title,
@@ -1156,10 +1243,41 @@ def analyze_business_logic(
                 "business_impact": f.business_impact,
                 "cvss_estimate": f.cvss_estimate,
                 "payload": f.reproduction_steps[0] if f.reproduction_steps else "",
+                **f.extra_details,
             },
         }
         for f in raw_findings
     ]
+
+
+def run_read_only_checks(
+    base_url: str,
+    domain: str,
+    *,
+    extra_paths: list[str] | None = None,
+    auth_headers: dict[str, str] | None = None,
+    auth_cookies: dict[str, str] | None = None,
+) -> list[dict]:
+    """Run only the battery checks that need no mutation/action plan at all.
+
+    Unlike `analyze_business_logic`, which bundles genuine writes (e.g.
+    `test_mass_assignment` registers a real account, `test_file_upload`
+    uploads a real file) and therefore must stay gated behind a vetted
+    action/contract, `test_open_cors` and `test_rate_limit_absent` only ever
+    issue reads or failed-login probes against `base_url`/`domain`. Callers
+    with no observed mutation actions (i.e. most read-heavy targets) can run
+    these unconditionally without touching the "no plan, no request" guard
+    that the rest of the battery still requires.
+    """
+    _token = _auth_context.set({"headers": auth_headers or {}, "cookies": auth_cookies or {}})
+    try:
+        raw_findings: list[BusinessLogicFinding] = [
+            *test_open_cors(base_url, domain),
+            *test_rate_limit_absent(base_url, domain, extra_paths=extra_paths),
+        ]
+    finally:
+        _auth_context.reset(_token)
+    return _to_platform_findings(raw_findings, classify_service(domain, None))
 
 
 _AUTH_PATH_KEYWORDS = ("login", "auth", "token", "signin", "sign-in", "session", "authorize", "sso")
@@ -1197,6 +1315,46 @@ def _discovered_auth_paths(db: Any, scan_id: int, domain: str) -> list[str]:
             continue
         path = parsed.path or ""
         if path and any(kw in path.lower() for kw in _AUTH_PATH_KEYWORDS):
+            paths.append(path)
+    return list(dict.fromkeys(paths))[:15]
+
+
+_INPUT_SURFACE_PATH_KEYWORDS = ("search", "comment", "feedback", "support", "message", "ticket", "contact")
+
+
+def _discovered_input_surface_paths(db: Any, scan_id: int, domain: str) -> list[str]:
+    """Same pattern as _discovered_auth_paths, for free-text write endpoints
+    (support tickets, comments, feedback forms) -- test_stored_html_injection_oob's
+    candidate paths, real endpoints the recon phase already found rather than
+    a hardcoded guess list."""
+    from urllib.parse import urlparse
+
+    from app.models.models import OffensiveEndpoint
+
+    try:
+        rows = (
+            db.query(OffensiveEndpoint.url, OffensiveEndpoint.method)
+            .filter(
+                OffensiveEndpoint.scan_job_id == scan_id,
+                OffensiveEndpoint.method.in_(["POST", "PUT"]),
+            )
+            .order_by(OffensiveEndpoint.url.asc(), OffensiveEndpoint.id.asc())
+            .limit(500)
+            .all()
+        )
+    except Exception:
+        return []
+
+    paths: list[str] = []
+    for url, _method in rows:
+        try:
+            parsed = urlparse(str(url or ""))
+        except Exception:
+            continue
+        if domain not in (parsed.hostname or ""):
+            continue
+        path = parsed.path or ""
+        if path and any(kw in path.lower() for kw in _INPUT_SURFACE_PATH_KEYWORDS):
             paths.append(path)
     return list(dict.fromkeys(paths))[:15]
 
@@ -1253,10 +1411,12 @@ def run_business_logic_scan(
             .all()
         )
         discovered_auth_paths = _discovered_auth_paths(db, scan_id, domain)
+        discovered_input_paths = _discovered_input_surface_paths(db, scan_id, domain)
 
         biz_findings = analyze_business_logic(
             domain, base_url, existing_findings, discovered_auth_paths,
             auth_headers=auth_headers, auth_cookies=auth_cookies,
+            discovered_input_paths=discovered_input_paths,
         )
 
         raw_findings = []

@@ -19,12 +19,32 @@ from sqlalchemy.orm import Session
 from app.models.models import ScanJob
 
 
+def _strip_wildcard_prefix(host: str) -> str:
+    """Fold a leading "*." wildcard into its bare root.
+
+    "*.example.com" is a common operator shorthand for "this root and all its
+    subdomains" -- exactly what is_host_in_scope already grants for the bare
+    apex via its `host.endswith(f".{root}")` check, so normalize the wildcard
+    away here instead of letting a literal "*.example.com" string survive
+    into scope comparisons, where it can never match a real hostname (this
+    previously made `*.domain` scope entries a silent no-op: accepted at
+    input, matched nothing at check time). A bare "*" root is rejected
+    (returns "") -- it would otherwise silently authorize every host on the
+    internet.
+    """
+    if host == "*":
+        return ""
+    if host.startswith("*."):
+        return host[2:]
+    return host
+
+
 def _normalize_scope_root(value: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
     if "://" in raw:
-        return str(urlparse(raw).hostname or "").strip().strip(".")
+        return _strip_wildcard_prefix(str(urlparse(raw).hostname or "").strip().strip("."))
     try:
         network = ipaddress.ip_network(raw, strict=False)
         return str(network) if "/" in raw else str(network.network_address)
@@ -32,7 +52,7 @@ def _normalize_scope_root(value: str) -> str:
         pass
     raw = raw.split("/", 1)[0]
     try:
-        return str(urlparse(f"//{raw}").hostname or raw).strip().strip(".")
+        return _strip_wildcard_prefix(str(urlparse(f"//{raw}").hostname or raw).strip().strip("."))
     except ValueError:
         return ""
 

@@ -205,6 +205,17 @@ def poll_callbacks(timeout_seconds: int = 30) -> list[dict[str, Any]]:
 def check_and_confirm_oob_findings(db, scan_id: int) -> int:
     """Poll Interactsh and promote candidate findings that triggered callbacks.
 
+    Two correlation schemes coexist:
+      1. Legacy: the finding already existed when the OOB URL was generated,
+         so its real id is embedded in the slug (f{id}-{type}-{hex}) --
+         e.g. adaptive_error_probe.py's SSRF collector.
+      2. oob_probe_slug: the finding did NOT exist yet at generation time
+         (test_stored_html_injection_oob generates the URL before the write
+         it's injected into has even been submitted, let alone persisted as
+         a Finding row) -- the full slug is instead stored in the finding's
+         own `details.oob_probe_slug` once it IS persisted, and matched here
+         by lookup instead of by parsing an id out of the callback.
+
     Returns count of findings confirmed via OOB callback.
     """
     from app.models.models import Finding
@@ -217,31 +228,41 @@ def check_and_confirm_oob_findings(db, scan_id: int) -> int:
 
     for cb in callbacks:
         uid = str(cb.get("unique_id") or "")
-        # Parse finding_id from slug: f{id}-{type}-{hex}
+        if not uid:
+            continue
+        finding = None
         if uid.startswith("f") and "-" in uid:
             parts = uid[1:].split("-")
             try:
                 finding_id = int(parts[0])
             except (ValueError, IndexError):
-                continue
-
-            finding = db.query(Finding).filter(
-                Finding.id == finding_id,
-                Finding.scan_job_id == scan_id,
-            ).first()
-
-            if finding and finding.verification_status in ("candidate", "hypothesis"):
-                finding.verification_status = "confirmed"
-                d = dict(finding.details or {})
-                d["verification_status"] = "confirmed"
-                d["oob_callback"] = {
-                    "protocol": cb.get("protocol"),
-                    "remote_address": cb.get("remote_address"),
-                    "timestamp": cb.get("timestamp"),
-                }
-                d["needs_verification"] = False
-                finding.details = d
-                confirmed += 1
+                finding_id = None
+            if finding_id is not None:
+                finding = db.query(Finding).filter(
+                    Finding.id == finding_id,
+                    Finding.scan_job_id == scan_id,
+                ).first()
+        if finding is None:
+            finding = (
+                db.query(Finding)
+                .filter(
+                    Finding.scan_job_id == scan_id,
+                    Finding.details["oob_probe_slug"].astext == uid,
+                )
+                .first()
+            )
+        if finding and finding.verification_status in ("candidate", "hypothesis"):
+            finding.verification_status = "confirmed"
+            d = dict(finding.details or {})
+            d["verification_status"] = "confirmed"
+            d["oob_callback"] = {
+                "protocol": cb.get("protocol"),
+                "remote_address": cb.get("remote_address"),
+                "timestamp": cb.get("timestamp"),
+            }
+            d["needs_verification"] = False
+            finding.details = d
+            confirmed += 1
 
     if confirmed:
         from datetime import datetime

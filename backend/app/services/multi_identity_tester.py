@@ -204,10 +204,17 @@ class MultiIdentityTester:
                 status_b, body_b = self._get_resource(self.token_b, path)
 
                 if status_b == 200 and body_a == body_b:
+                    # EVID-001: exact response-body equality is a weak signal on
+                    # its own -- it never checks any real ownership marker, so a
+                    # PUBLIC endpoint any authenticated user can read (no BOLA at
+                    # all) triggers this exact same condition. "candidate", not
+                    # "confirmed": this needs a human/re-test to actually confirm
+                    # cross-tenant access, not just "both users got 200 with the
+                    # same bytes back".
                     bola_findings.append({
                         "title": f"BOLA: User B can access User A's resource at {path}",
                         "severity": "high",
-                        "verification_status": "confirmed",
+                        "verification_status": "candidate",
                         "evidence": {
                             "path": path,
                             "user_a_status": status_a,
@@ -297,8 +304,12 @@ def run_multi_identity_test(db, job, target: str) -> dict[str, Any]:
             domain=target,
             tool="multi-identity-tester",
             risk_score=f_dict.get("risk_score", 8),
-            confidence_score=90,
-            verification_status=f_dict.get("verification_status", "confirmed"),
+            # EVID-001: this used to be a hardcoded 90 regardless of what the
+            # test actually observed, and defaulted an OMITTED
+            # verification_status to "confirmed" -- fail toward LESS
+            # confidence when data is missing, never more.
+            confidence_score=55 if f_dict.get("verification_status") == "candidate" else 90,
+            verification_status=f_dict.get("verification_status", "candidate"),
             url=f_dict.get("url"),
             details={
                 "source": "multi_identity_tester",

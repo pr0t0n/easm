@@ -461,7 +461,14 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                 title=title[:255],
                 severity=sev,
                 risk_score=risk,
-                confidence_score=80,
+                # EVID-001: this is a hostname-keyword-only inference ("ops" in
+                # subdomain -> "ops infra exposed") with no HTTP probe or other
+                # verification -- confidence_score used to be a flat 80 with no
+                # verification_status at all, indistinguishable from a
+                # tool-confirmed finding. "candidate" + a lower score marks it
+                # honestly as an unverified naming-convention signal.
+                confidence_score=45,
+                verification_status="candidate",
                 domain=target,
                 tool="business_risk_analysis",
                 details={
@@ -507,7 +514,10 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                 title=title[:255],
                 severity="high",
                 risk_score=8,
-                confidence_score=90,
+                # EVID-001: hostname-keyword-only inference ("dev"/"staging" in
+                # subdomain), no HTTP probe -- same rationale as infra_ops_exposed above.
+                confidence_score=50,
+                verification_status="candidate",
                 domain=root,
                 tool="business_risk_analysis",
                 details={
@@ -577,7 +587,13 @@ def analyze_business_risks(db: Session, scan_id: int) -> int:
                 title=title[:255],
                 severity="medium",
                 risk_score=6,
-                confidence_score=70,
+                # EVID-001: the missing-headers half of this claim is a real,
+                # separately-verified finding, but the "processes personal
+                # data" half is still a subdomain-keyword inference -- the
+                # compound claim shouldn't carry the same confidence as a
+                # directly-observed technical finding.
+                confidence_score=55,
+                verification_status="candidate",
                 domain=target,
                 tool="business_risk_analysis",
                 details={

@@ -33,8 +33,7 @@ import re
 # sqlmap: permitir enumeração de ESTRUTURA, bloquear extração de CONTEÚDO,
 # escrita em arquivo, shell de SO/SQL e execução de comandos.
 _SQLMAP_FORBIDDEN = [
-    r"^--dump(?:-all)?$",        # dump de conteúdo de tabelas
-    r"^--dump-all$",
+    r"^--dump(?:-all)?$",        # dump de conteúdo de tabelas (cobre --dump e --dump-all)
     r"^-D?$",                    # nota: -D/-T/-C sozinhos são p/ escopo de dump
     r"^--passwords$",            # hashes de senha = dado sensível
     r"^--sql-query.*$",          # query arbitrária pode extrair dados
@@ -74,6 +73,21 @@ _NUCLEI_FORBIDDEN = [
 # hydra / medusa: sem brute-force massivo (DoS de auth / account lockout).
 # Threads altas são reduzidas no sanitizador (ver _THREAD_CAPS).
 
+# crackmapexec: o profile post_exploitation.yaml só usa --shares (leitura de
+# listagem), mas a ferramenta suporta dump de credenciais (--sam/--lsa/--ntds)
+# e execução remota de comando via SMB (-x/-X/--exec-method) -- sem essas
+# flags no denylist, um extra_arg do operador (ou um profile futuro) poderia
+# escalar de "listar shares" para "dump de hashes"/"RCE" sem passar por
+# nenhum guardrail (KALI-002).
+_CRACKMAPEXEC_FORBIDDEN = [
+    r"(?i)^--sam$",
+    r"(?i)^--lsa$",
+    r"(?i)^--ntds.*$",
+    r"^-x.*$",
+    r"^-X.*$",
+    r"(?i)^--exec-method.*$",
+]
+
 # Padrões GLOBAIS proibidos para QUALQUER ferramenta (defesa em profundidade):
 _GLOBAL_FORBIDDEN = [
     r"(?i)^--dump(?:-all)?$",
@@ -85,6 +99,7 @@ _GLOBAL_FORBIDDEN = [
 FORBIDDEN_ARG_PATTERNS: dict[str, list[str]] = {
     "sqlmap": _SQLMAP_FORBIDDEN,
     "ghauri": _GHAURI_FORBIDDEN,
+    "crackmapexec": _CRACKMAPEXEC_FORBIDDEN,
 }
 
 # Valores de tag de nuclei que jamais devem rodar (DoS / fuzz destrutivo).
@@ -244,8 +259,10 @@ DISABLED_ATTACKS: list[dict] = [
         "what_we_never_do": "Nunca lemos, baixamos ou copiamos arquivos/segredos "
                             "do alvo.",
         "enforcement": "Flags de leitura/escrita de arquivo (--file-read, "
-                       "--file-write, --file-dest) removidas globalmente.",
-        "tools": ["sqlmap", "ghauri"],
+                       "--file-write, --file-dest) removidas globalmente; "
+                       "dump de credenciais (--sam, --lsa, --ntds) removido "
+                       "do crackmapexec.",
+        "tools": ["sqlmap", "ghauri", "crackmapexec"],
     },
     {
         "id": "defacement",
@@ -275,8 +292,9 @@ DISABLED_ATTACKS: list[dict] = [
                             "destrutivo. Só o comando de prova benigno.",
         "enforcement": "Comando de prova restrito ao allowlist (sem ;|&`$ etc.); "
                        "flags --os-shell/--os-cmd/--os-pwn de tools removidas; "
-                       "sem framework de C2/payload de shell.",
-        "tools": ["sqlmap", "interactsh (somente prova)"],
+                       "-x/-X/--exec-method removidas do crackmapexec (RCE via "
+                       "SMB); sem framework de C2/payload de shell.",
+        "tools": ["sqlmap", "interactsh (somente prova)", "crackmapexec"],
     },
     {
         "id": "bruteforce_destructive",

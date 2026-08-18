@@ -1,6 +1,7 @@
 import os
 import base64
 import gzip
+import logging
 import random
 import re
 import threading
@@ -43,9 +44,19 @@ from app.workers.worker_groups import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 SCHEDULE_TARGETS_PER_SCAN = max(1, min(200, int(os.getenv("SCHEDULE_TARGETS_PER_SCAN", "25"))))
 HALTED_SCAN_STATUSES = {"stopped", "paused"}
 TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps", "failed", "cancelled", "canceled"}
+# A late/stray error arriving after a scan already finalized successfully
+# (e.g. a work item created just before finalization but flushed just after
+# it, hitting the terminal-scan guard) must never clobber that success back
+# to "failed" -- confirmed live: this exact race turned a fully-completed
+# scan into FAILED. Checked before every unconditional job.status="failed"
+# write in this module.
+SUCCESS_TERMINAL_SCAN_STATUSES = {"completed", "completed_with_gaps"}
 NON_EXECUTABLE_SCAN_STATUSES = TERMINAL_SCAN_STATUSES | HALTED_SCAN_STATUSES | {"blocked"}
 
 
@@ -79,6 +90,68 @@ def _halted_scan_result(scan_status: str | None) -> dict[str, Any]:
 
 def _scan_is_terminal(scan_status: str | None) -> bool:
     return str(scan_status or "").lower() in TERMINAL_SCAN_STATUSES
+
+
+def _is_post_scan_revalidation(item: Any, job: Any | None = None) -> bool:
+    """Allow only a fully-bound P21 wire to execute after scan finalisation."""
+    try:
+        from app.models.models import is_post_scan_revalidation_item
+
+        return is_post_scan_revalidation_item(
+            item,
+            str(getattr(job, "status", "") or "") if job is not None else None,
+        )
+    except Exception:
+        return False
+
+
+def _collect_post_scan_followup_ids(db: Session, item: Any) -> list[int]:
+    """Collect newly materialised return wires after a terminal P21 result."""
+    try:
+        from app.models.models import ScanWorkItem
+
+        finding_id = (dict(getattr(item, "item_metadata", None) or {})).get("verifies_finding_id")
+        if not finding_id:
+            return []
+        rows = (
+            db.query(ScanWorkItem)
+            .filter(
+                ScanWorkItem.phase_id == "P21",
+                ScanWorkItem.status.in_(["queued", "retry"]),
+            )
+            .all()
+        )
+        return [
+            int(row.id) for row in rows
+            if int((dict(row.item_metadata or {})).get("verifies_finding_id") or 0) == int(finding_id)
+            and _is_post_scan_revalidation(row)
+        ]
+    except Exception:
+        return []
+
+
+def _consume_validation_wire_and_collect_followups(db: Session, job: Any, item: Any) -> list[int]:
+    metadata = dict(getattr(item, "item_metadata", None) or {})
+    if str(getattr(item, "phase_id", "") or "") != "P21" or not metadata.get("validation_wire_id"):
+        return []
+    try:
+        from app.services.finding_adjudication import consume_terminal_validation_wire
+
+        with db.begin_nested():
+            consume_terminal_validation_wire(db, job, item)
+        db.flush()
+        return _collect_post_scan_followup_ids(db, item)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("validation wire terminal consume failed item=%s: %s", getattr(item, "id", None), exc)
+        return []
+
+
+def _schedule_post_scan_followups(item_ids: list[int], *, countdown: int = 1) -> None:
+    for followup_id in sorted(set(int(value) for value in item_ids)):
+        try:
+            schedule_post_scan_validation_wire(followup_id, countdown=countdown)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("post-scan validation wire scheduling failed item=%s: %s", followup_id, exc)
 
 
 def _scan_execution_preflight(scan_id: int) -> dict[str, Any] | None:
@@ -2889,6 +2962,19 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
                 db.commit()
                 return _halted_scan_result(job.status)
+            if str(job.status or "").lower() in SUCCESS_TERMINAL_SCAN_STATUSES:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="worker",
+                    level="WARNING",
+                    message=(
+                        f"post_completion_error_ignored status={job.status} error={exc!s} — scan already "
+                        "finished successfully; not overwriting to failed"
+                    )[:2000],
+                ))
+                _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
+                db.commit()
+                return {"ok": True, "scan_id": scan_id, "scan_mode": scan_mode, "retryable": False, "post_completion_anomaly": str(exc)[:500]}
             job.status = "failed"
             job.last_error = str(exc)
             db.add(ScanLog(scan_job_id=job.id, source="worker", level="ERROR", message=str(exc)))
@@ -3287,6 +3373,26 @@ def recover_scan_if_orphaned(scan_id: int, mode: str = "unit", source: str = "wa
         if status not in _RECOVERABLE_SCAN_STATUSES:
             return {"scan_id": scan_id, "action": "skip", "status": status}
 
+        # A quality-gate hard-block auto-retry (see dispatch_scan_work_items
+        # and run_offensive_operator_scan) deliberately sets status="running"
+        # and schedules a follow-up dispatch minutes in the future via
+        # _schedule_scan_work_dispatch(countdown=...) -- during that wait the
+        # scan has no active celery task and no chain lock BY DESIGN, which
+        # this function's own orphan heuristic can't tell apart from a
+        # genuinely abandoned scan. Confirmed live: this fired every ~1min
+        # watchdog tick during the wait and burned through the entire
+        # redrive budget in minutes, permanently failing a scan whose own
+        # quality-gate retry hadn't even had a chance to run yet. Only the
+        # capacity_work_queue engine had an equivalent protection (the
+        # pending-work-queue check below); this covers both engines.
+        _qg_wait_until = str((job.state_data or {}).get("quality_gate_retry_scheduled_until") or "")
+        if _qg_wait_until:
+            try:
+                if datetime.fromisoformat(_qg_wait_until) > datetime.now():
+                    return {"scan_id": scan_id, "action": "quality_gate_retry_pending"}
+            except ValueError:
+                pass
+
         if active_ids is None:
             active_ids, inspect_ok = active_scan_task_ids()
 
@@ -3680,6 +3786,25 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
             )
             db.commit()
             raise task_ctx.retry(exc=Exception(result.get("error", "scan failed")), countdown=countdown)
+
+        if str(job.status or "").lower() in SUCCESS_TERMINAL_SCAN_STATUSES:
+            # Defense in depth alongside the same check in _execute_scan's
+            # exception handler: whatever reached retry-exhaustion here, the
+            # scan itself is already recorded as successfully finished --
+            # never let a doomed retry loop clobber that back to "failed".
+            db.add(
+                ScanLog(
+                    scan_job_id=scan_id,
+                    source="worker.retry",
+                    level="WARNING",
+                    message=(
+                        f"retry_exhaustion_ignored status={job.status} attempts={attempt}/{max_attempts} — "
+                        "scan already finished successfully; not overwriting to failed"
+                    ),
+                )
+            )
+            db.commit()
+            return {"ok": True, "scan_id": scan_id, "scan_mode": scan_mode, "retryable": False}
 
         job.status = "failed"
         job.next_retry_at = None
@@ -4796,7 +4921,10 @@ def dispatch_scan_work_items(
                 )
                 try:
                     from app.services.scan_execution_metrics import reconcile_tool_run_ledger
-                    from app.services.scan_quality import run_scan_quality_gate
+                    from app.services.scan_quality import (
+                        QUALITY_GATE_HARD_BLOCK_MAX_RETRIES,
+                        run_scan_quality_gate,
+                    )
 
                     reconcile_tool_run_ledger(db, job)
                     _quality_gate = run_scan_quality_gate(db, job)
@@ -4827,6 +4955,13 @@ def dispatch_scan_work_items(
                     job.status = "running"
                     job.mission_progress = 99
                     job.current_step = "P21 Quality Gate · validação e retry automático"
+                    # A quality-gate-driven transition sets its own,
+                    # up-to-date reason on current_step -- don't let an
+                    # unrelated stale error from an earlier attempt keep
+                    # showing next to it (confirmed live: a P21-blocked scan
+                    # displaying a leftover SQLAlchemy session error from a
+                    # completely different failure hours earlier).
+                    job.last_error = None
                     db.add(ScanLog(
                         scan_job_id=scan_id,
                         source="quality-gate",
@@ -4846,19 +4981,72 @@ def dispatch_scan_work_items(
                     _final_state["quality_gate_active"] = False
                     _final_state["quality_gate_blocked"] = True
                     _final_state["current_pentest_phase_id"] = "P21"
+                    # Separate, dedicated counter -- NOT ScanJob.retry_attempt/
+                    # retry_max, which belong to the generic celery-task retry
+                    # wrapper (tasks.py's _run_scan_with_retry_locked) and are
+                    # only ever touched while that task instance is alive. A
+                    # hard quality-gate block previously set status="blocked"
+                    # and returned with NOTHING scheduled to look at it again —
+                    # a scan could sit blocked indefinitely with zero further
+                    # activity (confirmed live: scan #1, 40+ hours, no retry
+                    # log entries after the initial block). Give it a few
+                    # bounded, backed-off automatic re-dispatches first — the
+                    # same recovery mechanism the softer requires_remediation
+                    # branch above already uses — before settling into a
+                    # genuinely final, human-intervention-required state.
+                    hard_retry_count = int(_final_state.get("quality_gate_hard_retry_count") or 0)
+                    _blockers = _quality_gate.get("blockers")
+                    _score = _quality_gate.get("quality", {}).get("score")
+                    _gap_count = _quality_gate.get("gap_count")
+                    if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES:
+                        hard_retry_count += 1
+                        backoff = min(3600, 300 * (2 ** (hard_retry_count - 1)))  # 5min, 10min, 20min, capped 1h
+                        _final_state["quality_gate_hard_retry_count"] = hard_retry_count
+                        # Tells recover_scan_if_orphaned's watchdog this
+                        # status="running"-with-no-active-task window is
+                        # intentional (a scheduled backoff wait), not
+                        # abandonment -- without this, the watchdog's
+                        # per-minute orphan check burns through its own
+                        # unrelated redrive budget and permanently fails the
+                        # scan long before this retry ever gets to run.
+                        _final_state["quality_gate_retry_scheduled_until"] = (
+                            datetime.now() + timedelta(seconds=backoff + 60)
+                        ).isoformat()
+                        _final_state = _assign_scan_state(db, job, _final_state)
+                        job.status = "running"
+                        job.mission_progress = 99
+                        job.current_step = (
+                            f"P21 Quality Gate · retry automático "
+                            f"{hard_retry_count}/{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} apos bloqueio de qualidade"
+                        )
+                        job.last_error = None
+                        db.add(ScanLog(
+                            scan_job_id=scan_id,
+                            source="quality-gate",
+                            level="WARNING",
+                            message=(
+                                "QUALITY GATE bloqueou conclusão — retry automático "
+                                f"{hard_retry_count}/{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} agendado "
+                                f"score={_score} gap_count={_gap_count} blockers={_blockers}"
+                            )[:2000],
+                        ))
+                        db.commit()
+                        _schedule_scan_work_dispatch(scan_id, limit, countdown=backoff)
+                        return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
                     _final_state = _assign_scan_state(db, job, _final_state)
                     job.status = "blocked"
                     job.mission_progress = 99
-                    job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade"
+                    job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade (retries automáticos esgotados)"
+                    job.last_error = None
                     db.add(ScanLog(
                         scan_job_id=scan_id,
                         source="quality-gate",
                         level="ERROR",
                         message=(
-                            "QUALITY GATE bloqueou conclusão — sem 100% de cobertura/evidência/validação "
-                            f"score={_quality_gate.get('quality', {}).get('score')} "
-                            f"gap_count={_quality_gate.get('gap_count')} "
-                            f"blockers={_quality_gate.get('blockers')}"
+                            "QUALITY GATE bloqueou conclusão definitivamente — "
+                            f"{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} retries automáticos esgotados sem 100% de "
+                            f"cobertura/evidência/validação score={_score} gap_count={_gap_count} "
+                            f"blockers={_blockers}. Requer intervenção manual (remediar gaps e retomar)."
                         )[:2000],
                     ))
                     db.commit()
@@ -4936,6 +5124,90 @@ def dispatch_scan_work_items(
             pass
 
 
+def schedule_post_scan_validation_wire(item_id: int, *, countdown: int = 0) -> str | None:
+    """Publish the dedicated dispatcher used by terminal-scan P21 wires."""
+    result = dispatch_post_scan_validation_wire.apply_async(
+        args=[int(item_id)],
+        countdown=max(0, int(countdown)),
+        queue=SCAN_PARALLEL_QUEUE,
+    )
+    return str(getattr(result, "id", "") or "") or None
+
+
+@celery.task(name="dispatch_post_scan_validation_wire", queue=SCAN_PARALLEL_QUEUE, ignore_result=True)
+def dispatch_post_scan_validation_wire(item_id: int):
+    """Capacity-aware dispatcher for one bounded P21 wire on a closed scan."""
+    from app.db.session import SessionLocal
+    from app.models.models import ScanJob, ScanLog, ScanWorkItem
+    from app.services.scan_work_queue import capacity_limits, kali_inflight_claim, kali_inflight_release
+    from app.workers.worker_groups import phase_queue
+
+    db = SessionLocal()
+    claimed_capacity = False
+    resource_class = "medium"
+    try:
+        item = (
+            db.query(ScanWorkItem)
+            .filter(ScanWorkItem.id == int(item_id))
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+        if item is None:
+            return {"error": f"work item {item_id} not found"}
+        job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+        if job is None or not _is_post_scan_revalidation(item, job):
+            return {"id": item.id, "status": item.status, "error": "invalid_post_scan_revalidation_binding"}
+        if item.status == "submitted":
+            db.commit()
+            _schedule_work_item_poll(item.id, countdown=1)
+            return {"id": item.id, "status": item.status, "poll_rehydrated": True}
+        if item.status not in {"queued", "retry"}:
+            return {"id": item.id, "status": item.status}
+        if int(item.attempts or 0) >= int(item.max_attempts or 1):
+            item.status = "failed"
+            item.finished_at = datetime.now()
+            item.lease_until = None
+            item.last_error = "post_scan_revalidation_attempts_exhausted"
+            db.commit()
+            return {"id": item.id, "status": item.status}
+
+        resource_class = str(item.resource_class or "medium")
+        cap = int(capacity_limits().get(resource_class) or 1)
+        if not kali_inflight_claim(resource_class, 1, cap):
+            db.commit()
+            schedule_post_scan_validation_wire(item.id, countdown=10)
+            return {"id": item.id, "status": item.status, "deferred": "capacity"}
+
+        claimed_capacity = True
+        item.status = "dispatched"
+        item.lease_until = datetime.now() + timedelta(seconds=max(60, int(settings.scan_work_queue_lease_seconds)))
+        item.updated_at = datetime.now()
+        db.add(ScanLog(
+            scan_job_id=item.scan_job_id,
+            source="validation-wire",
+            level="INFO",
+            message=(
+                f"post_scan_wire_dispatched item={item.id} "
+                f"wire={(item.item_metadata or {}).get('validation_wire_id')} tool={item.tool_name}"
+            ),
+        ))
+        db.commit()
+        queue = phase_queue("P21", mode="scheduled" if str(job.mode or "").lower() == "scheduled" else "unit")
+        execute_scan_work_item.apply_async(args=[item.id], queue=queue)
+        claimed_capacity = False
+        return {"id": item.id, "status": "dispatched", "queue": queue}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        if claimed_capacity:
+            try:
+                kali_inflight_release(resource_class, 1)
+            except Exception:
+                pass
+        return {"id": int(item_id), "status": "error", "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
 @celery.task(
     name="execute_scan_work_item",
     queue=SCAN_PARALLEL_QUEUE,
@@ -4961,6 +5233,7 @@ def execute_scan_work_item(item_id: int):
     _execute_lock = None
     _execute_lock_key = f"work_item_execute_lock:{int(item_id)}"
     _execute_lock_token = uuid.uuid4().hex
+    job = None
     try:
         item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
         if not item:
@@ -4972,7 +5245,7 @@ def execute_scan_work_item(item_id: int):
             item.finished_at = datetime.now()
             db.commit()
             return {"error": "scan_not_found"}
-        if _scan_is_terminal(job.status):
+        if _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
             if item.status in {"dispatched", "running", "submitted", "retry"}:
                 try:
                     kali_inflight_release(str(item.resource_class or "light"), 1)
@@ -5022,7 +5295,9 @@ def execute_scan_work_item(item_id: int):
             _state = dict(job.state_data or {})
             _state["work_queue_counts"] = counts
             job.state_data = _state
+            _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item)
             db.commit()
+            _schedule_post_scan_followups(_post_scan_followups)
             return {
                 "id": item.id,
                 "status": item.status,
@@ -5177,7 +5452,9 @@ def execute_scan_work_item(item_id: int):
                     f"target={item.target} tool={item.tool_name} reason={reason}"
                 ),
             ))
+            _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item)
             db.commit()
+            _schedule_post_scan_followups(_post_scan_followups)
             return {"id": item.id, "status": "skipped", "reason": reason}
 
         if _is_work_item_batch_target(item.target) and _applicability.get("batch_targets"):
@@ -5273,6 +5550,10 @@ def execute_scan_work_item(item_id: int):
                 "target": _dispatch_target,
                 "scan_id": item.scan_job_id,
                 "authorized_scope": _authorized_scope,
+                **({"validation_wire": dict(_item_meta.get("validation_wire") or {})} if _item_meta.get("validation_wire") else {}),
+                **({"input_bindings": dict(_item_meta.get("input_bindings") or {})} if _item_meta.get("input_bindings") else {}),
+                **({"parameter": str(_item_meta.get("target_parameter"))} if _item_meta.get("target_parameter") else {}),
+                **({"expected_signals": dict(_item_meta.get("expected_signals") or {})} if _item_meta.get("expected_signals") else {}),
                 **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
                 **({k: v for k, v in _job_env.items()} if _job_env else {}),
                 **({"auth_headers": _auth_headers} if _auth_headers else {}),
@@ -5297,12 +5578,24 @@ def execute_scan_work_item(item_id: int):
         if _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"} or _norm_item_tool.startswith("skill-probe"):
             from app.services.worker_dispatcher import execute_tool_with_workers
 
+            _wire_contract = dict(_item_meta.get("validation_wire") or {})
+            _execution_skill_contract = {
+                "phase_id": item.phase_id,
+                "skill_id": _primary_skill_id,
+                "identity_key": _item_meta.get("identity_key"),
+                "secondary_identity_key": _item_meta.get("secondary_identity_key"),
+                "validation_wire": _wire_contract,
+                "input_bindings": dict(_item_meta.get("input_bindings") or {}),
+                "expected_signals": dict(_item_meta.get("expected_signals") or {}),
+            }
             result = execute_tool_with_workers(
                 item.tool_name,
                 _dispatch_target,
                 scan_mode="unit",
                 scan_id=item.scan_job_id,
                 skill_id=_primary_skill_id,
+                skill_contract=_execution_skill_contract,
+                evidence_required=list((dict(_item_meta.get("expected_signals") or {})).values()),
                 targets=_batch_targets if _is_batch else None,
             )
             raw_status = str(result.get("status") or "").lower()
@@ -5391,6 +5684,23 @@ def execute_scan_work_item(item_id: int):
                     db.commit()
                 except Exception:
                     db.rollback()
+            # Backend-local tools return from this branch and never enter the
+            # asynchronous MCP poller below.  Close a P21 validation wire here
+            # as the same terminal hook used by polled tools.
+            if terminal != "retry" and item.phase_id == "P21" and _item_meta.get("validation_wire_id"):
+                try:
+                    _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item)
+                    db.commit()
+                    _schedule_post_scan_followups(_post_scan_followups)
+                except Exception as _wire_exc:
+                    db.rollback()
+                    logger.warning(
+                        "backend-local validation wire consume failed item=%s: %s",
+                        item.id,
+                        _wire_exc,
+                    )
+            if terminal == "retry" and _is_post_scan_revalidation(item, job):
+                schedule_post_scan_validation_wire(item.id, countdown=30)
             return {"id": item.id, "status": terminal, "execution_path": "backend_local"}
 
         # Never pass timeout to the kali runner — the profile's own timeout is
@@ -5405,7 +5715,7 @@ def execute_scan_work_item(item_id: int):
         response.raise_for_status()
         result = dict(response.json())
         db.refresh(job)
-        if _scan_is_terminal(job.status):
+        if _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
             try:
                 from app.services.scan_work_queue import kali_inflight_release
                 kali_inflight_release(str(item.resource_class or "light"), 1)
@@ -5509,7 +5819,13 @@ def execute_scan_work_item(item_id: int):
                 f"tool={item.tool_name} status={item.status} kali_job_id={(item.result or {}).get('kali_job_id')}"
             ),
         ))
+        _post_scan_followups: list[int] = []
+        if item.status in {"completed", "done", "failed", "timeout", "skipped"}:
+            _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item)
         db.commit()
+        _schedule_post_scan_followups(_post_scan_followups)
+        if item.status == "retry" and _is_post_scan_revalidation(item, job):
+            schedule_post_scan_validation_wire(item.id, countdown=120)
         return {"id": item.id, "status": item.status}
     except Exception as exc:  # noqa: BLE001
         db.rollback()
@@ -5536,7 +5852,14 @@ def execute_scan_work_item(item_id: int):
                     _release_exc(str(item.resource_class or "light"), 1)
                 except Exception:
                     pass
+            _post_scan_followups = (
+                _consume_validation_wire_and_collect_followups(db, job, item)
+                if item.status == "failed" and job is not None else []
+            )
             db.commit()
+            _schedule_post_scan_followups(_post_scan_followups)
+            if item.status == "retry" and job is not None and _is_post_scan_revalidation(item, job):
+                schedule_post_scan_validation_wire(item.id, countdown=120)
         return {"id": item_id, "status": "error", "error": str(exc)}
     finally:
         if _execute_lock is not None:
@@ -5576,7 +5899,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         if item.status != "submitted":
             return {"id": item.id, "status": item.status}
         job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
-        if job and _scan_is_terminal(job.status):
+        if job and _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
             try:
                 from app.services.scan_work_queue import kali_inflight_release
                 kali_inflight_release(str(item.resource_class or "light"), 1)
@@ -5697,7 +6020,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         result_state = dict(item.result or result_state)
         if job:
             db.refresh(job)
-            if _scan_is_terminal(job.status):
+            if _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
                 try:
                     from app.services.scan_work_queue import kali_inflight_release
                     kali_inflight_release(str(item.resource_class or "light"), 1)
@@ -6833,6 +7156,29 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                             pass
                         db.flush()
 
+                        # ValidationWire closes the loop: a terminal P21 test
+                        # returns to the exact finding/endpoint/parameter and
+                        # starts a fresh evidence adjudication.  Keep this
+                        # isolated so a reasoning/enrichment failure never
+                        # discards the already-persisted PoC outcome above.
+                        if item.phase_id == "P21" and (item.item_metadata or {}).get("validation_wire_id"):
+                            try:
+                                from app.services.finding_adjudication import consume_terminal_validation_wire
+
+                                with db.begin_nested():
+                                    _wire_result = consume_terminal_validation_wire(db, job, item)
+                                _orig_details = dict(_orig.details or {})
+                                _orig_details["validation_wire_result"] = _wire_result
+                                _orig.details = _orig_details
+                                db.add(_orig)
+                                db.flush()
+                            except Exception as _wire_exc:
+                                import logging as _wire_log
+                                _wire_log.getLogger(__name__).warning(
+                                    "validation wire consume failed item=%s finding=%s: %s",
+                                    item.id, _orig.id, _wire_exc,
+                                )
+
                         # ── P21 confirmation → re-correlate exploit chains ────────
                         # A newly-confirmed finding may complete a chain pattern
                         # (e.g., SQLi confirmed + admin panel → full takeover chain).
@@ -7009,8 +7355,13 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     + (f" findings={findings_created}" if findings_created else "")
                 ),
             ))
+        _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item) if job else []
         db.commit()
-        if item.status == "retry":
+        _schedule_post_scan_followups(_post_scan_followups)
+        if _is_post_scan_revalidation(item, job):
+            if item.status == "retry":
+                schedule_post_scan_validation_wire(item.id, countdown=120)
+        elif item.status == "retry":
             _schedule_scan_work_dispatch(item.scan_job_id)
         else:
             _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
@@ -7024,7 +7375,12 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             # not overwrite the authoritative terminal result or manufacture a
             # retry/failed state (observed under ScanJob row contention in #67).
             if str(item.status or "").lower() in {"completed", "done", "failed", "timeout", "skipped"}:
-                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
+                job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+                _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item) if job else []
+                db.commit()
+                _schedule_post_scan_followups(_post_scan_followups)
+                if not _is_post_scan_revalidation(item, job):
+                    _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
                 return {
                     "id": item.id,
                     "status": item.status,
@@ -7046,7 +7402,13 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             else:
                 item.lease_until = datetime.now() + timedelta(seconds=120)
             item.updated_at = datetime.now()
+            job = db.query(ScanJob).filter(ScanJob.id == item.scan_job_id).first()
+            _post_scan_followups = (
+                _consume_validation_wire_and_collect_followups(db, job, item)
+                if _over_limit and job else []
+            )
             db.commit()
+            _schedule_post_scan_followups(_post_scan_followups)
             if not _over_limit:
                 _schedule_work_item_poll(item.id, countdown=30)
         return {"id": item_id, "status": "poll_error", "error": str(exc)}

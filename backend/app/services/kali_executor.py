@@ -30,6 +30,69 @@ def _runner_url() -> str:
     return str(os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088")).rstrip("/")
 
 
+def resolve_authorized_scope_for_dispatch(scan_id: Any) -> list[str]:
+    """Roots (domains/IPs/CIDRs) `scan_id` is authorized to touch.
+
+    The Kali runner's own `/jobs` endpoint fail-closes (400) any request whose
+    `authorized_scope` is empty (SEC-001) — every dispatch path must supply
+    it, not just the work-queue path that already resolves this correctly.
+    Returns [] (and lets the runner reject the job) for a non-integer/missing
+    scan_id — there is no ScanJob to derive scope from.
+    """
+    if not isinstance(scan_id, int):
+        return []
+    try:
+        from app.db.session import SessionLocal
+        from app.services.scan_scope import authorized_scope_for_scan
+
+        db = SessionLocal()
+        try:
+            return authorized_scope_for_scan(db, scan_id)
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("resolve_authorized_scope_for_dispatch failed for scan_id=%s", scan_id, exc_info=True)
+        return []
+
+
+def _record_dispatch_audit_event(
+    *, tool_name: str, profile: str | None, target: str, scan_id: Any, job_id: str,
+) -> None:
+    """Best-effort durable audit record for a direct (non-MCP) Kali dispatch.
+
+    MCP-001: browser_capture_service.py, exploit_browser_xss.py and
+    business_logic_test.py all call execute_via_kali directly, bypassing
+    MCP's own request audit trail entirely. Auditing here, rather than at
+    each of those call sites, covers all of them (and any future direct
+    caller) from one place. Never allowed to block or fail the actual
+    dispatch — audit-write failures are logged and swallowed.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.services.audit_service import log_audit
+
+        db = SessionLocal()
+        try:
+            log_audit(
+                db,
+                event_type="kali.direct_dispatch",
+                message=f"Direct Kali dispatch tool={tool_name} profile={profile} target={target}",
+                scan_job_id=scan_id if isinstance(scan_id, int) else None,
+                metadata={
+                    "tool": tool_name,
+                    "profile": profile,
+                    "target": target,
+                    "job_id": job_id,
+                    "execution_path": "direct_kali_bypasses_mcp",
+                },
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("kali dispatch audit write failed tool=%s job_id=%s", tool_name, job_id, exc_info=True)
+
+
 def cancel_scan_jobs_in_kali_runner(
     scan_id: int,
     *,
@@ -339,6 +402,7 @@ def execute_via_kali(
             "timeout": int(max_wait),
             "skill_context": dict(skill_context or {}),
             "extra_args": _clean_extra,
+            "authorized_scope": resolve_authorized_scope_for_dispatch(scan_id),
         }
         _auth_headers = _auth_headers_from_skill_context(skill_context)
         if _auth_headers:
@@ -359,6 +423,16 @@ def execute_via_kali(
     except Exception as exc:  # noqa: BLE001
         logger.warning("kali_runner enqueue failed: %s", exc)
         return _kali_failure(tool_name, target, scan_mode, f"enqueue_error: {exc}")
+
+    # MCP-001: this direct-to-runner path has no equivalent of MCP's own
+    # request-level audit log, so record one here — this is the ONE choke
+    # point shared by every caller of execute_via_kali (direct/legacy
+    # fallback, browser capture, business-logic capture), rather than
+    # threading an audit call through each of them individually.
+    _record_dispatch_audit_event(
+        tool_name=tool_name, profile=profile, target=dispatch_target,
+        scan_id=scan_id, job_id=job_id,
+    )
 
     # Poll until terminal (job runner side does the heavy lifting)
     lost_job_count = 0

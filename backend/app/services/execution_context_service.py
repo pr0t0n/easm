@@ -177,18 +177,21 @@ def reconcile_execution_plan_state(db: Session, job: ScanJob) -> dict[str, Any]:
                 row.finished_at = None
             db.add(row)
 
-    job_status = str(job.status or "").lower()
+    # Reconciliation also runs in diagnostics/tests against lightweight job
+    # projections that may not carry every mutable ScanJob column.  Treat a
+    # missing status/progress as the normal non-terminal default.
+    job_status = str(getattr(job, "status", "") or "").lower()
     if job_status not in {"completed", "completed_with_gaps", "failed", "blocked", "cancelled", "canceled"}:
         if current_surface == "G1" and internal_status == "running":
             job.status = "running"
             job.current_step = "G1 interno em execução; G0 externo aguardando conclusão do interno"
-            if not int(job.mission_progress or 0):
+            if not int(getattr(job, "mission_progress", 0) or 0):
                 job.mission_progress = 1
             state["execution_plan_stage"] = "internal_running"
         elif current_surface == "G0" and external_status == "running":
             job.status = "running"
             job.current_step = "G0 externo em execução após conclusão do G1 interno"
-            if not int(job.mission_progress or 0):
+            if not int(getattr(job, "mission_progress", 0) or 0):
                 job.mission_progress = 1
             state["execution_plan_stage"] = "external_running"
         elif internal_status == "completed" and external_status == "waiting_for_internal":

@@ -19,7 +19,7 @@ from app.services.offensive_inventory_service import OffensiveInventoryService, 
 from app.services.sensitive_file_analyzer import classify_sensitive_file_url
 
 
-ANALYSIS_VERSION = "endpoint-intelligence-v8"
+ANALYSIS_VERSION = "endpoint-intelligence-v9"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".map"}
 SENSITIVE_MARKERS = {
@@ -48,6 +48,48 @@ STRUCTURED_INPUT_MARKERS = {"xml", "soap", "import"}
 STATE_CHANGE_CANDIDATE_MARKERS = {"update", "change", "create", "payment", "transfer", "register", "reset"}
 TOKEN_LIFECYCLE_MARKERS = {"token", "refresh", "otp", "mfa"}
 _OBJECT_SEGMENT = re.compile(r"/(?:\d{1,12}|[0-9a-f]{8}-[0-9a-f-]{27,}|\{id\})(?:/|$)", re.I)
+# Path segments whose IMMEDIATELY PRECEDING literal names a tenant/org-scoped
+# resource -- ".../organizations/{id}/members" -- are a categorically
+# different (and higher-value) authorization boundary than a generic
+# object_reference ("/products/{id}"): validate_idor_bola already covers
+# "does identity B get identity A's exact known object", but never
+# substitutes a DIFFERENT tenant's own id into the path, which is the actual
+# shape of a cross-tenant BOLA bug (server trusts the path/body id instead of
+# validating it against the caller's own tenant).
+_TENANT_SEGMENT_MARKERS = {
+    "organization", "organizations", "org", "orgs", "tenant", "tenants",
+    "account", "accounts", "company", "companies", "customer", "customers",
+    "workspace", "workspaces", "team", "teams", "client", "clients",
+    "merchant", "merchants",
+}
+_PATH_OBJECT_TOKEN = re.compile(r"^(?:\d{1,12}|[0-9a-f]{8}-[0-9a-f-]{27,})$", re.I)
+
+
+def _tenant_scoped_distinct_values(path: str, sample_urls: list[str]) -> tuple[str, list[str]]:
+    """Find a tenant/org-shaped path segment and the distinct concrete values
+    already observed for it across `sample_urls` -- the raw (non-normalized)
+    URLs accumulated for this same endpoint template. Two or more distinct
+    values is real evidence: the target's OWN traffic already visited more
+    than one tenant/org id through this exact route, so a cross-tenant test
+    isn't guessing a foreign id, it's reusing one the target itself produced.
+    """
+    segments = [seg for seg in path.split("/") if seg]
+    position = -1
+    marker = ""
+    for idx, segment in enumerate(segments):
+        if idx == 0:
+            continue
+        if _PATH_OBJECT_TOKEN.match(segment) and segments[idx - 1].lower() in _TENANT_SEGMENT_MARKERS:
+            position, marker = idx, segments[idx - 1].lower()
+            break
+    if position < 0:
+        return "", []
+    values: set[str] = set()
+    for sample in sample_urls:
+        sample_segments = [seg for seg in urlparse(str(sample or "")).path.split("/") if seg]
+        if position < len(sample_segments):
+            values.add(sample_segments[position])
+    return marker, sorted(values)
 
 
 def analyze_endpoint_contract(
@@ -58,6 +100,7 @@ def analyze_endpoint_contract(
     parameters: list[dict[str, Any]] | None = None,
     content_type: str = "",
     auth_required: bool | None = None,
+    sample_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     parsed = urlparse(str(url or ""))
     path = parsed.path or "/"
@@ -150,6 +193,17 @@ def analyze_endpoint_contract(
             tests.append(_test("object_authorization", "object_reference", 82, ["idor-validator"], ["user_a", "user_b"], ["baseline_vs_exploit", "negative_control"], "path:object_reference"))
         else:
             tests.append(_test("object_reference_discovery", "", 50, ["read-only-validator"], [], ["anonymous_baseline", "object_reference_observation"], "path:object_reference_unknown_auth"))
+    tenant_marker, tenant_values = _tenant_scoped_distinct_values(path, sample_urls or [])
+    if tenant_marker and len(tenant_values) >= 2 and not is_static and auth_observed:
+        tests.append(_test(
+            f"path:tenant_segment:{tenant_marker}",
+            "cross_tenant_object_access",
+            84,
+            ["cross-tenant-validator"],
+            ["user_a"],
+            ["baseline_vs_exploit", "negative_control"],
+            f"path:tenant_segment:{tenant_marker}:{len(tenant_values)}_distinct_values_observed",
+        ))
     if "graphql" in lower or "/gql" in lower:
         tests.append(_test("graphql_contract", "api_graphql", 70, ["read-only-validator", "auth-matrix"], [], ["schema_or_introspection", "auth_matrix"], "path:graphql"))
     if any(marker in lower for marker in ("swagger", "openapi", "api-docs")):
@@ -281,6 +335,11 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
                 (str(parameter.name), str(parameter.location), str(parameter.type_hint or ""), str(parameter.risk_hint or ""))
                 for parameter in parameters
             ),
+            # Feeds _tenant_scoped_distinct_values -- must participate in the
+            # cache-invalidation hash so a newly observed second tenant id
+            # (same endpoint template, new concrete value) re-triggers
+            # analysis instead of being silently skipped as "already current".
+            "sample_urls": sorted(str(u) for u in list(metadata.get("sample_urls") or [])),
         }
         analysis_input_hash = hashlib.sha256(
             json.dumps(analysis_input, sort_keys=True, separators=(",", ":")).encode()
@@ -316,6 +375,7 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
             } for parameter in parameters],
             content_type=str(endpoint.content_type or ""),
             auth_required=endpoint.auth_required,
+            sample_urls=list(metadata.get("sample_urls") or []),
         )
         analysis["input_hash"] = analysis_input_hash
         analysis["execution_context"] = execution_context

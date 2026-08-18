@@ -1,8 +1,12 @@
 """Authenticated pentest session manager.
 
 The manager turns ScanJob.state_data["auth_config"] into persisted identities
-and reusable auth material. It deliberately stores only operational headers,
-cookies and metadata; raw passwords stay in the transient auth_config payload.
+and reusable auth material (ScanAuthSession.headers/.cookies, encrypted via
+EncryptedJSON). The raw auth_config payload itself is NOT transient — it
+lives for the ScanJob's lifetime in state_data, so it is encrypted at rest
+there too (StateDataJSON, see app/models/encrypted_json.py) and redacted
+before ever being echoed back in an API response (see ScanResponse/
+ReportResponse in app/schemas/scan.py).
 """
 from __future__ import annotations
 

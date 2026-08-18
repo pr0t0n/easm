@@ -10,13 +10,25 @@ import "../styles/dashboard.css";
 
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
-const VSTATUS_LABEL = { confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado" };
+const VSTATUS_LABEL = {
+  confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado",
+  inconclusive: "Inconclusivo", blocked: "Bloqueado", not_applicable: "Não aplicável",
+  invalid_evidence: "Evidência inválida", needs_human_review: "Revisão humana",
+};
 
 function mitreStr(m) {
   if (!m) return "—";
   if (typeof m === "string") return m;
   if (Array.isArray(m)) return m.map((x) => (typeof x === "string" ? x : x?.id || x?.technique_id || "")).filter(Boolean).join(", ") || "—";
   return m.id || m.technique_id || m.name || "—";
+}
+
+function currentUserIsAdmin() {
+  try {
+    return Boolean(JSON.parse(localStorage.getItem("me") || "{}").is_admin);
+  } catch {
+    return false;
+  }
 }
 
 export default function VulnerabilitiesPage() {
@@ -28,7 +40,11 @@ export default function VulnerabilitiesPage() {
   const [sevFilter, setSevFilter] = useState("todas");
   const [selected, setSelected] = useState(null);
   const [selectedIntel, setSelectedIntel] = useState(null);
+  const [selectedAdjudication, setSelectedAdjudication] = useState(null);
   const [intelLoading, setIntelLoading] = useState(false);
+  const [adjudicationLoading, setAdjudicationLoading] = useState(false);
+  const [adjudicationAction, setAdjudicationAction] = useState("");
+  const [adjudicationError, setAdjudicationError] = useState("");
   const [scanId, setScanId] = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
 
@@ -49,10 +65,12 @@ export default function VulnerabilitiesPage() {
   }, [sevFilter, scanId, accessGroupId]);
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
+  const canAdjudicate = useMemo(() => currentUserIsAdmin(), []);
 
   useEffect(() => {
     if (!selected?.id) {
       setSelectedIntel(null);
+      setSelectedAdjudication(null);
       return;
     }
     setIntelLoading(true);
@@ -62,7 +80,37 @@ export default function VulnerabilitiesPage() {
       .then(({ data }) => setSelectedIntel(data || null))
       .catch(() => setSelectedIntel(null))
       .finally(() => setIntelLoading(false));
+    setAdjudicationLoading(true);
+    setAdjudicationError("");
+    client
+      .get(`/api/findings/${selected.id}/adjudication`, { _skipToast: true })
+      .then(({ data }) => setSelectedAdjudication(data || null))
+      .catch(() => {
+        setSelectedAdjudication(null);
+        setAdjudicationError("Adjudicação ainda não executada ou indisponível.");
+      })
+      .finally(() => setAdjudicationLoading(false));
   }, [selected?.id]);
+
+  async function reAdjudicateFinding(refreshIntelligence = false) {
+    if (!selected?.id || adjudicationAction) return;
+    setAdjudicationAction(refreshIntelligence ? "intelligence" : "adjudicate");
+    setAdjudicationError("");
+    try {
+      await client.post(`/api/findings/${selected.id}/adjudicate`, {
+        force: true,
+        refresh_intelligence: refreshIntelligence,
+      });
+      const { data } = await client.get(`/api/findings/${selected.id}/adjudication`, { _skipToast: true });
+      setSelectedAdjudication(data || null);
+      const verdict = data?.assessment?.answers?.does_it_make_sense?.verdict;
+      if (verdict) setSelected((current) => current ? { ...current, verification_status: verdict } : current);
+    } catch (err) {
+      setAdjudicationError(err?.response?.data?.detail || "Não foi possível executar a reavaliação.");
+    } finally {
+      setAdjudicationAction("");
+    }
+  }
 
   if (loading) {
     return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Carregando vulnerabilidades…</p></div></div></div></main>;
@@ -81,6 +129,15 @@ export default function VulnerabilitiesPage() {
     const experiment = selectedIntel?.experiment || {};
     const ledger = Array.isArray(selectedIntel?.confidence_ledger) ? selectedIntel.confidence_ledger : [];
     const contradictions = Array.isArray(selectedIntel?.contradictions) ? selectedIntel.contradictions : [];
+    const adjudication = selectedAdjudication?.current || null;
+    const answers = selectedAdjudication?.assessment?.answers || {};
+    const fpAnswer = answers.false_positive || {};
+    const pocAnswer = answers.poc || {};
+    const exploitAnswer = answers.public_exploit || {};
+    const cveAnswer = answers.cve || {};
+    const cvssAnswer = answers.cvss || {};
+    const attackPathAnswer = answers.attack_path || {};
+    const wireRows = Array.isArray(adjudication?.wires) ? adjudication.wires : [];
     const evidence = details.evidence || details.payload || details.command || details.proof || details.raw_output || details.request || "";
     const reproSteps = Array.isArray(details.repro_steps) ? details.repro_steps : (Array.isArray(details.reproduction_steps) ? details.reproduction_steps : []);
     const vrank = { hypothesis: 1, candidate: 2, confirmed: 3 };
@@ -94,7 +151,7 @@ export default function VulnerabilitiesPage() {
     return (
       <main className="dash">
         <div className="content report-shell">
-          <button className="vuln-back sk-mono" onClick={() => { setSelected(null); setSelectedIntel(null); }} type="button">← voltar para a lista</button>
+          <button className="vuln-back sk-mono" onClick={() => { setSelected(null); setSelectedIntel(null); setSelectedAdjudication(null); }} type="button">← voltar para a lista</button>
           <header className="vuln-detail-head">
             <div className="vuln-detail-badges">
               <span className={`sk-badge sk-badge--${sev}`}><span className={`sk-dot sk-dot--${sev}`} />{SEV_LABEL[sev]}</span>
@@ -112,6 +169,70 @@ export default function VulnerabilitiesPage() {
               <section className="report-section">
                 <div className="sk-eyebrow">Descrição técnica</div>
                 <p className="report-narrative">{f.cve_description || details.description || "Sem descrição técnica registrada para este achado."}</p>
+              </section>
+
+              <section className="report-section">
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                  <div className="sk-eyebrow">P21 · Adjudicação e retorno por wire</div>
+                  {canAdjudicate ? (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button type="button" className="btn-secondary" disabled={Boolean(adjudicationAction)} onClick={() => reAdjudicateFinding(false)}>
+                        {adjudicationAction === "adjudicate" ? "Reavaliando…" : "Reavaliar"}
+                      </button>
+                      {f.cve && (
+                        <button type="button" className="btn-secondary" disabled={Boolean(adjudicationAction)} onClick={() => reAdjudicateFinding(true)}>
+                          {adjudicationAction === "intelligence" ? "Consultando…" : "Atualizar CVE/exploit"}
+                        </button>
+                      )}
+                    </div>
+                  ) : <span className="sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)" }}>somente leitura</span>}
+                </div>
+                {adjudicationLoading ? (
+                  <div className="report-empty">Carregando dossier e wires...</div>
+                ) : adjudication ? (
+                  <>
+                    <div className="vuln-experiment-grid" style={{ marginTop: 10 }}>
+                      <div><b>Veredito final</b><span>{VSTATUS_LABEL[adjudication.final_verdict] || adjudication.final_verdict}</span></div>
+                      <div><b>Causa</b><span>{adjudication.reason_code || "—"}</span></div>
+                      <div><b>Falso positivo?</b><span>{fpAnswer.answer === true ? "Sim" : fpAnswer.answer === false ? "Não" : "Ainda não decidido"}</span></div>
+                      <div><b>Tipo da pendência/FP</b><span>{fpAnswer.cause || "—"}</span></div>
+                      <div><b>Informação faltante</b><span>{(answers.missing_evidence || []).join(", ") || "nenhuma"}</span></div>
+                      <div><b>Proposta da LLM</b><span>{adjudication.proposed_verdict || "não utilizada"}</span></div>
+                    </div>
+                    <div style={{ marginTop: 12 }}>
+                      <b style={{ fontSize: 12 }}>Wires executados/pendentes</b>
+                      {wireRows.length ? wireRows.map((wire) => (
+                        <div key={wire.id} className="vuln-code sk-mono" style={{ marginTop: 6 }}>
+                          #{wire.id} · {wire.action_id} · {wire.status} · {wire.tool_name || "ação interna"}<br />
+                          {wire.target_ref}{wire.parameter_ref ? ` · parâmetro=${wire.parameter_ref}` : ""}
+                          {wire.identity_key ? ` · identidade=${wire.identity_key}` : ""}
+                          {wire.secondary_identity_key ? ` → ${wire.secondary_identity_key}` : ""}
+                        </div>
+                      )) : <div className="report-empty">Nenhum wire necessário ou materializado.</div>}
+                    </div>
+                  </>
+                ) : <div className="report-empty">{adjudicationError || "Sem adjudicação persistida."}</div>}
+                {adjudicationError && adjudication && <div className="dash-err" style={{ marginTop: 10 }}>{adjudicationError}</div>}
+              </section>
+
+              <section className="report-section">
+                <div className="sk-eyebrow">Resposta técnica completa</div>
+                <div className="vuln-experiment-grid">
+                  <div><b>PoC</b><span>{pocAnswer.status || "—"}</span></div>
+                  <div><b>Alvo exato</b><span className="sk-mono">{pocAnswer.exact_target || "—"}</span></div>
+                  <div><b>CVE</b><span>{cveAnswer.exists ? `${cveAnswer.id} · ${cveAnswer.applicability}` : "Sem CVE aplicável"}</span></div>
+                  <div><b>CVSS</b><span className="sk-mono">{cvssAnswer.score ?? "—"}{cvssAnswer.vector ? ` · ${cvssAnswer.vector}` : ""}</span></div>
+                  <div><b>Exploit público</b><span>{exploitAnswer.status || "unknown"}</span></div>
+                  <div><b>Attack path</b><span>{attackPathAnswer.mounted ? "Montado" : attackPathAnswer.needs_rebuild ? "Requer reconstrução" : "Não demonstrado"}</span></div>
+                </div>
+                {(pocAnswer.steps || []).length > 0 && (
+                  <ol className="vuln-repro">{pocAnswer.steps.slice(0, 10).map((step, idx) => <li key={idx}>{String(step)}</li>)}</ol>
+                )}
+                {(exploitAnswer.urls || []).length > 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    {(exploitAnswer.urls || []).map((url) => <div key={url}><a href={url} target="_blank" rel="noreferrer">{url}</a></div>)}
+                  </div>
+                )}
               </section>
 
               <section className="report-section">

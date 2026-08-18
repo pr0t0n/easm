@@ -80,6 +80,31 @@ class CVEEnrichmentService:
             "cve_last_modified_at": cve.get("lastModified"),
         }
 
+        # Preserve the machine-readable affected ranges.  Adjudication uses
+        # these fields to prove applicability against the product/version
+        # observed on the exact wire target; prose descriptions are not a
+        # reliable version oracle.
+        affected_ranges: list[dict[str, Any]] = []
+        for configuration in cve.get("configurations") or []:
+            pending = list((configuration or {}).get("nodes") or [])
+            while pending:
+                node = dict(pending.pop() or {})
+                pending.extend(list(node.get("children") or []))
+                for match in node.get("cpeMatch") or []:
+                    row = dict(match or {})
+                    if not row.get("vulnerable"):
+                        continue
+                    affected_ranges.append({
+                        key: row.get(key)
+                        for key in (
+                            "criteria", "versionStartIncluding", "versionStartExcluding",
+                            "versionEndIncluding", "versionEndExcluding",
+                        )
+                        if row.get(key) not in (None, "")
+                    })
+        if affected_ranges:
+            result["affected_ranges"] = affected_ranges[:200]
+
         metrics = cve.get("metrics") or {}
         cvss_v31 = metrics.get("cvssMetricV31") or []
         cvss_v30 = metrics.get("cvssMetricV30") or []

@@ -51,4 +51,49 @@ class EncryptedJSON(TypeDecorator):
         return value
 
 
-__all__ = ["EncryptedJSON"]
+class StateDataJSON(TypeDecorator):
+    """ScanJob.state_data JSONB, with credential-bearing subtrees encrypted at rest.
+
+    state_data is a large, heterogeneous blob written and read by nearly every
+    service in the pentest pipeline as a plain dict (`state.get("auth_config")`,
+    `job.state_data = state`, ...). Splitting the credential-bearing keys into
+    a dedicated column would mean touching every one of those call sites, so
+    instead this transparently Fernet-encrypts just the `auth_config` and
+    `llm_risk` subtrees on write and decrypts them on read — every existing
+    caller keeps working unchanged, while a direct read of the `scan_jobs` row
+    (or `state_data->'auth_config'` in raw SQL) sees only an opaque token
+    instead of the raw password/bearer_token/cookie material (SEC-003).
+    """
+
+    impl = JSONB
+    cache_ok = True
+
+    _SENSITIVE_KEYS = ("auth_config", "llm_risk")
+
+    def process_bind_param(self, value: Any, dialect) -> Any:
+        if value is None or not isinstance(value, dict):
+            return value
+        out = dict(value)
+        for key in self._SENSITIVE_KEYS:
+            sub = out.get(key)
+            if sub is None:
+                continue
+            if isinstance(sub, dict) and "__enc__" in sub:
+                continue  # already encrypted (e.g. re-saving a loaded row unchanged)
+            plaintext = json.dumps(sub, default=str).encode("utf-8")
+            out[key] = {"__enc__": _fernet().encrypt(plaintext).decode("ascii")}
+        return out
+
+    def process_result_value(self, value: Any, dialect) -> Any:
+        if value is None or not isinstance(value, dict):
+            return value
+        out = dict(value)
+        for key in self._SENSITIVE_KEYS:
+            sub = out.get(key)
+            if isinstance(sub, dict) and "__enc__" in sub:
+                plaintext = _fernet().decrypt(sub["__enc__"].encode("ascii"))
+                out[key] = json.loads(plaintext)
+        return out
+
+
+__all__ = ["EncryptedJSON", "StateDataJSON"]

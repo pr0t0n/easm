@@ -96,10 +96,22 @@ def execute_tool_with_workers(
         # Business logic is evidence-led: the backend executor only consumes an
         # observed-endpoint plan assembled from this scan's persisted inventory.
         from app.services.business_logic_test import run_as_tool as _bl_run
-        execution_plan = _business_logic_execution_plan(scan_id)
+        wire_contract = dict((skill_contract or {}).get("validation_wire") or {})
+        execution_plan = _business_logic_execution_plan(scan_id, wire_contract=wire_contract or None)
         request_headers = dict(auth_context.get("headers") or {}) if isinstance(auth_context, dict) else {}
         request_cookies = dict(auth_context.get("cookies") or {}) if isinstance(auth_context, dict) else {}
-        identity_sessions = _resolve_auth_identities(scan_id)
+        requested_identity_keys = [
+            str(value)
+            for value in (
+                wire_contract.get("identity_key") or (skill_contract or {}).get("identity_key"),
+                wire_contract.get("secondary_identity_key") or (skill_contract or {}).get("secondary_identity_key"),
+            )
+            if str(value or "")
+        ]
+        identity_sessions = _resolve_auth_identities(
+            scan_id,
+            identity_keys=requested_identity_keys or None,
+        )
         result = _bl_run(
             target,
             execution_plan=execution_plan,
@@ -107,6 +119,10 @@ def execute_tool_with_workers(
             auth_cookies=request_cookies,
             identity_sessions=identity_sessions or None,
         )
+        if wire_contract:
+            result["validation_wire"] = wire_contract
+            result["input_bindings"] = dict((skill_contract or {}).get("input_bindings") or {})
+            result["expected_signals"] = dict((skill_contract or {}).get("expected_signals") or {})
         if skill_id:
             result.setdefault("skill_id", skill_id)
             result.setdefault("skill_contract", skill_contract or {})
@@ -294,7 +310,10 @@ def _resolve_auth_context(scan_id: int | None, skill_contract: dict[str, Any] | 
         return {}
 
 
-def _resolve_auth_identities(scan_id: int | None) -> dict[str, dict[str, Any]]:
+def _resolve_auth_identities(
+    scan_id: int | None,
+    identity_keys: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Return up to 2 identities' auth material keyed by logical role
     ("user_a" = lowest privilege rank, "user_b" = next). Business-logic
     actions that declare required_identities=["user_a","user_b"] need both
@@ -314,7 +333,16 @@ def _resolve_auth_identities(scan_id: int | None) -> dict[str, dict[str, Any]]:
             scan = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
             if not scan:
                 return {}
-            materials = AuthSessionManager(db, scan).list_material(limit=2)
+            manager = AuthSessionManager(db, scan)
+            requested = list(dict.fromkeys(str(key) for key in list(identity_keys or []) if str(key)))
+            if requested:
+                result: dict[str, dict[str, Any]] = {}
+                for key in requested[:2]:
+                    material = manager.get_material(key)
+                    if material is not None:
+                        result[key] = material.to_dict()
+                return result
+            materials = manager.list_material(limit=2)
             keys = ["user_a", "user_b"]
             return {keys[i]: materials[i].to_dict() for i in range(min(len(materials), len(keys)))}
         finally:
@@ -323,7 +351,10 @@ def _resolve_auth_identities(scan_id: int | None) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _business_logic_execution_plan(scan_id: int | None) -> dict[str, Any]:
+def _business_logic_execution_plan(
+    scan_id: int | None,
+    wire_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a no-guessing execution plan from persisted endpoint evidence."""
     if not scan_id:
         return {"version": "business-logic-v1", "policy": "observed-evidence-only", "actions": [], "blocked": [{"reasons": ["scan_id_required"]}]}
@@ -349,11 +380,62 @@ def _business_logic_execution_plan(scan_id: int | None) -> dict[str, Any]:
             ).count()
             identities = ["user_a", "user_b"] if valid_sessions >= 2 else (["user_a"] if valid_sessions else [])
             state = dict(scan.state_data or {})
-            return build_business_logic_execution_plan(
+            plan = build_business_logic_execution_plan(
                 analyses,
                 available_identities=identities,
                 mutation_plan=state.get("business_logic_mutation_plan"),
             )
+            wire = dict(wire_contract or {})
+            if not wire:
+                return plan
+            target_ref = str(wire.get("target_ref") or "").rstrip("/")
+            parameter_ref = str(wire.get("parameter_ref") or "")
+            bindings = dict(wire.get("input_bindings") or {})
+            method = str(bindings.get("method") or "").upper()
+            object_id = str(bindings.get("object_id") or "")
+            action_id = str(wire.get("action_id") or "")
+            exact_actions: list[dict[str, Any]] = []
+            exact_blocked: list[dict[str, Any]] = []
+            for action in list(plan.get("actions") or []):
+                endpoint = str(action.get("endpoint") or "").rstrip("/")
+                if endpoint != target_ref:
+                    continue
+                if method and str(action.get("method") or "GET").upper() != method:
+                    exact_blocked.append({"endpoint": endpoint, "reasons": ["wire_method_mismatch"]})
+                    continue
+                parameters = [str(value) for value in list(action.get("parameters") or [])]
+                if parameter_ref and parameter_ref not in parameters:
+                    exact_blocked.append({"endpoint": endpoint, "reasons": ["wire_parameter_not_observed"]})
+                    continue
+                if object_id and object_id not in endpoint and object_id not in parameters:
+                    exact_blocked.append({"endpoint": endpoint, "reasons": ["wire_object_not_bound_to_observed_action"]})
+                    continue
+                exact = dict(action)
+                requested = [
+                    str(value)
+                    for value in (wire.get("identity_key"), wire.get("secondary_identity_key"))
+                    if str(value or "")
+                ]
+                if action_id in {"compare_two_identities", "compare_two_objects"}:
+                    if len(requested) < 2:
+                        exact_blocked.append({"endpoint": endpoint, "reasons": ["wire_requires_two_exact_identities"]})
+                        continue
+                    exact["required_identities"] = requested[:2]
+                elif requested:
+                    exact["required_identities"] = requested[:1]
+                exact["validation_wire_id"] = wire.get("id")
+                exact["parameter_ref"] = parameter_ref
+                exact["object_id"] = object_id
+                exact_actions.append(exact)
+            if not exact_actions and not exact_blocked:
+                exact_blocked.append({"endpoint": target_ref, "reasons": ["wire_exact_endpoint_not_observed"]})
+            return {
+                **plan,
+                "actions": exact_actions,
+                "blocked": exact_blocked,
+                "validation_wire_id": wire.get("id"),
+                "policy": "validation-wire-exact-observed-evidence-only",
+            }
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001
@@ -383,6 +465,10 @@ def _persist_result_artifact(
                 db,
                 scan_job_id=int(scan_id),
                 result=result,
+                finding_id=(
+                    (skill_contract or {}).get("input_bindings", {}).get("finding_id")
+                    or (skill_contract or {}).get("validation_wire", {}).get("input_bindings", {}).get("finding_id")
+                ),
                 phase_id=str((skill_contract or {}).get("phase_id") or result.get("phase_id") or ""),
                 skill_id=str((skill_contract or {}).get("skill_id") or result.get("skill_id") or ""),
                 identity_key=str((auth_context or {}).get("identity_key") or ""),

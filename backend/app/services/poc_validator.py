@@ -208,6 +208,17 @@ def schedule_poc_validation(
         "paused",
         "blocked",
     }:
+        # No explicit db.commit()/rollback() here: this function is called
+        # from inside enforce_high_risk_lifecycle's `with db.begin_nested():`
+        # block (see scan_quality.run_scan_quality_gate) — committing or
+        # rolling back the SHARED session directly from inside a caller's
+        # savepoint desyncs SQLAlchemy's transaction-context bookkeeping
+        # (_trans_context_manager keeps pointing at the now-inactive
+        # savepoint), and the next DB call anywhere in that request raises
+        # "Can't operate on closed transaction inside context manager" —
+        # confirmed live, this exact log entry recurred on every quality-gate
+        # round for a scan whose findings hit this branch. Just queue the log
+        # row; the caller's own transaction lifecycle persists it.
         try:
             from app.models.models import ScanLog
 
@@ -221,12 +232,8 @@ def schedule_poc_validation(
                     "reason=scan_not_running"
                 )[:2000],
             ))
-            db.commit()
         except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            pass
         return False
 
     # Only HIGH and CRITICAL severity warrant PoC validation cost
@@ -266,6 +273,30 @@ def schedule_poc_validation(
                 return False
         except Exception:
             pass  # JSONB path query error — proceed without the check
+
+    # Preferred P21 path: reason over the normalized dossier, create a
+    # first-class ValidationWire and let that wire materialize the exact
+    # re-test.  Compatibility fallback below remains available during rollout
+    # or if the new tables/service are unavailable.
+    try:
+        from app.core.config import settings
+
+        if bool(getattr(settings, "finding_adjudication_enabled", True)):
+            from app.services.finding_adjudication import adjudicate_finding
+
+            adjudication = adjudicate_finding(db, job, finding)
+            queued = [
+                wire for wire in list(adjudication.get("wires") or [])
+                if str(wire.get("status") or "") == "queued"
+            ]
+            if queued:
+                return True
+            if str(adjudication.get("final_verdict") or "") in {
+                "confirmed", "refuted", "blocked", "not_applicable", "invalid_evidence", "needs_human_review",
+            }:
+                return False
+    except Exception as exc:
+        logger.debug("poc_validator: adjudication wire fallback finding=%s: %s", finding_id, exc)
 
     # ── Select validation tool ────────────────────────────────────────────────
     val_tool, val_target = _select_validation_tool(finding)
@@ -328,25 +359,47 @@ def schedule_poc_validation(
         # Use (phase_id=P21, tool=val_tool, target=val_target) as the unique key.
         # If the same finding spawns a duplicate (edge case), the DB unique constraint
         # will silently skip it via on_conflict_do_nothing in claim_work_items.
-        val_item = ScanWorkItem(
-            scan_job_id=job.id,
-            phase_id="P21",
-            target=storage_target,
-            tool_name=val_tool,
-            profile=val_tool,
-            resource_class=resource_class,
-            # Priority 30 = high priority (lower number = dispatched first).
-            # Normal items are 100. PoC items jump the queue because they
-            # unblock report generation.
-            priority=30,
-            status="queued",
-            # Infrastructure/tool failure is inconclusive, never negative proof.
-            # Permit one retry before retaining the finding as candidate.
-            max_attempts=2,
-            item_metadata=apply_phase_tool_metadata(meta, "P21", val_tool, source="poc_validator"),
-        )
-        db.add(val_item)
-        db.flush()
+        #
+        # This function runs from inside enforce_high_risk_lifecycle's own
+        # `with db.begin_nested():` (see scan_quality.run_scan_quality_gate),
+        # so a failed flush here (e.g. a unique-constraint collision) must
+        # unwind ONLY this attempt, not the caller's savepoint or the outer
+        # session. A bare db.rollback() on the shared session previously did
+        # exactly that damage: it desynced SQLAlchemy's transaction-context
+        # bookkeeping (_trans_context_manager kept pointing at the
+        # now-inactive savepoint), so the very next DB call anywhere in the
+        # request raised "Can't operate on closed transaction inside context
+        # manager" — confirmed live, recurring on every quality-gate round
+        # for a scan with a colliding finding. Our own nested savepoint here
+        # rolls back cleanly via the `with` protocol instead.
+        with db.begin_nested():
+            val_item = ScanWorkItem(
+                scan_job_id=job.id,
+                phase_id="P21",
+                target=storage_target,
+                tool_name=val_tool,
+                profile=val_tool,
+                resource_class=resource_class,
+                # Priority 30 = high priority (lower number = dispatched first).
+                # Normal items are 100. PoC items jump the queue because they
+                # unblock report generation.
+                priority=30,
+                status="queued",
+                # Infrastructure/tool failure is inconclusive, never negative proof.
+                # Permit one retry before retaining the finding as candidate.
+                max_attempts=2,
+                item_metadata=apply_phase_tool_metadata(meta, "P21", val_tool, source="poc_validator"),
+            )
+            db.add(val_item)
+            db.flush()
+
+            # Every concrete P21 re-test must have a durable reasoning edge
+            # back to the exact finding/target/parameter that caused it.  This
+            # wraps the legacy auto-PoC item in a ValidationWire so its terminal
+            # result can return to the same point and trigger re-adjudication.
+            from app.services.finding_adjudication import link_existing_work_item_wire
+
+            link_existing_work_item_wire(db, job, finding, val_item)
 
         logger.info(
             "poc_validator: scheduled P21 item=%d scan=%d finding=%s "
@@ -364,7 +417,6 @@ def schedule_poc_validation(
     except Exception as exc:
         # Unique constraint violation = already scheduled; other errors = log + skip
         logger.debug("poc_validator: schedule failed finding=%s: %s", finding_id, exc)
-        db.rollback()
         return False
 
 

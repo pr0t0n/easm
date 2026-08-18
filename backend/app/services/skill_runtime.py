@@ -9,10 +9,22 @@ from typing import Any
 from uuid import uuid4
 
 from app.graph.mission import SKILL_CATALOG
+from app.services.offensive_operator_core import parse_skill_markdown
 
 # ---------------------------------------------------------------------------
 # Skills markdown loader — loads structured skill objects from skills/*.md
 # ---------------------------------------------------------------------------
+#
+# SKILL-001 fix: this used to run its own hand-rolled, flat frontmatter
+# scanner with no concept of nested YAML mappings — a skill's `safety_rules:`
+# (or `exit_criteria:`/`retry_policy:`) sub-keys silently landed on the
+# top-level meta dict instead of nested under their parent key, and most of
+# them were then dropped entirely rather than copied into the returned skill
+# object. It now reuses offensive_operator_core.parse_skill_markdown, the
+# same real-PyYAML (with a nesting-aware fallback) loader the live
+# offensive-operator phase-loop already uses for the identical files —
+# fixing the fidelity bug and removing a second, disagreeing parser
+# implementation in one move.
 
 _SKILLS_ROOT = Path(
     __import__("os").getenv("SKILLS_DIR", "")
@@ -24,91 +36,15 @@ _SKILLS_ROOT = Path(
         str(Path(__file__).parent.parent.parent.parent / "skills"),
     )
 )
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-
-
-def _parse_inline_list(raw_val: str) -> list[str] | None:
-    """Parse YAML inline list syntax like ["P01", "P02"] or [naabu, nmap]."""
-    stripped = raw_val.strip()
-    if not (stripped.startswith("[") and stripped.endswith("]")):
-        return None
-    inner = stripped[1:-1].strip()
-    if not inner:
-        return []
-    items = [item.strip().strip('"').strip("'") for item in inner.split(",")]
-    return [item for item in items if item]
-
-
-def _parse_yaml_frontmatter(text: str) -> dict[str, Any]:
-    """Parse YAML frontmatter without requiring PyYAML (simple scalar/list parser)."""
-    result: dict[str, Any] = {}
-    lines = text.strip().splitlines()
-    i = 0
-    current_key: str | None = None
-    list_indent: int | None = None
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # List item under current key
-        if current_key and stripped.startswith("- ") and list_indent is not None:
-            if isinstance(result[current_key], list):
-                result[current_key].append(stripped[2:].strip().strip('"').strip("'"))
-            i += 1
-            continue
-
-        # Key: value line
-        if ":" in line and not stripped.startswith("-"):
-            colon = line.index(":")
-            key = line[:colon].strip()
-            raw_val = line[colon + 1:].strip()
-            list_indent = None
-
-            if not raw_val:
-                # Next lines may be list items
-                result[key] = []
-                current_key = key
-                list_indent = len(line) - len(line.lstrip())
-            elif raw_val.lower() in ("true", "yes"):
-                result[key] = True
-                current_key = None
-            elif raw_val.lower() in ("false", "no"):
-                result[key] = False
-                current_key = None
-            else:
-                # Try inline list syntax ["a", "b"]
-                inline = _parse_inline_list(raw_val)
-                if inline is not None:
-                    result[key] = inline
-                    current_key = None
-                else:
-                    # Try int
-                    try:
-                        result[key] = int(raw_val)
-                    except ValueError:
-                        result[key] = raw_val.strip('"').strip("'")
-                    current_key = None
-        i += 1
-
-    return result
 
 
 def _load_skill_file(path: Path) -> dict[str, Any] | None:
     """Load a single skill .md file and return a structured skill dict."""
     try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    m = _FRONTMATTER_RE.match(content)
-    if not m:
-        return None
-
-    try:
-        meta = _parse_yaml_frontmatter(m.group(1))
+        parsed = parse_skill_markdown(path)
     except Exception:
         return None
+    meta = parsed["metadata"]
     try:
         from app.services.vulnerability_catalog_config import is_vulnerability_skill_enabled
 
@@ -166,6 +102,10 @@ def _load_skill_file(path: Path) -> dict[str, Any] | None:
     if not isinstance(retry_policy, dict):
         retry_policy = {}
 
+    safety_rules = meta.get("safety_rules") or {}
+    if not isinstance(safety_rules, dict):
+        safety_rules = {}
+
     return {
         "skill_id": skill_id,
         "name": str(meta.get("name") or skill_id),
@@ -183,13 +123,32 @@ def _load_skill_file(path: Path) -> dict[str, Any] | None:
         "exit_criteria": exit_criteria,
         "retry_policy": retry_policy,
         "attack_chain_opportunities": attack_chain_opportunities,
-        # `safety_rules:` is a nested YAML mapping in every skill's
-        # frontmatter, but this parser is flat (see _parse_yaml_frontmatter) —
-        # its sub-keys land on `meta` at the top level, not nested under
-        # "safety_rules" (which stays an empty list). Surface the one flag
-        # consumers actually gate mutating actions on directly, rather than
-        # silently dropping it like the rest of `safety_rules` today.
-        "destructive_payloads_allowed": bool(meta.get("destructive_payloads_allowed", False)),
+        # Real nested mapping now that parse_skill_markdown does real YAML
+        # parsing (SKILL-001) — every sub-key a skill declares survives here,
+        # not just the ones a consumer happens to also read as a flat field
+        # below. New consumers should read from here.
+        "safety_rules": safety_rules,
+        # Flat convenience fields for existing consumers (skill_execution_engine.py)
+        # that already read these directly off the skill dict. Sourced from the
+        # real `safety_rules` mapping above, not from parser-flattening leakage.
+        "destructive_payloads_allowed": bool(safety_rules.get("destructive_payloads_allowed", False)),
+        # Narrower opt-in than destructive_payloads_allowed -- permits ONLY the
+        # one code-defined, always-reverted mutation sequence in
+        # skill_execution_engine.execute_self_grant_then_revert, never a
+        # free-form mutating request. See rbac_role_self_escalation.md.
+        "self_revert_mutation_allowed": bool(safety_rules.get("self_revert_mutation_allowed", False)),
+        # Narrow, read-only opt-in for weak_secret_probe.py's small
+        # code-defined dictionary check against a forgeable custom
+        # auth-adjacent header. See rbac_role_self_escalation.md.
+        "weak_secret_guessing_allowed": bool(safety_rules.get("weak_secret_guessing_allowed", False)),
+        # Previously silently dropped entirely (not even flattened through) by
+        # the old parser. Not yet consumed by a gate anywhere — surfacing them
+        # is the prerequisite fix; wiring real enforcement is a follow-up.
+        "scope_guard_required": bool(safety_rules.get("scope_guard_required", True)),
+        "authenticated_testing_requires_authorized_session": bool(
+            safety_rules.get("authenticated_testing_requires_authorized_session", True)
+        ),
+        "no_pii_exfiltration": bool(safety_rules.get("no_pii_exfiltration", True)),
         "source_file": str(path),
         # Legacy compat fields
         "id": skill_id,

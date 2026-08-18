@@ -485,9 +485,19 @@ def generate_pentest_report(
     # authenticated identity) so the deliverable never inflates unproven findings.
     try:
         from app.services.evidence_contract_service import apply_finding_validation, link_artifacts_to_findings
+        from app.models.models import FindingAdjudication
+        from app.services.finding_adjudication import project_adjudication_to_finding
         link_artifacts_to_findings(db, job)
         for _finding in all_findings:
             apply_finding_validation(db, _finding)
+            _latest_adj = (
+                db.query(FindingAdjudication)
+                .filter(FindingAdjudication.finding_id == _finding.id)
+                .order_by(FindingAdjudication.cycle.desc())
+                .first()
+            )
+            if _latest_adj is not None:
+                project_adjudication_to_finding(db, _finding, _latest_adj)
         db.commit()
     except Exception:
         db.rollback()
@@ -1372,6 +1382,97 @@ def generate_pentest_report(
         import logging as _nlog
         _nlog.getLogger(__name__).debug("attack_narrative embed failed: %s", _narr_err)
 
+    # ── P21 adjudication dossiers and return wires ──────────────────────────
+    adjudication_html = ""
+    try:
+        from app.models.models import FindingAdjudication, FindingIntelligenceSnapshot, ValidationWire
+        from app.services.finding_adjudication import build_finding_assessment
+
+        _adj_rows = []
+        _adjudication_findings = (
+            db.query(Finding)
+            .filter(Finding.scan_job_id == scan_id)
+            .order_by(Finding.id.asc())
+            .limit(100)
+            .all()
+        )
+        for _finding in _adjudication_findings:
+            _adj = (
+                db.query(FindingAdjudication)
+                .filter(FindingAdjudication.finding_id == _finding.id)
+                .order_by(FindingAdjudication.cycle.desc())
+                .first()
+            )
+            if _adj is None:
+                continue
+            _wires = (
+                db.query(ValidationWire)
+                .filter(ValidationWire.finding_id == _finding.id)
+                .order_by(ValidationWire.id.asc())
+                .all()
+            )
+            _intel = (
+                db.query(FindingIntelligenceSnapshot)
+                .filter(FindingIntelligenceSnapshot.finding_id == _finding.id)
+                .order_by(FindingIntelligenceSnapshot.fetched_at.desc())
+                .first()
+            )
+            _missing = ", ".join(str(item) for item in list(_adj.missing_evidence or [])) or "—"
+            _wire_text = " · ".join(
+                f"#{wire.id} {wire.action_id} [{wire.status}] → {wire.tool_name or 'ação interna'}"
+                for wire in _wires
+            ) or "nenhum wire necessário/criado"
+            _cve_text = "—"
+            if _intel:
+                _cve_text = (
+                    f"{_intel.cve_id or 'sem CVE'} · aplicabilidade={_intel.applicability} · "
+                    f"CVSS={_intel.cvss_score if _intel.cvss_score is not None else '—'} "
+                    f"({_intel.cvss_source or 'sem fonte'}) · KEV={_intel.kev if _intel.kev is not None else '—'} · "
+                    f"exploit={_intel.public_exploit_status}"
+                )
+            _assessment = build_finding_assessment(db, job, _finding).get("answers") or {}
+            _fp = dict(_assessment.get("false_positive") or {})
+            _rec = dict(_assessment.get("recommendation") or {})
+            _poc = dict(_assessment.get("poc") or {})
+            _exploit = dict(_assessment.get("public_exploit") or {})
+            _attack_path = dict(_assessment.get("attack_path") or {})
+            _poc_steps = " | ".join(str(step) for step in list(_poc.get("steps") or [])[:4]) or "—"
+            _exploit_urls = " | ".join(str(url) for url in list(_exploit.get("urls") or [])[:4]) or "—"
+            _answer_text = (
+                f"FP={_fp.get('answer')} · causa={_fp.get('cause') or '—'} · "
+                f"recomendação={_rec.get('text') or '—'} · PoC={_poc.get('status')} · passos={_poc_steps}"
+            )
+            _closure_text = (
+                f"{_cve_text} · exploit URLs={_exploit_urls} · "
+                f"attack path={'montado' if _attack_path.get('mounted') else 'não demonstrado'}"
+            )
+            _adj_rows.append(
+                '<tr>'
+                f'<td><strong>F-{_finding.id}</strong><br>{_html.escape(str(_finding.title or ""))}</td>'
+                f'<td><strong>{_html.escape(str(_adj.final_verdict))}</strong><br>'
+                f'<span style="font-size:10px;color:#777">proposta LLM: {_html.escape(str(_adj.proposed_verdict or "—"))}</span></td>'
+                f'<td>{_html.escape(str(_adj.reason_code))}<br><span style="font-size:10px;color:#777">confiança {_adj.confidence:.2f}</span></td>'
+                f'<td>{_html.escape(_missing)}</td>'
+                f'<td>{_html.escape(_wire_text)}</td>'
+                f'<td>{_html.escape(_answer_text)}</td>'
+                f'<td>{_html.escape(_closure_text)}</td>'
+                '</tr>'
+            )
+        if _adj_rows:
+            adjudication_html = (
+                '<div class="section" style="border-top:4px solid #2563eb">'
+                '<h2 style="color:#1d4ed8">P21 — Adjudicação, Lacunas e Wires de Revalidação</h2>'
+                '<p style="font-size:12px;color:#666;margin-bottom:12px">Cada wire retorna ao endpoint, parâmetro, '
+                'identidade e evidência que originaram a lacuna. A proposta da LLM é consultiva; o veredito final '
+                'é produzido pelo evidence gate após execução real.</p>'
+                '<table class="findings-table"><thead><tr>'
+                '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Teste de retorno</th><th>Resposta/PoC</th><th>CVE, exploit e path</th>'
+                f'</tr></thead><tbody>{"".join(_adj_rows)}</tbody></table></div>'
+            )
+    except Exception as _adj_err:
+        import logging as _adj_log
+        _adj_log.getLogger(__name__).debug("adjudication report section failed: %s", _adj_err)
+
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1459,6 +1560,9 @@ def generate_pentest_report(
 
   <!-- P21 POC SANDBOX STRIP -->
   {poc_strip_html}
+
+  <!-- P21 FINDING ADJUDICATION AND RETURN WIRES -->
+  {adjudication_html}
 
   <!-- ATTACK NARRATIVE (Frente D) -->
   {attack_narrative_html}

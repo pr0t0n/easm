@@ -59,6 +59,12 @@ QUALITY_GATE_MAX_ROUNDS = 4
 QUALITY_GATE_MAX_POC_PER_ROUND = 50
 QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
 QUALITY_GATE_MAX_FALLBACKS_PER_ROUND = 20
+# A hard block (completion_allowed=False) previously set status="blocked" and
+# scheduled nothing further -- a scan could sit there indefinitely with zero
+# follow-up activity (confirmed live: 40+ hours, no retry log entries after
+# the initial block). Bounded automatic re-dispatch attempts before settling
+# into a genuinely final, human-intervention-required state.
+QUALITY_GATE_HARD_BLOCK_MAX_RETRIES = 3
 
 QUALITY_TOOL_FALLBACKS: dict[str, list[str]] = {
     "httpx": ["curl-headers", "whatweb"],
@@ -1633,7 +1639,17 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
 
         validation_changes["endpoint_intelligence"] = analyze_endpoints_for_scan(db, job)
         validation_changes["hypothesis_generation"] = generate_hypotheses_for_scan(db, job)
-        hypothesis_drain = ensure_hypothesis_drain_work_item(db, job, batch_size=100)
+        # Isolate this write in a savepoint, same reasoning as the
+        # high_risk_lifecycle block below: ensure_hypothesis_drain_work_item
+        # inserts a ScanWorkItem, and the model-level terminal-scan guard can
+        # still reject it (e.g. the scan finished between this round starting
+        # and this insert running). A savepoint means that rejection rolls
+        # back only this nested block instead of poisoning the whole
+        # transaction and turning a fully drained, successfully-completed
+        # scan into FAILED -- confirmed live this happened before the model
+        # guard itself was also hardened to no longer raise on insert.
+        with db.begin_nested():
+            hypothesis_drain = ensure_hypothesis_drain_work_item(db, job, batch_size=100)
         validation_changes["hypothesis_drain"] = hypothesis_drain
         if int(hypothesis_drain.get("remaining", 0) or 0) > 0 and not hypothesis_drain.get("blocked"):
             actions.append({"type": "drain_hypotheses", **hypothesis_drain})

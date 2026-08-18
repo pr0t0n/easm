@@ -15,6 +15,7 @@ from app.services.scan_scope import (
     authorized_scope_from_target_query,
     host_from_scope_reference,
     is_host_in_scope,
+    registrable_domain,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,17 @@ _SPEC_URL_RE = re.compile(r"(?i)(/swagger(?:-ui)?/?(?:\.json)?$|/openapi\.json$|
 _FORM_RE = re.compile(r"(?is)<form\b[^>]*?(?:action=[\"']([^\"']+)[\"'])?[^>]*>(.*?)</form>")
 _INPUT_RE = re.compile(r"(?is)<(?:input|textarea|select)\b[^>]*?name=[\"']([^\"']+)[\"']")
 _METHOD_RE = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|OPTIONS)\b")
+# A host the authorized target's own client-side code names as its API base
+# is a categorically stronger ownership signal than an arbitrary crawled link
+# (third-party CDN, analytics domain, outbound reference) -- the target is
+# declaring it as its own backend, not merely linking to it. Used to promote
+# the scope-guard finding for such hosts from generic noise to an actionable
+# recommendation, without ever auto-expanding scope (still fail-closed: no
+# test traffic is sent until the operator explicitly adds the host).
+_OWN_API_DECLARATION_RE = re.compile(
+    r"""(?:baseURL|basePath|apiBase|API_URL|API_BASE_URL)\s*[:=]\s*['"`]([^'"`\s]+)['"`]""",
+    re.IGNORECASE,
+)
 
 
 def _try_ingest_exposed_spec(
@@ -86,39 +98,66 @@ def _flag_related_out_of_scope_hosts(
     in_scope_target: str,
     blocked_hosts: list[str],
     blocked_urls: list[str],
+    *,
+    declared_api_hosts: set[str] | None = None,
 ) -> None:
     """Surface hosts referenced by the target but outside its authorized scope
     as a visible, persisted signal — today this only ever produced a ScanLog
     WARNING line, invisible unless an operator had the live log drawer open at
     the right moment. Never auto-expands scope; only flags it for the operator
     to decide. Deduplicated per scan via state_data so the same host doesn't
-    re-fire a finding on every crawl result."""
+    re-fire a finding on every crawl result.
+
+    `declared_api_hosts` are hosts the target's own client-side code names as
+    its API base (see `_OWN_API_DECLARATION_RE`) — a categorically stronger
+    ownership signal than an arbitrary crawled link, surfaced as a distinct,
+    higher-severity, actionable recommendation instead of generic noise."""
     state = dict(getattr(scan, "state_data", None) or {})
     already_flagged = set(state.get("related_hosts_flagged") or [])
     new_hosts = [h for h in blocked_hosts if h and h not in already_flagged]
     if not new_hosts:
         return
+    declared_api_hosts = declared_api_hosts or set()
 
     raw_findings = []
     for host in new_hosts:
         example_urls = [u for u in blocked_urls if host_from_scope_reference(u) == host][:5]
+        is_own_api = host in declared_api_hosts
+        if is_own_api:
+            root_hint = registrable_domain(host) or host
+            title = f"Backend da propria aplicacao fora do escopo: {host}"
+            discovery_note = (
+                f"'{host}' foi declarado como base de API diretamente no codigo-cliente "
+                f"do alvo autorizado ({in_scope_target}) -- e muito provavelmente o "
+                "backend do mesmo produto, nao um dominio de terceiros. Nenhum teste "
+                "ativo foi executado contra este host porque ele nao esta no escopo "
+                "autorizado deste scan. Para testa-lo, adicione-o explicitamente ao "
+                f"target_query (ex.: '{in_scope_target}, https://{host}') ou autorize "
+                f"o dominio raiz com escopo coringa (ex.: '*.{root_hint}')."
+            )
+            severity, risk_score = "medium", 3.0
+        else:
+            title = f"Host relacionado fora do escopo detectado: {host}"
+            discovery_note = (
+                f"Referenciado a partir de {in_scope_target}, mas '{host}' nao esta "
+                "no escopo autorizado deste scan. Nenhum teste ativo foi executado "
+                "contra este host. Adicione-o ao escopo explicitamente se ele deve "
+                "ser testado."
+            )
+            severity, risk_score = "info", 1.0
         raw_findings.append({
-            "title": f"Host relacionado fora do escopo detectado: {host}",
-            "severity": "info",
-            "risk_score": 1,
+            "title": title,
+            "severity": severity,
+            "risk_score": risk_score,
             "details": {
                 # Deliberately NOT one of asset/domain/host/hostname/target/url/
                 # matched_at/final_url/network.* — those are exactly the keys
                 # scan_scope.out_of_scope_hosts_for_finding scans, which would
                 # reject this very finding for referencing an out-of-scope host.
                 "related_host_out_of_scope": host,
+                "own_api_declared_out_of_scope": is_own_api,
                 "example_references": example_urls,
-                "discovery_note": (
-                    f"Referenciado a partir de {in_scope_target}, mas '{host}' nao esta "
-                    "no escopo autorizado deste scan. Nenhum teste ativo foi executado "
-                    "contra este host. Adicione-o ao escopo explicitamente se ele deve "
-                    "ser testado."
-                ),
+                "discovery_note": discovery_note,
             },
         })
 
@@ -205,16 +244,24 @@ def normalize_crawler_result(
         _try_ingest_exposed_spec(db, scan, spec_urls[0], execution_context=context_type)
     if blocked_urls:
         blocked_hosts = sorted({host_from_scope_reference(url) for url in blocked_urls if host_from_scope_reference(url)})
+        declared_api_hosts = {
+            host for value in _OWN_API_DECLARATION_RE.findall(raw)
+            if (host := host_from_scope_reference(value)) and host in blocked_hosts
+        }
         db.add(ScanLog(
             scan_job_id=scan.id,
             source="scope-guard",
             level="WARNING",
             message=(
                 f"crawler_inventory_scope_blocked tool={tool_name} "
-                f"count={len(blocked_urls)} hosts={blocked_hosts}"
+                f"count={len(blocked_urls)} hosts={blocked_hosts} "
+                f"declared_api_hosts={sorted(declared_api_hosts)}"
             )[:4000],
         ))
-        _flag_related_out_of_scope_hosts(db, scan, target, blocked_hosts, blocked_urls)
+        _flag_related_out_of_scope_hosts(
+            db, scan, target, blocked_hosts, blocked_urls,
+            declared_api_hosts=declared_api_hosts,
+        )
 
     endpoints = []
     contextual_fuzzing: list[tuple[str, str, dict[str, Any]]] = []

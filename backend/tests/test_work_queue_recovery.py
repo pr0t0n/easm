@@ -268,6 +268,92 @@ def test_recover_terminal_capacity_queue_requests_finalization_only(monkeypatch)
     assert "work_queue_finalization_requested_at" in job.state_data["recovery"]
 
 
+def test_recover_skips_scan_with_pending_quality_gate_retry(monkeypatch) -> None:
+    """A quality-gate hard-block auto-retry (dispatch_scan_work_items /
+    run_offensive_operator_scan) deliberately sets status="running" with no
+    active task while it waits out its backoff. Without this check, the
+    orphan detector below would treat that intentional wait as abandonment
+    and burn through its unrelated redrive budget -- confirmed live: a scan
+    was permanently failed after 6 watchdog ticks, minutes into its own
+    5-20min quality-gate backoff, before that retry ever got to run."""
+    from app.models.models import ScanJob
+    from app.workers import tasks
+
+    job = SimpleNamespace(
+        id=9,
+        status="running",
+        state_data={
+            "quality_gate_hard_retry_count": 1,
+            "quality_gate_retry_scheduled_until": (datetime.now() + timedelta(minutes=5)).isoformat(),
+        },
+        current_step="P21 Quality Gate · retry automático 1/3 apos bloqueio de qualidade",
+    )
+    calls: list[str] = []
+
+    class FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return job
+
+    class FakeSession:
+        def query(self, model):
+            return FakeQuery()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: calls.append("chain_lock_alive") or False)
+    monkeypatch.setattr(tasks, "_kali_scan_has_active_jobs", lambda scan_id: calls.append("kali_active") or False)
+
+    result = tasks.recover_scan_if_orphaned(9, source="test")
+
+    assert result == {"scan_id": 9, "action": "quality_gate_retry_pending"}
+    assert calls == []  # short-circuited before any orphan-liveness check ran
+    assert job.status == "running"  # untouched
+
+
+def test_recover_falls_through_when_quality_gate_wait_expired(monkeypatch) -> None:
+    """An expired (in the past) quality_gate_retry_scheduled_until must NOT
+    protect the scan -- something genuinely went wrong if the scheduled
+    retry never fired, and normal orphan detection should still catch it."""
+    from app.models.models import ScanJob
+    from app.workers import tasks
+
+    job = SimpleNamespace(
+        id=10,
+        status="running",
+        state_data={
+            "quality_gate_retry_scheduled_until": (datetime.now() - timedelta(minutes=5)).isoformat(),
+        },
+        current_step="stale",
+    )
+
+    class FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return job
+
+    class FakeSession:
+        def query(self, model):
+            return FakeQuery()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(tasks, "_chain_lock_alive", lambda scan_id: True)
+    monkeypatch.setattr(tasks, "_kali_scan_has_active_jobs", lambda scan_id: False)
+
+    result = tasks.recover_scan_if_orphaned(10, source="test")
+
+    assert result["action"] != "quality_gate_retry_pending"
+
+
 def test_recover_does_not_interfere_with_valid_leased_work_item(monkeypatch) -> None:
     from app.models.models import ScanJob, ScanWorkItem
     from app.workers import tasks

@@ -27,9 +27,11 @@ VALIDATOR_TYPES = {
     "idor_bola", "object_reference", "bfla_authz", "business_logic_mass_assignment",
     "ssrf_open_redirect", "lfi_ssti_path_traversal", "xss_sqli", "rce",
     "api_security", "api_graphql", "api_spec_exposure", "information_disclosure",
+    "cross_tenant_object_access",
 }
 IMPACT = {
     "rce": 100, "idor_bola": 92, "object_reference": 88, "bfla_authz": 90,
+    "cross_tenant_object_access": 90,
     "business_logic_mass_assignment": 82, "xss_sqli": 80,
     "lfi_ssti_path_traversal": 78, "ssrf_open_redirect": 74,
     "api_security": 68, "api_graphql": 68, "api_spec_exposure": 58,
@@ -37,8 +39,8 @@ IMPACT = {
 }
 COST = {
     "rce": 90, "business_logic_mass_assignment": 80, "idor_bola": 65,
-    "object_reference": 65, "bfla_authz": 55, "xss_sqli": 45,
-    "lfi_ssti_path_traversal": 45, "ssrf_open_redirect": 35,
+    "object_reference": 65, "cross_tenant_object_access": 60, "bfla_authz": 55,
+    "xss_sqli": 45, "lfi_ssti_path_traversal": 45, "ssrf_open_redirect": 35,
 }
 _NUMERIC_OR_UUID = re.compile(r"(?<=/)(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,})(?=/|$)", re.I)
 

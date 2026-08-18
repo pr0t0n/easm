@@ -23,7 +23,7 @@ STAGE_TACTICS = {
 
 
 def build_attack_paths(db: Session, scan_id: int, job=None, max_paths: int = 20) -> dict:
-    from app.models.models import EvidenceArtifact, Finding, OffensiveHypothesis, ScanJob
+    from app.models.models import EvidenceArtifact, Finding, FindingAdjudication, OffensiveHypothesis, ScanJob
 
     if job is None:
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
@@ -43,6 +43,22 @@ def build_attack_paths(db: Session, scan_id: int, job=None, max_paths: int = 20)
     )
     for finding in findings:
         details = dict(finding.details or {})
+        adjudication = (
+            db.query(FindingAdjudication)
+            .filter(FindingAdjudication.finding_id == finding.id)
+            .order_by(FindingAdjudication.cycle.desc())
+            .first()
+        )
+        final_verdict = str(
+            getattr(adjudication, "final_verdict", None)
+            or finding.verification_status
+            or "candidate"
+        ).lower()
+        # An unusable/refuted finding is not an attack-path signal. Blocked or
+        # inconclusive evidence may remain a candidate step, but can never make
+        # a chain proven because it is not a VERIFIED_STATUS.
+        if final_verdict in {"refuted", "not_applicable", "invalid_evidence"}:
+            continue
         family = classify_family(
             title=finding.title,
             tool=finding.tool,
@@ -56,8 +72,12 @@ def build_attack_paths(db: Session, scan_id: int, job=None, max_paths: int = 20)
             "target": finding.url or finding.domain or details.get("target") or "",
             "title": finding.title,
             "severity": finding.severity,
-            "verification_status": finding.verification_status,
-            "confidence_score": finding.confidence_score,
+            "verification_status": final_verdict,
+            "confidence_score": (
+                float(adjudication.confidence)
+                if adjudication is not None
+                else finding.confidence_score
+            ),
             "evidence_ids": artifacts_by_finding.get(int(finding.id), []),
         })
 

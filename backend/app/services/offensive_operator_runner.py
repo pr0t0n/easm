@@ -141,27 +141,37 @@ def _release_db_session_before_external_wait(db) -> None:
             pass
 
 
-def _refresh_scan_job_after_wait(db, job: ScanJob | int) -> ScanJob | None:
-    """Rollback/reload a ScanJob after a long external wait."""
+def _refresh_scan_job_after_wait(db, job: ScanJob | int) -> ScanJob:
+    """Rollback/reload a ScanJob after a long external wait.
 
-    try:
-        job_id = int(job if isinstance(job, int) else job.id)
-    except Exception:  # noqa: BLE001
-        return None
-    _safe_db_rollback(db)
-    try:
-        refreshed = db.get(ScanJob, job_id)
-        if refreshed is not None:
-            return refreshed
-    except Exception:  # noqa: BLE001
+    Raises instead of returning None on failure. This used to return None on
+    any hiccup, and every call site did
+    `job = _refresh_scan_job_after_wait(db, job_id) or job` — silently
+    falling back to the OLD, now-detached `job` reference from before
+    `_release_db_session_before_external_wait`'s `db.close()`. That stale
+    object then blew up later, at the next `db.refresh(job)` call anywhere
+    downstream, with SQLAlchemy's "Instance '<ScanJob at 0x...>' is not
+    persistent within this Session" — confirmed live (a P21-quality-gate-
+    blocked scan carrying that exact error as its last_error). A transient
+    DB hiccup immediately after releasing the session is retried once; a
+    genuine failure to re-fetch is a real problem the caller's existing
+    retryable-task handling should see and retry the whole attempt from a
+    clean state, not something to paper over with corrupted state. Since
+    this now never returns a falsy value, callers' `... or job` fallback is
+    harmless dead code, not a silent trap.
+    """
+    job_id = int(job if isinstance(job, int) else job.id)
+    last_exc: Exception | None = None
+    for _attempt in range(2):
         _safe_db_rollback(db)
-    if not isinstance(job, int):
         try:
-            db.refresh(job)
-            return job
-        except Exception:  # noqa: BLE001
-            _safe_db_rollback(db)
-    return None
+            refreshed = db.get(ScanJob, job_id)
+            if refreshed is not None:
+                return refreshed
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            continue
+    raise RuntimeError(f"scan_job_refresh_failed_after_external_wait: job_id={job_id}") from last_exc
 
 
 def _scan_mode_value(scan_mode: str) -> str:
@@ -210,6 +220,23 @@ def _next_pending_phase_target(
             if f"{phase_id}:{target}" not in completed_work:
                 return phase_id, target
     return None
+
+
+def _pending_continuation_active(state: dict[str, Any]) -> bool:
+    """True while a phase continuation scheduled by _enqueue_operator_continuation
+    hasn't fired yet -- see that function for the race this closes. Self-expiring:
+    if `fires_at` is in the past (the continuation ran, or was lost), this returns
+    False on its own rather than requiring an explicit clear anywhere."""
+    pending = dict(state.get("_pending_phase_continuation") or {})
+    fires_at = str(pending.get("fires_at") or "")
+    if not fires_at:
+        return False
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(fires_at) > _dt.now()
+    except ValueError:
+        return False
 
 
 def _enqueue_operator_continuation(
@@ -279,6 +306,32 @@ def _enqueue_operator_continuation(
         countdown=max(0, int(countdown or 0)),
         queue=queue,
     )
+    if int(countdown or 0) > 0:
+        # A completion check running in THIS SAME celery task instance, a few
+        # lines further down the very same synchronous call (see the
+        # `has_pending_work`/`_wq_all_done` block), only looks at
+        # scan_work_items -- it has no way to know a future phase was just
+        # scheduled here and will only start producing new items after this
+        # countdown elapses. Confirmed live: P01 seeded a single item, that
+        # item finished in seconds, the completion check saw an empty queue
+        # and ran the quality gate immediately, which blocked the scan --
+        # and when the P02 continuation scheduled right here actually fired
+        # 60s later, it correctly saw status=blocked and self-skipped,
+        # permanently starving P02+ of any real work. Recording when this
+        # continuation is due lets that check wait instead of finalizing.
+        # Self-expiring (checked against `now`, not explicitly cleared) so a
+        # lost/never-fired continuation can't block finalization forever.
+        from datetime import datetime as _dt
+        from datetime import timedelta as _timedelta
+
+        state = dict(job.state_data or {})
+        state["_pending_phase_continuation"] = {
+            "phase_id": next_phase_id,
+            "reason": reason,
+            "task_id": async_result.id,
+            "fires_at": (_dt.now() + _timedelta(seconds=int(countdown))).isoformat(),
+        }
+        job.state_data = state
     db.add(ScanLog(
         scan_job_id=job.id,
         source="offensive-operator",
@@ -601,6 +654,41 @@ def _scan_halt_reason(job: ScanJob, expected_execution_epoch: int | None = None)
 
 def _scan_halted(job: ScanJob, expected_execution_epoch: int | None = None) -> bool:
     return _scan_halt_reason(job, expected_execution_epoch) is not None
+
+
+def _try_acquire_scan_finalize_lock(scan_id: int) -> tuple[bool, Any]:
+    """ARCH-003: best-effort acquire of the SAME dispatch_lock:{scan_id} Redis
+    key tasks.py::dispatch_scan_work_items already uses.
+
+    When the parallel work-queue engine is active for a scan, both
+    dispatch_scan_work_items and this module's own completion path can
+    independently observe "all work items terminal" at nearly the same
+    moment and race to finalize ScanJob.status with no row lock or
+    optimistic-concurrency check (confirmed live: a 40+ hour stuck scan
+    from exactly this pattern). Sharing the lock serializes the two writers
+    instead of leaving them to race.
+
+    Returns (acquired, redis_client_or_None). Fails OPEN (acquired=True,
+    client=None) if Redis itself is unavailable, matching
+    dispatch_scan_work_items' own precedent — a Redis outage must not be
+    able to block scan completion.
+    """
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        client = _redis_client()
+        acquired = bool(client.set(f"dispatch_lock:{scan_id}", "1", nx=True, ex=45))
+        return acquired, client
+    except Exception:
+        return True, None
+
+
+def _release_scan_finalize_lock(scan_id: int, client: Any) -> None:
+    try:
+        if client is not None:
+            client.delete(f"dispatch_lock:{scan_id}")
+    except Exception:
+        pass
 
 
 def _clean_tool_text(value: Any) -> str:
@@ -4064,7 +4152,7 @@ def run_offensive_operator_scan(
         _wq_all_done = False
         if _wq_engine:
             from app.services.scan_work_queue import has_pending_work, work_queue_counts
-            if has_pending_work(db, job.id):
+            if has_pending_work(db, job.id) or _pending_continuation_active(_final_state_snapshot):
                 _wait_seconds = max(15, int(_final_state_snapshot.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
                 _final_state_snapshot["work_queue_counts"] = work_queue_counts(db, job.id)
                 _final_targets = list(_final_state_snapshot.get("target_set") or all_targets)
@@ -4387,38 +4475,64 @@ def run_offensive_operator_scan(
                        message=f"learning_loop_failed error={exc!s}"))
         db.commit()
 
-    job.state_data = state
-    job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
-    # A scan is "completed" if at least one phase ran (completed or partial).
-    # It is "failed" only when zero phases produced any result at all.
-    _dead_targets = list((state or {}).get("dead_targets") or [])
-    if _dead_targets:
-        # Alvo(s) ficaram inacessíveis via SYN > grace. FINALIZA entregando os
-        # achados já coletados, com marcador final "Timeout Destination".
-        job.status = "completed"
-        job.current_step = "Timeout Destination"
-        state["timeout_destination"] = {
-            "dead_targets": _dead_targets,
-            "grace_seconds": _TARGET_UNREACHABLE_GRACE,
-            "reason": "alvo inacessível via SYN além do limite — fases restantes puladas",
-        }
+    # ARCH-003: dispatch_scan_work_items can independently finalize this same
+    # scan at nearly the same moment when the work-queue engine is in play —
+    # share its dispatch_lock rather than racing it unlocked.
+    _fin_lock_acquired = True
+    _fin_r_lock = None
+    if _wq_engine:
+        _fin_lock_acquired, _fin_r_lock = _try_acquire_scan_finalize_lock(job.id)
+
+    if not _fin_lock_acquired:
+        db.add(ScanLog(
+            scan_job_id=job.id, source="offensive-operator", level="INFO",
+            message="finalize_deferred_dispatch_lock_held — retrying shortly instead of racing the work-queue dispatcher",
+        ))
+        db.commit()
+        queued = _enqueue_operator_continuation(
+            db, job, scan_mode, "P22", countdown=5, reason="finalize_lock_contention",
+        )
+        db.commit()
+        return {"checkpointed": True, "deferred_finalize": True, **queued}
+
+    try:
         job.state_data = state
-        db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="ERROR",
-                       message=(f"scan_finalizado=Timeout Destination dead_targets={_dead_targets} "
-                                f"findings_preservados=sim phases_completed={completed_count} partial={partial_count}")))
-    else:
-        job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
-        job.current_step = "P22 Campaign Report"
-    if job.status == "completed":
-        job.mission_progress = 100
-    db.commit()
+        job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
+        # A scan is "completed" if at least one phase ran (completed or partial).
+        # It is "failed" only when zero phases produced any result at all.
+        _dead_targets = list((state or {}).get("dead_targets") or [])
+        if _dead_targets:
+            # Alvo(s) ficaram inacessíveis via SYN > grace. FINALIZA entregando os
+            # achados já coletados, com marcador final "Timeout Destination".
+            job.status = "completed"
+            job.current_step = "Timeout Destination"
+            state["timeout_destination"] = {
+                "dead_targets": _dead_targets,
+                "grace_seconds": _TARGET_UNREACHABLE_GRACE,
+                "reason": "alvo inacessível via SYN além do limite — fases restantes puladas",
+            }
+            job.state_data = state
+            db.add(ScanLog(scan_job_id=job.id, source="scan-intelligence", level="ERROR",
+                           message=(f"scan_finalizado=Timeout Destination dead_targets={_dead_targets} "
+                                    f"findings_preservados=sim phases_completed={completed_count} partial={partial_count}")))
+        else:
+            job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
+            job.current_step = "P22 Campaign Report"
+        if job.status == "completed":
+            job.mission_progress = 100
+        db.commit()
+    finally:
+        _release_scan_finalize_lock(job.id, _fin_r_lock)
 
     # ── Persist findings from phase evidence into the Finding table ────────
     _persist_offensive_findings(db, job, phase_ledgers, targets)
 
     try:
         from app.services.scan_execution_metrics import reconcile_tool_run_ledger
-        from app.services.scan_quality import run_scan_quality_gate
+        from app.services.scan_quality import (
+            QUALITY_GATE_HARD_BLOCK_MAX_RETRIES,
+            run_scan_quality_gate,
+        )
 
         reconcile_tool_run_ledger(db, job)
         _quality_gate = run_scan_quality_gate(db, job)
@@ -4461,19 +4575,72 @@ def run_offensive_operator_scan(
         state["quality_gate_blocked"] = True
         state["completion_source"] = "quality_gate"
         state["current_pentest_phase_id"] = "P21"
+        # Same dedicated counter as tasks.py's dispatch_scan_work_items hard
+        # block (this is the second, duplicate call site for the identical
+        # quality-gate logic -- confirmed live: a scan executed through THIS
+        # path, not that one, and hit the exact dead end the other site was
+        # fixed for: status="blocked" set with nothing scheduled to look at
+        # it again). Shared state key so either path retries the same scan
+        # consistently regardless of which one evaluates it.
+        _blockers = _quality_gate.get("blockers")
+        _score = _quality_gate.get("quality", {}).get("score")
+        _gap_count = _quality_gate.get("gap_count")
+        hard_retry_count = int(state.get("quality_gate_hard_retry_count") or 0)
+        if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES:
+            from datetime import datetime as _dt
+            from datetime import timedelta as _timedelta
+
+            hard_retry_count += 1
+            backoff = min(3600, 300 * (2 ** (hard_retry_count - 1)))  # 5min, 10min, 20min, capped 1h
+            state["quality_gate_hard_retry_count"] = hard_retry_count
+            # Tells recover_scan_if_orphaned's watchdog this
+            # status="running"-with-no-active-task window is intentional (a
+            # scheduled backoff wait), not abandonment -- without this, the
+            # watchdog's per-minute orphan check burns through its own
+            # unrelated redrive budget and permanently fails the scan long
+            # before this retry ever gets to run (confirmed live).
+            state["quality_gate_retry_scheduled_until"] = (_dt.now() + _timedelta(seconds=backoff + 60)).isoformat()
+            job.state_data = state
+            job.status = "running"
+            job.mission_progress = 99
+            job.current_step = (
+                f"P21 Quality Gate · retry automático "
+                f"{hard_retry_count}/{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} apos bloqueio de qualidade"
+            )
+            job.last_error = None
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="quality-gate",
+                level="WARNING",
+                message=(
+                    "QUALITY GATE bloqueou conclusão — retry automático "
+                    f"{hard_retry_count}/{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} agendado "
+                    f"score={_score} gap_count={_gap_count} blockers={_blockers}"
+                )[:2000],
+            ))
+            db.commit()
+            try:
+                from app.workers.tasks import _schedule_scan_work_dispatch
+
+                _schedule_scan_work_dispatch(job.id, countdown=backoff)
+            except Exception:
+                pass
+            return campaign
+
         job.state_data = state
         job.status = "blocked"
         job.mission_progress = 99
-        job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade"
+        job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade (retries automáticos esgotados)"
+        job.last_error = None
         db.add(ScanLog(
             scan_job_id=job.id,
             source="quality-gate",
             level="ERROR",
             message=(
-                "QUALITY GATE bloqueou conclusão — sem 100% de cobertura/evidência/validação "
-                f"score={_quality_gate.get('quality', {}).get('score')} "
-                f"gap_count={_quality_gate.get('gap_count')} "
-                f"blockers={_quality_gate.get('blockers')}"
+                "QUALITY GATE bloqueou conclusão definitivamente — "
+                f"{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} retries automáticos esgotados sem 100% de "
+                f"cobertura/evidência/validação score={_score} gap_count={_gap_count} "
+                f"blockers={_blockers}. Requer intervenção manual (remediar gaps e retomar)."
             )[:2000],
         ))
         db.commit()

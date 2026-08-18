@@ -735,6 +735,22 @@ def run_as_tool(
             logger.debug("business_logic_test: analyze_business_logic battery failed", exc_info=True)
             return []
 
+    def _read_only_business_logic_findings() -> list[dict]:
+        if not run_business_logic_battery:
+            return []
+        try:
+            from app.services.business_logic_analyzer import run_read_only_checks
+
+            return run_read_only_checks(
+                base_url=base,
+                domain=urlparse(base).hostname or base,
+                auth_headers=headers or None,
+                auth_cookies=cookies or None,
+            )
+        except Exception:
+            logger.debug("business_logic_test: run_read_only_checks failed", exc_info=True)
+            return []
+
     if not actions:
         return {
             **common,
@@ -743,16 +759,25 @@ def run_as_tool(
             "stdout": "business_logic: 0 ações; pré-condições/contratos pendentes",
             "stderr": "",
             "parsed": {"summary": {"observed": 0, "failed": 0, "blocked": len(blocked)}, "observations": [], "blocked": blocked},
-            # No observed actions means the contract preconditions are not met.
-            # Do not run the generic battery here: it can open clients / perform
-            # target analysis and would violate the fail-closed "no plan, no
-            # request" contract this branch exists to enforce.
-            "business_logic_findings": [],
+            # No observed actions means the mutation-action contract's
+            # preconditions are not met -- the "no plan, no request" guardrail
+            # correctly still blocks the FULL named-technique battery here
+            # (analyze_business_logic bundles genuine writes -- test_mass_assignment
+            # registers a real account, test_file_upload uploads a real file --
+            # those must stay gated behind a vetted action/contract). But two
+            # checks in that same battery need no mutation plan at all and were
+            # being suppressed as collateral damage on every target where no
+            # mutation baseline was observed (i.e. most targets, since most
+            # endpoints are read-only): CORS-reflection and rate-limit-absence
+            # only ever issue reads/failed-login probes against `base`/`domain`.
+            # Run just those two directly instead of the mutating battery.
+            "business_logic_findings": _read_only_business_logic_findings(),
         }
 
     base_parsed = urlparse(base)
     deadline = time.monotonic() + max(1, min(120, int(max_seconds or 0)))
     observations: list[dict] = []
+    wire_assessments: list[dict] = []
     failures = 0
     clients: dict[str, httpx.Client] = {}
 
@@ -799,6 +824,14 @@ def run_as_tool(
                     blocked.append({"endpoint": endpoint, "reasons": ["state_change_not_allowed_in_baseline_executor"]})
                     continue
                 required = [str(item) for item in dict.fromkeys(action.get("required_identities") or [])]
+                missing_required = [key for key in required if key not in identity_material]
+                if missing_required:
+                    blocked.append({
+                        "endpoint": endpoint,
+                        "reasons": ["wire_identity_material_missing:" + ",".join(missing_required)],
+                        "validation_wire_id": action.get("validation_wire_id"),
+                    })
+                    continue
                 cross_identity_keys = [key for key in required if key in identity_material]
                 try:
                     if len(cross_identity_keys) >= 2:
@@ -810,6 +843,31 @@ def run_as_tool(
                         obs_b["cross_identity_delta"] = delta
                         observations.append(obs_a)
                         observations.append(obs_b)
+                        owner_ok = 200 <= int(obs_a.get("status_code") or 0) < 300
+                        secondary_ok = 200 <= int(obs_b.get("status_code") or 0) < 300
+                        same_resource = (
+                            obs_a.get("body_fingerprint") == obs_b.get("body_fingerprint")
+                            and obs_a.get("content_type") == obs_b.get("content_type")
+                        )
+                        authorization_denied = int(obs_b.get("status_code") or 0) in {401, 403, 404}
+                        wire_assessments.append({
+                            "validation_wire_id": action.get("validation_wire_id"),
+                            "action_id": "compare_two_identities",
+                            "primary_identity_key": key_a,
+                            "secondary_identity_key": key_b,
+                            "owner_control_succeeded": owner_ok,
+                            "secondary_request_succeeded": secondary_ok,
+                            "same_resource_fingerprint": same_resource,
+                            "vulnerable": bool(owner_ok and secondary_ok and same_resource),
+                            "negative_control_passed": bool(owner_ok and authorization_denied),
+                            "evidence_status": (
+                                "positive_authorization_bypass"
+                                if owner_ok and secondary_ok and same_resource
+                                else "authorization_control_enforced"
+                                if owner_ok and authorization_denied
+                                else "inconclusive"
+                            ),
+                        })
                     else:
                         identity_key = cross_identity_keys[0] if cross_identity_keys else None
                         response = _client_for(identity_key or "__default__").request(method, endpoint)
@@ -823,11 +881,21 @@ def run_as_tool(
     except Exception as exc:  # noqa: BLE001
         return {**common, "status": "failed", "stdout": "", "stderr": f"{type(exc).__name__}: {exc}", "dispatch_error": type(exc).__name__}
 
+    vulnerable = any(row.get("vulnerable") is True for row in wire_assessments)
+    negative_control = bool(wire_assessments) and all(
+        row.get("negative_control_passed") is True for row in wire_assessments
+    )
     return {
         **common,
         "status": "done" if observations and failures == 0 else ("partial" if observations else "blocked_precondition"),
         "return_code": 0,
-        "stdout": f"business_logic: {len(observations)} baselines observados; {len(blocked)} bloqueados; {failures} falhas",
+        "stdout": (
+            "business_logic: authorization bypass confirmed"
+            if vulnerable
+            else "business_logic: authorization control enforced; not vulnerable"
+            if negative_control
+            else f"business_logic: {len(observations)} baselines observados; {len(blocked)} bloqueados; {failures} falhas"
+        ),
         "stderr": "",
         "parsed": {
             "summary": {"observed": len([row for row in observations if row.get("evidence_status") == "baseline_observed"]), "failed": failures, "blocked": len(blocked)},
@@ -835,6 +903,10 @@ def run_as_tool(
             "blocked": blocked,
             "mutation_authorized": bool(plan.get("mutation_authorized")),
             "mutation_executed": False,
+            "vulnerable": vulnerable,
+            "confirmed": vulnerable,
+            "negative_control_passed": negative_control,
+            "wire_assessments": wire_assessments,
         },
         "business_logic_findings": _business_logic_findings(),
     }

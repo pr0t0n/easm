@@ -69,6 +69,10 @@ _GUARDRAIL_BY_TOOL: dict[str, list[str]] = {
         r"^--dump(?:-all)?$", r"^--os-shell$", r"^--sql-shell$",
         r"^--file-read.*$", r"^--file-write.*$",
     ],
+    "crackmapexec": [
+        r"(?i)^--sam$", r"(?i)^--lsa$", r"(?i)^--ntds.*$",
+        r"^-x.*$", r"^-X.*$", r"(?i)^--exec-method.*$",
+    ],
 }
 _GUARDRAIL_GLOBAL = [
     r"(?i)^--dump(?:-all)?$", r"(?i)^--os-shell$", r"(?i)^--file-write.*$", r"(?i)^--exfil.*$",

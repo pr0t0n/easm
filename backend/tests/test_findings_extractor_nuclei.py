@@ -55,6 +55,63 @@ def test_nuclei_parser_normalizes_string_tags_and_non_mapping_info() -> None:
     )[0]["title"] == "minimal"
 
 
+def test_nuclei_takeover_evidence_surfaces_extracted_resource_not_just_host() -> None:
+    """Regression for a real, confirmed finding whose evidence text was just
+    "Nuclei template aws-bucket-takeover matched at https://byxcapital.com.br"
+    -- unreproducible: it named the host the request was sent to (a CDN
+    whose origin is misconfigured) but never the actual claimable resource
+    nuclei itself extracted (the orphaned bucket name), which is the one
+    fact needed to reproduce or remediate the finding."""
+    from app.services.findings_extractor import _extract_nuclei_findings
+
+    findings = _extract_nuclei_findings(
+        [{
+            "template-id": "aws-bucket-takeover",
+            "info": {
+                "name": "AWS Bucket Takeover Detection",
+                "severity": "high",
+                "tags": ["takeover", "aws", "bucket", "vuln"],
+                "description": "AWS Bucket takeover was detected.",
+            },
+            "host": "byxcapital.com.br",
+            "matched-at": "https://byxcapital.com.br",
+            "extracted-results": ["redirect-byxcapital"],
+        }],
+        "",
+        "byxcapital.com.br",
+        tool_name="nuclei-cloud",
+    )
+
+    assert len(findings) == 1
+    details = findings[0]["details"]
+    evidence = details["evidence"]
+    assert "redirect-byxcapital" in evidence
+    assert "https://byxcapital.com.br" in evidence
+    # The distinction between "where the request landed" and "what's
+    # actually claimable" must be explicit, not left for the reader to infer.
+    assert "não o host em si" in evidence or "recurso reivindicável" in evidence
+    assert details["reproduction_notes"]
+    assert "redirect-byxcapital" in details["reproduction_notes"][0]
+
+
+def test_nuclei_takeover_without_extracted_result_flags_manual_confirmation() -> None:
+    from app.services.findings_extractor import _extract_nuclei_findings
+
+    findings = _extract_nuclei_findings(
+        [{
+            "template-id": "some-subdomain-takeover",
+            "info": {"name": "Takeover", "severity": "high", "tags": ["takeover"]},
+            "matched-at": "https://stale.example.test",
+        }],
+        "",
+        "example.test",
+    )
+
+    evidence = findings[0]["details"]["evidence"]
+    assert "confirmar manualmente" in evidence
+    assert findings[0]["details"]["reproduction_notes"] is None
+
+
 def test_work_item_extractor_records_parser_error_metadata(monkeypatch) -> None:
     from app.services import findings_extractor as fe
 

@@ -89,6 +89,42 @@ _ACTION_TEMPLATES: dict[str, dict[str, Any]] = {
             "detail that should not be disclosed at this privilege level."
         ),
     },
+    "self_grant_then_revert": {
+        "mutating": True,
+        # Distinct from the general "mutating" gate: this template is only
+        # ever honored when the skill's OWN self_revert_mutation_allowed flag
+        # is set (see validate_skill_actions) -- destructive_payloads_allowed
+        # staying false does not block it, and being true does not enable it
+        # either. It never sends a free-form request: see
+        # self_reverting_mutation.execute_self_grant_then_revert, which
+        # refuses to even attempt the grant unless a revert endpoint was
+        # independently discovered first, and always tries to revert.
+        "self_scoped_revertible": True,
+        "description": (
+            "Fetch the endpoint's own roles/permissions listing, self-grant "
+            "the highest-ranked observed role to the caller's own identity "
+            "via the discovered assignment endpoint, confirm via read-back, "
+            "then immediately revert. Only proceeds if a revert endpoint "
+            "(DELETE on the same path, or a sibling '.../remove' path) was "
+            "independently discovered; never attempts the grant otherwise."
+        ),
+    },
+    "forge_weak_secret_header": {
+        "mutating": False,
+        # Read-only (GET replay only), but still gated on its own narrow flag
+        # (weak_secret_guessing_allowed) rather than folded into the general
+        # non-mutating templates -- active secret-guessing is a distinct
+        # policy decision from "replay this request as-is".
+        "weak_secret_guessing": True,
+        "description": (
+            "If the discovered endpoint's traffic carries a JWT-shaped value "
+            "under a custom, non-standard header (not Authorization), try a "
+            "small fixed dictionary of common/hostname-derived secrets to "
+            "sign a forged token reusing that token's own claim shape, and "
+            "check whether the endpoint's response changes when replayed "
+            "with an escalated privilege claim."
+        ),
+    },
 }
 
 # Hardcoded, not inferred: the skills whose technique only exists as markdown
@@ -416,9 +452,19 @@ def validate_skill_actions(
     endpoints: list[dict[str, str]],
     authorized_scope: list[str],
     destructive_payloads_allowed: bool,
+    self_revert_mutation_allowed: bool = False,
+    weak_secret_guessing_allowed: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Mechanical, fail-closed gate — never trusts the LLM's output directly.
-    Returns (accepted_actions_in_run_as_tool_shape, rejected_with_reasons)."""
+    Returns (accepted_actions_in_run_as_tool_shape, rejected_with_reasons).
+
+    self_scoped_revertible templates (today: only "self_grant_then_revert")
+    are gated by self_revert_mutation_allowed, a narrower and INDEPENDENT
+    flag from destructive_payloads_allowed — either one alone does not
+    enable the other's category. Their accepted-action shape also differs:
+    they carry endpoint_index/method/purpose only (no "flows"/"invariants"),
+    since run_skill_probe diverts them to execute_self_grant_then_revert
+    instead of run_as_tool's replay loop."""
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
@@ -437,6 +483,32 @@ def validate_skill_actions(
             continue
         endpoint = endpoints[idx]
         method = str(endpoint.get("method") or "GET").upper()
+        host = host_from_scope_reference(endpoint.get("url") or "")
+        if not host or not is_host_in_scope(host, authorized_scope):
+            rejected.append({"reason": "endpoint_out_of_scope", "raw": raw})
+            continue
+        if template.get("self_scoped_revertible"):
+            if not self_revert_mutation_allowed:
+                rejected.append({"reason": "self_grant_template_not_allowed_by_skill_safety_rules", "raw": raw})
+                continue
+            accepted.append({
+                "endpoint": endpoint["url"],
+                "method": method,
+                "template": template_name,
+                "purpose": str(raw.get("purpose") or "")[:200],
+            })
+            continue
+        if template.get("weak_secret_guessing"):
+            if not weak_secret_guessing_allowed:
+                rejected.append({"reason": "weak_secret_guessing_not_allowed_by_skill_safety_rules", "raw": raw})
+                continue
+            accepted.append({
+                "endpoint": endpoint["url"],
+                "method": "GET",
+                "template": template_name,
+                "purpose": str(raw.get("purpose") or "")[:200],
+            })
+            continue
         if template["mutating"] and not destructive_payloads_allowed:
             rejected.append({"reason": "mutating_template_not_allowed_by_skill_safety_rules", "raw": raw})
             continue
@@ -445,10 +517,6 @@ def validate_skill_actions(
             # (e.g. the endpoint was recorded as POST) — force it to a safe
             # HEAD/GET rather than replaying the original method blind.
             method = "GET"
-        host = host_from_scope_reference(endpoint.get("url") or "")
-        if not host or not is_host_in_scope(host, authorized_scope):
-            rejected.append({"reason": "endpoint_out_of_scope", "raw": raw})
-            continue
         accepted.append({
             "endpoint": endpoint["url"],
             "method": method,
@@ -505,18 +573,25 @@ def run_skill_probe(
         db.close()
 
     plan = build_skill_action_plan(skill_id, endpoints)
-    # skill_runtime.py's frontmatter parser is flat — `safety_rules:` is a
-    # nested YAML mapping, so its sub-keys land on the skill dict at the top
-    # level, not under "safety_rules" (see skill_runtime.py's own comment on
-    # _load_skill_file's "destructive_payloads_allowed" field).
+    # skill_runtime.py mirrors these off the real nested `safety_rules` mapping
+    # onto flat top-level fields for convenience — read those here.
     destructive_allowed = bool(skill.get("destructive_payloads_allowed"))
+    self_revert_allowed = bool(skill.get("self_revert_mutation_allowed"))
+    weak_secret_allowed = bool(skill.get("weak_secret_guessing_allowed"))
     accepted, rejected = validate_skill_actions(
         plan.get("actions") or [], endpoints, authorized_scope, destructive_allowed,
+        self_revert_mutation_allowed=self_revert_allowed,
+        weak_secret_guessing_allowed=weak_secret_allowed,
     )
+
+    self_grant_actions = [a for a in accepted if a.get("template") == "self_grant_then_revert"]
+    weak_secret_actions = [a for a in accepted if a.get("template") == "forge_weak_secret_header"]
+    diverted_templates = {"self_grant_then_revert", "forge_weak_secret_header"}
+    replay_actions = [a for a in accepted if a.get("template") not in diverted_templates]
 
     execution_plan = {
         "policy": "skill-probe-llm-planned",
-        "actions": accepted,
+        "actions": replay_actions,
         "blocked": rejected,
         "guardrails": {
             "guess_routes": False,
@@ -540,4 +615,222 @@ def run_skill_probe(
         result["parsed"]["llm_actions_proposed"] = len(plan.get("actions") or [])
         result["parsed"]["llm_actions_accepted"] = len(accepted)
         result["parsed"]["llm_actions_rejected"] = rejected
+        if self_grant_actions:
+            result["parsed"]["self_grant_then_revert"] = _run_self_grant_actions(
+                scan_id=int(scan_id),
+                grant_actions=self_grant_actions,
+                endpoints=endpoints,
+                auth_headers=auth_headers or {},
+                auth_cookies=auth_cookies or {},
+            )
+        if weak_secret_actions:
+            result["parsed"]["weak_secret_probe"] = _run_weak_secret_actions(
+                scan_id=int(scan_id),
+                target=target,
+                probe_actions=weak_secret_actions,
+                auth_headers=auth_headers or {},
+                auth_cookies=auth_cookies or {},
+            )
     return result
+
+
+def _run_weak_secret_actions(
+    *,
+    scan_id: int,
+    target: str,
+    probe_actions: list[dict[str, Any]],
+    auth_headers: dict[str, str],
+    auth_cookies: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Only proceeds when the caller's OWN captured auth_headers already
+    carry a JWT-shaped value under a non-standard header -- see
+    find_forgeable_header's docstring for why that's the exact shape of the
+    X-Impersonate class of bug this targets. No header of that shape ->
+    nothing to probe, full stop.
+
+    SEC-002: probe_weak_secret drives its own direct HTTP requests (not
+    through MCP/Kali), so — same as _run_self_grant_actions — this caller is
+    where the defense-in-depth scope re-check and durable audit trail live."""
+    from app.services.weak_secret_probe import find_forgeable_header, probe_weak_secret
+
+    found = find_forgeable_header(auth_headers)
+    if not found:
+        return [{"attempted": False, "reason": "no_forgeable_header_in_captured_session"}]
+    header_name, header_value = found
+    other_headers = {k: v for k, v in auth_headers.items() if k != header_name}
+    app_hostname = host_from_scope_reference(target) or target
+
+    from app.db.session import SessionLocal
+    db = SessionLocal()
+    try:
+        authorized_scope = authorized_scope_for_scan(db, scan_id)
+    finally:
+        db.close()
+
+    results = []
+    for action in probe_actions:
+        whoami_url = str(action.get("endpoint") or target)
+        probe_host = host_from_scope_reference(whoami_url)
+        if not probe_host or not is_host_in_scope(probe_host, authorized_scope):
+            outcome = {"attempted": False, "reason": "endpoint_out_of_scope", "whoami_url": whoami_url}
+            results.append(outcome)
+            _audit_weak_secret_attempt(scan_id, outcome)
+            continue
+        outcome = probe_weak_secret(
+            header_name=header_name,
+            header_value=header_value,
+            app_hostname=app_hostname,
+            whoami_url=whoami_url,
+            other_headers=other_headers,
+            cookies=auth_cookies,
+            elevated_privilege_value="admin",
+        )
+        outcome["whoami_url"] = whoami_url
+        results.append(outcome)
+        _audit_weak_secret_attempt(scan_id, outcome)
+    return results
+
+
+def _audit_weak_secret_attempt(scan_id: int, outcome: dict[str, Any]) -> None:
+    """Durable audit record for every weak-secret probe attempt — a direct
+    HTTP probe with no MCP/Kali audit trail of its own (SEC-002). Never
+    allowed to fail the actual probe."""
+    try:
+        from app.db.session import SessionLocal
+        from app.services.audit_service import log_audit
+
+        db = SessionLocal()
+        try:
+            log_audit(
+                db,
+                event_type="skill_probe.weak_secret_guess",
+                message=f"Weak-secret probe attempt url={outcome.get('whoami_url')}",
+                scan_job_id=scan_id,
+                metadata={
+                    "attempted": bool(outcome.get("attempted")),
+                    "confirmed": outcome.get("confirmed"),
+                    "reason": outcome.get("reason"),
+                    "whoami_url": outcome.get("whoami_url"),
+                },
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("weak_secret_probe audit write failed scan_id=%s", scan_id, exc_info=True)
+
+
+def _run_self_grant_actions(
+    *,
+    scan_id: int,
+    grant_actions: list[dict[str, Any]],
+    endpoints: list[dict[str, str]],
+    auth_headers: dict[str, str],
+    auth_cookies: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Resolve each self_grant_then_revert action's companion roles-listing
+    and revert endpoints, then run execute_self_grant_then_revert. Refuses to
+    attempt anything it can't resolve — see the module's own docstring for
+    why a missing revert endpoint hard-stops before any write is sent.
+
+    SEC-002: this drives a real, mutating write directly over HTTP — it never
+    goes through MCP/Kali, so it gets none of their guardrail/audit coverage
+    by construction. execute_self_grant_then_revert itself stays DB-free by
+    design (see its docstring), so the defense-in-depth scope re-check and
+    the durable audit trail belong here, at the one caller that already has
+    a DB session and scan_id, rather than threading DB coupling into it."""
+    from app.db.session import SessionLocal
+    from app.models.models import ScanLog
+    from app.services.audit_service import log_audit
+    from app.services.business_logic_test import _jwt_self_id
+    from app.services.self_reverting_mutation import (
+        execute_self_grant_then_revert,
+        find_revert_endpoint,
+        find_roles_listing_endpoint,
+    )
+
+    db = SessionLocal()
+    try:
+        authorized_scope = authorized_scope_for_scan(db, scan_id)
+    finally:
+        db.close()
+
+    results: list[dict[str, Any]] = []
+    for action in grant_actions:
+        grant_endpoint = str(action.get("endpoint") or "")
+        # Defense-in-depth: validate_skill_actions already scope-checked this
+        # endpoint before accepting it, but a mutating action gets its own
+        # independent re-check here rather than trusting that alone.
+        grant_host = host_from_scope_reference(grant_endpoint)
+        if not grant_host or not is_host_in_scope(grant_host, authorized_scope):
+            outcome = {"grant_endpoint": grant_endpoint, "granted": False, "reason": "endpoint_out_of_scope"}
+            results.append(outcome)
+            _audit_self_grant_attempt(scan_id, outcome)
+            continue
+        roles_endpoint = find_roles_listing_endpoint(endpoints)
+        revert_endpoint = find_revert_endpoint(grant_endpoint, endpoints)
+        if not roles_endpoint or not revert_endpoint:
+            outcome = {
+                "grant_endpoint": grant_endpoint,
+                "granted": False,
+                "reason": "no_roles_listing_endpoint" if not roles_endpoint else "no_revert_endpoint_discovered",
+            }
+            results.append(outcome)
+            _audit_self_grant_attempt(scan_id, outcome)
+            continue
+        token = str(auth_headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        self_user_id = _jwt_self_id(token)
+
+        def _log_error(message: str) -> None:
+            db = SessionLocal()
+            try:
+                db.add(ScanLog(scan_job_id=scan_id, source="self-grant-revert", level="ERROR", message=message[:2000]))
+                db.commit()
+            finally:
+                db.close()
+
+        outcome = execute_self_grant_then_revert(
+            grant_endpoint=grant_endpoint,
+            grant_method=str(action.get("method") or "POST"),
+            roles_endpoint=str(roles_endpoint.get("url") or ""),
+            revert_endpoint=revert_endpoint,
+            headers=auth_headers,
+            cookies=auth_cookies,
+            self_user_id=self_user_id,
+            scan_id=scan_id,
+            log_error=_log_error,
+        )
+        outcome["grant_endpoint"] = grant_endpoint
+        results.append(outcome)
+        _audit_self_grant_attempt(scan_id, outcome)
+    return results
+
+
+def _audit_self_grant_attempt(scan_id: int, outcome: dict[str, Any]) -> None:
+    """Durable audit record for every self-grant-then-revert attempt (not
+    just errors) — this is a real mutating write with no MCP/Kali audit
+    trail of its own (SEC-002). Never allowed to fail the actual probe."""
+    try:
+        from app.db.session import SessionLocal
+        from app.services.audit_service import log_audit
+
+        db = SessionLocal()
+        try:
+            log_audit(
+                db,
+                event_type="skill_probe.self_grant_then_revert",
+                message=f"Self-grant-then-revert attempt endpoint={outcome.get('grant_endpoint')}",
+                scan_job_id=scan_id,
+                metadata={
+                    "granted": bool(outcome.get("granted")),
+                    "reverted": outcome.get("reverted"),
+                    "escalation_confirmed": outcome.get("escalation_confirmed"),
+                    "reason": outcome.get("reason"),
+                    "grant_endpoint": outcome.get("grant_endpoint"),
+                },
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("self_grant audit write failed scan_id=%s", scan_id, exc_info=True)

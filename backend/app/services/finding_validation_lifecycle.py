@@ -28,6 +28,8 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
     result = {
         "seen": len(findings),
         "ready": 0,
+        "adjudicated": 0,
+        "wires_scheduled": 0,
         "scheduled": 0,
         "blocked_no_validator": 0,
         "retests_completed": 0,
@@ -147,12 +149,45 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
                 .first()
             )
             tool, _ = _select_validation_tool(finding)
-            scheduled = bool(tool and not existing_validation and schedule_poc_validation(db, finding, job))
+            scheduled = False
+            adjudication_handled = False
+            adjudication_result: dict[str, Any] = {}
+            try:
+                from app.core.config import settings
+                from app.services.finding_adjudication import adjudicate_finding
+
+                if bool(getattr(settings, "finding_adjudication_enabled", True)):
+                    adjudication_result = adjudicate_finding(db, job, finding)
+                    adjudication_handled = True
+                    result["adjudicated"] += 1
+                    queued_wires = [
+                        wire for wire in list(adjudication_result.get("wires") or [])
+                        if str(wire.get("status") or "") == "queued"
+                    ]
+                    if queued_wires:
+                        scheduled = True
+                        result["wires_scheduled"] += len(queued_wires)
+                        lifecycle["adjudication"] = adjudication_result
+            except Exception as exc:
+                # Compatibility fallback: a rollout/migration/LLM failure must
+                # not suppress the conservative validator that existed before
+                # adjudication wires.  The exception is preserved in the
+                # lifecycle for audit instead of being swallowed silently.
+                lifecycle["adjudication_error"] = f"{type(exc).__name__}: {exc}"[:500]
+            if not scheduled and not adjudication_handled:
+                scheduled = bool(tool and not existing_validation and schedule_poc_validation(db, finding, job))
             if scheduled:
                 result["scheduled"] += 1
                 coverage.status = "queued"
                 coverage.blocking_reason = "p21_validation_queued"
                 lifecycle["status"] = "validation_queued"
+            elif adjudication_handled and str(adjudication_result.get("final_verdict") or "") in {
+                "blocked", "needs_human_review", "invalid_evidence", "not_applicable",
+            }:
+                coverage.status = str(adjudication_result.get("final_verdict") or "blocked")
+                coverage.blocking_reason = str(adjudication_result.get("reason_code") or "adjudication_blocked")
+                lifecycle["status"] = coverage.blocking_reason
+                lifecycle["adjudication"] = adjudication_result
             elif not tool:
                 result["blocked_no_validator"] += 1
                 coverage.status = "blocked"

@@ -8,7 +8,12 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.services.kali_executor import TOOL_TO_PROFILE, normalize_kali_result, normalize_target_for_kali
+from app.services.kali_executor import (
+    TOOL_TO_PROFILE,
+    normalize_kali_result,
+    normalize_target_for_kali,
+    resolve_authorized_scope_for_dispatch,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -268,6 +273,9 @@ class MCPClient:
             "scan_id": scan_id or "mcp_scan",
             "timeout": runner_timeout,
             "extra_args": [str(arg) for arg in (extra_args or []) if str(arg).strip()],
+            "authorized_scope": resolve_authorized_scope_for_dispatch(
+                scan_id if isinstance(scan_id, int) else None
+            ),
         }
         if targets and len(targets) > 1:
             payload["targets"] = [
