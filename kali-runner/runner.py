@@ -699,6 +699,51 @@ def _inject_auth_headers(argv: list[str], auth_headers: dict[str, str], tool: st
     return new_argv
 
 
+def _redact_secrets_from_command(command: str, auth_headers: dict[str, str] | None) -> str:
+    """The rendered command string is written to command.txt and surfaced via
+    job-status observability -- it must never carry the raw session
+    credential _inject_auth_headers baked into argv for the subprocess
+    itself. Redacts only the concrete header VALUES that were actually
+    injected; the real argv used to launch the subprocess is untouched."""
+    if not auth_headers:
+        return command
+    redacted = command
+    for value in auth_headers.values():
+        if value and len(value) >= 4:
+            redacted = redacted.replace(value, "***REDACTED***")
+    return redacted
+
+
+def _ensure_bas_proxychains_conf(env_vars: dict[str, str]) -> str | None:
+    """BAS profiles route through a per-job SOCKS5 tunnel whose address
+    varies by which BasAgent was selected (bas_agent_stub, or a real agent
+    installed elsewhere) -- bas_dispatcher.py passes the target as
+    env_vars["BAS_TUNNEL_HOST"]/["BAS_TUNNEL_PORT"]. proxychains-ng only
+    accepts a literal IP for a proxy that's first/only in the chain
+    (confirmed live: a bare hostname is rejected even with dynamic_chain +
+    proxy_dns), so this resolves it once here in Python -- avoiding both a
+    second DNS hop inside the profile's own shell command AND the
+    {{name}}->{name} template pre-pass's brace collision that a shell-embedded
+    getent/awk one-liner would hit if it were written into the YAML cmd
+    instead. Returns None (profile falls back to whatever static path it
+    hardcodes, if any) when no tunnel env vars were supplied for this job."""
+    host = env_vars.get("BAS_TUNNEL_HOST")
+    port = env_vars.get("BAS_TUNNEL_PORT")
+    if not host or not port:
+        return None
+    try:
+        resolved_ip = socket.gethostbyname(host)
+    except OSError:
+        resolved_ip = host  # already a literal IP, or unresolvable -- let proxychains report the failure
+    conf_path = f"/tmp/bas_dynamic_proxychains_{os.getpid()}_{uuid.uuid4().hex[:8]}.conf"
+    with open(conf_path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "dynamic_chain\nproxy_dns\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n"
+            f"[ProxyList]\nsocks5 {resolved_ip} {port}\n"
+        )
+    return conf_path
+
+
 def _build_command(
     profile: dict[str, Any],
     target: str,
@@ -1075,6 +1120,10 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
                 ).hexdigest(),
             )
 
+        _bas_conf_path = _ensure_bas_proxychains_conf(_job_env)
+        if _bas_conf_path:
+            _job_env["BAS_PROXYCHAINS_CONF"] = _bas_conf_path
+
         _set_job_fields(job_id, stage="building_command")
         argv = _build_command(
             profile,
@@ -1093,6 +1142,7 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         _set_job_fields(job_id, stage="materializing_stdin")
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
         command = " ".join(shlex.quote(a) for a in argv)
+        command = _redact_secrets_from_command(command, req.auth_headers)
         # Merge per-job env vars into a copy of the process environment before
         # observability/availability checks. P02/P06 quality depends on knowing
         # whether a tool used direct container egress, a Docker proxy, or never

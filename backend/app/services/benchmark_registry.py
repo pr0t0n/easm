@@ -37,6 +37,7 @@ class BenchmarkTarget:
             "expected_evidence": list(self.expected_evidence),
             "recommended_profiles": list(self.recommended_profiles),
             "notes": self.notes,
+            "ground_truth_required": True,
         }
 
 

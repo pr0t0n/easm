@@ -1,0 +1,156 @@
+"""bas_dispatcher.dispatch_bas_technique: the only place a BasJob turns into
+a real kali_runner call. Must refuse before ever reaching execute_via_kali
+when the schedule's authorization doesn't cover the technique."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from app.services.bas_dispatcher import dispatch_bas_technique
+
+
+def _schedule(max_tier="safe", attested=False, attested_by=None):
+    return SimpleNamespace(
+        max_authorized_risk_tier=max_tier,
+        authorization_attested=attested,
+        authorization_attested_by_id=attested_by,
+    )
+
+
+_STUB_ENV_VARS = {"BAS_TUNNEL_HOST": "bas_agent_stub", "BAS_TUNNEL_PORT": "1080"}
+
+
+def test_dispatch_calls_execute_via_kali_with_the_catalogs_dispatch_key():
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="smb_enum_cme",
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is True
+    mock_exec.assert_called_once_with("crackmapexec-bas", "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
+
+
+def test_dispatch_calls_execute_via_kali_for_new_discovery_techniques():
+    cases = {
+        "network_share_discovery": "smbmap-bas",
+        "ad_scouting_ldap": "ldapsearch-bas",
+        "cloud_directory_scouting": "curl-clouddir-bas",
+        "port_service_scan": "nmap-portscan-bas",
+        "chat_webhook_discovery": "curl-chatwebhook-bas",
+        "owasp_web_app_scan": "nikto-owasp-bas",
+        "pipeline_secrets_harvesting": "curl-pipelinelogs-bas",
+        "source_code_secrets_scan": "gitleaks-bas",
+    }
+    for technique_key, expected_tool in cases.items():
+        with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+            outcome = dispatch_bas_technique(
+                technique_key=technique_key,
+                target_hint="10.10.10.5",
+                bas_agent=SimpleNamespace(id=1),
+                scan_id=42,
+                schedule=_schedule(),
+            )
+        assert outcome["dispatched"] is True, technique_key
+        mock_exec.assert_called_once_with(expected_tool, "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
+
+
+def test_dispatch_routes_a_real_kind_agent_through_host_docker_internal():
+    """A real (non-stub) agent's dispatch must target the host machine it's
+    actually installed on -- host.docker.internal in this phase -- never the
+    stub's fixed bas_agent_stub address, and must carry the agent's own
+    reported SOCKS port."""
+    real_agent = SimpleNamespace(id=9, kind="real", tunnel_host="some-macs-hostname.local", tunnel_port=1080)
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="network_share_discovery",
+            target_hint="127.0.0.1",
+            bas_agent=real_agent,
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is True
+    assert outcome["agent_kind"] == "real"
+    mock_exec.assert_called_once_with(
+        "smbmap-bas", "127.0.0.1", scan_id=42, scan_mode="unit",
+        env_vars={"BAS_TUNNEL_HOST": "host.docker.internal", "BAS_TUNNEL_PORT": "1080"},
+    )
+
+
+def test_dispatch_uses_agents_own_tunnel_port_when_not_default():
+    real_agent = SimpleNamespace(id=10, kind="real", tunnel_host="whatever", tunnel_port=1081)
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        dispatch_bas_technique(
+            technique_key="network_share_discovery", target_hint="127.0.0.1",
+            bas_agent=real_agent, scan_id=42, schedule=_schedule(),
+        )
+    mock_exec.assert_called_once_with(
+        "smbmap-bas", "127.0.0.1", scan_id=42, scan_mode="unit",
+        env_vars={"BAS_TUNNEL_HOST": "host.docker.internal", "BAS_TUNNEL_PORT": "1081"},
+    )
+
+
+def test_dispatch_refuses_host_only_techniques_even_with_authorized_schedule():
+    for technique_key in ("credential_dumping_mimikatz", "dotfile_config_harvesting", "kubeconfig_theft"):
+        with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+            outcome = dispatch_bas_technique(
+                technique_key=technique_key,
+                target_hint="10.10.10.5",
+                bas_agent=SimpleNamespace(id=1),
+                scan_id=42,
+                schedule=_schedule(max_tier="high_risk", attested=True, attested_by=7),
+            )
+        assert outcome["dispatched"] is False, technique_key
+        assert outcome["reason"] == "technique_not_executable:future_agent_required", technique_key
+        mock_exec.assert_not_called()
+
+
+def test_dispatch_refuses_unauthorized_tier_without_ever_calling_kali():
+    with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="ntlm_relay_smb",  # high_risk
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(max_tier="safe"),
+        )
+
+    assert outcome["dispatched"] is False
+    assert outcome["reason"] == "tier_not_authorized"
+    mock_exec.assert_not_called()
+
+
+def test_dispatch_refuses_future_agent_required_technique_even_with_no_schedule():
+    """A direct call with no schedule context still must never dispatch a
+    technique SOCKS5/proxychains structurally cannot carry."""
+    with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="arp_poisoning",
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=None,
+        )
+
+    assert outcome["dispatched"] is False
+    assert outcome["reason"] == "technique_not_executable:future_agent_required"
+    mock_exec.assert_not_called()
+
+
+def test_dispatch_unknown_technique_refused():
+    with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="not-a-real-technique",
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is False
+    assert outcome["reason"] == "unknown_technique"
+    mock_exec.assert_not_called()

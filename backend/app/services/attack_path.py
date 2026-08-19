@@ -35,9 +35,11 @@ def build_attack_paths(db: Session, scan_id: int, job=None, max_paths: int = 20)
         if artifact.finding_id is not None:
             artifacts_by_finding[int(artifact.finding_id)].append(str(artifact.id))
 
+    from app.services.bas_exclusion import exclude_simulated
+
     signals: list[dict] = []
     findings = (
-        db.query(Finding)
+        exclude_simulated(db.query(Finding))
         .filter(Finding.scan_job_id == scan_id, Finding.is_false_positive.is_(False))
         .all()
     )

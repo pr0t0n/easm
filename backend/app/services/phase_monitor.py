@@ -96,7 +96,14 @@ def _operator_skill_tools_by_phase() -> dict[str, dict[str, set[str]]]:
 def _tool_backend(tool_name: str, profile: str = "") -> str:
     tool = _normalize_tool(tool_name)
     prof = _normalize_tool(profile)
-    if tool in {"bl-test", "code-analyzer", "semgrep"} or prof in {"business_logic_backend", "code_analyzer_backend", "semgrep_backend"}:
+    if (
+        tool in {
+            "bl-test", "code-analyzer", "semgrep",
+            "credential-boundary-review", "post-exploitation-boundary-review",
+            "attack-path-correlator", "evidence-adjudicator", "report-snapshot-builder",
+        }
+        or prof in {"business_logic_backend", "code_analyzer_backend", "semgrep_backend", "backend_control"}
+    ):
         return "backend_local"
     if tool in {"manual_review", "manual_scope_review", "manual_correlation"} or tool.startswith("manual_"):
         return "manual"

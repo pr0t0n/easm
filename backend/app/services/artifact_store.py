@@ -76,6 +76,15 @@ def create_request_response_artifact(
     confidence_score: int = 50,
     metadata: dict[str, Any] | None = None,
 ) -> EvidenceArtifact:
+    # A caller putting "negative_control" inside `metadata=` instead of using
+    # the dedicated `negative_control=` kwarg used to have it silently
+    # clobbered to {} by the merge below -- evaluate_finding_promotion reads
+    # this exact key to decide confirmed vs candidate, so that clobber
+    # silently stranded confirmed findings at "candidate" forever. Honor
+    # whichever was actually supplied, preferring the dedicated kwarg.
+    _meta = dict(metadata or {})
+    _meta_negative_control = _meta.pop("negative_control", None)
+    resolved_negative_control = negative_control if negative_control is not None else _meta_negative_control
     artifact_payload = {
         "target": target,
         "tool_name": tool_name,
@@ -84,9 +93,9 @@ def create_request_response_artifact(
         "baseline_response": baseline_response or {},
         "exploit_request": exploit_request or {},
         "exploit_response": exploit_response or {},
-        "negative_control": negative_control or {},
+        "negative_control": resolved_negative_control or {},
         "diff_summary": diff_summary,
-        "metadata": metadata or {},
+        "metadata": _meta,
     }
     path = write_artifact_file(scan.id, "proof-pack", artifact_payload)
     contract = EvidenceContract(
@@ -107,7 +116,7 @@ def create_request_response_artifact(
         diff_summary=diff_summary,
         reproduction_steps=_steps(target, baseline_request, exploit_request),
         workspace_path=path,
-        metadata={**(metadata or {}), "negative_control": redact(negative_control or {}), "artifact_path": path},
+        metadata={**_meta, "negative_control": redact(resolved_negative_control or {}), "artifact_path": path},
     )
     return create_evidence_artifact(db, contract)
 
@@ -120,8 +129,12 @@ def replay_artifact(db: Session, artifact: EvidenceArtifact, *, timeout: int = 2
     body = request_data.get("body") or request_data.get("json")
     if not url.startswith("http"):
         return {"ok": False, "error": "artifact_has_no_replayable_url", "artifact_id": artifact.id}
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        return {"ok": False, "error": "mutation_retest_requires_family_validator", "artifact_id": artifact.id}
+    if not _url_in_scan_scope(db, artifact.scan_job_id, url):
+        return {"ok": False, "error": "artifact_url_out_of_scope", "artifact_id": artifact.id}
     try:
-        resp = requests.request(method, url, headers=headers, json=body if isinstance(body, dict) else None, data=body if not isinstance(body, dict) else None, timeout=timeout, verify=False)
+        resp = requests.request(method, url, headers=headers, json=body if isinstance(body, dict) else None, data=body if not isinstance(body, dict) else None, timeout=timeout, verify=False, allow_redirects=False)
         replay = {
             "ok": True,
             "artifact_id": artifact.id,
@@ -157,6 +170,14 @@ def replay_artifact_pair(
     exploit_request = dict(artifact.exploit_request or {})
     if not exploit_request:
         return {"ok": False, "error": "artifact_has_no_exploit_request", "artifact_id": artifact.id}
+    replay_requests = [baseline_request or {"method": "GET", "url": artifact.target}, exploit_request]
+    for request_row in replay_requests:
+        method = str(request_row.get("method") or "GET").upper()
+        url = str(request_row.get("url") or artifact.target or "")
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            return {"ok": False, "error": "mutation_retest_requires_family_validator", "artifact_id": artifact.id}
+        if not _url_in_scan_scope(db, artifact.scan_job_id, url):
+            return {"ok": False, "error": "artifact_url_out_of_scope", "artifact_id": artifact.id}
     baseline = _execute_request_stable(
         baseline_request or {"method": "GET", "url": artifact.target},
         timeout=timeout,
@@ -181,6 +202,8 @@ def replay_artifact_pair(
     )
     metadata = dict(artifact.artifact_metadata or {})
     negative_url = str(metadata.get("negative_control_url") or "")
+    if negative_url and not _url_in_scan_scope(db, artifact.scan_job_id, negative_url):
+        return {"ok": False, "error": "negative_control_url_out_of_scope", "artifact_id": artifact.id}
     negative = _execute_request_stable(
         {"method": exploit_request.get("method") or "GET", "url": negative_url},
         timeout=timeout,
@@ -296,6 +319,8 @@ def _execute_request(
     url = str(request_data.get("url") or "")
     if not url.startswith("http"):
         return {"ok": False, "error": "request_has_no_replayable_url"}
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        return {"ok": False, "error": "mutation_retest_requires_family_validator"}
     headers = {str(k): str(v) for k, v in dict(request_data.get("headers") or {}).items()}
     headers.update({str(k): str(v) for k, v in dict(operational_headers or {}).items()})
     cookies = {str(k): str(v) for k, v in dict(operational_cookies or {}).items()}
@@ -323,6 +348,13 @@ def _execute_request(
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
+
+
+def _url_in_scan_scope(db: Session, scan_job_id: int, url: str) -> bool:
+    from app.services.scan_scope import authorized_scope_for_scan, host_from_scope_reference, is_host_in_scope
+
+    host = host_from_scope_reference(url)
+    return bool(host and is_host_in_scope(host, authorized_scope_for_scan(db, scan_job_id)))
 
 
 def _json_keys(text: str) -> list[str]:

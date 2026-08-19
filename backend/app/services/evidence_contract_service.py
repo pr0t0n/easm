@@ -74,7 +74,10 @@ def create_artifact_from_tool_result(
     ]
     baseline_observation = observations[0] if observations else {}
     attempted_observation = observations[1] if len(observations) > 1 else {}
-    positive = details.get("vulnerable") is True or details.get("confirmed") is True
+    positive = bool(
+        details.get("validation_contract_satisfied") is True
+        and details.get("false_positive_controls_passed") is True
+    )
     explicit_negative = details.get("negative_control_passed") is True
     validation_status = "confirmed" if positive else "refuted" if explicit_negative else "candidate"
     contract = EvidenceContract(
@@ -147,25 +150,51 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
     )
     confirmed_artifacts = [a for a in artifacts if str(a.validation_status or "") == "confirmed"]
     has_repro_pair = any(_artifact_has_repro_pair(a) for a in artifacts)
+    from app.services.vuln_family import classify_family
+
+    family = classify_family(title=finding.title, tool=finding.tool, cve=finding.cve)
+    if family == "lfri":
+        family = "lfi"
+    differential_families = {
+        "sqli", "xss", "ssrf", "rce", "lfi", "path_traversal", "xxe",
+        "idor_bola", "bola_bfla", "broken_access_control", "auth_bypass",
+        "csrf", "mass_assignment", "business_logic", "race_condition",
+        "prototype_pollution", "file_upload", "nosql_injection",
+    }
+    identity_families = {"idor_bola", "bola_bfla", "broken_access_control", "auth_bypass"}
+    has_negative_control = any(bool((a.artifact_metadata or {}).get("negative_control")) for a in artifacts)
+    identity_values = {
+        part.strip()
+        for artifact in artifacts
+        for part in str(artifact.identity_key or "").split(",")
+        if part.strip()
+    }
     missing: list[str] = []
     required: list[str] = []
 
-    if severity in HIGH_IMPACT_SEVERITIES:
+    if severity in HIGH_IMPACT_SEVERITIES or status == "confirmed":
         required.append("proof_pack")
         if not artifacts:
             missing.append("proof_pack")
 
-    needs_repro = any(token in title for token in REPRO_REQUIRED_KEYWORDS)
-    if severity in HIGH_IMPACT_SEVERITIES and needs_repro:
+    needs_repro = family in differential_families or any(token in title for token in REPRO_REQUIRED_KEYWORDS)
+    if needs_repro:
         required.append("baseline_vs_exploit")
-        if not has_repro_pair and not confirmed_artifacts:
+        if not has_repro_pair:
             missing.append("baseline_vs_exploit")
+        required.append("negative_control")
+        if not has_negative_control:
+            missing.append("negative_control")
 
-    needs_auth = any(token in title for token in AUTH_REQUIRED_KEYWORDS)
+    needs_auth = family in identity_families or any(token in title for token in AUTH_REQUIRED_KEYWORDS)
     if needs_auth:
         required.append("authenticated_identity")
         if not any(str(a.identity_key or "") for a in artifacts) and not details.get("identity_key"):
             missing.append("authenticated_identity")
+        if family in identity_families:
+            required.append("two_distinct_identities")
+            if len(identity_values) < 2 and not (details.get("identity_key") and details.get("secondary_identity_key")):
+                missing.append("two_distinct_identities")
 
     if status == "hypothesis":
         return ValidationDecision(
@@ -185,7 +214,7 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
             required_artifacts=required,
             missing_artifacts=missing,
         )
-    if status == "confirmed" or confirmed_artifacts or has_repro_pair:
+    if confirmed_artifacts and (not needs_repro or has_repro_pair and has_negative_control):
         return ValidationDecision(
             status="confirmed",
             can_promote=True,

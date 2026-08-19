@@ -8,7 +8,9 @@ Política (resumo):
   - DoS / DDoS .................. nunca executado (sem flood/exaustão).
   - SQLi — extração de dados .... só MAPEAMOS estrutura (dbs/tabelas/colunas);
                                   nunca extraímos/dumpamos conteúdo.
-  - Defacement / modificação .... nunca escrevemos/alteramos o alvo.
+  - Mutação controlada .......... permitida só em fixture própria, com snapshot,
+                                  read-back, rollback e igualdade final.
+  - Defacement / poluição ....... nunca executados.
   - Exfiltração de dados ........ nunca lemos/baixamos arquivos ou segredos.
   - RCE / shell ................. confirmamos a POSSIBILIDADE (ex.: callback OOB);
                                   nunca abrimos shell nem rodamos comando no alvo.
@@ -187,6 +189,29 @@ def sanitize_tool_args(tool: str, args: list[str] | None) -> tuple[list[str], li
     return clean, removed
 
 
+def classify_payload_use(*, channel: str, tool: str = "", args: list[str] | None = None) -> dict:
+    """Separate documentation from execution.
+
+    Reports may explain the exact payload/command an authorised human would
+    use.  The same text is never an execution capability: every dispatch is
+    re-parsed by ``sanitize_tool_args`` and forbidden tokens fail closed.
+    """
+    if str(channel or "").lower() in {"report", "documentation", "recommendation"}:
+        return {
+            "allowed": True,
+            "executable": False,
+            "reason": "descriptive_reproduction_guidance_only",
+        }
+    clean, removed = sanitize_tool_args(tool, args)
+    return {
+        "allowed": not removed,
+        "executable": True,
+        "clean_args": clean,
+        "blocked_args": removed,
+        "reason": "execution_guardrail_passed" if not removed else "execution_guardrail_blocked",
+    }
+
+
 def _cap_threads(args: list[str], cap: int, removed: list[str]) -> list[str]:
     out: list[str] = []
     i = 0
@@ -272,10 +297,10 @@ DISABLED_ATTACKS: list[dict] = [
         "impact_if_executed": "Alteração visível do site, dano à reputação.",
         "what_we_do": "Identificamos uploads inseguros e endpoints graváveis "
                       "como vulnerabilidade.",
-        "what_we_never_do": "Nunca escrevemos, alteramos ou apagamos conteúdo no "
-                            "alvo.",
-        "enforcement": "Escrita em arquivo e os-shell bloqueados; nenhum profile "
-                       "executa PUT/upload de payload.",
+        "what_we_never_do": "Nunca fazemos defacement, poluição persistente ou "
+                            "alteração fora de fixture descartável autorizada.",
+        "enforcement": "Mutação exige contrato, snapshot, read-back, rollback em "
+                       "finally e igualdade final; escrita livre e os-shell ficam bloqueados.",
         "tools": ["sqlmap", "ghauri"],
     },
     {
@@ -316,9 +341,14 @@ DISABLED_ATTACKS: list[dict] = [
 def guardrail_policy_payload() -> dict:
     """Payload consumido pela página de Guardrails."""
     return {
-        "principle": "A plataforma é um pentest automatizado. Ataques de impacto "
-                     "real são permanentemente desativados: informamos a "
-                     "possibilidade de execução, nunca o efeito destrutivo.",
+        "principle": "A plataforma executa provas mínimas e mutações reversíveis "
+                     "em fixtures autorizadas. Pode documentar integralmente como "
+                     "um payload seria explorado, mas o canal de execução bloqueia "
+                     "dump, defacement, poluição, persistência, DoS e exfiltração.",
+        "channels": {
+            "documentation": "payloads e comandos podem ser descritos como reprodução manual",
+            "execution": "somente prova mínima governada e mutação transacional reversível",
+        },
         "attacks": DISABLED_ATTACKS,
         "summary": {
             "total": len(DISABLED_ATTACKS),

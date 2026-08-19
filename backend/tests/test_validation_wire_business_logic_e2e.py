@@ -201,6 +201,12 @@ def test_wire_result_becomes_a_finding_bound_reproduction_pair():
         "parsed": {
             "vulnerable": True,
             "confirmed": True,
+            # A tool self-reporting "vulnerable" is not proof by itself --
+            # "confirmed" requires the dedicated validator's own mechanically
+            # checked contract (independent reproduction + FP controls),
+            # same requirement evidence_gate.get_verification_status enforces.
+            "validation_contract_satisfied": True,
+            "false_positive_controls_passed": True,
             "observations": [
                 {"identity_key": "tenant_owner", "body_fingerprint": "same"},
                 {"identity_key": "tenant_attacker", "body_fingerprint": "same"},

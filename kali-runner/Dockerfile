@@ -68,6 +68,40 @@ RUN apt-get update && \
     (command -v crackmapexec || \
      (command -v nxc && ln -sf "$(command -v nxc)" /usr/local/bin/crackmapexec))
 
+# ── BAS (Breach & Attack Simulation) internal/AD tooling ────────────────────
+# proxychains4 is the tunnel mechanism itself: BAS profiles wrap the real
+# tool command with it so the tool's TCP connections route through the
+# BasAgent's SOCKS5 tunnel (bas_agent_stub today) instead of leaving this
+# container directly -- see bas_dispatcher.py and bas_proxychains.conf.
+# Responder is installed but never dispatched in Phase 1 (poisoning needs a
+# real agent on the customer's L2 segment, not a TCP-only SOCKS tunnel --
+# see bas_technique_catalog.py's availability="future_agent_required").
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends proxychains4 smbmap ldap-utils && \
+    (apt-get install -y --no-install-recommends responder python3-netifaces || true) && \
+    rm -rf /var/lib/apt/lists/*
+# PyPI package is named "bloodhound" (not "bloodhound-python") -- it installs
+# the bloodhound-python console script kali-runner/profiles/bas_internal.yaml calls.
+RUN pipx install impacket && \
+    pipx install bloodhound
+
+# enum4linux-ng isn't on PyPI (it's a git-distributed script) -- clone it and
+# expose a thin wrapper on PATH instead of pipx-installing it.
+RUN git clone --depth 1 https://github.com/cddmp/enum4linux-ng.git /opt/tools/src/enum4linux-ng && \
+    pip install --break-system-packages --no-cache-dir -r /opt/tools/src/enum4linux-ng/requirements.txt && \
+    printf '#!/bin/sh\nexec python3 /opt/tools/src/enum4linux-ng/enum4linux-ng.py "$@"\n' > /opt/tools/bin/enum4linux-ng && \
+    chmod +x /opt/tools/bin/enum4linux-ng
+
+# gitleaks: git-secrets scanner for the BAS "Hardcoded Secrets in Source Code
+# Detection" technique (source_code_secrets_scan) -- not packaged in Kali's
+# apt repos, so pull the official release binary directly.
+RUN GITLEAKS_URL="$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | \
+      grep -o 'https://[^"]*linux_x64\.tar\.gz' | head -n1)" && \
+    curl -fsSL "$GITLEAKS_URL" -o /tmp/gitleaks.tar.gz && \
+    tar -xzf /tmp/gitleaks.tar.gz -C /opt/tools/bin gitleaks && \
+    chmod +x /opt/tools/bin/gitleaks && \
+    rm -f /tmp/gitleaks.tar.gz
+
 # ── Layer 2b: dirsearch runtime deps ─────────────────────────────────────────
 # The Kali dirsearch package ships without its Python deps resolved on
 # Python 3.13 (pkg_resources removed from setuptools >=81). Pin setuptools<81
@@ -110,6 +144,17 @@ RUN set -eux; \
 RUN mkdir -p /workspace
 VOLUME ["/workspace", "/opt/tools"]
 
+# proxychains-ng only accepts a literal IP for a proxy that's first/only in
+# the chain (confirmed live: a docker-compose service hostname like
+# "bas_agent_stub" is rejected even with dynamic_chain + proxy_dns). Resolve
+# it once at container start and write a runtime conf BAS profiles reference
+# instead of the static, hostname-based one -- re-resolved on every restart
+# of this container, which is the same cadence bas_agent_stub itself gets
+# recreated on in this dev stack.
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8088
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "runner:app", "--host", "0.0.0.0", "--port", "8088"]

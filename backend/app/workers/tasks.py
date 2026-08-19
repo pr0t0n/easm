@@ -1916,6 +1916,28 @@ def scheduler_tick():
         db.close()
 
 
+@celery.task(name="bas_scheduler.tick", queue=PLATFORM_CONTROL_QUEUE)
+def bas_scheduler_tick_task():
+    from app.services.bas_scheduler import bas_scheduler_tick
+
+    db: Session = SessionLocal()
+    try:
+        return bas_scheduler_tick(db)
+    finally:
+        db.close()
+
+
+@celery.task(name="bas_watchdog.tick", queue=PLATFORM_CONTROL_QUEUE)
+def bas_watchdog_tick_task():
+    from app.services.bas_scheduler import bas_watchdog_tick
+
+    db: Session = SessionLocal()
+    try:
+        return bas_watchdog_tick(db)
+    finally:
+        db.close()
+
+
 # Scheduler separado
 # O heartbeat periódico em leque (um por fila de worker) é definido de forma
 # ESTÁTICA em celery_app.beat_schedule (_HEARTBEAT_SCHEDULE). on_after_configure
@@ -4216,16 +4238,16 @@ def run_scan_postprocessor(
                 except Exception:
                     db.rollback()
                 if high_value and active_count < 8:
-                    result = run_zap_active_scan(url, auth_headers=auth_headers or None)
+                    result = run_zap_active_scan(url, auth_headers=auth_headers or None, scan_id=job.id)
                     patch = {"zap_active_count": active_count + 1}
                 else:
-                    result = run_zap_baseline(url, auth_headers=auth_headers or None)
+                    result = run_zap_baseline(url, auth_headers=auth_headers or None, scan_id=job.id)
                     patch = {}
                 # G1 always receives a browser-backed spider so authenticated
                 # SPA routes are not limited to links visible in static HTML.
                 tech_text = " ".join(str(value) for value in list(job.tech_stack or [])).lower()
                 if execution_context == "internal" or any(token in tech_text for token in ("react", "vue", "angular", "next", "nuxt")):
-                    ajax_result = run_zap_ajax_spider(url, auth_headers=auth_headers or None)
+                    ajax_result = run_zap_ajax_spider(url, auth_headers=auth_headers or None, scan_id=job.id)
                     result["ajax_spider"] = ajax_result
                     result["discovered_urls"] = sorted(set(
                         list(result.get("discovered_urls") or [])
@@ -5575,7 +5597,18 @@ def execute_scan_work_item(item_id: int):
             raise
 
         _norm_item_tool = str(item.tool_name or "").strip().lower()
-        if _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"} or _norm_item_tool.startswith("skill-probe"):
+        _PHASE_CONTROL_TOOL_NAMES = {
+            "credential-boundary-review",
+            "post-exploitation-boundary-review",
+            "attack-path-correlator",
+            "evidence-adjudicator",
+            "report-snapshot-builder",
+        }
+        if (
+            _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"}
+            or _norm_item_tool in _PHASE_CONTROL_TOOL_NAMES
+            or _norm_item_tool.startswith("skill-probe")
+        ):
             from app.services.worker_dispatcher import execute_tool_with_workers
 
             _wire_contract = dict(_item_meta.get("validation_wire") or {})

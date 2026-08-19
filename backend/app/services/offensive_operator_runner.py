@@ -1876,6 +1876,19 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
             from app.services.code_analyzer import run_as_tool as _run
         elif tool == "semgrep":
             from app.services.semgrep_local import run_as_tool as _run
+        elif tool in {
+            "credential-boundary-review",
+            "post-exploitation-boundary-review",
+            "attack-path-correlator",
+            "evidence-adjudicator",
+            "report-snapshot-builder",
+        }:
+            from app.services.phase_control_tools import run_phase_control_tool
+
+            scan_id = int(execution.get("scan_id") or (execution.get("arguments") or {}).get("scan_id") or 0)
+            if not scan_id:
+                return {"status": "blocked", "error": "phase_control_scan_id_required", "exit_code": None}
+            return run_phase_control_tool(tool, scan_id, target)
         else:
             return {"status": "blocked", "error": f"unknown_backend_local:{tool}", "exit_code": None}
         r = _run(target)
@@ -2033,6 +2046,9 @@ def _call_operator_tool(
     MCP está indisponível. Assim o executor é criado com available=True e o gate de
     MCP fica AQUI — senão o core bloquearia tudo (inclusive backend-local) antes."""
     def _call(execution: dict[str, Any]) -> dict[str, Any]:
+        if scan_id is not None:
+            execution.setdefault("scan_id", int(scan_id))
+            execution.setdefault("arguments", {}).setdefault("scan_id", int(scan_id))
         tool = str(execution.get("tool_name") or "").strip().lower()
         if tool in _BACKEND_LOCAL_TOOLS:
             return _run_backend_local_tool(execution)
@@ -2555,11 +2571,27 @@ def run_offensive_operator_scan(
     from app.services.scan_scope import authorized_scope_from_target_query
 
     authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
+    from app.services.methodology_planner import contracts_from_plan, resolve_methodology_plan
+
+    methodology_plan = resolve_methodology_plan(job)
+    active_phase_contracts = contracts_from_plan(methodology_plan)
+    db.add(job)
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="methodology-planner",
+        level="INFO",
+        message=(
+            f"methodology_plan version={methodology_plan.get('version')} "
+            f"source={methodology_plan.get('source')} phases={len(active_phase_contracts)}"
+        ),
+    ))
+    db.commit()
     runtime = OffensiveSkillRuntime(
         executor=MCPToolExecutor(
             call_tool=_call_operator_tool(mcp_available, authorized_scope, job.id),
             available=True,
-        )
+        ),
+        phase_contracts=active_phase_contracts,
     )
 
     # Read EASM scan-level (asm/full) from state_data; default = full.

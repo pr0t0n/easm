@@ -22,6 +22,21 @@ from app.workers.worker_groups import find_agent_by_tool
 
 logger = logging.getLogger(__name__)
 
+# P18-P22 backend-local reviewers (phase_control_tools.py) -- pure Python
+# over already-collected evidence, no real kali-runner profile exists for
+# any of these, so they must be intercepted here rather than reaching the
+# MCP/Kali path (which would correctly, but uselessly, report
+# tool_or_profile_not_found). Subset of offensive_operator_core's
+# BACKEND_LOCAL_TOOL_NAMES -- that set also contains bl-test/code-analyzer/
+# semgrep, which already have their own dedicated branches above this one.
+_PHASE_CONTROL_TOOLS = {
+    "credential-boundary-review",
+    "post-exploitation-boundary-review",
+    "attack-path-correlator",
+    "evidence-adjudicator",
+    "report-snapshot-builder",
+}
+
 
 def execute_tool_with_workers(
     tool_name: str,
@@ -165,6 +180,32 @@ def execute_tool_with_workers(
             result.setdefault("mcp_adapter_contract", adapter_contract)
         result.setdefault("source_agent_id", "backend")
         result.setdefault("source_agent_name", "Backend Skill Probe (LLM-planned)")
+        result.setdefault("worker_group", "risk_assessment")
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
+        return result
+
+    if norm_tool in _PHASE_CONTROL_TOOLS:
+        # P18-P22 reviewers: pure Python over already-collected evidence,
+        # never sent to Kali/MCP (there is no real kali-runner profile for
+        # these — they have no target traffic to send). This is the
+        # ScanWorkItem-queue's own interception point, mirroring the same
+        # short-circuit offensive_operator_runner._run_backend_local_tool
+        # already does for its own direct-execution path.
+        from app.services.phase_control_tools import run_phase_control_tool
+
+        if not scan_id:
+            return {"status": "blocked", "error": "phase_control_scan_id_required"}
+        result = run_phase_control_tool(norm_tool, int(scan_id), target)
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("evidence_required", evidence_required or [])
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend Phase Control Reviewer")
         result.setdefault("worker_group", "risk_assessment")
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result

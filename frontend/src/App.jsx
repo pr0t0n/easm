@@ -25,6 +25,10 @@ const GuardrailsPage = lazy(() => import("./pages/GuardrailsPage"));
 const CapabilityBlueprintPage = lazy(() => import("./pages/CapabilityBlueprintPage"));
 const SchedulingPage = lazy(() => import("./pages/SchedulingPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const BasDashboardPage = lazy(() => import("./pages/BasDashboardPage"));
+const BasTestMenuPage = lazy(() => import("./pages/BasTestMenuPage"));
+const BasOperationsCenterPage = lazy(() => import("./pages/BasOperationsCenterPage"));
+const BasReportPage = lazy(() => import("./pages/BasReportPage"));
 
 function Protected({ children }) {
   // Sem sessão → cai na página índice (landing), não direto no login.
@@ -91,6 +95,7 @@ export default function App() {
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<RedTeamReportPage />} />
                     <Route path="/relatorios-legacy" element={<Navigate to="/relatorios" replace />} />
+                    <Route path="/relatorios/bas" element={<BasReportPage />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
@@ -108,6 +113,9 @@ export default function App() {
                     <Route path="/jobs" element={<Navigate to="/operacional?module=infra" replace />} />
                     <Route path="/worker-logs" element={<Navigate to="/operacional?module=runtime" replace />} />
                     <Route path="/agent-flow" element={<Navigate to="/operacional?module=phases_agents" replace />} />
+                    <Route path="/bas" element={<BasDashboardPage />} />
+                    <Route path="/bas/testes" element={<BasTestMenuPage />} />
+                    <Route path="/bas/operacional" element={<AdminOnly><BasOperationsCenterPage /></AdminOnly>} />
                     <Route path="/aprendizado" element={<AdminOnly><LearningPage /></AdminOnly>} />
                     <Route path="/guardrails" element={<AdminOnly><GuardrailsPage /></AdminOnly>} />
                     <Route path="/estrategia" element={<AdminOnly><CapabilityBlueprintPage /></AdminOnly>} />

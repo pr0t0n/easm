@@ -1,4 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-pydantic==2.9.2
+# 2.9.2's pydantic-core has no prebuilt wheel for the Python version the
+# kali-rolling base image now ships (3.14) and PyO3 0.22 can't source-build
+# against it -- unrelated to BAS, but blocks any kali_runner rebuild until
+# bumped. >=2.10 has prebuilt wheels for current Python releases.
+pydantic>=2.10
 pyyaml==6.0.2

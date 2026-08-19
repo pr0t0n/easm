@@ -28,6 +28,17 @@ backend/burp/*.jar
 backend/burp/*.json
 backend/burp-export/
 burp/
+
+# BAS internal PKI root CA/server private keys -- must live only in the
+# bas_ca_data named docker volume, never in the repo. This also guards
+# against a stray local run of bas_ca.py before that volume is wired up.
+backend/bas_ca/
+
+# bas-agent build output -- regenerable via bas-agent/build.sh. The actually
+# SERVED linux/windows binaries live at backend/bas_agent_dist/ (committed
+# on purpose, no CI build step exists yet); this dist/ dir also holds a
+# darwin-arm64 build that's dev/smoke-test-only, never a customer download.
+bas-agent/dist/
 backend/celerybeat-schedule
 
 # Scan output artifacts (do not commit raw target dumps)

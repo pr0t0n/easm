@@ -108,6 +108,37 @@ services:
       start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────
+  # BAS (Breach & Attack Simulation) tunnel stub — Phase 1 stand-in for the
+  # real Rust agent. Enrolls for real against /api/bas/agents/enroll and
+  # runs a real SOCKS5 handshake listener that kali_runner's proxychains-
+  # wrapped BAS tools connect to; only the tunnel's response content is
+  # simulated (there's no real customer network in dev to relay into).
+  #
+  # To exercise it: generate an enrollment token via POST /api/bas/
+  # enrollment-tokens (or the BAS dashboard), then set
+  # BAS_STUB_ENROLLMENT_CODE/_USERNAME/_PASSWORD below and restart this
+  # service — same credentials an operator would type into the real
+  # installer once it exists.
+  # ─────────────────────────────────────────────────────────────────
+
+  bas_agent_stub:
+    build:
+      context: ./bas-agent-stub
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_bas_agent_stub
+    restart: unless-stopped
+    profiles: ["dev", "prod"]
+    environment:
+      BAS_BACKEND_URL: "http://backend:8000"
+      BAS_STUB_ENROLLMENT_CODE: "${BAS_STUB_ENROLLMENT_CODE:-}"
+      BAS_STUB_ENROLLMENT_USERNAME: "${BAS_STUB_ENROLLMENT_USERNAME:-bas-agent-stub}"
+      BAS_STUB_ENROLLMENT_PASSWORD: "${BAS_STUB_ENROLLMENT_PASSWORD:-}"
+      BAS_STUB_SOCKS_PORT: "1080"
+      TZ: America/Sao_Paulo
+    # No host port mapping: only kali_runner (inside the compose network)
+    # needs to reach this tunnel, never the host or the public internet.
+
+  # ─────────────────────────────────────────────────────────────────
   # Kali Runner — single source of truth for offensive tools
   # All workers dispatch jobs HERE via HTTP (POST /jobs).
   # ─────────────────────────────────────────────────────────────────
@@ -199,6 +230,19 @@ services:
     volumes:
       - evidence_storage:/evidence
 
+  # A freshly-created named volume mounts owned by root; backend runs as
+  # non-root appuser (uid 1000) and needs to write the BAS root CA/server
+  # cert into it on first boot (bas_ca.py). Same fix-permissions-then-exit
+  # pattern as evidence_init above.
+  bas_ca_init:
+    image: busybox:1.36
+    container_name: scriptkiddo_bas_ca_init
+    profiles: ["dev", "prod"]
+    restart: "no"
+    command: sh -c "mkdir -p /app/bas_ca && chown -R 1000:1000 /app/bas_ca && chmod -R 0700 /app/bas_ca"
+    volumes:
+      - bas_ca_data:/app/bas_ca
+
   # ─────────────────────────────────────────────────────────────────
   # Backend API
   # ─────────────────────────────────────────────────────────────────
@@ -209,8 +253,7 @@ services:
       dockerfile: Dockerfile
     container_name: scriptkiddo_backend
     restart: unless-stopped
-    command: >
-      sh -c "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: sh /app/start.sh
     env_file: *optional_env_file
     environment:
       <<: *vulnerability_catalog_env
@@ -248,10 +291,16 @@ services:
         condition: service_started
       evidence_init:
         condition: service_completed_successfully
+      bas_ca_init:
+        condition: service_completed_successfully
       zap:
         condition: service_started
     ports:
       - "${BACKEND_HOST_PORT:-8001}:8000"
+      # BAS agent mTLS listener (heartbeat and onward) -- see bas_ca.py and
+      # backend/start.sh. Distinct from the plain port above so a client
+      # cert failure here never affects normal user/frontend traffic.
+      - "${BAS_MTLS_HOST_PORT:-8444}:8443"
     mem_limit: 1g
     profiles: ["dev"]
     # group_add 0 (root group): permite ao processo non-root (uid 1000) LER o
@@ -261,6 +310,10 @@ services:
       - ./backend:/app
       - ./skills:/app/skills:ro
       - evidence_storage:/evidence
+      # BAS internal PKI (root CA + mTLS server cert) -- must survive
+      # container recreates so agents' already-issued client certs keep
+      # validating. Never mounted into any other service.
+      - bas_ca_data:/app/bas_ca
       # Visão de saúde dos containers (Centro Operacional). Socket read-only:
       # o backend lê status/health/logs via Docker API. Não inicia/para nada.
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -662,3 +715,4 @@ volumes:
   zap_data:
   evidence_storage:
   browser_traces:
+  bas_ca_data:

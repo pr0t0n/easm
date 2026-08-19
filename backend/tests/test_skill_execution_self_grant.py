@@ -73,7 +73,7 @@ def test_run_self_grant_actions_skips_without_revert_endpoint() -> None:
             scan_id=1,
             grant_actions=[{"endpoint": "https://api.example.com/grant", "method": "POST"}],
             endpoints=_ENDPOINTS,
-            auth_headers={"Authorization": "Bearer x"},
+            auth_headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1MSJ9.sig"},
             auth_cookies={},
         )
     assert results[0]["granted"] is False
@@ -91,10 +91,10 @@ def test_run_self_grant_actions_skips_without_roles_endpoint() -> None:
             scan_id=1,
             grant_actions=[{"endpoint": "https://api.example.com/grant", "method": "POST"}],
             endpoints=_ENDPOINTS,
-            auth_headers={},
+            auth_headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1MSJ9.sig"},
             auth_cookies={},
         )
-    assert results[0]["reason"] == "no_roles_listing_endpoint"
+    assert results[0]["reason"] == "no_self_bound_roles_listing_endpoint"
     mock_execute.assert_not_called()
 
 

@@ -716,18 +716,17 @@ def run_as_tool(
             # here too would duplicate bl-test's own, unrelated invocation.
             return []
         try:
-            from app.services.business_logic_analyzer import analyze_business_logic
+            from app.services.business_logic_analyzer import run_read_only_checks
 
             post_paths = [
                 str(row.get("endpoint") or "")
                 for row in actions
                 if str(row.get("method") or "").upper() in ("POST", "PUT")
             ]
-            return analyze_business_logic(
-                domain=urlparse(base).hostname or base,
+            return run_read_only_checks(
                 base_url=base,
-                existing_findings=[],
-                discovered_auth_paths=post_paths or None,
+                domain=urlparse(base).hostname or base,
+                extra_paths=post_paths or None,
                 auth_headers=headers or None,
                 auth_cookies=cookies or None,
             )

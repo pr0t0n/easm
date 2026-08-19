@@ -105,13 +105,24 @@ def find_revert_endpoint(grant_url: str, endpoints: list[dict[str, str]]) -> dic
     return None
 
 
-def find_roles_listing_endpoint(endpoints: list[dict[str, str]]) -> dict[str, str] | None:
+def _path_binds_self(url: str, self_user_id: Any) -> bool:
+    path = urlparse(str(url or "")).path.lower()
+    identity = str(self_user_id or "").strip().lower()
+    segments = {part for part in path.split("/") if part}
+    return bool(identity and identity in segments or segments & {"me", "self", "current-user"})
+
+
+def find_roles_listing_endpoint(
+    endpoints: list[dict[str, str]], self_user_id: Any | None = None,
+) -> dict[str, str] | None:
     """A GET endpoint whose path names roles/permissions -- the source of
     truth for what to self-grant, never an LLM-invented value."""
     for ep in endpoints:
         method = str(ep.get("method") or "GET").upper()
         path = urlparse(str(ep.get("url") or "")).path.lower()
-        if method == "GET" and ("role" in path or "permission" in path):
+        if method == "GET" and ("role" in path or "permission" in path) and (
+            self_user_id is None or _path_binds_self(str(ep.get("url") or ""), self_user_id)
+        ):
             return ep
     return None
 
@@ -138,8 +149,14 @@ def execute_self_grant_then_revert(
     """
     result: dict[str, Any] = {
         "granted": False, "escalation_confirmed": False, "reverted": None,
-        "attempts": [], "target_role": None, "reason": "",
+        "attempts": [], "target_role": None, "reason": "", "cleanup_status": "not_required",
     }
+    if not self_user_id:
+        result["reason"] = "self_identity_unavailable"
+        return result
+    if not _path_binds_self(grant_endpoint, self_user_id) or not _path_binds_self(roles_endpoint, self_user_id):
+        result["reason"] = "endpoints_not_bound_to_caller_identity"
+        return result
     try:
         roles_resp = requests.get(roles_endpoint, headers=headers, cookies=cookies, timeout=_HTTP_TIMEOUT, verify=False)
         roles = _extract_role_objects(roles_resp.json() if roles_resp.ok else None)
@@ -150,6 +167,8 @@ def execute_self_grant_then_revert(
         result["reason"] = "roles_listing_not_parseable"
         return result
 
+    baseline_roles = sorted(str(r.get("name") or r.get("id")) for r in roles)
+    result["baseline_roles"] = baseline_roles
     ranked = sorted(roles, key=_rank_role, reverse=True)
     target_role = ranked[0]
     if _rank_role(target_role) < 2:
@@ -161,10 +180,12 @@ def execute_self_grant_then_revert(
     result["target_role"] = target_role
 
     granted = False
+    mutation_attempted = False
     successful_shape = ""
     try:
         for shape_name, shape_fn in _BODY_SHAPES:
             body = shape_fn(target_role)
+            mutation_attempted = True
             try:
                 resp = requests.request(
                     grant_method, grant_endpoint, json=body,
@@ -179,7 +200,8 @@ def execute_self_grant_then_revert(
                 successful_shape = shape_name
                 break
         result["granted"] = granted
-        if granted:
+        if mutation_attempted:
+            result["cleanup_status"] = "required"
             try:
                 whoami = requests.get(roles_endpoint, headers=headers, cookies=cookies, timeout=_HTTP_TIMEOUT, verify=False)
                 after_roles = {r.get("name") or r.get("id") for r in _extract_role_objects(whoami.json() if whoami.ok else None)}
@@ -213,11 +235,24 @@ def execute_self_grant_then_revert(
                 except Exception as exc:
                     revert_error = str(exc)
                     continue
-                if revert_resp.status_code in (200, 201, 204, 404):
-                    reverted = True
+                if revert_resp.status_code in (200, 201, 202, 204, 404):
                     break
                 revert_error = f"status={revert_resp.status_code}"
+            try:
+                post = requests.get(roles_endpoint, headers=headers, cookies=cookies, timeout=_HTTP_TIMEOUT, verify=False)
+                post_roles = sorted(
+                    str(r.get("name") or r.get("id"))
+                    for r in _extract_role_objects(post.json() if post.ok else None)
+                )
+                result["post_rollback_roles"] = post_roles
+                reverted = bool(post.ok and post_roles == baseline_roles)
+                if not reverted and not revert_error:
+                    revert_error = "post_rollback_state_differs_from_baseline"
+            except Exception as exc:
+                reverted = False
+                revert_error = f"post_rollback_readback_failed:{exc}"
             result["reverted"] = reverted
+            result["cleanup_status"] = "restored" if reverted else "cleanup_failed"
             if not reverted:
                 result["revert_error"] = revert_error
                 log_error(

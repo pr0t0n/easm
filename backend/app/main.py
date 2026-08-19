@@ -14,6 +14,7 @@ from app.api.routes_scans import router as scans_router
 from app.api.routes_ws import router as ws_router
 from app.api.routes_agent_flow import router as agent_flow_router
 from app.api.routes_pentest import router as pentest_router
+from app.api.routes_bas import router as bas_router
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.db.session import Base, engine
@@ -96,8 +97,16 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
     seed_admin_user()
     seed_skill_library_data()
+    start_skill_rag()
     start_platform_guard()
     start_credential_capture_reaper()
+
+
+def start_skill_rag():
+    """Warm the versioned Skill corpus into pgvector on every deployment."""
+    from app.services.skill_rag_indexer import start_skill_index_background
+
+    start_skill_index_background()
 
 
 def start_credential_capture_reaper():
@@ -195,4 +204,5 @@ app.include_router(management_router)
 app.include_router(ws_router)
 app.include_router(agent_flow_router)
 app.include_router(pentest_router)
+app.include_router(bas_router)
 app.include_router(identities_router)

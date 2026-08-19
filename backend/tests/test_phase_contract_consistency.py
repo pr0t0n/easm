@@ -23,7 +23,11 @@ def test_p18_contract_is_credential_exposure_not_tls() -> None:
 
     p18 = PHASE_CONTRACTS["P18"]
     assert p18["name"] == "Credential Exposure Boundary"
-    assert p18["required_tools"] == ["theharvester"]
+    # theharvester alone used to be the whole phase (a scan-only signal); it's
+    # now a real backend-local reviewer's required tool, with theharvester
+    # demoted to one of several optional signal sources it reviews.
+    assert p18["required_tools"] == ["credential-boundary-review"]
+    assert "theharvester" in p18["optional_tools"]
     assert "theharvester" in QUALITY_PHASE_FALLBACKS["P18"]
     assert not {"sslscan", "testssl", "nmap-ssl-vuln"} & set(QUALITY_PHASE_FALLBACKS["P18"])
 

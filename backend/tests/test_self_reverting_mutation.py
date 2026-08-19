@@ -86,9 +86,9 @@ def test_grant_then_revert_full_success_confirms_escalation() -> None:
 
     def fake_request(method, url, **kwargs):
         call_log.append((method, url, kwargs.get("json")))
-        if method == "POST" and url == "https://api.example.com/grant":
+        if method == "POST" and url == "https://api.example.com/me/grant":
             return _mock_response(200)
-        if method == "DELETE" and url == "https://api.example.com/revert":
+        if method == "DELETE" and url == "https://api.example.com/me/revert":
             return _mock_response(204)
         return _mock_response(404)
 
@@ -97,10 +97,10 @@ def test_grant_then_revert_full_success_confirms_escalation() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=fake_get), \
          patch("app.services.self_reverting_mutation.requests.request", side_effect=fake_request):
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/me/revert"},
             headers={"Authorization": "Bearer x"},
             cookies={},
             self_user_id="me",
@@ -125,10 +125,10 @@ def test_grant_never_attempted_without_no_elevated_role() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=fake_get), \
          patch("app.services.self_reverting_mutation.requests.request") as mock_request:
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/me/revert"},
             headers={}, cookies={}, self_user_id="me", scan_id=1, log_error=log_error,
         )
 
@@ -150,10 +150,10 @@ def test_grant_failure_never_attempts_revert() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=fake_get), \
          patch("app.services.self_reverting_mutation.requests.request", side_effect=fake_request) as mock_request:
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/me/revert"},
             headers={}, cookies={}, self_user_id="me", scan_id=1, log_error=log_error,
         )
 
@@ -166,13 +166,16 @@ def test_grant_failure_never_attempts_revert() -> None:
 
 
 def test_revert_failure_screams_via_log_error() -> None:
-    roles_payload = {"data": [{"id": "r1", "name": "member"}, {"id": "r2", "name": "admin"}]}
+    # Mutable role state so the post-rollback read-back can actually observe
+    # a difference from baseline when the revert never truly took effect.
+    state = {"roles": [{"id": "r1", "name": "member"}, {"id": "r2", "name": "admin"}]}
 
     def fake_get(url, **kwargs):
-        return _mock_response(200, roles_payload)
+        return _mock_response(200, {"data": list(state["roles"])})
 
     def fake_request(method, url, **kwargs):
-        if method == "POST" and url == "https://api.example.com/grant":
+        if method == "POST" and url == "https://api.example.com/me/grant":
+            state["roles"].append({"id": "r3", "name": "escalated-marker"})
             return _mock_response(200)
         return _mock_response(500)  # revert always fails, regardless of shape tried
 
@@ -180,10 +183,10 @@ def test_revert_failure_screams_via_log_error() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=fake_get), \
          patch("app.services.self_reverting_mutation.requests.request", side_effect=fake_request):
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "POST", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "POST", "url": "https://api.example.com/me/revert"},
             headers={}, cookies={}, self_user_id="me", scan_id=42, log_error=log_error,
         )
 
@@ -202,9 +205,9 @@ def test_revert_tries_multiple_body_shapes_when_first_fails() -> None:
         return _mock_response(200, roles_payload)
 
     def fake_request(method, url, **kwargs):
-        if method == "POST" and url == "https://api.example.com/grant":
+        if method == "POST" and url == "https://api.example.com/me/grant":
             return _mock_response(200)
-        if url == "https://api.example.com/revert":
+        if url == "https://api.example.com/me/revert":
             revert_attempts.append(kwargs.get("json"))
             # only succeed on the 3rd distinct shape tried
             return _mock_response(200) if len(revert_attempts) >= 3 else _mock_response(400)
@@ -214,10 +217,10 @@ def test_revert_tries_multiple_body_shapes_when_first_fails() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=fake_get), \
          patch("app.services.self_reverting_mutation.requests.request", side_effect=fake_request):
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "POST", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "POST", "url": "https://api.example.com/me/revert"},
             headers={}, cookies={}, self_user_id="me", scan_id=1, log_error=log_error,
         )
 
@@ -231,10 +234,10 @@ def test_roles_listing_fetch_failure_never_attempts_write() -> None:
     with patch("app.services.self_reverting_mutation.requests.get", side_effect=ConnectionError("boom")), \
          patch("app.services.self_reverting_mutation.requests.request") as mock_request:
         result = execute_self_grant_then_revert(
-            grant_endpoint="https://api.example.com/grant",
+            grant_endpoint="https://api.example.com/me/grant",
             grant_method="POST",
-            roles_endpoint="https://api.example.com/roles",
-            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/revert"},
+            roles_endpoint="https://api.example.com/me/roles",
+            revert_endpoint={"method": "DELETE", "url": "https://api.example.com/me/revert"},
             headers={}, cookies={}, self_user_id="me", scan_id=1, log_error=log_error,
         )
 

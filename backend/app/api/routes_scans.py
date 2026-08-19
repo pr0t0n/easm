@@ -362,11 +362,18 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
 
 
 def _authorized_scan_query(db: Session, current_user: User):
-    return apply_company_scope(db.query(ScanJob), current_user, ScanJob)
+    # Shadow ScanJob(mode="bas") rows exist only to anchor BAS Finding/
+    # EvidenceArtifact FKs (see bas_dispatcher) -- they're never a real scan
+    # and must never appear in the main Scans list/Ops Center.
+    return apply_company_scope(db.query(ScanJob), current_user, ScanJob).filter(ScanJob.mode != "bas")
 
 
 def _authorized_finding_query(db: Session, current_user: User):
-    return apply_company_scope(db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id), current_user, ScanJob)
+    from app.services.bas_exclusion import exclude_simulated
+
+    return exclude_simulated(
+        apply_company_scope(db.query(Finding).join(ScanJob, ScanJob.id == Finding.scan_job_id), current_user, ScanJob)
+    )
 
 
 def _authorized_asset_query(db: Session, current_user: User):
@@ -2790,8 +2797,10 @@ def _open_finding_counts_by_scan(db: Session, scan_ids: list[int]) -> dict[int, 
     counts: dict[int, dict[str, int]] = {}
     if not scan_ids:
         return counts
+    from app.services.bas_exclusion import exclude_simulated
+
     rows = (
-        db.query(Finding.scan_job_id, Finding.severity, func.count(Finding.id))
+        exclude_simulated(db.query(Finding.scan_job_id, Finding.severity, func.count(Finding.id)))
         .filter(Finding.scan_job_id.in_(scan_ids))
         .filter(Finding.is_false_positive.isnot(True))
         .group_by(Finding.scan_job_id, Finding.severity)
@@ -6736,14 +6745,16 @@ def get_rating_methodology(current_user: User = Depends(get_current_user)):
 
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from app.services.bas_exclusion import exclude_simulated
+
     if current_user.is_admin:
-        jobs = db.query(ScanJob).all()
-        findings = db.query(Finding).all()
+        jobs = db.query(ScanJob).filter(ScanJob.mode != "bas").all()
+        findings = exclude_simulated(db.query(Finding)).all()
     else:
         allowed_ids = [g.id for g in current_user.groups]
-        jobs = apply_company_scope(db.query(ScanJob), current_user, ScanJob).all()
+        jobs = apply_company_scope(db.query(ScanJob), current_user, ScanJob).filter(ScanJob.mode != "bas").all()
         findings = (
-            db.query(Finding)
+            exclude_simulated(db.query(Finding))
             .join(ScanJob, ScanJob.id == Finding.scan_job_id)
             .filter(ScanJob.access_group_id.in_(allowed_ids))
             .all()
@@ -9805,7 +9816,11 @@ def get_cockpit(
         if normalized_target:
             findings_query = findings_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
     else:
-        findings_query = db.query(Finding).filter(Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False))
+        from app.services.bas_exclusion import exclude_simulated
+
+        findings_query = exclude_simulated(db.query(Finding)).filter(
+            Finding.scan_job_id == selected.id, Finding.is_false_positive.is_(False)
+        )
 
     total_findings = findings_query.count()
     summary_findings = findings_query.with_entities(

@@ -4,10 +4,20 @@ Implementa o ponto #3 do usuário: subdomínio A e subdomínio B não são mais
 isolados. Descobertas se propagam entre targets do mesmo scan.
 
 Casos de uso cobertos:
-  1. Credential leak em sub A → credential stuffing em auth endpoints de sub B, C, D
+  1. Credential leak em sub A → sinal de que auth em sub B, C, D também merece
+     um probe de default-credentials (NÃO reutiliza o segredo real encontrado
+     — ver nota abaixo)
   2. Mesmo software/versão em múltiplos subs → testa CVE uma vez, reporta em todos
   3. Mesmo IP em múltiplos subs → testa virtual host confusion
   4. SAN do certificado SSL → descobre subdomínios adicionais não encontrados via DNS
+
+NOTA: este módulo NUNCA reenvia o valor real de uma credencial vazada contra
+outro alvo (isso seria credential stuffing de fato — uma mutação arriscada
+fora do escopo do self_reverting_mutation.py, o único caminho de mutação
+explicitamente aprovado). O que ele faz é bem mais estreito: um leak em um
+target aumenta a probabilidade de que outros subdomínios do mesmo scan também
+tenham segredos fracos, então agenda um probe GENÉRICO de credenciais padrão
+(nuclei-default-credentials) — nunca o segredo específico que foi encontrado.
 
 Chamado em poll_scan_work_item após ferramentas de:
   - Credential discovery: gitleaks, trufflehog, git-dumper, h8mail
@@ -173,7 +183,8 @@ def _seed_credential_test(
     cred_count: int,
     source_target: str,
 ) -> int:
-    """Enfileira teste de credential stuffing para um target que tem auth endpoint."""
+    """Enfileira um probe de credenciais padrão (não o segredo vazado) para um
+    target que tem auth endpoint conhecido."""
     try:
         from app.models.models import ScanWorkItem
         from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool, PHASE_PRIORITY
@@ -210,7 +221,9 @@ def _seed_credential_test(
                 "source": "cross_target_propagator",
                 "source_target": source_target,
                 "cred_count": cred_count,
-                "propagation_type": "credential_stuffing",
+                # This is a generic default-credentials probe, never a replay
+                # of the actual leaked secret value against another target.
+                "propagation_type": "default_credential_probe",
                 "engine": "cross_target_propagator",
             }, phase_id, tool_name, source="cross_target_propagator"),
             created_at=datetime.now(),
@@ -335,7 +348,10 @@ def propagate_credential_findings(
     # Persiste um finding de "credential leaked + propagation" no source
     try:
         from app.models.models import Finding
-        leak_title = f"Credential leak detectado em {source_target} — testando {seeded} targets"
+        leak_title = (
+            f"Credential leak detectado em {source_target} — probe de "
+            f"credenciais padrão agendado em {seeded} targets"
+        )
         existing = (
             db.query(Finding.id)
             .filter(
@@ -362,7 +378,7 @@ def propagate_credential_findings(
                     "credential_count": len(creds),
                     "propagated_to": seeded,
                     "credential_types": list({c.get("rule", "unknown") for c in creds}),
-                    "propagation_type": "credential_stuffing",
+                    "propagation_type": "default_credential_probe",
                     "owasp_category": "A07:2021 Identification and Authentication Failures",
                 },
                 created_at=datetime.now(),

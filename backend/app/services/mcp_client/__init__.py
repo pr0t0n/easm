@@ -53,7 +53,7 @@ def _rag_ingest(
 def _rag_available() -> bool:
     try:
         from app.services import rag_repository
-        return rag_repository.document_count() >= 0
+        return rag_repository.document_count() > 0
     except Exception:
         return False
 

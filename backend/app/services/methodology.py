@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 # (exclui dos/outros/misconfiguration genérico — não são "técnicas testáveis")
 METHODOLOGY_FAMILIES: list[str] = [
     "xss", "sqli", "rce", "ssrf", "idor", "broken_access_control", "auth_bypass",
-    "jwt_oauth", "csrf", "open_redirect", "lfri", "path_traversal", "xxe",
+    "jwt_oauth", "csrf", "open_redirect", "lfi", "path_traversal", "xxe",
     "file_upload", "deserialization", "subdomain_takeover", "cors",
     "header_injection", "race_condition", "graphql_api", "business_logic",
     "info_exposure", "secrets", "security_headers", "tls_ssl", "vulnerable_dependency",
@@ -38,34 +38,47 @@ def compute_methodology_coverage(db: Session, scan_id: int) -> dict:
     # ACHADOS e marcava como "não testado" classes cujas ferramentas de fato
     # rodaram (ex.: dalfox=XSS, sqlmap=SQLi, nuclei-auth-bypass=Auth Bypass,
     # nuclei-lfi=LFI) mas não produziram achado — o oposto de transparência.
+    def _canonical_family(value: str) -> str:
+        return "lfi" if value == "lfri" else value
+
     etr_rows = (
         db.query(ExecutedToolRun.tool_name)
-        .filter(ExecutedToolRun.scan_job_id == scan_id)
+        .filter(
+            ExecutedToolRun.scan_job_id == scan_id,
+            ExecutedToolRun.status.in_(["success", "completed", "done"]),
+        )
         .group_by(ExecutedToolRun.tool_name)
         .all()
     )
     for (tool_name,) in etr_rows:
-        fam = classify_family(title="", tool=str(tool_name or ""))
+        fam = _canonical_family(classify_family(title="", tool=str(tool_name or "")))
         if fam in METHODOLOGY_FAMILIES:
             tested.add(fam)
 
     # Famílias exercitadas via work items (modos que usam a fila de work items).
     wi_rows = (
         db.query(ScanWorkItem.tool_name, func.count(ScanWorkItem.id))
-        .filter(ScanWorkItem.scan_job_id == scan_id)
+        .filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status == "completed",
+        )
         .group_by(ScanWorkItem.tool_name)
         .all()
     )
     for tool_name, _cnt in wi_rows:
-        fam = classify_family(title="", tool=str(tool_name or ""))
+        fam = _canonical_family(classify_family(title="", tool=str(tool_name or "")))
         if fam in METHODOLOGY_FAMILIES:
             tested.add(fam)
 
     # Famílias com achado (cobertura "produtiva").
-    f_rows = db.query(Finding.tool, Finding.title, Finding.cve).filter(Finding.scan_job_id == scan_id).all()
+    f_rows = db.query(Finding.tool, Finding.title, Finding.cve).filter(
+        Finding.scan_job_id == scan_id,
+        Finding.is_false_positive.is_(False),
+        Finding.verification_status.in_(["confirmed", "refuted"]),
+    ).all()
     produced: set[str] = set()
     for tool, title, cve in f_rows:
-        fam = classify_family(title=title, tool=tool, cve=cve)
+        fam = _canonical_family(classify_family(title=title, tool=tool, cve=cve))
         if fam in METHODOLOGY_FAMILIES:
             produced.add(fam)
             tested.add(fam)

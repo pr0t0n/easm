@@ -26,6 +26,9 @@ BACKEND_LOCAL_PROFILES = {
     # container via zap_scanner.py, never through a kali_runner profile — see
     # workers/tasks.py's ZAP post-processing hook.
     "zap_api_scan",
+    # P18-P22 phase reviewers — pure Python over already-collected evidence,
+    # dispatched in-process by offensive_operator_runner._run_backend_local_tool.
+    "backend_control",
 }
 RUNNER_BUILTIN_EXECUTABLES = {"bash", "sh", "python", "python3"}
 

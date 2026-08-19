@@ -7,11 +7,13 @@ via rag_repository. Cada skill vira um documento RAG com embedding semântico
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from app.services.skill_runtime import load_all_md_skills
 
 logger = logging.getLogger(__name__)
+_INDEX_LOCK = threading.Lock()
 
 
 def _build_rag_document(skill: dict[str, Any]) -> dict[str, Any]:
@@ -33,6 +35,17 @@ def _build_rag_document(skill: dict[str, Any]) -> dict[str, Any]:
         f"chains: {' '.join(attack_chain_opportunities)}",
         f"risk: {skill.get('risk_level') or 'medium'}",
     ]
+    source_file = str(skill.get("source_file") or "")
+    if source_file:
+        try:
+            from pathlib import Path
+
+            # Index the actual operational methodology, not only its labels.
+            # RAG retrieval can therefore reason about preconditions, evidence,
+            # safety rules, negative controls and exit criteria.
+            text_parts.append(Path(source_file).read_text(encoding="utf-8"))
+        except OSError:
+            logger.warning("skill_rag_indexer: cannot read source_file=%s", source_file)
 
     return {
         "id": f"skill:{skill_id}",
@@ -125,6 +138,44 @@ def index_skills_to_knowledge_store() -> dict[str, Any]:
         "total_in_store": total,
         "skill_ids": list(skills.keys()),
     }
+
+
+def ensure_skill_index_ready(*, force: bool = False) -> dict[str, Any]:
+    """Idempotently make the approved Skill corpus available to RAG.
+
+    Called both at API startup and immediately before methodology planning.
+    The second call closes the race where a scan is submitted while the
+    background startup index is still warming up.
+    """
+    with _INDEX_LOCK:
+        from app.db.session import SessionLocal
+        from sqlalchemy import text
+
+        db = SessionLocal()
+        try:
+            current = int(db.execute(text(
+                "SELECT COUNT(DISTINCT source) FROM rag_knowledge_store WHERE source_kind = 'skill'"
+            )).scalar() or 0)
+        except Exception:
+            current = 0
+        finally:
+            db.close()
+        expected = len(load_all_md_skills())
+        if not force and expected > 0 and current >= expected:
+            return {"indexed": 0, "errors": 0, "already_ready": True, "skill_documents": current}
+        return index_skills_to_knowledge_store()
+
+
+def start_skill_index_background() -> None:
+    """Start non-blocking RAG warm-up during API boot."""
+    def _run() -> None:
+        try:
+            result = ensure_skill_index_ready()
+            logger.info("automatic Skill RAG initialization complete: %s", result)
+        except Exception:
+            logger.exception("automatic Skill RAG initialization failed")
+
+    threading.Thread(target=_run, name="skill-rag-indexer", daemon=True).start()
 
 
 def query_skills_by_phase(phase_id: str) -> list[dict[str, Any]]:

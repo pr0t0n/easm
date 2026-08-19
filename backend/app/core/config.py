@@ -14,6 +14,27 @@ class Settings(BaseSettings):
     # Token de refresh: 7 dias. Usado pelo frontend para reemitir access tokens
     # silenciosamente sem forcar re-login durante sessoes longas de monitoramento.
     refresh_token_expire_days: int = 7
+    # Token de agente BAS: 365 dias. Emitido uma vez no enroll, persistido pelo
+    # agente (bas_agent_stub hoje, agente Rust real depois) — diferente do
+    # access_token de usuario humano, nao ha refresh flow para isso ainda.
+    bas_agent_token_expire_days: int = 365
+    # Internal BAS PKI: root CA + server cert live on a persistent volume so
+    # they survive container recreates (agents' issued client certs must
+    # keep validating against the SAME CA). Enrollment stays on the plain
+    # HTTP port (bootstrap, no cert yet); heartbeat and onward run on the
+    # separate mTLS-required listener below. See bas_ca.py.
+    bas_ca_dir: str = "/app/bas_ca"
+    # Internal container port the mTLS listener actually binds to (see
+    # backend/start.sh) -- reachable directly by anything on the same
+    # docker network (e.g. bas_agent_stub).
+    bas_mtls_port: int = 8443
+    # Port a REAL agent (installed on an actual customer/dev machine,
+    # outside docker) must dial instead -- the docker-compose host port
+    # mapping onto bas_mtls_port (see BAS_MTLS_HOST_PORT in
+    # docker-compose.yml). This is what enroll/install-config hand back,
+    # since a real downloadable agent is always external by definition.
+    bas_mtls_external_port: int = 8444
+    bas_agent_cert_valid_days: int = 365
     admin_email: str = "admin@example.com"
     admin_password: str = "admin123"
 

@@ -1263,3 +1263,162 @@ class ToolHealthSnapshot(Base):
     resource_class: Mapped[str | None] = mapped_column(String(40), nullable=True)
     detail: Mapped[dict] = mapped_column(JSONB, default=dict)
     checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+# ── BAS (Breach & Attack Simulation) ────────────────────────────────────────
+# status enums, kept as comments (not DB-enforced) per the rest of this file's
+# convention: BasEnrollmentToken.status: active|revoked|expired|exhausted
+# BasAgent.status: pending|online|offline|revoked
+# BasJob.status: queued|dispatched_to_kali|running|completed|failed|cancelled|skipped
+
+class BasEnrollmentToken(Base):
+    """One-time (or capped-use) secret an operator types into the agent
+    installer to enroll a BasAgent. Plaintext password is returned once at
+    creation and never stored -- only its bcrypt hash persists."""
+    __tablename__ = "bas_enrollment_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
+    issued_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    username: Mapped[str] = mapped_column(String(120), index=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    secret_hash: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class BasAgent(Base):
+    """A tunnel endpoint (bas_agent_stub today, a real Rust agent installed
+    on a customer host in a later phase) kali_runner's proxychains-wrapped
+    tools route through to reach an internal network.
+
+    `kind` is the honesty boundary: "stub" (bas_agent_stub, the docker-
+    compose Python container kept around to validate Kali<->agent traffic --
+    ALWAYS fabricates its tunnel's response content) vs "real" (a genuine
+    agent binary that relays actual bytes to an actual destination -- stamped
+    server-side, never client-declared, based on whether it obtained a
+    CA-signed mTLS client certificate at enroll time; see routes_bas.py's
+    enroll_agent and bas_ca.py). Findings/BasJobs are only marked
+    `simulated` when the dispatching agent's kind is "stub"."""
+    __tablename__ = "bas_agents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
+    enrollment_token_id: Mapped[int | None] = mapped_column(ForeignKey("bas_enrollment_tokens.id"), nullable=True, index=True)
+    label: Mapped[str] = mapped_column(String(255), default="")
+    hostname: Mapped[str] = mapped_column(String(255), default="")
+    os: Mapped[str] = mapped_column(String(20), default="", index=True)
+    os_version: Mapped[str] = mapped_column(String(120), default="")
+    arch: Mapped[str] = mapped_column(String(20), default="")
+    agent_version: Mapped[str] = mapped_column(String(40), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="stub", index=True)
+    tunnel_host: Mapped[str] = mapped_column(String(255), default="")
+    tunnel_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_seen_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enrolled_via_host: Mapped[str] = mapped_column(String(255), default="")
+    enrolled_via_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class BasSchedule(Base):
+    """The 'cardápio' entry: an agent + a set of techniques + a periodicity,
+    plus the risk-tier authorization ceiling that gates which techniques may
+    actually run (bas_guardrail_policy.check_bas_authorization)."""
+    __tablename__ = "bas_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    agent_id: Mapped[int] = mapped_column(ForeignKey("bas_agents.id"), index=True)
+    target_hint: Mapped[str] = mapped_column(String(255), default="")
+    technique_keys: Mapped[list] = mapped_column(JSONB, default=list)
+    frequency: Mapped[str] = mapped_column(String(20), default="daily")
+    run_time: Mapped[str] = mapped_column(String(5), default="00:00")
+    day_of_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_authorized_risk_tier: Mapped[str] = mapped_column(String(20), default="safe")
+    authorization_attested: Mapped[bool] = mapped_column(Boolean, default=False)
+    authorization_attested_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    authorization_attested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    authorization_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    agent = relationship("BasAgent")
+
+
+class BasJob(Base):
+    """One real dispatch of a Kali tool through a BasAgent's tunnel. Not a
+    poll/lease queue for a remote agent -- the backend dispatches this
+    directly to kali_runner via bas_dispatcher (proxychains-wrapped)."""
+    __tablename__ = "bas_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    schedule_id: Mapped[int | None] = mapped_column(ForeignKey("bas_schedules.id"), nullable=True, index=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("bas_agents.id"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    technique_key: Mapped[str] = mapped_column(String(120), index=True)
+    risk_tier: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    kali_job_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict] = mapped_column(JSONB, default=dict)
+    job_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    schedule = relationship("BasSchedule")
+    agent = relationship("BasAgent")
+    scan_job = relationship("ScanJob")
+
+
+_BAS_JOB_NON_TERMINAL_STATUSES = {"queued", "dispatched_to_kali", "running"}
+_BAS_JOB_HALTED_AGENT_STATUSES = {"revoked"}
+
+
+def _guard_bas_job_insert(mapper, connection, target: "BasJob") -> None:
+    """Mirrors _guard_scan_work_item_insert: never raise mid-flush (that
+    poisons the caller's session) -- silently downgrade to a terminal
+    'skipped' row if the BasAgent is already revoked when the job is created."""
+    item_status = str(getattr(target, "status", "") or "queued").lower()
+    if item_status not in _BAS_JOB_NON_TERMINAL_STATUSES:
+        return
+    agent_id = getattr(target, "agent_id", None)
+    if agent_id is None:
+        return
+    agent_status = connection.execute(
+        sa.text("SELECT lower(status) FROM bas_agents WHERE id = :agent_id"),
+        {"agent_id": int(agent_id)},
+    ).scalar_one_or_none()
+    if str(agent_status or "") in _BAS_JOB_HALTED_AGENT_STATUSES:
+        target.status = "skipped"
+        metadata = dict(getattr(target, "job_metadata", None) or {})
+        metadata["rejected_for_revoked_agent"] = {
+            "agent_status": agent_status,
+            "reason": "agent_already_revoked_when_job_was_created",
+        }
+        target.job_metadata = metadata
+
+
+sa.event.listen(BasJob, "before_insert", _guard_bas_job_insert)

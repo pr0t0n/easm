@@ -134,15 +134,25 @@ def test_mcp_payload_contains_authorized_scope(monkeypatch) -> None:
 
 
 def test_all_controlled_pentest_phases_can_advance_with_successful_tool_results() -> None:
+    # P20/P21/P22 are real evidence-adjudication reviewers now (not Kali
+    # placeholders), so they require "strong" evidence (a reproducible
+    # request/response pair) rather than a bare successful exit code --
+    # simulate that a backend-local reviewer actually found something to
+    # correlate/adjudicate/report on, the same shape phase_control_tools.py
+    # produces when the scan has real findings to work from.
+    _STRONG_EVIDENCE_TOOLS = {"attack-path-correlator", "evidence-adjudicator", "report-snapshot-builder"}
+
+    def _fake_call_tool(execution):
+        result = {"status": "success", "exit_code": 0, "stdout_path": "/tmp/tool-output.txt"}
+        if execution.get("tool_name") in _STRONG_EVIDENCE_TOOLS:
+            result["parsed_result"] = {"reproducible": True, "request_response_pair": True}
+        return result
+
     job = ScanJob(id=1, owner_id=1, target_query="valid.com", state_data={})
     scope = _scope_from_job(job, "valid.com", "controlled_pentest")
     runtime = OffensiveSkillRuntime(
         executor=MCPToolExecutor(
-            call_tool=lambda _execution: {
-                "status": "success",
-                "exit_code": 0,
-                "stdout_path": "/tmp/tool-output.txt",
-            },
+            call_tool=_fake_call_tool,
             available=True,
         )
     )

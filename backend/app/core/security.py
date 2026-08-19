@@ -49,3 +49,25 @@ def decode_refresh_token(token: str) -> str | None:
         return payload.get("sub")
     except JWTError:
         return None
+
+
+def create_bas_agent_token(agent_id: int) -> str:
+    """BAS agent credential, type="bas_agent" — segregated from human
+    access_token/refresh_token by type, never accepted by decode_access_token."""
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.bas_agent_token_expire_days)
+    payload = {"sub": f"bas_agent:{agent_id}", "exp": expire, "type": "bas_agent"}
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+def decode_bas_agent_token(token: str) -> int | None:
+    """Returns the BasAgent id, or None if the token is invalid/expired/wrong type."""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        if payload.get("type") != "bas_agent":
+            return None
+        subject = str(payload.get("sub") or "")
+        if not subject.startswith("bas_agent:"):
+            return None
+        return int(subject.split(":", 1)[1])
+    except (JWTError, ValueError):
+        return None

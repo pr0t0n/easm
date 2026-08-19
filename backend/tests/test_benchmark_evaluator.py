@@ -22,9 +22,17 @@ def test_benchmark_evaluator_passes_local_scan_with_proof_pack() -> None:
                 {"phase_id": f"P{i:02d}", "status": "completed", "tools_success": [f"tool-{i}"]}
                 for i in range(1, 10)
             ],
+            "benchmark_ground_truth": [{"family": "sqli"}],
         },
     )
-    finding = _finding("critical", {"proof_pack": {"baseline": "EV-1", "exploit": "EV-2"}})
+    finding = _finding(
+        "critical",
+        {
+            "proof_pack": {"baseline": "EV-1", "exploit": "EV-2"},
+            "vuln_family": "sqli",
+            "verification_status": "confirmed",
+        },
+    )
 
     result = evaluate_benchmark_scan(scan, benchmark_id="vuln-bank", findings=[finding])
 
@@ -40,9 +48,10 @@ def test_benchmark_evaluator_blocks_external_target_for_local_lab() -> None:
             "phase_ledger_v2": [
                 {"phase_id": "P01", "status": "completed", "tools_success": ["subfinder"]}
             ],
+            "benchmark_ground_truth": [{"family": "sqli"}],
         },
     )
-    finding = _finding("high")
+    finding = _finding("high", {"vuln_family": "xss", "verification_status": "confirmed"})
 
     result = evaluate_benchmark_scan(scan, benchmark_id="vuln-bank", findings=[finding])
 

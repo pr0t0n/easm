@@ -273,6 +273,43 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "code-analyzer": "code_analyzer_backend",
     # Backend-local: teste ativo de business logic (worker_dispatcher short-circuit).
     "bl-test": "business_logic_backend",
+
+    # Backend-local P18-P22 phase reviewers (offensive_operator_runner short-
+    # circuits these into phase_control_tools.run_phase_control_tool — never
+    # dispatched to Kali).
+    "credential-boundary-review": "backend_control",
+    "post-exploitation-boundary-review": "backend_control",
+    "attack-path-correlator": "backend_control",
+    "evidence-adjudicator": "backend_control",
+    "report-snapshot-builder": "backend_control",
+
+    # BAS (Breach & Attack Simulation) — proxychains-wrapped profiles, ONLY
+    # ever dispatched by bas_dispatcher.py. "-bas" suffixed so these never
+    # collide with the same tool's untunneled profile used by the external
+    # P01-P22 pipeline (e.g. plain "crackmapexec" above).
+    "crackmapexec-bas": "crackmapexec_smb_bas_tunnel",
+    "enum4linux-ng-bas": "enum4linux_ng_basic",
+    "bloodhound-python-bas": "bloodhound_python_collect",
+    "getuserspns-bas": "impacket_kerberoast",
+    "ntlmrelayx-bas": "impacket_ntlmrelayx",
+    "curl-vmware-bas": "vmware_vcenter_default_creds_check",
+    "nmap-firewall-bas": "firewall_segmentation_probe",
+    "smbmap-bas": "smbmap_share_discovery",
+    "ldapsearch-bas": "ad_ldap_scouting",
+    "curl-clouddir-bas": "cloud_directory_scouting_check",
+    "nmap-portscan-bas": "port_service_scan",
+    "curl-chatwebhook-bas": "chat_webhook_discovery_check",
+    "zerologon-bas": "netlogon_zerologon_check",
+    "nikto-owasp-bas": "owasp_web_app_scan",
+    "curl-pipelinelogs-bas": "pipeline_secrets_harvest",
+    "gitleaks-bas": "source_code_secrets_scan",
+    # Deliberately dispatched (not gated future_agent_required) per an
+    # explicit product decision: let the architectural limit (proxychains
+    # can't help a bind()/listen() tool reach a network segment it was never
+    # on) show up as a real, observed dispatch failure/no-signal result,
+    # rather than a silent guardrail block. See bas_internal.yaml's
+    # responder_analyze_attempt for the full rationale.
+    "responder-bas": "responder_analyze_attempt",
 }
 
 
@@ -341,6 +378,7 @@ def execute_via_kali(
     max_wait: int = 1800,
     skill_context: dict[str, Any] | None = None,
     extra_args: list[str] | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Dispatches `tool` to the Kali runner via HTTP and waits for completion.
 
@@ -404,6 +442,8 @@ def execute_via_kali(
             "extra_args": _clean_extra,
             "authorized_scope": resolve_authorized_scope_for_dispatch(scan_id),
         }
+        if env_vars:
+            payload["env_vars"] = dict(env_vars)
         _auth_headers = _auth_headers_from_skill_context(skill_context)
         if _auth_headers:
             payload["auth_headers"] = _auth_headers

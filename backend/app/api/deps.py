@@ -3,12 +3,13 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import false
 from sqlalchemy.orm import Session
 
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, decode_bas_agent_token
 from app.db.session import get_db
-from app.models.models import AccessGroup, User
+from app.models.models import AccessGroup, BasAgent, User
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+bas_agent_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/bas/agents/enroll", auto_error=False)
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
@@ -20,6 +21,20 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario nao encontrado")
     return user
+
+
+def get_current_bas_agent(
+    token: str | None = Depends(bas_agent_oauth2_scheme), db: Session = Depends(get_db)
+) -> BasAgent:
+    agent_id = decode_bas_agent_token(token or "")
+    if agent_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de agente BAS invalido")
+    agent = db.query(BasAgent).filter(BasAgent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Agente BAS nao encontrado")
+    if str(agent.status or "") == "revoked":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agente BAS revogado")
+    return agent
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:

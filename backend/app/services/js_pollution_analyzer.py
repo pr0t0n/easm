@@ -70,9 +70,9 @@ def _json_payloads(canary: str) -> list[dict]:
     """Retorna payloads JSON que tentam poluir Object.prototype."""
     return [
         # Vetor clássico — mais comum em apps Express/Koa
-        {"__proto__": {"polluted": canary, "admin": "true", "isAdmin": True}},
+        {"__proto__": {"easmCanary": canary}},
         # Via constructor — funciona quando __proto__ é sanitizado por chave
-        {"constructor": {"prototype": {"polluted": canary, "admin": "true"}}},
+        {"constructor": {"prototype": {"easmCanary": canary}}},
         # Nested — bypass de sanitizações rasas
         {"a": {"__proto__": {"polluted": canary}}},
         # Merge profundo — afeta lodash _.merge, jQuery.extend(true)
@@ -395,17 +395,13 @@ def _test_gadget_chains(url: str, baseline: tuple[int, str]) -> list[PollutionFi
     findings: list[PollutionFinding] = []
 
     for gadget in GADGET_CHAINS:
-        if gadget["impact"] != "auth_bypass":
-            # RCE gadgets: testar apenas se a anomalia for observável sem executar realmente
-            # Enviamos o payload mas sem comandos destrutivos — apenas testamos a reflexão
-            safe_payload = dict(gadget["payload"])
-            # Remove payloads RCE reais, substitui por canary
-            safe_canary = _canary()
-            for k in list(safe_payload.get("__proto__", {}).keys()):
-                if k not in ("shell", "execPath"):
-                    safe_payload["__proto__"][k] = safe_canary
+        safe_canary = _canary()
+        safe_payload = {"__proto__": {"easmCanary": safe_canary}}
 
-        r = _post(url, json_data=gadget["payload"])
+        # Only the inert canary form is allowed in an explicitly isolated
+        # fixture. The former code computed this value and accidentally sent
+        # gadget["payload"] (shell/execPath/admin flags) instead.
+        r = _post(url, json_data=safe_payload)
         if not r:
             continue
 
@@ -607,6 +603,7 @@ def analyze_js_pollution(
     base_url: str | None = None,
     max_endpoints: int = 6,
     skip_persistence_test: bool = False,
+    isolated_fixture: bool = False,
 ) -> list[dict]:
     """
     Executa análise completa de prototype pollution e HPP para um domínio.
@@ -623,7 +620,12 @@ def analyze_js_pollution(
     if not base_url:
         base_url = f"https://{domain}" if not domain.startswith("http") else domain
 
-    logger.info("JS Pollution analysis: %s", base_url)
+    logger.info("JS Pollution analysis: %s isolated_fixture=%s", base_url, isolated_fixture)
+    if not isolated_fixture:
+        # Prototype pollution is itself a state mutation. Production targets
+        # receive only passive dependency/fingerprint assessment; active
+        # canaries require an explicitly isolated, disposable fixture.
+        return _passive_pollution_candidates(domain, base_url)
     all_findings: list[PollutionFinding] = []
 
     # Descobrir endpoints disponíveis
@@ -644,8 +646,9 @@ def analyze_js_pollution(
         all_findings.extend(_test_gadget_chains(endpoint, baseline))
 
     # ── Teste de persistência (global — executa uma vez) ──────────────────
-    if not skip_persistence_test and endpoints:
-        all_findings.extend(_test_persistence_across_requests(endpoints[0]))
+    # Cross-request pollution deliberately changes global process state and
+    # cannot be rolled back reliably. It is never executed by the platform,
+    # including against an isolated fixture; impact is documented instead.
 
     # ── HTTP Parameter Pollution (no base_url) ────────────────────────────
     all_findings.extend(_test_http_parameter_pollution(base_url))
@@ -688,6 +691,32 @@ def analyze_js_pollution(
         }
         for f in unique
     ]
+
+
+def _passive_pollution_candidates(domain: str, base_url: str) -> list[dict]:
+    """Read-only dependency signals; never claims pollution was confirmed."""
+    response = _get(base_url)
+    if response is None:
+        return []
+    text = " ".join([str(response.headers), (response.text or "")[:50_000]]).lower()
+    signals = [name for name in ("express", "lodash", "jquery", "qs") if name in text]
+    if not signals:
+        return []
+    return [{
+        "title": "Stack JavaScript requer revisão dirigida de prototype pollution",
+        "severity": "info",
+        "domain": domain,
+        "source_tool": "js_pollution_analyzer",
+        "evidence": f"Sinais passivos de stack: {', '.join(signals)}",
+        "description": "Nenhum payload de pollution foi enviado. Validar versão e executar canário somente em fixture isolada.",
+        "validation_status": "hypothesis",
+        "details": {
+            "source": "js_pollution_passive",
+            "signals": signals,
+            "active_pollution_executed": False,
+            "verification_status": "hypothesis",
+        },
+    }]
 
 
 def run_js_pollution_scan(

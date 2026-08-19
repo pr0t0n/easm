@@ -113,13 +113,14 @@ def generate_executive_report(
     Gera e retorna HTML do relatório executivo para o scan indicado.
     """
     from app.models.models import Finding, ScanJob
+    from app.services.bas_exclusion import exclude_simulated
 
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not job:
         return "<h1>Scan não encontrado</h1>"
 
     findings = (
-        db.query(Finding)
+        exclude_simulated(db.query(Finding))
         .filter(Finding.scan_job_id == scan_id)
         .order_by(Finding.id)
         .all()
@@ -466,13 +467,14 @@ def generate_pentest_report(
     com inventário completo de superfície de ataque.
     """
     from app.models.models import Finding, ScanJob
+    from app.services.bas_exclusion import exclude_simulated
 
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not job:
         return "<h1>Scan não encontrado</h1>"
 
     all_findings = (
-        db.query(Finding)
+        exclude_simulated(db.query(Finding))
         .filter(Finding.scan_job_id == scan_id, Finding.is_false_positive.is_(False))
         .order_by(Finding.id)
         .all()
@@ -723,7 +725,13 @@ def generate_pentest_report(
         if curl_cmd:
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">{curl_cmd[:600]}</pre>'
         elif tool_name == "sqlmap":
-            repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">sqlmap -u "{target_url}" --forms --level=3 --risk=2 --batch --dump</pre>'
+            repro = (
+                '<p style="font-size:11px;color:#9a6700"><strong>Orientação manual:</strong> '
+                'o relatório pode explicar a exploração, mas este comando não é reenviado pelo scanner. '
+                'A execução automática para em enumeração estrutural e nunca faz dump.</p>'
+                f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">'
+                f'sqlmap -u "{target_url}" --forms --level=3 --risk=2 --batch --dbs --tables --columns</pre>'
+            )
         elif tool_name == "dalfox":
             repro = f'<pre style="background:#1a1a2e;color:#00ff88;padding:10px;border-radius:6px;font-size:11px;overflow-x:auto">dalfox url "{target_url}" --skip-bav --silence</pre>'
         elif tool_name in ("gitleaks", "trufflehog"):

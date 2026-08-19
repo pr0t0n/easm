@@ -767,20 +767,23 @@ def _run_self_grant_actions(
             results.append(outcome)
             _audit_self_grant_attempt(scan_id, outcome)
             continue
-        roles_endpoint = find_roles_listing_endpoint(endpoints)
+        token = str(auth_headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        self_user_id = _jwt_self_id(token)
+        roles_endpoint = find_roles_listing_endpoint(endpoints, self_user_id=self_user_id)
         revert_endpoint = find_revert_endpoint(grant_endpoint, endpoints)
-        if not roles_endpoint or not revert_endpoint:
+        if not self_user_id or not roles_endpoint or not revert_endpoint:
             outcome = {
                 "grant_endpoint": grant_endpoint,
                 "granted": False,
-                "reason": "no_roles_listing_endpoint" if not roles_endpoint else "no_revert_endpoint_discovered",
+                "reason": (
+                    "self_identity_unavailable" if not self_user_id
+                    else "no_self_bound_roles_listing_endpoint" if not roles_endpoint
+                    else "no_revert_endpoint_discovered"
+                ),
             }
             results.append(outcome)
             _audit_self_grant_attempt(scan_id, outcome)
             continue
-        token = str(auth_headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        self_user_id = _jwt_self_id(token)
-
         def _log_error(message: str) -> None:
             db = SessionLocal()
             try:

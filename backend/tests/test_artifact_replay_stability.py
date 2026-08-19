@@ -10,6 +10,15 @@ class _Db:
     def flush(self):
         return None
 
+    def query(self, *_args, **_kwargs):
+        return self
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return SimpleNamespace(target_query="app.example.test")
+
 
 def _artifact() -> SimpleNamespace:
     return SimpleNamespace(

@@ -1,0 +1,240 @@
+"""bas_reporting.py: the BAS Operations Center panels (framework coverage,
+exposure, findings, crown jewels, MITRE heatmap, risk score). Every number
+here must be real -- either a coverage/activity metric, or (for risk_score)
+a real worked-vs-blocked ratio over actual BasJob outcomes -- never an
+invented verdict, since Phase 1 technique content is simulated."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from app.services import bas_reporting
+
+
+def _query_chain(rows):
+    """A MagicMock query object where every chained call (.filter/.join/
+    .distinct/.order_by/.limit) returns itself, and .all() returns `rows`."""
+    q = MagicMock()
+    q.filter.return_value = q
+    q.join.return_value = q
+    q.distinct.return_value = q
+    q.order_by.return_value = q
+    q.limit.return_value = q
+    q.all.return_value = rows
+    return q
+
+
+def test_framework_coverage_counts_only_relevant_techniques_as_tested():
+    db = MagicMock()
+    db.query.return_value = _query_chain([("smb_enum_cme",)])  # only this technique was ever dispatched
+
+    result = bas_reporting.framework_coverage(db)
+
+    # smb_enum_cme is category "smb", relevant to nist/iso27001/cis_v8 (not pci)
+    assert result["nist"]["tested"] == 1
+    assert result["pci"]["tested"] == 0
+    for fw in result.values():
+        assert 0 <= fw["coverage_pct"] <= 100
+
+
+def test_framework_coverage_joins_against_basagent_kind_real():
+    """A stub-agent dispatch must never count as coverage -- catches a
+    regression that drops the join/filter entirely (see the live-verified
+    behavior: a completed stub job for a never-tested technique does not
+    change framework_coverage). Confirmed live against a real DB during
+    development; this just guards the query shape doesn't regress."""
+    db = MagicMock()
+    query = _query_chain([])
+    db.query.return_value = query
+
+    bas_reporting.framework_coverage(db)
+
+    assert query.join.called
+    join_args = query.join.call_args[0]
+    assert bas_reporting.BasAgent in join_args
+
+
+def test_risk_score_joins_against_basagent_kind_real():
+    db = MagicMock()
+    query = _query_chain([])
+    db.query.return_value = query
+
+    bas_reporting.risk_score(db)
+
+    assert query.join.called
+    join_args = query.join.call_args[0]
+    assert bas_reporting.BasAgent in join_args
+
+
+def test_exposure_summary_counts_real_tunnel_roundtrips_as_completed_jobs_only():
+    db = MagicMock()
+    jobs = [
+        SimpleNamespace(technique_key="smb_enum_cme", status="completed"),
+        SimpleNamespace(technique_key="smb_enum_cme", status="failed"),
+        SimpleNamespace(technique_key="ad_kerberoast", status="completed"),
+    ]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasJob:
+            return _query_chain(jobs)
+        return _query_chain([("10.10.10.5",), ("admin-portal.corp.local",)])
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.exposure_summary(db)
+
+    assert result["total_dispatches"] == 3
+    assert result["real_tunnel_roundtrips"] == 2
+    assert result["failed_dispatches"] == 1
+    assert result["distinct_targets_tested"] == 2
+    assert set(result["categories_tested"]) == {"smb", "ad"}
+
+
+def test_bas_findings_view_marks_every_row_simulated():
+    db = MagicMock()
+    finding = SimpleNamespace(
+        id=1, title="BAS: test (simulado)", created_at="now",
+        details={"technique_key": "smb_enum_cme", "category": "smb", "risk_tier": "safe"},
+    )
+    db.query.return_value = _query_chain([finding])
+
+    rows = bas_reporting.bas_findings_view(db)
+
+    assert rows[0]["simulated"] is True
+    assert rows[0]["technique_key"] == "smb_enum_cme"
+
+
+def test_crown_jewels_view_reuses_the_real_keyword_identifier():
+    db = MagicMock()
+    schedules = [SimpleNamespace(id=1, target_hint="admin-portal.corp.local")]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasSchedule:
+            return _query_chain(schedules)
+        return _query_chain([])
+
+    db.query.side_effect = query_side_effect
+
+    rows = bas_reporting.crown_jewels_view(db)
+
+    assert len(rows) == 1
+    assert rows[0]["target"] == "admin-portal.corp.local"
+    assert rows[0]["label"] == "admin_panel"
+
+
+def test_crown_jewels_view_empty_for_generic_hostnames():
+    db = MagicMock()
+    schedules = [SimpleNamespace(id=1, target_hint="10.10.10.5")]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasSchedule:
+            return _query_chain(schedules)
+        return _query_chain([])
+
+    db.query.side_effect = query_side_effect
+
+    assert bas_reporting.crown_jewels_view(db) == []
+
+
+def test_attack_heatmap_includes_every_cataloged_mitre_ref_even_untested():
+    db = MagicMock()
+    db.query.return_value = _query_chain([])  # nothing dispatched yet
+
+    rows = bas_reporting.attack_heatmap(db)
+
+    assert any(r["times_tested"] == 0 for r in rows)  # coverage gaps are visible, not hidden
+    assert all("mitre_id" in r for r in rows)
+
+
+def test_attack_heatmap_counts_completed_separately_from_total_dispatches():
+    db = MagicMock()
+    db.query.return_value = _query_chain([
+        ("smb_enum_cme", "completed"),
+        ("smb_enum_cme", "failed"),
+    ])
+
+    rows = bas_reporting.attack_heatmap(db)
+    cme_rows = [r for r in rows if r["technique_key"] == "smb_enum_cme"]
+
+    assert cme_rows[0]["times_tested"] == 2
+    assert cme_rows[0]["times_completed"] == 1
+
+
+def test_risk_score_is_none_when_no_jobs_have_resolved():
+    db = MagicMock()
+    db.query.return_value = _query_chain([])
+
+    result = bas_reporting.risk_score(db)
+
+    assert result["score"] is None
+    assert result["resolved_total"] == 0
+
+
+def test_risk_score_excludes_queued_and_skipped_from_the_ratio():
+    db = MagicMock()
+    db.query.return_value = _query_chain([
+        ("completed",), ("completed",), ("completed",),
+        ("failed",),
+        ("queued",), ("skipped",), ("running",),
+    ])
+
+    result = bas_reporting.risk_score(db)
+
+    # 3 completed / (3 completed + 1 failed) = 75 -- queued/skipped/running never enter the ratio
+    assert result["score"] == 75
+    assert result["worked"] == 3
+    assert result["blocked"] == 1
+    assert result["resolved_total"] == 4
+
+
+def test_risk_score_all_blocked_is_zero():
+    db = MagicMock()
+    db.query.return_value = _query_chain([("failed",), ("failed",)])
+
+    result = bas_reporting.risk_score(db)
+
+    assert result["score"] == 0
+
+
+def test_executive_report_narrative_reflects_zero_resolved_jobs():
+    """executive_report is a thin combiner over the already-tested panel
+    functions -- patch those directly rather than re-deriving every db.query
+    shape they each need."""
+    db = MagicMock()
+    with patch.object(bas_reporting, "framework_coverage", return_value={}), \
+         patch.object(bas_reporting, "exposure_summary", return_value={
+             "distinct_targets_tested": 0, "categories_tested": [], "total_dispatches": 0,
+             "real_tunnel_roundtrips": 0, "failed_dispatches": 0,
+         }), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": None, "worked": 0, "blocked": 0, "resolved_total": 0}), \
+         patch.object(bas_reporting, "crown_jewels_view", return_value=[]), \
+         patch.object(bas_reporting, "attack_heatmap", return_value=[
+             {"technique_key": "smb_enum_cme", "times_tested": 0}, {"technique_key": "ad_kerberoast", "times_tested": 0},
+         ]), \
+         patch.object(bas_reporting, "bas_findings_view", return_value=[]):
+        result = bas_reporting.executive_report(db)
+
+    assert "Nenhum job BAS foi resolvido" in result["narrative"]
+    assert result["risk_score"]["score"] is None
+    assert result["total_techniques"] > 0
+    assert result["tested_techniques"] == 0
+
+
+def test_executive_report_narrative_reflects_real_resolved_jobs():
+    db = MagicMock()
+    with patch.object(bas_reporting, "framework_coverage", return_value={}), \
+         patch.object(bas_reporting, "exposure_summary", return_value={
+             "distinct_targets_tested": 1, "categories_tested": ["smb"], "total_dispatches": 2,
+             "real_tunnel_roundtrips": 1, "failed_dispatches": 1,
+         }), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": 50, "worked": 1, "blocked": 1, "resolved_total": 2}), \
+         patch.object(bas_reporting, "crown_jewels_view", return_value=[{"target": "admin-portal.corp.local", "jobs_run": 1}]), \
+         patch.object(bas_reporting, "attack_heatmap", return_value=[
+             {"technique_key": "smb_enum_cme", "times_tested": 2}, {"technique_key": "ad_kerberoast", "times_tested": 0},
+         ]), \
+         patch.object(bas_reporting, "bas_findings_view", return_value=[{"id": 1, "title": "BAS: smb_enum_cme"}]):
+        result = bas_reporting.executive_report(db)
+
+    assert result["risk_score"]["resolved_total"] == 2
+    assert "50" in result["narrative"]
+    assert result["tested_techniques"] == 1

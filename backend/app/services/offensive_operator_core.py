@@ -43,7 +43,16 @@ EXECUTION_MODES = {
     "controlled_pentest",
     "full_authorized_pentest",
 }
-BACKEND_LOCAL_TOOL_NAMES = {"bl-test", "code-analyzer", "semgrep"}
+BACKEND_LOCAL_TOOL_NAMES = {
+    "bl-test",
+    "code-analyzer",
+    "semgrep",
+    "credential-boundary-review",
+    "post-exploitation-boundary-review",
+    "attack-path-correlator",
+    "evidence-adjudicator",
+    "report-snapshot-builder",
+}
 
 
 def utc_now() -> str:
@@ -302,25 +311,25 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-lfi",    # HackerOne: path traversal exploit confirmation
           "nuclei-sqli",   # HackerOne: SQL injection exploit confirmation
           "nuclei-ssti"]), # HackerOne: template injection → RCE confirmation
-        ("P18", "Credential Exposure Boundary", "Validate credential exposure via OSINT and secret scanning",
-         ["skill.chain.exposed_git_to_credential_leak"], ["theharvester"],
-         ["gitleaks", "trufflehog", "h8mail", "bandit", "semgrep", "trivy",
+        ("P18", "Credential Exposure Boundary", "Validate credential exposure without credential reuse",
+         ["skill.chain.exposed_git_to_credential_leak"], ["credential-boundary-review"],
+         ["theharvester", "gitleaks", "trufflehog", "h8mail", "bandit", "semgrep", "trivy",
           "nuclei-exposure", # HackerOne: 78 info/secret exposure reports — API keys, debug endpoints
           "nuclei-cloud"]),   # HackerOne: 15 cloud/S3 exposure reports — open buckets, AWS metadata
-        ("P19", "Post Exploitation Boundary", "Validate post-exploitation scope controls",
-         ["skill.idor_object_authorization"], ["nuclei"],
-         ["ffuf", "arjun",
+        ("P19", "Post Exploitation Boundary", "Model impact and enforce the no-impact boundary",
+         ["skill.idor_object_authorization"], ["post-exploitation-boundary-review"],
+         ["nuclei", "ffuf", "arjun",
           "nuclei-csrf",    # HackerOne: 110 CSRF reports — post-auth CSRF on sensitive actions
           "nuclei-cors",    # HackerOne: 8 CORS misconfig — cross-origin credential access
           "nuclei-idor"]),  # HackerOne: 73 IDOR — post-auth object boundary testing
-        ("P20", "Attack Path Correlation", "Build offensive chains from evidence",
-         ["skill.chain.exposed_git_to_credential_leak"], ["nuclei"],
-         ["gitleaks", "trufflehog",
+        ("P20", "Attack Path Correlation", "Build concise evidence-bound attack paths",
+         ["skill.chain.exposed_git_to_credential_leak"], ["attack-path-correlator"],
+         ["nuclei", "gitleaks", "trufflehog",
           "nuclei-race"]),  # HackerOne: 20 race condition reports — coupon/invitation bypass chains
-        ("P21", "Evidence Quality Review", "Score evidence and false positive controls",
-         ["skill.reporting.evidence_quality"], ["manual_review"], []),
-        ("P22", "Campaign Reporting", "Build offensive campaign narrative",
-         ["skill.technical_report"], ["report-builder"], ["manual_review"]),
+        ("P21", "Evidence Quality Review", "Adjudicate every finding against its evidence contract",
+         ["skill.reporting.evidence_quality"], ["evidence-adjudicator"], []),
+        ("P22", "Campaign Reporting", "Persist an immutable evidence-based report snapshot",
+         ["skill.technical_report"], ["report-snapshot-builder"], []),
     ]
 
     contracts: dict[str, dict[str, Any]] = {}
@@ -340,9 +349,11 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
                 "all_applicable_skill_objectives_required": True,
                 "evidence_required": True,
                 "validator_required": True,
-                "allow_partial": True,
-                "allow_skip": phase_id in {"P18", "P19"},
-                "minimum_evidence_strength": "medium" if phase_id not in {"P01", "P21", "P22"} else "weak",
+                "allow_partial": phase_id not in {"P18", "P19", "P20", "P21", "P22"},
+                "allow_skip": False,
+                "minimum_evidence_strength": "strong" if phase_id in {"P20", "P21", "P22"} else (
+                    "medium" if phase_id != "P01" else "weak"
+                ),
             },
             "retry_policy": {"max_retries": 2, "fallback_allowed": True, "rag_reconsult_allowed": True},
         }
@@ -479,7 +490,11 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # backend-local (curto-circuitado em _call_mcp_execution, profile sentinela).
         entry("chromium-capture", "chromium_capture", ["client_side_analysis", "dom_xss", "api_capture"], "generic_json_parser"),
         entry("bl-test", "business_logic_backend", ["business_logic", "idor_bola", "mass_assignment", "sensitive_data_exposure"], "generic_json_parser"),
-        entry("report-builder", "report_builder", ["reporting"], "report_parser"),
+        entry("credential-boundary-review", "backend_control", ["credential_exposure_boundary", "data_minimization"], "generic_json_parser"),
+        entry("post-exploitation-boundary-review", "backend_control", ["impact_projection", "post_exploitation_boundary"], "generic_json_parser"),
+        entry("attack-path-correlator", "backend_control", ["attack_path_correlation"], "generic_json_parser"),
+        entry("evidence-adjudicator", "backend_control", ["evidence_review", "false_positive_control"], "generic_json_parser"),
+        entry("report-snapshot-builder", "backend_control", ["reporting", "immutable_snapshot"], "report_parser"),
         entry("subfinder", "subfinder_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
         entry("subfinder-passive", "subfinder_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
         entry("assetfinder", "assetfinder_passive", ["subdomain_enumeration", "passive_recon"], "subfinder_parser"),
@@ -1444,10 +1459,12 @@ class PhaseValidator:
                                       "required_tool_degraded_other_tools_succeeded", [])
             return self._decision(phase_contract["phase_id"], "blocked", False, reason, [r["tool_name"] for r in required_blocked])
         if any(result["status"] == "failed" for result in mcp_results if result["tool_name"] in required_tools):
-            return self._decision(phase_contract["phase_id"], "partial", True, "mcp_execution_failed", [])
+            if phase_contract["exit_criteria"].get("allow_partial"):
+                return self._decision(phase_contract["phase_id"], "partial", True, "mcp_execution_failed", [])
+            return self._decision(phase_contract["phase_id"], "blocked", False, "required_execution_failed", [])
         # Phases that tolerate missing evidence still advance as partial.
         _PARTIAL_OK = {"P05", "P06", "P07", "P08", "P09", "P10",
-                       "P11", "P15", "P16", "P17", "P18", "P19", "P20", "P21", "P22"}
+                       "P11", "P15", "P16", "P17"}
         if phase_contract["exit_criteria"].get("evidence_required") and not evidence:
             if phase_contract["phase_id"] in _PARTIAL_OK:
                 return self._decision(phase_contract["phase_id"], "partial", True, "no_evidence_partial_ok", [])
@@ -1455,7 +1472,9 @@ class PhaseValidator:
         min_strength = phase_contract["exit_criteria"].get("minimum_evidence_strength", "medium")
         strongest = max((EVIDENCE_STRENGTHS.index(ev.get("evidence_strength", "none")) for ev in evidence), default=0)
         if strongest < EVIDENCE_STRENGTHS.index(min_strength):
-            return self._decision(phase_contract["phase_id"], "partial", True, "evidence_strength_too_weak", [])
+            if phase_contract["exit_criteria"].get("allow_partial"):
+                return self._decision(phase_contract["phase_id"], "partial", True, "evidence_strength_too_weak", [])
+            return self._decision(phase_contract["phase_id"], "blocked", False, "evidence_strength_too_weak", [])
         # COBERTURA POR SKILL (vale p/ TODAS as fases multi-skill): a fase só é
         # 'completed' quando TODAS as required_skills estão completed. Se alguma
         # ficou blocked/partial mas houve execução útil → partial. Se NENHUMA
@@ -1716,12 +1735,14 @@ class OffensiveSkillRuntime:
         compiler: SkillToToolPlanCompiler | None = None,
         executor: MCPToolExecutor | None = None,
         validator: PhaseValidator | None = None,
+        phase_contracts: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.registry = registry or SkillRegistry()
         self.rag = rag or SkillRagIndex(self.registry)
         self.compiler = compiler or SkillToToolPlanCompiler()
         self.executor = executor or MCPToolExecutor()
         self.validator = validator or PhaseValidator()
+        self.phase_contracts = phase_contracts or PHASE_CONTRACTS
         self.collector = EvidenceCollector()
         self.hypotheses = HypothesisEngine()
         self.attack_paths = AttackPathEngine()
@@ -1736,7 +1757,7 @@ class OffensiveSkillRuntime:
         offensive_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         state = offensive_state or create_offensive_state(target)
-        contract = PHASE_CONTRACTS[phase_id]
+        contract = self.phase_contracts[phase_id]
         retrieved = self.rag.retrieve(
             f"{contract['name']} {target} {' '.join(contract['required_skills'])}",
             filters={"phase_id": phase_id, "execution_mode": execution_mode, "status": "approved"},

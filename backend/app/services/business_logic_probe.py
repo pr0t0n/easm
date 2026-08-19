@@ -206,7 +206,13 @@ def _mutation_negative_value(client: httpx.Client, base: str, ua: dict, plan: di
       "bad_value": -99, "good_value": 1, "method": "PUT",
     }
     """
-    out = {"attempts": 0, "executed": True, "confirmed": False}
+    out = {
+        "attempts": 0,
+        "executed": False,
+        "confirmed": False,
+        "reverted": None,
+        "cleanup_status": "not_required",
+    }
 
     def _dig(obj, path):
         cur = obj
@@ -217,60 +223,98 @@ def _mutation_negative_value(client: httpx.Client, base: str, ua: dict, plan: di
                 return None
         return cur
 
+    cu = str(plan.get("create_url") or "")
+    ut = str(plan.get("update_url_tpl") or "")
+    read_tpl = str(plan.get("read_url_tpl") or "")
+    delete_tpl = str(plan.get("delete_url_tpl") or "")
+    field = str(plan.get("field") or "quantity")
+    bad = plan.get("bad_value", -99)
+    method = str(plan.get("method") or "PUT").upper()
+    eid = plan.get("entity_id")
+    created = False
+    baseline_value: Any = None
+    upd_url = ""
+    if not ut or not read_tpl or (not eid and (not cu or not delete_tpl)):
+        out["note"] = "mutation contract requires update/read and either an existing fixture or create/delete pair"
+        return out
     try:
-        cu = plan.get("create_url"); ut = plan.get("update_url_tpl")
-        field = plan.get("field", "quantity"); bad = plan.get("bad_value", -99)
-        good = plan.get("good_value", 1); method = (plan.get("method") or "PUT").upper()
-        eid = plan.get("entity_id")
         if cu and not eid:
             out["attempts"] += 1
             cr = client.post(base + cu, headers=ua, json=plan.get("create_body") or {})
-            try:
-                eid = _dig(cr.json(), plan.get("id_path", "data.id"))
-            except Exception:
-                eid = None
+            eid = _dig(cr.json(), plan.get("id_path", "data.id")) if cr.status_code < 400 else None
+            created = bool(eid)
             out["created_id"] = eid
-        if not eid or not ut:
-            out["executed"] = False
-            out["note"] = "plano insuficiente (sem id/entidade ou update_url_tpl)"
+        if not eid:
+            out["note"] = "disposable fixture could not be resolved"
             return out
         upd_url = base + ut.format(id=eid)
-        # >>> seta valor adversário (negativo) <<<
+        read_url = base + read_tpl.format(id=eid)
+        out["attempts"] += 1
+        before = client.get(read_url, headers=ua)
+        before_json = before.json() if before.status_code < 400 else None
+        baseline_value = _dig(before_json, str(plan.get("read_value_path") or f"data.{field}"))
+        if baseline_value is None and isinstance(before_json, dict):
+            baseline_value = before_json.get(field)
+        out["baseline_value"] = baseline_value
+        if not created and baseline_value is None:
+            out["note"] = "pre-mutation snapshot unavailable"
+            return out
+
+        out["executed"] = True
+        out["cleanup_status"] = "required"
         out["attempts"] += 1
         req = client.request(method, upd_url, headers=ua, json={field: bad})
-        stored = None
-        try:
-            stored = _dig(req.json(), "data." + field)
-            if stored is None:
-                stored = req.json().get(field)
-        except Exception:
-            stored = None
         out["status"] = req.status_code
+        # A mutation response is not a read-back. Verify with an independent GET.
+        out["attempts"] += 1
+        readback = client.get(read_url, headers=ua)
+        readback_json = readback.json() if readback.status_code < 400 else None
+        stored = _dig(readback_json, str(plan.get("read_value_path") or f"data.{field}"))
+        if stored is None and isinstance(readback_json, dict):
+            stored = readback_json.get(field)
         out["stored_value"] = stored
-        # PROVA: servidor aceitou e ARMAZENOU o valor negativo
-        if req.status_code < 400 and isinstance(stored, (int, float)) and stored == bad:
+        if req.status_code < 400 and readback.status_code < 400 and stored == bad:
             out["confirmed"] = True
             out["finding"] = {
                 "type": "negative_value_mutation", "vuln_family": "business_logic",
-                "endpoint": upd_url, "payload": f"{field}={bad}",
+                "endpoint": upd_url, "payload": f"{field}=<invalid-negative>",
                 "verification_status": "confirmed",
-                "evidence": (f"Servidor ACEITOU e ARMAZENOU valor de negócio inválido "
-                             f"'{field}={bad}' (HTTP {req.status_code}; leitura-de-volta confirmou "
-                             f"{field}={stored}). Falha de lógica de negócio: ausência de validação "
-                             f"server-side permite preço/quantidade/valor negativo (ex.: crédito "
-                             f"indevido / inversão de cobrança). Prova read-back, sem completar transação."),
+                "evidence": (
+                    f"Fixture descartável aceitou {field} negativo e GET independente confirmou o estado. "
+                    "O valor concreto foi minimizado; rollback e igualdade final são registrados separadamente."
+                ),
+                "false_positive_controls_passed": True,
+                "validation_contract_satisfied": True,
                 "severity": "high",
             }
-        # REVERTE para um valor são (não deixa lixo adversário)
-        try:
-            out["attempts"] += 1
-            client.request(method, upd_url, headers=ua, json={field: good})
-            out["reverted"] = True
-        except Exception:
-            out["reverted"] = False
     except Exception as exc:
-        out["executed"] = False
-        out["note"] = f"erro na mutação: {type(exc).__name__}"
+        out["note"] = f"mutation execution error: {type(exc).__name__}"
+    finally:
+        if eid and out["cleanup_status"] == "required":
+            try:
+                out["attempts"] += 1
+                if created:
+                    cleanup = client.delete(base + delete_tpl.format(id=eid), headers=ua)
+                    verify = client.get(base + read_tpl.format(id=eid), headers=ua)
+                    restored = cleanup.status_code < 400 and verify.status_code in {404, 410}
+                else:
+                    cleanup = client.request(method, upd_url, headers=ua, json={field: baseline_value})
+                    verify = client.get(base + read_tpl.format(id=eid), headers=ua)
+                    verify_json = verify.json() if verify.status_code < 400 else None
+                    final_value = _dig(verify_json, str(plan.get("read_value_path") or f"data.{field}"))
+                    if final_value is None and isinstance(verify_json, dict):
+                        final_value = verify_json.get(field)
+                    out["final_value"] = final_value
+                    restored = cleanup.status_code < 400 and final_value == baseline_value
+                out["reverted"] = restored
+                out["cleanup_status"] = "restored" if restored else "cleanup_failed"
+            except Exception as exc:
+                out["reverted"] = False
+                out["cleanup_status"] = "cleanup_failed"
+                out["cleanup_error"] = type(exc).__name__
+        if out.get("finding") and out.get("cleanup_status") != "restored":
+            out["finding"]["verification_status"] = "candidate"
+            out["finding"]["validation_contract_satisfied"] = False
     return out
 
 

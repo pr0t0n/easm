@@ -84,6 +84,18 @@ celery.conf.update(
             "schedule": crontab(minute="*"),
             "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _MINUTELY_CONTROL_EXPIRES},
         },
+        # BAS (Breach & Attack Simulation): dispara BasSchedule devidos.
+        "bas-scheduler-tick": {
+            "task": "bas_scheduler.tick",
+            "schedule": crontab(minute="*"),
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _MINUTELY_CONTROL_EXPIRES},
+        },
+        # BAS: agente offline por heartbeat velho + BasJob travado além do timeout.
+        "bas-watchdog-tick": {
+            "task": "bas_watchdog.tick",
+            "schedule": crontab(minute="*"),
+            "options": {"queue": PLATFORM_CONTROL_QUEUE, "expires": _MINUTELY_CONTROL_EXPIRES},
+        },
         # Ingestao semanal do aprendizado HackerOne/GitHub (antes so rodava sob demanda).
         "hackerone-learning-tick": {
             "task": "hackerone_learning.tick",

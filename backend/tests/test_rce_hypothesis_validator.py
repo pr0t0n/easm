@@ -75,7 +75,7 @@ def test_rce_validator_confirms_when_verify_rce_confirms():
         mock_inv = mock_inv_cls.return_value
         result = validate_rce_hypothesis(db, scan, hyp)
 
-    mock_verify.assert_called_once_with(endpoint.url)
+    mock_verify.assert_called_once_with(endpoint.url, observed_parameter=None)
     assert result["result"] == "confirmed"
     assert result["artifact_id"] == 555
     assert "cmd-param:cmd" in result["reason"]
@@ -115,7 +115,10 @@ def test_rce_validator_refutes_honestly_when_verify_rce_does_not_confirm():
         mock_inv = mock_inv_cls.return_value
         result = validate_rce_hypothesis(db, scan, hyp)
 
-    assert result["result"] == "refuted"
-    assert mock_artifact.call_args.kwargs["validation_status"] == "refuted"
+    # No negative-control-backed disproof ran — 12 failed attempts is an
+    # absence of proof, not proof of absence, so this stays inconclusive
+    # rather than a dishonest "refuted".
+    assert result["result"] == "inconclusive"
+    assert mock_artifact.call_args.kwargs["validation_status"] == "inconclusive"
     assert mock_artifact.call_args.kwargs["confidence_score"] == 20
-    assert mock_inv.record_validation.call_args.kwargs["result"] == "refuted"
+    assert mock_inv.record_validation.call_args.kwargs["result"] == "inconclusive"

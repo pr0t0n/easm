@@ -52,4 +52,5 @@ RUN groupadd -r appgroup && useradd -r -g appgroup -u 1000 appuser && \
 ENV HOME=/tmp
 USER appuser
 
-CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+RUN chmod +x start.sh
+CMD ["sh", "start.sh"]

@@ -1,18 +1,19 @@
 from app.services.evidence_gate import validate_finding_grounding
 
 
-def test_no_raw_output_is_not_checked() -> None:
+def test_no_raw_output_is_checked_and_fails_closed() -> None:
+    # A finding claiming "confirmed" with no captured raw output has no proof
+    # to check against — that must downgrade, not silently pass.
     result = validate_finding_grounding(["https://valid.com/admin"], None)
 
-    assert result["checked"] is False
-    assert result["grounded"] is True
+    assert result["checked"] is True
+    assert result["grounded"] is False
 
 
 def test_no_usable_anchor_is_not_checked() -> None:
     result = validate_finding_grounding([None, ""], "some raw tool output")
 
     assert result["checked"] is False
-    assert result["grounded"] is True
 
 
 def test_anchor_present_in_raw_output_is_grounded() -> None:

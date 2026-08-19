@@ -30,17 +30,9 @@ from typing import Any
 # ── Ferramentas que produzem findings diretamente confirmados ──────────────────
 # Essas ferramentas têm baixíssima taxa de FP porque testam a condição
 # de forma determinística (ex: SQLmap confirma injeção com payload real).
-CONFIRMED_TOOLS = {
-    "sqlmap",           # prova a injeção com payload
-    "dalfox",           # prova XSS com callback
-    "nuclei",           # templates com matchers precisos
-    "wpscan",           # confirma plugin vulnerável via resposta
-    "hydra",            # confirma credencial válida
-    "nuclei-cve-2021-26855",  # ProxyLogon tem matcher preciso
-    "nuclei-cve-2020-1938",   # Ghostcat: lê /WEB-INF/web.xml
-    "nuclei-cve-2017-12617",  # Tomcat PUT: confirma por resposta 201
-    "nuclei-default-credentials",
-}
+# Kept for API compatibility only. A tool name is never evidence by itself;
+# confirmation is performed by the family-specific evidence contract.
+CONFIRMED_TOOLS: set[str] = set()
 
 # Ferramentas que produzem hipóteses (precisam de verificação)
 HYPOTHESIS_TOOLS = {
@@ -132,8 +124,9 @@ def get_verification_status(tool_name: str, finding: dict[str, Any]) -> str:
     title = str(finding.get("title") or "").lower()
     details = dict(finding.get("details") or {})
 
-    # Ferramentas de confirmação direta
-    if tool in CONFIRMED_TOOLS:
+    # A dedicated validator may carry an explicit, mechanically checked
+    # decision. Scanner/parser identity alone never confirms a finding.
+    if details.get("validation_contract_satisfied") is True and details.get("false_positive_controls_passed") is True:
         return "confirmed"
 
     # Ferramentas de hipótese
@@ -153,10 +146,8 @@ def get_verification_status(tool_name: str, finding: dict[str, Any]) -> str:
     if tool == "adaptive_probe":
         return str(details.get("verification_status") or "candidate")
 
-    # nuclei com matcher específico → confirmed; nuclei genérico → candidate
+    # Nuclei matchers are detections; family validators decide confirmation.
     if tool.startswith("nuclei"):
-        if details.get("matcher-name") or details.get("matched-at"):
-            return "confirmed"
         return "candidate"
 
     # nmap-vulscan: lookup de versão → hipótese
@@ -320,13 +311,13 @@ def validate_finding_grounding(
 ) -> dict[str, Any]:
     """Check that at least one identity anchor is present in the tool's raw output.
 
-    Returns {"checked": bool, "grounded": bool, "reason": str}. `checked=False`
-    means there wasn't enough signal to judge (no usable anchor or no raw
-    output captured) — callers must treat that as a pass, never a downgrade.
+    Missing raw output is never a successful grounding decision.
     """
     usable_anchors = [a for a in anchors if a and len(a) >= 4]
-    if not usable_anchors or not raw_output:
-        return {"checked": False, "grounded": True, "reason": "no_anchor_or_raw_output"}
+    if not usable_anchors:
+        return {"checked": False, "grounded": False, "reason": "no_usable_anchor"}
+    if not raw_output:
+        return {"checked": True, "grounded": False, "reason": "raw_output_missing"}
 
     haystack = _normalize_for_grounding(raw_output)
     for anchor in usable_anchors:

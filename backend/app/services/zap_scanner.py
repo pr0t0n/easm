@@ -16,7 +16,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
+from contextlib import contextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -74,7 +77,7 @@ def is_zap_available() -> bool:
         return False
 
 
-def _apply_auth_headers(auth_headers: dict[str, str] | None) -> list[str]:
+def _apply_auth_headers(auth_headers: dict[str, str] | None, *, scan_id: int | None = None) -> list[str]:
     """Configura scan autenticado: injeta cabeçalhos em TODA requisição do ZAP.
 
     Usa a extensão Replacer do ZAP (regras REQ_HEADER) — funciona para spider,
@@ -87,7 +90,7 @@ def _apply_auth_headers(auth_headers: dict[str, str] | None) -> list[str]:
     for name, value in auth_headers.items():
         if not name or value is None:
             continue
-        desc = f"easm-auth-{name}"
+        desc = f"easm-auth-{scan_id or 'adhoc'}-{uuid.uuid4().hex[:8]}-{name}"
         try:
             # matchType REQ_HEADER + matchString=<header> + replacement=<value>
             _zap_post("/JSON/replacer/action/addRule/", {
@@ -111,6 +114,41 @@ def _clear_auth_headers(descriptions: list[str]) -> None:
             _zap_post("/JSON/replacer/action/removeRule/", {"description": desc})
         except Exception:
             pass
+
+
+@contextmanager
+def _exclusive_zap_session(scan_id: int | None):
+    """Serialize ZAP sessions because Replacer rules are process-global."""
+    token = uuid.uuid4().hex
+    client = None
+    acquired = False
+    try:
+        from app.services.scan_work_queue import _redis_client
+
+        client = _redis_client()
+        acquired = bool(client.set("zap:exclusive-session", f"{scan_id}:{token}", nx=True, ex=3600))
+    except Exception:
+        # Without the distributed lock, authenticated ZAP cannot safely run.
+        acquired = not bool(scan_id)
+    if not acquired:
+        raise RuntimeError("zap_session_busy")
+    try:
+        yield
+    finally:
+        if client is not None:
+            try:
+                current = client.get("zap:exclusive-session")
+                if current and token in (current.decode() if isinstance(current, bytes) else str(current)):
+                    client.delete("zap:exclusive-session")
+            except Exception:
+                pass
+
+
+def _same_target_host(url: str, target: str) -> bool:
+    try:
+        return bool(urlparse(url).hostname and urlparse(url).hostname == urlparse(target).hostname)
+    except Exception:
+        return False
 
 
 def _is_zap_does_not_exist(exc: Exception) -> bool:
@@ -302,7 +340,7 @@ def resolve_zap_auth_headers(db: Any, job: Any, state: dict[str, Any] | None = N
 # Scan entry points
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
+def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None, *, scan_id: int | None = None) -> dict[str, Any]:
     """
     ZAP Baseline: passive scan + quick spider.
     Não faz ataques ativos. Baixo ruído, rápido (1-2 min).
@@ -314,31 +352,32 @@ def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None) ->
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
-    _auth_rules = _apply_auth_headers(auth_headers)
+    alerts: list[dict] = []
     try:
-        # Access target to populate ZAP proxy (baseline access)
-        try:
-            _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "true"})
-        except Exception as exc:
-            logger.debug("ZAP accessUrl error: %s", exc)
-
-        # Start passive spider
-        try:
-            spider_data = _zap_post("/JSON/spider/action/scan/", {
-                "url": target,
-                "maxChildren": "0",
-                "recurse": "true",
-                "contextName": "",
-                "subtreeOnly": "false",
-            })
-            scan_id = str(spider_data.get("scan") or "0")
-            _wait_for_spider(scan_id, max_wait=_SPIDER_MAX_WAIT)
-        except Exception as exc:
-            logger.warning("ZAP spider error: %s", exc)
-
-        alerts = _get_alerts(target)
-    finally:
-        _clear_auth_headers(_auth_rules)
+        with _exclusive_zap_session(scan_id):
+            auth_rules = _apply_auth_headers(auth_headers, scan_id=scan_id)
+            try:
+                try:
+                    _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "false"})
+                except Exception as exc:
+                    logger.debug("ZAP accessUrl error: %s", exc)
+                try:
+                    spider_data = _zap_post("/JSON/spider/action/scan/", {
+                        "url": target,
+                        "maxChildren": "0",
+                        "recurse": "true",
+                        "contextName": "",
+                        "subtreeOnly": "true",
+                    })
+                    spider_scan_id = str(spider_data.get("scan") or "0")
+                    _wait_for_spider(spider_scan_id, max_wait=_SPIDER_MAX_WAIT)
+                except Exception as exc:
+                    logger.warning("ZAP spider error: %s", exc)
+                alerts = _get_alerts(target)
+            finally:
+                _clear_auth_headers(auth_rules)
+    except RuntimeError as exc:
+        return {"status": "skipped", "reason": str(exc), "findings": []}
 
     findings = _alerts_to_findings(alerts, target)
     for f in findings:
@@ -357,6 +396,7 @@ def run_zap_baseline(target: str, auth_headers: dict[str, str] | None = None) ->
 
 def run_zap_ajax_spider(
     target: str, max_duration_mins: int = 3, auth_headers: dict[str, str] | None = None,
+    *, scan_id: int | None = None,
 ) -> dict[str, Any]:
     """
     ZAP AJAX Spider: usa headless browser para navegar SPAs.
@@ -370,19 +410,23 @@ def run_zap_ajax_spider(
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
-    _auth_rules = _apply_auth_headers(auth_headers)
     try:
-        _zap_post("/JSON/ajaxSpider/action/scan/", {
-            "url": target,
-            "inScope": "false",
-            "contextName": "",
-            "subtreeOnly": "false",
-        })
-        _wait_for_ajax_spider(max_wait=max_duration_mins * 60)
-    except Exception as exc:
-        logger.warning("ZAP AJAX spider error: %s", exc)
-    finally:
-        _clear_auth_headers(_auth_rules)
+        with _exclusive_zap_session(scan_id):
+            auth_rules = _apply_auth_headers(auth_headers, scan_id=scan_id)
+            try:
+                _zap_post("/JSON/ajaxSpider/action/scan/", {
+                    "url": target,
+                    "inScope": "true",
+                    "contextName": "",
+                    "subtreeOnly": "true",
+                })
+                _wait_for_ajax_spider(max_wait=max_duration_mins * 60)
+            except Exception as exc:
+                logger.warning("ZAP AJAX spider error: %s", exc)
+            finally:
+                _clear_auth_headers(auth_rules)
+    except RuntimeError as exc:
+        return {"status": "skipped", "reason": str(exc), "findings": []}
 
     # Get discovered URLs
     try:
@@ -390,6 +434,7 @@ def run_zap_ajax_spider(
         discovered_urls = [
             str(r.get("requestHeader", "").split("\n")[0]).replace("GET ", "").split(" HTTP")[0]
             for r in (results_data.get("results") or [])
+            if _same_target_host(str(r.get("requestHeader", "").split("\n")[0]).replace("GET ", "").split(" HTTP")[0], target)
         ]
     except Exception:
         discovered_urls = []
@@ -412,7 +457,7 @@ def run_zap_ajax_spider(
     }
 
 
-def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
+def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None, *, scan_id: int | None = None) -> dict[str, Any]:
     """
     ZAP Active Scan: fuzzing ativo para OWASP Top 10.
     Detecta: SQLi, XSS, SSRF, Path Traversal, Command Injection, etc.
@@ -423,44 +468,41 @@ def run_zap_active_scan(target: str, auth_headers: dict[str, str] | None = None)
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
-    _auth_rules = _apply_auth_headers(auth_headers)
+    alerts: list[dict] = []
     try:
-        # ZAP's active scanner rejects a URL with "URL Not Found in the Scan
-        # Tree" unless it's already been registered — accessUrl is the
-        # cheapest way to guarantee that regardless of what the spider does.
-        try:
-            _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "true"})
-        except Exception as exc:
-            logger.debug("ZAP accessUrl error: %s", exc)
-
-        # Spider first to populate sitemap
-        try:
-            spider_data = _zap_post("/JSON/spider/action/scan/", {
-                "url": target, "recurse": "true", "subtreeOnly": "false",
-            })
-            scan_id = str(spider_data.get("scan") or "0")
-            _wait_for_spider(scan_id, max_wait=120)
-        except Exception:
-            pass
-
-        # Active scan
-        try:
-            ascan_data = _zap_post("/JSON/ascan/action/scan/", {
-                "url": target,
-                "recurse": "true",
-                "inScopeOnly": "false",
-                "scanPolicyName": "",
-                "method": "",
-                "postData": "",
-            })
-            ascan_id = str(ascan_data.get("scan") or "0")
-            _wait_for_active_scan(ascan_id, max_wait=_ACTIVE_MAX_WAIT)
-        except Exception as exc:
-            logger.warning("ZAP active scan error: %s", exc)
-
-        alerts = _get_alerts(target)
-    finally:
-        _clear_auth_headers(_auth_rules)
+        with _exclusive_zap_session(scan_id):
+            auth_rules = _apply_auth_headers(auth_headers, scan_id=scan_id)
+            try:
+                try:
+                    _zap_post("/JSON/core/action/accessUrl/", {"url": target, "followRedirects": "false"})
+                except Exception as exc:
+                    logger.debug("ZAP accessUrl error: %s", exc)
+                try:
+                    spider_data = _zap_post("/JSON/spider/action/scan/", {
+                        "url": target, "recurse": "true", "subtreeOnly": "true",
+                    })
+                    spider_scan_id = str(spider_data.get("scan") or "0")
+                    _wait_for_spider(spider_scan_id, max_wait=120)
+                except Exception:
+                    pass
+                try:
+                    ascan_data = _zap_post("/JSON/ascan/action/scan/", {
+                        "url": target,
+                        "recurse": "true",
+                        "inScopeOnly": "true",
+                        "scanPolicyName": "",
+                        "method": "",
+                        "postData": "",
+                    })
+                    ascan_id = str(ascan_data.get("scan") or "0")
+                    _wait_for_active_scan(ascan_id, max_wait=_ACTIVE_MAX_WAIT)
+                except Exception as exc:
+                    logger.warning("ZAP active scan error: %s", exc)
+                alerts = _get_alerts(target)
+            finally:
+                _clear_auth_headers(auth_rules)
+    except RuntimeError as exc:
+        return {"status": "skipped", "reason": str(exc), "findings": []}
 
     findings = _alerts_to_findings(alerts, target)
     for f in findings:
